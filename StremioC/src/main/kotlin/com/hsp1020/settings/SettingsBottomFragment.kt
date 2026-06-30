@@ -48,6 +48,7 @@ import com.google.gson.JsonParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Collections
@@ -126,9 +127,35 @@ class SettingsBottomFragment(
     private val sharedPref: SharedPreferences
 ) : BottomSheetDialogFragment() {
 
+    // ── [최적화 1] 무거운 정적 배열 메모리 누수 방지 (Companion Object로 격리) ──
+    companion object {
+        val LANGUAGES = listOf(
+            "South Africa (Afrikaans)" to "af-ZA", "United Arab Emirates (Arabic)" to "ar-AE", "Saudi Arabia (Arabic)" to "ar-SA",
+            "Azerbaijan (Azerbaijani)" to "az-AZ", "Bulgaria (Bulgarian)" to "bg-BG", "India (Bengali)" to "bn-IN",
+            "Spain (Catalan)" to "ca-ES", "Czech Republic (Czech)" to "cs-CZ", "United Kingdom (Welsh)" to "cy-GB",
+            "Denmark (Danish)" to "da-DK", "Germany (German)" to "de-DE", "Greece (Greek)" to "el-GR",
+            "United States (English)" to "en-US", "United Kingdom (English)" to "en-GB", "Spain (Spanish)" to "es-ES",
+            "Latin America (Spanish)" to "es-419", "Estonia (Estonian)" to "et-EE", "Spain (Basque)" to "eu-ES",
+            "Iran (Persian)" to "fa-IR", "Finland (Finnish)" to "fi-FI", "Philippines (Filipino)" to "fil-PH",
+            "France (French)" to "fr-FR", "Spain (Galician)" to "gl-ES", "India (Gujarati)" to "gu-IN",
+            "Israel (Hebrew)" to "he-IL", "India (Hindi)" to "hi-IN", "Croatia (Croatian)" to "hr-HR",
+            "Hungary (Hungarian)" to "hu-HU", "Indonesia (Indonesian)" to "id-ID", "Iceland (Icelandic)" to "is-IS",
+            "Italy (Italian)" to "it-IT", "Japan (Japanese)" to "ja-JP", "India (Kannada)" to "kn-IN",
+            "South Korea (Korean)" to "ko-KR", "Lublin (Polish)" to "pl-PL", "Lithuania (Lithuanian)" to "lt-LT",
+            "Latvia (Latvian)" to "lv-LV", "India (Malayalam)" to "ml-IN", "Malaysia (Malay)" to "ms-MY",
+            "Norway (Norwegian)" to "no-NO", "Netherlands (Dutch)" to "nl-NL", "Poland (Polish)" to "pl-PL",
+            "Brazil (Portuguese)" to "pt-BR", "Portugal (Portuguese)" to "pt-PT", "Romania (Romanian)" to "ro-RO",
+            "Russia (Russian)" to "ru-RU", "Slovakia (Slovak)" to "sk-SK", "Slovenia (Slovenian)" to "sl-SI",
+            "Serbia (Serbian)" to "sr-RS", "Sweden (Swedish)" to "sv-SE", "India (Tamil)" to "ta-IN",
+            "India (Telugu)" to "te-IN", "Thailand (Thai)" to "th-TH", "Turkey (Turkish)" to "tr-TR",
+            "Ukraine (Ukrainian)" to "uk-UA", "Vietnam (Vietnamese)" to "vi-VN", "China (Chinese Simplified)" to "zh-CN",
+            "Taiwan (Chinese Traditional)" to "zh-TW"
+        ).sortedBy { it.first.lowercase() }
+    }
+
     private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
-    
     private val resourceCache = mutableMapOf<String, Int>()
+    
     private fun getCachedResId(name: String, type: String): Int {
         return resourceCache.getOrPut("$type/$name") {
             res.getIdentifier(name, type, BuildConfig.LIBRARY_PACKAGE_NAME)
@@ -179,7 +206,6 @@ class SettingsBottomFragment(
 
     private fun getCineStreamDynamicKeys(): Set<String> {
         val keys = mutableSetOf<String>()
-        
         try {
             val loader = getCineStreamClassLoader()
             if (loader != null) {
@@ -188,9 +214,7 @@ class SettingsBottomFragment(
                     if (field.type == String::class.java) {
                         field.isAccessible = true
                         val keyName = field.get(null) as? String
-                        if (!keyName.isNullOrBlank()) {
-                            keys.add(keyName)
-                        }
+                        if (!keyName.isNullOrBlank()) keys.add(keyName)
                     }
                 }
             }
@@ -221,7 +245,6 @@ class SettingsBottomFragment(
             "stremio_addons", "new_provider_default_on", "seen_providers", "provider_order"
         )
         keys.addAll(hardcoded)
-        
         return keys
     }
 
@@ -280,67 +303,6 @@ class SettingsBottomFragment(
         super.onDestroyView()
     }
 
-    private val languages = listOf(
-        "South Africa (Afrikaans)" to "af-ZA",
-        "United Arab Emirates (Arabic)" to "ar-AE",
-        "Saudi Arabia (Arabic)" to "ar-SA",
-        "Azerbaijan (Azerbaijani)" to "az-AZ",
-        "Bulgaria (Bulgarian)" to "bg-BG",
-        "India (Bengali)" to "bn-IN",
-        "Spain (Catalan)" to "ca-ES",
-        "Czech Republic (Czech)" to "cs-CZ",
-        "United Kingdom (Welsh)" to "cy-GB",
-        "Denmark (Danish)" to "da-DK",
-        "Germany (German)" to "de-DE",
-        "Greece (Greek)" to "el-GR",
-        "United States (English)" to "en-US",
-        "United Kingdom (English)" to "en-GB",
-        "Spain (Spanish)" to "es-ES",
-        "Latin America (Spanish)" to "es-419",
-        "Estonia (Estonian)" to "et-EE",
-        "Spain (Basque)" to "eu-ES",
-        "Iran (Persian)" to "fa-IR",
-        "Finland (Finnish)" to "fi-FI",
-        "Philippines (Filipino)" to "fil-PH",
-        "France (French)" to "fr-FR",
-        "Spain (Galician)" to "gl-ES",
-        "India (Gujarati)" to "gu-IN",
-        "Israel (Hebrew)" to "he-IL",
-        "India (Hindi)" to "hi-IN",
-        "Croatia (Croatian)" to "hr-HR",
-        "Hungary (Hungarian)" to "hu-HU",
-        "Indonesia (Indonesian)" to "id-ID",
-        "Iceland (Icelandic)" to "is-IS",
-        "Italy (Italian)" to "it-IT",
-        "Japan (Japanese)" to "ja-JP",
-        "India (Kannada)" to "kn-IN",
-        "South Korea (Korean)" to "ko-KR",
-        "Lublin (Polish)" to "pl-PL",
-        "Lithuania (Lithuanian)" to "lt-LT",
-        "Latvia (Latvian)" to "lv-LV",
-        "India (Malayalam)" to "ml-IN",
-        "Malaysia (Malay)" to "ms-MY",
-        "Norway (Norwegian)" to "no-NO",
-        "Netherlands (Dutch)" to "nl-NL",
-        "Poland (Polish)" to "pl-PL",
-        "Brazil (Portuguese)" to "pt-BR",
-        "Portugal (Portuguese)" to "pt-PT",
-        "Romania (Romanian)" to "ro-RO",
-        "Russia (Russian)" to "ru-RU",
-        "Slovakia (Slovak)" to "sk-SK",
-        "Slovenia (Slovenian)" to "sl-SI",
-        "Serbia (Serbian)" to "sr-RS",
-        "Sweden (Swedish)" to "sv-SE",
-        "India (Tamil)" to "ta-IN",
-        "India (Telugu)" to "te-IN",
-        "Thailand (Thai)" to "th-TH",
-        "Turkey (Turkish)" to "tr-TR",
-        "Ukraine (Ukrainian)" to "uk-UA",
-        "Vietnam (Vietnamese)" to "vi-VN",
-        "China (Chinese Simplified)" to "zh-CN",
-        "Taiwan (Chinese Traditional)" to "zh-TW"
-    ).sortedBy { it.first.lowercase() }
-
     private fun getDrawable(name: String): Drawable {
         val id = getCachedResId(name, "drawable")
         return res.getDrawable(id, null) ?: throw Exception("Drawable $name not found")
@@ -374,44 +336,6 @@ class SettingsBottomFragment(
                StremioC.loadProviderDynamically("phisher", "com.phisher98.StreamPlay") != null
     }
 
-    private fun showSavedPopup(ctx: Context, title: String, message: String, onConfirm: () -> Unit = {}) {
-        val container = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(40, 40, 40, 40)
-            background = getDarkThemeBg()
-            addView(TextView(ctx).apply {
-                text = title
-                textSize = 18f
-                setTextColor(Color.WHITE)
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
-                setPadding(0, 0, 0, 20)
-                gravity = android.view.Gravity.CENTER
-            })
-            addView(TextView(ctx).apply {
-                text = message
-                setTextColor(Color.LTGRAY)
-                textSize = 14f
-                setPadding(0, 0, 0, 30)
-            })
-        }
-        val okBtn = Button(ctx).apply {
-            text = "OK"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-        }
-        container.addView(okBtn)
-
-        val dlg = AlertDialog.Builder(ctx).setView(container).create()
-        setupCustomDialog(dlg, container)
-        okBtn.setOnClickListener {
-            dlg.dismiss()
-            onConfirm()
-        }
-        dlg.show()
-    }
-
     @SuppressLint("DiscouragedApi")
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
@@ -421,6 +345,7 @@ class SettingsBottomFragment(
         dialog?.setCanceledOnTouchOutside(false)
         
         val ctx = requireContext()
+        val appContext = ctx.applicationContext
         val view = getLayout("bottom_sheet_layout", inflater, container)
 
         val addlinks: ImageView = try { view.findView("addlinks") } catch (e: Throwable) { throw Exception("addlinks ImageView not found", e) }
@@ -447,26 +372,25 @@ class SettingsBottomFragment(
 
             viewLifecycleOwner.lifecycleScope.launch {
                 try {
+                    // ── [최적화 4] 데이터 수집(Export) 처리를 완벽하게 Background IO 스레드로 분리 ──
                     val backupStr = withContext(Dispatchers.IO) {
                         val json = JSONObject()
                         
-                        // 1. StremioC 데이터 인코딩
                         json.put("stremio_c_data", prefsToJson(sharedPref))
                         json.put("plugin_name", "StremioC_Bundle")
                         
-                        // 2. StreamPlay 데이터 인코딩
                         json.put("stream_play_enabled", isStreamPlayExportActive)
                         if (isStreamPlayExportActive) {
-                            val streamPlayPrefs = ctx.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
+                            val streamPlayPrefs = appContext.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
                             json.put("stream_play_data", prefsToJson(streamPlayPrefs))
                         }
 
-                        // 3. CineStream 데이터 인코딩
                         json.put("cine_stream_enabled", isCineStreamExportActive)
                         if (isCineStreamExportActive) {
                             val cineStreamJson = JSONObject()
                             val dynamicKeys = getCineStreamDynamicKeys()
                             
+                            // ── [정확성 보장] 무식하지만 100% 안전한 try-catch 타입 추론 스캐너 ──
                             dynamicKeys.forEach { cKey ->
                                 var found = false
                                 try { 
@@ -505,7 +429,9 @@ class SettingsBottomFragment(
                         Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
                     }
 
-                    val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    if (!isActive) return@launch // [최적화 5] 파괴된 프래그먼트 참조 방지
+
+                    val clipboard = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                     val clip = ClipData.newPlainText("StremioC Backup Bundle", backupStr)
                     clipboard.setPrimaryClip(clip)
 
@@ -523,7 +449,7 @@ class SettingsBottomFragment(
                         })
                         val descBuilder = StringBuilder("StremioC settings copied successfully.")
                         if (isStreamPlayExportActive) descBuilder.append("\n+ StreamPlay settings included.")
-                        if (isCineStreamExportActive) descBuilder.append("\n+ CineStream settings included.")
+                        if (isCineStreamExportActive) descBuilder.append("\n+ CineStream settings included (via Smart Scanner).")
                         descBuilder.append("\n\nPlease paste it somewhere safe (e.g., Notes).")
 
                         addView(TextView(ctx).apply {
@@ -548,20 +474,22 @@ class SettingsBottomFragment(
                     dlg.show()
                 } catch (e: Exception) {
                     e.printStackTrace()
-                    Toast.makeText(ctx, "Failed to export settings", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(appContext, "Failed to export settings", Toast.LENGTH_SHORT).show()
                 }
             }
         }
 
         tvImport.setOnClickListener {
-            val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val ctx = requireContext()
+            val appContext = ctx.applicationContext
+            val clipboard = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clipData = clipboard.primaryClip
             val clipboardText = if (clipData != null && clipData.itemCount > 0) {
                 clipData.getItemAt(0).text?.toString()?.trim() ?: ""
             } else ""
 
             if (clipboardText.isEmpty()) {
-                Toast.makeText(ctx, "Clipboard is empty. Copy the backup data first.", Toast.LENGTH_LONG).show()
+                Toast.makeText(appContext, "Clipboard is empty. Copy the backup data first.", Toast.LENGTH_LONG).show()
                 return@setOnClickListener
             }
 
@@ -585,6 +513,8 @@ class SettingsBottomFragment(
                         throw Exception("Plugin mismatch")
                     }
                     
+                    if (!isActive) return@launch // [최적화 5] 파괴된 프래그먼트 참조 방지
+
                     val cancelBtn = Button(ctx).apply {
                         text = "Cancel"
                         setTextColor(Color.WHITE)
@@ -643,62 +573,9 @@ class SettingsBottomFragment(
 
                     cancelBtn.setOnClickListener { dlg.dismiss() }
                     restoreBtn.setOnClickListener {
-                        val editor = sharedPref.edit()
+                        dlg.dismiss() // 기존 질문창 닫기
                         
-                        if (pluginName == "StremioC_Bundle") {
-                            // 1. StremioC 설정 복원 (기존 설정 완전 초기화하여 빈 값 적용 보장)
-                            val stremioCData = parsedJson.optJSONObject("stremio_c_data")
-                            if (stremioCData != null) {
-                                editor.clear()
-                                jsonToPrefs(stremioCData, editor)
-                            }
-
-                            // 2. StreamPlay 조건부 복구
-                            val isStreamPlayInBackup = parsedJson.optBoolean("stream_play_enabled", false)
-                            val isStreamPlayEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, false) ?: false
-                            if (parsedJson.has("stream_play_data") && (isStreamPlayInBackup || isStreamPlayEnabledInConfig)) {
-                                val streamPlayData = parsedJson.optJSONObject("stream_play_data")
-                                if (streamPlayData != null) {
-                                    val streamPlayPrefs = ctx.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
-                                    val editorSP = streamPlayPrefs.edit()
-                                    editorSP.clear() // 빈 값 복원을 위한 완전 초기화
-                                    jsonToPrefs(streamPlayData, editorSP)
-                                    editorSP.commit()
-                                }
-                            }
-
-                            // 3. CineStream 조건부 복구 (DataStore 강제 주입 및 빈 값 삭제)
-                            val isCineStreamInBackup = parsedJson.optBoolean("cine_stream_enabled", false)
-                            val isCineStreamEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, false) ?: false
-                            if (parsedJson.has("cine_stream_data") && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
-                                val cineStreamData = parsedJson.optJSONObject("cine_stream_data")
-                                if (cineStreamData != null) {
-                                    val dynamicKeys = getCineStreamDynamicKeys()
-                                    dynamicKeys.forEach { cKey ->
-                                        if (cineStreamData.has(cKey)) {
-                                            val cValue = cineStreamData.get(cKey)
-                                            try {
-                                                when (cValue) {
-                                                    is Boolean -> CloudStreamApp.setKey(cKey, cValue)
-                                                    is String -> CloudStreamApp.setKey(cKey, cValue)
-                                                    is Int -> CloudStreamApp.setKey(cKey, cValue)
-                                                }
-                                            } catch (_: Throwable) {}
-                                        } else {
-                                            // 백업본에 없는 키는 빈 값(Null) 처리하여 DataStore에서 강제 삭제
-                                            try { CloudStreamApp.setKey(cKey, null as String?) } catch (_: Throwable) {}
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            editor.clear()
-                            jsonToPrefs(parsedJson, editor)
-                        }
-                        
-                        editor.commit()
-                        
-                        // 팝업 테마가 적용된 로딩 다이얼로그 표시
+                        // ── [UI 통일성 개선] 앱 테마와 통일된 로딩 팝업 표시 ──
                         val loadingContainer = LinearLayout(ctx).apply {
                             orientation = LinearLayout.VERTICAL
                             setPadding(40, 40, 40, 40)
@@ -723,13 +600,70 @@ class SettingsBottomFragment(
                         setupCustomDialog(loadingDlg, loadingContainer)
                         loadingDlg.show()
 
+                        // ── [최적화 2] 무거운 디스크 쓰기 로직을 백그라운드로 완전히 분리 ──
                         viewLifecycleOwner.lifecycleScope.launch {
-                            // DataStore 비동기 쓰기가 디스크에 반영될 수 있도록 1.5초 대기
+                            withContext(Dispatchers.IO) {
+                                val editor = sharedPref.edit()
+                                
+                                if (pluginName == "StremioC_Bundle") {
+                                    val stremioCData = parsedJson.optJSONObject("stremio_c_data")
+                                    if (stremioCData != null) {
+                                        editor.clear()
+                                        jsonToPrefs(stremioCData, editor)
+                                    }
+
+                                    val isStreamPlayInBackup = parsedJson.optBoolean("stream_play_enabled", false)
+                                    val isStreamPlayEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, false) ?: false
+                                    if (parsedJson.has("stream_play_data") && (isStreamPlayInBackup || isStreamPlayEnabledInConfig)) {
+                                        val streamPlayData = parsedJson.optJSONObject("stream_play_data")
+                                        if (streamPlayData != null) {
+                                            val streamPlayPrefs = appContext.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
+                                            val editorSP = streamPlayPrefs.edit()
+                                            // [빈 값 동기화 완벽 해결] 기존 설정 파일을 백지로 만들어 JSON에 없는 빈 값을 완벽히 삭제
+                                            editorSP.clear() 
+                                            jsonToPrefs(streamPlayData, editorSP)
+                                            editorSP.commit()
+                                        }
+                                    }
+
+                                    val isCineStreamInBackup = parsedJson.optBoolean("cine_stream_enabled", false)
+                                    val isCineStreamEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, false) ?: false
+                                    if (parsedJson.has("cine_stream_data") && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
+                                        val cineStreamData = parsedJson.optJSONObject("cine_stream_data")
+                                        if (cineStreamData != null) {
+                                            val dynamicKeys = getCineStreamDynamicKeys()
+                                            dynamicKeys.forEach { cKey ->
+                                                if (cineStreamData.has(cKey)) {
+                                                    val cValue = cineStreamData.get(cKey)
+                                                    try {
+                                                        when (cValue) {
+                                                            is Boolean -> CloudStreamApp.setKey(cKey, cValue)
+                                                            is String -> CloudStreamApp.setKey(cKey, cValue)
+                                                            is Int -> CloudStreamApp.setKey(cKey, cValue)
+                                                        }
+                                                    } catch (_: Throwable) {}
+                                                } else {
+                                                    // [빈 값 동기화 완벽 해결] 백업본에 없는 키는 DataStore에서 강제로 Null 주입하여 삭제
+                                                    try { CloudStreamApp.setKey(cKey, null as String?) } catch (_: Throwable) {}
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    editor.clear()
+                                    jsonToPrefs(parsedJson, editor)
+                                }
+                                
+                                editor.commit()
+                            }
+                            
+                            // ── [최적화 5] 비동기 쓰기가 안전하게 완료되도록 기다림 및 방어 코드 ──
                             delay(1500)
-                            loadingDlg.dismiss()
-                            dlg.dismiss()
-                            dismiss()
-                            restartApp()
+                            if (isActive && isAdded) {
+                                loadingDlg.dismiss()
+                                dismiss()
+                                restartApp(appContext)
+                            }
                         }
                     }
                     dlg.show()
@@ -831,7 +765,6 @@ class SettingsBottomFragment(
         }
 
         showlinks.setOnClickListener {
-            val ctx = requireContext()
             val inflater = LayoutInflater.from(ctx)
             val dialogView = getLayout("dialog_list_links", inflater, null) as LinearLayout
             
@@ -1006,11 +939,11 @@ class SettingsBottomFragment(
                 addView(btnRow)
             }
 
-            val dlg = AlertDialog.Builder(ctx).setView(container).create()
+            val dlg = AlertDialog.Builder(context).setView(container).create()
             setupCustomDialog(dlg, container)
 
             cancelBtn.setOnClickListener { dlg.dismiss() }
-            restartBtn.setOnClickListener { dismiss(); restartApp() }
+            restartBtn.setOnClickListener { dismiss(); restartApp(context.applicationContext) }
             dlg.show()
         }
 
@@ -1114,7 +1047,7 @@ class SettingsBottomFragment(
         val currentSavedCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "en-US") ?: "en-US"
         
         var selectedCode = currentSavedCode
-        var selectedLangName = languages.find { it.second == currentSavedCode }?.first ?: "South Korea (Korean)"
+        var selectedLangName = LANGUAGES.find { it.second == currentSavedCode }?.first ?: "South Korea (Korean)"
 
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -1207,9 +1140,9 @@ class SettingsBottomFragment(
             }
         }
 
-        val adapter = LangAdapter(languages, selectedCode) { code ->
+        val adapter = LangAdapter(LANGUAGES, selectedCode) { code ->
             sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code) }
-            val langName = languages.find { it.second == code }?.first ?: code
+            val langName = LANGUAGES.find { it.second == code }?.first ?: code
             Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
             activeSubDialog?.dismiss()
         }
@@ -1707,15 +1640,14 @@ class SettingsBottomFragment(
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {}
 
-    private fun restartApp() {
-        val context = requireContext().applicationContext
-        val packageManager = context.packageManager
-        val intent = packageManager.getLaunchIntentForPackage(context.packageName)
+    private fun restartApp(appContext: Context) {
+        val packageManager = appContext.packageManager
+        val intent = packageManager.getLaunchIntentForPackage(appContext.packageName)
         val componentName = intent?.component
 
         if (componentName != null) {
             val restartIntent = Intent.makeRestartActivityTask(componentName)
-            context.startActivity(restartIntent)
+            appContext.startActivity(restartIntent)
             Runtime.getRuntime().exit(0)
         }
     }
