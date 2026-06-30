@@ -34,6 +34,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -55,9 +56,49 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
     private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f }
 
+    // ── [추가됨] SharedPreferences -> JSONObject 정밀 변환 헬퍼 (StringSet 보존) ──
+    private fun prefsToJson(prefs: SharedPreferences): JSONObject {
+        val json = JSONObject()
+        prefs.all.forEach { (key, value) ->
+            if (value != null) {
+                if (value is Set<*>) {
+                    val arr = JSONArray()
+                    value.forEach { item -> if (item != null) arr.put(item) }
+                    json.put(key, arr)
+                } else {
+                    json.put(key, value)
+                }
+            }
+        }
+        return json
+    }
+
+    // ── [추가됨] JSONObject -> SharedPreferences 정밀 복원 헬퍼 (Long, Float, StringSet 완벽 지원) ──
+    private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
+        val keys = json.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            when (val value = json.get(key)) {
+                is Boolean -> editor.putBoolean(key, value)
+                is String -> editor.putString(key, value)
+                is Int -> editor.putInt(key, value)
+                is Long -> editor.putLong(key, value)
+                is Double -> editor.putFloat(key, value.toFloat())
+                is JSONArray -> {
+                    val set = mutableSetOf<String>()
+                    for (i in 0 until value.length()) {
+                        val item = value.optString(i)
+                        if (item != null) set.add(item)
+                    }
+                    editor.putStringSet(key, set)
+                }
+            }
+        }
+    }
+
     private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {
         activeAlertDialog = dialog
-        dialog.setCanceledOnTouchOutside(false) // 🚨 [기능 수정] 모든 부속 팝업/부속창 밖 터치 시 종료 차단 (뒤로가기는 정상 동작)
+        dialog.setCanceledOnTouchOutside(false)
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.setOnShowListener {
             dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
@@ -141,12 +182,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
-        isCancelable = true // 🚨 [기능 수정] 뒤로가기 허용
-        dialog?.setCanceledOnTouchOutside(false) // 🚨 [기능 수정] 메인 설정창 밖 터치 시 종료만 차단
+        isCancelable = true 
+        dialog?.setCanceledOnTouchOutside(false) 
         val ctx = requireContext()
         val prefs = ctx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
     
-
         maxIdGen = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
         instanceMemoryList.clear()
         for (i in 1..maxIdGen) {
@@ -189,11 +229,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 viewLifecycleOwner.lifecycleScope.launch {
                     try {
                         val backupStr = withContext(Dispatchers.IO) {
-                            val json = JSONObject()
-                            for ((key, value) in prefs.all) {
-                                json.put(key, value)
-                            }
+                            // 🚨 [수정됨] 타입 안전성을 위해 prefsToJson 헬퍼 사용
+                            val json = prefsToJson(prefs)
                             json.put("plugin_name", "UltimaEvo")
+                            
                             val bos = ByteArrayOutputStream()
                             GZIPOutputStream(bos).use { it.write(json.toString().toByteArray(Charsets.UTF_8)) }
                             Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
@@ -315,9 +354,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         cancelBtn.setOnClickListener { dlg.dismiss() }
                         
                         restoreBtn.setOnClickListener {
-                            dlg.dismiss() // 기존 확인창 닫기
+                            dlg.dismiss() 
                             
-                            // ── [UI 통일성 개선] 앱 테마와 통일된 로딩 팝업 표시 ──
                             val loadingContainer = LinearLayout(ctx).apply {
                                 orientation = LinearLayout.VERTICAL
                                 setPadding(40, 40, 40, 40)
@@ -345,25 +383,14 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             viewLifecycleOwner.lifecycleScope.launch {
                                 withContext(Dispatchers.IO) {
                                     val editor = prefs.edit()
-                                    // 🚨 [최적화 1] 고스트 데이터 방지: 기존 설정을 완전히 초기화
-                                    editor.clear() 
+                                    editor.clear() // 고스트 데이터 방지
                                     
-                                    val keys = parsedJson.keys()
-                                    while (keys.hasNext()) {
-                                        val key = keys.next()
-                                        when (val value = parsedJson.get(key)) {
-                                            is Boolean -> editor.putBoolean(key, value)
-                                            is String -> editor.putString(key, value)
-                                            is Int -> editor.putInt(key, value)
-                                            is Long -> editor.putLong(key, value)
-                                            is Double -> editor.putFloat(key, value.toFloat())
-                                        }
-                                    }
-                                    // 🚨 [최적화 2] 백그라운드 스레드에서 디스크 쓰기 진행
+                                    // 🚨 [수정됨] 타입 안전성을 위해 jsonToPrefs 헬퍼 사용
+                                    jsonToPrefs(parsedJson, editor)
+                                    
                                     editor.commit()
                                 }
                                 
-                                // 🚨 [최적화 3] 1.5초 대기 후 안전하게 앱 재시작
                                 delay(1500)
                                 if (isActive && isAdded) {
                                     loadingDlg.dismiss()
