@@ -909,6 +909,9 @@ class SettingsBottomFragment(
             dlg.show()
         }
 
+        // hsp1020/settings/SettingsBottomFragment.kt
+// (기존 코드와 동일하되, saveIcon.setOnClickListener 부분만 아래와 같이 수정/추가됩니다)
+
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
             val tmdbApiKeyVal = etTmdbApiKey.text.toString().trim()
@@ -935,6 +938,13 @@ class SettingsBottomFragment(
                 putBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, switchStreamPlay.isChecked)
                 putBoolean(SettingsRepository.PREF_KEY_VIXSRC_ENABLED, switchVixSrc.isChecked)
             }
+            
+            // 🚨 [순정 백업 연동] 설정이 저장될 때 즉시 Cloudstream DataStore에 기생 업데이트
+            try {
+                CloudStreamApp.setKey("native_backup_stremioc", prefsToJson(sharedPref).toString())
+                val spPrefs = requireContext().applicationContext.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
+                CloudStreamApp.setKey("native_backup_streamplay", prefsToJson(spPrefs).toString())
+            } catch (e: Exception) { e.printStackTrace() }
 
             val cancelBtn = Button(context).apply {
                 text = "No"
