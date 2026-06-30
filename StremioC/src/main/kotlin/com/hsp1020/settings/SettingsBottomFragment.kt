@@ -150,7 +150,6 @@ class SettingsBottomFragment(
     private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
     private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f }
 
-    // ── CineStream 전용 SharedPreferences 수집 헬퍼 ──
     private fun getCineStreamPrefs(ctx: Context): SharedPreferences? {
         val possibleNames = listOf(
             "CineStream", "CineStream_preferences", "plugin_CineStream", "plugin_CineStream_preferences", 
@@ -165,7 +164,6 @@ class SettingsBottomFragment(
         return ctx.getSharedPreferences("${ctx.packageName}_preferences", Context.MODE_PRIVATE)
     }
 
-    // ── CineStream 키 정밀 필터링 검사기 ──
     private fun isCineStreamKey(key: String): Boolean {
         val staticKeys = setOf(
             "ScrapeConcurrency", "DownloadEnable", "ProviderCineStream", "ProviderSimkl", 
@@ -173,6 +171,46 @@ class SettingsBottomFragment(
             "stremio_addons", "new_provider_default_on", "seen_providers", "provider_order"
         )
         return key in staticKeys || key.startsWith("p_") || key.startsWith("stremio_")
+    }
+
+    // ── [신규 추가] SharedPreferences를 JSONObject로 정밀 변환하는 헬퍼 (Set<String> 호환) ──
+    private fun prefsToJson(prefs: SharedPreferences, filterBlock: ((String) -> Boolean)? = null): JSONObject {
+        val json = JSONObject()
+        prefs.all.forEach { (key, value) ->
+            if (value != null && (filterBlock == null || filterBlock(key))) {
+                if (value is Set<*>) {
+                    val arr = JSONArray()
+                    value.forEach { item -> if (item != null) arr.put(item) }
+                    json.put(key, arr)
+                } else {
+                    json.put(key, value)
+                }
+            }
+        }
+        return json
+    }
+
+    // ── [신규 추가] JSONObject를 SharedPreferences에 강제 복원하는 헬퍼 (JSONArray -> StringSet 복원) ──
+    private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
+        val keys = json.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            when (val value = json.get(key)) {
+                is Boolean -> editor.putBoolean(key, value)
+                is String -> editor.putString(key, value)
+                is Int -> editor.putInt(key, value)
+                is Long -> editor.putLong(key, value)
+                is Double -> editor.putFloat(key, value.toFloat())
+                is JSONArray -> {
+                    val set = mutableSetOf<String>()
+                    for (i in 0 until value.length()) {
+                        val item = value.optString(i)
+                        if (item != null) set.add(item)
+                    }
+                    editor.putStringSet(key, set)
+                }
+            }
+        }
     }
 
     private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {
@@ -353,7 +391,6 @@ class SettingsBottomFragment(
 
         tvExport.setOnClickListener {
             val ctx = requireContext()
-            // 🚨 [Export 시점 획득] 클릭 순간 스위치의 ON/OFF 상태를 획득하여 조건부 백업을 구성
             val isStreamPlayExportActive = try { view.findView<Switch>("switchStreamPlay").isChecked } catch (_: Throwable) { false }
             val isCineStreamExportActive = try { view.findView<Switch>("switchCineStream").isChecked } catch (_: Throwable) { false }
 
@@ -362,32 +399,24 @@ class SettingsBottomFragment(
                     val backupStr = withContext(Dispatchers.IO) {
                         val json = JSONObject()
                         
-                        // 1. StremioC 설정 수집
-                        val stremioCJson = JSONObject()
-                        sharedPref.all.forEach { (key, value) -> stremioCJson.put(key, value) }
-                        json.put("stremio_c_data", stremioCJson)
+                        // 1. StremioC 데이터 인코딩
+                        json.put("stremio_c_data", prefsToJson(sharedPref))
                         json.put("plugin_name", "StremioC_Bundle")
                         
-                        // 2. StreamPlay 설정 수집 (토글이 켜져 있을 때만 포함)
+                        // 2. StreamPlay 데이터 인코딩 (활성화 및 설치 시에만)
                         json.put("stream_play_enabled", isStreamPlayExportActive)
                         if (isStreamPlayExportActive) {
                             val streamPlayPrefs = ctx.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
-                            val streamPlayJson = JSONObject()
-                            streamPlayPrefs.all.forEach { (key, value) -> streamPlayJson.put(key, value) }
-                            json.put("stream_play_data", streamPlayJson)
+                            json.put("stream_play_data", prefsToJson(streamPlayPrefs))
                         }
 
-                        // 3. CineStream 설정 수집 (토글이 켜져 있을 때만 포함 및 키 필터링)
+                        // 3. CineStream 데이터 인코딩 (활성화 및 설치 시에만 정밀 필터링 적용)
                         json.put("cine_stream_enabled", isCineStreamExportActive)
                         if (isCineStreamExportActive) {
-                            val cineStreamJson = JSONObject()
                             val cineStreamPrefs = getCineStreamPrefs(ctx)
-                            cineStreamPrefs?.all?.forEach { (key, value) ->
-                                if (isCineStreamKey(key)) {
-                                    cineStreamJson.put(key, value)
-                                }
+                            if (cineStreamPrefs != null) {
+                                json.put("cine_stream_data", prefsToJson(cineStreamPrefs) { isCineStreamKey(it) })
                             }
-                            json.put("cine_stream_data", cineStreamJson)
                         }
 
                         val jsonString = json.toString()
@@ -538,23 +567,13 @@ class SettingsBottomFragment(
                         val editor = sharedPref.edit()
                         
                         if (pluginName == "StremioC_Bundle") {
-                            // 1. StremioC 데이터 전면 복구
+                            // 1. StremioC 설정 전원 복원
                             val stremioCData = parsedJson.optJSONObject("stremio_c_data")
                             if (stremioCData != null) {
-                                val sKeys = stremioCData.keys()
-                                while (sKeys.hasNext()) {
-                                    val key = sKeys.next()
-                                    when (val value = stremioCData.get(key)) {
-                                        is Boolean -> editor.putBoolean(key, value)
-                                        is String -> editor.putString(key, value)
-                                        is Int -> editor.putInt(key, value)
-                                        is Long -> editor.putLong(key, value)
-                                        is Double -> editor.putFloat(key, value.toFloat())
-                                    }
-                                }
+                                jsonToPrefs(stremioCData, editor)
                             }
 
-                            // 2. StreamPlay 조건부 복구 (백업본 데이터가 존재하고, 복원 대상 토글 설정이 ON인 경우만)
+                            // 2. StreamPlay 조건부 복구 (설정이 켜져 있고 백업본에 존재하는 경우)
                             val isStreamPlayInBackup = parsedJson.optBoolean("stream_play_enabled", false)
                             val isStreamPlayEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, false) ?: false
                             val hasStreamPlayData = parsedJson.has("stream_play_data")
@@ -564,22 +583,12 @@ class SettingsBottomFragment(
                                 if (streamPlayData != null) {
                                     val streamPlayPrefs = ctx.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
                                     val editorSP = streamPlayPrefs.edit()
-                                    val spKeys = streamPlayData.keys()
-                                    while (spKeys.hasNext()) {
-                                        val key = spKeys.next()
-                                        when (val value = streamPlayData.get(key)) {
-                                            is Boolean -> editorSP.putBoolean(key, value)
-                                            is String -> editorSP.putString(key, value)
-                                            is Int -> editorSP.putInt(key, value)
-                                            is Long -> editorSP.putLong(key, value)
-                                            is Double -> editorSP.putFloat(key, value.toFloat())
-                                        }
-                                    }
+                                    jsonToPrefs(streamPlayData, editorSP)
                                     editorSP.commit()
                                 }
                             }
 
-                            // 3. CineStream 조건부 복구 (백업본 데이터가 존재하고, 복원 대상 토글 설정이 ON인 경우만)
+                            // 3. CineStream 조건부 복구 (설정이 켜져 있고 백업본에 존재하는 경우)
                             val isCineStreamInBackup = parsedJson.optBoolean("cine_stream_enabled", false)
                             val isCineStreamEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, false) ?: false
                             val hasCineStreamData = parsedJson.has("cine_stream_data")
@@ -590,36 +599,14 @@ class SettingsBottomFragment(
                                     val cineStreamPrefs = getCineStreamPrefs(ctx)
                                     if (cineStreamPrefs != null) {
                                         val editorCS = cineStreamPrefs.edit()
-                                        val csKeys = cineStreamData.keys()
-                                        while (csKeys.hasNext()) {
-                                            val key = csKeys.next()
-                                            when (val value = cineStreamData.get(key)) {
-                                                is Boolean -> editorCS.putBoolean(key, value)
-                                                is String -> editorCS.putString(key, value)
-                                                is Int -> editorCS.putInt(key, value)
-                                                is Long -> editorCS.putLong(key, value)
-                                                is Double -> editorCS.putFloat(key, value.toFloat())
-                                            }
-                                        }
+                                        jsonToPrefs(cineStreamData, editorCS)
                                         editorCS.commit()
                                     }
                                 }
                             }
                         } else {
-                            // 구버전(StremioC 단일) 복원 하위호환성 유지
-                            val keys = parsedJson.keys()
-                            while (keys.hasNext()) {
-                                val key = keys.next()
-                                if (key != "plugin_name") {
-                                    when (val value = parsedJson.get(key)) {
-                                        is Boolean -> editor.putBoolean(key, value)
-                                        is String -> editor.putString(key, value)
-                                        is Int -> editor.putInt(key, value)
-                                        is Long -> editor.putLong(key, value)
-                                        is Double -> editor.putFloat(key, value.toFloat())
-                                    }
-                                }
-                            }
+                            // 구버전 단일 백업 하위호환 복구
+                            jsonToPrefs(parsedJson, editor)
                         }
                         
                         editor.commit()
@@ -1473,12 +1460,12 @@ class SettingsBottomFragment(
         val touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
             override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
                 val fromPos = viewHolder.adapterPosition
-                val toPos = target.adapterPosition
+                val_toPos = target.adapterPosition
                 
-                if (fromPos == RecyclerView.NO_POSITION || toPos == RecyclerView.NO_POSITION) return false
+                if (fromPos == RecyclerView.NO_POSITION ||_toPos == RecyclerView.NO_POSITION) return false
                 
                 val movedTab = adapter.visibleTabs[fromPos]
-                Collections.swap(adapter.visibleTabs, fromPos, toPos)
+                Collections.swap(adapter.visibleTabs, fromPos, _toPos)
                 
                 val masterFrom = masterTabs.indexOf(movedTab)
                 val targetTab = adapter.visibleTabs[fromPos]
@@ -1489,7 +1476,7 @@ class SettingsBottomFragment(
                     masterTabs.add(masterTo, movedTab)
                 }
 
-                adapter.notifyItemMoved(fromPos, toPos)
+                adapter.notifyItemMoved(fromPos, _toPos)
                 return true
             }
 
