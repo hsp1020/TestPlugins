@@ -173,7 +173,6 @@ class SettingsBottomFragment(
         return key in staticKeys || key.startsWith("p_") || key.startsWith("stremio_")
     }
 
-    // ── [신규 추가] SharedPreferences를 JSONObject로 정밀 변환하는 헬퍼 (Set<String> 호환) ──
     private fun prefsToJson(prefs: SharedPreferences, filterBlock: ((String) -> Boolean)? = null): JSONObject {
         val json = JSONObject()
         prefs.all.forEach { (key, value) ->
@@ -190,7 +189,6 @@ class SettingsBottomFragment(
         return json
     }
 
-    // ── [신규 추가] JSONObject를 SharedPreferences에 강제 복원하는 헬퍼 (JSONArray -> StringSet 복원) ──
     private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
         val keys = json.keys()
         while (keys.hasNext()) {
@@ -265,6 +263,7 @@ class SettingsBottomFragment(
         "Japan (Japanese)" to "ja-JP",
         "India (Kannada)" to "kn-IN",
         "South Korea (Korean)" to "ko-KR",
+        "Lublin (Polish)" to "pl-PL",
         "Lithuania (Lithuanian)" to "lt-LT",
         "Latvia (Latvian)" to "lv-LV",
         "India (Malayalam)" to "ml-IN",
@@ -403,14 +402,14 @@ class SettingsBottomFragment(
                         json.put("stremio_c_data", prefsToJson(sharedPref))
                         json.put("plugin_name", "StremioC_Bundle")
                         
-                        // 2. StreamPlay 데이터 인코딩 (활성화 및 설치 시에만)
+                        // 2. StreamPlay 데이터 인코딩
                         json.put("stream_play_enabled", isStreamPlayExportActive)
                         if (isStreamPlayExportActive) {
                             val streamPlayPrefs = ctx.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
                             json.put("stream_play_data", prefsToJson(streamPlayPrefs))
                         }
 
-                        // 3. CineStream 데이터 인코딩 (활성화 및 설치 시에만 정밀 필터링 적용)
+                        // 3. CineStream 데이터 인코딩
                         json.put("cine_stream_enabled", isCineStreamExportActive)
                         if (isCineStreamExportActive) {
                             val cineStreamPrefs = getCineStreamPrefs(ctx)
@@ -573,7 +572,7 @@ class SettingsBottomFragment(
                                 jsonToPrefs(stremioCData, editor)
                             }
 
-                            // 2. StreamPlay 조건부 복구 (설정이 켜져 있고 백업본에 존재하는 경우)
+                            // 2. StreamPlay 조건부 복구
                             val isStreamPlayInBackup = parsedJson.optBoolean("stream_play_enabled", false)
                             val isStreamPlayEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, false) ?: false
                             val hasStreamPlayData = parsedJson.has("stream_play_data")
@@ -588,7 +587,7 @@ class SettingsBottomFragment(
                                 }
                             }
 
-                            // 3. CineStream 조건부 복구 (설정이 켜져 있고 백업본에 존재하는 경우)
+                            // 3. CineStream 조건부 복구
                             val isCineStreamInBackup = parsedJson.optBoolean("cine_stream_enabled", false)
                             val isCineStreamEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, false) ?: false
                             val hasCineStreamData = parsedJson.has("cine_stream_data")
@@ -1438,10 +1437,14 @@ class SettingsBottomFragment(
                             val referenceTab = if (newPos + 1 in visibleTabs.indices) visibleTabs[newPos + 1] else if (newPos - 1 in visibleTabs.indices) visibleTabs[newPos - 1] else null
                             var masterTo = if (referenceTab != null) masterTabs.indexOf(referenceTab) else -1
                             
-                            if (referenceTab == visibleTabs.getOrNull(newPos - 1)) {
-                                masterTo += 1
+                            if (masterTo != -1) {
+                                if (referenceTab == visibleTabs.getOrNull(newPos - 1)) {
+                                    masterTo += 1
+                                }
+                                masterTabs.add(masterTo.coerceIn(0, masterTabs.size), item)
+                            } else {
+                                masterTabs.add(item)
                             }
-                            masterTabs.add(masterTo.coerceIn(0, masterTabs.size), item)
                         }
                         
                         notifyItemMoved(oldPos, newPos)
@@ -1460,12 +1463,12 @@ class SettingsBottomFragment(
         val touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
             override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
                 val fromPos = viewHolder.adapterPosition
-                val_toPos = target.adapterPosition
+                val toPos = target.adapterPosition
                 
-                if (fromPos == RecyclerView.NO_POSITION ||_toPos == RecyclerView.NO_POSITION) return false
+                if (fromPos == RecyclerView.NO_POSITION || toPos == RecyclerView.NO_POSITION) return false
                 
                 val movedTab = adapter.visibleTabs[fromPos]
-                Collections.swap(adapter.visibleTabs, fromPos, _toPos)
+                Collections.swap(adapter.visibleTabs, fromPos, toPos)
                 
                 val masterFrom = masterTabs.indexOf(movedTab)
                 val targetTab = adapter.visibleTabs[fromPos]
@@ -1476,7 +1479,7 @@ class SettingsBottomFragment(
                     masterTabs.add(masterTo, movedTab)
                 }
 
-                adapter.notifyItemMoved(fromPos, _toPos)
+                adapter.notifyItemMoved(fromPos, toPos)
                 return true
             }
 
