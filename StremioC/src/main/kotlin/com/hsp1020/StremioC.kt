@@ -1,1776 +1,2048 @@
-// hsp1020/settings/SettingsBottomFragment.kt
 package com.hsp1020
 
-import android.annotation.SuppressLint
 import android.content.Context
-import android.content.Intent
-import android.content.SharedPreferences
-import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
-import android.graphics.drawable.Drawable
-import android.graphics.drawable.GradientDrawable
-import android.os.Bundle
-import android.view.LayoutInflater
-import android.view.View
-import android.view.ViewGroup
-import android.view.WindowManager
-import android.view.inputmethod.EditorInfo
-import android.view.inputmethod.InputMethodManager
-import android.text.InputType
-import android.widget.Button
-import android.widget.CompoundButton
-import android.widget.EditText
-import android.widget.ImageButton
-import android.widget.ImageView
-import android.widget.TextView
-import android.widget.Toast
-import android.widget.CheckBox
-import android.widget.Switch
-import android.widget.LinearLayout
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.util.Base64
-import android.app.AlertDialog
-import com.google.android.material.bottomsheet.BottomSheetDialogFragment
-import androidx.core.net.toUri
-import androidx.lifecycle.lifecycleScope
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.RecyclerView
-import androidx.recyclerview.widget.ItemTouchHelper
-import com.lagradost.api.Log
+import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.databind.JsonNode
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CloudStreamApp
-import com.lagradost.cloudstream3.CommonActivity.showToast
-import org.json.JSONArray
-import org.json.JSONObject
+import com.lagradost.cloudstream3.Actor
+import com.lagradost.cloudstream3.ActorData
+import com.lagradost.cloudstream3.Episode
+import com.lagradost.cloudstream3.HomePageList
+import com.lagradost.cloudstream3.HomePageResponse
+import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
+import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addTMDbId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
+import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
+import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.MainPageRequest
+import com.lagradost.cloudstream3.MainPageData
+import com.lagradost.cloudstream3.mainPageOf
+import com.lagradost.cloudstream3.Score
+import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.ShowStatus
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.addDate
+import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.imdbUrlToIdNullable
+import com.lagradost.cloudstream3.newEpisode
+import com.lagradost.cloudstream3.newHomePageResponse
+import com.lagradost.cloudstream3.newMovieLoadResponse
+import com.lagradost.cloudstream3.newMovieSearchResponse
+import com.lagradost.cloudstream3.newSubtitleFile
+import com.lagradost.cloudstream3.newTvSeriesLoadResponse
+import com.lagradost.cloudstream3.runAllAsync
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.SubtitleHelper
+import com.lagradost.cloudstream3.utils.USER_PROVIDER_API
+import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import com.hsp1020.SubsExtractors.invokeOpenSubs
+import com.hsp1020.SubsExtractors.invokeWatchsomuch
+import com.lagradost.nicehttp.Requests
+import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
+import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.Protocol
+import java.net.URI
+import java.net.URLEncoder
 import java.util.Collections
-import com.lagradost.cloudstream3.MainAPI
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+import java.lang.ref.WeakReference
 
-data class LinkItem(
-    val id: Long = System.currentTimeMillis(),
-    val name: String,
-    val link: String,
-    val type: String
-)
+inline fun <T> runSuspendCatching(block: () -> T): Result<T> {
+    return try {
+        Result.success(block())
+    } catch (c: CancellationException) {
+        throw c 
+    } catch (t: Throwable) { 
+        Result.failure(t)
+    }
+}
 
-object SettingsRepository {
-    private const val PREF_KEY_LINKS = "stremio_saved_links"
-    const val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled"
-    const val PREF_KEY_STREAMPLAY_ENABLED = "streamplay_integration_enabled"
-    const val PREF_KEY_VIXSRC_ENABLED = "vixsrc_integration_enabled"
-    const val PREF_KEY_HISTORY_SYNC_ENABLED = "history_sync_enabled"
-    const val PREF_KEY_HISTORY_SYNC_URL = "history_sync_url"
+private fun String.urlEncode(): String = try { URLEncoder.encode(this, "UTF-8").replace("+", "%20") } catch (e: Exception) { this }
+
+private fun String.cleanBaseUrl(): String {
+    return this.substringBefore("?").replace("/manifest.json", "").trimEnd('/')
+}
+
+private inline fun <T> lruSet(maxSize: Int): MutableSet<T> {
+    return Collections.synchronizedSet(Collections.newSetFromMap(object : java.util.LinkedHashMap<T, Boolean>(maxSize, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<T, Boolean>): Boolean {
+            return size > maxSize
+        }
+    }))
+}
+
+private inline fun <K, V> lruCacheMap(maxSize: Int): MutableMap<K, V> {
+    return Collections.synchronizedMap(object : java.util.LinkedHashMap<K, V>(maxSize, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>): Boolean {
+            return size > maxSize
+        }
+    })
+}
+
+private fun JsonNode?.textOrNull(): String? {
+    if (this == null || this.isNull || this.isMissingNode) return null
+    return try { this.asText().takeIf { it.isNotBlank() && it != "null" } } catch (e: Exception) { null }
+}
+
+private fun JsonNode?.intOrNull(): Int? {
+    if (this == null || this.isNull || this.isMissingNode) return null
+    return try { this.asInt() } catch (e: Exception) { null }
+}
+
+open class StremioC(override var mainUrl: String, override var name: String) : MainAPI() {
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Others)
+    override val hasMainPage = true
+     
+    private var cachedManifest: Manifest? = null
+    private var lastManifestUrl: String = ""
+    private var lastCacheTime: Long = 0
     
-    const val PREF_KEY_TMDB_LANG_CODE = "tmdb_language_code"
-    const val PREF_KEY_CUSTOM_POSTER_ENABLED = "custom_poster_enabled"
-    const val PREF_KEY_CUSTOM_POSTER_URL = "custom_poster_url"
+    private val pageMutex = Mutex()
+    private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
 
-    const val PREF_KEY_TMDB_API_KEY = "tmdb_api_key"
-    const val PREF_KEY_MDBLIST_ENABLED = "mdblist_enabled"
-    const val PREF_KEY_MDBLIST_API_KEY = "mdblist_api_key"
+    private fun getCineStreamProvider(forceSearch: Boolean = false): MainAPI? {
+        if (cachedCineStreamProvider != null) return cachedCustomCineStreamProvider()
+        if (!forceSearch && hasSearchedCineStream) return null
 
-    fun loadLinks(sharedPref: SharedPreferences): MutableList<LinkItem> {
-        val json = sharedPref.getString(PREF_KEY_LINKS, null) ?: return mutableListOf()
-        val list = mutableListOf<LinkItem>()
-        return try {
-            val arr = JSONArray(json)
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                list.add(
-                    LinkItem(
-                        id = obj.optLong("id", System.currentTimeMillis()),
-                        name = obj.optString("name", ""),
-                        link = obj.optString("link", ""),
-                        type = obj.optString("type", "StremioC")
-                    )
-                )
+        synchronized(StremioC::class.java) {
+            if (cachedCineStreamProvider != null) return cachedCustomCineStreamProvider()
+            hasSearchedCineStream = true
+
+            val provider = getSafeAllProviders().find { it.name.equals("CineStream", true) }
+                ?: loadProviderDynamically("megix", "com.megix.CineStreamProvider")
+            
+            if (provider != null) cachedCineStreamProvider = provider
+            return provider
+        }
+    }
+
+    private fun cachedCustomCineStreamProvider(): MainAPI? = cachedCineStreamProvider
+
+    private fun getStreamPlayProvider(forceSearch: Boolean = false): MainAPI? {
+        if (cachedStreamPlayProvider != null) return cachedCustomStreamPlayProvider()
+        if (!forceSearch && hasSearchedStreamPlay) return null
+
+        synchronized(StremioC::class.java) {
+            if (cachedStreamPlayProvider != null) return cachedCustomStreamPlayProvider()
+            hasSearchedStreamPlay = true
+
+            val provider = getSafeAllProviders().find { it.name.equals("StreamPlay", true) }
+                ?: loadProviderDynamically("phisher", "com.phisher98.StreamPlay")
+            
+            if (provider != null) cachedStreamPlayProvider = provider
+            return provider
+        }
+    }
+
+    private fun cachedCustomStreamPlayProvider(): MainAPI? = cachedStreamPlayProvider
+
+    fun getUnifiedMetaUrl(type: String, id: String): String {
+        val context = CloudStreamApp.context ?: return "${mainUrl.cleanBaseUrl()}/meta/$type/${id.urlEncode()}.json"
+        val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+        val isSyncEnabled = prefs.getBoolean("history_sync_enabled", false)
+        val syncUrl = prefs.getString("history_sync_url", "") ?: ""
+
+        return if (isSyncEnabled && syncUrl.isNotBlank()) {
+            val cleanBase = syncUrl.cleanBaseUrl()
+            "$cleanBase/meta/$type/${id.urlEncode()}.json"
+        } else {
+            val cleanBase = mainUrl.cleanBaseUrl()
+            "$cleanBase/meta/$type/${id.urlEncode()}.json"
+        }
+    }
+
+    fun getTargetApiName(): String {
+        val context = CloudStreamApp.context ?: return name
+        val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+        val isSyncEnabled = prefs.getBoolean("history_sync_enabled", false)
+        return if (isSyncEnabled) "StremioC" else name
+    }
+    
+    companion object {
+        private const val tmdbAPI = "https://api.themoviedb.org/3"
+        private const val TRANSPARENT_PIXEL = "https://upload.wikimedia.org/wikipedia/commons/c/ca/1x1.png"
+        
+        private val IMDB_ID_REGEX = "tt[0-9]+".toRegex()
+        private val JSON_ID_EXTRACT_REGEX = "\"id\":\"([^\"]+)\"".toRegex()
+        
+        val globalPageCache = lruCacheMap<String, Triple<List<SearchResponse>, Int, Long>>(100)
+        val cacheMutexes = ConcurrentHashMap<String, Mutex>()
+        const val CACHE_TTL_MS = 3600000L 
+        
+        private val settingsCache = ConcurrentHashMap<String, Pair<Boolean, Long>>()
+        
+        @Volatile private var cachedCustomHosts: Set<String>? = null
+        @Volatile private var cachedCustomHostsTime: Long = 0
+        private const val SETTINGS_CACHE_TTL = 60_000L
+
+        val networkSemaphore = Semaphore(35)
+        val homeNetworkSemaphore = Semaphore(10)
+        
+        @Volatile private var cachedCineStreamProvider: MainAPI? = null
+        @Volatile private var hasSearchedCineStream = false
+
+        @Volatile private var cachedStreamPlayProvider: MainAPI? = null
+        @Volatile private var hasSearchedStreamPlay = false
+
+        @Volatile private var hasSyncedCineStreamSettings = false
+        
+        @Volatile private var cachedClassLoaderRef: WeakReference<ClassLoader>? = null
+
+        private val tmdbDetailsCache = lruCacheMap<String, Pair<TmdbDetailResponse, Long>>(100)
+        private val tmdbSeasonCache = lruCacheMap<String, Pair<TmdbSeasonDetail, Long>>(150)
+        private val kitsuMetaCache = lruCacheMap<String, Pair<String, Long>>(100)
+        private val tmdbFindCache = lruCacheMap<String, Pair<Pair<String, String>?, Long>>(100)
+        private val aniZipCache = lruCacheMap<String, Pair<Pair<Int?, Int?>?, Long>>(100)
+        private const val METADATA_CACHE_TTL = 12 * 60 * 60 * 1000L
+
+        val catalogSentIds = ConcurrentHashMap<String, MutableSet<String>>()
+        val catalogSkipState = ConcurrentHashMap<String, Int>()
+
+        suspend fun getOrFetchKitsu(url: String): String? {
+            val now = System.currentTimeMillis()
+            kitsuMetaCache[url]?.let { (res, time) ->
+                if (now - time < METADATA_CACHE_TTL) return res
             }
-            list
+            return runSuspendCatching {
+                val res = customSession.get(url, timeout = 10L).text
+                if (res.isNotBlank()) kitsuMetaCache[url] = Pair(res, now)
+                res
+            }.onFailure { it.printStackTrace() }.getOrNull()
+        }
+
+        val customSession by lazy {
+            val newClient = app.baseClient.newBuilder()
+                .protocols(listOf(Protocol.HTTP_1_1))
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)
+                .writeTimeout(20, TimeUnit.SECONDS)
+                .dispatcher(Dispatcher().apply {
+                    maxRequests = 70
+                    maxRequestsPerHost = 40
+                })
+                .connectionPool(ConnectionPool(45, 15, TimeUnit.SECONDS))
+                .build()
+                
+            Requests(newClient).apply {
+                this.responseParser = app.responseParser
+                this.defaultHeaders = app.defaultHeaders
+            }
+        }
+
+        init {
+            app.baseClient.dispatcher.maxRequestsPerHost = 40
+            app.baseClient.dispatcher.maxRequests = 70 
+        }
+
+        fun loadProviderDynamically(pluginKeyword: String, className: String): MainAPI? {
+            val loader = cachedClassLoaderRef?.get()
+            if (loader != null) {
+                try {
+                    val clazz = loader.loadClass(className)
+                    return clazz.newInstance() as? MainAPI
+                } catch (e: Exception) { e.printStackTrace() }
+            }
+            try {
+                val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
+                val pmInstance = pmClass.getField("INSTANCE").get(null)
+
+                var foundLoader: ClassLoader? = null
+                for (field in pmClass.declaredFields) {
+                    field.isAccessible = true
+                    val obj = runSuspendCatching { field.get(pmInstance) }.onFailure { it.printStackTrace() }.getOrNull()
+                    val items = when (obj) {
+                        is Map<*, *> -> obj.values
+                        is java.util.Collection<*> -> obj
+                        is Array<*> -> obj.toList()
+                        else -> null
+                    }
+
+                    if (items != null) {
+                        for (plugin in items) {
+                            val pName = plugin?.javaClass?.name ?: ""
+                            if (pName.contains(pluginKeyword, true)) {
+                                foundLoader = plugin!!.javaClass.classLoader
+                                break
+                            }
+                        }
+                    }
+                    if (foundLoader != null) break
+                }
+                
+                if (foundLoader != null) {
+                    cachedClassLoaderRef = WeakReference(foundLoader)
+                    val clazz = foundLoader.loadClass(className)
+                    return clazz.newInstance() as? MainAPI
+                }
+            } catch (e: Exception) { e.printStackTrace() }
+            return null
+        }
+
+        fun isIntegrationEnabled(prefKey: String): Boolean {
+            val now = System.currentTimeMillis()
+            val cached = settingsCache[prefKey]
+            if (cached != null && (now - cached.second) < SETTINGS_CACHE_TTL) {
+                return cached.first
+            }
+
+            val context = CloudStreamApp.context ?: return true
+            val possibleNames = listOf("StremioC", "StremioC_preferences", "stremio_preferences", "com.hsp1020_preferences", context.packageName + "_preferences")
+            
+            var isEnabled = true
+            for (name in possibleNames) {
+                val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+                if (prefs.contains(prefKey)) {
+                    isEnabled = prefs.getBoolean(prefKey, true)
+                    break
+                }
+            }
+            
+            settingsCache[prefKey] = Pair(isEnabled, now)
+            return isEnabled
+        }
+
+        suspend fun getOrFetchCachedPage(
+            key: String, 
+            fetchBlock: suspend () -> Pair<List<SearchResponse>, Int>?
+        ): Pair<List<SearchResponse>, Int>? {
+            val now = System.currentTimeMillis()
+            
+            globalPageCache[key]?.let { entry ->
+                if (now - entry.third <= CACHE_TTL_MS) return Pair(entry.first, entry.second)
+            }
+
+            val mutex = cacheMutexes.getOrPut(key) { Mutex() }
+
+            return mutex.withLock {
+                globalPageCache[key]?.let { entry ->
+                    if (now - entry.third <= CACHE_TTL_MS) {
+                        return@withLock Pair(entry.first, entry.second)
+                    }
+                }
+
+                val result = fetchBlock()
+                if (result != null && result.first.isNotEmpty()) {
+                    globalPageCache[key] = Triple(result.first, result.second, System.currentTimeMillis())
+                }
+                result
+            }
+        }
+    }
+
+    private fun SearchResponse.extractPureId(): String {
+        return try {
+            JSON_ID_EXTRACT_REGEX.find(this.url)?.groupValues?.get(1) ?: this.url
         } catch (e: Exception) {
             e.printStackTrace()
-            mutableListOf()
+            this.url
         }
     }
 
-    fun saveLinks(sharedPref: SharedPreferences, list: List<LinkItem>) {
-        val arr = JSONArray()
-        for (item in list) {
-            val obj = JSONObject().apply {
-                put("id", item.id)
-                put("name", item.name)
-                put("link", item.link)
-                put("type", item.type)
+    private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String {
+        val builder = "$tmdbAPI$endpoint".toHttpUrlOrNull()?.newBuilder() ?: return ""
+        val context = CloudStreamApp.context
+        val prefs = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+        val tmdbKey = prefs?.getString("tmdb_api_key", "") ?: ""
+        builder.addQueryParameter("api_key", tmdbKey)
+        val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
+        builder.addQueryParameter("language", langCode)
+        params.forEach { (key, value) -> builder.addQueryParameter(key, value) }
+        return builder.build().toString()
+    }
+
+    private fun extractImdbId(url: String?): String? {
+        if (url.isNullOrBlank() || !url.contains("tt")) return null
+        return runSuspendCatching { IMDB_ID_REGEX.find(url)?.value }.onFailure { it.printStackTrace() }.getOrNull()
+    }
+
+    private fun buildStremioId(type: String?, id: String?, season: Int?, episode: Int?, isSubtitle: Boolean = false): String? {
+        if (type == "series" && season != null && episode != null) {
+            return when {
+                id?.startsWith("kitsu:") == true || id?.startsWith("mal:") == true -> {
+                    val parts = id.split(":")
+                    val baseId = if (parts.size >= 2) "${parts[0]}:${parts[1]}" else id
+                    if (isSubtitle) "$baseId:$season:$episode" else "$baseId:$episode"
+                }
+                id?.endsWith(":$season:$episode") == true -> id
+                else -> "$id:$season:$episode"
             }
-            arr.put(obj)
         }
-        val editor = sharedPref.edit()
-        editor.putString(PREF_KEY_LINKS, arr.toString())
-        editor.commit()
+        return id
     }
 
-    fun isIntegrationEnabled(sharedPref: SharedPreferences, key: String, default: Boolean = true): Boolean {
-        return sharedPref.getBoolean(key, default)
+    private fun baseUrl(): String {
+        return mainUrl.fixSourceUrl().cleanBaseUrl()
     }
 
-    fun setIntegrationEnabled(sharedPref: SharedPreferences, key: String, state: Boolean) {
-        val editor = sharedPref.edit()
-        editor.putBoolean(key, state)
-        editor.commit()
-    }
-}
-
-class SettingsBottomFragment(
-    private val plugin: StremioCPlugin,
-    private val sharedPref: SharedPreferences
-) : BottomSheetDialogFragment() {
-
-    companion object {
-        val LANGUAGES = listOf(
-            "South Africa (Afrikaans)" to "af-ZA", "United Arab Emirates (Arabic)" to "ar-AE", "Saudi Arabia (Arabic)" to "ar-SA",
-            "Azerbaijan (Azerbaijani)" to "az-AZ", "Bulgaria (Bulgarian)" to "bg-BG", "India (Bengali)" to "bn-IN",
-            "Spain (Catalan)" to "ca-ES", "Czech Republic (Czech)" to "cs-CZ", "United Kingdom (Welsh)" to "cy-GB",
-            "Denmark (Danish)" to "da-DK", "Germany (German)" to "de-DE", "Greece (Greek)" to "el-GR",
-            "United States (English)" to "en-US", "United Kingdom (English)" to "en-GB", "Spain (Spanish)" to "es-ES",
-            "Latin America (Spanish)" to "es-419", "Estonia (Estonian)" to "et-EE", "Spain (Basque)" to "eu-ES",
-            "Iran (Persian)" to "fa-IR", "Finland (Finnish)" to "fi-FI", "Philippines (Filipino)" to "fil-PH",
-            "France (French)" to "fr-FR", "Spain (Galician)" to "gl-ES", "India (Gujarati)" to "gu-IN",
-            "Israel (Hebrew)" to "he-IL", "India (Hindi)" to "hi-IN", "Croatia (Croatian)" to "hr-HR",
-            "Hungary (Hungarian)" to "hu-HU", "Indonesia (Indonesian)" to "id-ID", "Iceland (Icelandic)" to "is-IS",
-            "Italy (Italian)" to "it-IT", "Japan (Japanese)" to "ja-JP", "India (Kannada)" to "kn-IN",
-            "South Korea (Korean)" to "ko-KR", "Lublin (Polish)" to "pl-PL", "Lithuania (Lithuanian)" to "lt-LT",
-            "Latvia (Latvian)" to "lv-LV", "India (Malayalam)" to "ml-IN", "Malaysia (Malay)" to "ms-MY",
-            "Norway (Norwegian)" to "no-NO", "Netherlands (Dutch)" to "nl-NL", "Poland (Polish)" to "pl-PL",
-            "Brazil (Portuguese)" to "pt-BR", "Portugal (Portuguese)" to "pt-PT", "Romania (Romanian)" to "ro-RO",
-            "Russia (Russian)" to "ru-RU", "Slovakia (Slovak)" to "sk-SK", "Slovenia (Slovenian)" to "sl-SI",
-            "Serbia (Serbian)" to "sr-RS", "Sweden (Swedish)" to "sv-SE", "India (Tamil)" to "ta-IN",
-            "India (Telugu)" to "te-IN", "Thailand (Thai)" to "th-TH", "Turkey (Turkish)" to "tr-TR",
-            "Ukraine (Ukrainian)" to "uk-UA", "Vietnam (Vietnamese)" to "vi-VN", "China (Chinese Simplified)" to "zh-CN",
-            "Taiwan (Chinese Traditional)" to "zh-TW"
-        ).sortedBy { it.first.lowercase() }
+    private fun querySuffix(): String {
+        return mainUrl.substringAfter("?", "")
+            .takeIf { it.isNotEmpty() }
+            ?.let { "?$it" }
+            ?: ""
     }
 
-    private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
-    private val resourceCache = mutableMapOf<String, Int>()
+    private fun buildUrl(path: String): String {
+        return "${baseUrl()}$path${querySuffix()}"
+    }
+
+    private fun getActorUrl(link: String?): String? {
+        if (link == null) return null
+        return if (link.startsWith("/")) "https://image.tmdb.org/t/p/w300$link" else link
+    }
+
+    private suspend fun getManifest(): Manifest? {
+        val originalBase = mainUrl.substringBefore("?").trimEnd('/')
+        val currentUrl = if (originalBase.endsWith("manifest.json")) originalBase else "$originalBase/manifest.json"
+        
+        val now = System.currentTimeMillis()
+        val isExpired = (now - lastCacheTime) > CACHE_TTL_MS
+
+        if (cachedManifest != null && lastManifestUrl == currentUrl && !isExpired && !cachedManifest?.catalogs.isNullOrEmpty()) {
+            return cachedManifest
+        }
+
+        val resText = runSuspendCatching { 
+            customSession.get(currentUrl, timeout = 15L).text
+        }.onFailure { it.printStackTrace() }.getOrNull()
+
+        if (!resText.isNullOrBlank()) {
+            try {
+                val parsed = parseJson<Manifest>(resText)
+                if (parsed?.catalogs?.isNotEmpty() == true) {
+                    cachedManifest = parsed
+                    lastManifestUrl = currentUrl
+                    lastCacheTime = now
+                    
+                    val prefix = "${this@StremioC.name}_"
+                    catalogSentIds.keys.filter { it.startsWith(prefix) }.forEach { catalogSentIds.remove(it) }
+                    catalogSkipState.keys.filter { it.startsWith(prefix) }.forEach { catalogSkipState.remove(it) }
+                    
+                    val context = CloudStreamApp.context
+                    context?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
+                        ?.edit()?.putString(currentUrl.toUniqueKey(), resText)?.apply()
+                        
+                    return parsed
+                }
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+        
+        return cachedManifest
+    }
+
+
+    override val mainPage: List<MainPageData>
+        get() {
+            val context = CloudStreamApp.context ?: return emptyList()
+            val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+            val manifestPrefs = context.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
+
+            val originalBase = mainUrl.substringBefore("?").trimEnd('/')
+            val currentUrl = if (originalBase.endsWith("manifest.json")) originalBase else "$originalBase/manifest.json"
+            val uniqueKey = currentUrl.toUniqueKey()
+            
+            val diskCache = manifestPrefs.getString(uniqueKey, null)
+            
+            val rawCatalogs = if (cachedManifest != null) {
+                cachedManifest?.catalogs ?: emptyList()
+            } else if (!diskCache.isNullOrBlank()) {
+                try {
+                    parseJson<Manifest>(diskCache).catalogs ?: emptyList()
+                } catch (e: Exception) { 
+                    e.printStackTrace()
+                    emptyList() 
+                }
+            } else {
+                emptyList()
+            }
+
+            if (rawCatalogs.isEmpty()) return emptyList()
+            
+            val flatTabs = mutableListOf<FlatTab>()
+            rawCatalogs.forEach { catalog ->
+                val catalogId = catalog.id ?: ""
+                val catalogType = catalog.type ?: "movie"
+                val catalogName = catalog.name ?: catalogId
+                val displayType = catalogType.replaceFirstChar { it.uppercase() }
+                
+                val requiresGenre = catalog.extra?.any { it.name == "genre" && it.isRequired == true } == true
+
+                if (!requiresGenre) {
+                    flatTabs.add(FlatTab(
+                        key = "${catalogId}_${catalogType}_default",
+                        displayName = "$catalogName - $displayType",
+                        urlPath = "/catalog/$catalogType/$catalogId/skip=###.json"
+                    ))
+                }
+
+                val genres = catalog.getGenresList()
+                genres.forEach { genre ->
+                    val capitalizedGenre = genre.replaceFirstChar { it.uppercase() }
+                    flatTabs.add(FlatTab(
+                        key = "${catalogId}_${catalogType}_genre_$genre",
+                        displayName = "$catalogName : $capitalizedGenre  - $displayType",
+                        urlPath = "/catalog/$catalogType/$catalogId/genre=${genre.urlEncodeLocal()}&skip=###.json"
+                    ))
+                }
+            }
+
+            val orderKey = "catalog_order_$uniqueKey"
+            val orderJson = prefs.getString(orderKey, null)
+            val orderedKeys = mutableListOf<String>()
+            if (orderJson != null) {
+                try {
+                    val arr = org.json.JSONArray(orderJson)
+                    for (i in 0 until arr.length()) {
+                        orderedKeys.add(arr.getString(i))
+                    }
+                } catch (e: Exception) { e.printStackTrace() }
+            }
+
+            val sortedTabs = flatTabs.sortedBy { tab ->
+                val idx = orderedKeys.indexOf(tab.key)
+                if (idx != -1) idx else Int.MAX_VALUE
+            }
+
+            return mainPageOf(
+                *buildList<Pair<String, String>> {
+                    sortedTabs.forEach { tab ->
+                        val isEnabled = if (tab.key.contains("_genre_")) {
+                            val catalogKey = tab.key.substringBefore("_genre_")
+                            val isGenresMasterEnabled = prefs.getBoolean("genres_enabled_${uniqueKey}_$catalogKey", true)
+                            val isIndividualGenreEnabled = prefs.getBoolean("tab_enabled_${uniqueKey}_${tab.key}", true)
+                            isGenresMasterEnabled && isIndividualGenreEnabled
+                        } else {
+                            prefs.getBoolean("tab_enabled_${uniqueKey}_${tab.key}", true)
+                        }
+                        
+                        if (isEnabled) {
+                            add(tab.urlPath to tab.displayName)
+                        }
+                    }
+                }.toTypedArray()
+            )
+        }
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse = coroutineScope {
+        println("[PAGINATION-DEBUG] ===== getMainPage START =====")
+        println("[PAGINATION-DEBUG] Requested Page: $page, Tab Name: ${request.name}")
+        println("[PAGINATION-DEBUG] Request Data: ${request.data}")
+
+        launch(Dispatchers.IO) {
+            runSuspendCatching { getManifest() }.onFailure { it.printStackTrace() }
+        }
+
+        var isNewRequest = false
+        val stateKey = "${this@StremioC.name}_${request.name}" 
+
+        val deferred = pageMutex.withLock {
+            if (page <= 1) {
+                println("[PAGINATION-DEBUG] Page <= 1 detected. Clearing states for Tab Key: $stateKey")
+                catalogSentIds.remove(stateKey)
+                activePageRequests.clear()
+                catalogSkipState.remove(stateKey)
+            }
+            
+            activePageRequests.getOrPut(page) {
+                isNewRequest = true
+                println("[PAGINATION-DEBUG] Creating new async request for Page: $page")
+                async { fetchTabCatalogData(request, page) }
+            }
+        }
+        
+        return@coroutineScope try {
+            val response = deferred.await()
+            if (!isNewRequest && page > 1) {
+                println("[PAGINATION-DEBUG] Returning empty list because it's not a new request for Page: $page")
+                newHomePageResponse(emptyList(), hasNext = true)
+            } else {
+                val listSize = response.items.firstOrNull()?.list?.size ?: 0
+                println("[PAGINATION-DEBUG] Returning response for Page: $page with $listSize items.")
+                response
+            }
+        } finally {
+            pageMutex.withLock {
+                activePageRequests.remove(page)
+            }
+            println("[PAGINATION-DEBUG] ===== getMainPage END (Page: $page) =====")
+        }
+    }
+
+    private suspend fun fetchTabCatalogData(request: MainPageRequest, page: Int): HomePageResponse {
+        val stateKey = "${this@StremioC.name}_${request.name}"
+
+        if (page > 1 && !catalogSkipState.containsKey(stateKey)) {
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Cold start detected on Page $page. Silently pre-fetching Page 1 to restore state.")
+            try {
+                fetchTabCatalogData(request, 1) 
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        val currentSkip = catalogSkipState[stateKey] ?: 0
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Current Skip State: $currentSkip for Tab Key: $stateKey")
+        
+        val targetPath = request.data.replace("###", currentSkip.toString())
+        val targetUrl = buildUrl(targetPath)
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Target URL: $targetUrl")
+        
+        val cacheKey = "${this@StremioC.name}_${request.name}_$currentSkip"
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Cache Key: $cacheKey")
+
+        val resultPair = getOrFetchCachedPage(cacheKey) {
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Fetching from network or cache...")
+            
+            val jsonText = StremioC.homeNetworkSemaphore.withPermit {
+                customSession.get(targetUrl).text
+            }
+            
+            val response = try {
+                parseJson<CatalogResponse>(jsonText)
+            } catch (e: Exception) { e.printStackTrace(); null }
+
+            val metas = response?.metas ?: emptyList()
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Network/JSON parsed ${metas.size} items.")
+            
+            val mappedItems = metas.map { it.toSearchResponse(this@StremioC) }
+            Pair(mappedItems, metas.size)
+        }
+
+        if (resultPair != null) {
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] ResultPair acquired. Size: ${resultPair.first.size}, Returned Meta Size: ${resultPair.second}")
+            catalogSkipState[stateKey] = currentSkip + resultPair.second
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Next Skip State updated to: ${catalogSkipState[stateKey]}")
+            
+            var seenForThisCatalog = catalogSentIds[stateKey]
+            if (seenForThisCatalog == null) {
+                synchronized(catalogSentIds) {
+                    seenForThisCatalog = catalogSentIds.getOrPut(stateKey) { 
+                        lruSet(500) 
+                    }
+                }
+            }
+            
+            var duplicateCount = 0
+            val filteredItems = resultPair.first.filter { item -> 
+                val pureId = item.extractPureId()
+                val isNew = seenForThisCatalog!!.add(pureId)
+                if (!isNew) {
+                    duplicateCount++
+                }
+                isNew
+            }
+            
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Deduplication complete. Duplicates found: $duplicateCount. Final items to return: ${filteredItems.size}")
+            
+            return newHomePageResponse(listOf(HomePageList(request.name, filteredItems)), hasNext = resultPair.second > 0)
+        }
+
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] ResultPair is null. Returning empty.")
+        return newHomePageResponse(emptyList(), hasNext = false)
+    }
+                
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        mainUrl = mainUrl.fixSourceUrl()
+        val manifest = getManifest()
+        val supportedCatalogs = manifest?.catalogs?.filter { it.supportsSearch() } ?: emptyList()
+        
+        val searchResults = coroutineScope {
+            supportedCatalogs.map { catalog ->
+                async(Dispatchers.IO) {
+                    try { catalog.search(query, this@StremioC) } catch (e: CancellationException) { throw e } catch (e: Exception) { e.printStackTrace(); emptyList() }
+                }
+            }.awaitAll().flatten()
+        }
+
+        val seenIds = mutableSetOf<String>()
+        return searchResults.filter { item ->
+            val extractedId = item.extractPureId()
+            if (seenIds.contains(extractedId)) false else { seenIds.add(extractedId); true }
+        }
+    }
+
+    override suspend fun load(url: String): LoadResponse = coroutineScope {
+        val res: CatalogEntry = if (url.startsWith("{")) {
+            parseJson<CatalogEntry>(url)
+        } else {
+            val responseText = customSession.get(url).text
+            try {
+                val rootNode = parseJson<JsonNode>(responseText)
+                val metaNode = if (rootNode.has("meta")) rootNode.get("meta") else rootNode
+                parseJson<CatalogEntry>(metaNode.toString()) 
+                    ?: throw IllegalStateException("Failed to bind JSON to CatalogEntry")
+            } catch (e: Exception) {
+                e.printStackTrace()
+                throw IllegalStateException("Metadata not found or parsing failed: $url", e)
+            }
+        }
+        
+        val normalizedId = try { normalizeId(res.id ?: "") } catch (e: Exception) { e.printStackTrace(); res.id ?: "" }
+        val encodedId = normalizedId.urlEncode()
+
+        val isKitsuOrMal = res.id?.startsWith("kitsu:") == true || res.id?.startsWith("mal:") == true
+        var fetchedAniListId: Int? = null
+        var fetchedMalId: Int? = null
+        var resolvedImdbId: String? = null
+        var resolvedTmdbId: String? = null
+        var kitsuVideos: List<Video>? = null
+        
+        if (isKitsuOrMal) {
+            val targetType = if (res.type == "movie") "movie" else "series"
+            val kitsuUrl = "https://anime-kitsu.strem.fun/meta/$targetType/${res.id}.json"
+            val kitsuRes = getOrFetchKitsu(kitsuUrl)
+            
+            if (!kitsuRes.isNullOrBlank()) {
+                runSuspendCatching {
+                    val root = parseJson<JsonNode>(kitsuRes)
+                    val metaObj = root.get("meta")
+                    if (metaObj != null && !metaObj.isNull) {
+                        resolvedImdbId = metaObj.get("imdb_id").textOrNull()?.takeIf { it.startsWith("tt") }
+                        resolvedTmdbId = metaObj.get("tmdb_id").textOrNull() 
+                            ?: metaObj.get("moviedb_id").intOrNull()?.takeIf { it > 0 }?.toString()
+                        
+                        fetchedAniListId = metaObj.get("anilist_id").intOrNull()
+                        fetchedMalId = metaObj.get("mal_id").intOrNull()
+
+                        val videosNode = metaObj.get("videos")
+                        if (videosNode != null && videosNode.isArray) {
+                            val vids = mutableListOf<Video>()
+                            for (i in 0 until videosNode.size()) {
+                                val v = videosNode.get(i)
+                                if (v != null && !v.isNull) {
+                                    runSuspendCatching {
+                                        val vid = Video(
+                                            id = v.get("id").textOrNull(),
+                                            title = v.get("title").textOrNull(),
+                                            name = v.get("name").textOrNull(),
+                                            seasonNumber = v.get("season").intOrNull()?.takeIf { it > 0 },
+                                            number = v.get("number").intOrNull()?.takeIf { it > 0 },
+                                            episode = v.get("episode").intOrNull()?.takeIf { it > 0 },
+                                            thumbnail = v.get("thumbnail").textOrNull(),
+                                            overview = v.get("overview").textOrNull(),
+                                            description = v.get("description").textOrNull(),
+                                            firstAired = v.get("firstAired").textOrNull(),
+                                            released = v.get("released").textOrNull(),
+                                            tvdb_id = v.get("tvdb_id").intOrNull()?.takeIf { it > 0 },
+                                            imdbSeason = v.get("imdbSeason").intOrNull()?.takeIf { it > 0 },
+                                            imdbEpisode = v.get("imdbEpisode").intOrNull()?.takeIf { it > 0 },
+                                            imdb_id = v.get("imdb_id").textOrNull()
+                                        )
+                                        vids.add(vid)
+                                    }.onFailure { it.printStackTrace() }
+                                }
+                            }
+                            if (vids.isNotEmpty()) kitsuVideos = vids
+                        }
+                    }
+                }.onFailure { it.printStackTrace() }
+            }
+        }
+
+        val primaryMdbId = resolvedTmdbId ?: resolvedImdbId ?: when {
+            res.id?.startsWith("tt") == true -> res.id
+            res.id?.startsWith("tmdb:") == true -> res.id.removePrefix("tmdb:")
+            res.moviedb_id != null -> res.moviedb_id.toString()
+            res.tmdbIdExt != null -> res.tmdbIdExt
+            else -> null
+        }
+        
+        val primaryMdbIsTmdb = (primaryMdbId == resolvedTmdbId) || (primaryMdbId?.startsWith("tt") == false)
+
+        val mdbDeferred: Deferred<List<String>>? = primaryMdbId?.let { id ->
+            async(Dispatchers.IO) {
+                runSuspendCatching { fetchMdbListRatings(id, primaryMdbIsTmdb) }.onFailure { it.printStackTrace() }.getOrDefault(emptyList())
+            }
+        }
+
+        val addonDeferred = async(Dispatchers.IO) {
+            runSuspendCatching {
+                val syncMetaUrl = this@StremioC.getUnifiedMetaUrl(res.type ?: "movie", res.id ?: "")
+                val text = customSession.get(syncMetaUrl).text
+                val response = if (text.isNotBlank()) parseJson<CatalogResponse>(text) else null
+                response?.meta ?: response?.metas?.firstOrNull { it.id == res.id } ?: response?.metas?.firstOrNull()
+            }.onFailure { it.printStackTrace() }.getOrNull()
+        }
+             
+        
+        val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
+        val targetTmdbId = resolvedTmdbId ?: if (res.id?.startsWith("tmdb:") == true) res.id.removePrefix("tmdb:") else tmdbIdFromRes
+        
+        val tmdbDeferred = targetTmdbId?.let { id ->
+            async(Dispatchers.IO) {
+                val mediaType = if (res.type == "movie") "movie" else "tv"
+                val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
+                val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend)
+                runSuspendCatching { 
+                    val text = customSession.get(detailUrl).text
+                    if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
+                }.onFailure { it.printStackTrace() }.getOrNull()
+            }
+        }
+
+        val preFetchedTmdbDetail = tmdbDeferred?.await()
+        
+        var finalProcessedId = res.id
+        var imdbId = resolvedImdbId ?: preFetchedTmdbDetail?.external_ids?.imdb_id
+
+        if (!imdbId.isNullOrBlank() && (imdbId.startsWith("tt") || imdbId.startsWith("kitsu:"))) {
+            finalProcessedId = imdbId
+        }
+
+        val loadRes = res.toLoadResponse(
+            provider = this@StremioC, 
+            imdbId = finalProcessedId, 
+            addonDeferred = addonDeferred, 
+            preFetchedDetail = preFetchedTmdbDetail, 
+            fetchedAniListId = fetchedAniListId, 
+            fetchedMalId = fetchedMalId, 
+            resolvedTmdbId = resolvedTmdbId,
+            kitsuVideos = kitsuVideos
+        )
+        
+        val mdbRatings = mdbDeferred?.await() ?: emptyList()
+        if (mdbRatings.isNotEmpty()) {
+            val ratingStr = mdbRatings.joinToString("  ")
+            val currentPlot = loadRes.plot 
+            
+            loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr<br>$currentPlot" else ratingStr
+            loadRes.score = null 
+        }
+        
+        return@coroutineScope loadRes
+    }
+
+    override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
+        val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { e.printStackTrace(); null } ?: return false
+        
+        val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
+            loadData.imdbId
+        } else {
+            loadData.id ?: ""
+        }
+
+        val globalId = if (!loadData.imdbId.isNullOrBlank()) loadData.imdbId else primaryId
+        val targetType = loadData.type ?: if ((loadData.season ?: 0) > 0 || (loadData.episode ?: 0) > 0) "series" else "movie"
+        
+        val actualIsMovie = targetType == "movie" || (loadData.season == null && loadData.episode == null)
+        
+        val globalSeason = if (actualIsMovie) null else loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 } ?: 1
+        val globalEpisode = if (actualIsMovie) null else loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 } ?: 1
+
+        val primaryStremioId = buildStremioId(targetType, primaryId, loadData.season, loadData.episode) ?: primaryId
+        val encodedPrimaryId = primaryStremioId.urlEncode()
+
+        val seenLinks = Collections.synchronizedSet(mutableSetOf<String>())
+        val wrappedCallback: (ExtractorLink) -> Unit = { link ->
+            if (seenLinks.add(link.url)) {
+                callback(link)
+            }
+        }
+
+        val copyId = loadData.imdbId ?: loadData.id ?: ""
+        if (!copyId.isNullOrBlank()) {
+            wrappedCallback.invoke(
+                newExtractorLink(
+                    "Copy to clipboard",
+                    "📋 Video ID: $copyId",
+                    copyId,
+                    ExtractorLinkType.VIDEO
+                )
+                {
+                        this.quality = 2160
+                    }
+            )
+        }
+
+        val customHosts = withContext(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            if (cachedCustomHosts != null && now - cachedCustomHostsTime < SETTINGS_CACHE_TTL) {
+                return@withContext cachedCustomHosts!!
+            }
+            
+            val context = CloudStreamApp.context
+            
+            try {
+                if (context != null) {
+                    val sharedPrefsDir = java.io.File(context.applicationInfo.dataDir, "shared_prefs")
+                    if (sharedPrefsDir.exists() && sharedPrefsDir.isDirectory) {
+                        sharedPrefsDir.listFiles()?.forEach { file ->
+                            val name = file.name.removeSuffix(".xml")
+                            val p = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+                            if (p.contains("stremio_addons")) {
+                                println("[STREMIOSUB] Setup Scan: Found 'stremio_addons' key in file: '$name' -> value = ${p.getString("stremio_addons", "")}")
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                println("[STREMIOSUB] Setup Scan Warning: ${e.message}")
+                e.printStackTrace()
+            }
+
+            val raw = try { 
+                val rebuildPrefs = context?.getSharedPreferences("rebuild_preference", Context.MODE_PRIVATE)
+                var rawValue = rebuildPrefs?.getString("stremio_addons", "") ?: ""
+                
+                if (rawValue.isBlank()) {
+                    val rebuildPrefsBackup = context?.getSharedPreferences("rebuild_key", Context.MODE_PRIVATE)
+                    rawValue = rebuildPrefsBackup?.getString("stremio_addons", "") ?: ""
+                }
+                
+                println("[STREMIOSUB] Attempt 1 (rebuild_preference/key) -> raw value length: ${rawValue.length}, data: $rawValue")
+                if (rawValue.startsWith("\"") && rawValue.endsWith("\"") && rawValue.length >= 2) {
+                    rawValue.substring(1, rawValue.length - 1)
+                } else {
+                    rawValue
+                }
+            } catch (t: Throwable) {
+                println("[STREMIOSUB] Attempt 1 (rebuild_preference) Crash: ${t.message}. Trying Fallback.")
+                t.printStackTrace()
+                try {
+                    val prefs = CloudStreamApp.context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
+                    val v = prefs?.getString("stremio_addons", "") ?: ""
+                    println("[STREMIOSUB] Attempt 2 (default SharedPreferences) -> length: ${v.length}, data: $v")
+                    if (v.startsWith("\"") && v.endsWith("\"") && v.length >= 2) v.substring(1, v.length - 1) else v
+                } catch (e: Exception) {
+                    println("[STREMIOSUB] Attempt 2 (default SharedPreferences) Failed: ${e.message}")
+                    e.printStackTrace()
+                    ""
+                }
+            }
+            
+            val hosts = raw.lines()
+                .filter { it.isNotBlank() }
+                .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.onFailure { it.printStackTrace() }.getOrNull() }
+                .toSet() 
+                
+            println("[STREMIOSUB] Final parsed customHosts list: $hosts")
+            cachedCustomHosts = hosts
+            cachedCustomHostsTime = now
+            hosts
+        }
+        val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
+
+        val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
+            println("[STREMIOSUB] Interceptor Triggered -> lang: '${sub.lang}', url: '${sub.url}'")
+            try {
+                val host = try {
+                    sub.url.toHttpUrlOrNull()?.host ?: URI(sub.url).host ?: ""
+                } catch (t: Throwable) {
+                    val fallback = try {
+                        sub.url.substringAfter("://").substringBefore("/").substringBefore(":")
+                    } catch (ex: Exception) {
+                        ""
+                    }
+                    println("[STREMIOSUB] Host Parse Error, Fallback parsing used: '$fallback'. Error: ${t.message}")
+                    fallback
+                }
+                
+                val isCustom = customHosts.contains(host)
+                val isBuiltIn = builtInHosts.contains(host)
+                val isContainsStrem = host.contains("strem", ignoreCase = true)
+                
+                println("[STREMIOSUB] Match Check -> host: '$host', isCustom: $isCustom, isBuiltIn: $isBuiltIn, isContainsStrem: $isContainsStrem")
+                
+                val isStremio = isCustom || isBuiltIn || isContainsStrem
+                
+                if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
+                    val newLang = "${sub.lang} (Stremio)"
+                    println("[STREMIOSUB] Target Matched! Renaming subtitle label: '${sub.lang}' -> '$newLang'")
+                    subtitleCallback.invoke(SubtitleFile(newLang, sub.url))
+                } else {
+                    println("[STREMIOSUB] Target Skipped -> Passing raw subtitle")
+                    subtitleCallback.invoke(sub)
+                }
+            } catch (e: Exception) {
+                println("[STREMIOSUB] Interceptor Crash: ${e.message}")
+                e.printStackTrace()
+                subtitleCallback.invoke(sub)
+            }
+        }
+
+        runAllAsync(
+            {
+                runSuspendCatching {
+                    val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
+                    println("[STREMIOSUB] Requesting primary streams from url: $url")
+                    val text = customSession.get(url, timeout = 120L).text
+                    val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
+                    println("[STREMIOSUB] Primary streams count returned: ${res?.streams?.size ?: 0}")
+                    res?.streams?.forEach { stream -> 
+                        stream.runCallback(this@StremioC, subtitleInterceptor, wrappedCallback) 
+                    }
+                }.onFailure { it.printStackTrace() }
+            },
+            { invokeWatchsomuch(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
+            { invokeOpenSubs(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
+            { 
+                println("[STREMIOSUB] Initiating invokeCineStream")
+                invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) 
+            },
+            { 
+                println("[STREMIOSUB] Initiating invokeStreamPlay")
+                invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) 
+            },
+            {
+                if (isIntegrationEnabled("vixsrc_integration_enabled")) {
+                    VixSrcExtractor.invokeVixSrc(loadData, targetType, globalSeason, globalEpisode, subtitleInterceptor, wrappedCallback)
+                }
+            }
+        )
+        return true
+    }
+
+    private suspend fun syncCineStreamSettings() = withContext(Dispatchers.IO) {
+        if (hasSyncedCineStreamSettings) return@withContext
+        try {
+            val context = CloudStreamApp.context ?: return@withContext
+            val possibleNames = listOf(
+                "CineStream", "CineStream_preferences", "plugin_CineStream", "plugin_CineStream_preferences", 
+                "com.megix", "com.megix_preferences", context.packageName + "_preferences"
+            )
+            
+            var sourcePrefs: android.content.SharedPreferences? = null
+            for (name in possibleNames) {
+                val p = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+                if (p.contains("seen_providers") || p.contains("provider_order") || p.contains("ScrapeConcurrency")) {
+                    sourcePrefs = p
+                    break
+                }
+            }
+            val source = sourcePrefs ?: return@withContext
+
+            source.all.forEach { (key, value) ->
+                try {
+                    val currentValue = try { CloudStreamApp.getKey<Any>(key) } catch (t: Throwable) { null }
+                    if (currentValue != value) {
+                        try {
+                            when (value) {
+                                is Boolean -> CloudStreamApp.setKey(key, value)
+                                is String -> CloudStreamApp.setKey(key, value)
+                                is Int -> CloudStreamApp.setKey(key, value)
+                                is Long -> CloudStreamApp.setKey(key, value)
+                                is Float -> CloudStreamApp.setKey(key, value)
+                            }
+                        } catch (t: Throwable) {}
+                    }
+                } catch (e: Exception) { e.printStackTrace() }
+            }
+            hasSyncedCineStreamSettings = true 
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun buildBasePayload(
+        loadData: LoadData,
+        targetType: String,
+        globalId: String?,
+        globalSeason: Int?,
+        globalEpisode: Int?
+    ): MutableMap<String, Any?> {
+        val rawId = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") || it.startsWith("tmdb:") } ?: ""
+        val correctImdbId = if (rawId.startsWith("tmdb:")) {
+            val parts = rawId.split(":")
+            if (parts.size >= 2) "${parts[0]}:${parts[1]}" else rawId
+        } else {
+            rawId
+        }
+
+        val scrapingTitle = loadData.englishTitle?.takeIf { it.isNotBlank() } ?: loadData.originalTitle?.takeIf { it.isNotBlank() } ?: loadData.title ?: "Unknown"
+        val isAnimeMedia = loadData.isAnime || globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true || loadData.anilistId != null || loadData.malId != null
+        val isSeason2Plus = isAnimeMedia && (globalSeason ?: 0) > 1
+
+        val finalTitle = if (isSeason2Plus) "$scrapingTitle Season $globalSeason" else scrapingTitle
+        val finalYear = if (isSeason2Plus) loadData.airedYear?.toString() ?: loadData.year?.toString() else loadData.year?.toString()
+
+        val actualIsMovie = targetType == "movie" || (loadData.season == null && loadData.episode == null)
+
+        return mutableMapOf(
+            "title" to scrapingTitle,
+            "orgTitle" to loadData.originalTitle,
+            "jpTitle" to loadData.originalTitle,
+            "year" to finalYear,
+            "airedYear" to loadData.airedYear,
+            "date" to loadData.firstAired,
+            "airedDate" to loadData.firstAired,
+            "firstAired" to loadData.firstAired,
+            "season" to globalSeason,
+            "episode" to globalEpisode,
+            "imdbSeason" to globalSeason,
+            "imdbEpisode" to globalEpisode,
+            "imdb_id" to loadData.imdbId,
+            "imdbId" to correctImdbId,
+            "tmdbId" to loadData.tmdbId,
+            "type" to targetType,
+            "tvtype" to targetType,
+            "isMovie" to actualIsMovie,
+            "isAnime" to isAnimeMedia,
+            "isBollywood" to loadData.isBollywood,
+            "isAsian" to loadData.isAsian,
+            "isCartoon" to loadData.isCartoon,
+            "malId" to loadData.malId
+        )
+    }
     
-    private fun getCachedResId(name: String, type: String): Int {
-        return resourceCache.getOrPut("$type/$name") {
-            res.getIdentifier(name, type, BuildConfig.LIBRARY_PACKAGE_NAME)
+    private suspend fun invokeCineStream(
+        loadData: LoadData,
+        targetType: String,
+        globalId: String?,
+        globalSeason: Int?,
+        globalEpisode: Int?,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        if (!isIntegrationEnabled("cinestream_integration_enabled")) return
+
+        try {
+            val cineStreamProvider = getCineStreamProvider() ?: return
+            syncCineStreamSettings()
+
+            val payload = buildBasePayload(loadData, targetType, globalId, globalSeason, globalEpisode)
+            
+            val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
+            payload["id"] = payload["imdbId"] ?: ""
+            payload["anilistId"] = loadData.anilistId
+            payload["isKitsu"] = isKitsuMedia
+            payload["kitsuId"] = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
+
+            val payloadJson = payload.toJson()
+
+            withTimeoutOrNull(25000L) {
+                cineStreamProvider.loadLinks(payloadJson, isCasting, subtitleCallback, callback)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
-    private data class ConfigFlatTab(
-        val key: String, 
-        val displayName: String, 
-        val isGenre: Boolean, 
-        val catalogKey: String,
-        var isChecked: Boolean = true,
-        var isGenresEnabled: Boolean = true
+    private suspend fun invokeStreamPlay(
+        loadData: LoadData,
+        targetType: String,
+        globalId: String?,
+        globalSeason: Int?,
+        globalEpisode: Int?,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        if (!isIntegrationEnabled("streamplay_integration_enabled")) return
+
+        try {
+            val streamPlayProvider = getStreamPlayProvider() ?: return
+
+            val payload = buildBasePayload(loadData, targetType, globalId, globalSeason, globalEpisode)
+            
+            payload["id"] = loadData.tmdbId ?: loadData.imdbId ?: loadData.id
+            payload["year"] = loadData.year ?: loadData.airedYear
+            
+            if (payload["title"] == null || payload["title"] == "Unknown") {
+                payload["title"] = loadData.id ?: payload["id"]?.toString() ?: "Unknown Title"
+            }
+            payload["lastSeason"] = 1 
+            payload["aniId"] = loadData.anilistId?.toString()
+
+            val payloadJson = payload.toJson()
+
+            withTimeoutOrNull(25000L) {
+                streamPlayProvider.loadLinks(payloadJson, isCasting, subtitleCallback, callback)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    data class LoadData(
+        @JsonProperty("type") val type: String? = null, 
+        @JsonProperty("id") val id: String? = null, 
+        @JsonProperty("season") val season: Int? = null, 
+        @JsonProperty("episode") val episode: Int? = null, 
+        @JsonProperty("imdbId") val imdbId: String? = null, 
+        @JsonProperty("year") val year: Int? = null, 
+        @JsonProperty("title") val title: String? = null, 
+        @JsonProperty("tmdbId") val tmdbId: Int? = null, 
+        @JsonProperty("isAnime") val isAnime: Boolean = false,
+        @JsonProperty("isBollywood") val isBollywood: Boolean = false,
+        @JsonProperty("isAsian") val isAsian: Boolean = false,
+        @JsonProperty("isCartoon") val isCartoon: Boolean = false,
+        @JsonProperty("firstAired") val firstAired: String? = null,
+        @JsonProperty("airedYear") val airedYear: Int? = null, 
+        @JsonProperty("originalTitle") val originalTitle: String? = null, 
+        @JsonProperty("englishTitle") val englishTitle: String? = null, 
+        @JsonProperty("imdbSeason") val imdbSeason: Int? = null,
+        @JsonProperty("imdbEpisode") val imdbEpisode: Int? = null,
+        @JsonProperty("anilistId") val anilistId: Int? = null,
+        @JsonProperty("malId") val malId: Int? = null,
+        @JsonProperty("kitsuId") val kitsuId: String? = null
+    )
+    
+    data class Manifest(val catalogs: List<Catalog>)
+    
+    data class Extra(
+        @JsonProperty("name") val name: String?, 
+        @JsonProperty("isRequired") val isRequired: Boolean? = false,
+        @JsonProperty("options") val options: List<String>? = null
     )
 
-    private var activeSubDialog: AlertDialog? = null 
-    private var searchJob: Job? = null 
-
-    private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.parseColor("#000000")); cornerRadius = 25f }
-    private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
-    private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f }
-
-    private fun getCineStreamClassLoader(): ClassLoader? {
-        try {
-            val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
-            val pmInstance = pmClass.getField("INSTANCE").get(null)
-            for (field in pmClass.declaredFields) {
-                field.isAccessible = true
-                val obj = runCatching { field.get(pmInstance) }.getOrNull()
-                val items = when (obj) {
-                    is Map<*, *> -> obj.values
-                    is java.util.Collection<*> -> obj
-                    is Array<*> -> obj.toList()
-                    else -> null
-                }
-                if (items != null) {
-                    for (plugin in items) {
-                        val pName = plugin?.javaClass?.name ?: ""
-                        if (pName.contains("megix", true) || pName.contains("CineStream", true)) {
-                            return plugin!!.javaClass.classLoader
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) { e.printStackTrace() }
-        return null
-    }
-
-    private fun getCineStreamDynamicKeys(): Set<String> {
-        val keys = mutableSetOf<String>()
-        try {
-            val loader = getCineStreamClassLoader()
-            if (loader != null) {
-                val settingsClass = Class.forName("com.megix.settings.Settings", true, loader)
-                settingsClass.declaredFields.forEach { field ->
-                    if (field.type == String::class.java) {
-                        field.isAccessible = true
-                        val keyName = field.get(null) as? String
-                        if (!keyName.isNullOrBlank()) keys.add(keyName)
-                    }
-                }
-            }
-        } catch (e: Exception) { }
-
-        try {
-            CloudStreamApp.getKey<String>("seen_providers")?.split(",")?.forEach {
-                if (it.isNotBlank()) keys.add(it.trim())
-            }
-            CloudStreamApp.getKey<String>("provider_order")?.split(",")?.forEach {
-                if (it.isNotBlank()) keys.add(it.trim())
-            }
-        } catch (e: Exception) { }
-
-        try {
-            CloudStreamApp.getKey<String>("stremio_addons")?.lines()?.forEach { line ->
-                val name = line.split("|").firstOrNull()?.trim()
-                if (!name.isNullOrBlank()) {
-                    val formatted = name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
-                    keys.add("stremio_$formatted")
-                }
-            }
-        } catch (e: Exception) { }
-
-        val hardcoded = listOf(
-            "ScrapeConcurrency", "DownloadEnable", "ProviderCineStream", "ProviderSimkl", 
-            "ProviderTmdb", "showbox_ui_token", "wyzie_subs_api_key", "gramcinema_bearer_token", 
-            "stremio_addons", "new_provider_default_on", "seen_providers", "provider_order"
-        )
-        keys.addAll(hardcoded)
-        return keys
-    }
-
-    private fun prefsToJson(prefs: SharedPreferences, filterBlock: ((String) -> Boolean)? = null): JSONObject {
-        val json = JSONObject()
-        prefs.all.forEach { (key, value) ->
-            if (value != null && (filterBlock == null || filterBlock(key))) {
-                if (value is Set<*>) {
-                    val arr = JSONArray()
-                    value.forEach { item -> if (item != null) arr.put(item) }
-                    json.put(key, arr)
-                } else {
-                    json.put(key, value)
-                }
-            }
-        }
-        return json
-    }
-
-    private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
-        val keys = json.keys()
-        while (keys.hasNext()) {
-            val key = keys.next()
-            when (val value = json.get(key)) {
-                is Boolean -> editor.putBoolean(key, value)
-                is String -> editor.putString(key, value)
-                is Int -> editor.putInt(key, value)
-                is Long -> editor.putLong(key, value)
-                is Double -> editor.putFloat(key, value.toFloat())
-                is JSONArray -> {
-                    val set = mutableSetOf<String>()
-                    for (i in 0 until value.length()) {
-                        val item = value.optString(i)
-                        if (item != null) set.add(item)
-                    }
-                    editor.putStringSet(key, set)
-                }
-            }
-        }
-    }
-
-    private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {
-        activeSubDialog = dialog
-        dialog.setCanceledOnTouchOutside(false)
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        dialog.setOnShowListener {
-            dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-            dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-        }
-    }
-
-    private fun getDrawable(name: String): Drawable {
-        val id = getCachedResId(name, "drawable")
-        return res.getDrawable(id, null) ?: throw Exception("Drawable $name not found")
-    }
-
-    private fun <T : View> View.findView(name: String): T {
-        val id = getCachedResId(name, "id")
-        if (id == 0) throw Exception("View ID $name not found.")
-        return this.findViewById(id)
-    }
-
-    @SuppressLint("UseCompatLoadingForDrawables")
-    private fun View.makeTvCompatible() {
-        val outlineId = getCachedResId("outline", "drawable")
-        this.background = res.getDrawable(outlineId, null)
-    }
-
-    private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
-        val id = getCachedResId(name, "layout")
-        val layout = res.getLayout(id)
-        return inflater.inflate(layout, container, false)
-    }
-
-    private fun isCineStreamInstalled(): Boolean {
-        return getSafeAllProviders().any { it.name.equals("CineStream", true) } ||
-               StremioC.loadProviderDynamically("megix", "com.megix.CineStreamProvider") != null
-    }
-
-    private fun isStreamPlayInstalled(): Boolean {
-        return getSafeAllProviders().any { it.name.equals("StreamPlay", true) } ||
-               StremioC.loadProviderDynamically("phisher", "com.phisher98.StreamPlay") != null
-    }
-
-    private fun showSavedPopup(ctx: Context, title: String, message: String, onConfirm: () -> Unit = {}) {
-        val container = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(40, 40, 40, 40)
-            background = getDarkThemeBg()
-            addView(TextView(ctx).apply {
-                text = title
-                textSize = 18f
-                setTextColor(Color.WHITE)
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
-                setPadding(0, 0, 0, 20)
-                gravity = android.view.Gravity.CENTER
-            })
-            addView(TextView(ctx).apply {
-                text = message
-                setTextColor(Color.LTGRAY)
-                textSize = 14f
-                setPadding(0, 0, 0, 30)
-            })
-        }
-        val okBtn = Button(ctx).apply {
-            text = "OK"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-        }
-        container.addView(okBtn)
-
-        val dlg = AlertDialog.Builder(ctx).setView(container).create()
-        setupCustomDialog(dlg, container)
-        okBtn.setOnClickListener {
-            dlg.dismiss()
-            onConfirm()
-        }
-        dlg.show()
-    }
-    
-    @SuppressLint("DiscouragedApi")
-    override fun onCreateView(
-        inflater: LayoutInflater, container: ViewGroup?,
-        savedInstanceState: Bundle?
-    ): View {
-        isCancelable = true
-        dialog?.setCanceledOnTouchOutside(false)
-        
-        val ctx = requireContext()
-        val appContext = ctx.applicationContext
-        val view = getLayout("bottom_sheet_layout", inflater, container)
-
-        val addlinks: ImageView = try { view.findView("addlinks") } catch (e: Throwable) { throw Exception("addlinks ImageView not found", e) }
-        val showlinks: ImageView = try { view.findView("showlinks") } catch (e: Throwable) { throw Exception("showlinks ImageView not found", e) }
-        val saveIcon: ImageView = try { view.findView("saveIcon") } catch (e: Throwable) { throw Exception("saveIcon ImageView not found", e) }
-
-        addlinks.setImageDrawable(getDrawable("settings_icon"))
-        showlinks.setImageDrawable(getDrawable("settings_icon"))
-        saveIcon.setImageDrawable(getDrawable("save_icon"))
-
-        addlinks.makeTvCompatible()
-        showlinks.makeTvCompatible()
-        saveIcon.makeTvCompatible()
-
-        val tvExport: TextView = try { view.findView("tvExport") } catch (e: Throwable) { throw Exception("tvExport TextView not found", e) }
-        val tvImport: TextView = try { view.findView("tvImport") } catch (e: Throwable) { throw Exception("tvImport TextView not found", e) }
-
-        tvExport.makeTvCompatible()
-        tvImport.makeTvCompatible()
-
-        tvExport.setOnClickListener {
-            val isStreamPlayExportActive = try { view.findView<Switch>("switchStreamPlay").isChecked } catch (_: Throwable) { false }
-            val isCineStreamExportActive = try { view.findView<Switch>("switchCineStream").isChecked } catch (_: Throwable) { false }
-
-            viewLifecycleOwner.lifecycleScope.launch {
-                try {
-                    val backupStr = withContext(Dispatchers.IO) {
-                        val json = JSONObject()
-                        
-                        json.put("stremio_c_data", prefsToJson(sharedPref))
-                        json.put("plugin_name", "StremioC_Bundle")
-                        
-                        json.put("stream_play_enabled", isStreamPlayExportActive)
-                        if (isStreamPlayExportActive) {
-                            val streamPlayPrefs = appContext.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
-                            json.put("stream_play_data", prefsToJson(streamPlayPrefs))
-                        }
-
-                        json.put("cine_stream_enabled", isCineStreamExportActive)
-                        if (isCineStreamExportActive) {
-                            val cineStreamJson = JSONObject()
-                            val dynamicKeys = getCineStreamDynamicKeys()
-                            
-                            dynamicKeys.forEach { cKey ->
-                                var found = false
-                                try { 
-                                    val strVal = CloudStreamApp.getKey<String>(cKey)
-                                    if (strVal != null) {
-                                        cineStreamJson.put(cKey, strVal)
-                                        found = true
-                                    }
-                                } catch (_: Throwable) {}
-                                
-                                if (!found) {
-                                    try {
-                                        val boolVal = CloudStreamApp.getKey<Boolean>(cKey)
-                                        if (boolVal != null) {
-                                            cineStreamJson.put(cKey, boolVal)
-                                            found = true
-                                        }
-                                    } catch (_: Throwable) {}
-                                }
-                                
-                                if (!found) {
-                                    try {
-                                        val intVal = CloudStreamApp.getKey<Int>(cKey)
-                                        if (intVal != null) {
-                                            cineStreamJson.put(cKey, intVal)
-                                        }
-                                    } catch (_: Throwable) {}
-                                }
-                            }
-                            json.put("cine_stream_data", cineStreamJson)
-                        }
-
-                        val jsonString = json.toString()
-                        val bos = java.io.ByteArrayOutputStream()
-                        java.util.zip.GZIPOutputStream(bos).use { it.write(jsonString.toByteArray(Charsets.UTF_8)) }
-                        Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
-                    }
-
-                    if (!isActive) return@launch
-
-                    val clipboard = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    val clip = ClipData.newPlainText("StremioC Backup Bundle", backupStr)
-                    clipboard.setPrimaryClip(clip)
-
-                    val container = LinearLayout(ctx).apply {
-                        orientation = LinearLayout.VERTICAL
-                        setPadding(40, 40, 40, 40)
-                        background = getDarkThemeBg()
-                        addView(TextView(ctx).apply {
-                            text = "Export Successful"
-                            textSize = 18f
-                            setTextColor(Color.WHITE)
-                            typeface = android.graphics.Typeface.DEFAULT_BOLD
-                            setPadding(0, 0, 0, 20)
-                            gravity = android.view.Gravity.CENTER
-                        })
-                        val descBuilder = StringBuilder("StremioC settings copied successfully.")
-                        if (isStreamPlayExportActive) descBuilder.append("\n+ StreamPlay settings included.")
-                        if (isCineStreamExportActive) descBuilder.append("\n+ CineStream settings included.")
-                        descBuilder.append("\n\nPlease paste it somewhere safe.")
-
-                        addView(TextView(ctx).apply {
-                            text = descBuilder.toString()
-                            setTextColor(Color.LTGRAY)
-                            textSize = 14f
-                            setPadding(0, 0, 0, 30)
-                        })
-                    }
-                    val okBtn = Button(ctx).apply {
-                        text = "OK"
-                        setTextColor(Color.WHITE)
-                        isAllCaps = false
-                        background = getButtonBg()
-                        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                    }
-                    container.addView(okBtn)
-
-                    val dlg = AlertDialog.Builder(ctx).setView(container).create()
-                    setupCustomDialog(dlg, container)
-                    okBtn.setOnClickListener { dlg.dismiss() } 
-                    dlg.show()
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    Toast.makeText(appContext, "Failed to export settings", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-
-        tvImport.setOnClickListener {
-            val ctx = requireContext()
-            val appContext = ctx.applicationContext
-            val clipboard = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            val clipData = clipboard.primaryClip
-            val clipboardText = if (clipData != null && clipData.itemCount > 0) {
-                clipData.getItemAt(0).text?.toString()?.trim() ?: ""
-            } else ""
-
-            if (clipboardText.isEmpty()) {
-                Toast.makeText(appContext, "Clipboard is empty. Copy the backup data first.", Toast.LENGTH_LONG).show()
-                return@setOnClickListener
-            }
-
-            viewLifecycleOwner.lifecycleScope.launch {
-                try {
-                    val parsedJson = withContext(Dispatchers.IO) {
-                        val decodedBytes = Base64.decode(clipboardText, Base64.NO_WRAP)
-                        val jsonString = try {
-                            val bais = java.io.ByteArrayInputStream(decodedBytes)
-                            java.util.zip.GZIPInputStream(bais).bufferedReader(Charsets.UTF_8).readText()
-                        } catch (e: Exception) {
-                            String(decodedBytes, Charsets.UTF_8)
-                        }
-                        JSONObject(jsonString)
-                    }
-
-                    if (parsedJson.length() == 0) throw Exception("Empty JSON Data")
-
-                    val pluginName = parsedJson.optString("plugin_name")
-                    if (pluginName != "StremioC_Bundle" && pluginName != "StremioC") {
-                        throw Exception("Plugin mismatch")
-                    }
-                    
-                    if (!isActive) return@launch
-
-                    val cancelBtn = Button(ctx).apply {
-                        text = "Cancel"
-                        setTextColor(Color.WHITE)
-                        isAllCaps = false
-                        background = getButtonBg()
-                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
-                    }
-                    val restoreBtn = Button(ctx).apply {
-                        text = "Restore"
-                        setTextColor(Color.WHITE)
-                        isAllCaps = false
-                        background = getButtonBg()
-                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
-                    }
-
-                    val container = LinearLayout(ctx).apply {
-                        orientation = LinearLayout.VERTICAL
-                        setPadding(40, 40, 40, 40)
-                        background = getDarkThemeBg()
-                        addView(TextView(ctx).apply {
-                            text = "Backup Data Detected"
-                            textSize = 18f
-                            setTextColor(Color.WHITE)
-                            typeface = android.graphics.Typeface.DEFAULT_BOLD
-                            setPadding(0, 0, 0, 20)
-                            gravity = android.view.Gravity.CENTER
-                        })
-                        
-                        val msgBuilder = StringBuilder("Valid backup data found in clipboard!\n")
-                        if (pluginName == "StremioC_Bundle") {
-                            val isSPAvailable = parsedJson.optBoolean("stream_play_enabled", false)
-                            val isCSAvailable = parsedJson.optBoolean("cine_stream_enabled", false)
-                            msgBuilder.append("\nDetected packages:")
-                            msgBuilder.append("\n• StremioC: Ready")
-                            if (isSPAvailable) msgBuilder.append("\n• StreamPlay: Ready")
-                            if (isCSAvailable) msgBuilder.append("\n• CineStream: Ready")
-                        }
-                        msgBuilder.append("\n\nAre you sure you want to proceed?")
-
-                        addView(TextView(ctx).apply {
-                            text = msgBuilder.toString()
-                            setTextColor(Color.LTGRAY)
-                            textSize = 14f
-                            setPadding(0, 0, 0, 30)
-                        })
-                        val btnRow = LinearLayout(ctx).apply {
-                            orientation = LinearLayout.HORIZONTAL
-                            addView(cancelBtn)
-                            addView(restoreBtn)
-                        }
-                        addView(btnRow)
-                    }
-
-                    val dlg = AlertDialog.Builder(ctx).setView(container).create()
-                    setupCustomDialog(dlg, container)
-
-                    cancelBtn.setOnClickListener { dlg.dismiss() }
-                    restoreBtn.setOnClickListener {
-                        dlg.dismiss() 
-                        
-                        val loadingContainer = LinearLayout(ctx).apply {
-                            orientation = LinearLayout.VERTICAL
-                            setPadding(40, 40, 40, 40)
-                            background = getDarkThemeBg()
-                            addView(TextView(ctx).apply {
-                                text = "Restoring Data"
-                                textSize = 18f
-                                setTextColor(Color.WHITE)
-                                typeface = android.graphics.Typeface.DEFAULT_BOLD
-                                setPadding(0, 0, 0, 20)
-                                gravity = android.view.Gravity.CENTER
-                            })
-                            addView(TextView(ctx).apply {
-                                text = "Please wait while settings are being applied...\nApp will restart automatically."
-                                setTextColor(Color.LTGRAY)
-                                textSize = 14f
-                                gravity = android.view.Gravity.CENTER
-                                setPadding(0, 0, 0, 10)
-                            })
-                        }
-                        val loadingDlg = AlertDialog.Builder(ctx).setView(loadingContainer).setCancelable(false).create()
-                        setupCustomDialog(loadingDlg, loadingContainer)
-                        loadingDlg.show()
-
-                        viewLifecycleOwner.lifecycleScope.launch {
-                            withContext(Dispatchers.IO) {
-                                val editor = sharedPref.edit()
-                                
-                                if (pluginName == "StremioC_Bundle") {
-                                    val stremioCData = parsedJson.optJSONObject("stremio_c_data")
-                                    if (stremioCData != null) {
-                                        editor.clear()
-                                        jsonToPrefs(stremioCData, editor)
-                                    }
-                                    editor.commit()
-
-                                    val finalStremioCJson = prefsToJson(sharedPref).toString()
-                                    val finalStremioCHash = finalStremioCJson.hashCode().toString()
-                                    
-                                    val se = sharedPref.edit()
-                                    se.putBoolean("stremio_c_restore_complete", true)
-                                    se.putString("stremio_c_last_applied_backup_hash", finalStremioCHash)
-                                    se.commit()
-
-                                    try {
-                                        CloudStreamApp.setKey("native_backup_stremioc", finalStremioCJson)
-                                    } catch (t: Throwable) { t.printStackTrace() }
-
-                                    val isStreamPlayInBackup = parsedJson.optBoolean("stream_play_enabled", false)
-                                    val isStreamPlayEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, false) ?: false
-                                    if (parsedJson.has("stream_play_data") && (isStreamPlayInBackup || isStreamPlayEnabledInConfig)) {
-                                        val streamPlayData = parsedJson.optJSONObject("stream_play_data")
-                                        if (streamPlayData != null) {
-                                            val streamPlayPrefs = appContext.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
-                                            val editorSP = streamPlayPrefs.edit()
-                                            editorSP.clear() 
-                                            jsonToPrefs(streamPlayData, editorSP)
-                                            editorSP.commit()
-
-                                            val finalStreamPlayJson = prefsToJson(streamPlayPrefs).toString()
-                                            val finalStreamPlayHash = finalStreamPlayJson.hashCode().toString()
-                                            
-                                            val seSP = streamPlayPrefs.edit()
-                                            seSP.putBoolean("streamplay_restore_complete", true)
-                                            seSP.putString("streamplay_last_applied_backup_hash", finalStreamPlayHash)
-                                            seSP.commit()
-
-                                            try {
-                                                CloudStreamApp.setKey("native_backup_streamplay", finalStreamPlayJson)
-                                            } catch (t: Throwable) { t.printStackTrace() }
-                                        }
-                                    }
-
-                                    val isCineStreamInBackup = parsedJson.optBoolean("cine_stream_enabled", false)
-                                    val isCineStreamEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, false) ?: false
-                                    if (parsedJson.has("cine_stream_data") && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
-                                        val cineStreamData = parsedJson.optJSONObject("cine_stream_data")
-                                        if (cineStreamData != null) {
-                                            val dynamicKeys = getCineStreamDynamicKeys()
-                                            dynamicKeys.forEach { cKey ->
-                                                if (cineStreamData.has(cKey)) {
-                                                    val cValue = cineStreamData.get(cKey)
-                                                    try {
-                                                        when (cValue) {
-                                                            is Boolean -> CloudStreamApp.setKey(cKey, cValue)
-                                                            is String -> CloudStreamApp.setKey(cKey, cValue)
-                                                            is Int -> CloudStreamApp.setKey(cKey, cValue)
-                                                        }
-                                                    } catch (_: Throwable) {}
-                                                } else {
-                                                    try { CloudStreamApp.setKey(cKey, null as String?) } catch (_: Throwable) {}
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    editor.clear()
-                                    jsonToPrefs(parsedJson, editor)
-                                    editor.commit()
-
-                                    val finalStremioCJson = prefsToJson(sharedPref).toString()
-                                    val finalStremioCHash = finalStremioCJson.hashCode().toString()
-                                    
-                                    val se = sharedPref.edit()
-                                    se.putBoolean("stremio_c_restore_complete", true)
-                                    se.putString("stremio_c_last_applied_backup_hash", finalStremioCHash)
-                                    se.commit()
-
-                                    try {
-                                        CloudStreamApp.setKey("native_backup_stremioc", finalStremioCJson)
-                                    } catch (t: Throwable) { t.printStackTrace() }
-                                }
-                            }
-                            
-                            delay(1500)
-                            if (isActive && isAdded) {
-                                loadingDlg.dismiss()
-                                dismiss()
-                                restartApp(appContext)
-                            }
-                        }
-                    }
-                    dlg.show()
-
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    val okBtn = Button(ctx).apply {
-                        text = "OK"
-                        setTextColor(Color.WHITE)
-                        isAllCaps = false
-                        background = getButtonBg()
-                        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                    }
-
-                    val errContainer = LinearLayout(ctx).apply {
-                        orientation = LinearLayout.VERTICAL
-                        setPadding(40, 40, 40, 40)
-                        background = getDarkThemeBg()
-                        addView(TextView(ctx).apply {
-                            text = "Invalid Backup Data"
-                            textSize = 18f
-                            setTextColor(Color.WHITE)
-                            typeface = android.graphics.Typeface.DEFAULT_BOLD
-                            setPadding(0, 0, 0, 20)
-                            gravity = android.view.Gravity.CENTER
-                        })
-                        addView(TextView(ctx).apply {
-                            text = "No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again."
-                            setTextColor(Color.LTGRAY)
-                            textSize = 14f
-                            setPadding(0, 0, 0, 30)
-                        })
-                        addView(okBtn)
-                    }
-                    val errDlg = AlertDialog.Builder(ctx).setView(errContainer).create()
-                    setupCustomDialog(errDlg, errContainer)
-                    okBtn.setOnClickListener { errDlg.dismiss() }
-                    errDlg.show()
-                }
-            }
-        }
-
-        val switchHistorySync: Switch = try { view.findView("switchHistorySync") } catch (e: Throwable) { throw Exception("switchHistorySync Switch not found", e) }
-        val layoutHistorySyncUrl: View = try { view.findView("layoutHistorySyncUrl") } catch (e: Throwable) { throw Exception("layoutHistorySyncUrl View not found", e) }
-        val etHistorySyncUrl: EditText = try { view.findView("etHistorySyncUrl") } catch (e: Throwable) { throw Exception("etHistorySyncUrl EditText not found", e) }
-
-        val isSyncEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_HISTORY_SYNC_ENABLED, false)
-        switchHistorySync.isChecked = isSyncEnabled
-        layoutHistorySyncUrl.visibility = if (isSyncEnabled) View.VISIBLE else View.GONE
-        etHistorySyncUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, ""))
-
-        switchHistorySync.setOnCheckedChangeListener { _, isChecked ->
-            layoutHistorySyncUrl.visibility = if (isChecked) View.VISIBLE else View.GONE
-        }
-
-        setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
-        setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
-        setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
-
-        val btnSelectLanguage: ImageView = try { view.findView("btnSelectLanguage") } catch (e: Throwable) { throw Exception("btnSelectLanguage ImageView not found", e) }
-        val switchCustomPoster: Switch = try { view.findView("switchCustomPoster") } catch (e: Throwable) { throw Exception("switchCustomPoster Switch not found", e) }
-        val layoutCustomPosterUrl: View = try { view.findView("layoutCustomPosterUrl") } catch (e: Throwable) { throw Exception("layoutCustomPosterUrl View not found", e) }
-        val etCustomPosterUrl: EditText = try { view.findView("etCustomPosterUrl") } catch (e: Throwable) { throw Exception("etCustomPosterUrl EditText not found", e) }
-
-        btnSelectLanguage.setImageDrawable(getDrawable("settings_icon"))
-        btnSelectLanguage.makeTvCompatible()
-
-        val isPosterEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_CUSTOM_POSTER_ENABLED, false)
-        switchCustomPoster.isChecked = isPosterEnabled
-        layoutCustomPosterUrl.visibility = if (isPosterEnabled) View.VISIBLE else View.GONE
-        etCustomPosterUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, ""))
-
-        switchCustomPoster.setOnCheckedChangeListener { _, isChecked ->
-            layoutCustomPosterUrl.visibility = if (isChecked) View.VISIBLE else View.GONE
-        }
-
-        btnSelectLanguage.setOnClickListener {
-            showLanguageSelectDialog()
-        }
-
-        val etTmdbApiKey: EditText = try { view.findView("etTmdbApiKey") } catch (e: Throwable) { throw Exception("etTmdbApiKey EditText not found", e) }
-        val switchMdbList: Switch = try { view.findView("switchMdbList") } catch (e: Throwable) { throw Exception("switchMdbList Switch not found", e) }
-        val layoutMdbList: View = try { view.findView("layoutMdbList") } catch (e: Throwable) { throw Exception("layoutMdbList View not found", e) }
-        val etMdbListApiKey: EditText = try { view.findView("etMdbListApiKey") } catch (e: Throwable) { throw Exception("etMdbListApiKey EditText not found", e) }
-
-        etTmdbApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_API_KEY, ""))
-
-        val isMdbListEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, false)
-        switchMdbList.isChecked = isMdbListEnabled
-        layoutMdbList.visibility = if (isMdbListEnabled) View.VISIBLE else View.GONE
-        etMdbListApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, ""))
-
-        switchMdbList.setOnCheckedChangeListener { _, isChecked ->
-            layoutMdbList.visibility = if (isChecked) View.VISIBLE else View.GONE
-        }
-
-        addlinks.setOnClickListener {
-            showLinkEditorDialog(false, null, -1, null)
-        }
-
-        showlinks.setOnClickListener {
-            val inflater = LayoutInflater.from(ctx)
-            val dialogView = getLayout("dialog_list_links", inflater, null) as LinearLayout
-            
-            dialogView.background = getDarkThemeBg()
-            dialogView.setPadding(40, 40, 40, 40)
-            
-            val rv: RecyclerView = dialogView.findView("rvLinks")
-            val tvNoLinks: TextView = dialogView.findView("tvNoLinks")
-            
-            val list = SettingsRepository.loadLinks(sharedPref)
+    data class Catalog(
+        @JsonProperty("name") var name: String? = null, 
+        @JsonProperty("id") val id: String? = null, 
+        @JsonProperty("type") val type: String? = null, 
+        @JsonProperty("types") val parsedTypes: List<String>? = null, 
+        @JsonProperty("extra") val extra: List<Extra>? = null, 
+        @JsonProperty("extraSupported") val extraSupported: List<String>? = null,
+        @JsonProperty("genres") val genres: List<String>? = null
+    ) {
+        val activeTypes: List<String> get() = if (!parsedTypes.isNullOrEmpty()) parsedTypes else listOfNotNull(type)
+
+        fun getGenresList(): List<String> {
+            val list = mutableListOf<String>()
+            genres?.let { list.addAll(it) }
             if (list.isEmpty()) {
-                tvNoLinks.visibility = View.VISIBLE
-                rv.visibility = View.GONE
+                extra?.find { it.name == "genre" }?.options?.let { list.addAll(it) }
+            }
+            return list
+        }
+
+        fun isSearchRequired(): Boolean = extra?.any { it.name == "search" && it.isRequired == true } == true
+        fun supportsSearch(): Boolean = extra?.any { it.name == "search" } == true || extraSupported?.contains("search") == true
+
+        private suspend fun fetchMetas(provider: StremioC, path: String): List<CatalogEntry> {
+            return try {
+                val text = StremioC.customSession.get(provider.buildUrl(path), timeout = 120L).text
+                if (text.isNotBlank()) parseJson<CatalogResponse>(text).metas ?: emptyList() else emptyList()
+            } catch (e: Throwable) { e.printStackTrace(); emptyList() }
+        }
+
+        suspend fun search(query: String, provider: StremioC): List<SearchResponse> {
+            val allMetasWithType = coroutineScope {
+                activeTypes.map { type ->
+                    async(Dispatchers.IO) {
+                        val path = "/catalog/${type}/${id}/search=${query.urlEncode()}.json"
+                        fetchMetas(provider, path).map { it to type }
+                    }
+                }.awaitAll().flatten()
+            }
+            return allMetasWithType.distinctBy { it.first.id }.map { (meta, type) ->
+                meta.toSearchResponse(provider, catalogName = name ?: id ?: "", typeName = type)
+            }
+        }
+
+        suspend fun toHomePageList(provider: StremioC, skip: Int): Pair<HomePageList, Int> {
+            val allMetas = coroutineScope {
+                activeTypes.map { type ->
+                    async(Dispatchers.IO) {
+                        val path = if (skip > 0) "/catalog/$type/$id/skip=$skip.json" else "/catalog/$type/$id.json"
+                        fetchMetas(provider, path)
+                    }
+                }.awaitAll().flatten()
+            }
+            val distinctEntries = allMetas.distinctBy { it.id }.map { it.toSearchResponse(provider) }
+            val displayType = type?.replaceFirstChar { it.uppercase() } ?: ""
+            return Pair(HomePageList("${name ?: id} - $displayType", distinctEntries), allMetas.size)
+        }
+    }
+
+    private data class CatalogResponse(
+        @JsonProperty("metas") val metas: List<CatalogEntry>?, 
+        @JsonProperty("meta") val meta: CatalogEntry?
+    )
+
+    private data class Trailer(
+        @JsonProperty("source") val source: String?, 
+        @JsonProperty("type") val type: String?
+    )
+    
+    private data class TrailerStream(
+        @JsonProperty("ytId") val ytId: String?, 
+        @JsonProperty("title") val title: String? = null
+    )
+    
+    private data class Link(
+        @JsonProperty("name") val name: String? = null, 
+        @JsonProperty("category") val category: String? = null, 
+        @JsonProperty("url") val url: String? = null
+    )
+
+    private data class FetchedTmdbData(
+        val fetchedTitle: String?, val fetchedOverview: String?, val fetchedLogo: String?,
+        val fetchedTrailers: List<String>, val fetchedRecommendations: List<SearchResponse>?,
+        val fetchedRuntime: Int?, val fetchedAgeRating: String?, val fetchedActors: List<ActorData>?,
+        val fetchedYear: Int?, val fetchedStatus: ShowStatus?, val episodeTmdbMeta: Map<String, TmdbEpisode>,
+        val fetchedOriginCountry: List<String>?,
+        val fetchedOriginalTitle: String?,
+        val fetchedEnglishTitle: String?
+    )
+
+    private data class CatalogEntry(
+        @JsonProperty("name") val name: String? = null, 
+        @JsonProperty("id") val id: String? = null, 
+        @JsonProperty("moviedb_id") val moviedb_id: Int? = null,
+        @JsonProperty("_tmdbId") val tmdbIdExt: String? = null, 
+        @JsonProperty("_malId") val malIdExt: String? = null,
+        @JsonProperty("_kitsuId") val kitsuIdExt: String? = null,
+        @JsonProperty("poster") val poster: String? = null, 
+        @JsonProperty("background") val background: String? = null, 
+        @JsonProperty("logo") val logo: String? = null,
+        @JsonProperty("description") val description: String? = null, 
+        @JsonProperty("imdbRating") val imdbRating: String? = null, 
+        @JsonProperty("type") val type: String? = null,
+        @JsonProperty("videos") val videos: List<Video>? = null, 
+        @JsonProperty("genre") val genre: List<String>? = null, 
+        @JsonProperty("genres") val genres: List<String>? = null,
+        @JsonProperty("cast") val cast: List<String>? = null, 
+        @JsonProperty("trailers") val trailersSources: List<Trailer>? = null,
+        @JsonProperty("trailerStreams") val trailerStreams: List<TrailerStream>? = null, 
+        @JsonProperty("links") val links: List<Link>? = null
+    ) {
+
+        fun toSearchResponse(
+            provider: StremioC, 
+            catalogName: String? = null, 
+            typeName: String? = null
+        ): SearchResponse {
+            val targetType = this.type ?: typeName ?: "movie"
+            val metaUrl = provider.getUnifiedMetaUrl(targetType, this.id ?: "")
+
+            val baseName = if (!name.isNullOrBlank()) {
+                name
             } else {
-                tvNoLinks.visibility = View.GONE
-                rv.visibility = View.VISIBLE
-                rv.layoutManager = LinearLayoutManager(ctx)
-
-                val adapter = LinksAdapter(
-                    items = list,
-                    onDelete = { itemToDelete ->
-                        val updatedList = SettingsRepository.loadLinks(sharedPref)
-                        val removed = updatedList.removeAll { it.id == itemToDelete.id }
-
-                        if (removed) {
-                            SettingsRepository.saveLinks(sharedPref, updatedList)
-                            (rv.adapter as? LinksAdapter)?.remove(itemToDelete)
-                            showToast("Deleted")
-                            if (updatedList.isEmpty()) {
-                                tvNoLinks.visibility = View.VISIBLE
-                                rv.visibility = View.GONE
-                            }
-                        }
-                    },
-                    onEdit = { itemToEdit, position ->
-                        val choiceContainer = LinearLayout(ctx).apply {
-                            orientation = LinearLayout.VERTICAL
-                            setPadding(40, 40, 40, 40)
-                            background = getDarkThemeBg()
-                        }
-                        
-                        choiceContainer.addView(TextView(ctx).apply {
-                            text = itemToEdit.name
-                            textSize = 18f
-                            typeface = android.graphics.Typeface.DEFAULT_BOLD
-                            setTextColor(Color.WHITE)
-                            setPadding(0, 0, 0, 30)
-                            gravity = android.view.Gravity.CENTER
-                        })
-
-                        val optEdit = Button(ctx).apply {
-                            text = "Edit Link Info"
-                            setTextColor(Color.WHITE)
-                            isAllCaps = false
-                            background = getButtonBg()
-                            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 15) }
-                        }
-                        
-                        val optCatalog = Button(ctx).apply {
-                            text = "Configure Catalogs & Genres"
-                            setTextColor(Color.WHITE)
-                            isAllCaps = false
-                            background = getButtonBg()
-                            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                        }
-                        
-                        choiceContainer.addView(optEdit)
-                        choiceContainer.addView(optCatalog)
-
-                        val choiceDlg = AlertDialog.Builder(ctx).setView(choiceContainer).create()
-                        choiceDlg.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-                        
-                        optEdit.setOnClickListener {
-                            choiceDlg.dismiss()
-                            showLinkEditorDialog(true, itemToEdit, position, rv)
-                        }
-                        optCatalog.setOnClickListener {
-                            choiceDlg.dismiss()
-                            showCatalogConfigDialog(itemToEdit)
-                        }
-                        choiceDlg.show()
-                    }
-                )
-                rv.adapter = adapter
+                id ?: ""
             }
 
-            val footer = LinearLayout(ctx).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(0, 20, 0, 0)
-            }
-            val closeBtn = Button(ctx).apply {
-                text = "Close"
-                setTextColor(Color.WHITE)
-                isAllCaps = false
-                background = getButtonBg()
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            }
-            footer.addView(closeBtn)
-            dialogView.addView(footer)
-
-            val dlg = AlertDialog.Builder(ctx).setView(dialogView).create()
-            setupCustomDialog(dlg, dialogView)
-            closeBtn.setOnClickListener { dlg.dismiss() }
-            dlg.show()
-        }
-
-        saveIcon.setOnClickListener {
-            val context = this.context ?: return@setOnClickListener
-            val tmdbApiKeyVal = etTmdbApiKey.text.toString().trim()
-            if (tmdbApiKeyVal.isEmpty()) {
-                showToast("TMDB API key is a required field")
-                return@setOnClickListener
-            }
-
-            val switchCineStream = view.findView<Switch>("switchCineStream")
-            val switchStreamPlay = view.findView<Switch>("switchStreamPlay")
-            val switchVixSrc = view.findView<Switch>("switchVixSrc")
-
-            val editor = sharedPref.edit()
-            editor.putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, tmdbApiKeyVal)
-            editor.putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim())
-            editor.putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
-            editor.putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim())
-            
-            editor.putBoolean(SettingsRepository.PREF_KEY_HISTORY_SYNC_ENABLED, switchHistorySync.isChecked)
-            editor.putBoolean(SettingsRepository.PREF_KEY_CUSTOM_POSTER_ENABLED, switchCustomPoster.isChecked)
-            editor.putBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, switchMdbList.isChecked)
-            
-            editor.putBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, switchCineStream.isChecked)
-            editor.putBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, switchStreamPlay.isChecked)
-            editor.putBoolean(SettingsRepository.PREF_KEY_VIXSRC_ENABLED, switchVixSrc.isChecked)
-            editor.commit()
-
-            val stremioCJson = prefsToJson(sharedPref).toString()
-            val stremioCHash = stremioCJson.hashCode().toString()
-            
-            val se = sharedPref.edit()
-            se.putBoolean("stremio_c_restore_complete", true)
-            se.putString("stremio_c_last_applied_backup_hash", stremioCHash)
-            se.commit()
-
-            try {
-                CloudStreamApp.setKey("native_backup_stremioc", stremioCJson)
-            } catch (t: Throwable) { t.printStackTrace() }
-
-            val streamPlayPrefs = context.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
-            val streamPlayJson = prefsToJson(streamPlayPrefs).toString()
-            val streamPlayHash = streamPlayJson.hashCode().toString()
-            
-            val seSP = streamPlayPrefs.edit()
-            seSP.putBoolean("streamplay_restore_complete", true)
-            seSP.putString("streamplay_last_applied_backup_hash", streamPlayHash)
-            seSP.commit()
-
-            try {
-                CloudStreamApp.setKey("native_backup_streamplay", streamPlayJson)
-            } catch (t: Throwable) { t.printStackTrace() }
-
-            val cancelBtn = Button(context).apply {
-                text = "No"
-                setTextColor(Color.WHITE)
-                isAllCaps = false
-                background = getButtonBg()
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
-            }
-            val restartBtn = Button(context).apply {
-                text = "Yes"
-                setTextColor(Color.WHITE)
-                isAllCaps = false
-                background = getButtonBg()
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
-            }
-
-            val container = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(40, 40, 40, 40)
-                background = getDarkThemeBg()
-                addView(TextView(context).apply {
-                    text = "Save & Reload"
-                    textSize = 18f
-                    setTextColor(Color.WHITE)
-                    typeface = android.graphics.Typeface.DEFAULT_BOLD
-                    setPadding(0, 0, 0, 20)
-                    gravity = android.view.Gravity.CENTER
-                })
-                addView(TextView(context).apply {
-                    text = "Changes have been saved. Do you want to restart the app to apply them?"
-                    setTextColor(Color.LTGRAY)
-                    textSize = 14f
-                    setPadding(0, 0, 0, 30)
-                })
-                val btnRow = LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    addView(cancelBtn)
-                    addView(restartBtn)
-                }
-                addView(btnRow)
-            }
-
-            val dlg = AlertDialog.Builder(context).setView(container).create()
-            setupCustomDialog(dlg, container)
-
-            cancelBtn.setOnClickListener { dlg.dismiss() }
-            restartBtn.setOnClickListener { dismiss(); restartApp(context.applicationContext) }
-            dlg.show()
-        }
-
-        return view
-    }
-
-    private fun showLinkEditorDialog(isEdit: Boolean, itemToEdit: LinkItem?, position: Int, rv: RecyclerView?) {
-        val ctx = requireContext()
-        val inflater = LayoutInflater.from(ctx)
-        val dialogView = getLayout("addlinks", inflater, null) as LinearLayout
-        
-        dialogView.background = getDarkThemeBg()
-        dialogView.setPadding(40, 40, 40, 40)
-        
-        val titleTv = dialogView.getChildAt(0) as? TextView
-        if (titleTv != null) {
-            titleTv.text = if (isEdit) "Edit Link" else "Add Link"
-            titleTv.setTextColor(Color.WHITE)
-            titleTv.textSize = 20f
-            titleTv.typeface = android.graphics.Typeface.DEFAULT_BOLD
-            titleTv.gravity = android.view.Gravity.CENTER
-        }
-        
-        val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
-        val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
-        
-        etName?.background = getButtonBg()
-        etName?.setTextColor(Color.WHITE)
-        etName?.setHintTextColor(Color.GRAY)
-        etName?.setPadding(25, 0, 25, 0) 
-        if (isEdit) etName?.setText(itemToEdit?.name)
-        
-        etLink?.background = getButtonBg()
-        etLink?.setTextColor(Color.WHITE)
-        etLink?.setHintTextColor(Color.GRAY)
-        etLink?.setPadding(25, 0, 25, 0) 
-        if (isEdit) etLink?.setText(itemToEdit?.link)
-
-        val footer = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 30, 0, 0)
-        }
-        val saveBtn = Button(ctx).apply {
-            text = if (isEdit) "Update" else "Save"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
-        }
-        val cancelBtn = Button(ctx).apply {
-            text = "Cancel"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
-        }
-        footer.addView(cancelBtn)
-        footer.addView(saveBtn)
-        dialogView.addView(footer)
-
-        val dlg = AlertDialog.Builder(ctx).setView(dialogView).create()
-        setupCustomDialog(dlg, dialogView)
-
-        saveBtn.setOnClickListener {
-            if (etName == null || etLink == null) return@setOnClickListener
-            val name = etName.text.toString().trim()
-            val link = etLink.text.toString().trim()
-            val type = "StremioC"
-
-            if (link.isEmpty()) { showToast("Please enter a link"); return@setOnClickListener }
-            val valid = try { val uri = link.toUri(); val scheme = uri.scheme?.lowercase(); scheme == "http" || scheme == "https" } catch (_: Exception) { false }
-            if (!valid) { showToast("Enter a valid URL (http/https)"); return@setOnClickListener }
-
-            if (isEdit && itemToEdit != null) {
-                val updatedList = SettingsRepository.loadLinks(sharedPref)
-                val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
-                if (indexInDb != -1) {
-                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
-                    updatedList[indexInDb] = newItem
-                    SettingsRepository.saveLinks(sharedPref, updatedList)
-                    (rv?.adapter as? LinksAdapter)?.updateItem(newItem, position)
-                    showToast("Link Updated Successfully")
-                }
+            val finalName = if (!catalogName.isNullOrBlank() && !typeName.isNullOrBlank()) {
+                val capType = typeName.replaceFirstChar { it.uppercase() }
+                "[$catalogName-$capType] $baseName"
             } else {
-                val item = LinkItem(name = name.ifBlank { link }, link = link, type = type)
-                try {
-                    val list = SettingsRepository.loadLinks(sharedPref)
-                    list.add(0, item)
-                    SettingsRepository.saveLinks(sharedPref, list)
-                    Toast.makeText(ctx, "Link saved", Toast.LENGTH_SHORT).show()
-                } catch (e: Throwable) { e.printStackTrace(); showToast("Failed to save link") }
-            }
-            dlg.dismiss()
-        }
-        cancelBtn.setOnClickListener { dlg.dismiss() }
-        dlg.show()
-    }
-
-    private fun showLanguageSelectDialog() {
-        val context = requireContext()
-        val currentSavedCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "en-US") ?: "en-US"
-        
-        var selectedCode = currentSavedCode
-        var selectedLangName = LANGUAGES.find { it.second == currentSavedCode }?.first ?: "South Korea (Korean)"
-
-        val container = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(40, 40, 40, 40)
-            background = getDarkThemeBg()
-        }
-
-        container.addView(TextView(context).apply {
-            text = "Select TMDB Language"
-            textSize = 20f
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setPadding(0, 0, 0, 20)
-            gravity = android.view.Gravity.CENTER
-        })
-
-        val searchBar = EditText(context).apply {
-            hint = "Search language..."
-            setHintTextColor(Color.GRAY)
-            setTextColor(Color.WHITE)
-            textSize = 15f
-            setPadding(25, 20, 25, 20)
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                setMargins(0, 0, 0, 20)
-            }
-        }
-        container.addView(searchBar)
-
-        val rv = RecyclerView(context).apply {
-            layoutManager = LinearLayoutManager(context)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 600)
-        }
-        container.addView(rv)
-
-        class LangAdapter(
-            private val originalList: List<Pair<String, String>>,
-            private val selectedCode: String,
-            private val onClick: (String) -> Unit
-        ) : RecyclerView.Adapter<LangAdapter.VH>() {
-
-            private var filteredList = originalList.toMutableList()
-
-            inner class VH(val view: LinearLayout, val tvName: TextView, val tvCheck: TextView) : RecyclerView.ViewHolder(view)
-
-            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-                val rowLayout = LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(10, 20, 10, 20)
-                    isClickable = true
-                    focusable = View.FOCUSABLE
-                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                }
-                val tvName = TextView(context).apply {
-                    textSize = 15f
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                }
-                val tvCheck = TextView(context).apply {
-                    text = "✓"
-                    textSize = 16f
-                    setTextColor(Color.parseColor("#FF5555")) 
-                    setPadding(10, 0, 10, 0)
-                }
-                rowLayout.addView(tvName)
-                rowLayout.addView(tvCheck)
-                return VH(rowLayout, tvName, tvCheck)
-            }
-
-            override fun onBindViewHolder(holder: VH, position: Int) {
-                val (langName, code) = filteredList[position]
-                val isSelected = code == selectedCode
-                holder.tvName.text = langName
-                holder.tvName.setTextColor(if (isSelected) Color.parseColor("#FF5555") else Color.WHITE) 
-                holder.tvCheck.visibility = if (isSelected) View.GONE else View.GONE
-                
-                holder.view.setOnClickListener {
-                    onClick(code)
-                }
-            }
-            override fun getItemCount() = filteredList.size
-
-            @SuppressLint("NotifyDataSetChanged")
-            fun filter(query: String) {
-                filteredList = if (query.isBlank()) {
-                    originalList.toMutableList()
+                if (!name.isNullOrBlank()) {
+                    name
                 } else {
-                    originalList.filter { it.first.contains(query, ignoreCase = true) }.toMutableList()
-                }
-                notifyDataSetChanged()
-            }
-        }
-
-        val adapter = LangAdapter(LANGUAGES, selectedCode) { code ->
-            val editor = sharedPref.edit()
-            editor.putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code)
-            editor.commit()
-
-            val langName = LANGUAGES.find { it.second == code }?.first ?: code
-            Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
-            activeSubDialog?.dismiss()
-        }
-        rv.adapter = adapter
-
-        searchBar.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                searchJob?.cancel()
-                searchJob = viewLifecycleOwner.lifecycleScope.launch {
-                    delay(150) 
-                    val query = s.toString().trim().lowercase()
-                    adapter.filter(query)
+                    val capitalizedType = targetType.replaceFirstChar { it.uppercase() }
+                    "[$capitalizedType] $id"
                 }
             }
-            override fun afterTextChanged(s: android.text.Editable?) {}
-        })
 
-        val footer = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 30, 0, 0)
+            return provider.newMovieSearchResponse(finalName, metaUrl, TvType.Others) { 
+                posterUrl = poster 
+            }
         }
-        val applyBtn = Button(context).apply {
-            text = "Apply"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
-        }
-        val cancelBtn = Button(context).apply {
-            text = "Cancel"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
-        }
-        footer.addView(cancelBtn)
-        footer.addView(applyBtn)
-        container.addView(footer)
-
-        val langDialog = AlertDialog.Builder(context).setView(container).create()
-        setupCustomDialog(langDialog, container)
-
-        applyBtn.setOnClickListener {
-            val code = selectedCode
-            val langName = selectedLangName
-
-            val editor = sharedPref.edit()
-            editor.putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code)
-            editor.commit()
-
-            Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
-            langDialog.dismiss()
-        }
-        cancelBtn.setOnClickListener { langDialog.dismiss() }
-        langDialog.show()
-    }
-
-    private fun showCatalogConfigDialog(item: LinkItem) {
-        val context = requireContext()
-        val uniqueId = item.link.toUniqueKeyLocal() 
         
-        val progressContainer = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(40, 40, 40, 40)
-            background = getDarkThemeBg()
-            addView(TextView(context).apply {
-                text = "Loading Stremio Addon Manifest..."
-                setTextColor(Color.WHITE)
-                textSize = 16f
-                gravity = android.view.Gravity.CENTER
-            })
-        }
-        val progressDialog = AlertDialog.Builder(context).setView(progressContainer).setCancelable(false).create()
-        setupCustomDialog(progressDialog, progressContainer)
-        progressDialog.show()
-
-        viewLifecycleOwner.lifecycleScope.launch {
-            val manifestText = withContext(Dispatchers.IO) {
-                try { com.lagradost.cloudstream3.app.get(item.link, timeout = 30L).text } catch (e: Exception) { e.printStackTrace(); null }
-            }
-            progressDialog.dismiss()
-
-            if (manifestText.isNullOrBlank()) {
-                Toast.makeText(context, "Failed to load manifest. Check link.", Toast.LENGTH_LONG).show()
-                return@launch
-            }
-
-            val cleanUrl = item.link.substringBefore("?").trimEnd('/')
-            val currentUrl = if (cleanUrl.endsWith("manifest.json")) cleanUrl else "$cleanUrl/manifest.json"
-            val manifestPrefs = context.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
-            manifestPrefs.edit().putString(currentUrl.toUniqueKeyLocal(), manifestText).apply()
-
-            val flatTabs = mutableListOf<ConfigFlatTab>()
-            try {
-                val manifest = parseJson<StremioC.Manifest>(manifestText)
-                val catalogs = manifest.catalogs
-                
-                if (catalogs != null) {
-                    for (cat in catalogs) {
-                        val id = cat.id ?: ""
-                        val type = cat.type ?: "movie"
-                        val name = cat.name ?: id
-                        val displayType = type.replaceFirstChar { it.uppercase() }
-                        
-                        val requiresGenre = cat.extra?.any { it.name == "genre" && it.isRequired == true } ?: false
-
-                        flatTabs.add(ConfigFlatTab(
-                            key = "${id}_${type}_default", 
-                            displayName = "$name - $displayType", 
-                            isGenre = false, 
-                            catalogKey = "${id}_${type}",
-                            isChecked = sharedPref.getBoolean("tab_enabled_${uniqueId}_${id}_${type}_default", true),
-                            isGenresEnabled = sharedPref.getBoolean("genres_enabled_${uniqueId}_${id}_${type}", true)
-                        ))
-
-                        val genres = cat.getGenresList()
-
-                        genres.forEach { genre ->
-                            val capitalizedGenre = genre.capitalizeFirstLocal()
-                            flatTabs.add(ConfigFlatTab(
-                                key = "${id}_${type}_genre_$genre", 
-                                displayName = "$name : $capitalizedGenre  - $displayType", 
-                                isGenre = true, 
-                                catalogKey = "${id}_${type}",
-                                isChecked = sharedPref.getBoolean("tab_enabled_${uniqueId}_${id}_${type}_genre_$genre", true)
-                            ))
-                        }
-                    }
-                }
-            } catch (e: Exception) { e.printStackTrace() }
-
-            if (flatTabs.isEmpty()) { Toast.makeText(context, "No catalogs found in manifest.", Toast.LENGTH_LONG).show(); return@launch }
-            displayCatalogListDialog(item.name, flatTabs, item.link)
-        }
-    }
-
-    private fun displayCatalogListDialog(addonName: String, flatTabs: List<ConfigFlatTab>, linkUrl: String) {
-        val context = requireContext()
-        val prefs = sharedPref
-        val uniqueId = linkUrl.toUniqueKeyLocal()
-        val orderKey = "catalog_order_$uniqueId"
-        
-        val orderJson = prefs.getString(orderKey, null)
-        val orderedKeys = mutableListOf<String>()
-        if (orderJson != null) {
-            try {
-                val arr = JSONArray(orderJson)
-                for (i in 0 until arr.length()) orderedKeys.add(arr.getString(i))
-            } catch (e: Exception) { e.printStackTrace() }
+        private fun isSingleMovie(finalType: String?, finalVideos: List<Video>?): Boolean {
+            return (finalType == "movie" && finalVideos?.size == 1 && finalVideos[0].seasonNumber == 1 && (finalVideos[0].episode == 1 || finalVideos[0].number == 1)) ||
+                   (finalVideos?.size == 1 && (finalVideos[0].seasonNumber ?: 0) == 0 && (finalVideos[0].episode ?: finalVideos[0].number ?: 0) == 0)
         }
 
-        val sortedTabs = flatTabs.sortedBy { tab ->
-            val idx = orderedKeys.indexOf(tab.key)
-            if (idx != -1) idx else Int.MAX_VALUE
-        }
-        val checkedInit = sortedTabs.filter { it.isChecked }
-        val uncheckedInit = sortedTabs.filter { !it.isChecked }
-        val masterTabs = (checkedInit + uncheckedInit).toMutableList()
-
-        val dialogContainer = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(25, 40, 25, 30)
-            background = getDarkThemeBg()
-        }
-
-        val titleView = TextView(context).apply {
-            text = "$addonName - Catalog Settings"
-            textSize = 20f
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
-            setPadding(0, 0, 0, 30)
-            gravity = android.view.Gravity.CENTER
-        }
-        dialogContainer.addView(titleView)
-
-        val rv = RecyclerView(context).apply {
-            layoutManager = LinearLayoutManager(context)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
-                setMargins(0, 0, 0, 20)
-            }
-            isVerticalFadingEdgeEnabled = true
-            setFadingEdgeLength(120)
-        }
-        dialogContainer.addView(rv)
-
-        class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.VH>() {
-            var visibleTabs = mutableListOf<ConfigFlatTab>()
+        private suspend fun fetchTmdbDetails(
+            provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
+            stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null
+        ): FetchedTmdbData {
+            var fetchedRecommendations: List<SearchResponse>? = null
             
-            fun updateVisibleTabs() {
-                visibleTabs = masterTabs.filter { tab ->
-                    if (tab.isGenre) {
-                        val parentTab = masterTabs.find { !it.isGenre && it.catalogKey == tab.catalogKey }
-                        parentTab?.isGenresEnabled ?: true
-                    } else true
-                }.toMutableList()
-                
-                if (rv.isComputingLayout) {
-                    rv.post { notifyDataSetChanged() }
-                } else {
-                    notifyDataSetChanged()
+            val cacheKey = "${tmdbMediaType}_${tmdbIdStr}"
+            val cached = tmdbDetailsCache[cacheKey]
+            val detailRes = preFetchedDetail ?: if (cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL) {
+                cached.first
+            } else {
+                val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
+                val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend)
+                val text = StremioC.customSession.get(detailUrl).text
+                val fetched = if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
+                if (fetched != null) {
+                    tmdbDetailsCache[cacheKey] = Pair(fetched, System.currentTimeMillis())
                 }
+                fetched
             }
-
-            inner class VH(val view: LinearLayout, val checkbox: CheckBox, val etOrder: EditText, val genreSwitch: Switch, val dragHandle: ImageView) : RecyclerView.ViewHolder(view)
-
-            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-                val layout = LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(10, 8, 10, 8)
-                    background = getCardBg()
-                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                        setMargins(0, 5, 0, 5)
-                    }
-                }
-                val dragHandle = ImageView(context).apply {
-                    setImageResource(android.R.drawable.ic_menu_sort_by_size)
-                    setPadding(10, 0, 20, 0)
-                }
-                
-                val etOrder = EditText(context).apply {
-                    inputType = InputType.TYPE_CLASS_NUMBER
-                    imeOptions = EditorInfo.IME_ACTION_DONE
-                    setTextColor(Color.WHITE)
-                    textSize = 12f
-                    setPadding(10, 10, 10, 10)
-                    background = getButtonBg()
-                    gravity = android.view.Gravity.CENTER
-                    layoutParams = LinearLayout.LayoutParams(90, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                        setMargins(0, 0, 15, 0)
-                    }
-                    setOnClickListener {
-                        requestFocus()
-                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-                        imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
-                    }
-                }
-                
-                val checkbox = CheckBox(context).apply {
-                    textSize = 15f
-                    setTextColor(Color.WHITE)
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                }
-                val genreSwitch = Switch(context).apply {
-                    text = "Genre"
-                    setTextColor(Color.WHITE)
-                    textSize = 12f
-                    setPadding(20, 0, 20, 0)
-                }
-                layout.addView(dragHandle)
-                layout.addView(etOrder)
-                layout.addView(checkbox)
-                layout.addView(genreSwitch)
-                return VH(layout, checkbox, etOrder, genreSwitch, dragHandle)
-            }
-
-            override fun onBindViewHolder(holder: VH, position: Int) {
-                val tab = visibleTabs[position]
-                
-                holder.checkbox.setOnCheckedChangeListener(null)
-                holder.checkbox.isChecked = tab.isChecked 
-                holder.checkbox.text = tab.displayName
-                holder.checkbox.setOnCheckedChangeListener { _, isChecked ->
-                    tab.isChecked = isChecked 
-                    
-                    val checkedTabs = masterTabs.filter { it.isChecked }
-                    val uncheckedTabs = masterTabs.filter { !it.isChecked }
-                    masterTabs.clear()
-                    masterTabs.addAll(checkedTabs)
-                    masterTabs.addAll(uncheckedTabs)
-                    updateVisibleTabs()
-                }
-
-                if (!tab.isGenre && masterTabs.any { it.isGenre && it.catalogKey == tab.catalogKey }) {
-                    holder.genreSwitch.visibility = View.VISIBLE
-                    holder.genreSwitch.setOnCheckedChangeListener(null)
-                    holder.genreSwitch.isChecked = tab.isGenresEnabled 
-                    holder.genreSwitch.setOnCheckedChangeListener { _, isChecked ->
-                        tab.isGenresEnabled = isChecked 
-                        updateVisibleTabs()
-                    }
-                } else {
-                    holder.genreSwitch.visibility = View.GONE
-                }
-                
-                holder.etOrder.setOnFocusChangeListener(null)
-                holder.etOrder.setText((position + 1).toString())
-                
-                holder.etOrder.setOnFocusChangeListener { _, hasFocus ->
-                    val curPos = holder.adapterPosition 
-                    if (curPos == RecyclerView.NO_POSITION) return@setOnFocusChangeListener
-
-                    if (hasFocus) {
-                        rv.postDelayed({
-                            rv.smoothScrollToPosition(curPos)
-                        }, 150)
-                    } else {
-                        val inputVal = holder.etOrder.text.toString().toIntOrNull()
-                        if (inputVal != null) {
-                            shiftItemInRecyclerView(curPos, inputVal) 
-                        } else {
-                            holder.etOrder.setText((curPos + 1).toString()) 
-                        }
-                    }
-                }
-                
-                holder.etOrder.setOnEditorActionListener { _, actionId, _ ->
-                    if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_NEXT) {
-                        holder.etOrder.clearFocus()
-                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-                        imm.hideSoftInputFromWindow(holder.etOrder.windowToken, 0)
-                        true
-                    } else false
-                }
-            }
-
-            override fun getItemCount() = visibleTabs.size
             
-            fun shiftItemInRecyclerView(oldPos: Int, newOrder: Int) {
-                rv.post {
-                    if (oldPos !in visibleTabs.indices) return@post
-                    val item = visibleTabs[oldPos]
+            if (detailRes == null) {
+                return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null)
+            }
+
+            val episodeTmdbMeta = ConcurrentHashMap<String, TmdbEpisode>()
+
+            val context = CloudStreamApp.context
+            val prefs = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+            val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
+            val customPosterEnabled = prefs?.getBoolean("custom_poster_enabled", false) ?: false
+            val customPosterBase = prefs?.getString("custom_poster_url", "") ?: ""
+            
+            coroutineScope {
+                val shouldFocusEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType == "other" && !isMovie)
+                
+                val episodeDeferred = if (shouldFocusEpisodes) {
+                    var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
+                    if (requiredSeasons.isEmpty()) {
+                        val totalSeasons = detailRes.number_of_seasons ?: 1
+                        requiredSeasons = if (totalSeasons > 0) (1..totalSeasons).toList() else listOf(1)
+                    }
                     
-                    val isEnabled = item.isChecked 
-                    val checkedCount = visibleTabs.count { it.isChecked } 
-                    
-                    val groupMin = if (isEnabled) 1 else checkedCount + 1
-                    val groupMax = if (isEnabled) checkedCount else visibleTabs.size
-                    
-                    val clampedOrder = newOrder.coerceIn(groupMin, groupMax)
-                    val newPos = clampedOrder - 1
-                    
-                    if (oldPos != newPos) {
-                        visibleTabs.removeAt(oldPos)
-                        visibleTabs.add(newPos, item)
-                        
-                        val masterFrom = masterTabs.indexOf(item)
-                        if (masterFrom != -1) {
-                            masterTabs.removeAt(masterFrom)
-                            
-                            val referenceTab = if (newPos + 1 in visibleTabs.indices) visibleTabs[newPos + 1] else if (newPos - 1 in visibleTabs.indices) visibleTabs[newPos - 1] else null
-                            var masterTo = if (referenceTab != null) masterTabs.indexOf(referenceTab) else -1
-                            
-                            if (masterTo != -1) {
-                                if (referenceTab == visibleTabs.getOrNull(newPos - 1)) {
-                                    masterTo += 1
+                    requiredSeasons.map { seasonNum ->
+                        async(Dispatchers.IO) {
+                            StremioC.networkSemaphore.withPermit {
+                                withTimeoutOrNull(10000L) {
+                                    runSuspendCatching {
+                                        val seasonCacheKey = "${tmdbIdStr}_$seasonNum"
+                                        val cachedSeason = tmdbSeasonCache[seasonCacheKey]
+                                        val seasonRes = if (cachedSeason != null && System.currentTimeMillis() - cachedSeason.second < METADATA_CACHE_TTL) {
+                                            cachedSeason.first
+                                        } else {
+                                            val fetchedSeasonText = StremioC.customSession.get(provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")).text
+                                            val fetchedSeason = if (fetchedSeasonText.isNotBlank()) parseJson<TmdbSeasonDetail>(fetchedSeasonText) else null
+                                            if (fetchedSeason != null) {
+                                                tmdbSeasonCache[seasonCacheKey] = Pair(fetchedSeason, System.currentTimeMillis())
+                                            }
+                                            fetchedSeason
+                                        }
+                                        seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
+                                    }.onFailure { it.printStackTrace() }
                                 }
-                                masterTabs.add(masterTo.coerceIn(0, masterTabs.size), item)
-                            } else {
-                                masterTabs.add(item)
                             }
                         }
-                        
-                        notifyItemMoved(oldPos, newPos)
-                        notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
+                    }
+                } else null
+
+                val collectionDeferred = async(Dispatchers.IO) {
+                    if (isMovie && detailRes.belongs_to_collection?.id != null) {
+                        runSuspendCatching {
+                            val colUrl = provider.buildTmdbUrl("/collection/${detailRes.belongs_to_collection.id}")
+                            val colText = StremioC.customSession.get(colUrl).text
+                            if (colText.isNotBlank()) parseJson<TmdbCollectionDetail>(colText).parts ?: emptyList() else emptyList()
+                        }.getOrDefault(emptyList())
+                    } else emptyList()
+                }
+
+                val collectionParts = collectionDeferred.await()
+                episodeDeferred?.awaitAll()
+
+                val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
+                val finalCombinedMedia = (collectionParts + tmdbRecs)
+                    .distinctBy { it.id }
+                    .filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
+
+                fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
+                    val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
+                    val recTmdbId = media.id ?: return@mapNotNull null
+                    val rawMediaType = media.mediaType ?: tmdbMediaType
+                    val posterType = if (rawMediaType == "tv") "tv" else "movie"
+                    val outType = if (rawMediaType == "tv") "series" else "movie"
+                    
+                    val resolvedPosterUrl = if (customPosterEnabled && customPosterBase.isNotBlank()) {
+                        val rawUrl = customPosterBase.trim()
+                        if (rawUrl.contains("posterType") || rawUrl.contains("recTmdbId") || rawUrl.contains("{type}") || rawUrl.contains("{tmdb_id}")) {
+                            rawUrl.replace("\$posterType", posterType)
+                                  .replace("posterType", posterType)
+                                  .replace("{type}", posterType)
+                                  .replace("\$recTmdbId", recTmdbId.toString())
+                                  .replace("recTmdbId", recTmdbId.toString())
+                                  .replace("{tmdb_id}", recTmdbId.toString())
+                        } else {
+                            val cleanBase = rawUrl.trimEnd('/')
+                            "$cleanBase/tmdb:$posterType:$recTmdbId.jpg?config=aed081fd-73b1-460e-879d-377c5658691c"
+                        }
                     } else {
-                        notifyItemChanged(oldPos)
+                        val path = media.poster_path
+                        if (!path.isNullOrBlank()) "https://image.tmdb.org/t/p/w500$path" else TRANSPARENT_PIXEL
+                    }
+                    
+                    val thinData = LoadData(id = "tmdb:${media.id}", type = outType)
+                    val thinDataJson = thinData.toJson()
+                    
+                    provider.newMovieSearchResponse(recTitle, thinDataJson, if (outType == "movie") TvType.Movie else TvType.TvSeries) { 
+                        this.posterUrl = resolvedPosterUrl 
+                    }
+                }.take(50)
+            }
+            
+            val countryCode = langCode.substringAfter("-", "KR").uppercase()
+
+            val fetchedAgeRating = if (isMovie) {
+                detailRes.release_dates?.results?.firstOrNull { it.iso_3166_1 == countryCode }?.release_dates?.firstOrNull { !it.certification.isNullOrEmpty() }?.certification
+                    ?: detailRes.release_dates?.results?.firstOrNull { it.iso_3166_1 == "US" }?.release_dates?.firstOrNull { !it.certification.isNullOrEmpty() }?.certification
+            } else {
+                detailRes.content_ratings?.results?.firstOrNull { it.iso_3166_1 == countryCode }?.rating
+                    ?: detailRes.content_ratings?.results?.firstOrNull { it.iso_3166_1 == "US" }?.rating
+            }
+
+            val crewList = detailRes.credits?.crew?.filter { it.job == "Director" || it.job == "Writer" }?.groupBy { it.name ?: it.originalName }?.mapNotNull { (name, roles) ->
+                if (name == null) return@mapNotNull null
+                val sortedJobs = roles.mapNotNull { it.job }.distinct().sortedBy { if (it == "Director") 1 else 2 }.joinToString(", ")
+                val img = roles.firstNotNullOfOrNull { it.profilePath }?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
+                ActorData(Actor(name, img), roleString = sortedJobs)
+            }?.sortedBy { if (it.roleString?.contains("Director, Writer") == true) 1 else if (it.roleString?.contains("Director") == true) 2 else 3 } ?: emptyList()
+
+            val castList = detailRes.credits?.cast?.mapNotNull { cast ->
+                val actorName = cast.name ?: cast.originalName ?: return@mapNotNull null
+                val profileImg = cast.profilePath?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
+                ActorData(Actor(actorName, profileImg), roleString = cast.character)
+            } ?: emptyList()
+
+            val fetchedTrailers = (detailRes.videos?.results ?: emptyList()).filter { it.type == "Trailer" || it.type == "Teaser" }.sortedWith(compareBy({ if (it.type == "Trailer") 0 else 1 }, { it.publishedAt ?: "9999-12-31" })).mapNotNull { it.key }.map { "https://m.youtube.com/watch?v=$it" }
+
+            val translationData = detailRes.translations?.translations?.firstOrNull { 
+                it.iso_3166_1 == "US" || it.iso_639_1 == "en" 
+            }?.data
+            val enTranslation = (translationData?.title ?: translationData?.name)?.takeIf { it.isNotBlank() }
+
+            val extractedEnglishTitle = if (detailRes.original_language == "en") {
+                detailRes.original_title ?: detailRes.original_name
+            } else {
+                enTranslation ?: detailRes.original_title ?: detailRes.original_name
+            }
+
+            return FetchedTmdbData(
+                if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
+                detailRes.overview, detailRes.images?.logos?.firstOrNull()?.file_path?.let { "https://image.tmdb.org/t/p/w500$it" },
+                fetchedTrailers, fetchedRecommendations, if (isMovie) detailRes.runtime else null, fetchedAgeRating, crewList + castList,
+                (detailRes.releaseDate ?: detailRes.firstAirDate)?.split("-")?.first()?.toIntOrNull(),
+                if (detailRes.status == "Returning Series") ShowStatus.Ongoing else ShowStatus.Completed, episodeTmdbMeta, detailRes.origin_country,
+                detailRes.original_title ?: detailRes.original_name,
+                extractedEnglishTitle
+            )
+        }
+
+        private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>?, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): List<Episode> {
+            val videos = targetVideos ?: emptyList()
+            val sortedVideos = videos.groupBy { Pair(it.seasonNumber ?: 0, it.episode ?: it.number ?: 0) }.flatMap { (_, group) -> group.sortedBy { it.title ?: it.name ?: "" } }
+            val maxRegularSeason = sortedVideos.mapNotNull { it.seasonNumber }.filter { it > 0 }.maxOrNull() ?: 0
+            val targetSeasonForZero = maxRegularSeason + 1
+            
+            val maxEpisodePerSeason = mutableMapOf<Int, Int>()
+            val zeroEpCounterPerSeason = mutableMapOf<Int, Int>()
+            val uniqueEpisodeChecker = mutableSetOf<String>()
+
+            return sortedVideos.map { video ->
+                val displaySeason = if ((video.seasonNumber ?: 0) == 0) targetSeasonForZero else (video.seasonNumber ?: 0)
+                val originalEpisode = video.episode ?: video.number ?: 0
+                
+                var displayEpisode = if (originalEpisode == 0) {
+                    val currentZeroCount = zeroEpCounterPerSeason.getOrDefault(displaySeason, 0) + 1
+                    zeroEpCounterPerSeason[displaySeason] = currentZeroCount
+                    maxEpisodePerSeason.getOrDefault(displaySeason, 0) + currentZeroCount
+                } else {
+                    val currentMax = maxEpisodePerSeason.getOrDefault(displaySeason, 0)
+                    if (originalEpisode > currentMax) maxEpisodePerSeason[displaySeason] = originalEpisode
+                    originalEpisode
+                }
+                
+                var key = "${displaySeason}_${displayEpisode}"
+                if (uniqueEpisodeChecker.contains(key)) {
+                    val currentMax = maxEpisodePerSeason.getOrDefault(displaySeason, displayEpisode)
+                    displayEpisode = maxOf(currentMax, displayEpisode) + 1
+                    key = "${displaySeason}_${displayEpisode}"
+                }
+                uniqueEpisodeChecker.add(key)
+                maxEpisodePerSeason[displaySeason] = maxOf(maxEpisodePerSeason.getOrDefault(displaySeason, 0), displayEpisode)
+
+                val imdbSeason = video.imdbSeason ?: video.seasonNumber ?: 0
+                val imdbEpisode = video.imdbEpisode ?: video.episode ?: video.number ?: 0
+                
+                val rawEpImdbId = video.imdb_id ?: finalImdbId
+                val epImdbId = rawEpImdbId?.let { idStr ->
+                    val parts = idStr.split(":")
+                    if (idStr.startsWith("kitsu:") || idStr.startsWith("mal:") || idStr.startsWith("tmdb:")) {
+                        if (parts.size >= 2) "${parts[0]}:${parts[1]}" else idStr
+                    } else {
+                        parts[0]
                     }
                 }
+                
+                video.toEpisode(provider, type, epImdbId, episodeTmdbMeta, displaySeason, displayEpisode, showTitle, tmdbId, isAnime, isBollywood, isAsian, isCartoon, imdbSeason, imdbEpisode, originalTitle, englishTitle, aniListId, malId, kitsuId)
             }
         }
 
-        val adapter = CatalogAdapter()
-        adapter.updateVisibleTabs()
-        rv.adapter = adapter
+        suspend fun toLoadResponse(
+            provider: StremioC, 
+            imdbId: String?, 
+            addonDeferred: Deferred<CatalogEntry?>?, 
+            preFetchedDetail: TmdbDetailResponse? = null, 
+            fetchedAniListId: Int? = null, 
+            fetchedMalId: Int? = null, 
+            resolvedTmdbId: String? = null,
+            kitsuVideos: List<Video>? = null
+        ): LoadResponse = coroutineScope {
+            val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
 
-        val touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
-            override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: Reflection.ViewHolder): Boolean {
-                return false
+            var finalImdbId = if (this@CatalogEntry.id?.startsWith("tt") == true) this@CatalogEntry.id 
+                              else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
+            
+            if (finalImdbId == null && detailedEntry.links?.isNotEmpty() == true) {
+                finalImdbId = detailedEntry.links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/")?.takeIf { it.startsWith("tt") }
             }
-            override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
-                val fromPos = viewHolder.adapterPosition
-                val toPos = target.adapterPosition
-                
-                if (fromPos == RecyclerView.NO_POSITION || toPos == RecyclerView.NO_POSITION) return false
-                
-                val movedTab = adapter.visibleTabs[fromPos]
-                Collections.swap(adapter.visibleTabs, fromPos, toPos)
-                
-                val masterFrom = masterTabs.indexOf(movedTab)
-                val targetTab = adapter.visibleTabs[fromPos]
-                val masterTo = masterTabs.indexOf(targetTab)
-                
-                if (masterFrom != -1 && masterTo != -1) {
-                    masterTabs.removeAt(masterFrom)
-                    masterTabs.add(masterTo, movedTab)
+            if (finalImdbId == null) {
+                finalImdbId = provider.extractImdbId(detailedEntry.logo) ?: provider.extractImdbId(detailedEntry.poster) ?: provider.extractImdbId(detailedEntry.background)
+            }
+
+            var tmdbIdStr: String? = resolvedTmdbId ?: if (this@CatalogEntry.id?.startsWith("tmdb:") == true) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
+
+            val findApiDeferred = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
+                async(Dispatchers.IO) {
+                    val cacheKey = finalImdbId
+                    val cachedFind = tmdbFindCache[cacheKey]
+                    if (cachedFind != null && System.currentTimeMillis() - cachedFind.second < METADATA_CACHE_TTL) {
+                        cachedFind.first
+                    } else {
+                        val fetchedFind = runSuspendCatching {
+                            val fetchedFindText = StremioC.customSession.get(provider.buildTmdbUrl("/find/$finalImdbId", "external_source" to "imdb_id")).text
+                            val findRes = if (fetchedFindText.isNotBlank()) parseJson<TmdbFindResponse>(fetchedFindText) else null
+                            val movieMatch = findRes?.movie_results?.firstOrNull()
+                            if (movieMatch?.id != null) Pair(movieMatch.id.toString(), "movie") else findRes?.tv_results?.firstOrNull()?.id?.let { Pair(it.toString(), "tv") }
+                        }.getOrNull()
+                        if (fetchedFind != null) {
+                            tmdbFindCache[cacheKey] = Pair(fetchedFind, System.currentTimeMillis())
+                        }
+                        fetchedFind
+                    }
+                }
+            } else null
+
+            var finalVideos = kitsuVideos ?: detailedEntry.videos ?: this@CatalogEntry.videos
+            val finalTrailersSources = detailedEntry.trailersSources ?: this@CatalogEntry.trailersSources
+            val finalTrailerStreams = detailedEntry.trailerStreams ?: this@CatalogEntry.trailerStreams
+            val originalName = detailedEntry.name ?: this@CatalogEntry.name
+            val finalGenre = detailedEntry.genre ?: detailedEntry.genres ?: this@CatalogEntry.genre ?: this@CatalogEntry.genres
+            val finalPoster = detailedEntry.poster ?: this@CatalogEntry.poster
+            val finalBackground = detailedEntry.background ?: this@CatalogEntry.background
+            val finalImdbRating = detailedEntry.imdbRating ?: this@CatalogEntry.imdbRating
+            val finalType = detailedEntry.type ?: this@CatalogEntry.type
+
+            var foundMediaType: String? = null
+            if (findApiDeferred != null) {
+                val findResult = findApiDeferred.await()
+                if (findResult != null) { tmdbIdStr = findResult.first; foundMediaType = findResult.second }
+            }
+
+            var tmdbData: FetchedTmdbData? = null
+            if (tmdbIdStr != null) {
+                try {
+                    val refinedMediaType = foundMediaType ?: if (finalType == "series" || finalType == "tv") "tv" else if (isSingleMovie(finalType, finalVideos) || finalType == "movie" || finalVideos.isNullOrEmpty()) "movie" else "tv"
+                    tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!, refinedMediaType == "movie", finalImdbId, finalType, finalVideos, preFetchedDetail)
+                } catch (e: Exception) { e.printStackTrace() }
+            }
+
+            var finalName = originalName ?: this@CatalogEntry.name ?: "Unknown Content"
+            var finalDescription = detailedEntry.description ?: this@CatalogEntry.description
+            
+            if (tmdbData != null) {
+                if (!tmdbData.fetchedTitle.isNullOrBlank()) finalName = tmdbData.fetchedTitle
+                finalDescription = tmdbData.fetchedOverview?.takeIf { it.isNotBlank() } ?: finalDescription
+            }
+            
+            if (finalType == "other") {
+                finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription<br>$originalName"
+            }
+
+            val movieId = this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id ?: ""
+            if (tmdbData != null && finalVideos.isNullOrEmpty() && tmdbData.episodeTmdbMeta.isNotEmpty()) {
+                val generatedVideos = tmdbData.episodeTmdbMeta.mapNotNull { (key, tmdbEp) ->
+                    val parts = key.split("_")
+                    if (parts.size == 2) {
+                        val s = parts[0].toIntOrNull() ?: return@mapNotNull null
+                        val e = parts[1].toIntOrNull() ?: return@mapNotNull null
+                        Video(
+                            id = movieId, 
+                            title = tmdbEp.name,
+                            seasonNumber = s,
+                            episode = e,
+                            overview = tmdbEp.overview,
+                            released = tmdbEp.airDate
+                        )
+                    } else null
+                }
+                if (generatedVideos.isNotEmpty()) {
+                    finalVideos = generatedVideos
+                }
+            }
+
+            val fallbackTrailers = finalTrailerStreams?.mapNotNull { it.ytId }?.ifEmpty { finalTrailersSources?.mapNotNull { it.source } }?.distinct()?.map { if (it.startsWith("http")) it else "https://m.youtube.com/watch?v=$it" } ?: emptyList()
+            val finalTrailers = tmdbData?.fetchedTrailers?.ifEmpty { fallbackTrailers } ?: fallbackTrailers
+
+            val countries = tmdbData?.fetchedOriginCountry ?: emptyList()
+            val isBollywood = countries.any { it.contains("IN", true) || it.contains("India", true) }
+            val isAsian = countries.any { it.contains("KR", true) || it.contains("JP", true) || it.contains("CN", true) || it.contains("TH", true) || it.contains("TW", true) }
+            val isCartoon = finalGenre?.any { it.contains("Animation", true) } == true
+            val isAnimeMedia = fetchedMalId != null || finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
+
+            var finalMalId = fetchedMalId
+            var finalAniId = fetchedAniListId
+
+            val aniZipDeferred = if (isAnimeMedia && finalImdbId != null) {
+                async(Dispatchers.IO) {
+                    val cacheKey = finalImdbId
+                    val cachedZip = aniZipCache[cacheKey]
+                    if (cachedZip != null && System.currentTimeMillis() - cachedZip.second < METADATA_CACHE_TTL) {
+                        cachedZip.first
+                    } else {
+                        val fetchedZip = runSuspendCatching {
+                            val mappingRes = StremioC.customSession.get("https://api.ani.zip/mappings?imdb_id=$finalImdbId", timeout = 5L).text
+                            val node = parseJson<JsonNode>(mappingRes)
+                            val mappings = node.get("mappings")
+                            if (mappings != null && !mappings.isNull) {
+                                val mal = mappings.get("mal_id").intOrNull()?.takeIf { it > 0 }
+                                val ani = mappings.get("anilist_id").intOrNull()?.takeIf { it > 0 }
+                                Pair(mal, ani)
+                            } else null
+                        }.onFailure { it.printStackTrace() }.getOrNull()
+                        if (fetchedZip != null) {
+                            aniZipCache[cacheKey] = Pair(fetchedZip, System.currentTimeMillis())
+                        }
+                        fetchedZip
+                    }
+                }
+            } else null
+
+            if (isAnimeMedia && finalMalId == null && finalImdbId != null) {
+                val aniZipResult = aniZipDeferred?.await()
+                if (aniZipResult != null) {
+                    finalMalId = aniZipResult.first ?: finalMalId
+                    finalAniId = aniZipResult.second ?: finalAniId
+                }
+            }
+
+            val cleanImdbId = finalImdbId?.let { idStr ->
+                val parts = idStr.split(":")
+                if (idStr.startsWith("kitsu:") || idStr.startsWith("mal:") || idStr.startsWith("tmdb:")) {
+                    if (parts.size >= 2) "${parts[0]}:${parts[1]}" else idStr
+                } else {
+                    parts[0]
+                }
+            }
+            val cleanTmdbId = tmdbIdStr?.substringBefore(":")
+
+            val hasAnimeTrackerIds = finalMalId != null || finalAniId != null || this@CatalogEntry.kitsuIdExt != null
+            val finalMovieType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.AnimeMovie else TvType.Movie
+            val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
+
+            if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
+                val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id ?: "")
+                return@coroutineScope provider.newMovieLoadResponse(
+                    finalName, metaUrl, finalMovieType, 
+                    LoadData(
+                        type = finalType, 
+                        id = movieId, 
+                        imdbId = cleanImdbId, 
+                        year = tmdbData?.fetchedYear, 
+                        title = finalName, 
+                        tmdbId = cleanTmdbId?.toIntOrNull(), 
+                        isAnime = isAnimeMedia,
+                        isBollywood = isBollywood,
+                        isAsian = isAsian,
+                        isCartoon = isCartoon,
+                        anilistId = finalAniId,
+                        malId = finalMalId,
+                        kitsuId = this@CatalogEntry.kitsuIdExt,
+                        originalTitle = tmdbData?.fetchedOriginalTitle,
+                        englishTitle = tmdbData?.fetchedEnglishTitle
+                    )
+                ) {
+                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
+                    this.plot = finalDescription
+                    this.actors = tmdbData?.fetchedActors
+                    this.tags = finalGenre
+                    this.recommendations = tmdbData?.fetchedRecommendations 
+                    addTrailer(finalTrailers); this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
+                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }
+
+                    val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
+                    validImdb?.let { addImdbId(it) }
+                    if (validImdb == null) {
+                        cleanTmdbId?.takeIf { it.isNotBlank() }?.let { addTMDbId(it) }
+                    }
+                    
+                    finalMalId?.let { addMalId(it) }
+                    finalAniId?.let { addAniListId(it) }
+
+                    this.apiName = provider.getTargetApiName()
                 }
 
-                adapter.notifyItemMoved(fromPos, toPos)
-                return true
-            }
-
-            override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
-                super.clearView(recyclerView, viewHolder)
-                adapter.notifyDataSetChanged()
-            }
-
-            override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
-        })
-        
-        touchHelper.attachToRecyclerView(rv)
-
-        val footer = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 30, 0, 0)
-        }
-        val cancelBtn = Button(context).apply {
-            text = "Cancel"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(0, 0, 15, 0)
-            }
-        }
-        val saveBtn = Button(context).apply {
-            text = "Save"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(15, 0, 0, 0)
-            }
-        }
-        footer.addView(cancelBtn)
-        footer.addView(saveBtn)
-        dialogContainer.addView(footer)
-
-        val dialog = AlertDialog.Builder(context).setView(dialogContainer).create()
-        setupCustomDialog(dialog, dialogContainer)
-
-        saveBtn.setOnClickListener {
-            val editor = prefs.edit()
-            val keysToSave = JSONArray()
-            
-            masterTabs.forEach { 
-                keysToSave.put(it.key) 
-                editor.putBoolean("tab_enabled_${uniqueId}_${it.key}", it.isChecked)
-                if (!it.isGenre) {
-                    editor.putBoolean("genres_enabled_${uniqueId}_${it.catalogKey}", it.isGenresEnabled)
-                }
-            }
-            editor.putString(orderKey, keysToSave.toString())
-            editor.commit() 
-            
-            dialog.dismiss()
-            showSavedPopup(context, "Catalog Settings", "Catalog settings saved. Reload to apply.")
-        }
-
-        cancelBtn.setOnClickListener {
-            dialog.dismiss()
-        }
-
-        dialog.show()
-    }
-
-    private fun String.capitalizeFirstLocal(): String = if (this.isNotEmpty()) this.substring(0, 1).uppercase() + this.substring(1) else this
-    private fun String.toUniqueKeyLocal(): String = this.lowercase().filter { it.isLetter() }
-
-    private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
-        try {
-            val switchView: CompoundButton = view.findView(viewId)
-            switchView.isEnabled = isInstalled
-            if (!isInstalled) {
-                switchView.isChecked = false
-                switchView.text = "Not Installed"
-                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
             } else {
-                switchView.text = "Integration"
-                switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
-            }
-            switchView.setOnCheckedChangeListener { _, isChecked ->
-                showToast("$displayName Integration " + if (isChecked) "Enabled" else "Disabled")
-            }
-        } catch (e: Throwable) { e.printStackTrace() }
-    }
+                val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
+                val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
+                return@coroutineScope provider.newTvSeriesLoadResponse(
+                    finalName, metaUrl, finalSeriesType, finalEpisodes
+                ) {
+                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
+                    this.showStatus = tmdbData?.fetchedStatus 
+                    this.plot = finalDescription
+                    this.actors = tmdbData?.fetchedActors
+                    this.tags = finalGenre
+                    this.recommendations = tmdbData?.fetchedRecommendations
+                    addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
+                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }
+                    
+                    val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
+                    validImdb?.let { addImdbId(it) }
+                    if (validImdb == null) {
+                        cleanTmdbId?.takeIf { it.isNotBlank() }?.let { addTMDbId(it) }
+                    }
+                    
+                    finalMalId?.let { addMalId(it) }
+                    finalAniId?.let { addAniListId(it) }
 
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {}
-
-    private fun restartApp(appContext: Context) {
-        val packageManager = appContext.packageManager
-        val intent = packageManager.getLaunchIntentForPackage(appContext.packageName)
-        val componentName = intent?.component
-
-        if (componentName != null) {
-            val restartIntent = Intent.makeRestartActivityTask(componentName)
-            appContext.startActivity(restartIntent)
-            Runtime.getRuntime().exit(0)
+                    this.apiName = provider.getTargetApiName()
+                }
+            }           
         }
     }
 
-    inner class LinksAdapter(
-        private val items: MutableList<LinkItem>,
-        private val onDelete: (LinkItem) -> Unit,
-        private val onEdit: (LinkItem, Int) -> Unit
-    ) : RecyclerView.Adapter<LinksAdapter.VH>() {
+    private data class Video(
+        @JsonProperty("id") val id: String? = null,
+        @JsonProperty("title") val title: String? = null,
+        @JsonProperty("name") val name: String? = null,
+        @JsonProperty("season") val seasonNumber: Int? = null,
+        @JsonProperty("number") val number: Int? = null,
+        @JsonProperty("episode") val episode: Int? = null,
+        @JsonProperty("thumbnail") val thumbnail: String? = null,
+        @JsonProperty("overview") val overview: String? = null,
+        @JsonProperty("description") val description: String? = null,
+        @JsonProperty("firstAired") val firstAired: String? = null,
+        @JsonProperty("released") val released: String? = null,
+        @JsonProperty("tvdb_id") val tvdb_id: Int? = null,
+        @JsonProperty("imdbSeason") val imdbSeason: Int? = null,
+        @JsonProperty("imdbEpisode") val imdbEpisode: Int? = null,
+        @JsonProperty("imdb_id") val imdb_id: String? = null
+    ) {
+        fun toEpisode(provider: StremioC, type: String?, imdbId: String?, tmdbMetaMap: Map<String, TmdbEpisode>, displaySeason: Int, displayEpisode: Int, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, imdbSeason: Int?, imdbEpisode: Int?, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): Episode {
+            val tmdbEp = tmdbMetaMap["${displaySeason}_${displayEpisode}"] ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
+            val finalAirDate = tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@Video.firstAired ?: this@Video.released
+            val airedYearInt = finalAirDate?.split("-")?.first()?.toIntOrNull()
+            
+            return provider.newEpisode(LoadData(
+                type = type, 
+                id = id, 
+                season = displaySeason, 
+                episode = displayEpisode, 
+                imdbId = imdbId, 
+                title = showTitle, 
+                tmdbId = tmdbId, 
+                isAnime = isAnime,
+                isBollywood = isBollywood,
+                isAsian = isAsian,
+                isCartoon = isCartoon,
+                firstAired = finalAirDate, 
+                airedYear = airedYearInt, 
+                imdbSeason = imdbSeason, 
+                imdbEpisode = imdbEpisode,
+                originalTitle = originalTitle,
+                englishTitle = englishTitle,
+                anilistId = aniListId,
+                malId = malId,
+                kitsuId = kitsuId
+            )) {
+                val rawTitle = this@Video.name ?: this@Video.title ?: "Episode $displayEpisode"
+                val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
 
-        inner class VH(val view: View) : RecyclerView.ViewHolder(view) {
-            val tvName: TextView = view.findView("tvName")
-            val tvLink: TextView = view.findView("tvLink")
-            val tvType: TextView = view.findView("tvType")
-            val btnDelete: ImageButton = view.findView("btnDelete")
-        }
+                this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
+                this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
+                
+                var finalEpDesc = (tmdbEp?.overview ?: this@Video.overview ?: this@Video.description)?.takeIf { it != "null" }
+                if (type == "other") {
+                    finalEpDesc = if (finalEpDesc.isNullOrBlank()) cleanOriginalTitle else "$finalEpDesc | $cleanOriginalTitle"
+                }
+                this.description = finalEpDesc                
+                this.season = displaySeason
+                this.episode = displayEpisode
 
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-            val layoutId = getCachedResId("item_saved_link", "layout")
-            val v = layoutInflater.inflate(res.getLayout(layoutId), parent, false)
-            v.background = getCardBg() 
-            return VH(v)
-        }
-
-        override fun onBindViewHolder(holder: VH, position: Int) {
-            val item = items[position]
-            holder.tvName.text = item.name
-            holder.tvLink.text = item.link
-            holder.tvType.text = item.type
-            holder.btnDelete.setOnClickListener { onDelete(item) }
-            holder.itemView.setOnClickListener { onEdit(item, position) }
-        }
-
-        override fun getItemCount(): Int = items.size
-
-        fun remove(item: LinkItem) {
-            val idx = items.indexOfFirst { it.id == item.id }
-            if (idx >= 0) {
-                items.removeAt(idx)
-                notifyItemRemoved(idx)
+                finalAirDate?.takeIf { it.isNotBlank() }?.let { this.addDate(it) }
             }
         }
+    }
 
-        fun updateItem(newItem: LinkItem, position: Int) {
-            if (position in items.indices) {
-                items[position] = newItem
-                notifyItemChanged(position)
+    private data class StreamsResponse(@JsonProperty("streams") val streams: List<Stream>)    
+    private data class Subtitle(@JsonProperty("url") val url: String?, @JsonProperty("lang") val lang: String?, @JsonProperty("lang_code") val lang_code: String?, @JsonProperty("id") val id: String?)    
+    private data class ProxyHeaders(@JsonProperty("request") val request: Map<String, String>?)   
+    private data class BehaviorHints(@JsonProperty("proxyHeaders") val proxyHeaders: ProxyHeaders?, @JsonProperty("headers") val headers: Map<String, String>?)
+
+    private data class Stream(
+        @JsonProperty("name") val name: String?,
+        @JsonProperty("title") val title: String?,
+        @JsonProperty("url") val url: String?,
+        @JsonProperty("description") val description: String?,
+        @JsonProperty("ytId") val ytId: String?,
+        @JsonProperty("externalUrl") val externalUrl: String?,
+        @JsonProperty("behaviorHints") val behaviorHints: BehaviorHints?,
+        @JsonProperty("infoHash") val infoHash: String?,
+        @JsonProperty("sources") val sources: List<String> = emptyList(),
+        @JsonProperty("subtitles") val subtitles: List<Subtitle> = emptyList()
+    ) {
+        suspend fun runCallback(provider: StremioC, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
+            if (url != null) {
+                val lowerUrl = url.lowercase()
+                val linkType = when {
+                    lowerUrl.contains(".m3u8") || name?.contains("m3u8", true) == true || title?.contains("m3u8", true) == true -> ExtractorLinkType.M3U8
+                    lowerUrl.contains(".mpd") -> ExtractorLinkType.DASH
+                    lowerUrl.contains(".torrent") -> ExtractorLinkType.TORRENT
+                    else -> ExtractorLinkType.VIDEO 
+                }
+
+                callback.invoke(newExtractorLink(name ?: "", fixSourceName(name, title), url, linkType) {
+                    this.quality = getQuality(listOf(description, title, name))
+                    this.headers = behaviorHints?.proxyHeaders?.request ?: behaviorHints?.headers ?: mapOf()
+                })
+                
+                println("[STREMIOSUB] Stream.runCallback matched subtitles list. Count: ${subtitles.size}")
+                subtitles.map { sub -> 
+                    val lang = sub.lang ?: sub.lang_code ?: "Unknown"
+                    val parsedLang = SubtitleHelper.fromTagToEnglishLanguageName(lang) ?: lang
+                    println("[STREMIOSUB] Stream.runCallback invoking subtitleCallback with parsedLang: '$parsedLang', url: '${sub.url}'")
+                    subtitleCallback.invoke(newSubtitleFile(parsedLang, sub.url ?: return@map)) 
+                }
             }
+            if (ytId != null) loadExtractor("https://m.youtube.com/watch?v=$ytId", subtitleCallback, callback)
+            if (externalUrl != null) loadExtractor(externalUrl, subtitleCallback, callback)
+            if (infoHash != null) callback.invoke(newExtractorLink(name ?: "", title ?: name ?: "", "magnet:?xt=urn:btih:${infoHash}") { this.quality = Qualities.Unknown.value })
         }
     }
 }
+
+private data class TraktRelatedIds(@JsonProperty("tmdb") val tmdb: Int?)
+private data class TraktRelatedItem(@JsonProperty("ids") val ids: TraktRelatedIds?)
+private data class SimklIds(@JsonProperty("tmdb") val tmdb: Int?, @JsonProperty("simkl") val simkl: Int?)
+private data class SimklRecItem(@JsonProperty("type") val type: String?, @JsonProperty("ids") val ids: SimklIds?)
+private data class SimklRecResponse(@JsonProperty("users_recommendations") val users_recommendations: List<SimklRecItem>?)
+private data class SimklDetailResponse(@JsonProperty("ids") val ids: SimklIds?)
+
+private data class TmdbFindResponse(
+    @JsonProperty("movie_results") val movie_results: List<TmdbFindResult>? = null,
+    @JsonProperty("tv_results") val tv_results: List<TmdbFindResult>? = null
+)
+
+private data class TmdbFindResult(
+    @JsonProperty("id") val id: Int? = null,
+    @JsonProperty("media_type") val media_type: String? = null
+)
+
+private data class TmdbCollection(
+    @JsonProperty("id") val id: Int? = null,
+    @JsonProperty("name") val name: String? = null,
+    @JsonProperty("poster_path") val poster_path: String? = null,
+    @JsonProperty("backdrop_path") val backdrop_path: String? = null
+)
+
+private data class TmdbCollectionDetail(
+    @JsonProperty("id") val id: Int? = null,
+    @JsonProperty("name") val name: String? = null,
+    @JsonProperty("parts") val parts: List<TmdbMedia>? = null
+)
+
+private data class TmdbTranslations(@JsonProperty("translations") val translations: List<TmdbTranslationItem>?)
+private data class TmdbTranslationItem(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("iso_639_1") val iso_639_1: String?, @JsonProperty("data") val data: TmdbTranslationData?)
+private data class TmdbTranslationData(@JsonProperty("title") val title: String?, @JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?)
+
+private data class TmdbDetailResponse(
+    @JsonProperty("id") val id: Int? = null,
+    @JsonProperty("number_of_seasons") val number_of_seasons: Int? = null,
+    @JsonProperty("title") val title: String? = null, 
+    @JsonProperty("name") val name: String? = null, 
+    @JsonProperty("original_title") val original_title: String? = null, 
+    @JsonProperty("original_name") val original_name: String? = null, 
+    @JsonProperty("overview") val overview: String? = null, 
+    @JsonProperty("release_date") val releaseDate: String? = null, 
+    @JsonProperty("first_air_date") val firstAirDate: String? = null, 
+    @JsonProperty("status") val status: String? = null, 
+    @JsonProperty("poster_path") val posterPath: String? = null, 
+    @JsonProperty("origin_country") val origin_country: List<String>? = null, 
+    @JsonProperty("original_language") val original_language: String? = null, 
+    @JsonProperty("belongs_to_collection") val belongs_to_collection: TmdbCollection? = null, 
+    @JsonProperty("recommendations") val recommendations: TmdbRecommendations? = null,
+    @JsonProperty("runtime") val runtime: Int? = null, 
+    @JsonProperty("release_dates") val release_dates: TmdbReleaseDates? = null, 
+    @JsonProperty("content_ratings") val content_ratings: TmdbContentRatings? = null, 
+    @JsonProperty("credits") val credits: TmdbCredits? = null, 
+    @JsonProperty("images") val images: TmdbImages? = null, 
+    @JsonProperty("videos") val videos: ResultsTrailer? = null, 
+    @JsonProperty("external_ids") val external_ids: ExternalIds? = null, 
+    @JsonProperty("translations") val translations: TmdbTranslations? = null
+) {
+    fun toTmdbMedia(mediaType: String): TmdbMedia {
+        return TmdbMedia(
+            id = this.id,
+            name = this.name ?: this.title,
+            title = this.title ?: this.name,
+            originalTitle = this.original_title ?: this.original_name,
+            mediaType = mediaType,
+            poster_path = this.posterPath,
+            overview = this.overview,
+            origin_country = this.origin_country,
+            original_language = this.original_language,
+            releaseDate = this.releaseDate,
+            firstAirDate = this.firstAirDate
+        )
+    }
+}
+
+private data class TmdbImages(@JsonProperty("logos") val logos: List<TmdbLogo>? = null)
+private data class TmdbLogo(@JsonProperty("file_path") val file_path: String? = null)
+private data class TmdbRecommendations(@JsonProperty("results") val results: List<TmdbMedia>? = null)
+private data class TmdbMedia(
+    @JsonProperty("id") val id: Int? = null,
+    @JsonProperty("name") val name: String? = null,
+    @JsonProperty("title") val title: String? = null,
+    @JsonProperty("original_title") val originalTitle: String? = null,
+    @JsonProperty("media_type") val mediaType: String? = null,
+    @JsonProperty("poster_path") val poster_path: String? = null,
+    @JsonProperty("overview") val overview: String? = null,
+    @JsonProperty("origin_country") val origin_country: List<String>? = null,
+    @JsonProperty("original_language") val original_language: String? = null,
+    @JsonProperty("release_date") val releaseDate: String? = null,
+    @JsonProperty("first_air_date") val firstAirDate: String? = null
+)
+
+private data class TmdbReleaseDates(@JsonProperty("results") val results: List<TmdbReleaseDateResult>?)
+private data class TmdbReleaseDateResult(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("release_dates") val release_dates: List<TmdbReleaseDate>?)
+private data class TmdbReleaseDate(@JsonProperty("certification") val certification: String?)
+private data class TmdbContentRatings(@JsonProperty("results") val results: List<TmdbContentRatingResult>?)
+private data class TmdbContentRatingResult(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("rating") val rating: String?)
+private data class TmdbCredits(@JsonProperty("cast") val cast: List<TmdbCast>? = null, @JsonProperty("crew") val crew: List<TmdbCrew>? = null)
+private data class TmdbCast(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("character") val character: String?, @JsonProperty("profile_path") val profilePath: String?)
+private data class TmdbCrew(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("job") val job: String?, @JsonProperty("profile_path") val profilePath: String?)
+private data class TmdbSeasonDetail(@JsonProperty("episodes") val episodes: List<TmdbEpisode>? = null)
+private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("episode_number") val episodeNumber: Int?, @JsonProperty("air_date") val airDate: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("runtime") val runtime: Int?)
+
+data class Trailers(@JsonProperty("key") val key: String? = null, @JsonProperty("type") val type: String? = null, @JsonProperty("published_at") val publishedAt: String? = null)
+data class ResultsTrailer(@JsonProperty("results") val results: ArrayList<Trailers>? = arrayListOf())
+data class ExternalIds(@JsonProperty("imdb_id") val imdb_id: String? = null, @JsonProperty("tvdb_id") val tvdb_id: String? = null)
+
+private fun String.toUniqueKey(): String {
+    return this.lowercase().filter { it.isLetter() }
+}
+
+private fun String.urlEncodeLocal(): String = try {
+    java.net.URLEncoder.encode(this, "UTF-8").replace("+", "%20")
+} catch (e: Exception) {
+    this
+}
+
+fun getSafeAllProviders(): List<MainAPI> {
+    return try {
+        val method = APIHolder::class.java.methods.find { it.name == "getAllProviders" }
+        val obj = method?.invoke(APIHolder)
+        when (obj) {
+            is Iterable<*> -> obj.filterIsInstance<MainAPI>()
+            is Array<*> -> obj.filterIsInstance<MainAPI>()
+            else -> emptyList()
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        emptyList()
+    }
+}
+
+private data class FlatTab(val key: String, val displayName: String, val urlPath: String)
