@@ -209,10 +209,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/TvchakProvider/logo.png",
-        "fileHash": "sha256-20793fe4b70f7ddbaa7793661b6e4fc1037a35ee07dfd36df606e6e427831e70",
+        "fileHash": "sha256-91af4ea59eeecaa844ddd69a34bd64afc29677ffa04eacb60c8d2d7816df0825",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 33945,
+        "fileSize": 32609,
         "status": 1,
         "language": "ko",
         "authors": [
