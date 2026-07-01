@@ -1473,6 +1473,11 @@ class YoutubeProvider(
 
         try {
             if (page == 1) {
+                // [해결 1] 홈 화면 새로고침 시 인메모리 카테고리(탭) 리스트 캐시를 무효화합니다.
+                if (requestData == "Home") {
+                    cachedMainPageList = null
+                }
+                
                 saveContinuationToken(requestData, null)
 
                 if (isChip) {
@@ -1489,17 +1494,19 @@ class YoutubeProvider(
                     if (requestData.startsWith("chip_name_")) {
                         chipName = requestData.removePrefix("chip_name_")
                         tokenToUse = cachedChips.find { it.name == chipName }?.token
-                        Log.d("YoutubeUtils", "[CHIP_DEBUG] name-based chip request: name = $chipName, fallback tokenToUse = $tokenToUse")
                     } else {
                         val oldToken = requestData.removePrefix("chip_")
                         tokenToUse = oldToken
                         chipName = cachedChips.find { it.token == oldToken }?.name
-                        Log.d("YoutubeUtils", "[CHIP_DEBUG] token-based legacy chip request: oldToken = $oldToken, reverse-lookup name = $chipName")
                     }
 
                     if (!chipName.isNullOrBlank()) {
                         try {
-                            val html = app.get(mainUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
+                            // [해결 2] 타임스탬프 파라미터(?t=...)를 주입하여 OkHttp 및 CDN의 캐시 반환을 완벽히 무력화하고 
+                            // 무조건 최신 상태의 유튜브 메인 HTML을 강제 수집합니다.
+                            val freshUrl = "$mainUrl/?t=${System.currentTimeMillis()}"
+                            val html = app.get(freshUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
+                            
                             savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
                             savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
                             savedClientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
@@ -1527,7 +1534,6 @@ class YoutubeProvider(
                                     }
                                     
                                     if (incomingChips.isNotEmpty()) {
-                                        Log.d("YoutubeUtils", "[CHIP_DEBUG] merge and save chips on token-refresh block")
                                         mergeAndSaveChips(incomingChips)
                                         
                                         val freshToken = incomingChips.find { it.name == chipName }?.token
@@ -1541,7 +1547,8 @@ class YoutubeProvider(
                             Log.e("YoutubeUtils", "[CHIP] Failed to refresh chip tokens on pull-to-refresh", e)
                         }
                     }
-
+                    
+            
                     savedApiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
                     savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
