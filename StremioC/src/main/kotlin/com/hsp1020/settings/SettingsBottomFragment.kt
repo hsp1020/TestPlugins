@@ -58,7 +58,8 @@ data class LinkItem(
     val id: Long = System.currentTimeMillis(),
     val name: String,
     val link: String,
-    val type: String
+    val type: String,
+    val isSyncEnabled: Boolean = true
 )
 
 object SettingsRepository {
@@ -66,7 +67,6 @@ object SettingsRepository {
     const val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled"
     const val PREF_KEY_STREAMPLAY_ENABLED = "streamplay_integration_enabled"
     const val PREF_KEY_VIXSRC_ENABLED = "vixsrc_integration_enabled"
-    const val PREF_KEY_HISTORY_SYNC_ENABLED = "history_sync_enabled"
     const val PREF_KEY_HISTORY_SYNC_URL = "history_sync_url"
     
     const val PREF_KEY_TMDB_LANG_CODE = "tmdb_language_code"
@@ -89,7 +89,8 @@ object SettingsRepository {
                         id = obj.optLong("id", System.currentTimeMillis()),
                         name = obj.optString("name", ""),
                         link = obj.optString("link", ""),
-                        type = obj.optString("type", "StremioC")
+                        type = obj.optString("type", "StremioC"),
+                        isSyncEnabled = obj.optBoolean("isSyncEnabled", true)
                     )
                 )
             }
@@ -108,6 +109,7 @@ object SettingsRepository {
                 put("name", item.name)
                 put("link", item.link)
                 put("type", item.type)
+                put("isSyncEnabled", item.isSyncEnabled)
             }
             arr.put(obj)
         }
@@ -770,18 +772,11 @@ class SettingsBottomFragment(
             }
         }
 
-        val switchHistorySync: Switch = try { view.findView("switchHistorySync") } catch (e: Throwable) { throw Exception("switchHistorySync Switch not found", e) }
         val layoutHistorySyncUrl: View = try { view.findView("layoutHistorySyncUrl") } catch (e: Throwable) { throw Exception("layoutHistorySyncUrl View not found", e) }
         val etHistorySyncUrl: EditText = try { view.findView("etHistorySyncUrl") } catch (e: Throwable) { throw Exception("etHistorySyncUrl EditText not found", e) }
 
-        val isSyncEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_HISTORY_SYNC_ENABLED, false)
-        switchHistorySync.isChecked = isSyncEnabled
-        layoutHistorySyncUrl.visibility = if (isSyncEnabled) View.VISIBLE else View.GONE
+        layoutHistorySyncUrl.visibility = View.VISIBLE
         etHistorySyncUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, ""))
-
-        switchHistorySync.setOnCheckedChangeListener { _, isChecked ->
-            layoutHistorySyncUrl.visibility = if (isChecked) View.VISIBLE else View.GONE
-        }
 
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
@@ -953,7 +948,6 @@ class SettingsBottomFragment(
             editor.putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
             editor.putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim())
             
-            editor.putBoolean(SettingsRepository.PREF_KEY_HISTORY_SYNC_ENABLED, switchHistorySync.isChecked)
             editor.putBoolean(SettingsRepository.PREF_KEY_CUSTOM_POSTER_ENABLED, switchCustomPoster.isChecked)
             editor.putBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, switchMdbList.isChecked)
             
@@ -1058,6 +1052,7 @@ class SettingsBottomFragment(
         
         val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
         val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
+        val switchLinkSync = try { dialogView.findView<Switch>("switchLinkSync") } catch (t: Throwable) { null }
         
         etName?.background = getButtonBg()
         etName?.setTextColor(Color.WHITE)
@@ -1070,6 +1065,8 @@ class SettingsBottomFragment(
         etLink?.setHintTextColor(Color.GRAY)
         etLink?.setPadding(25, 0, 25, 0) 
         if (isEdit) etLink?.setText(itemToEdit?.link)
+
+        switchLinkSync?.isChecked = itemToEdit?.isSyncEnabled ?: true
 
         val footer = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1101,6 +1098,7 @@ class SettingsBottomFragment(
             val name = etName.text.toString().trim()
             val link = etLink.text.toString().trim()
             val type = "StremioC"
+            val isSync = switchLinkSync?.isChecked ?: true
 
             if (link.isEmpty()) { showToast("Please enter a link"); return@setOnClickListener }
             val valid = try { val uri = link.toUri(); val scheme = uri.scheme?.lowercase(); scheme == "http" || scheme == "https" } catch (_: Exception) { false }
@@ -1110,14 +1108,14 @@ class SettingsBottomFragment(
                 val updatedList = SettingsRepository.loadLinks(sharedPref)
                 val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
                 if (indexInDb != -1) {
-                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
+                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type, isSyncEnabled = isSync)
                     updatedList[indexInDb] = newItem
                     SettingsRepository.saveLinks(sharedPref, updatedList)
                     (rv?.adapter as? LinksAdapter)?.updateItem(newItem, position)
                     showToast("Link Updated Successfully")
                 }
             } else {
-                val item = LinkItem(name = name.ifBlank { link }, link = link, type = type)
+                val item = LinkItem(name = name.ifBlank { link }, link = link, type = type, isSyncEnabled = isSync)
                 try {
                     val list = SettingsRepository.loadLinks(sharedPref)
                     list.add(0, item)
@@ -1739,6 +1737,7 @@ private fun showLanguageSelectDialog() {
             val tvName: TextView = view.findView("tvName")
             val tvLink: TextView = view.findView("tvLink")
             val tvType: TextView = view.findView("tvType")
+            val tvSyncBadge: TextView = view.findView("tvSyncBadge")
             val btnDelete: ImageButton = view.findView("btnDelete")
         }
 
@@ -1754,6 +1753,7 @@ private fun showLanguageSelectDialog() {
             holder.tvName.text = item.name
             holder.tvLink.text = item.link
             holder.tvType.text = item.type
+            holder.tvSyncBadge.visibility = if (item.isSyncEnabled) View.VISIBLE else View.GONE
             holder.btnDelete.setOnClickListener { onDelete(item) }
             holder.itemView.setOnClickListener { onEdit(item, position) }
         }
@@ -1776,3 +1776,4 @@ private fun showLanguageSelectDialog() {
         }
     }
 }
+
