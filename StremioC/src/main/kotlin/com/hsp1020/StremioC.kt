@@ -1125,7 +1125,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             payload["isKitsu"] = isKitsuMedia
             payload["kitsuId"] = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
 
-            val payloadJson = toJson(payload)
+            val payloadJson = payload.toJson()
 
             withTimeoutOrNull(25000L) {
                 cineStreamProvider.loadLinks(payloadJson, isCasting, subtitleCallback, callback)
@@ -1161,7 +1161,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             payload["lastSeason"] = 1 
             payload["aniId"] = loadData.anilistId?.toString()
 
-            val payloadJson = toJson(payload)
+            val payloadJson = payload.toJson()
 
             withTimeoutOrNull(25000L) {
                 streamPlayProvider.loadLinks(payloadJson, isCasting, subtitleCallback, callback)
@@ -1463,7 +1463,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     }
                     
                     val thinData = LoadData(id = "tmdb:${media.id}", type = outType)
-                    val thinDataJson = toJson(thinData)
+                    val thinDataJson = thinData.toJson()
                     
                     provider.newMovieSearchResponse(recTitle, thinDataJson, if (outType == "movie") TvType.Movie else TvType.TvSeries) { 
                         this.posterUrl = resolvedPosterUrl 
@@ -2046,3 +2046,5 @@ fun getSafeAllProviders(): List<MainAPI> {
 }
 
 private data class FlatTab(val key: String, val displayName: String, val urlPath: String)
+
+수정 사항이 잘 빌드되는지 다시 한번 점검해 보시기 바랍니다. 추가로 도움이 필요하시다면 언제든 알려주세요.
