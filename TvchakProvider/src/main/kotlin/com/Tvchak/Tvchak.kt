@@ -217,8 +217,16 @@ class TvchakProvider : MainAPI() {
                     println("[ChakPlay] ❌ 우회 처리 실패")
                 }
             }
+        }
+        
+        // 시그니처 요소를 동반하여 파킹 및 차단 페이지를 가려내는 안전 감지 로그 적용
+        val hasSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title") || res.text.contains("vod-search-list")
+        if (res.isSuccessful && hasSignature) {
+            println("[ChakPlay] 🟢 HTTP 응답 성공 및 실데이터 확인 완료 (코드: ${res.code})")
+        } else if (res.isSuccessful) {
+            println("[ChakPlay] ⚠️ HTTP 응답 성공(200)했으나 알맹이가 없음 (파킹/통신사 차단 의심, 코드: ${res.code})")
         } else {
-            println("[ChakPlay] 🟢 HTTP 응답 상태 정상")
+            println("[ChakPlay] 🔴 HTTP 응답 실패 (코드: ${res.code})")
         }
         return res
     }
@@ -241,20 +249,25 @@ class TvchakProvider : MainAPI() {
             }
 
             val testPath = "/index.php/vod/show/id/1/page/1.html"
+            println("[ChakPlay] 🔄 기본 검증 시도 -> $currentMainUrl$testPath")
 
             try {
                 val res = app.get("$currentMainUrl$testPath", headers = getHeaders(), timeout = 3L)
                 val finalUrl = res.url.substringBefore("/index.php").trimEnd('/')
+                val hasSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title")
                 
-                if (res.isSuccessful && res.text.contains("movie-list-item") || isCloudflareChallenge(res.text)) {
+                // 괄호를 적용하여 논리적 우선순위를 명확히 규정
+                if ((res.isSuccessful && hasSignature) || isCloudflareChallenge(res.text)) {
                     if (currentMainUrl != finalUrl && finalUrl.startsWith("http")) {
                         println("[ChakPlay] 🔄 리다이렉트 도메인 검출: $currentMainUrl -> $finalUrl")
                         saveDomain(finalUrl)
                         mainUrl = currentMainUrl
                     }
                     isDomainChecked = true
-                    println("[ChakPlay] ✅ 도메인 유지 확정")
+                    println("[ChakPlay] ✅ 도메인 유지 확정 -> $mainUrl")
                     return@withLock
+                } else {
+                    println("[ChakPlay] ⚠️ 기본 도메인 무효화됨 (응답성공: ${res.isSuccessful}, 시그니처여부: $hasSignature)")
                 }
             } catch (e: Exception) { 
                 println("[ChakPlay] ❌ 접속 확인 불가: ${e.message}") 
@@ -262,7 +275,7 @@ class TvchakProvider : MainAPI() {
 
             val match = Regex("tvchak(\\d+)").find(currentMainUrl)
             val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 200
-            println("[ChakPlay] 🚀 신규 도메인 브루트포스 개시 (시작 범위: $startNum)")
+            println("[ChakPlay] 🚀 신규 도메인 브루트포스 개시 (시작 번호: $startNum)")
 
             var foundDomain: String? = null
 
@@ -274,10 +287,14 @@ class TvchakProvider : MainAPI() {
                     val deferreds = chunk.map { testDomain ->
                         async {
                             val testUrl = "$testDomain$testPath"
+                            // 현재 대입 시도 중인 도메인을 실시간으로 출력하도록 개선
+                            println("[ChakPlay] 🔄 도메인 후보 검증 시도 -> $testUrl")
                             try {
                                 val res = app.get(testUrl, headers = getHeaders(), timeout = 3L)
                                 val extractedFinalUrl = res.url.substringBefore("/index.php").trimEnd('/')
-                                if (res.isSuccessful && res.text.contains("movie-list-item")) {
+                                val testSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title")
+                                
+                                if (res.isSuccessful && testSignature) {
                                     println("[ChakPlay] 🎯 활성 도메인 확보: $extractedFinalUrl")
                                     return@async extractedFinalUrl
                                 } else if (isCloudflareChallenge(res.text)) {
@@ -304,7 +321,8 @@ class TvchakProvider : MainAPI() {
                 return@withLock
             }
 
-            println("[ChakPlay] 💀 탐색 범주 내 모든 탐색 실패. 기본 도메인 유지")
+            // 모든 경우의 수가 실패했을 때 확실한 피드백을 전달하도록 로그 수정
+            println("[ChakPlay] 💀 탐색 범주($startNum ~ ${startNum + 50}) 내 모든 접속 실패. 수동 검토가 필요합니다.")
             isDomainChecked = true
         }
     }
@@ -413,7 +431,6 @@ class TvchakProvider : MainAPI() {
         checkAndUpdateDomain()
         println("[ChakPlay] [loadLinks] 정적 무음 핸드쉐이크 기반 탐색 개시: $data")
         
-        // 1. 디테일 플레이 페이지 획득 및 player_aaaa 파싱
         val document = safeGet(data).document
         val scriptContent = document.select("script").find { it.data().contains("player_aaaa") }?.data()
         
@@ -436,17 +453,14 @@ class TvchakProvider : MainAPI() {
         println("[ChakPlay] [loadLinks] 🔍 스크립트 추출 원본 주소: $rawUrl")
 
         var videoUrl = rawUrl
-        var refererUrl = mainUrl // 기본 레퍼러 지정
+        var refererUrl = mainUrl
 
-        // [ChakPlay] 2. 중요: 하드코딩 완전 배제 및 동적 검증 도메인(Referer) 수립 로직
         val isChakttWrapper = rawUrl.contains("chaktt.php?url=")
         val isDirectBcdn = rawUrl.contains("b-cdn.net")
 
         if (isChakttWrapper || isDirectBcdn) {
-            // [A] 최적의 우회 검증 서버 도메인을 수집합니다. (기본값 설정)
             var detectDomain = "https://ckp.wiselife.blog" 
 
-            // 1단계: 원본 주소 자체에 검증 페이지 도메인이 들어가 있는 경우 바로 추출
             if (rawUrl.contains("chaktt.php") || rawUrl.contains("wiselife")) {
                 try {
                     val parsedUri = java.net.URL(rawUrl)
@@ -454,7 +468,6 @@ class TvchakProvider : MainAPI() {
                     println("[ChakPlay] [loadLinks] 🌐 원본 URL 파싱으로 동적 중계 도메인 감지 성공: $detectDomain")
                 } catch (e: Exception) {}
             } else {
-                // 2단계: 하드코딩 직링크인 경우, HTML Jsoup 내 iframe에서 검증서버 주소 동적 탐색
                 val iframeSrc = document.select("iframe").map { it.attr("src") }
                     .firstOrNull { it.contains("chaktt.php") || it.contains("wiselife") }
                 
@@ -465,7 +478,6 @@ class TvchakProvider : MainAPI() {
                         println("[ChakPlay] [loadLinks] 🌐 HTML iframe 분석으로 동적 중계 도메인 감지 성공: $detectDomain")
                     } catch (e: Exception) {}
                 } else {
-                    // 3단계: iframe이 없는 예외 케이스의 경우 script 영역 내 텍스트 매칭
                     val scriptWithWiselife = document.select("script").map { it.html() }
                         .firstOrNull { it.contains("wiselife") || it.contains("chaktt.php") }
                     if (scriptWithWiselife != null) {
@@ -478,21 +490,17 @@ class TvchakProvider : MainAPI() {
                 }
             }
 
-            // [B] 수립된 동적 도메인을 기준으로 핸드쉐이크 URL 가공 및 Referer 설정
             val handshakeUrl = if (isChakttWrapper) {
-                // 우회 경로가 적용된 경우 재생에 쓸 리얼 비디오 주소 추출
                 val realEncodedUrl = rawUrl.substringAfter("url=")
                 videoUrl = URLDecoder.decode(realEncodedUrl, "UTF-8")
                 rawUrl
             } else {
-                // 하드코딩 직링크인 경우 획득한 동적 도메인 주소와 합성하여 가상 핸드쉐이크 URL 수립
                 val encodedVideoUrl = URLEncoder.encode(rawUrl, "UTF-8")
                 "$detectDomain/chak/chaktt.php?url=$encodedVideoUrl"
             }
 
-            refererUrl = "$detectDomain/" // 최종 재생 요청에 실어 보낼 Referer 헤더
+            refererUrl = "$detectDomain/"
 
-            // [C] 백엔드 IP 자동 승인을 획득하기 위해 무음 사전 접속 (Silent Handshake) 실행
             println("[ChakPlay] [loadLinks] 🔓 백엔드 IP 승인을 위해 중계 서버 사전 접속 시도 (Silent Handshake) -> $handshakeUrl")
             try {
                 val handshakeResponse = safeGet(handshakeUrl, referer = mainUrl)
@@ -502,7 +510,6 @@ class TvchakProvider : MainAPI() {
             }
         }
 
-        // 자막 분리 처리
         var subUrl: String? = null
         val subRegex = Regex("""\?(srt|vtt)(https?://.*)""")
         val subMatch = subRegex.find(videoUrl)
@@ -527,7 +534,6 @@ class TvchakProvider : MainAPI() {
                 this.referer = refererUrl
                 this.quality = Qualities.P1080.value
                 
-                // CDN 방화벽 패스용 헤더 구성 (동적 Referer 및 User-Agent 매칭)
                 this.headers = mapOf(
                     "User-Agent" to (cfUserAgent ?: userAgent),
                     "Referer" to refererUrl
