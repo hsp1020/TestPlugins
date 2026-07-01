@@ -1,4 +1,3 @@
-// hsp1020/settings/SettingsBottomFragment.kt
 package com.hsp1020
 
 import android.annotation.SuppressLint
@@ -129,7 +128,6 @@ class SettingsBottomFragment(
     private val sharedPref: SharedPreferences
 ) : BottomSheetDialogFragment() {
 
-    // ── [최적화 1] 무거운 정적 배열 메모리 누수 방지 (Companion Object로 격리) ──
     companion object {
         val LANGUAGES = listOf(
             "South Africa (Afrikaans)" to "af-ZA", "United Arab Emirates (Arabic)" to "ar-AE", "Saudi Arabia (Arabic)" to "ar-SA",
@@ -298,13 +296,6 @@ class SettingsBottomFragment(
         }
     }
 
-    override fun onDestroyView() {
-        searchJob?.cancel()
-        activeSubDialog?.dismiss()
-        activeSubDialog = null
-        super.onDestroyView()
-    }
-
     private fun getDrawable(name: String): Drawable {
         val id = getCachedResId(name, "drawable")
         return res.getDrawable(id, null) ?: throw Exception("Drawable $name not found")
@@ -406,13 +397,13 @@ class SettingsBottomFragment(
         tvExport.makeTvCompatible()
         tvImport.makeTvCompatible()
 
+        // ── 백업 번들 내보내기 (Export) ──
         tvExport.setOnClickListener {
             val isStreamPlayExportActive = try { view.findView<Switch>("switchStreamPlay").isChecked } catch (_: Throwable) { false }
             val isCineStreamExportActive = try { view.findView<Switch>("switchCineStream").isChecked } catch (_: Throwable) { false }
 
             viewLifecycleOwner.lifecycleScope.launch {
                 try {
-                    // ── [최적화 4] 데이터 수집(Export) 처리를 완벽하게 Background IO 스레드로 분리 ──
                     val backupStr = withContext(Dispatchers.IO) {
                         val json = JSONObject()
                         
@@ -430,7 +421,6 @@ class SettingsBottomFragment(
                             val cineStreamJson = JSONObject()
                             val dynamicKeys = getCineStreamDynamicKeys()
                             
-                            // ── [정확성 보장] 무식하지만 100% 안전한 try-catch 타입 추론 스캐너 ──
                             dynamicKeys.forEach { cKey ->
                                 var found = false
                                 try { 
@@ -469,7 +459,7 @@ class SettingsBottomFragment(
                         Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
                     }
 
-                    if (!isActive) return@launch // [최적화 5] 파괴된 프래그먼트 참조 방지
+                    if (!isActive) return@launch
 
                     val clipboard = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                     val clip = ClipData.newPlainText("StremioC Backup Bundle", backupStr)
@@ -489,8 +479,8 @@ class SettingsBottomFragment(
                         })
                         val descBuilder = StringBuilder("StremioC settings copied successfully.")
                         if (isStreamPlayExportActive) descBuilder.append("\n+ StreamPlay settings included.")
-                        if (isCineStreamExportActive) descBuilder.append("\n+ CineStream settings included (via Smart Scanner).")
-                        descBuilder.append("\n\nPlease paste it somewhere safe (e.g., Notes).")
+                        if (isCineStreamExportActive) descBuilder.append("\n+ CineStream settings included.")
+                        descBuilder.append("\n\nPlease paste it somewhere safe.")
 
                         addView(TextView(ctx).apply {
                             text = descBuilder.toString()
@@ -519,6 +509,7 @@ class SettingsBottomFragment(
             }
         }
 
+        // ── 백업 번들 불러오기 (Import & Mirroring) ──
         tvImport.setOnClickListener {
             val ctx = requireContext()
             val appContext = ctx.applicationContext
@@ -553,7 +544,7 @@ class SettingsBottomFragment(
                         throw Exception("Plugin mismatch")
                     }
                     
-                    if (!isActive) return@launch // [최적화 5] 파괴된 프래그먼트 참조 방지
+                    if (!isActive) return@launch
 
                     val cancelBtn = Button(ctx).apply {
                         text = "Cancel"
@@ -613,9 +604,8 @@ class SettingsBottomFragment(
 
                     cancelBtn.setOnClickListener { dlg.dismiss() }
                     restoreBtn.setOnClickListener {
-                        dlg.dismiss() // 기존 질문창 닫기
+                        dlg.dismiss()
                         
-                        // ── [UI 통일성 개선] 앱 테마와 통일된 로딩 팝업 표시 ──
                         val loadingContainer = LinearLayout(ctx).apply {
                             orientation = LinearLayout.VERTICAL
                             setPadding(40, 40, 40, 40)
@@ -640,7 +630,6 @@ class SettingsBottomFragment(
                         setupCustomDialog(loadingDlg, loadingContainer)
                         loadingDlg.show()
 
-                        // ── [최적화 2] 무거운 디스크 쓰기 로직을 백그라운드로 완전히 분리 ──
                         viewLifecycleOwner.lifecycleScope.launch {
                             withContext(Dispatchers.IO) {
                                 val editor = sharedPref.edit()
@@ -651,6 +640,18 @@ class SettingsBottomFragment(
                                         editor.clear()
                                         jsonToPrefs(stremioCData, editor)
                                     }
+                                    editor.commit()
+
+                                    // 즉시 순정 DataStore에 백업본 미러링 주입 및 로컬 해시 업데이트
+                                    val finalStremioCJson = prefsToJson(sharedPref).toString()
+                                    val finalStremioCHash = finalStremioCJson.hashCode().toString()
+                                    sharedPref.edit(commit = true) {
+                                        putBoolean("stremio_c_restore_complete", true)
+                                        putString("stremio_c_last_applied_backup_hash", finalStremioCHash)
+                                    }
+                                    try {
+                                        CloudStreamApp.setKey("native_backup_stremioc", finalStremioCJson)
+                                    } catch (t: Throwable) { t.printStackTrace() }
 
                                     val isStreamPlayInBackup = parsedJson.optBoolean("stream_play_enabled", false)
                                     val isStreamPlayEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, false) ?: false
@@ -659,10 +660,20 @@ class SettingsBottomFragment(
                                         if (streamPlayData != null) {
                                             val streamPlayPrefs = appContext.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
                                             val editorSP = streamPlayPrefs.edit()
-                                            // [빈 값 동기화 완벽 해결] 기존 설정 파일을 백지로 만들어 JSON에 없는 빈 값을 완벽히 삭제
                                             editorSP.clear() 
                                             jsonToPrefs(streamPlayData, editorSP)
                                             editorSP.commit()
+
+                                            // StreamPlay 미러링 주입 및 로컬 해시 업데이트
+                                            val finalStreamPlayJson = prefsToJson(streamPlayPrefs).toString()
+                                            val finalStreamPlayHash = finalStreamPlayJson.hashCode().toString()
+                                            streamPlayPrefs.edit(commit = true) {
+                                                putBoolean("streamplay_restore_complete", true)
+                                                putString("streamplay_last_applied_backup_hash", finalStreamPlayHash)
+                                            }
+                                            try {
+                                                CloudStreamApp.setKey("native_backup_streamplay", finalStreamPlayJson)
+                                            } catch (t: Throwable) { t.printStackTrace() }
                                         }
                                     }
 
@@ -683,7 +694,6 @@ class SettingsBottomFragment(
                                                         }
                                                     } catch (_: Throwable) {}
                                                 } else {
-                                                    // [빈 값 동기화 완벽 해결] 백업본에 없는 키는 DataStore에서 강제로 Null 주입하여 삭제
                                                     try { CloudStreamApp.setKey(cKey, null as String?) } catch (_: Throwable) {}
                                                 }
                                             }
@@ -692,12 +702,20 @@ class SettingsBottomFragment(
                                 } else {
                                     editor.clear()
                                     jsonToPrefs(parsedJson, editor)
+                                    editor.commit()
+
+                                    val finalStremioCJson = prefsToJson(sharedPref).toString()
+                                    val finalStremioCHash = finalStremioCJson.hashCode().toString()
+                                    sharedPref.edit(commit = true) {
+                                        putBoolean("stremio_c_restore_complete", true)
+                                        putString("stremio_c_last_applied_backup_hash", finalStremioCHash)
+                                    }
+                                    try {
+                                        CloudStreamApp.setKey("native_backup_stremioc", finalStremioCJson)
+                                    } catch (t: Throwable) { t.printStackTrace() }
                                 }
-                                
-                                editor.commit()
                             }
                             
-                            // ── [최적화 5] 비동기 쓰기가 안전하게 완료되도록 기다림 및 방어 코드 ──
                             delay(1500)
                             if (isActive && isAdded) {
                                 loadingDlg.dismiss()
@@ -911,6 +929,7 @@ class SettingsBottomFragment(
             dlg.show()
         }
 
+        // ── 변경 사항 저장 시 즉시 순정 DataStore와 자동 연동 미러링 반영 ──
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
             val tmdbApiKeyVal = etTmdbApiKey.text.toString().trim()
@@ -923,6 +942,7 @@ class SettingsBottomFragment(
             val switchStreamPlay = view.findView<Switch>("switchStreamPlay")
             val switchVixSrc = view.findView<Switch>("switchVixSrc")
 
+            // 1. SharedPreferences 동기 반영
             sharedPref.edit(commit = true) {
                 putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, tmdbApiKeyVal)
                 putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim())
@@ -937,6 +957,29 @@ class SettingsBottomFragment(
                 putBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, switchStreamPlay.isChecked)
                 putBoolean(SettingsRepository.PREF_KEY_VIXSRC_ENABLED, switchVixSrc.isChecked)
             }
+
+            // 2. [실시간 동기화 미러링] StremioC 백업 문자열 생성 및 적용 해시 업데이트
+            val stremioCJson = prefsToJson(sharedPref).toString()
+            val stremioCHash = stremioCJson.hashCode().toString()
+            sharedPref.edit(commit = true) {
+                putBoolean("stremio_c_restore_complete", true)
+                putString("stremio_c_last_applied_backup_hash", stremioCHash)
+            }
+            try {
+                CloudStreamApp.setKey("native_backup_stremioc", stremioCJson)
+            } catch (t: Throwable) { t.printStackTrace() }
+
+            // 3. [실시간 동기화 미러링] StreamPlay 백업 문자열 생성 및 적용 해시 업데이트 (기생 백업)
+            val streamPlayPrefs = context.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
+            val streamPlayJson = prefsToJson(streamPlayPrefs).toString()
+            val streamPlayHash = streamPlayJson.hashCode().toString()
+            streamPlayPrefs.edit(commit = true) {
+                putBoolean("streamplay_restore_complete", true)
+                putString("streamplay_last_applied_backup_hash", streamPlayHash)
+            }
+            try {
+                CloudStreamApp.setKey("native_backup_streamplay", streamPlayJson)
+            } catch (t: Throwable) { t.printStackTrace() }
 
             val cancelBtn = Button(context).apply {
                 text = "No"
@@ -1495,7 +1538,6 @@ class SettingsBottomFragment(
                     } else false
                 }
             }
-
 
             override fun getItemCount() = visibleTabs.size
             
