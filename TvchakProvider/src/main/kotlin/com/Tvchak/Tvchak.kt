@@ -28,7 +28,7 @@ class TvchakProvider : MainAPI() {
             currentMainUrl = newDomain
             AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 ?.edit()?.putString(PREF_KEY, newDomain)?.apply()
-            println("[ChakPlay DBG] 💾 영구 도메인 저장 완료 -> $newDomain")
+            println("[ChakPlay DBG] 💾 도메인 로컬 저장 완료 -> $newDomain")
         }
     }
 
@@ -93,6 +93,15 @@ class TvchakProvider : MainAPI() {
         } catch (e: Exception) { null } ?: return@withContext null
 
         suspendCancellableCoroutine { continuation ->
+            // [안전장치 복구]: 이전에 구워진 만료 쿠키 찌꺼기 제거
+            try {
+                val cookieManager = android.webkit.CookieManager.getInstance()
+                cookieManager.removeAllCookies(null)
+                cookieManager.flush()
+            } catch (e: Exception) {
+                println("[ChakPlay DBG] ⚠️ 쿠키 초기화 실패: ${e.message}")
+            }
+
             val webView = android.webkit.WebView(context).apply {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
@@ -168,7 +177,8 @@ class TvchakProvider : MainAPI() {
         if (res.isSuccessful && hasSignature) {
             println("[ChakPlay DBG] 🟢 HTTP 응답 성공 및 실데이터 확인 완료 (코드: ${res.code})")
         } else if (res.isSuccessful) {
-            println("[ChakPlay DBG] ⚠️ HTTP 응답 성공(200)했으나 알맹이가 없음 (코드: ${res.code})")
+            // [로그 버그 수정]: 성공(200)을 텍스트로 하드코딩하지 않고 실제 응답 코드를 유연하게 출력하도록 수정
+            println("[ChakPlay DBG] ⚠️ HTTP 응답 성공(코드: ${res.code})했으나 알맹이가 없음")
         }
         return res
     }
@@ -187,7 +197,6 @@ class TvchakProvider : MainAPI() {
             println("[ChakPlay DBG] 🔄 기본 도메인 유효성 체크 -> $currentMainUrl$testPath")
 
             try {
-                // [리팩토링 핵심]: app.get 대신 safeGet을 호출하여 도메인 유효성 검사 단계에서 WAF 우회를 끝마침
                 val res = safeGet("$currentMainUrl$testPath")
                 val finalUrl = res.url.trimEnd('/')
                 
@@ -222,7 +231,6 @@ class TvchakProvider : MainAPI() {
                     val deferreds = chunk.map { testDomain ->
                         async {
                             try {
-                                // 탐색 단계에서는 오프라인 도메인의 웹뷰 스팸 방지를 위해 가벼운 app.get을 유지하되 시그니처 체크로 판별
                                 val res = app.get("$testDomain$testPath", headers = getHeaders(), timeout = 3L)
                                 val finalUrl = res.url.trimEnd('/')
                                 val testSignature = res.text.contains("movie-list-item") || 
