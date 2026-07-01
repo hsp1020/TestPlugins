@@ -64,7 +64,6 @@ class TvchakProvider : MainAPI() {
         return headers
     }
 
-    // 202 상태 코드 및 우회 장벽에 쓰이는 Turnstile 키워드 대응 탐지기 강화
     private fun isCloudflareChallenge(html: String, code: Int): Boolean {
         val lowerHtml = html.lowercase()
         return code == 202 || 
@@ -103,6 +102,17 @@ class TvchakProvider : MainAPI() {
             webView.settings.databaseEnabled = true
             webView.settings.userAgentString = userAgent
             
+            // [중요] 사용자가 직접 보안 체크박스를 누를 수 있도록 AlertDialog로 감싸서 유저 화면에 임시 노출
+            val dialog = android.app.AlertDialog.Builder(context)
+                .setTitle("티비착 우회 보안 검증")
+                .setMessage("잠시 기다리시거나 화면에 사람 모양 체크박스가 나타나면 눌러주세요.")
+                .setView(webView)
+                .setNegativeButton("취소") { d, _ ->
+                    d.dismiss()
+                    if (continuation.isActive) continuation.resume(null)
+                }
+                .create()
+            
             webView.webViewClient = object : android.webkit.WebViewClient() {
                 var solved = false
 
@@ -125,6 +135,7 @@ class TvchakProvider : MainAPI() {
                             continuation.resume(Pair(cookies, userAgent))
                         }
                         try {
+                            dialog.dismiss() // 성공 즉시 창 자동 폐쇄
                             webView.stopLoading()
                             webView.destroy()
                         } catch (e: Exception) {}
@@ -132,6 +143,7 @@ class TvchakProvider : MainAPI() {
                 }
             }
 
+            dialog.show()
             webView.loadUrl(url)
 
             val handler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -147,6 +159,7 @@ class TvchakProvider : MainAPI() {
                         continuation.resume(null)
                     }
                     try {
+                        dialog.dismiss()
                         webView.stopLoading()
                         webView.destroy()
                     } catch (e: Exception) {}
@@ -165,6 +178,7 @@ class TvchakProvider : MainAPI() {
                                 handler.removeCallbacks(timeoutRunnable)
                                 continuation.resume(Pair(cookies, userAgent))
                                 try {
+                                    dialog.dismiss()
                                     webView.stopLoading()
                                     webView.destroy()
                                 } catch (e: Exception) {}
@@ -182,6 +196,7 @@ class TvchakProvider : MainAPI() {
                 handler.removeCallbacks(timeoutRunnable)
                 handler.removeCallbacks(intervalRunnable)
                 try {
+                    dialog.dismiss()
                     webView.stopLoading()
                     webView.destroy()
                 } catch (e: Exception) {}
@@ -254,7 +269,6 @@ class TvchakProvider : MainAPI() {
                 println("[ChakPlay] [checkAndUpdateDomain] 8. 캐시된 도메인을 전역 변수에 바인딩 완료 -> currentMainUrl: $currentMainUrl")
             }
 
-            // 가짜 404 및 보안 필터 오진을 피하기 위해 최우선적으로 홈 화면 주소("/")를 검증용 testPath로 적용
             val testPath = "/"
             println("[ChakPlay] [checkAndUpdateDomain] 9. 기본 도메인 검증 시도 -> 주소: $currentMainUrl$testPath")
 
@@ -288,7 +302,7 @@ class TvchakProvider : MainAPI() {
 
             println("[ChakPlay] [checkAndUpdateDomain] 16. 순차 탐색 루프(브루트포스) 개시")
             coroutineScope {
-                val candidates = (startNum..startNum + 100).map { "https://tvchak$it.com" }
+                val candidates = (startNum..startNum + 50).map { "https://tvchak$it.com" }
                 val chunks = candidates.chunked(5)
                 println("[ChakPlay] [checkAndUpdateDomain] 17. 총 ${candidates.size}개의 후보군을 5개 단위 청크로 검증 시작")
 
