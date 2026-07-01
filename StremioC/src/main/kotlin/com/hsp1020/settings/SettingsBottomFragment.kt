@@ -44,7 +44,8 @@ import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CommonActivity.showToast
 import org.json.JSONArray
 import org.json.JSONObject
-import com.google.gson.JsonParser
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -1273,25 +1274,17 @@ class SettingsBottomFragment(
 
             val flatTabs = mutableListOf<ConfigFlatTab>()
             try {
-                val node = JsonParser.parseString(manifestText).asJsonObject
-                val catsNode = node.get("catalogs")?.takeIf { it.isJsonArray }?.asJsonArray
+                val manifest = parseJson<StremioC.Manifest>(manifestText)
+                val catalogs = manifest.catalogs
                 
-                if (catsNode != null) {
-                    for (i in 0 until catsNode.size()) {
-                        val cat = catsNode.get(i).asJsonObject
-                        val id = cat.get("id")?.asString ?: ""
-                        val type = cat.get("type")?.asString ?: "movie"
-                        val name = cat.get("name")?.asString ?: id
+                if (catalogs != null) {
+                    for (cat in catalogs) {
+                        val id = cat.id ?: ""
+                        val type = cat.type ?: "movie"
+                        val name = cat.name ?: id
                         val displayType = type.replaceFirstChar { it.uppercase() }
                         
-                        val requiresGenre = cat.get("extra")?.takeIf { it.isJsonArray }?.asJsonArray?.let { extraArr ->
-                            var found = false
-                            for (j in 0 until extraArr.size()) {
-                                val extraObj = extraArr.get(j).asJsonObject
-                                if (extraObj.get("name")?.asString == "genre" && extraObj.get("isRequired")?.asBoolean == true) found = true
-                            }
-                            found
-                        } ?: false
+                        val requiresGenre = cat.extra?.any { it.name == "genre" && it.isRequired == true } ?: false
 
                         flatTabs.add(ConfigFlatTab(
                             key = "${id}_${type}_default", 
@@ -1302,22 +1295,7 @@ class SettingsBottomFragment(
                             isGenresEnabled = sharedPref.getBoolean("genres_enabled_${uniqueId}_${id}_${type}", true)
                         ))
 
-                        val genres = mutableListOf<String>()
-                        cat.get("genres")?.takeIf { it.isJsonArray }?.asJsonArray?.let { gArr ->
-                            for (j in 0 until gArr.size()) genres.add(gArr.get(j).asString)
-                        }
-                        if (genres.isEmpty()) {
-                            cat.get("extra")?.takeIf { it.isJsonArray }?.asJsonArray?.let { extraArr ->
-                                for (j in 0 until extraArr.size()) {
-                                    val extraObj = extraArr.get(j).asJsonObject
-                                    if (extraObj.get("name")?.asString == "genre") {
-                                        extraObj.get("options")?.takeIf { it.isJsonArray }?.asJsonArray?.let { optsArr ->
-                                            for (k in 0 until optsArr.size()) genres.add(optsArr.get(k).asString)
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        val genres = cat.getGenresList()
 
                         genres.forEach { genre ->
                             val capitalizedGenre = genre.capitalizeFirstLocal()
@@ -1697,11 +1675,11 @@ class SettingsBottomFragment(
         private val onEdit: (LinkItem, Int) -> Unit
     ) : RecyclerView.Adapter<LinksAdapter.VH>() {
 
-        inner class VH(v: View) : RecyclerView.ViewHolder(v) {
-            val tvName: TextView = v.findView("tvName")
-            val tvLink: TextView = v.findView("tvLink")
-            val tvType: TextView = v.findView("tvType")
-            val btnDelete: ImageButton = v.findView("btnDelete")
+        inner class VH(val view: View) : RecyclerView.ViewHolder(view) {
+            val tvName: TextView = view.findView("tvName")
+            val tvLink: TextView = view.findView("tvLink")
+            val tvType: TextView = view.findView("tvType")
+            val btnDelete: ImageButton = view.findView("btnDelete")
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
@@ -1738,4 +1716,3 @@ class SettingsBottomFragment(
         }
     }
 }
-
