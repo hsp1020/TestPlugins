@@ -156,7 +156,7 @@ object BackupUtils {
 
 @Suppress("UNCHECKED_CAST")
     fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
-        Log.d("SYNC", "[BackupUtils] getBackup() called (Strict Whitelist Mode).")
+        Log.d("SYNC", "[SyncBackup] getBackup() called (Strict Whitelist Mode).")
         
         val sharedPrefs = with(DataStore) { context.getSharedPrefs() }
         val prefs = sharedPrefs.all
