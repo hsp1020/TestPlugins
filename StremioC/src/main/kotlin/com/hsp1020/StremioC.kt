@@ -2046,5 +2046,3 @@ fun getSafeAllProviders(): List<MainAPI> {
 }
 
 private data class FlatTab(val key: String, val displayName: String, val urlPath: String)
-
-수정 사항이 잘 빌드되는지 다시 한번 점검해 보시기 바랍니다. 추가로 도움이 필요하시다면 언제든 알려주세요.
