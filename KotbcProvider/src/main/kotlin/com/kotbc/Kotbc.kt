@@ -48,16 +48,23 @@ class Kotbc : MainAPI() {
                 println("[Kotbc DBG] 📂 캐시된 도메인 로드: $currentMainUrl")
             }
             
+            println("[Kotbc DBG] 🔄 기본 도메인 유효성 체크 -> $currentMainUrl")
             try {
                 val res = app.get(currentMainUrl, timeout = 3L)
                 val finalUrl = res.url.trimEnd('/')
-                if (res.isSuccessful && res.text.contains("list-box")) {
+                val hasSignature = res.text.contains("list-box")
+                
+                if (res.isSuccessful && hasSignature) {
                     if (currentMainUrl != finalUrl) {
                         println("[Kotbc DBG] 🔄 리다이렉트 감지됨: $currentMainUrl -> $finalUrl")
                         saveDomain(finalUrl)
                         mainUrl = currentMainUrl
                     }
-                    isDomainChecked = true; return@withLock
+                    isDomainChecked = true
+                    println("[Kotbc DBG] ✅ 기존 도메인 활성 상태 확정 -> $mainUrl")
+                    return@withLock
+                } else {
+                    println("[Kotbc DBG] ⚠️ 기존 도메인 무효화됨 (응답성공: ${res.isSuccessful}, 시그니처매칭: $hasSignature)")
                 }
             } catch (e: Exception) { println("[Kotbc DBG] ❌ 현재 도메인 접속 실패: ${e.message}") }
 
@@ -76,29 +83,39 @@ class Kotbc : MainAPI() {
             val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 142
             println("[Kotbc DBG] 🚀 브루트포스 탐색 시작 (시작번호: $startNum)")
             
+            var foundDomain: String? = null
             coroutineScope {
                 val candidates = (startNum..startNum + 100).map { "https://m$it.kotbc2.com" }
-                val chunks = candidates.chunked(10)
+                val chunks = candidates.chunked(5) // 원활한 병렬 처리를 위해 chunk를 5로 하향 조정
                 
                 for (chunk in chunks) {
                     val deferreds = chunk.map { testUrl ->
                         async {
+                            println("[Kotbc DBG] 🔄 후보 도메인 검증 시도 -> $testUrl")
                             try {
                                 val res = app.get(testUrl, timeout = 3L)
-                                if (res.isSuccessful && res.text.contains("list-box")) return@async res.url.trimEnd('/')
+                                val testSignature = res.text.contains("list-box")
+                                if (res.isSuccessful && testSignature) return@async res.url.trimEnd('/')
                             } catch (e: Exception) { if (e is CancellationException) throw e }
                             null
                         }
                     }
-                    val found = deferreds.awaitAll().firstOrNull { it != null }
-                    if (found != null) {
-                        println("[Kotbc DBG] ✨ 브루트포스 성공: $found")
-                        saveDomain(found)
-                        mainUrl = currentMainUrl
-                        isDomainChecked = true; return@coroutineScope
+                    foundDomain = deferreds.awaitAll().firstOrNull { it != null }
+                    if (foundDomain != null) {
+                        break
                     }
                 }
             }
+
+            if (foundDomain != null) {
+                println("[Kotbc DBG] ✨ 브루트포스 성공: $foundDomain")
+                saveDomain(foundDomain)
+                mainUrl = currentMainUrl
+                isDomainChecked = true
+                return@withLock
+            }
+
+            println("[Kotbc DBG] 💀 탐색 범주(m$startNum ~ m${startNum + 100}) 내 모든 접속 실패. 수동 검토가 필요합니다.")
             isDomainChecked = true 
         }
     }
