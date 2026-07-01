@@ -6,7 +6,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.nicehttp.NiceResponse
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
@@ -65,7 +64,6 @@ class TvchakProvider : MainAPI() {
         return headers
     }
 
-    // 보안 장벽(AWS WAF / Cloudflare) 감지기 (오진 필터링 포함)
     private fun isWebAccessChallenge(html: String, code: Int): Boolean {
         val lowerHtml = html.lowercase()
         
@@ -88,6 +86,68 @@ class TvchakProvider : MainAPI() {
         return code == 202 || hasAwsWaf || hasCf
     }
 
+    // 불필요한 루프와 다중 타이머를 걷어낸 초경량 백그라운드 WAF 솔버
+    private suspend fun solveChallenge(url: String): Pair<String, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+        val context = try {
+            Class.forName("android.app.ActivityThread")
+                .getMethod("currentApplication")
+                .invoke(null) as? android.content.Context
+        } catch (e: Exception) { null } ?: return@withContext null
+
+        suspendCancellableCoroutine { continuation ->
+            val webView = android.webkit.WebView(context).apply {
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.databaseEnabled = true
+                settings.userAgentString = userAgent
+            }
+            
+            var solved = false
+            val handler = android.os.Handler(android.os.Looper.getMainLooper())
+            
+            // 1초 주기로 보안 토큰 쿠키 적재 여부 감시
+            val checkRunnable = object : Runnable {
+                override fun run() {
+                    if (solved || !continuation.isActive) return
+                    val cookies = android.webkit.CookieManager.getInstance().getCookie(url) ?: ""
+                    if (cookies.contains("aws-waf-token") || cookies.contains("cf_clearance")) {
+                        solved = true
+                        println("[ChakPlay] ✅ 성공: 보안 쿠키 가로채기 완료 (길이: ${cookies.length})")
+                        continuation.resume(Pair(cookies, userAgent))
+                        webView.destroy()
+                    } else {
+                        handler.postDelayed(this, 1000)
+                    }
+                }
+            }
+
+            webView.webViewClient = object : android.webkit.WebViewClient() {
+                override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
+                    handler.post(checkRunnable)
+                }
+            }
+
+            webView.loadUrl(url)
+            handler.postDelayed(checkRunnable, 1000)
+
+            // 10초 타임아웃 제한 (WAF는 대개 2초 이내 해결됨)
+            val timeoutRunnable = Runnable {
+                if (!solved && continuation.isActive) {
+                    println("[ChakPlay] ⏰ 우회 타임아웃 발생")
+                    continuation.resume(null)
+                    webView.destroy()
+                }
+            }
+            handler.postDelayed(timeoutRunnable, 10000)
+
+            continuation.invokeOnCancellation {
+                solved = true
+                handler.removeCallbacksAndMessages(null)
+                webView.destroy()
+            }
+        }
+    }
+
     private suspend fun safeGet(url: String, referer: String? = null): NiceResponse {
         println("[ChakPlay] 📡 GET 요청 전송: $url")
         var res = app.get(url, headers = getHeaders(referer))
@@ -103,7 +163,7 @@ class TvchakProvider : MainAPI() {
             println(res.text)
             println("[ChakPlay] 📄 [보안 장벽 감지 페이지 소스 출력 종료]")
 
-            println("[ChakPlay] 🧱 WebViewResolver 인터셉터를 통한 보안 우회 가동 -> $url")
+            println("[ChakPlay] 🧱 우회 대기열 진입")
             
             cfMutex.withLock {
                 res = app.get(url, headers = getHeaders(referer))
@@ -112,26 +172,20 @@ class TvchakProvider : MainAPI() {
                     return res
                 }
 
-                // [리팩토링 반영]: 프레임워크 공식 WebViewResolver 적용하여 우회 진행
-                try {
-                    val resolver = WebViewResolver(Regex("tvchak"), timeout = 15000L)
-                    res = app.get(url, headers = getHeaders(referer), interceptor = resolver)
-                    
-                    // NiceHttp와 Android WebView의 쿠키 자동 동기화 예외에 대비해 헤더 쿠키 수동 대입 보강
-                    val cookieManager = android.webkit.CookieManager.getInstance()
-                    val cookies = cookieManager.getCookie(url) ?: ""
-                    if (cookies.isNotEmpty()) {
-                        cfCookies = cookies
-                        println("[ChakPlay] 🍪 우회 완료 후 실시간 수집된 쿠키 갱신 (길이: ${cookies.length})")
-                    }
-                } catch (e: Exception) {
-                    if (e is CancellationException) throw e
-                    println("[ChakPlay] ❌ WebViewResolver 우회 처리 중 에러 발생: ${e.message}")
+                println("[ChakPlay] 🔒 대표 대기열 진입: 우회 직접 처리 시작")
+                val bypass = solveChallenge(url)
+                if (bypass != null) {
+                    cfCookies = bypass.first
+                    cfUserAgent = bypass.second
+                    println("[ChakPlay] 🔓 우회 성공. 헤더 갱신 후 재요청")
+                    res = app.get(url, headers = getHeaders(referer))
+                } else {
+                    println("[ChakPlay] ❌ 우회 처리 실패")
                 }
             }
         }
         
-        // [반영 사항]: 메인 감지 로직 및 확인 루프의 요소 선택식을 OR(||) 구조로 극대화 적용
+        // [OR 적용]: 감지 로직의 요소 선택을 OR 연산으로 보강
         val hasSignature = res.text.contains("movie-list-item") || 
                            res.text.contains("movie-title") || 
                            res.text.contains("movie-list-body") || 
@@ -181,7 +235,7 @@ class TvchakProvider : MainAPI() {
                 val res = app.get("$currentMainUrl$testPath", headers = getHeaders(), timeout = 3L)
                 val finalUrl = res.url.trimEnd('/')
                 
-                // [반영 사항]: 요소 판별식을 OR(||)로 보강하여 감지율 최적화
+                // [OR 적용]: 검증용 요소 판별 로직을 완전한 OR 구조로 개선
                 val hasSignature = res.text.contains("movie-list-item") || 
                                    res.text.contains("movie-title") || 
                                    res.text.contains("movie-list-body") || 
@@ -227,7 +281,7 @@ class TvchakProvider : MainAPI() {
                                 val res = app.get(testUrl, headers = getHeaders(), timeout = 3L)
                                 val extractedFinalUrl = res.url.trimEnd('/')
                                 
-                                // [반영 사항]: 브루트포스 검증 또한 OR(||) 조건으로 강화
+                                // [OR 적용]: 브루트포스 확인을 위한 판별 로직 또한 OR 구조 적용
                                 val testSignature = res.text.contains("movie-list-item") || 
                                                     res.text.contains("movie-title") || 
                                                     res.text.contains("movie-list-body") || 
