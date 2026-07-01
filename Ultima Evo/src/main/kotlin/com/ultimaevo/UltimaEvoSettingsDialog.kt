@@ -555,7 +555,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
                 val actionRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
                 val configBtn = Button(ctx).apply { text = "Configure Providers"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg(); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0,0,15,0) } }
-                val delBtn = Button(ctx).apply { text = "Delete"; setTextColor(Color.parseColor("#FF5555")); isAllCaps = false; background = getButtonBg(); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
+                val delBtn = Button(ctx).apply { text = "Delete"; setTextColor(Color.parseColor("#FF5555")); isAllCaps = false; background = getButtonBg(); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15,0,0,0) } }
                 actionRow.addView(configBtn); actionRow.addView(delBtn); card.addView(actionRow)
 
                 return VH(card, nameInput, visSwitch, searchSwitch, configBtn, delBtn)
@@ -1150,7 +1150,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     }
                 }
                 
-                val jsonStr = toJson(activeCatsForGson)
+                val jsonStr = activeCatsForGson.toJson()
                 editor.putString("evo_active_cats_json_$instanceId", jsonStr)
                 editor.commit()
 
