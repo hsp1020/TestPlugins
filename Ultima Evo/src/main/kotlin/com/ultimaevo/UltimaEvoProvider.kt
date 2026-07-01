@@ -27,6 +27,22 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
+// --- [리플렉션 안전 우회 프록시 엔진] ---
+fun getSafeAllProviders(): List<MainAPI> {
+    return try {
+        val method = APIHolder::class.java.methods.find { it.name == "getAllProviders" }
+        val obj = method?.invoke(APIHolder)
+        when (obj) {
+            is Iterable<*> -> obj.filterIsInstance<MainAPI>()
+            is Array<*> -> obj.filterIsInstance<MainAPI>()
+            else -> emptyList()
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        emptyList()
+    }
+}
+
 object UltimaEvoSyncManager {
     private var isSyncing = false
     private const val SYNC_THROTTLE_MS = 6 * 60 * 60 * 1000L 
@@ -61,9 +77,9 @@ object UltimaEvoSyncManager {
         val instanceCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
 
         val targetProviders = if (forceSyncAll) {
-            APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
+            getSafeAllProviders().filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
         } else {
-            APIHolder.allProviders.filter { provider ->
+            getSafeAllProviders().filter { provider ->
                 !provider.mainUrl.startsWith("ultima_evo") && provider.hasMainPage &&
                 (1..instanceCount).any { instId ->
                     prefs.getBoolean("ext_toggle_${instId}_${provider.name}", false) ||
@@ -116,7 +132,7 @@ object UltimaEvoSyncManager {
         prefs.edit().putLong("evo_last_sync_time", System.currentTimeMillis()).apply()
 
         if (anyChange) {
-            APIHolder.allProviders.forEach { p ->
+            getSafeAllProviders().forEach { p ->
                 if (p is UltimaEvoProvider) {
                     p.invalidateCache()
                 }
@@ -150,7 +166,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
     private fun applyAdBlockPatch() {
         try {
-            val cncverseProviders = APIHolder.allProviders.filter { 
+            val cncverseProviders = getSafeAllProviders().filter { 
                 it::class.java.name.startsWith("com.cncverse.") 
             }
             
@@ -205,7 +221,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             }
 
             var dynamicOrder = 10000 
-            val targetProviders = APIHolder.allProviders.filter { !it.mainUrl.startsWith("ultima_evo") }
+            val targetProviders = getSafeAllProviders().filter { !it.mainUrl.startsWith("ultima_evo") }
 
             for (p in targetProviders) {
                 val isAutoAdd = prefs.getBoolean("auto_add_${instanceId}_${p.name}", false)
@@ -241,7 +257,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                 val config = parseJson<EvoCatalogConfig>(request.data)
                 if (config == null) return@withContext newHomePageResponse(emptyList(), false)
 
-                val targetProvider = APIHolder.allProviders.find { it.name == config.providerName } 
+                val targetProvider = getSafeAllProviders().find { it.name == config.providerName } 
                     ?: return@withContext newHomePageResponse(emptyList(), false)
 
                 val originalRequest = MainPageRequest(request.name, config.originalData, request.horizontalImages)
@@ -269,7 +285,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
     override suspend fun load(url: String): LoadResponse? {
         applyAdBlockPatch() 
         return withContext(Dispatchers.IO) {
-            val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
+            val allProviders = getSafeAllProviders().filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
             val exactProvider = allProviders.find { url.startsWith(it.mainUrl) }
             
             if (exactProvider != null) {
@@ -308,7 +324,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
         return coroutineScope {
             val deferredResults = providersToSearch.mapNotNull { providerName ->
-                val provider = APIHolder.allProviders.find { it.name == providerName } ?: return@mapNotNull null
+                val provider = getSafeAllProviders().find { it.name == providerName } ?: return@mapNotNull null
                 async<List<SearchResponse>>(Dispatchers.IO) {
                     semaphore.withPermit {
                         try {
