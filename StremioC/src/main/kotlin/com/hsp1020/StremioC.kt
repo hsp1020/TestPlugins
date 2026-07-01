@@ -1518,56 +1518,101 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             )
         }
 
-        private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>?, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): List<Episode> {
+        private fun processEpisodes(
+            provider: StremioC, 
+            finalImdbId: String?, 
+            episodeTmdbMeta: Map<String, TmdbEpisode>, 
+            targetVideos: List<Video>?, 
+            type: String?, 
+            showTitle: String?, 
+            tmdbId: Int?, 
+            isAnime: Boolean, 
+            isBollywood: Boolean, 
+            isAsian: Boolean, 
+            isCartoon: Boolean, 
+            originalTitle: String?, 
+            englishTitle: String?, 
+            aniListId: Int?, 
+            malId: Int?, 
+            kitsuId: String?
+        ): List<Episode> {
             val videos = targetVideos ?: emptyList()
-            val sortedVideos = videos.groupBy { Pair(it.seasonNumber ?: 0, it.episode ?: it.number ?: 0) }.flatMap { (_, group) -> group.sortedBy { it.title ?: it.name ?: "" } }
-            val maxRegularSeason = sortedVideos.mapNotNull { it.seasonNumber }.filter { it > 0 }.maxOrNull() ?: 0
+            
+            // 시즌 번호가 0인 경우를 처리하기 위해 최대 정규 시즌 번호를 구합니다.
+            val maxRegularSeason = videos.mapNotNull { it.seasonNumber }.filter { it > 0 }.maxOrNull() ?: 0
             val targetSeasonForZero = maxRegularSeason + 1
             
-            val maxEpisodePerSeason = mutableMapOf<Int, Int>()
-            val zeroEpCounterPerSeason = mutableMapOf<Int, Int>()
-            val uniqueEpisodeChecker = mutableSetOf<String>()
-
-            return sortedVideos.map { video ->
-                val displaySeason = if ((video.seasonNumber ?: 0) == 0) targetSeasonForZero else (video.seasonNumber ?: 0)
-                val originalEpisode = video.episode ?: video.number ?: 0
-                
-                var displayEpisode = if (originalEpisode == 0) {
-                    val currentZeroCount = zeroEpCounterPerSeason.getOrDefault(displaySeason, 0) + 1
-                    zeroEpCounterPerSeason[displaySeason] = currentZeroCount
-                    maxEpisodePerSeason.getOrDefault(displaySeason, 0) + currentZeroCount
-                } else {
-                    val currentMax = maxEpisodePerSeason.getOrDefault(displaySeason, 0)
-                    if (originalEpisode > currentMax) maxEpisodePerSeason[displaySeason] = originalEpisode
-                    originalEpisode
-                }
-                
-                var key = "${displaySeason}_${displayEpisode}"
-                if (uniqueEpisodeChecker.contains(key)) {
-                    val currentMax = maxEpisodePerSeason.getOrDefault(displaySeason, displayEpisode)
-                    displayEpisode = maxOf(currentMax, displayEpisode) + 1
-                    key = "${displaySeason}_${displayEpisode}"
-                }
-                uniqueEpisodeChecker.add(key)
-                maxEpisodePerSeason[displaySeason] = maxOf(maxEpisodePerSeason.getOrDefault(displaySeason, 0), displayEpisode)
-
-                val imdbSeason = video.imdbSeason ?: video.seasonNumber ?: 0
-                val imdbEpisode = video.imdbEpisode ?: video.episode ?: video.number ?: 0
-                
-                val rawEpImdbId = video.imdb_id ?: finalImdbId
-                val epImdbId = rawEpImdbId?.let { idStr ->
-                    val parts = idStr.split(":")
-                    if (idStr.startsWith("kitsu:") || idStr.startsWith("mal:") || idStr.startsWith("tmdb:")) {
-                        if (parts.size >= 2) "${parts[0]}:${parts[1]}" else idStr
-                    } else {
-                        parts[0]
-                    }
-                }
-                
-                video.toEpisode(provider, type, epImdbId, episodeTmdbMeta, displaySeason, displayEpisode, showTitle, tmdbId, isAnime, isBollywood, isAsian, isCartoon, imdbSeason, imdbEpisode, originalTitle, englishTitle, aniListId, malId, kitsuId)
+            // 시즌별로 그룹화합니다.
+            val videosByDisplaySeason = videos.groupBy { 
+                val s = it.seasonNumber ?: 0
+                if (s == 0) targetSeasonForZero else s
             }
-        }
 
+            val processedEpisodes = mutableListOf<Episode>()
+
+            for ((displaySeason, seasonVideos) in videosByDisplaySeason) {
+                // 실제 에피소드 번호가 있는 것(> 0)을 오름차순 정렬합니다.
+                val normalEpisodes = seasonVideos.filter { (it.episode ?: it.number ?: 0) > 0 }
+                    .sortedBy { it.episode ?: it.number ?: 0 }
+                
+                // 에피소드 번호가 0 이하인 홍보/특수 영상들을 정렬합니다.
+                val zeroEpisodes = seasonVideos.filter { (it.episode ?: it.number ?: 0) <= 0 }
+                    .sortedBy { it.title ?: it.name ?: "" }
+
+                val uniqueEpisodeChecker = mutableSetOf<Int>()
+                val finalSeasonVideos = mutableListOf<Pair<Video, Int>>()
+
+                var maxEpisodeNum = 0
+                // 1. 정상 에피소드들을 먼저 고유 번호대로 배치합니다.
+                for (video in normalEpisodes) {
+                    val epNum = video.episode ?: video.number ?: 1
+                    maxEpisodeNum = maxOf(maxEpisodeNum, epNum)
+                    uniqueEpisodeChecker.add(epNum)
+                    finalSeasonVideos.add(video to epNum)
+                }
+
+                // 2. 에피소드 0인 홍보성 파일들은 정상 에피소드 뒷번호(maxEpisodeNum + 1)부터 부여합니다.
+                var nextZeroEpNum = maxEpisodeNum + 1
+                for (video in zeroEpisodes) {
+                    while (uniqueEpisodeChecker.contains(nextZeroEpNum)) {
+                        nextZeroEpNum++
+                    }
+                    uniqueEpisodeChecker.add(nextZeroEpNum)
+                    finalSeasonVideos.add(video to nextZeroEpNum)
+                    maxEpisodeNum = maxOf(maxEpisodeNum, nextZeroEpNum)
+                }
+
+                // 3. 부여된 번호에 맞춰 Episode 객체를 생성합니다.
+                for ((video, displayEpisode) in finalSeasonVideos) {
+                    val imdbSeason = video.imdbSeason ?: video.seasonNumber ?: 0
+                    val imdbEpisode = video.imdbEpisode ?: video.episode ?: video.number ?: 0
+                    
+                    val rawEpImdbId = video.imdb_id ?: finalImdbId
+                    val epImdbId = rawEpImdbId?.let { idStr ->
+                        val parts = idStr.split(":")
+                        if (idStr.startsWith("kitsu:") || idStr.startsWith("mal:") || idStr.startsWith("tmdb:")) {
+                            if (parts.size >= 2) "${parts[0]}:${parts[1]}" else idStr
+                        } else {
+                            parts[0]
+                        }
+                    }
+                    
+                    val ep = video.toEpisode(
+                        provider, type, epImdbId, episodeTmdbMeta, 
+                        displaySeason, displayEpisode, showTitle, tmdbId, 
+                        isAnime, isBollywood, isAsian, isCartoon, 
+                        imdbSeason, imdbEpisode, originalTitle, englishTitle, 
+                        aniListId, malId, kitsuId
+                    )
+                    processedEpisodes.add(ep)
+                }
+            }
+
+            // 최종 에피소드 리스트를 시즌과 에피소드 번호 순으로 정렬하여 UI에 일관되게 보여줍니다.
+            return processedEpisodes.sortedWith(compareBy({ it.season }, { it.episode }))
+        }
+        
+   
         suspend fun toLoadResponse(
             provider: StremioC, 
             imdbId: String?, 
@@ -1851,12 +1896,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
                 this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
-                
+
                 var finalEpDesc = (tmdbEp?.overview ?: this@Video.overview ?: this@Video.description)?.takeIf { it != "null" }
                 if (type == "other") {
-                    finalEpDesc = if (finalEpDesc.isNullOrBlank()) cleanOriginalTitle else "$finalEpDesc | $cleanOriginalTitle"
+                    finalEpDesc = if (finalEpDesc.isNullOrBlank()) cleanOriginalTitle else "$finalEpDesc<br>$cleanOriginalTitle"
                 }
-                this.description = finalEpDesc                
+                this.description = finalEpDesc
                 this.season = displaySeason
                 this.episode = displayEpisode
 
