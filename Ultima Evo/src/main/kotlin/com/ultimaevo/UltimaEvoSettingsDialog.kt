@@ -1,4 +1,3 @@
-// hsp1020/ultimaevo/UltimaEvoSettingsDialog.kt
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -29,6 +28,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -385,8 +385,18 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                     editor.clear() 
                                     
                                     jsonToPrefs(parsedJson, editor)
-                                    
                                     editor.commit()
+
+                                    // 불러온 즉시 순정 백업용 DataStore 미러링에 자동 보정 주입
+                                    val finalUltimaEvoJson = prefsToJson(prefs).toString()
+                                    val finalUltimaEvoHash = finalUltimaEvoJson.hashCode().toString()
+                                    prefs.edit(commit = true) {
+                                        putBoolean("ultima_evo_restore_complete", true)
+                                        putString("ultima_evo_last_applied_backup_hash", finalUltimaEvoHash)
+                                    }
+                                    try {
+                                        CloudStreamApp.setKey("native_backup_ultimaevo", finalUltimaEvoJson)
+                                    } catch (t: Throwable) { t.printStackTrace() }
                                 }
                                 
                                 delay(1500)
@@ -654,6 +664,17 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     }
 
                     editor.commit()
+
+                    // 설정 변경 사항을 즉시 순정 DataStore 미러링에 실시간 자동 동기화 주입
+                    val ultimaEvoJson = prefsToJson(prefs).toString()
+                    val ultimaEvoHash = ultimaEvoJson.hashCode().toString()
+                    prefs.edit(commit = true) {
+                        putBoolean("ultima_evo_restore_complete", true)
+                        putString("ultima_evo_last_applied_backup_hash", ultimaEvoHash)
+                    }
+                    try {
+                        CloudStreamApp.setKey("native_backup_ultimaevo", ultimaEvoJson)
+                    } catch (t: Throwable) { t.printStackTrace() }
                     
                     withContext(Dispatchers.Main) {
                         APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
@@ -1136,7 +1157,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 tempActiveSettings.forEach { (pName, isChecked) -> editor.putBoolean("provider_enabled_${instanceId}_$pName", isChecked) }
                 tempAutoAddSettings.forEach { (pName, isChecked) -> editor.putBoolean("auto_add_${instanceId}_$pName", isChecked) }
                 
-                // 기존 activeCatsForGson에서 명칭을 activeCatsConfig로 변경하여 혼선을 예방합니다.
                 val activeCatsConfig = mutableListOf<EvoCatalogConfig>()
                 for ((index, item) in allCatalogList.withIndex()) {
                     val finalOrder = index + 1 
@@ -1151,10 +1171,20 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     }
                 }
                 
-                // AppUtils.toJson() 확장 함수 호출
                 val jsonStr = activeCatsConfig.toJson()
                 editor.putString("evo_active_cats_json_$instanceId", jsonStr)
                 editor.commit()
+
+                // 공급자 구성 변경 시 즉시 순정 DataStore 미러링 동기화 주입
+                val ultimaEvoJson = prefsToJson(prefs).toString()
+                val ultimaEvoHash = ultimaEvoJson.hashCode().toString()
+                prefs.edit(commit = true) {
+                    putBoolean("ultima_evo_restore_complete", true)
+                    putString("ultima_evo_last_applied_backup_hash", ultimaEvoHash)
+                }
+                try {
+                    CloudStreamApp.setKey("native_backup_ultimaevo", ultimaEvoJson)
+                } catch (t: Throwable) { t.printStackTrace() }
 
                 withContext(Dispatchers.Main) { 
                     APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
