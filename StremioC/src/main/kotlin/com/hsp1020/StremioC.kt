@@ -156,8 +156,30 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     fun getUnifiedMetaUrl(type: String, id: String): String {
         val context = CloudStreamApp.context ?: return "${mainUrl.cleanBaseUrl()}/meta/$type/${id.urlEncode()}.json"
         val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-        val isSyncEnabled = prefs.getBoolean("history_sync_enabled", false)
         val syncUrl = prefs.getString("history_sync_url", "") ?: ""
+
+        val isSyncEnabled = try {
+            val json = prefs.getString("stremio_saved_links", null)
+            if (json != null) {
+                val arr = org.json.JSONArray(json)
+                var matched = false
+                val currentCleanUrl = mainUrl.cleanBaseUrl().lowercase()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    val link = obj.optString("link", "").cleanBaseUrl().lowercase()
+                    if (link == currentCleanUrl) {
+                        matched = obj.optBoolean("isSyncEnabled", true)
+                        break
+                    }
+                }
+                matched
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
 
         return if (isSyncEnabled && syncUrl.isNotBlank()) {
             val cleanBase = syncUrl.cleanBaseUrl()
