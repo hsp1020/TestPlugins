@@ -64,18 +64,15 @@ class TvchakProvider : MainAPI() {
         return headers
     }
 
-    private fun isCloudflareChallenge(html: String): Boolean {
+    // 202 상태 코드 및 우회 장벽에 쓰이는 Turnstile 키워드 대응 탐지기 강화
+    private fun isCloudflareChallenge(html: String, code: Int): Boolean {
         val lowerHtml = html.lowercase()
-        val isChallenge = (lowerHtml.contains("window._cf_chl_opt") || 
-                lowerHtml.contains("cf-challenge-running") || 
-                lowerHtml.contains("id=\"challenge-form\"") ||
-                lowerHtml.contains("id=\"cf-challenge-form\"") ||
-                lowerHtml.contains("just a moment...")) && 
+        return code == 202 || 
+               lowerHtml.contains("window._cf_chl_opt") || 
+               lowerHtml.contains("cf-challenge") || 
+               lowerHtml.contains("just a moment...") ||
+               lowerHtml.contains("turnstile") ||
                lowerHtml.contains("cloudflare")
-        if (isChallenge) {
-            println("[ChakPlay] 🚨 Cloudflare 보안 챌린지 감지됨")
-        }
-        return isChallenge
     }
 
     private suspend fun solveCloudflare(url: String): Pair<String, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
@@ -196,12 +193,12 @@ class TvchakProvider : MainAPI() {
         println("[ChakPlay] 📡 GET 요청 전송: $url")
         var res = app.get(url, headers = getHeaders(referer))
         
-        if (isCloudflareChallenge(res.text)) {
+        if (isCloudflareChallenge(res.text, res.code)) {
             println("[ChakPlay] 🧱 Cloudflare 장벽 도달. 우회 대기열 진입")
             
             cfMutex.withLock {
                 res = app.get(url, headers = getHeaders(referer))
-                if (!isCloudflareChallenge(res.text)) {
+                if (!isCloudflareChallenge(res.text, res.code)) {
                     println("[ChakPlay] 🚀 타 스레드 우회 완료 대기열 통과 -> $url")
                     return res
                 }
@@ -267,7 +264,7 @@ class TvchakProvider : MainAPI() {
                 val hasSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title")
                 println("[ChakPlay] [checkAndUpdateDomain] 10. 기본 검증 결과 - 코드: ${res.code}, 시그니처 존재 여부: $hasSignature")
                 
-                if (res.isSuccessful && hasSignature) {
+                if ((res.isSuccessful && hasSignature) || isCloudflareChallenge(res.text, res.code)) {
                     if (currentMainUrl != finalUrl && finalUrl.startsWith("http")) {
                         println("[ChakPlay] [checkAndUpdateDomain] 11. 리다이렉트 발생 감지: $currentMainUrl -> $finalUrl")
                         saveDomain(finalUrl)
@@ -283,7 +280,6 @@ class TvchakProvider : MainAPI() {
                 println("[ChakPlay] [checkAndUpdateDomain] 14. 기본 도메인 검증 시 예외 발생 -> 에러 메시지: ${e.message}") 
             }
 
-            // 불필요한 오버엔지니어링 코드를 전부 걷어내고 정석대로 오직 숫자만 순차 분석하도록 롤백
             val match = Regex("tvchak(\\d+)").find(currentMainUrl)
             val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 200
             println("[ChakPlay] [checkAndUpdateDomain] 15. 브루트포스 대상 숫자 파싱 완료 -> startNum: $startNum")
@@ -292,9 +288,9 @@ class TvchakProvider : MainAPI() {
 
             println("[ChakPlay] [checkAndUpdateDomain] 16. 순차 탐색 루프(브루트포스) 개시")
             coroutineScope {
-                val candidates = (startNum..startNum + 100).map { "https://tvchak$it.com" }
+                val candidates = (startNum..startNum + 50).map { "https://tvchak$it.com" }
                 val chunks = candidates.chunked(5)
-                println("[ChakPlay] [checkAndUpdateDomain] 17. 총 ${candidates.size}개의 후보군을 5개 단위 청크로 분할하여 검증 시작")
+                println("[ChakPlay] [checkAndUpdateDomain] 17. 총 ${candidates.size}개의 후보군을 5개 단위 청크로 검증 시작")
 
                 for ((index, chunk) in chunks.withIndex()) {
                     println("[ChakPlay] [checkAndUpdateDomain] 18. 청크 [${index + 1}/${chunks.size}] 병렬 실행 시작 -> 대상: $chunk")
@@ -308,7 +304,7 @@ class TvchakProvider : MainAPI() {
                                 val testSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title")
                                 println("[ChakPlay] [checkAndUpdateDomain] 20. 후보 $testDomain 응답 결과 -> 코드: ${res.code}, 시그니처 존재 여부: $testSignature")
                                 
-                                if (res.isSuccessful && testSignature) {
+                                if ((res.isSuccessful && testSignature) || isCloudflareChallenge(res.text, res.code)) {
                                     println("[ChakPlay] [checkAndUpdateDomain] 21. 후보 $testDomain 유효 검증 성공!")
                                     return@async extractedFinalUrl
                                 }
@@ -340,7 +336,6 @@ class TvchakProvider : MainAPI() {
             }
 
             println("[ChakPlay] [checkAndUpdateDomain] 27. 💀 모든 탐색 실패. 복구 불가능 상태")
-            // 다른 4개 플러그인과 동일하게, 최종 실패 시에는 플래그를 false로 유지해 새로고침 시 도메인 재탐색 시도가 가능하도록 설계
             isDomainChecked = false
         }
     }
