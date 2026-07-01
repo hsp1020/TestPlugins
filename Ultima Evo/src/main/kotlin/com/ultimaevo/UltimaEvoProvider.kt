@@ -4,7 +4,6 @@ package com.ultimaevo
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
-import com.google.gson.reflect.TypeToken
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -14,6 +13,8 @@ import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.newHomePageResponse
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -147,10 +148,8 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         applyAdBlockPatch() 
     }
 
-    // com.cncverse 패키지 하위의 모든 프로바이더를 런타임에 동적으로 탐색하여 일괄 차단하는 함수
     private fun applyAdBlockPatch() {
         try {
-            // 메모리에 로드된 프로바이더 중 cncverse 계열 패키지인 것만 필터링
             val cncverseProviders = APIHolder.allProviders.filter { 
                 it::class.java.name.startsWith("com.cncverse.") 
             }
@@ -162,13 +161,12 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                     field.isAccessible = true
                     val targetContext = field.get(null)
 
-                    // 타겟 컨텍스트가 존재하며, 아직 광고 차단기로 래핑되지 않은 경우에만 주입
                     if (targetContext is Context && targetContext !is PreventAdContextWrapper) {
                         field.set(null, PreventAdContextWrapper(targetContext))
                         println("[UltimaEvo_AdBlock] ${clazz.simpleName} 광고 가로채기 차단 패치 주입 완료")
                     }
                 } catch (e: NoSuchFieldException) {
-                    // context 변수가 없는 헬퍼 클래스 등은 안전하게 건너뜀
+                    // context 변수가 없는 경우 안전히 생략
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -195,15 +193,14 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             val pages = mutableListOf<Pair<MainPageData, Int>>()
 
             val activeCatsJson = prefs.getString("evo_active_cats_json_$instanceId", "") ?: ""
-            val listType = object : TypeToken<List<EvoCatalogConfig>>() {}.type
             val savedConfigs: List<EvoCatalogConfig> = if (activeCatsJson.isNotBlank()) {
-                try { UltimaEvoPlugin.gson.fromJson(activeCatsJson, listType) ?: emptyList() } catch (e: Exception) { emptyList() }
+                try { AppUtils.parseJson<List<EvoCatalogConfig>>(activeCatsJson) } catch (e: Exception) { emptyList() }
             } else emptyList()
 
             val savedSet = savedConfigs.map { "${it.providerName}:::${it.originalCatalogName}" }.toSet()
 
             savedConfigs.forEach { config ->
-                val combinedData = UltimaEvoPlugin.gson.toJson(config)
+                val combinedData = AppUtils.toJson(config)
                 pages.add(Pair(MainPageData(config.customCatalogName, combinedData), config.orderIndex))
             }
 
@@ -224,7 +221,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                                 val customName = prefs.getString("cat_rename_${instanceId}_${p.name}_$cName", cName) ?: cName
                                 val origData = p.mainPage.find { it.name == cName }?.data ?: ""
                                 val newConfig = EvoCatalogConfig(p.name, cName, customName, origData, dynamicOrder)
-                                val combinedData = UltimaEvoPlugin.gson.toJson(newConfig)
+                                val combinedData = AppUtils.toJson(newConfig)
                                 pages.add(Pair(MainPageData(customName, combinedData), dynamicOrder))
                                 dynamicOrder++
                             }
@@ -241,7 +238,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         applyAdBlockPatch() 
         return withContext(Dispatchers.IO) {
             try {
-                val config = UltimaEvoPlugin.gson.fromJson(request.data, EvoCatalogConfig::class.java)
+                val config = AppUtils.parseJson<EvoCatalogConfig>(request.data)
                 if (config == null) return@withContext newHomePageResponse(emptyList(), false)
 
                 val targetProvider = APIHolder.allProviders.find { it.name == config.providerName } 
@@ -300,8 +297,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         if (activeCatsJson.isBlank()) return emptyList()
 
         val providersToSearch = try {
-            val listType = object : TypeToken<List<EvoCatalogConfig>>() {}.type
-            val configs: List<EvoCatalogConfig> = UltimaEvoPlugin.gson.fromJson(activeCatsJson, listType)
+            val configs: List<EvoCatalogConfig> = AppUtils.parseJson<List<EvoCatalogConfig>>(activeCatsJson)
             configs.map { it.providerName }.distinct()
         } catch (e: Exception) {
             e.printStackTrace()
