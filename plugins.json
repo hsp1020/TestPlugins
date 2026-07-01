@@ -168,10 +168,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/StremioC/stremio.png",
-        "fileHash": "sha256-df9c960774656d355f6872239593c136fa0daba9e13bd221828eb67474c96a03",
+        "fileHash": "sha256-e25e5074ec65d44a61c2ef9c913e66a8d25f099a351dabbaadd18a8a028f9539",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 235889,
+        "fileSize": 238230,
         "status": 1,
         "language": "en",
         "authors": [
@@ -278,10 +278,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/Ultima%20Evo/UltimaBeta.jpg",
-        "fileHash": "sha256-ab0e990e4254a9b84054687b43f347d34d72de3cb31934d5fd77c559df35d819",
+        "fileHash": "sha256-c4d061b89bd8c68df697abdb67ae71886c5a293c39c7e35e0703296add9ce8a5",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 66895,
+        "fileSize": 69758,
         "status": 1,
         "language": "ko",
         "authors": [
