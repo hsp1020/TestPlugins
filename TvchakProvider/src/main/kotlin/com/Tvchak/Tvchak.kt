@@ -19,7 +19,6 @@ class TvchakProvider : MainAPI() {
     companion object {
         var currentMainUrl = "https://tvchak200.com"
         var isDomainChecked = false
-        private var lastCheckTime = 0L 
         private val domainMutex = Mutex()
         private val cfMutex = Mutex()
         private const val PREFS_NAME = "TvChak_Domain_Cache"
@@ -232,16 +231,10 @@ class TvchakProvider : MainAPI() {
     }
 
     private suspend fun checkAndUpdateDomain() {
-        val now = System.currentTimeMillis()
-        val cooldown = if (isDomainChecked) 600000L else 30000L
-        if (now - lastCheckTime < cooldown) return
+        if (isDomainChecked) return
 
         domainMutex.withLock {
-            val lockNow = System.currentTimeMillis()
-            val lockCooldown = if (isDomainChecked) 600000L else 30000L
-            if (lockNow - lastCheckTime < lockCooldown) return@withLock
-            
-            lastCheckTime = lockNow
+            if (isDomainChecked) return@withLock
             println("[ChakPlay] 🔍 액티브 도메인 유효성 검증")
 
             val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -262,7 +255,7 @@ class TvchakProvider : MainAPI() {
                 val finalUrl = res.url.substringBefore("/index.php").trimEnd('/')
                 val hasSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title")
                 
-                // 오진을 유발하던 || isCloudflareChallenge 조건을 전면 제거하고 오직 정상 시그니처만 인정
+                // 텔레그램 등 가짜 리다이렉트 시 검출 불가능하도록 철저히 실제 시그니처가 있을 때만 유효 도메인으로 인정
                 if (res.isSuccessful && hasSignature) {
                     if (currentMainUrl != finalUrl && finalUrl.startsWith("http")) {
                         println("[ChakPlay] 🔄 리다이렉트 도메인 검출: $currentMainUrl -> $finalUrl")
@@ -270,7 +263,6 @@ class TvchakProvider : MainAPI() {
                         mainUrl = currentMainUrl
                     }
                     isDomainChecked = true
-                    lastCheckTime = System.currentTimeMillis()
                     println("[ChakPlay] ✅ 도메인 유지 확정 -> $mainUrl")
                     return@withLock
                 } else {
@@ -321,13 +313,12 @@ class TvchakProvider : MainAPI() {
                 saveDomain(foundDomain!!)
                 mainUrl = currentMainUrl
                 isDomainChecked = true
-                lastCheckTime = System.currentTimeMillis()
                 return@withLock
             }
 
             println("[ChakPlay] 💀 탐색 범주($startNum ~ ${startNum + 50}) 내 모든 접속 실패. 수동 검토가 필요합니다.")
+            // 탐색에 아예 실패했을 시에는 플래그를 세팅하지 않아, 앱 구동 시 다음 생명주기 진입이나 새로고침 시 다시 시도할 수 있도록 규격 수정
             isDomainChecked = false
-            lastCheckTime = System.currentTimeMillis() 
         }
     }
 
