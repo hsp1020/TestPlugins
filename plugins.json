@@ -60,10 +60,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/KotbcProvider/ktblogo.png",
-        "fileHash": "sha256-0e5f5f3c16584f3d3929afc94cb911f0820a63ee9b7863d0996ac92cc2686c5c",
+        "fileHash": "sha256-909ea163fd3c0512517af3f8d83251b68b85baa5b44dbacba861ddf5336471ea",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 30415,
+        "fileSize": 30858,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -232,10 +232,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/TVMONProvider/111.png",
-        "fileHash": "sha256-85a1e5cead59bb1d45ffcb4ff47932e56973269e4fe7a0b0e882c1137aa948d3",
+        "fileHash": "sha256-83d57f72eaf77507b29c50491808724725df021be13c46245a569c12ccddb7bc",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 50342,
+        "fileSize": 51110,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -255,10 +255,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/TVWikiProvider/logo.png",
-        "fileHash": "sha256-e64625021d61e5a5cdeb2f899476415b02144063e0251605a7e071afa657f7ba",
+        "fileHash": "sha256-744fad5ae92aaacd6125f4a513ad25feb36a08b65adbdfb47e33e9b4d713873f",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 52209,
+        "fileSize": 52932,
         "status": 1,
         "language": "ko",
         "authors": [
