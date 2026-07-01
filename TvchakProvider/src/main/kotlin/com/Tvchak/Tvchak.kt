@@ -19,6 +19,7 @@ class TvchakProvider : MainAPI() {
     companion object {
         var currentMainUrl = "https://tvchak200.com"
         var isDomainChecked = false
+        private var lastCheckTime = 0L 
         private val domainMutex = Mutex()
         private val cfMutex = Mutex()
         private const val PREFS_NAME = "TvChak_Domain_Cache"
@@ -219,7 +220,6 @@ class TvchakProvider : MainAPI() {
             }
         }
         
-        // 시그니처 요소를 동반하여 파킹 및 차단 페이지를 가려내는 안전 감지 로그 적용
         val hasSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title") || res.text.contains("vod-search-list")
         if (res.isSuccessful && hasSignature) {
             println("[ChakPlay] 🟢 HTTP 응답 성공 및 실데이터 확인 완료 (코드: ${res.code})")
@@ -232,10 +232,16 @@ class TvchakProvider : MainAPI() {
     }
 
     private suspend fun checkAndUpdateDomain() {
-        if (isDomainChecked) return
+        val now = System.currentTimeMillis()
+        val cooldown = if (isDomainChecked) 600000L else 30000L
+        if (now - lastCheckTime < cooldown) return
 
         domainMutex.withLock {
-            if (isDomainChecked) return@withLock
+            val lockNow = System.currentTimeMillis()
+            val lockCooldown = if (isDomainChecked) 600000L else 30000L
+            if (lockNow - lastCheckTime < lockCooldown) return@withLock
+            
+            lastCheckTime = lockNow
             println("[ChakPlay] 🔍 액티브 도메인 유효성 검증")
 
             val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -256,14 +262,15 @@ class TvchakProvider : MainAPI() {
                 val finalUrl = res.url.substringBefore("/index.php").trimEnd('/')
                 val hasSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title")
                 
-                // 괄호를 적용하여 논리적 우선순위를 명확히 규정
-                if ((res.isSuccessful && hasSignature) || isCloudflareChallenge(res.text)) {
+                // 오진을 유발하던 || isCloudflareChallenge 조건을 전면 제거하고 오직 정상 시그니처만 인정
+                if (res.isSuccessful && hasSignature) {
                     if (currentMainUrl != finalUrl && finalUrl.startsWith("http")) {
                         println("[ChakPlay] 🔄 리다이렉트 도메인 검출: $currentMainUrl -> $finalUrl")
                         saveDomain(finalUrl)
                         mainUrl = currentMainUrl
                     }
                     isDomainChecked = true
+                    lastCheckTime = System.currentTimeMillis()
                     println("[ChakPlay] ✅ 도메인 유지 확정 -> $mainUrl")
                     return@withLock
                 } else {
@@ -287,7 +294,6 @@ class TvchakProvider : MainAPI() {
                     val deferreds = chunk.map { testDomain ->
                         async {
                             val testUrl = "$testDomain$testPath"
-                            // 현재 대입 시도 중인 도메인을 실시간으로 출력하도록 개선
                             println("[ChakPlay] 🔄 도메인 후보 검증 시도 -> $testUrl")
                             try {
                                 val res = app.get(testUrl, headers = getHeaders(), timeout = 3L)
@@ -296,9 +302,6 @@ class TvchakProvider : MainAPI() {
                                 
                                 if (res.isSuccessful && testSignature) {
                                     println("[ChakPlay] 🎯 활성 도메인 확보: $extractedFinalUrl")
-                                    return@async extractedFinalUrl
-                                } else if (isCloudflareChallenge(res.text)) {
-                                    println("[ChakPlay] 🧱 Cloudflare 탐지 완료 도메인 확보: $extractedFinalUrl")
                                     return@async extractedFinalUrl
                                 }
                             } catch (e: Exception) {}
@@ -318,12 +321,13 @@ class TvchakProvider : MainAPI() {
                 saveDomain(foundDomain!!)
                 mainUrl = currentMainUrl
                 isDomainChecked = true
+                lastCheckTime = System.currentTimeMillis()
                 return@withLock
             }
 
-            // 모든 경우의 수가 실패했을 때 확실한 피드백을 전달하도록 로그 수정
             println("[ChakPlay] 💀 탐색 범주($startNum ~ ${startNum + 50}) 내 모든 접속 실패. 수동 검토가 필요합니다.")
-            isDomainChecked = true
+            isDomainChecked = false
+            lastCheckTime = System.currentTimeMillis() 
         }
     }
 
