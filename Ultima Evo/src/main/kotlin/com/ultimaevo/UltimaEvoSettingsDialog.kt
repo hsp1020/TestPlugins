@@ -1,3 +1,4 @@
+// hsp1020/ultimaevo/UltimaEvoSettingsDialog.kt
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -61,7 +62,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     private fun prefsToJson(prefs: SharedPreferences): JSONObject {
         val json = JSONObject()
         prefs.all.forEach { (key, value) ->
-            if (value != null) {
+            if (value != null && !key.startsWith("dynamic_catalogs_")) { // [Issue 1 해결] 단순 캐시용 카탈로그 목록은 필터링 제외하여 용량 극소화
                 if (value is Set<*>) {
                     val arr = JSONArray()
                     value.forEach { item -> if (item != null) arr.put(item) }
@@ -387,13 +388,13 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                     jsonToPrefs(parsedJson, editor)
                                     editor.commit()
 
-                                    // 플랫폼 네이티브 방식으로 SharedPreferences 명시적 수정 트랜잭션 진행
                                     val finalUltimaEvoJson = prefsToJson(prefs).toString()
                                     val finalUltimaEvoHash = finalUltimaEvoJson.hashCode().toString()
                                     
                                     val mirrorEditor = prefs.edit()
                                     mirrorEditor.putBoolean("ultima_evo_restore_complete", true)
                                     mirrorEditor.putString("ultima_evo_last_applied_backup_hash", finalUltimaEvoHash)
+                                    mirrorEditor.putLong("evo_last_sync_time", 0L) // 0L로 리셋하여 복원 재구동 시 우회 처리 수행
                                     mirrorEditor.commit()
 
                                     try {
@@ -667,13 +668,13 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
                     editor.commit()
 
-                    // 플랫폼 네이티브 방식으로 SharedPreferences 명시적 수정 트랜잭션 진행
                     val ultimaEvoJson = prefsToJson(prefs).toString()
                     val ultimaEvoHash = ultimaEvoJson.hashCode().toString()
                     
                     val mirrorEditor = prefs.edit()
                     mirrorEditor.putBoolean("ultima_evo_restore_complete", true)
                     mirrorEditor.putString("ultima_evo_last_applied_backup_hash", ultimaEvoHash)
+                    mirrorEditor.putLong("evo_last_sync_time", 0L)
                     mirrorEditor.commit()
 
                     try {
@@ -1146,7 +1147,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         updateVisibleCatalogs()
 
-        val footer = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 30, 0, 0) }
+        val footer = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; setPadding(0, 30, 0, 0) }
         val cancelBtn = Button(ctx).apply { text = "Cancel"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg(); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0,0,15,0) } }
         val applyBtn = Button(ctx).apply { text = "Save"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg(); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15,0,0,0) } }
         footer.addView(cancelBtn); footer.addView(applyBtn); mainContainer.addView(footer)
@@ -1179,13 +1180,13 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 editor.putString("evo_active_cats_json_$instanceId", jsonStr)
                 editor.commit()
 
-                // 플랫폼 네이티브 방식으로 SharedPreferences 명시적 수정 트랜잭션 진행
                 val ultimaEvoJson = prefsToJson(prefs).toString()
                 val ultimaEvoHash = ultimaEvoJson.hashCode().toString()
                 
                 val mirrorEditor = prefs.edit()
                 mirrorEditor.putBoolean("ultima_evo_restore_complete", true)
                 mirrorEditor.putString("ultima_evo_last_applied_backup_hash", ultimaEvoHash)
+                mirrorEditor.putLong("evo_last_sync_time", 0L)
                 mirrorEditor.commit()
 
                 try {
@@ -1205,4 +1206,3 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         dialog.show()
     }
 }
-
