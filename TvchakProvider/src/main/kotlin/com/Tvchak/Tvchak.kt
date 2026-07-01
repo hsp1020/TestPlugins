@@ -64,35 +64,42 @@ class TvchakProvider : MainAPI() {
         return headers
     }
 
-    // 202 상태 코드 및 우회 장벽에 쓰이는 Turnstile 키워드 대응 탐지기 (CDN 라이브러리 오진 차단 필터 적용)
-    private fun isCloudflareChallenge(html: String, code: Int): Boolean {
+    // 보안 장벽(AWS WAF / Cloudflare) 탐지기 고도화 (오진 차단 필터 및 AWS WAF 시그니처 추가)
+    private fun isWebAccessChallenge(html: String, code: Int): Boolean {
         val lowerHtml = html.lowercase()
         
-        // 공용 JS CDN 링크 등으로 인해 'cloudflare' 또는 'turnstile' 단어가 잡히는 오진 방지
+        // 공용 JS CDN 링크 등으로 인해 핵심 키워드가 잡혀서 오진하는 상황 차단
         val cleanHtml = lowerHtml
             .replace("cdnjs.cloudflare.com", "")
             .replace("ajax.cloudflare.com", "")
             .replace("templates.cloudflare.com", "")
 
-        return code == 202 || 
-               cleanHtml.contains("window._cf_chl_opt") || 
-               cleanHtml.contains("cf-challenge") || 
-               cleanHtml.contains("just a moment...") ||
-               cleanHtml.contains("turnstile") ||
-               cleanHtml.contains("cloudflare")
+        val hasAwsWaf = cleanHtml.contains("aws-waf") || 
+                        cleanHtml.contains("awswaf") || 
+                        cleanHtml.contains("awswafintegration") || 
+                        cleanHtml.contains("awswafcookiedomainlist")
+                             
+        val hasCf = cleanHtml.contains("window._cf_chl_opt") || 
+                     cleanHtml.contains("cf-challenge") || 
+                     cleanHtml.contains("just a moment...") ||
+                     cleanHtml.contains("turnstile") ||
+                     cleanHtml.contains("cloudflare")
+
+        return code == 202 || hasAwsWaf || hasCf
     }
 
-    private suspend fun solveCloudflare(url: String): Pair<String, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+    // 보안 챌린지 해결 전용 웹뷰 솔버 (AWS WAF / Cloudflare 쿠키 가로채기 통합 대응)
+    private suspend fun solveChallenge(url: String): Pair<String, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
         val context = try {
             Class.forName("android.app.ActivityThread")
                 .getMethod("currentApplication")
                 .invoke(null) as? android.content.Context
         } catch (e: Exception) {
-            println("[ChakPlay] ❌ CF 우회 시도 중 Context 획득 실패")
+            println("[ChakPlay] ❌ 보안 우회 시도 중 Context 획득 실패")
             null
         } ?: return@withContext null
 
-        println("[ChakPlay] 🛡️ Cloudflare 우회 웹뷰 기동 -> URL: $url")
+        println("[ChakPlay] 🛡️ 보안 우회 웹뷰 기동 -> URL: $url")
 
         try {
             val cookieManager = android.webkit.CookieManager.getInstance()
@@ -125,9 +132,10 @@ class TvchakProvider : MainAPI() {
                     val cookies = cookieManager.getCookie(currentUrl) ?: ""
                     println("[ChakPlay] 🍪 실시간 쿠키 수집 중... (길이: ${cookies.length})")
 
-                    if (cookies.contains("cf_clearance")) {
+                    // AWS WAF Token(aws-waf-token) 또는 Cloudflare Clearance(cf_clearance) 감지 시 성공 판단
+                    if (cookies.contains("cf_clearance") || cookies.contains("aws-waf-token")) {
                         solved = true
-                        println("[ChakPlay] ✅ 성공: cf_clearance 쿠키 획득 완료!")
+                        println("[ChakPlay] ✅ 성공: 유효 보안 쿠키(CF/AWS WAF) 획득 완료!")
                         if (continuation.isActive) {
                             continuation.resume(Pair(cookies, userAgent))
                         }
@@ -144,10 +152,10 @@ class TvchakProvider : MainAPI() {
             val handler = android.os.Handler(android.os.Looper.getMainLooper())
             val timeoutRunnable = Runnable {
                 if (continuation.isActive) {
-                    println("[ChakPlay] ⏰ CF 우회 웹뷰 15초 타임아웃 발생")
+                    println("[ChakPlay] ⏰ 우회 웹뷰 15초 타임아웃 발생")
                     val cookieManager = android.webkit.CookieManager.getInstance()
                     val cookies = cookieManager.getCookie(url) ?: ""
-                    if (cookies.contains("cf_clearance")) {
+                    if (cookies.contains("cf_clearance") || cookies.contains("aws-waf-token")) {
                         println("[ChakPlay] 🍀 타임아웃 도달 직전 수집된 쿠키 반환 시도")
                         continuation.resume(Pair(cookies, userAgent))
                     } else {
@@ -167,8 +175,8 @@ class TvchakProvider : MainAPI() {
                         webView.url?.let { currentUrl ->
                             val cookieManager = android.webkit.CookieManager.getInstance()
                             val cookies = cookieManager.getCookie(currentUrl) ?: ""
-                            if (cookies.contains("cf_clearance")) {
-                                println("[ChakPlay] ✅ 성공 (인터벌 체크): cf_clearance 검출 완료")
+                            if (cookies.contains("cf_clearance") || cookies.contains("aws-waf-token")) {
+                                println("[ChakPlay] ✅ 성공 (인터벌 체크): 보안 쿠키 검출 완료")
                                 handler.removeCallbacks(timeoutRunnable)
                                 continuation.resume(Pair(cookies, userAgent))
                                 try {
@@ -185,7 +193,7 @@ class TvchakProvider : MainAPI() {
             handler.postDelayed(intervalRunnable, 1500)
 
             continuation.invokeOnCancellation {
-                println("[ChakPlay] 🛑 CF 코루틴 취소됨 -> 자원 정리")
+                println("[ChakPlay] 🛑 우회 코루틴 취소됨 -> 자원 정리")
                 handler.removeCallbacks(timeoutRunnable)
                 handler.removeCallbacks(intervalRunnable)
                 try {
@@ -200,31 +208,30 @@ class TvchakProvider : MainAPI() {
         println("[ChakPlay] 📡 GET 요청 전송: $url")
         var res = app.get(url, headers = getHeaders(referer))
         
-        if (isCloudflareChallenge(res.text, res.code)) {
-            println("[ChakPlay] 🧱 Cloudflare 장벽 도달 감지. (상태코드: ${res.code})")
+        if (isWebAccessChallenge(res.text, res.code)) {
+            println("[ChakPlay] 🧱 보안 장벽(CF/AWS WAF) 도달 감지. (상태코드: ${res.code})")
             
-            // 실제 클라우드플레어 보안페이지가 맞는지 소스 분석용 디버그 출력 추가
-            println("[ChakPlay] 📄 [CF 감지 상세 헤더 출력 시작]")
+            println("[ChakPlay] 📄 [보안 장벽 감지 상세 헤더 출력 시작]")
             println(res.headers.toString())
-            println("[ChakPlay] 📄 [CF 감지 상세 헤더 출력 종료]")
+            println("[ChakPlay] 📄 [보안 장벽 감지 상세 헤더 출력 종료]")
             
-            println("[ChakPlay] 📄 [CF 감지 페이지 소스 출력 시작]")
+            println("[ChakPlay] 📄 [보안 장벽 감지 페이지 소스 출력 시작]")
             println(res.text)
-            println("[ChakPlay] 📄 [CF 감지 페이지 소스 출력 종료]")
+            println("[ChakPlay] 📄 [보안 장벽 감지 페이지 소스 출력 종료]")
 
             println("[ChakPlay] 🧱 우회 대기열 진입")
             
             cfMutex.withLock {
                 res = app.get(url, headers = getHeaders(referer))
-                if (!isCloudflareChallenge(res.text, res.code)) {
+                if (!isWebAccessChallenge(res.text, res.code)) {
                     println("[ChakPlay] 🚀 타 스레드 우회 완료 대기열 통과 -> $url")
                     return res
                 }
 
                 println("[ChakPlay] 🔒 대표 대기열 진입: 우회 직접 처리 시작")
                 
-                // [반영 사항 1]: 메인 홈 주소(mainUrl) 대신 실제 차단이 발생한 대상 주소(url)를 넘겨 웹뷰가 동일 챌린지를 마주하도록 수정
-                val bypass = solveCloudflare(url)
+                // [반영 사항]: 실제 차단이 이루어진 경로(url)로 우회를 가동하도록 매핑
+                val bypass = solveChallenge(url)
                 if (bypass != null) {
                     cfCookies = bypass.first
                     cfUserAgent = bypass.second
@@ -284,7 +291,7 @@ class TvchakProvider : MainAPI() {
                 val hasSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title")
                 println("[ChakPlay] [checkAndUpdateDomain] 10. 기본 검증 결과 - 코드: ${res.code}, 시그니처 존재 여부: $hasSignature")
                 
-                if ((res.isSuccessful && hasSignature) || isCloudflareChallenge(res.text, res.code)) {
+                if ((res.isSuccessful && hasSignature) || isWebAccessChallenge(res.text, res.code)) {
                     if (currentMainUrl != finalUrl && finalUrl.startsWith("http")) {
                         println("[ChakPlay] [checkAndUpdateDomain] 11. 리다이렉트 발생 감지: $currentMainUrl -> $finalUrl")
                         saveDomain(finalUrl)
@@ -324,7 +331,7 @@ class TvchakProvider : MainAPI() {
                                 val testSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title")
                                 println("[ChakPlay] [checkAndUpdateDomain] 20. 후보 $testDomain 응답 결과 -> 코드: ${res.code}, 시그니처 존재 여부: $testSignature")
                                 
-                                if ((res.isSuccessful && testSignature) || isCloudflareChallenge(res.text, res.code)) {
+                                if ((res.isSuccessful && testSignature) || isWebAccessChallenge(res.text, res.code)) {
                                     println("[ChakPlay] [checkAndUpdateDomain] 21. 후보 $testDomain 유효 검증 성공!")
                                     return@async extractedFinalUrl
                                 }
