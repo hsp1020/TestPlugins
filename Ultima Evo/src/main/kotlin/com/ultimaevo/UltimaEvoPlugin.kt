@@ -109,5 +109,3 @@ class UltimaEvoPlugin : Plugin() {
         }
     }
 }
-
-④ UltimaEvoSettingsDialog.kt
