@@ -4,7 +4,7 @@
     android:padding="20dp"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:background="@android:color/transparent"> <!-- Kotlin의 getDarkThemeBg() 적용을 위해 투명화 -->
+    android:background="@android:color/transparent">
 
     <TextView
         android:layout_width="match_parent"
