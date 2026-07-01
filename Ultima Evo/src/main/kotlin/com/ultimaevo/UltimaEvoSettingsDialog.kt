@@ -29,6 +29,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -57,7 +58,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
     private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f }
 
-    // ── [추가됨] SharedPreferences -> JSONObject 정밀 변환 헬퍼 (StringSet 보존) ──
     private fun prefsToJson(prefs: SharedPreferences): JSONObject {
         val json = JSONObject()
         prefs.all.forEach { (key, value) ->
@@ -74,7 +74,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         return json
     }
 
-    // ── [추가됨] JSONObject -> SharedPreferences 정밀 복원 헬퍼 (Long, Float, StringSet 완벽 지원) ──
     private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
         val keys = json.keys()
         while (keys.hasNext()) {
@@ -230,7 +229,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 viewLifecycleOwner.lifecycleScope.launch {
                     try {
                         val backupStr = withContext(Dispatchers.IO) {
-                            // 🚨 [수정됨] 타입 안전성을 위해 prefsToJson 헬퍼 사용
                             val json = prefsToJson(prefs)
                             json.put("plugin_name", "UltimaEvo")
                             
@@ -384,9 +382,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             viewLifecycleOwner.lifecycleScope.launch {
                                 withContext(Dispatchers.IO) {
                                     val editor = prefs.edit()
-                                    editor.clear() // 고스트 데이터 방지
+                                    editor.clear() 
                                     
-                                    // 🚨 [수정됨] 타입 안전성을 위해 jsonToPrefs 헬퍼 사용
                                     jsonToPrefs(parsedJson, editor)
                                     
                                     editor.commit()
@@ -1153,7 +1150,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     }
                 }
                 
-                val jsonStr = UltimaEvoPlugin.gson.toJson(activeCatsForGson)
+                val jsonStr = toJson(activeCatsForGson)
                 editor.putString("evo_active_cats_json_$instanceId", jsonStr)
                 editor.commit()
 
