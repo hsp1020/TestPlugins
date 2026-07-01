@@ -1131,7 +1131,7 @@ class SettingsBottomFragment(
         dlg.show()
     }
 
-    private fun showLanguageSelectDialog() {
+private fun showLanguageSelectDialog() {
         val context = requireContext()
         val currentSavedCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "en-US") ?: "en-US"
         
@@ -1171,10 +1171,11 @@ class SettingsBottomFragment(
         }
         container.addView(rv)
 
+        // 언어 목록 어댑터
         class LangAdapter(
             private val originalList: List<Pair<String, String>>,
-            private val selectedCode: String,
-            private val onClick: (String) -> Unit
+            var selectedCode: String, // 선택 상상 추적을 위해 var로 변경
+            private val onClick: (String, String) -> Unit
         ) : RecyclerView.Adapter<LangAdapter.VH>() {
 
             private var filteredList = originalList.toMutableList()
@@ -1190,6 +1191,7 @@ class SettingsBottomFragment(
                     focusable = View.FOCUSABLE
                     layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 }
+                // 가로 전체를 차지하여 체크 아이콘을 우측 끝으로 밀어냅니다.
                 val tvName = TextView(context).apply {
                     textSize = 15f
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -1197,7 +1199,7 @@ class SettingsBottomFragment(
                 val tvCheck = TextView(context).apply {
                     text = "✓"
                     textSize = 16f
-                    setTextColor(Color.parseColor("#FF5555")) 
+                    setTextColor(Color.parseColor("#FF0000")) // 빨간색 적용
                     setPadding(10, 0, 10, 0)
                 }
                 rowLayout.addView(tvName)
@@ -1209,11 +1211,13 @@ class SettingsBottomFragment(
                 val (langName, code) = filteredList[position]
                 val isSelected = code == selectedCode
                 holder.tvName.text = langName
-                holder.tvName.setTextColor(if (isSelected) Color.parseColor("#FF5555") else Color.WHITE) 
-                holder.tvCheck.visibility = if (isSelected) View.GONE else View.GONE
+                
+                // 선택되었을 때만 글자색 빨간색(#FF0000) 및 체크표시 활성화
+                holder.tvName.setTextColor(if (isSelected) Color.parseColor("#FF0000") else Color.WHITE) 
+                holder.tvCheck.visibility = if (isSelected) View.VISIBLE else View.GONE
                 
                 holder.view.setOnClickListener {
-                    onClick(code)
+                    onClick(code, langName)
                 }
             }
             override fun getItemCount() = filteredList.size
@@ -1229,14 +1233,13 @@ class SettingsBottomFragment(
             }
         }
 
-        val adapter = LangAdapter(LANGUAGES, selectedCode) { code ->
-            val editor = sharedPref.edit()
-            editor.putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code)
-            editor.commit()
-
-            val langName = LANGUAGES.find { it.second == code }?.first ?: code
-            Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
-            activeSubDialog?.dismiss()
+        // 어댑터 생성 및 연결 (항목 클릭 시 UI만 즉각 업데이트)
+        lateinit var adapter: LangAdapter
+        adapter = LangAdapter(LANGUAGES, selectedCode) { code, langName ->
+            selectedCode = code
+            selectedLangName = langName
+            adapter.selectedCode = code
+            adapter.notifyDataSetChanged() // 화면 갱신
         }
         rv.adapter = adapter
 
@@ -1278,6 +1281,7 @@ class SettingsBottomFragment(
         val langDialog = AlertDialog.Builder(context).setView(container).create()
         setupCustomDialog(langDialog, container)
 
+        // Apply 버튼 클릭 시에만 SharedPreferences에 값을 저장하고 토스트 메시지를 표시한 후 창을 닫습니다.
         applyBtn.setOnClickListener {
             val code = selectedCode
             val langName = selectedLangName
