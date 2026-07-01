@@ -1136,7 +1136,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 tempActiveSettings.forEach { (pName, isChecked) -> editor.putBoolean("provider_enabled_${instanceId}_$pName", isChecked) }
                 tempAutoAddSettings.forEach { (pName, isChecked) -> editor.putBoolean("auto_add_${instanceId}_$pName", isChecked) }
                 
-                val activeCatsForGson = mutableListOf<EvoCatalogConfig>()
+                // 기존 activeCatsForGson에서 명칭을 activeCatsConfig로 변경하여 혼선을 예방합니다.
+                val activeCatsConfig = mutableListOf<EvoCatalogConfig>()
                 for ((index, item) in allCatalogList.withIndex()) {
                     val finalOrder = index + 1 
                     editor.putBoolean("cat_toggle_${instanceId}_${item.providerName}_${item.catalogName}", item.isChecked)
@@ -1146,11 +1147,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     val isProviderActive = tempActiveSettings[item.providerName] ?: true
                     if (isProviderActive && item.isChecked) {
                         val origData = APIHolder.allProviders.find { it.name == item.providerName }?.mainPage?.find { it.name == item.catalogName }?.data ?: ""
-                        activeCatsForGson.add(EvoCatalogConfig(item.providerName, item.catalogName, item.customName, origData, finalOrder))
+                        activeCatsConfig.add(EvoCatalogConfig(item.providerName, item.catalogName, item.customName, origData, finalOrder))
                     }
                 }
                 
-                val jsonStr = activeCatsForGson.toJson()
+                // AppUtils.toJson() 확장 함수 호출
+                val jsonStr = activeCatsConfig.toJson()
                 editor.putString("evo_active_cats_json_$instanceId", jsonStr)
                 editor.commit()
 
@@ -1162,7 +1164,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 }
             }
         }
-
+        
         cancelBtn.setOnClickListener { dialog.dismiss() }
         dialog.show()
     }
