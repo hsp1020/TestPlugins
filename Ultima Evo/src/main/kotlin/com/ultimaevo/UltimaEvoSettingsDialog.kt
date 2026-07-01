@@ -1206,4 +1206,3 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     }
 }
 
-2. SettingsBottomFragment.kt (수정 완료)
