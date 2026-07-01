@@ -10,10 +10,14 @@ import java.net.URLEncoder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 class MovieKing : MainAPI() {
     companion object {
-        var currentMainUrl = "https://mvking.top"
+        // 기본 도메인을 mvking7.org로 변경
+        var currentMainUrl = "https://mvking7.org"
         var isDomainChecked = false 
         private val domainMutex = Mutex()
         private const val PREFS_NAME = "MovieKing_Domain_Cache"
@@ -34,7 +38,11 @@ class MovieKing : MainAPI() {
     override var lang = "ko"
 
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama, TvType.Anime)
-    private val commonHeaders = mapOf("Referer" to "$mainUrl/")
+    
+    // 도메인 갱신 시 Referer 헤더가 유기적으로 업데이트되도록 커스텀 게터 적용
+    private val commonHeaders: Map<String, String>
+        get() = mapOf("Referer" to "$mainUrl/")
+        
     private val titleRegex = Regex("""\s*\(\d{4}\).*""")
     private val tagCleanRegex = Regex("""\s*(한국|해외)?영화\s*\(?\d{4}\)?.*""")
 
@@ -60,6 +68,7 @@ class MovieKing : MainAPI() {
                 println("[MovieKing DBG] 📂 캐시된 도메인 로드: $currentMainUrl")
             }
             
+            // 1단계: 현재/캐시된 도메인 유효성 체크
             try {
                 val res = app.get(currentMainUrl, headers = commonHeaders, timeout = 5L)
                 val finalUrl = res.url.trimEnd('/')
@@ -71,11 +80,57 @@ class MovieKing : MainAPI() {
                     }
                     isDomainChecked = true; return@withLock
                 }
-            } catch (e: Exception) { println("[MovieKing DBG] ❌ 현재 도메인 접속 실패") }
+            } catch (e: Exception) { 
+                println("[MovieKing DBG] ❌ 현재 도메인 접속 실패") 
+            }
+
+            // 2단계: TVWiki 스타일 브루트포스 순차 탐색 적용
+            val match = Regex("mvking(\\d+)\\.(\\w+)").find(currentMainUrl)
+            val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 7
+            val tld = match?.groupValues?.get(2) ?: "org"
+            println("[MovieKing DBG] 🚀 브루트포스 탐색 시작 (시작번호: $startNum, TLD: $tld)")
 
             try {
-                println("[MovieKing DBG] 🌐 베이스 도메인(mvking.top) 폴백 시도")
-                val baseRes = app.get("https://mvking.top", headers = commonHeaders, timeout = 5L)
+                coroutineScope {
+                    val candidates = (startNum..startNum + 100).map { "https://mvking$it.$tld" }
+                    val chunks = candidates.chunked(5)
+                    
+                    for (chunk in chunks) {
+                        val deferreds = chunk.map { testDomain ->
+                            async {
+                                try {
+                                    val res = app.get(testDomain, headers = commonHeaders, timeout = 3L)
+                                    val extractedTestUrl = Regex("^https?://[^/]+").find(res.url)?.value ?: testDomain
+                                    val testFinalUrl = extractedTestUrl.replace("http://", "https://")
+                                    
+                                    if (res.isSuccessful && res.text.contains("video-card")) {
+                                        return@async testFinalUrl
+                                    }
+                                } catch (e: Exception) {}
+                                null
+                            }
+                        }
+                        
+                        val foundDomain = deferreds.awaitAll().firstOrNull { it != null }
+                        if (foundDomain != null) {
+                            println("[MovieKing DBG] ✨ 브루트포스 성공: $foundDomain")
+                            saveDomain(foundDomain)
+                            mainUrl = currentMainUrl
+                            isDomainChecked = true
+                            return@coroutineScope
+                        }
+                    }
+                }
+                if (isDomainChecked) return@withLock
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                println("[MovieKing DBG] ❌ 브루트포스 탐색 오류: ${e.message}")
+            }
+
+            // 3단계: 베이스 주소 폴백 시도
+            try {
+                println("[MovieKing DBG] 🌐 베이스 도메인(mvking7.org) 폴백 시도")
+                val baseRes = app.get("https://mvking7.org", headers = commonHeaders, timeout = 5L)
                 val baseFinalUrl = baseRes.url.trimEnd('/')
                 if (baseRes.isSuccessful && baseRes.text.contains("video-card")) {
                     println("[MovieKing DBG] ✨ 베이스 도메인 폴백 성공: $baseFinalUrl")
@@ -85,22 +140,19 @@ class MovieKing : MainAPI() {
                 }
             } catch (e: Exception) {}
 
+            // 4단계: 링크룸 대피소 포털 스크래핑 시도
             try {
                 println("[MovieKing DBG] 🕵️ 링크룸 대피소 포털 스크래핑 시도")
-                // 1단계: 링크룸 메인페이지 호출
                 val mainDoc = app.get(PORTAL_URL, timeout = 10L).document
                 
-                // 2단계: 제목에 "다시보기"가 들어간 구체적인 카테고리 박스(.link-box)만 타깃팅합니다.
                 val categoryBox = mainDoc.select(".link-box").firstOrNull { box ->
                     box.select(".link-head").text().contains("다시보기")
                 }
                 
-                // 3단계: 해당 다시보기 박스 안에서만 "무비킹" 링크를 추출합니다.
                 var channelHref = categoryBox?.select("a")?.firstOrNull { 
                     it.text().contains("무비킹") || it.attr("href").contains("mvking") || it.attr("href").contains("movieking")
                 }?.attr("href")
 
-                // 4단계 (이중 안전장치): 만약 카테고리명 변경 등으로 실패할 경우, 다른 메뉴를 제외한 전체 사이트 그리드(.link-box a) 내에서 차선책 검색
                 if (channelHref.isNullOrBlank()) {
                     channelHref = mainDoc.select(".link-box a").firstOrNull { 
                         it.text().trim() == "무비킹" 
@@ -111,10 +163,8 @@ class MovieKing : MainAPI() {
                     val detailUrl = if (channelHref.startsWith("http")) channelHref else "$PORTAL_URL$channelHref"
                     println("[MovieKing DBG] 📂 무비킹 상세페이지 주소 발견: $detailUrl")
                     
-                    // 5단계: 상세페이지 호출
                     val detailDoc = app.get(detailUrl, timeout = 10L).document
                     
-                    // 6단계: 상세페이지 테이블 안의 최신주소 주입
                     val latestUrl = detailDoc.select(".paybody-zbinfo a").firstOrNull {
                         it.attr("href").contains("mvking") || it.attr("href").contains("movieking")
                     }?.attr("href")?.trimEnd('/') ?: detailDoc.selectFirst("ul.paybody-zbinfo span.data a")?.attr("href")?.trimEnd('/')
@@ -128,6 +178,7 @@ class MovieKing : MainAPI() {
                     }
                 }
             } catch (e: Exception) { 
+                if (e is CancellationException) throw e
                 println("[MovieKing DBG] ❌ 링크룸 대피소 파싱 실패: ${e.message}") 
             }
             
