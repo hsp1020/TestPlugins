@@ -64,14 +64,18 @@ class TvchakProvider : MainAPI() {
         return headers
     }
 
-    private fun isCloudflareChallenge(html: String, code: Int): Boolean {
+    private fun isCloudflareChallenge(html: String): Boolean {
         val lowerHtml = html.lowercase()
-        return code == 202 || 
-               lowerHtml.contains("window._cf_chl_opt") || 
-               lowerHtml.contains("cf-challenge") || 
-               lowerHtml.contains("just a moment...") ||
-               lowerHtml.contains("turnstile") ||
+        val isChallenge = (lowerHtml.contains("window._cf_chl_opt") || 
+                lowerHtml.contains("cf-challenge-running") || 
+                lowerHtml.contains("id=\"challenge-form\"") ||
+                lowerHtml.contains("id=\"cf-challenge-form\"") ||
+                lowerHtml.contains("just a moment...")) && 
                lowerHtml.contains("cloudflare")
+        if (isChallenge) {
+            println("[ChakPlay] 🚨 Cloudflare 보안 챌린지 감지됨")
+        }
+        return isChallenge
     }
 
     private suspend fun solveCloudflare(url: String): Pair<String, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
@@ -102,17 +106,6 @@ class TvchakProvider : MainAPI() {
             webView.settings.databaseEnabled = true
             webView.settings.userAgentString = userAgent
             
-            // [중요] 사용자가 직접 보안 체크박스를 누를 수 있도록 AlertDialog로 감싸서 유저 화면에 임시 노출
-            val dialog = android.app.AlertDialog.Builder(context)
-                .setTitle("티비착 우회 보안 검증")
-                .setMessage("잠시 기다리시거나 화면에 사람 모양 체크박스가 나타나면 눌러주세요.")
-                .setView(webView)
-                .setNegativeButton("취소") { d, _ ->
-                    d.dismiss()
-                    if (continuation.isActive) continuation.resume(null)
-                }
-                .create()
-            
             webView.webViewClient = object : android.webkit.WebViewClient() {
                 var solved = false
 
@@ -135,7 +128,6 @@ class TvchakProvider : MainAPI() {
                             continuation.resume(Pair(cookies, userAgent))
                         }
                         try {
-                            dialog.dismiss() // 성공 즉시 창 자동 폐쇄
                             webView.stopLoading()
                             webView.destroy()
                         } catch (e: Exception) {}
@@ -143,7 +135,6 @@ class TvchakProvider : MainAPI() {
                 }
             }
 
-            dialog.show()
             webView.loadUrl(url)
 
             val handler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -159,7 +150,6 @@ class TvchakProvider : MainAPI() {
                         continuation.resume(null)
                     }
                     try {
-                        dialog.dismiss()
                         webView.stopLoading()
                         webView.destroy()
                     } catch (e: Exception) {}
@@ -178,7 +168,6 @@ class TvchakProvider : MainAPI() {
                                 handler.removeCallbacks(timeoutRunnable)
                                 continuation.resume(Pair(cookies, userAgent))
                                 try {
-                                    dialog.dismiss()
                                     webView.stopLoading()
                                     webView.destroy()
                                 } catch (e: Exception) {}
@@ -196,7 +185,6 @@ class TvchakProvider : MainAPI() {
                 handler.removeCallbacks(timeoutRunnable)
                 handler.removeCallbacks(intervalRunnable)
                 try {
-                    dialog.dismiss()
                     webView.stopLoading()
                     webView.destroy()
                 } catch (e: Exception) {}
@@ -208,12 +196,12 @@ class TvchakProvider : MainAPI() {
         println("[ChakPlay] 📡 GET 요청 전송: $url")
         var res = app.get(url, headers = getHeaders(referer))
         
-        if (isCloudflareChallenge(res.text, res.code)) {
+        if (isCloudflareChallenge(res.text)) {
             println("[ChakPlay] 🧱 Cloudflare 장벽 도달. 우회 대기열 진입")
             
             cfMutex.withLock {
                 res = app.get(url, headers = getHeaders(referer))
-                if (!isCloudflareChallenge(res.text, res.code)) {
+                if (!isCloudflareChallenge(res.text)) {
                     println("[ChakPlay] 🚀 타 스레드 우회 완료 대기열 통과 -> $url")
                     return res
                 }
@@ -231,6 +219,7 @@ class TvchakProvider : MainAPI() {
             }
         }
         
+        // 시그니처 요소를 동반하여 파킹 및 차단 페이지를 가려내는 안전 감지 로그 적용
         val hasSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title") || res.text.contains("vod-search-list")
         if (res.isSuccessful && hasSignature) {
             println("[ChakPlay] 🟢 HTTP 응답 성공 및 실데이터 확인 완료 (코드: ${res.code})")
@@ -243,114 +232,98 @@ class TvchakProvider : MainAPI() {
     }
 
     private suspend fun checkAndUpdateDomain() {
-        println("[ChakPlay] [checkAndUpdateDomain] 1. 진입 완료 (isDomainChecked: $isDomainChecked, currentMainUrl: $currentMainUrl)")
-        if (isDomainChecked) {
-            println("[ChakPlay] [checkAndUpdateDomain] 2. 이미 검증 완료 상태(isDomainChecked == true)로 판단되어 즉시 리턴")
-            return
-        }
+        if (isDomainChecked) return
 
-        println("[ChakPlay] [checkAndUpdateDomain] 3. 뮤텍스 락 획득 대기 시작")
         domainMutex.withLock {
-            println("[ChakPlay] [checkAndUpdateDomain] 4. 뮤텍스 락 획득 완료 (락 내부 isDomainChecked: $isDomainChecked)")
-            if (isDomainChecked) {
-                println("[ChakPlay] [checkAndUpdateDomain] 5. 락 획득 후 중복 진입 방지 처리되어 리턴")
-                return@withLock
-            }
-            println("[ChakPlay] [checkAndUpdateDomain] 6. 도메인 검증 로직 본격 가동")
+            if (isDomainChecked) return@withLock
+            println("[ChakPlay] 🔍 액티브 도메인 유효성 검증")
 
             val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val rawCachedDomain = prefs?.getString(PREF_KEY, null)
             val cachedDomain = rawCachedDomain?.replace("http://", "https://")
-            println("[ChakPlay] [checkAndUpdateDomain] 7. 캐시 파일 분석 결과: rawCachedDomain=$rawCachedDomain, cachedDomain=$cachedDomain")
 
             if (cachedDomain != null) {
                 currentMainUrl = cachedDomain
                 mainUrl = currentMainUrl
-                println("[ChakPlay] [checkAndUpdateDomain] 8. 캐시된 도메인을 전역 변수에 바인딩 완료 -> currentMainUrl: $currentMainUrl")
+                println("[ChakPlay] 📂 캐시 도메인 정보 로드: $currentMainUrl")
             }
 
-            val testPath = "/"
-            println("[ChakPlay] [checkAndUpdateDomain] 9. 기본 도메인 검증 시도 -> 주소: $currentMainUrl$testPath")
+            val testPath = "/index.php/vod/show/id/1/page/1.html"
+            println("[ChakPlay] 🔄 기본 검증 시도 -> $currentMainUrl$testPath")
 
             try {
                 val res = app.get("$currentMainUrl$testPath", headers = getHeaders(), timeout = 3L)
-                val finalUrl = res.url.trimEnd('/')
+                val finalUrl = res.url.substringBefore("/index.php").trimEnd('/')
                 val hasSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title")
-                println("[ChakPlay] [checkAndUpdateDomain] 10. 기본 검증 결과 - 코드: ${res.code}, 시그니처 존재 여부: $hasSignature")
                 
-                if ((res.isSuccessful && hasSignature) || isCloudflareChallenge(res.text, res.code)) {
+                // 괄호를 적용하여 논리적 우선순위를 명확히 규정
+                if ((res.isSuccessful && hasSignature) || isCloudflareChallenge(res.text)) {
                     if (currentMainUrl != finalUrl && finalUrl.startsWith("http")) {
-                        println("[ChakPlay] [checkAndUpdateDomain] 11. 리다이렉트 발생 감지: $currentMainUrl -> $finalUrl")
+                        println("[ChakPlay] 🔄 리다이렉트 도메인 검출: $currentMainUrl -> $finalUrl")
                         saveDomain(finalUrl)
                         mainUrl = currentMainUrl
                     }
                     isDomainChecked = true
-                    println("[ChakPlay] [checkAndUpdateDomain] 12. 기본 도메인이 온전하므로 유지 확정 -> $mainUrl")
+                    println("[ChakPlay] ✅ 도메인 유지 확정 -> $mainUrl")
                     return@withLock
                 } else {
-                    println("[ChakPlay] [checkAndUpdateDomain] 13. 기본 도메인의 시그니처 검증 실패 (무효한 페이지 혹은 텔레그램 리다이렉트 상태)")
+                    println("[ChakPlay] ⚠️ 기본 도메인 무효화됨 (응답성공: ${res.isSuccessful}, 시그니처여부: $hasSignature)")
                 }
             } catch (e: Exception) { 
-                println("[ChakPlay] [checkAndUpdateDomain] 14. 기본 도메인 검증 시 예외 발생 -> 에러 메시지: ${e.message}") 
+                println("[ChakPlay] ❌ 접속 확인 불가: ${e.message}") 
             }
 
             val match = Regex("tvchak(\\d+)").find(currentMainUrl)
             val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 200
-            println("[ChakPlay] [checkAndUpdateDomain] 15. 브루트포스 대상 숫자 파싱 완료 -> startNum: $startNum")
+            println("[ChakPlay] 🚀 신규 도메인 브루트포스 개시 (시작 번호: $startNum)")
 
             var foundDomain: String? = null
 
-            println("[ChakPlay] [checkAndUpdateDomain] 16. 순차 탐색 루프(브루트포스) 개시")
             coroutineScope {
                 val candidates = (startNum..startNum + 50).map { "https://tvchak$it.com" }
                 val chunks = candidates.chunked(5)
-                println("[ChakPlay] [checkAndUpdateDomain] 17. 총 ${candidates.size}개의 후보군을 5개 단위 청크로 검증 시작")
 
-                for ((index, chunk) in chunks.withIndex()) {
-                    println("[ChakPlay] [checkAndUpdateDomain] 18. 청크 [${index + 1}/${chunks.size}] 병렬 실행 시작 -> 대상: $chunk")
+                for (chunk in chunks) {
                     val deferreds = chunk.map { testDomain ->
                         async {
                             val testUrl = "$testDomain$testPath"
-                            println("[ChakPlay] [checkAndUpdateDomain] 19. 후보 도메인 검증 요청 송신 -> $testUrl")
+                            // 현재 대입 시도 중인 도메인을 실시간으로 출력하도록 개선
+                            println("[ChakPlay] 🔄 도메인 후보 검증 시도 -> $testUrl")
                             try {
                                 val res = app.get(testUrl, headers = getHeaders(), timeout = 3L)
-                                val extractedFinalUrl = res.url.trimEnd('/')
+                                val extractedFinalUrl = res.url.substringBefore("/index.php").trimEnd('/')
                                 val testSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title")
-                                println("[ChakPlay] [checkAndUpdateDomain] 20. 후보 $testDomain 응답 결과 -> 코드: ${res.code}, 시그니처 존재 여부: $testSignature")
                                 
-                                if ((res.isSuccessful && testSignature) || isCloudflareChallenge(res.text, res.code)) {
-                                    println("[ChakPlay] [checkAndUpdateDomain] 21. 후보 $testDomain 유효 검증 성공!")
+                                if (res.isSuccessful && testSignature) {
+                                    println("[ChakPlay] 🎯 활성 도메인 확보: $extractedFinalUrl")
+                                    return@async extractedFinalUrl
+                                } else if (isCloudflareChallenge(res.text)) {
+                                    println("[ChakPlay] 🧱 Cloudflare 탐지 완료 도메인 확보: $extractedFinalUrl")
                                     return@async extractedFinalUrl
                                 }
-                            } catch (e: Exception) {
-                                println("[ChakPlay] [checkAndUpdateDomain] 22. 후보 $testDomain 예외 발생 -> 에러: ${e.message}")
-                            }
+                            } catch (e: Exception) {}
                             null
                         }
                     }
 
                     val results = deferreds.awaitAll()
                     foundDomain = results.firstOrNull { it != null }
-                    println("[ChakPlay] [checkAndUpdateDomain] 23. 청크 [${index + 1}/${chunks.size}] 결과 확인 -> foundDomain: $foundDomain")
 
-                    if (foundDomain != null) {
-                        println("[ChakPlay] [checkAndUpdateDomain] 24. 유효 도메인을 발견하여 청크 순회 조기 중단")
-                        break
-                    }
+                    if (foundDomain != null) break
                 }
             }
 
             if (foundDomain != null) {
-                println("[ChakPlay] [checkAndUpdateDomain] 25. 브루트포스 성공 -> 도메인 저장 진행: $foundDomain")
+                println("[ChakPlay] ✨ 신규 도메인 확정 저장: $foundDomain")
                 saveDomain(foundDomain!!)
                 mainUrl = currentMainUrl
                 isDomainChecked = true
-                println("[ChakPlay] [checkAndUpdateDomain] 26. 신규 도메인으로 가동 승인 완료")
                 return@withLock
             }
 
-            println("[ChakPlay] [checkAndUpdateDomain] 27. 💀 모든 탐색 실패. 복구 불가능 상태")
-            isDomainChecked = false
+            // 모든 경우의 수가 실패했을 때 확실한 피드백을 전달하도록 로그 수정
+            println("[ChakPlay] 💀 탐색 범주($startNum ~ ${startNum + 50}) 내 모든 접속 실패. 수동 검토가 필요합니다.")
+            isDomainChecked = true
         }
     }
 
