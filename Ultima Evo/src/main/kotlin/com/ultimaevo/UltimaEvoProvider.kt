@@ -194,13 +194,13 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
             val activeCatsJson = prefs.getString("evo_active_cats_json_$instanceId", "") ?: ""
             val savedConfigs: List<EvoCatalogConfig> = if (activeCatsJson.isNotBlank()) {
-                try { AppUtils.parseJson<List<EvoCatalogConfig>>(activeCatsJson) } catch (e: Exception) { emptyList() }
+                try { parseJson<List<EvoCatalogConfig>>(activeCatsJson) } catch (e: Exception) { emptyList() }
             } else emptyList()
 
             val savedSet = savedConfigs.map { "${it.providerName}:::${it.originalCatalogName}" }.toSet()
 
             savedConfigs.forEach { config ->
-                val combinedData = AppUtils.toJson(config)
+                val combinedData = config.toJson()
                 pages.add(Pair(MainPageData(config.customCatalogName, combinedData), config.orderIndex))
             }
 
@@ -221,7 +221,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                                 val customName = prefs.getString("cat_rename_${instanceId}_${p.name}_$cName", cName) ?: cName
                                 val origData = p.mainPage.find { it.name == cName }?.data ?: ""
                                 val newConfig = EvoCatalogConfig(p.name, cName, customName, origData, dynamicOrder)
-                                val combinedData = AppUtils.toJson(newConfig)
+                                val combinedData = newConfig.toJson()
                                 pages.add(Pair(MainPageData(customName, combinedData), dynamicOrder))
                                 dynamicOrder++
                             }
@@ -238,7 +238,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         applyAdBlockPatch() 
         return withContext(Dispatchers.IO) {
             try {
-                val config = AppUtils.parseJson<EvoCatalogConfig>(request.data)
+                val config = parseJson<EvoCatalogConfig>(request.data)
                 if (config == null) return@withContext newHomePageResponse(emptyList(), false)
 
                 val targetProvider = APIHolder.allProviders.find { it.name == config.providerName } 
@@ -297,7 +297,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         if (activeCatsJson.isBlank()) return emptyList()
 
         val providersToSearch = try {
-            val configs: List<EvoCatalogConfig> = AppUtils.parseJson<List<EvoCatalogConfig>>(activeCatsJson)
+            val configs: List<EvoCatalogConfig> = parseJson<List<EvoCatalogConfig>>(activeCatsJson)
             configs.map { it.providerName }.distinct()
         } catch (e: Exception) {
             e.printStackTrace()
