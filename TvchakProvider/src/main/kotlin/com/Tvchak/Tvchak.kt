@@ -19,7 +19,6 @@ class TvchakProvider : MainAPI() {
     companion object {
         var currentMainUrl = "https://tvchak200.com"
         var isDomainChecked = false
-        private var lastCheckTime = 0L // 마지막으로 도메인 검증을 실제로 구동한 타임스탬프
         private val domainMutex = Mutex()
         private val cfMutex = Mutex()
         private const val PREFS_NAME = "TvChak_Domain_Cache"
@@ -232,28 +231,19 @@ class TvchakProvider : MainAPI() {
     }
 
     private suspend fun checkAndUpdateDomain() {
-        val now = System.currentTimeMillis()
         println("[ChakPlay] [checkAndUpdateDomain] 1. 진입 완료 (isDomainChecked: $isDomainChecked, currentMainUrl: $currentMainUrl)")
-        
-        // 탐색에 실패한 상황(isDomainChecked == false)이더라도 30초의 최소 쿨다운을 두어 쓰레드 폭풍 방지
-        val cooldown = if (isDomainChecked) 600000L else 30000L
-        if (now - lastCheckTime < cooldown) {
-            println("[ChakPlay] [checkAndUpdateDomain] 2. 쿨다운 대기 시간 미충족으로 패스 (경과: ${now - lastCheckTime}ms / 제한: ${cooldown}ms)")
+        if (isDomainChecked) {
+            println("[ChakPlay] [checkAndUpdateDomain] 2. 이미 검증 완료 상태(isDomainChecked == true)로 판단되어 즉시 리턴")
             return
         }
 
         println("[ChakPlay] [checkAndUpdateDomain] 3. 뮤텍스 락 획득 대기 시작")
         domainMutex.withLock {
-            val lockNow = System.currentTimeMillis()
             println("[ChakPlay] [checkAndUpdateDomain] 4. 뮤텍스 락 획득 완료 (락 내부 isDomainChecked: $isDomainChecked)")
-            
-            val lockCooldown = if (isDomainChecked) 600000L else 30000L
-            if (lockNow - lastCheckTime < lockCooldown) {
-                println("[ChakPlay] [checkAndUpdateDomain] 5. 락 대기 중 쿨다운이 갱신되어 리턴")
+            if (isDomainChecked) {
+                println("[ChakPlay] [checkAndUpdateDomain] 5. 락 획득 후 중복 진입 방지 처리되어 리턴")
                 return@withLock
             }
-            
-            lastCheckTime = lockNow
             println("[ChakPlay] [checkAndUpdateDomain] 6. 도메인 검증 로직 본격 가동")
 
             val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -267,12 +257,13 @@ class TvchakProvider : MainAPI() {
                 println("[ChakPlay] [checkAndUpdateDomain] 8. 캐시된 도메인을 전역 변수에 바인딩 완료 -> currentMainUrl: $currentMainUrl")
             }
 
-            val testPath = "/index.php/vod/show/id/1/page/1.html"
+            // 가짜 404 및 보안 필터 오진을 피하기 위해 최우선적으로 홈 화면 주소("/")를 검증용 testPath로 적용
+            val testPath = "/"
             println("[ChakPlay] [checkAndUpdateDomain] 9. 기본 도메인 검증 시도 -> 주소: $currentMainUrl$testPath")
 
             try {
                 val res = app.get("$currentMainUrl$testPath", headers = getHeaders(), timeout = 3L)
-                val finalUrl = res.url.substringBefore("/index.php").trimEnd('/')
+                val finalUrl = res.url.trimEnd('/')
                 val hasSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title")
                 println("[ChakPlay] [checkAndUpdateDomain] 10. 기본 검증 결과 - 코드: ${res.code}, 시그니처 존재 여부: $hasSignature")
                 
@@ -292,6 +283,7 @@ class TvchakProvider : MainAPI() {
                 println("[ChakPlay] [checkAndUpdateDomain] 14. 기본 도메인 검증 시 예외 발생 -> 에러 메시지: ${e.message}") 
             }
 
+            // 불필요한 오버엔지니어링 코드를 전부 걷어내고 정석대로 오직 숫자만 순차 분석하도록 롤백
             val match = Regex("tvchak(\\d+)").find(currentMainUrl)
             val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 200
             println("[ChakPlay] [checkAndUpdateDomain] 15. 브루트포스 대상 숫자 파싱 완료 -> startNum: $startNum")
@@ -300,7 +292,7 @@ class TvchakProvider : MainAPI() {
 
             println("[ChakPlay] [checkAndUpdateDomain] 16. 순차 탐색 루프(브루트포스) 개시")
             coroutineScope {
-                val candidates = (startNum..startNum + 50).map { "https://tvchak$it.com" }
+                val candidates = (startNum..startNum + 100).map { "https://tvchak$it.com" }
                 val chunks = candidates.chunked(5)
                 println("[ChakPlay] [checkAndUpdateDomain] 17. 총 ${candidates.size}개의 후보군을 5개 단위 청크로 분할하여 검증 시작")
 
@@ -312,7 +304,7 @@ class TvchakProvider : MainAPI() {
                             println("[ChakPlay] [checkAndUpdateDomain] 19. 후보 도메인 검증 요청 송신 -> $testUrl")
                             try {
                                 val res = app.get(testUrl, headers = getHeaders(), timeout = 3L)
-                                val extractedFinalUrl = res.url.substringBefore("/index.php").trimEnd('/')
+                                val extractedFinalUrl = res.url.trimEnd('/')
                                 val testSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title")
                                 println("[ChakPlay] [checkAndUpdateDomain] 20. 후보 $testDomain 응답 결과 -> 코드: ${res.code}, 시그니처 존재 여부: $testSignature")
                                 
@@ -348,7 +340,7 @@ class TvchakProvider : MainAPI() {
             }
 
             println("[ChakPlay] [checkAndUpdateDomain] 27. 💀 모든 탐색 실패. 복구 불가능 상태")
-            // 모든 브루트포스 탐색이 완벽히 실패했을 때만 플래그를 false로 유지해 새로고침 시 다시 돌 수 있도록 보완
+            // 다른 4개 플러그인과 동일하게, 최종 실패 시에는 플래그를 false로 유지해 새로고침 시 도메인 재탐색 시도가 가능하도록 설계
             isDomainChecked = false
         }
     }
