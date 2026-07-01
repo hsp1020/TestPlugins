@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.nicehttp.NiceResponse
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
@@ -64,11 +65,10 @@ class TvchakProvider : MainAPI() {
         return headers
     }
 
-    // 보안 장벽(AWS WAF / Cloudflare) 탐지기 고도화 (오진 차단 필터 및 AWS WAF 시그니처 추가)
+    // 보안 장벽(AWS WAF / Cloudflare) 감지기 (오진 필터링 포함)
     private fun isWebAccessChallenge(html: String, code: Int): Boolean {
         val lowerHtml = html.lowercase()
         
-        // 공용 JS CDN 링크 등으로 인해 핵심 키워드가 잡혀서 오진하는 상황 차단
         val cleanHtml = lowerHtml
             .replace("cdnjs.cloudflare.com", "")
             .replace("ajax.cloudflare.com", "")
@@ -88,122 +88,6 @@ class TvchakProvider : MainAPI() {
         return code == 202 || hasAwsWaf || hasCf
     }
 
-    // 보안 챌린지 해결 전용 웹뷰 솔버 (AWS WAF / Cloudflare 쿠키 가로채기 통합 대응)
-    private suspend fun solveChallenge(url: String): Pair<String, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-        val context = try {
-            Class.forName("android.app.ActivityThread")
-                .getMethod("currentApplication")
-                .invoke(null) as? android.content.Context
-        } catch (e: Exception) {
-            println("[ChakPlay] ❌ 보안 우회 시도 중 Context 획득 실패")
-            null
-        } ?: return@withContext null
-
-        println("[ChakPlay] 🛡️ 보안 우회 웹뷰 기동 -> URL: $url")
-
-        try {
-            val cookieManager = android.webkit.CookieManager.getInstance()
-            cookieManager.removeAllCookies(null)
-            cookieManager.flush()
-            println("[ChakPlay] 🧹 우회용 웹뷰 기존 캐시 쿠키 제거 완료")
-        } catch (e: Exception) {
-            println("[ChakPlay] ⚠️ 쿠키 초기화 실패: ${e.message}")
-        }
-
-        suspendCancellableCoroutine<Pair<String, String>?> { continuation ->
-            val webView = android.webkit.WebView(context)
-            webView.settings.javaScriptEnabled = true
-            webView.settings.domStorageEnabled = true
-            webView.settings.databaseEnabled = true
-            webView.settings.userAgentString = userAgent
-            
-            webView.webViewClient = object : android.webkit.WebViewClient() {
-                var solved = false
-
-                override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
-                    super.onPageFinished(view, url)
-                    if (url == null) return
-                    checkCookies(url)
-                }
-
-                fun checkCookies(currentUrl: String) {
-                    if (solved) return
-                    val cookieManager = android.webkit.CookieManager.getInstance()
-                    val cookies = cookieManager.getCookie(currentUrl) ?: ""
-                    println("[ChakPlay] 🍪 실시간 쿠키 수집 중... (길이: ${cookies.length})")
-
-                    // AWS WAF Token(aws-waf-token) 또는 Cloudflare Clearance(cf_clearance) 감지 시 성공 판단
-                    if (cookies.contains("cf_clearance") || cookies.contains("aws-waf-token")) {
-                        solved = true
-                        println("[ChakPlay] ✅ 성공: 유효 보안 쿠키(CF/AWS WAF) 획득 완료!")
-                        if (continuation.isActive) {
-                            continuation.resume(Pair(cookies, userAgent))
-                        }
-                        try {
-                            webView.stopLoading()
-                            webView.destroy()
-                        } catch (e: Exception) {}
-                    }
-                }
-            }
-
-            webView.loadUrl(url)
-
-            val handler = android.os.Handler(android.os.Looper.getMainLooper())
-            val timeoutRunnable = Runnable {
-                if (continuation.isActive) {
-                    println("[ChakPlay] ⏰ 우회 웹뷰 15초 타임아웃 발생")
-                    val cookieManager = android.webkit.CookieManager.getInstance()
-                    val cookies = cookieManager.getCookie(url) ?: ""
-                    if (cookies.contains("cf_clearance") || cookies.contains("aws-waf-token")) {
-                        println("[ChakPlay] 🍀 타임아웃 도달 직전 수집된 쿠키 반환 시도")
-                        continuation.resume(Pair(cookies, userAgent))
-                    } else {
-                        continuation.resume(null)
-                    }
-                    try {
-                        webView.stopLoading()
-                        webView.destroy()
-                    } catch (e: Exception) {}
-                }
-            }
-            handler.postDelayed(timeoutRunnable, 15000)
-
-            val intervalRunnable = object : Runnable {
-                override fun run() {
-                    if (continuation.isActive) {
-                        webView.url?.let { currentUrl ->
-                            val cookieManager = android.webkit.CookieManager.getInstance()
-                            val cookies = cookieManager.getCookie(currentUrl) ?: ""
-                            if (cookies.contains("cf_clearance") || cookies.contains("aws-waf-token")) {
-                                println("[ChakPlay] ✅ 성공 (인터벌 체크): 보안 쿠키 검출 완료")
-                                handler.removeCallbacks(timeoutRunnable)
-                                continuation.resume(Pair(cookies, userAgent))
-                                try {
-                                    webView.stopLoading()
-                                    webView.destroy()
-                                } catch (e: Exception) {}
-                                return
-                            }
-                        }
-                        handler.postDelayed(this, 1500)
-                    }
-                }
-            }
-            handler.postDelayed(intervalRunnable, 1500)
-
-            continuation.invokeOnCancellation {
-                println("[ChakPlay] 🛑 우회 코루틴 취소됨 -> 자원 정리")
-                handler.removeCallbacks(timeoutRunnable)
-                handler.removeCallbacks(intervalRunnable)
-                try {
-                    webView.stopLoading()
-                    webView.destroy()
-                } catch (e: Exception) {}
-            }
-        }
-    }
-
     private suspend fun safeGet(url: String, referer: String? = null): NiceResponse {
         println("[ChakPlay] 📡 GET 요청 전송: $url")
         var res = app.get(url, headers = getHeaders(referer))
@@ -219,7 +103,7 @@ class TvchakProvider : MainAPI() {
             println(res.text)
             println("[ChakPlay] 📄 [보안 장벽 감지 페이지 소스 출력 종료]")
 
-            println("[ChakPlay] 🧱 우회 대기열 진입")
+            println("[ChakPlay] 🧱 WebViewResolver 인터셉터를 통한 보안 우회 가동 -> $url")
             
             cfMutex.withLock {
                 res = app.get(url, headers = getHeaders(referer))
@@ -228,22 +112,31 @@ class TvchakProvider : MainAPI() {
                     return res
                 }
 
-                println("[ChakPlay] 🔒 대표 대기열 진입: 우회 직접 처리 시작")
-                
-                // [반영 사항]: 실제 차단이 이루어진 경로(url)로 우회를 가동하도록 매핑
-                val bypass = solveChallenge(url)
-                if (bypass != null) {
-                    cfCookies = bypass.first
-                    cfUserAgent = bypass.second
-                    println("[ChakPlay] 🔓 우회 성공. 헤더 갱신 후 재요청")
-                    res = app.get(url, headers = getHeaders(referer))
-                } else {
-                    println("[ChakPlay] ❌ 우회 처리 실패")
+                // [리팩토링 반영]: 프레임워크 공식 WebViewResolver 적용하여 우회 진행
+                try {
+                    val resolver = WebViewResolver(Regex("tvchak"), timeout = 15000L)
+                    res = app.get(url, headers = getHeaders(referer), interceptor = resolver)
+                    
+                    // NiceHttp와 Android WebView의 쿠키 자동 동기화 예외에 대비해 헤더 쿠키 수동 대입 보강
+                    val cookieManager = android.webkit.CookieManager.getInstance()
+                    val cookies = cookieManager.getCookie(url) ?: ""
+                    if (cookies.isNotEmpty()) {
+                        cfCookies = cookies
+                        println("[ChakPlay] 🍪 우회 완료 후 실시간 수집된 쿠키 갱신 (길이: ${cookies.length})")
+                    }
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    println("[ChakPlay] ❌ WebViewResolver 우회 처리 중 에러 발생: ${e.message}")
                 }
             }
         }
         
-        val hasSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title") || res.text.contains("vod-search-list")
+        // [반영 사항]: 메인 감지 로직 및 확인 루프의 요소 선택식을 OR(||) 구조로 극대화 적용
+        val hasSignature = res.text.contains("movie-list-item") || 
+                           res.text.contains("movie-title") || 
+                           res.text.contains("movie-list-body") || 
+                           res.text.contains("vod-search-list")
+                           
         if (res.isSuccessful && hasSignature) {
             println("[ChakPlay] 🟢 HTTP 응답 성공 및 실데이터 확인 완료 (코드: ${res.code})")
         } else if (res.isSuccessful) {
@@ -281,14 +174,19 @@ class TvchakProvider : MainAPI() {
                 println("[ChakPlay] [checkAndUpdateDomain] 8. 캐시된 도메인을 전역 변수에 바인딩 완료 -> currentMainUrl: $currentMainUrl")
             }
 
-            // 가짜 404 및 보안 필터 오진을 피하기 위해 최우선적으로 홈 화면 주소("/")를 검증용 testPath로 적용
             val testPath = "/"
             println("[ChakPlay] [checkAndUpdateDomain] 9. 기본 도메인 검증 시도 -> 주소: $currentMainUrl$testPath")
 
             try {
                 val res = app.get("$currentMainUrl$testPath", headers = getHeaders(), timeout = 3L)
                 val finalUrl = res.url.trimEnd('/')
-                val hasSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title")
+                
+                // [반영 사항]: 요소 판별식을 OR(||)로 보강하여 감지율 최적화
+                val hasSignature = res.text.contains("movie-list-item") || 
+                                   res.text.contains("movie-title") || 
+                                   res.text.contains("movie-list-body") || 
+                                   res.text.contains("vod-search-list")
+                                   
                 println("[ChakPlay] [checkAndUpdateDomain] 10. 기본 검증 결과 - 코드: ${res.code}, 시그니처 존재 여부: $hasSignature")
                 
                 if ((res.isSuccessful && hasSignature) || isWebAccessChallenge(res.text, res.code)) {
@@ -328,7 +226,13 @@ class TvchakProvider : MainAPI() {
                             try {
                                 val res = app.get(testUrl, headers = getHeaders(), timeout = 3L)
                                 val extractedFinalUrl = res.url.trimEnd('/')
-                                val testSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title")
+                                
+                                // [반영 사항]: 브루트포스 검증 또한 OR(||) 조건으로 강화
+                                val testSignature = res.text.contains("movie-list-item") || 
+                                                    res.text.contains("movie-title") || 
+                                                    res.text.contains("movie-list-body") || 
+                                                    res.text.contains("vod-search-list")
+                                                    
                                 println("[ChakPlay] [checkAndUpdateDomain] 20. 후보 $testDomain 응답 결과 -> 코드: ${res.code}, 시그니처 존재 여부: $testSignature")
                                 
                                 if ((res.isSuccessful && testSignature) || isWebAccessChallenge(res.text, res.code)) {
