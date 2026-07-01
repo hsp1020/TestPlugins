@@ -23,7 +23,6 @@ class StremioCPlugin : Plugin() {
     private val PREF_FILE = "StremioC"
     private val PREF_KEY_LINKS = "stremio_saved_links"
 
-    // ── [V2 최적화 기생 엔진] JSONObject -> SharedPreferences 정밀 복원 헬퍼 ──
     private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
         val keys = json.keys()
         while (keys.hasNext()) {
@@ -46,26 +45,29 @@ class StremioCPlugin : Plugin() {
         }
     }
 
-    // ── [V2 최적화 기생 엔진] 자동 동기화 로직 (복원 전용, 백그라운드 처리) ──
     private fun autoSyncNativeBackup(context: Context) {
         val appContext = context.applicationContext
         
-        // 🚨 메인 스레드 렉(프리징) 방지를 위해 백그라운드 IO 스레드로 완전히 격리
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                // 1. StremioC 순정 백업 연동 (로컬 데이터가 비어있을 때만 복원)
+                println("🚨🚨🚨 [StremioC-AutoSync] V2 기생 엔진 백그라운드 시작됨! 🚨🚨🚨")
+                
                 val stremioCPrefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
                 if (stremioCPrefs.all.isEmpty()) {
+                    println("🚨🚨🚨 [StremioC-AutoSync] 로컬 데이터 없음. DataStore 복원 시도... 🚨🚨🚨")
                     val nativeStremioC = try { CloudStreamApp.getKey<String>("native_backup_stremioc") } catch (e: Exception) { null }
                     if (!nativeStremioC.isNullOrEmpty()) {
                         val editor = stremioCPrefs.edit()
                         jsonToPrefs(JSONObject(nativeStremioC), editor)
                         editor.commit()
-                        println("[StremioC-AutoSync] 순정 백업에서 StremioC 데이터 복원 완료")
+                        println("🚨🚨🚨 [StremioC-AutoSync] 순정 백업에서 StremioC 데이터 복원 완료! 🚨🚨🚨")
+                    } else {
+                        println("🚨🚨🚨 [StremioC-AutoSync] DataStore에도 백업 데이터가 없습니다. 🚨🚨🚨")
                     }
+                } else {
+                    println("🚨🚨🚨 [StremioC-AutoSync] 로컬 데이터가 이미 존재하여 복원을 스킵합니다. 🚨🚨🚨")
                 }
 
-                // 2. StreamPlay 순정 백업 기생 연동 (로컬 데이터가 비어있을 때만 복원)
                 val streamPlayPrefs = appContext.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
                 if (streamPlayPrefs.all.isEmpty()) {
                     val nativeStreamPlay = try { CloudStreamApp.getKey<String>("native_backup_streamplay") } catch (e: Exception) { null }
@@ -73,11 +75,11 @@ class StremioCPlugin : Plugin() {
                         val editor = streamPlayPrefs.edit()
                         jsonToPrefs(JSONObject(nativeStreamPlay), editor)
                         editor.commit()
-                        println("[StremioC-AutoSync] 순정 백업에서 StreamPlay 데이터 복원 완료")
+                        println("🚨🚨🚨 [StremioC-AutoSync] 순정 백업에서 StreamPlay 데이터 복원 완료! 🚨🚨🚨")
                     }
                 }
             } catch (e: Exception) {
-                println("[StremioC-AutoSync] 동기화 중 오류 발생: ${e.message}")
+                println("🚨🚨🚨 [StremioC-AutoSync] 동기화 중 오류 발생: ${e.message} 🚨🚨🚨")
             }
         }
     }
