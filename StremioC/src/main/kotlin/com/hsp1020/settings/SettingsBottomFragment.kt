@@ -1602,10 +1602,8 @@ class SettingsBottomFragment(
         adapter.updateVisibleTabs()
         rv.adapter = adapter
 
+
         val touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
-            override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: Reflection.ViewHolder): Boolean {
-                return false
-            }
             override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
                 val fromPos = viewHolder.adapterPosition
                 val toPos = target.adapterPosition
