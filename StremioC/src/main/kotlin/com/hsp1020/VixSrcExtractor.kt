@@ -10,13 +10,15 @@ import kotlinx.coroutines.CancellationException
 
 object VixSrcExtractor {
 
-    // 🔥 [최적화] 매 호출마다 재생성되던 무거운 정규식을 상수로 분리하여 CPU/메모리 부하 완벽 제거
     private val EMBED_REGEX = """(/embed/(\d+)[^"'\s]*)""".toRegex()
     private val MASTER_PLAYLIST_REGEX = """window\.masterPlaylist\s*=\s*(\{.*?\})""".toRegex()
     private val TOKEN_REGEX_1 = """["']?token["']?\s*[:=]\s*["']([^"']+)["']""".toRegex()
     private val EXPIRY_REGEX_1 = """["']?expir(?:es|y)["']?\s*[:=]\s*["']?(\d+)["']?""".toRegex()
     private val TOKEN_REGEX_2 = """["']?token["']?\s*[:=]\s*["']([a-fA-F0-9]{32})["']""".toRegex()
     private val EXPIRY_REGEX_2 = """["']?expir(?:es|y)["']?\s*[:=]\s*["']?(\d{10,})["']?""".toRegex()
+    
+    // [추가] b 파라미터를 파싱하기 위한 정규식
+    private val B_REGEX = """["']?b["']?\s*[:=]\s*["']?(\d+)["']?""".toRegex()
 
     suspend fun invokeVixSrc(
         loadData: StremioC.LoadData,
@@ -65,33 +67,42 @@ object VixSrcExtractor {
             
             var masterPlaylistUrl: String? = null
 
-            // 3. window.masterPlaylist 객체 직접 추출
+            // 3. window.masterPlaylist 객체 직접 추출 및 b값 동적 매칭
             val masterPlaylistMatch = MASTER_PLAYLIST_REGEX.find(embedHtml)?.groupValues?.get(1)
             
+            var token: String? = null
+            var expires: String? = null
+            var bVal: String? = null
+
             if (masterPlaylistMatch != null) {
-                val token = TOKEN_REGEX_1.find(masterPlaylistMatch)?.groupValues?.get(1)
-                val expires = EXPIRY_REGEX_1.find(masterPlaylistMatch)?.groupValues?.get(1)
-                
-                if (token != null && expires != null) {
-                    masterPlaylistUrl = "$baseUrl/playlist/$actualVid?token=$token&expires=$expires&h=1&lang=en"
-                }
+                token = TOKEN_REGEX_1.find(masterPlaylistMatch)?.groupValues?.get(1)
+                expires = EXPIRY_REGEX_1.find(masterPlaylistMatch)?.groupValues?.get(1)
+                bVal = B_REGEX.find(masterPlaylistMatch)?.groupValues?.get(1)
             } else {
-                val token = TOKEN_REGEX_2.find(embedHtml)?.groupValues?.get(1)
-                val expires = EXPIRY_REGEX_2.find(embedHtml)?.groupValues?.get(1)
-                
-                if (token != null && expires != null) {
-                    masterPlaylistUrl = "$baseUrl/playlist/$actualVid?token=$token&expires=$expires&h=1&lang=en"
-                }
+                token = TOKEN_REGEX_2.find(embedHtml)?.groupValues?.get(1)
+                expires = EXPIRY_REGEX_2.find(embedHtml)?.groupValues?.get(1)
+                bVal = B_REGEX.find(embedHtml)?.groupValues?.get(1)
+            }
+
+            if (token != null && expires != null) {
+                // [변경] b 파라미터가 정상적으로 검출되었다면 주소에 병합합니다.
+                val bParam = if (bVal != null) "b=$bVal&" else ""
+                masterPlaylistUrl = "$baseUrl/playlist/$actualVid?${bParam}token=$token&expires=$expires&h=1&lang=en"
             }
 
             // 4. 플레이어가 영상과 사운드 트랙을 스스로 믹싱할 수 있도록 마스터 링크 직접 전송!
             if (masterPlaylistUrl != null) {
                 println("[STREMIOSUB-VIXSRC] ⚡ SUCCESS! Final Playlist URL: $masterPlaylistUrl")
                 
+                // [변경] ExoPlayer가 영상 파일을 요청할 때는 부모 페이지가 아닌 실제 iframe인 embedUrl을 Referer로 설정합니다.
+                val playerHeaders = commonHeaders.toMutableMap().apply {
+                    put("Referer", embedUrl)
+                }
+
                 callback.invoke(
                     newExtractorLink("VixSrc", "VixSrc", masterPlaylistUrl, ExtractorLinkType.M3U8) {
                         this.quality = Qualities.P1080.value
-                        this.headers = commonHeaders
+                        this.headers = playerHeaders // 변경된 헤더 적용
                     }
                 )
             } else {
@@ -103,7 +114,7 @@ object VixSrcExtractor {
             throw c
         } catch (e: Exception) {
             println("[STREMIOSUB-VIXSRC] Crash: ${e.message}")
-            e.printStackTrace() // 🔥 [개선] 침묵하던 예외를 디버깅 가능하도록 수정
+            e.printStackTrace()
         }
     }
 }
