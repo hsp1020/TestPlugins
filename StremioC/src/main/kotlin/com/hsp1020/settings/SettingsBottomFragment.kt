@@ -947,7 +947,6 @@ class SettingsBottomFragment(
             val switchStreamPlay = view.findView<Switch>("switchStreamPlay")
             val switchVixSrc = view.findView<Switch>("switchVixSrc")
 
-            // 플랫폼 규격에 맞춰 명시적으로 SharedPreferences.Editor 트랜잭션 수동 진행
             val editor = sharedPref.edit()
             editor.putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, tmdbApiKeyVal)
             editor.putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim())
@@ -1211,7 +1210,7 @@ class SettingsBottomFragment(
                 val isSelected = code == selectedCode
                 holder.tvName.text = langName
                 holder.tvName.setTextColor(if (isSelected) Color.parseColor("#FF5555") else Color.WHITE) 
-                holder.tvCheck.visibility = if (isSelected) View.VISIBLE else View.GONE
+                holder.tvCheck.visibility = if (isSelected) View.GONE else View.GONE
                 
                 holder.view.setOnClickListener {
                     onClick(code)
@@ -1604,6 +1603,9 @@ class SettingsBottomFragment(
         rv.adapter = adapter
 
         val touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
+            override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: Reflection.ViewHolder): Boolean {
+                return false
+            }
             override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
                 val fromPos = viewHolder.adapterPosition
                 val toPos = target.adapterPosition
