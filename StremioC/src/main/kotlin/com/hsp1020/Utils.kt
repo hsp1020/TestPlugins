@@ -1,7 +1,7 @@
 // 파일명: hsp1020/Utils.kt
 package com.hsp1020
 
-import com.google.gson.annotations.SerializedName
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.APIHolder.unixTimeMS
 import com.lagradost.cloudstream3.mvvm.logError
@@ -41,8 +41,6 @@ private val RATING_SOURCES = mapOf(
     "rogerebert" to RatingMeta("RE", "👍", 10),
     "re" to RatingMeta("RE", "👍", 10)
 )
-
-// 🔥 [V3 패치] 캐시 스탬피드를 유발하던 미사용 자석 링크(Magnet) 트래커 변수 완전 폐기
 
 suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<String> {
     if (id.isNullOrBlank()) return emptyList()
@@ -136,17 +134,15 @@ fun fixUrl(url: String, domain: String): String {
 }
 
 data class TorrentioResponse(
-    @SerializedName("streams") val streams: List<TorrentioStream> = emptyList()
+    @JsonProperty("streams") val streams: List<TorrentioStream> = emptyList()
 )
 
 data class TorrentioStream(
-    @SerializedName("name") val name: String? = null, 
-    @SerializedName("title") val title: String? = null, 
-    @SerializedName("infoHash") val infoHash: String? = null, 
-    @SerializedName("fileIdx") val fileIdx: Int? = null
+    @JsonProperty("name") val name: String? = null, 
+    @JsonProperty("title") val title: String? = null, 
+    @JsonProperty("infoHash") val infoHash: String? = null, 
+    @JsonProperty("fileIdx") val fileIdx: Int? = null
 )
-
-// 🔥 [V3 패치]generateMagnetLink 함수 완전 삭제
 
 suspend fun fetchTmdbLogoUrl(
     tmdbAPI: String, 
