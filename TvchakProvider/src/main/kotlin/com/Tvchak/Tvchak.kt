@@ -64,15 +64,22 @@ class TvchakProvider : MainAPI() {
         return headers
     }
 
-    // 202 상태 코드 및 우회 장벽에 쓰이는 Turnstile 키워드 대응 탐지기 강화
+    // 202 상태 코드 및 우회 장벽에 쓰이는 Turnstile 키워드 대응 탐지기 (CDN 라이브러리 오진 차단 필터 적용)
     private fun isCloudflareChallenge(html: String, code: Int): Boolean {
         val lowerHtml = html.lowercase()
+        
+        // 공용 JS CDN 링크 등으로 인해 'cloudflare' 또는 'turnstile' 단어가 잡히는 오진 방지
+        val cleanHtml = lowerHtml
+            .replace("cdnjs.cloudflare.com", "")
+            .replace("ajax.cloudflare.com", "")
+            .replace("templates.cloudflare.com", "")
+
         return code == 202 || 
-               lowerHtml.contains("window._cf_chl_opt") || 
-               lowerHtml.contains("cf-challenge") || 
-               lowerHtml.contains("just a moment...") ||
-               lowerHtml.contains("turnstile") ||
-               lowerHtml.contains("cloudflare")
+               cleanHtml.contains("window._cf_chl_opt") || 
+               cleanHtml.contains("cf-challenge") || 
+               cleanHtml.contains("just a moment...") ||
+               cleanHtml.contains("turnstile") ||
+               cleanHtml.contains("cloudflare")
     }
 
     private suspend fun solveCloudflare(url: String): Pair<String, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
@@ -194,7 +201,18 @@ class TvchakProvider : MainAPI() {
         var res = app.get(url, headers = getHeaders(referer))
         
         if (isCloudflareChallenge(res.text, res.code)) {
-            println("[ChakPlay] 🧱 Cloudflare 장벽 도달. 우회 대기열 진입")
+            println("[ChakPlay] 🧱 Cloudflare 장벽 도달 감지. (상태코드: ${res.code})")
+            
+            // 실제 클라우드플레어 보안페이지가 맞는지 소스 분석용 디버그 출력 추가
+            println("[ChakPlay] 📄 [CF 감지 상세 헤더 출력 시작]")
+            println(res.headers.toString())
+            println("[ChakPlay] 📄 [CF 감지 상세 헤더 출력 종료]")
+            
+            println("[ChakPlay] 📄 [CF 감지 페이지 소스 출력 시작]")
+            println(res.text)
+            println("[ChakPlay] 📄 [CF 감지 페이지 소스 출력 종료]")
+
+            println("[ChakPlay] 🧱 우회 대기열 진입")
             
             cfMutex.withLock {
                 res = app.get(url, headers = getHeaders(referer))
@@ -204,7 +222,9 @@ class TvchakProvider : MainAPI() {
                 }
 
                 println("[ChakPlay] 🔒 대표 대기열 진입: 우회 직접 처리 시작")
-                val bypass = solveCloudflare(mainUrl)
+                
+                // [반영 사항 1]: 메인 홈 주소(mainUrl) 대신 실제 차단이 발생한 대상 주소(url)를 넘겨 웹뷰가 동일 챌린지를 마주하도록 수정
+                val bypass = solveCloudflare(url)
                 if (bypass != null) {
                     cfCookies = bypass.first
                     cfUserAgent = bypass.second
