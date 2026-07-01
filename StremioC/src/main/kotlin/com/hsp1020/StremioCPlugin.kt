@@ -1,3 +1,4 @@
+// 파일명: hsp1020/StremioCPlugin.kt
 package com.hsp1020
 
 import android.content.Context
@@ -23,7 +24,6 @@ class StremioCPlugin : Plugin() {
     private val PREF_FILE = "StremioC"
     private val PREF_KEY_LINKS = "stremio_saved_links"
 
-    // SharedPreferences 직렬화 유틸리티 (타입 안전성 확보)
     private fun prefsToJson(prefs: SharedPreferences): JSONObject {
         val json = JSONObject()
         prefs.all.forEach { (key, value) ->
@@ -40,7 +40,6 @@ class StremioCPlugin : Plugin() {
         return json
     }
 
-    // SharedPreferences 역직렬화 유틸리티 (ClassCastException 원천 방지)
     private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
         val keys = json.keys()
         while (keys.hasNext()) {
@@ -63,6 +62,10 @@ class StremioCPlugin : Plugin() {
         }
     }
 
+    private fun String.toUniqueKeyLocal(): String {
+        return this.lowercase().filter { it.isLetter() }
+    }
+
     override fun load(context: Context) {
         println("[StremioCPlugin v3.0-TRACKING] load() 함수 호출됨")
         val appContext = context.applicationContext
@@ -82,10 +85,9 @@ class StremioCPlugin : Plugin() {
                 val incomingHash = stremioCBackupStr.hashCode().toString()
 
                 if (!localComplete || localHash != incomingHash) {
-                    val json = JSONObject(stremioCBackupStr)
                     val editor = stremioCPrefs.edit()
-                    editor.clear() // 무손실 덮어쓰기 보장
-                    jsonToPrefs(json, editor)
+                    editor.clear() 
+                    jsonToPrefs(JSONObject(stremioCBackupStr), editor)
                     editor.putBoolean("stremio_c_restore_complete", true)
                     editor.putString("stremio_c_last_applied_backup_hash", incomingHash)
                     editor.commit()
@@ -112,10 +114,9 @@ class StremioCPlugin : Plugin() {
                 val incomingHash = streamPlayBackupStr.hashCode().toString()
 
                 if (!localComplete || localHash != incomingHash) {
-                    val json = JSONObject(streamPlayBackupStr)
                     val editor = streamPlayPrefs.edit()
                     editor.clear()
-                    jsonToPrefs(json, editor)
+                    jsonToPrefs(JSONObject(streamPlayBackupStr), editor)
                     editor.putBoolean("streamplay_restore_complete", true)
                     editor.putString("streamplay_last_applied_backup_hash", incomingHash)
                     editor.commit()
@@ -127,7 +128,51 @@ class StremioCPlugin : Plugin() {
             e.printStackTrace()
         }
 
-        // 기본 API 로드 동작 개시
+        // --- 3. Restored Links Manifest Auto-Prefetch Engine (부팅 비동기 프리페처) ---
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val prefs = appContext.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+                val json = prefs.getString("stremio_saved_links", null) ?: "[]"
+                val arr = JSONArray(json)
+                val links = mutableListOf<String>()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val link = obj.optString("link", "")
+                    if (link.isNotBlank()) {
+                        links.add(link)
+                    }
+                }
+
+                val manifestPrefs = appContext.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
+                
+                links.forEach { link ->
+                    val cleanUrl = link.substringBefore("?").trimEnd('/')
+                    val currentUrl = if (cleanUrl.endsWith("manifest.json")) cleanUrl else "$cleanUrl/manifest.json"
+                    val uniqueKey = currentUrl.toUniqueKeyLocal()
+
+                    if (!manifestPrefs.contains(uniqueKey)) {
+                        println("[StremioCPlugin] Manifest cache missing for link: $link. Prefetching asynchronously...")
+                        try {
+                            val responseText = com.lagradost.cloudstream3.app.get(currentUrl, timeout = 15L).text
+                            if (responseText.isNotBlank()) {
+                                val parsed = JSONObject(responseText)
+                                if (parsed.has("catalogs")) {
+                                    val manifestEditor = manifestPrefs.edit()
+                                    manifestEditor.putString(uniqueKey, responseText)
+                                    manifestEditor.commit()
+                                    println("[StremioCPlugin] Prefetched and cached manifest for uniqueKey: $uniqueKey")
+                                }
+                            }
+                        } catch (e: Throwable) {
+                            println("[StremioCPlugin] Failed to prefetch manifest for $link: ${e.message}")
+                        }
+                    }
+                }
+            } catch (e: Throwable) {
+                e.printStackTrace()
+            }
+        }
+
         try {
             registerMainAPI(StremioC("", "StremioC"))
         } catch (e: Throwable) {
@@ -237,4 +282,3 @@ class StremioCPlugin : Plugin() {
         val type: String
     )
 }
-
