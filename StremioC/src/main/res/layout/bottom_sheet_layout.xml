@@ -251,46 +251,29 @@
                 android:singleLine="true" />
         </LinearLayout>
 
-        <!-- History & Library Sync Toggle -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="10dp"
-            android:gravity="center_vertical">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="History &amp; Library Sync"
-                android:textColor="#FFFFFF"
-                android:textSize="18sp"
-                android:textStyle="bold" />
-
-            <Switch
-                android:id="@+id/switchHistorySync"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:focusable="true"
-                android:padding="5dp" />
-        </LinearLayout>
-
-        <!-- History & Library Sync URL Input -->
+        <!-- History & Library Sync URL Input (상시 노출) -->
         <LinearLayout
             android:id="@+id/layoutHistorySyncUrl"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:layout_marginTop="5dp"
-            android:visibility="gone">
+            android:layout_marginTop="10dp">
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Sync Metadata Base URL (Required)"
+                android:text="Sync Metadata Base URL"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Required globally for active addon syncs"
                 android:textColor="#AAAAAA"
-                android:textSize="14sp" />
+                android:textSize="12sp"
+                android:layout_marginTop="2dp" />
 
             <EditText
                 android:id="@+id/etHistorySyncUrl"
