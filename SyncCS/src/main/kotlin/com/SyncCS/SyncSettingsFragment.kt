@@ -25,7 +25,6 @@ import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.DataStore
 
-// ★ 해결: 누락되었던 코루틴 핵심 임포트 구문들을 추가했습니다.
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -141,7 +140,15 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                             }
 
                             val devices = ApiUtils.fetchDevices()
-                            val currentDeviceId = UtilKt.getDeviceId(resPackageName, requireContext())
+                            
+                            // 기기 ID 판정 방식 통일 (SharedPreferences 값 우선, 차선으로 호스트 패키지 기반 계산)
+                            val currentDeviceId = try {
+                                val prefs = with(DataStore) { requireContext().getSharedPrefs() }
+                                prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) }
+                            } catch (e: Exception) {
+                                null
+                            } ?: UtilKt.getDeviceId(requireContext().packageName, requireContext())
+
                             val isDuplicate = devices.any { it.name == deviceName && it.deviceId != currentDeviceId }
                             
                             if (isDuplicate) {
@@ -218,8 +225,17 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         val listLayout = getLayout("device_list", inflater, container)
         val containerLayout = findView<LinearLayout>(listLayout, "device_list_container")
 
+        // 현재 사용 중인 기기의 ID를 확인합니다. (SharedPreferences 우선, 차선으로 호스트 패키지 기반 계산)
+        val ctx = requireContext()
+        val currentDeviceId = try {
+            val prefs = with(DataStore) { ctx.getSharedPrefs() }
+            prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) }
+        } catch (e: Exception) {
+            null
+        } ?: UtilKt.getDeviceId(ctx.packageName, ctx)
+
         if (devices.isEmpty()) {
-            val emptyText = TextView(requireContext()).apply {
+            val emptyText = TextView(ctx).apply {
                 text = "No devices synced yet."
                 setPadding(16, 16, 16, 16)
             }
@@ -230,7 +246,14 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 val nameText = findView<TextView>(itemLayout, "device_name_text")
                 val deleteBtn = findView<Button>(itemLayout, "btn_delete_device")
 
-                nameText.text = "${device.name}\n(${device.deviceId})"
+                val isCurrentDevice = device.deviceId == currentDeviceId
+                if (isCurrentDevice) {
+                    // 현재 기기인 경우 텍스트 뒤에 (Current Device)를 추가하며 볼드 처리합니다.
+                    nameText.text = "${device.name} (Current Device)\n(${device.deviceId})"
+                    nameText.setTypeface(null, android.graphics.Typeface.BOLD)
+                } else {
+                    nameText.text = "${device.name}\n(${device.deviceId})"
+                }
                 
                 deleteBtn.setOnClickListener {
                     Log.d("SYNC", "[SyncSettingsFragment] Delete clicked for device: ${device.name} (${device.deviceId})")
