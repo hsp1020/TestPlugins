@@ -682,7 +682,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     } catch (t: Throwable) { t.printStackTrace() }
                     
                     withContext(Dispatchers.Main) {
-                        APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
+                        getSafeAllProviders().forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
                     
                         val cancelBtn = Button(ctx).apply {
                             text = "No"
@@ -756,7 +756,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         
         mainContainer.addView(TextView(ctx).apply { text = "Configure Providers"; textSize = 20f; typeface = android.graphics.Typeface.DEFAULT_BOLD; setTextColor(Color.WHITE); setPadding(0, 0, 0, 30); gravity = Gravity.CENTER })
 
-        val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
+        val allProviders = getSafeAllProviders().filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
         
         val providerSettingsCard = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; setPadding(25, 25, 25, 25); background = getCardBg(); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 20) } }
         val headerRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -1026,7 +1026,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val tv = TextView(ctx).apply { 
                     setTextColor(Color.LTGRAY)
                     textSize = 13f
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 }
                 
                 val swContainer = LinearLayout(ctx).apply {
@@ -1171,7 +1171,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     
                     val isProviderActive = tempActiveSettings[item.providerName] ?: true
                     if (isProviderActive && item.isChecked) {
-                        val origData = APIHolder.allProviders.find { it.name == item.providerName }?.mainPage?.find { it.name == item.catalogName }?.data ?: ""
+                        val origData = getSafeAllProviders().find { it.name == item.providerName }?.mainPage?.find { it.name == item.catalogName }?.data ?: ""
                         activeCatsConfig.add(EvoCatalogConfig(item.providerName, item.catalogName, item.customName, origData, finalOrder))
                     }
                 }
@@ -1194,7 +1194,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 } catch (t: Throwable) { t.printStackTrace() }
 
                 withContext(Dispatchers.Main) { 
-                    APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
+                    getSafeAllProviders().forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
                     
                     dialog.dismiss() 
                     showSavedPopup(ctx, "Catalog Settings", "Catalog settings saved. Reload to apply.")
