@@ -248,9 +248,10 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
 
                 val isCurrentDevice = device.deviceId == currentDeviceId
                 if (isCurrentDevice) {
-                    // 현재 기기인 경우 텍스트 뒤에 (Current Device)를 추가하며 볼드 처리합니다.
-                    nameText.text = "${device.name} (Current Device)\n(${device.deviceId})"
+                    // 기기명 (Current) 형태로 변경하고, 파란색(#0000FF) 및 Bold 스타일을 적용합니다.
+                    nameText.text = "${device.name} (Current)\n(${device.deviceId})"
                     nameText.setTypeface(null, android.graphics.Typeface.BOLD)
+                    nameText.setTextColor(android.graphics.Color.parseColor("#0000FF"))
                 } else {
                     nameText.text = "${device.name}\n(${device.deviceId})"
                 }
