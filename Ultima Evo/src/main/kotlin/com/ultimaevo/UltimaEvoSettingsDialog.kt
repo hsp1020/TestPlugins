@@ -387,13 +387,15 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                     jsonToPrefs(parsedJson, editor)
                                     editor.commit()
 
-                                    // 불러온 즉시 순정 백업용 DataStore 미러링에 자동 보정 주입
+                                    // 플랫폼 네이티브 방식으로 SharedPreferences 명시적 수정 트랜잭션 진행
                                     val finalUltimaEvoJson = prefsToJson(prefs).toString()
                                     val finalUltimaEvoHash = finalUltimaEvoJson.hashCode().toString()
-                                    prefs.edit(commit = true) {
-                                        putBoolean("ultima_evo_restore_complete", true)
-                                        putString("ultima_evo_last_applied_backup_hash", finalUltimaEvoHash)
-                                    }
+                                    
+                                    val mirrorEditor = prefs.edit()
+                                    mirrorEditor.putBoolean("ultima_evo_restore_complete", true)
+                                    mirrorEditor.putString("ultima_evo_last_applied_backup_hash", finalUltimaEvoHash)
+                                    mirrorEditor.commit()
+
                                     try {
                                         CloudStreamApp.setKey("native_backup_ultimaevo", finalUltimaEvoJson)
                                     } catch (t: Throwable) { t.printStackTrace() }
@@ -665,13 +667,15 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
                     editor.commit()
 
-                    // 설정 변경 사항을 즉시 순정 DataStore 미러링에 실시간 자동 동기화 주입
+                    // 플랫폼 네이티브 방식으로 SharedPreferences 명시적 수정 트랜잭션 진행
                     val ultimaEvoJson = prefsToJson(prefs).toString()
                     val ultimaEvoHash = ultimaEvoJson.hashCode().toString()
-                    prefs.edit(commit = true) {
-                        putBoolean("ultima_evo_restore_complete", true)
-                        putString("ultima_evo_last_applied_backup_hash", ultimaEvoHash)
-                    }
+                    
+                    val mirrorEditor = prefs.edit()
+                    mirrorEditor.putBoolean("ultima_evo_restore_complete", true)
+                    mirrorEditor.putString("ultima_evo_last_applied_backup_hash", ultimaEvoHash)
+                    mirrorEditor.commit()
+
                     try {
                         CloudStreamApp.setKey("native_backup_ultimaevo", ultimaEvoJson)
                     } catch (t: Throwable) { t.printStackTrace() }
@@ -1175,13 +1179,15 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 editor.putString("evo_active_cats_json_$instanceId", jsonStr)
                 editor.commit()
 
-                // 공급자 구성 변경 시 즉시 순정 DataStore 미러링 동기화 주입
+                // 플랫폼 네이티브 방식으로 SharedPreferences 명시적 수정 트랜잭션 진행
                 val ultimaEvoJson = prefsToJson(prefs).toString()
                 val ultimaEvoHash = ultimaEvoJson.hashCode().toString()
-                prefs.edit(commit = true) {
-                    putBoolean("ultima_evo_restore_complete", true)
-                    putString("ultima_evo_last_applied_backup_hash", ultimaEvoHash)
-                }
+                
+                val mirrorEditor = prefs.edit()
+                mirrorEditor.putBoolean("ultima_evo_restore_complete", true)
+                mirrorEditor.putString("ultima_evo_last_applied_backup_hash", ultimaEvoHash)
+                mirrorEditor.commit()
+
                 try {
                     CloudStreamApp.setKey("native_backup_ultimaevo", ultimaEvoJson)
                 } catch (t: Throwable) { t.printStackTrace() }
@@ -1199,3 +1205,5 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         dialog.show()
     }
 }
+
+2. SettingsBottomFragment.kt (수정 완료)
