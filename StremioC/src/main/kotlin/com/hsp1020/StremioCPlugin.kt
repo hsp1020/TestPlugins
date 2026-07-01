@@ -2,17 +2,14 @@
 package com.hsp1020
 
 import android.content.Context
-import android.content.SharedPreferences
 import androidx.appcompat.app.AppCompatActivity
 import com.lagradost.api.Log
-import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.plugins.PluginData
 import com.lagradost.cloudstream3.plugins.PluginManager
 import org.json.JSONArray
-import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -23,73 +20,9 @@ class StremioCPlugin : Plugin() {
     private val PREF_FILE = "StremioC"
     private val PREF_KEY_LINKS = "stremio_saved_links"
 
-    private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
-        val keys = json.keys()
-        while (keys.hasNext()) {
-            val key = keys.next()
-            when (val value = json.get(key)) {
-                is Boolean -> editor.putBoolean(key, value)
-                is String -> editor.putString(key, value)
-                is Int -> editor.putInt(key, value)
-                is Long -> editor.putLong(key, value)
-                is Double -> editor.putFloat(key, value.toFloat())
-                is JSONArray -> {
-                    val set = mutableSetOf<String>()
-                    for (i in 0 until value.length()) {
-                        val item = value.optString(i)
-                        if (item != null) set.add(item)
-                    }
-                    editor.putStringSet(key, set)
-                }
-            }
-        }
-    }
-
-    private fun autoSyncNativeBackup(context: Context) {
-        val appContext = context.applicationContext
-        
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                println("🚨🚨🚨 [StremioC-AutoSync] V2 기생 엔진 백그라운드 시작됨! 🚨🚨🚨")
-                
-                val stremioCPrefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
-                if (stremioCPrefs.all.isEmpty()) {
-                    println("🚨🚨🚨 [StremioC-AutoSync] 로컬 데이터 없음. DataStore 복원 시도... 🚨🚨🚨")
-                    val nativeStremioC = try { CloudStreamApp.getKey<String>("native_backup_stremioc") } catch (e: Exception) { null }
-                    if (!nativeStremioC.isNullOrEmpty()) {
-                        val editor = stremioCPrefs.edit()
-                        jsonToPrefs(JSONObject(nativeStremioC), editor)
-                        editor.commit()
-                        println("🚨🚨🚨 [StremioC-AutoSync] 순정 백업에서 StremioC 데이터 복원 완료! 🚨🚨🚨")
-                    } else {
-                        println("🚨🚨🚨 [StremioC-AutoSync] DataStore에도 백업 데이터가 없습니다. 🚨🚨🚨")
-                    }
-                } else {
-                    println("🚨🚨🚨 [StremioC-AutoSync] 로컬 데이터가 이미 존재하여 복원을 스킵합니다. 🚨🚨🚨")
-                }
-
-                val streamPlayPrefs = appContext.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
-                if (streamPlayPrefs.all.isEmpty()) {
-                    val nativeStreamPlay = try { CloudStreamApp.getKey<String>("native_backup_streamplay") } catch (e: Exception) { null }
-                    if (!nativeStreamPlay.isNullOrEmpty()) {
-                        val editor = streamPlayPrefs.edit()
-                        jsonToPrefs(JSONObject(nativeStreamPlay), editor)
-                        editor.commit()
-                        println("🚨🚨🚨 [StremioC-AutoSync] 순정 백업에서 StreamPlay 데이터 복원 완료! 🚨🚨🚨")
-                    }
-                }
-            } catch (e: Exception) {
-                println("🚨🚨🚨 [StremioC-AutoSync] 동기화 중 오류 발생: ${e.message} 🚨🚨🚨")
-            }
-        }
-    }
-
     override fun load(context: Context) {
         println("[StremioCPlugin v3.0-TRACKING] load() 함수 호출됨")
         
-        // 🚨 앱 구동 시 순정 백업 연동 엔진 실행
-        autoSyncNativeBackup(context)
-
         try {
             registerMainAPI(StremioC("", "StremioC"))
         } catch (e: Throwable) {
