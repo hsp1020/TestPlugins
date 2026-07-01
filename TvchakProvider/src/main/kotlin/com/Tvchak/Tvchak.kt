@@ -217,16 +217,16 @@ class TvchakProvider : MainAPI() {
                     println("[ChakPlay] ❌ 우회 처리 실패")
                 }
             }
-        }
-        
-        // 시그니처 요소를 동반하여 파킹 및 차단 페이지를 가려내는 안전 감지 로그 적용
-        val hasSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title") || res.text.contains("vod-search-list")
-        if (res.isSuccessful && hasSignature) {
-            println("[ChakPlay] 🟢 HTTP 응답 성공 및 실데이터 확인 완료 (코드: ${res.code})")
-        } else if (res.isSuccessful) {
-            println("[ChakPlay] ⚠️ HTTP 응답 성공(200)했으나 알맹이가 없음 (파킹/통신사 차단 의심, 코드: ${res.code})")
         } else {
-            println("[ChakPlay] 🔴 HTTP 응답 실패 (코드: ${res.code})")
+            // [3번 반영] 단순 상태 코드 판정을 탈피하여 알맹이 시그니처 정밀 검증 및 에러 상태 공지 추가
+            val hasSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title") || res.text.contains("vod-search-list")
+            if (res.isSuccessful && hasSignature) {
+                println("[ChakPlay] 🟢 HTTP 응답 성공 및 실데이터 확인 완료 (코드: ${res.code})")
+            } else if (res.isSuccessful) {
+                println("[ChakPlay] ⚠️ HTTP 응답 성공(200)했으나 알맹이가 없음 (파킹/통신사 차단 의심, 코드: ${res.code})")
+            } else {
+                println("[ChakPlay] 🔴 HTTP 응답 실패 (코드: ${res.code})")
+            }
         }
         return res
     }
@@ -249,14 +249,17 @@ class TvchakProvider : MainAPI() {
             }
 
             val testPath = "/index.php/vod/show/id/1/page/1.html"
-            println("[ChakPlay] 🔄 기본 검증 시도 -> $currentMainUrl$testPath")
 
             try {
                 val res = app.get("$currentMainUrl$testPath", headers = getHeaders(), timeout = 3L)
                 val finalUrl = res.url.substringBefore("/index.php").trimEnd('/')
                 val hasSignature = res.text.contains("movie-list-item") || res.text.contains("movie-title")
                 
-                // 괄호를 적용하여 논리적 우선순위를 명확히 규정
+                if (res.isSuccessful && !hasSignature) {
+                    println("[ChakPlay] ⚠️ 기본 도메인의 HTTP 응답은 성공(200)했으나 알맹이가 없음 (파킹/통신사 차단 의심)")
+                }
+
+                // [4번 반영] 연산 우선순위 괄호 명시화 교정
                 if ((res.isSuccessful && hasSignature) || isCloudflareChallenge(res.text)) {
                     if (currentMainUrl != finalUrl && finalUrl.startsWith("http")) {
                         println("[ChakPlay] 🔄 리다이렉트 도메인 검출: $currentMainUrl -> $finalUrl")
@@ -264,10 +267,8 @@ class TvchakProvider : MainAPI() {
                         mainUrl = currentMainUrl
                     }
                     isDomainChecked = true
-                    println("[ChakPlay] ✅ 도메인 유지 확정 -> $mainUrl")
+                    println("[ChakPlay] ✅ 도메인 유지 확정")
                     return@withLock
-                } else {
-                    println("[ChakPlay] ⚠️ 기본 도메인 무효화됨 (응답성공: ${res.isSuccessful}, 시그니처여부: $hasSignature)")
                 }
             } catch (e: Exception) { 
                 println("[ChakPlay] ❌ 접속 확인 불가: ${e.message}") 
@@ -275,20 +276,22 @@ class TvchakProvider : MainAPI() {
 
             val match = Regex("tvchak(\\d+)").find(currentMainUrl)
             val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 200
-            println("[ChakPlay] 🚀 신규 도메인 브루트포스 개시 (시작 번호: $startNum)")
+            
+            // [1번 반영] 브루트포스 최대 대역을 100개로 상향
+            println("[ChakPlay] 🚀 신규 도메인 브루트포스 개시 (시작 범위: $startNum)")
 
             var foundDomain: String? = null
 
             coroutineScope {
-                val candidates = (startNum..startNum + 50).map { "https://tvchak$it.com" }
+                val candidates = (startNum..startNum + 100).map { "https://tvchak$it.com" }
                 val chunks = candidates.chunked(5)
 
                 for (chunk in chunks) {
                     val deferreds = chunk.map { testDomain ->
                         async {
                             val testUrl = "$testDomain$testPath"
-                            // 현재 대입 시도 중인 도메인을 실시간으로 출력하도록 개선
-                            println("[ChakPlay] 🔄 도메인 후보 검증 시도 -> $testUrl")
+                            // [2번 반영] 도메인 대입 시 구체적인 진척 상황을 실시간 로그로 출력
+                            println("[ChakPlay] 🔄 도메인 후보 검증 시도: $testUrl")
                             try {
                                 val res = app.get(testUrl, headers = getHeaders(), timeout = 3L)
                                 val extractedFinalUrl = res.url.substringBefore("/index.php").trimEnd('/')
@@ -321,8 +324,8 @@ class TvchakProvider : MainAPI() {
                 return@withLock
             }
 
-            // 모든 경우의 수가 실패했을 때 확실한 피드백을 전달하도록 로그 수정
-            println("[ChakPlay] 💀 탐색 범주($startNum ~ ${startNum + 50}) 내 모든 접속 실패. 수동 검토가 필요합니다.")
+            // [5번 반영] 다른 4개 표준 플러그인 규격과 일치하게 도메인 유지 및 락은 보장하되, 에러 범주를 공지(출력)하여 명시화함
+            println("[ChakPlay] 💀 탐색 범주($startNum ~ ${startNum + 100}) 내 모든 접속 실패. 기본 도메인 유지 및 수동 검토 필요")
             isDomainChecked = true
         }
     }
@@ -334,7 +337,8 @@ class TvchakProvider : MainAPI() {
             println("[ChakPlay] [getMainPage] 요청 페이지: $page, 대상: $url")
             
             val document = safeGet(url).document
-            val items = document.select(".movie-list-body .movie-list-item").mapNotNull { element ->
+            // [ Jsoup 셀렉터 OR 유연화 적용 ] 부모 구조 변화에도 정상 수집되도록 쉼표 OR 조건 부여
+            val items = document.select(".movie-list-body .movie-list-item, .movie-list-item").mapNotNull { element ->
                 parseItem(element, request.data == "1")
             }
 
@@ -453,7 +457,7 @@ class TvchakProvider : MainAPI() {
         println("[ChakPlay] [loadLinks] 🔍 스크립트 추출 원본 주소: $rawUrl")
 
         var videoUrl = rawUrl
-        var refererUrl = mainUrl
+        var refererUrl = mainUrl 
 
         val isChakttWrapper = rawUrl.contains("chaktt.php?url=")
         val isDirectBcdn = rawUrl.contains("b-cdn.net")
@@ -499,7 +503,7 @@ class TvchakProvider : MainAPI() {
                 "$detectDomain/chak/chaktt.php?url=$encodedVideoUrl"
             }
 
-            refererUrl = "$detectDomain/"
+            refererUrl = "$detectDomain/" 
 
             println("[ChakPlay] [loadLinks] 🔓 백엔드 IP 승인을 위해 중계 서버 사전 접속 시도 (Silent Handshake) -> $handshakeUrl")
             try {
