@@ -19,6 +19,7 @@ class TvchakProvider : MainAPI() {
     companion object {
         var currentMainUrl = "https://tvchak200.com"
         var isDomainChecked = false
+        private var lastCheckTime = 0L // 마지막으로 도메인 검증을 실제로 구동한 타임스탬프
         private val domainMutex = Mutex()
         private val cfMutex = Mutex()
         private const val PREFS_NAME = "TvChak_Domain_Cache"
@@ -231,19 +232,28 @@ class TvchakProvider : MainAPI() {
     }
 
     private suspend fun checkAndUpdateDomain() {
+        val now = System.currentTimeMillis()
         println("[ChakPlay] [checkAndUpdateDomain] 1. 진입 완료 (isDomainChecked: $isDomainChecked, currentMainUrl: $currentMainUrl)")
-        if (isDomainChecked) {
-            println("[ChakPlay] [checkAndUpdateDomain] 2. 이미 검증 완료 상태(isDomainChecked == true)로 판단되어 즉시 리턴")
+        
+        // 탐색에 실패한 상황(isDomainChecked == false)이더라도 30초의 최소 쿨다운을 두어 쓰레드 폭풍 방지
+        val cooldown = if (isDomainChecked) 600000L else 30000L
+        if (now - lastCheckTime < cooldown) {
+            println("[ChakPlay] [checkAndUpdateDomain] 2. 쿨다운 대기 시간 미충족으로 패스 (경과: ${now - lastCheckTime}ms / 제한: ${cooldown}ms)")
             return
         }
 
         println("[ChakPlay] [checkAndUpdateDomain] 3. 뮤텍스 락 획득 대기 시작")
         domainMutex.withLock {
+            val lockNow = System.currentTimeMillis()
             println("[ChakPlay] [checkAndUpdateDomain] 4. 뮤텍스 락 획득 완료 (락 내부 isDomainChecked: $isDomainChecked)")
-            if (isDomainChecked) {
-                println("[ChakPlay] [checkAndUpdateDomain] 5. 락 획득 후 중복 진입 방지 처리되어 리턴")
+            
+            val lockCooldown = if (isDomainChecked) 600000L else 30000L
+            if (lockNow - lastCheckTime < lockCooldown) {
+                println("[ChakPlay] [checkAndUpdateDomain] 5. 락 대기 중 쿨다운이 갱신되어 리턴")
                 return@withLock
             }
+            
+            lastCheckTime = lockNow
             println("[ChakPlay] [checkAndUpdateDomain] 6. 도메인 검증 로직 본격 가동")
 
             val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -338,7 +348,8 @@ class TvchakProvider : MainAPI() {
             }
 
             println("[ChakPlay] [checkAndUpdateDomain] 27. 💀 모든 탐색 실패. 복구 불가능 상태")
-            isDomainChecked = true
+            // 모든 브루트포스 탐색이 완벽히 실패했을 때만 플래그를 false로 유지해 새로고침 시 다시 돌 수 있도록 보완
+            isDomainChecked = false
         }
     }
 
