@@ -3,18 +3,17 @@ package com.ultimaevo
 
 import android.content.Context
 import androidx.fragment.app.FragmentActivity
-import com.google.gson.Gson
-import com.google.gson.annotations.SerializedName
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 
-// 🔥 [V2 패치] 시한폭탄 텍스트 파싱을 대체할 견고한 네이티브 Gson 데이터 클래스
+// 시한폭탄 텍스트 파싱을 대체할 견고한 네이티브 데이터 클래스
 data class EvoCatalogConfig(
-    @SerializedName("providerName") val providerName: String,
-    @SerializedName("originalCatalogName") val originalCatalogName: String,
-    @SerializedName("customCatalogName") val customCatalogName: String,
-    @SerializedName("originalData") val originalData: String,
-    @SerializedName("orderIndex") val orderIndex: Int
+    @JsonProperty("providerName") val providerName: String,
+    @JsonProperty("originalCatalogName") val originalCatalogName: String,
+    @JsonProperty("customCatalogName") val customCatalogName: String,
+    @JsonProperty("originalData") val originalData: String,
+    @JsonProperty("orderIndex") val orderIndex: Int
 )
 
 @CloudstreamPlugin
@@ -22,7 +21,6 @@ class UltimaEvoPlugin : Plugin() {
     companion object {
         var pluginContext: Context? = null
         const val PREFS_NAME = "ultima_evo_settings"
-        val gson = Gson() // 전역 Gson 인스턴스
     }
 
     override fun load(context: Context) {
