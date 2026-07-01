@@ -288,7 +288,7 @@ class TvchakProvider : MainAPI() {
 
             println("[ChakPlay] [checkAndUpdateDomain] 16. 순차 탐색 루프(브루트포스) 개시")
             coroutineScope {
-                val candidates = (startNum..startNum + 50).map { "https://tvchak$it.com" }
+                val candidates = (startNum..startNum + 100).map { "https://tvchak$it.com" }
                 val chunks = candidates.chunked(5)
                 println("[ChakPlay] [checkAndUpdateDomain] 17. 총 ${candidates.size}개의 후보군을 5개 단위 청크로 검증 시작")
 
