@@ -4,7 +4,7 @@
     android:layout_height="wrap_content"
     android:orientation="vertical"
     android:padding="20dp"
-    android:background="@android:color/transparent"> <!-- Kotlin의 getDarkThemeBg() 적용을 위해 투명화 -->
+    android:background="@android:color/transparent">
 
     <TextView
         android:layout_width="match_parent"
@@ -27,7 +27,7 @@
         android:textColorHint="#666666"
         android:textSize="14sp"
         android:paddingHorizontal="12dp"
-        android:background="@android:color/transparent" /> <!-- Kotlin의 getButtonBg() 적용을 위해 투명화 -->
+        android:background="@android:color/transparent" />
 
     <EditText
         android:id="@+id/etLink"
@@ -42,6 +42,19 @@
         android:textSize="14sp"
         android:paddingHorizontal="12dp"
         android:layout_marginBottom="10dp"
-        android:background="@android:color/transparent" /> <!-- Kotlin의 getButtonBg() 적용을 위해 투명화 -->
+        android:background="@android:color/transparent" />
+
+    <!-- 개별 동기화 ON/OFF 조작을 위한 스위치 추가 -->
+    <Switch
+        android:id="@+id/switchLinkSync"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="Enable Sync"
+        android:textColor="#FFFFFF"
+        android:textSize="14sp"
+        android:focusable="true"
+        android:background="?android:attr/selectableItemBackground"
+        android:padding="5dp" />
 
 </LinearLayout>
