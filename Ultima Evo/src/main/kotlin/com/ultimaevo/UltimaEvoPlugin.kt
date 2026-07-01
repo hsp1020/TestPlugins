@@ -1,3 +1,4 @@
+// 파일명: hsp1020/ultimaevo/UltimaEvoPlugin.kt
 package com.ultimaevo
 
 import android.content.Context
@@ -10,7 +11,6 @@ import com.lagradost.cloudstream3.CloudStreamApp
 import org.json.JSONArray
 import org.json.JSONObject
 
-// 세부 설정 데이터 전송 포맷
 data class EvoCatalogConfig(
     @JsonProperty("providerName") val providerName: String,
     @JsonProperty("originalCatalogName") val originalCatalogName: String,
@@ -53,7 +53,7 @@ class UltimaEvoPlugin : Plugin() {
         val appContext = context.applicationContext
         pluginContext = appContext
         
-        // --- Ultima Evo 자체 부팅 복원 엔진 (Flag Guard + Checksum 검증) ---
+        // --- 1. Ultima Evo 자체 부팅 복원 엔진 (Flag Guard + Checksum 검증) ---
         try {
             val ultimaEvoBackupStr = try {
                 CloudStreamApp.getKey<String>("native_backup_ultimaevo")
@@ -68,14 +68,17 @@ class UltimaEvoPlugin : Plugin() {
                 val incomingHash = ultimaEvoBackupStr.hashCode().toString()
 
                 if (!localComplete || localHash != incomingHash) {
-                    val json = JSONObject(ultimaEvoBackupStr)
                     val editor = prefs.edit()
                     editor.clear()
-                    jsonToPrefs(json, editor)
+                    jsonToPrefs(JSONObject(ultimaEvoBackupStr), editor)
                     editor.putBoolean("ultima_evo_restore_complete", true)
                     editor.putString("ultima_evo_last_applied_backup_hash", incomingHash)
+                    
+                    // [대기 우회 초기화] 복원 시점에 동기화 세션을 0으로 초기화해 부팅 후 첫 mainPage 로드 때 즉시 실시간 동기화 유도
+                    editor.putLong("evo_last_sync_time", 0L)
+                    
                     editor.commit()
-                    println("[UltimaEvoPlugin] Ultima Evo preferences restored successfully on load.")
+                    println("[UltimaEvoPlugin] Ultima Evo preferences restored successfully on load with sync reset.")
                 }
             }
         } catch (e: Throwable) {
@@ -107,5 +110,4 @@ class UltimaEvoPlugin : Plugin() {
     }
 }
 
-
-// hsp1020/ultimaevo/UltimaEvoSettingsDialog.kt
+④ UltimaEvoSettingsDialog.kt
