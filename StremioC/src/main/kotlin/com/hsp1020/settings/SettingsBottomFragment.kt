@@ -1,3 +1,4 @@
+// hsp1020/settings/SettingsBottomFragment.kt
 package com.hsp1020
 
 import android.annotation.SuppressLint
@@ -32,7 +33,6 @@ import android.util.Base64
 import android.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
-import androidx.core.content.edit
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -111,7 +111,9 @@ object SettingsRepository {
             }
             arr.put(obj)
         }
-        sharedPref.edit { putString(PREF_KEY_LINKS, arr.toString()) }
+        val editor = sharedPref.edit()
+        editor.putString(PREF_KEY_LINKS, arr.toString())
+        editor.commit()
     }
 
     fun isIntegrationEnabled(sharedPref: SharedPreferences, key: String, default: Boolean = true): Boolean {
@@ -119,7 +121,9 @@ object SettingsRepository {
     }
 
     fun setIntegrationEnabled(sharedPref: SharedPreferences, key: String, state: Boolean) {
-        sharedPref.edit { putBoolean(key, state) }
+        val editor = sharedPref.edit()
+        editor.putBoolean(key, state)
+        editor.commit()
     }
 }
 
@@ -397,7 +401,6 @@ class SettingsBottomFragment(
         tvExport.makeTvCompatible()
         tvImport.makeTvCompatible()
 
-        // ── 백업 번들 내보내기 (Export) ──
         tvExport.setOnClickListener {
             val isStreamPlayExportActive = try { view.findView<Switch>("switchStreamPlay").isChecked } catch (_: Throwable) { false }
             val isCineStreamExportActive = try { view.findView<Switch>("switchCineStream").isChecked } catch (_: Throwable) { false }
@@ -509,7 +512,6 @@ class SettingsBottomFragment(
             }
         }
 
-        // ── 백업 번들 불러오기 (Import & Mirroring) ──
         tvImport.setOnClickListener {
             val ctx = requireContext()
             val appContext = ctx.applicationContext
@@ -604,7 +606,7 @@ class SettingsBottomFragment(
 
                     cancelBtn.setOnClickListener { dlg.dismiss() }
                     restoreBtn.setOnClickListener {
-                        dlg.dismiss()
+                        dlg.dismiss() 
                         
                         val loadingContainer = LinearLayout(ctx).apply {
                             orientation = LinearLayout.VERTICAL
@@ -642,13 +644,14 @@ class SettingsBottomFragment(
                                     }
                                     editor.commit()
 
-                                    // 즉시 순정 DataStore에 백업본 미러링 주입 및 로컬 해시 업데이트
                                     val finalStremioCJson = prefsToJson(sharedPref).toString()
                                     val finalStremioCHash = finalStremioCJson.hashCode().toString()
-                                    sharedPref.edit(commit = true) {
-                                        putBoolean("stremio_c_restore_complete", true)
-                                        putString("stremio_c_last_applied_backup_hash", finalStremioCHash)
-                                    }
+                                    
+                                    val se = sharedPref.edit()
+                                    se.putBoolean("stremio_c_restore_complete", true)
+                                    se.putString("stremio_c_last_applied_backup_hash", finalStremioCHash)
+                                    se.commit()
+
                                     try {
                                         CloudStreamApp.setKey("native_backup_stremioc", finalStremioCJson)
                                     } catch (t: Throwable) { t.printStackTrace() }
@@ -664,13 +667,14 @@ class SettingsBottomFragment(
                                             jsonToPrefs(streamPlayData, editorSP)
                                             editorSP.commit()
 
-                                            // StreamPlay 미러링 주입 및 로컬 해시 업데이트
                                             val finalStreamPlayJson = prefsToJson(streamPlayPrefs).toString()
                                             val finalStreamPlayHash = finalStreamPlayJson.hashCode().toString()
-                                            streamPlayPrefs.edit(commit = true) {
-                                                putBoolean("streamplay_restore_complete", true)
-                                                putString("streamplay_last_applied_backup_hash", finalStreamPlayHash)
-                                            }
+                                            
+                                            val seSP = streamPlayPrefs.edit()
+                                            seSP.putBoolean("streamplay_restore_complete", true)
+                                            seSP.putString("streamplay_last_applied_backup_hash", finalStreamPlayHash)
+                                            seSP.commit()
+
                                             try {
                                                 CloudStreamApp.setKey("native_backup_streamplay", finalStreamPlayJson)
                                             } catch (t: Throwable) { t.printStackTrace() }
@@ -706,10 +710,12 @@ class SettingsBottomFragment(
 
                                     val finalStremioCJson = prefsToJson(sharedPref).toString()
                                     val finalStremioCHash = finalStremioCJson.hashCode().toString()
-                                    sharedPref.edit(commit = true) {
-                                        putBoolean("stremio_c_restore_complete", true)
-                                        putString("stremio_c_last_applied_backup_hash", finalStremioCHash)
-                                    }
+                                    
+                                    val se = sharedPref.edit()
+                                    se.putBoolean("stremio_c_restore_complete", true)
+                                    se.putString("stremio_c_last_applied_backup_hash", finalStremioCHash)
+                                    se.commit()
+
                                     try {
                                         CloudStreamApp.setKey("native_backup_stremioc", finalStremioCJson)
                                     } catch (t: Throwable) { t.printStackTrace() }
@@ -929,7 +935,6 @@ class SettingsBottomFragment(
             dlg.show()
         }
 
-        // ── 변경 사항 저장 시 즉시 순정 DataStore와 자동 연동 미러링 반영 ──
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
             val tmdbApiKeyVal = etTmdbApiKey.text.toString().trim()
@@ -942,41 +947,43 @@ class SettingsBottomFragment(
             val switchStreamPlay = view.findView<Switch>("switchStreamPlay")
             val switchVixSrc = view.findView<Switch>("switchVixSrc")
 
-            // 1. SharedPreferences 동기 반영
-            sharedPref.edit(commit = true) {
-                putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, tmdbApiKeyVal)
-                putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim())
-                putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
-                putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim())
-                
-                putBoolean(SettingsRepository.PREF_KEY_HISTORY_SYNC_ENABLED, switchHistorySync.isChecked)
-                putBoolean(SettingsRepository.PREF_KEY_CUSTOM_POSTER_ENABLED, switchCustomPoster.isChecked)
-                putBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, switchMdbList.isChecked)
-                
-                putBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, switchCineStream.isChecked)
-                putBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, switchStreamPlay.isChecked)
-                putBoolean(SettingsRepository.PREF_KEY_VIXSRC_ENABLED, switchVixSrc.isChecked)
-            }
+            // 플랫폼 규격에 맞춰 명시적으로 SharedPreferences.Editor 트랜잭션 수동 진행
+            val editor = sharedPref.edit()
+            editor.putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, tmdbApiKeyVal)
+            editor.putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim())
+            editor.putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
+            editor.putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim())
+            
+            editor.putBoolean(SettingsRepository.PREF_KEY_HISTORY_SYNC_ENABLED, switchHistorySync.isChecked)
+            editor.putBoolean(SettingsRepository.PREF_KEY_CUSTOM_POSTER_ENABLED, switchCustomPoster.isChecked)
+            editor.putBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, switchMdbList.isChecked)
+            
+            editor.putBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, switchCineStream.isChecked)
+            editor.putBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, switchStreamPlay.isChecked)
+            editor.putBoolean(SettingsRepository.PREF_KEY_VIXSRC_ENABLED, switchVixSrc.isChecked)
+            editor.commit()
 
-            // 2. [실시간 동기화 미러링] StremioC 백업 문자열 생성 및 적용 해시 업데이트
             val stremioCJson = prefsToJson(sharedPref).toString()
             val stremioCHash = stremioCJson.hashCode().toString()
-            sharedPref.edit(commit = true) {
-                putBoolean("stremio_c_restore_complete", true)
-                putString("stremio_c_last_applied_backup_hash", stremioCHash)
-            }
+            
+            val se = sharedPref.edit()
+            se.putBoolean("stremio_c_restore_complete", true)
+            se.putString("stremio_c_last_applied_backup_hash", stremioCHash)
+            se.commit()
+
             try {
                 CloudStreamApp.setKey("native_backup_stremioc", stremioCJson)
             } catch (t: Throwable) { t.printStackTrace() }
 
-            // 3. [실시간 동기화 미러링] StreamPlay 백업 문자열 생성 및 적용 해시 업데이트 (기생 백업)
             val streamPlayPrefs = context.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
             val streamPlayJson = prefsToJson(streamPlayPrefs).toString()
             val streamPlayHash = streamPlayJson.hashCode().toString()
-            streamPlayPrefs.edit(commit = true) {
-                putBoolean("streamplay_restore_complete", true)
-                putString("streamplay_last_applied_backup_hash", streamPlayHash)
-            }
+            
+            val seSP = streamPlayPrefs.edit()
+            seSP.putBoolean("streamplay_restore_complete", true)
+            seSP.putString("streamplay_last_applied_backup_hash", streamPlayHash)
+            seSP.commit()
+
             try {
                 CloudStreamApp.setKey("native_backup_streamplay", streamPlayJson)
             } catch (t: Throwable) { t.printStackTrace() }
@@ -1224,7 +1231,10 @@ class SettingsBottomFragment(
         }
 
         val adapter = LangAdapter(LANGUAGES, selectedCode) { code ->
-            sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code) }
+            val editor = sharedPref.edit()
+            editor.putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code)
+            editor.commit()
+
             val langName = LANGUAGES.find { it.second == code }?.first ?: code
             Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
             activeSubDialog?.dismiss()
@@ -1272,7 +1282,11 @@ class SettingsBottomFragment(
         applyBtn.setOnClickListener {
             val code = selectedCode
             val langName = selectedLangName
-            sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code) }
+
+            val editor = sharedPref.edit()
+            editor.putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code)
+            editor.commit()
+
             Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
             langDialog.dismiss()
         }
