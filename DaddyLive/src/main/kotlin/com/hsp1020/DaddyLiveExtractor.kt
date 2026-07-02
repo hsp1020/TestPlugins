@@ -88,13 +88,16 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             val resp = app.get(url, headers = headers)
+            debugLog("2. 플레이어 페이지 응답 코드: ${resp.code}")
             if (!resp.isSuccessful) return null
             val html = resp.text
             
-            // 본문 내의 모든 iframe 주소를 일괄 수집합니다.
-            val iframeMatches = Regex("""<iframe\s+[^>]*src=["']((?:https?:)?//[^"']+)["']""", RegexOption.IGNORE_CASE)
+            // [우회 반영] 큰따옴표, 작은따옴표, 따옴표가 없는 비규격 주소까지 모두 추출하는 통합 수집기
+            val iframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
                 .findAll(html)
-                .map { it.groupValues[1] }
+                .map { match ->
+                    match.groupValues[1].ifEmpty { match.groupValues[2] }
+                }
                 .distinct()
                 .toList()
             
@@ -104,9 +107,17 @@ class DaddyLiveExtractor : ExtractorApi() {
             iframeHeaders["Referer"] = url
             iframeHeaders["Origin"] = entryOrigin
 
-            // 수집된 iframe들을 순회하며 재귀적으로 내부를 검사합니다.
+            // 수집된 iframe들을 순회하며 재귀적으로 내부 검사합니다.
             for (rawSrc in iframeMatches) {
-                val iframeUrl = if (rawSrc.startsWith("//")) "https:$rawSrc" else rawSrc
+                var iframeUrl = rawSrc
+                if (rawSrc.startsWith("//")) {
+                    iframeUrl = "https:$rawSrc"
+                } else if (rawSrc.startsWith("/")) {
+                    iframeUrl = "$entryOrigin$rawSrc"
+                } else if (!rawSrc.startsWith("http")) {
+                    iframeUrl = "$entryOrigin/${rawSrc.trimStart('/')}"
+                }
+                
                 if (iframeUrl.endsWith(".js") || iframeUrl.endsWith(".css") || iframeUrl.contains("tag.min")) continue
                 
                 // depth = 1 단계부터 재귀 탐색 시작
@@ -123,7 +134,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
-    // 중첩된 가짜 페이지 및 다중 iframe 깊이를 재귀적으로 파고들며 wiki.js를 탐색하는 유닛
+    // 중첩된 가짜 페이지 및 다중 iframe 깊이를 재귀적으로 파고들며 wiki.js를 탐색하는 핵심 유닛
     private suspend fun crawlIframe(iframeUrl: String, iframeHeaders: Map<String, String>, depth: Int, sourceName: String): ExtractorLink? {
         if (depth > 3) return null // 무한 루프 방지용 깊이 제한
         
@@ -202,17 +213,31 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
 
             // 2. 만약 해당 페이지에 wiki.js가 없고 또 다른 iframe들이 존재하면 재귀적으로 진입하여 검사합니다.
-            val nestedIframeMatches = Regex("""<iframe\s+[^>]*src=["']((?:https?:)?//[^"']+)["']""", RegexOption.IGNORE_CASE)
+            val nestedIframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
                 .findAll(iframeHtml)
-                .map { it.groupValues[1] }
+                .map { match ->
+                    match.groupValues[1].ifEmpty { match.groupValues[2] }
+                }
                 .distinct()
                 .toList()
                 
             for (nestedRawSrc in nestedIframeMatches) {
-                val nestedIframeUrl = if (nestedRawSrc.startsWith("//")) "https:$nestedRawSrc" else nestedRawSrc
+                var nestedIframeUrl = nestedRawSrc
+                val parsedParent = URL(iframeUrl)
+                val parentOrigin = "${parsedParent.protocol}://${parsedParent.host}"
+                
+                // 상대 경로 복정 처리 수행
+                if (nestedRawSrc.startsWith("//")) {
+                    nestedIframeUrl = "https:$nestedRawSrc"
+                } else if (nestedRawSrc.startsWith("/")) {
+                    nestedIframeUrl = "$parentOrigin$nestedRawSrc"
+                } else if (!nestedRawSrc.startsWith("http")) {
+                    nestedIframeUrl = "$parentOrigin/${nestedRawSrc.trimStart('/')}"
+                }
+                
                 if (nestedIframeUrl.endsWith(".js") || nestedIframeUrl.endsWith(".css") || nestedIframeUrl.contains("tag.min")) continue
                 
-                // 더 깊은 단계로 재귀 탐색
+                // 더 깊은 단계로 재귀 탐색 진행
                 val link = crawlIframe(nestedIframeUrl, iframeHeaders, depth + 1, sourceName)
                 if (link != null) return link
             }
