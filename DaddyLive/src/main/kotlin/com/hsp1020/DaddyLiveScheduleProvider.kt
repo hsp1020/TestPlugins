@@ -30,7 +30,7 @@ import java.util.Locale
 import java.util.TimeZone
 
 class DaddyLiveScheduleProvider : MainAPI() {
-    override var mainUrl = "https://dlhd.pk"
+    override var mainUrl = "https://dlhd.st"
     override var name = "DaddyLive"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "en"
