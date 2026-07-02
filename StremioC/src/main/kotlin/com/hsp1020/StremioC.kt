@@ -1658,7 +1658,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             return processedEpisodes.sortedWith(compareBy({ it.season }, { it.episode }))
         }
         
-   
         suspend fun toLoadResponse(
             provider: StremioC, 
             imdbId: String?, 
@@ -1820,10 +1819,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val hasAnimeTrackerIds = finalMalId != null || finalAniId != null || this@CatalogEntry.kitsuIdExt != null
             val finalMovieType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.AnimeMovie else TvType.Movie
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
+
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id ?: "")
                 
-                // 타입이 "other" 이며 비디오가 1개 존재할 때, 그 비디오가 가진 고유의 파일 스트림 ID를 사용하도록 설정
+                // 타입이 "other"이며 단일 파일(1개) 정보가 있을 때, 실제 스트림 주소가 포함된 비디오 ID를 바인딩합니다.
                 val resolvedMovieId = if (finalType == "other" && finalVideos?.size == 1) {
                     finalVideos[0].id ?: movieId
                 } else {
@@ -1834,7 +1834,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     finalName, metaUrl, finalMovieType, 
                     LoadData(
                         type = finalType, 
-                        id = resolvedMovieId, // ★ 해결: 이제 올바른 전체 스트림 경로 ID가 loadLinks로 전달됩니다.
+                        id = resolvedMovieId, 
                         imdbId = cleanImdbId, 
                         year = tmdbData?.fetchedYear, 
                         title = finalName, 
@@ -1848,6 +1848,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         kitsuId = this@CatalogEntry.kitsuIdExt,
                         originalTitle = tmdbData?.fetchedOriginalTitle,
                         englishTitle = tmdbData?.fetchedEnglishTitle
+                    )
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.plot = finalDescription
