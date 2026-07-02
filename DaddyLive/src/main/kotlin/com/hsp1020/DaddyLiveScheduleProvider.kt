@@ -99,7 +99,11 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 val eventTitle = e.select(".schedule__eventTitle").text()
                 val time = e.select(".schedule__time").text()
                 val formattedTime = convertGMTToLocalTime(time)
-                newLiveSearchResponse("$formattedTime - $eventTitle", dataTitle){
+                
+                // [보완] 공백 및 이모지로 인한 코어 URI 크래시를 우회하기 위해 URL 인코딩을 적용합니다.
+                val encodedDataTitle = java.net.URLEncoder.encode(dataTitle, "UTF-8")
+                
+                newLiveSearchResponse("$formattedTime - $eventTitle", encodedDataTitle){
                     this.posterUrl = Companion.posterUrl
                 }
             }
