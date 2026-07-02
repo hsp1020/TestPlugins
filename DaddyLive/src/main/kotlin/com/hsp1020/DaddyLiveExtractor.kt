@@ -30,6 +30,15 @@ class DaddyLiveExtractor : ExtractorApi() {
         println("[DDL-DEBUG] $message")
     }
 
+    private fun printLargeLog(tag: String, message: String) {
+        var i = 0
+        while (i < message.length) {
+            val end = (i + 3500).coerceAtMost(message.length)
+            Log.d(tag, "[BODY-CHUNK] ${message.substring(i, end)}")
+            i += 3500
+        }
+    }
+
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -85,7 +94,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             
             var iframeSrc = Regex("""<iframe[^>]*id=["']thatframe["'][^>]*src=["'](.*?)["']""").find(html)?.groupValues?.get(1)
             if (iframeSrc.isNullOrEmpty()) {
-                iframeSrc = Regex("""<iframe\s+[^>]*src=["'](https?://[^"']+)["']""", RegexOption.IGNORE_CASE).find(html)?.groupValues?.get(1)
+                iframeSrc = Regex("""<iframe\s+[^+]*src=["'](https?://[^"']+)["']""", RegexOption.IGNORE_CASE).find(html)?.groupValues?.get(1)
             }
             if (iframeSrc.isNullOrEmpty()) {
                 iframeSrc = Regex("""<iframe[^>]*src=["'](.*?)["']""").find(html)?.groupValues?.get(1)
@@ -152,9 +161,8 @@ class DaddyLiveExtractor : ExtractorApi() {
             val iframeHtml = iframeResp.text
 
             // =======================================================
-            // [보완] 동적 자바스크립트 수집기 파싱 분기 (CORS 우회 우회)
+            // [CORS 우회] 동적 자바스크립트 수집기 파싱 분기
             // =======================================================
-            // wiki.js를 불러오는 도메인이 유동적이어도 감지하도록 설계
             val wikiJsMatch = Regex("""src=["'](https?://[^"']+|//[^"']+)wiki\.js""").find(iframeHtml)
             if (wikiJsMatch != null) {
                 var rawWikiHost = wikiJsMatch.groupValues[1]
@@ -167,7 +175,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val pageName = parsedIframe.path.substringAfterLast("/").substringBefore(".php")
                 debugLog("[IGNITE] 동적 스트림 플레이어 감지! 호스트: $igniteHost, pageName: $pageName")
 
-                // 진짜 토큰 정보가 실리는 플레이어 페이지 조립 및 요청
                 val playerUrl = "$igniteHost/wiki.php?player=desktop&live=$pageName"
                 val playerHeaders = mapOf(
                     "User-Agent" to userAgent,
@@ -177,8 +184,13 @@ class DaddyLiveExtractor : ExtractorApi() {
                 debugLog("[IGNITE] 진짜 플레이어 페이지 요청 -> $playerUrl")
                 val playerResp = app.get(playerUrl, headers = playerHeaders)
                 val playerHtml = playerResp.text
+                debugLog("[IGNITE] 플레이어 페이지 응답 크기: ${playerHtml.length}")
 
-                // 플레이어 본문 내부에서 md5, expires 가 완벽히 삽입된 진짜 m3u8 주소 추출
+                printLargeLog("DDL-BODY-DEBUG", playerHtml)
+
+                val atobInPlayer = Regex("""atob\(['"](.*?)['"]\)""").findAll(playerHtml).map { it.groupValues[1] }.toList()
+                debugLog("[IGNITE] 플레이어 본문 내 발견된 atob 목록: $atobInPlayer")
+
                 val streamUrl = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(playerHtml)?.groupValues?.get(1)?.replace("\\", "")
                 
                 if (!streamUrl.isNullOrEmpty()) {
@@ -203,67 +215,36 @@ class DaddyLiveExtractor : ExtractorApi() {
                         headers = finalHeaders
                     )
                 } else {
-                    debugLog("[IGNITE] 플레이어 소스 내부에서 m3u8 주소 탐색 실패.")
+                    debugLog("[IGNITE] m3u8 단순 문자열 매칭 실패. 수집된 atob 디코딩 자가 분석 가동.")
+                    for (b64 in atobInPlayer) {
+                        try {
+                            val decoded = base64Decode(b64).replace("\"", "").trim()
+                            if (decoded.contains(".m3u8")) {
+                                debugLog("[IGNITE] 자가 역디코딩 발견 및 성공 -> $decoded")
+                                val finalHeaders = mapOf(
+                                    "Referer" to "$igniteHost/",
+                                    "Origin" to igniteHost,
+                                    "User-Agent" to userAgent,
+                                    "Accept" to "*/*",
+                                    "X-Direct-Connection" to "1",
+                                    "Sec-Fetch-Dest" to "empty",
+                                    "Sec-Fetch-Mode" to "cors",
+                                    "Sec-Fetch-Site" to "same-site"
+                                )
+                                return ExtractorLink(
+                                    source = sourceName, name = sourceName, url = decoded,
+                                    referer = "$igniteHost/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
+                                    headers = finalHeaders
+                                )
+                            }
+                        } catch (e: Exception) {}
+                    }
                 }
             }
 
-            // =======================================================
-            // [기존 분기 레거시 백업] (atob 로직)
-            // =======================================================
-            val atobMatch = Regex("""atob\(['"](.*?)['"]\)""").find(iframeHtml)
-            if (atobMatch != null) {
-                val b64Url = atobMatch.groupValues[1]
-                val decodedUrl = base64Decode(b64Url).replace("\"", "").trim()
-                debugLog("6. atob Base64 원본 해독 성공 -> $decodedUrl")
-                
-                val parsedIframe = URL(iframeUrl)
-                val iframeOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
-                
-                val pageName = parsedIframe.path.substringAfterLast("/").substringBefore(".php")
-                val resolvedPath = if (decodedUrl.contains("stream") && pageName.isNotEmpty() && pageName != "stream") {
-                    decodedUrl.replace("stream", pageName)
-                } else {
-                    decodedUrl
-                }
-                
-                val isRelative = resolvedPath.startsWith("/") || (!resolvedPath.startsWith("http://") && !resolvedPath.startsWith("https://"))
-                
-                var streamUrl = resolvedPath
-                if (resolvedPath.startsWith("//")) {
-                    streamUrl = "https:$resolvedPath"
-                } else if (resolvedPath.startsWith("/")) {
-                    streamUrl = "$iframeOrigin$resolvedPath"
-                } else if (!resolvedPath.startsWith("http://") && !resolvedPath.startsWith("https://")) {
-                    streamUrl = "$iframeOrigin/$resolvedPath"
-                }
-                
-                val finalReferer = if (isRelative) iframeUrl else "$iframeOrigin/"
-                val finalOrigin = iframeOrigin
-                val fetchSite = if (isRelative) "same-origin" else "cross-site"
-                
-                val finalHeaders = mutableMapOf(
-                    "Referer" to finalReferer,
-                    "Origin" to finalOrigin,
-                    "User-Agent" to userAgent,
-                    "Accept" to "*/*",
-                    "X-Direct-Connection" to "1",
-                    "Sec-Fetch-Dest" to "empty",
-                    "Sec-Fetch-Mode" to "cors",
-                    "Sec-Fetch-Site" to fetchSite
-                )
-                
-                debugLog("================= [DDL EXTRACT END] =================")
-                
-                return ExtractorLink(
-                    source = sourceName, name = sourceName, url = streamUrl,
-                    referer = finalReferer, quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
-                    headers = finalHeaders
-                )
-            } else {
-                debugLog("알림: 이 iframe($iframeUrl)에는 atob 구문이 존재하지 않습니다. 다음 후보로 넘어갑니다.")
-                debugLog("================= [DDL EXTRACT END] =================")
-                return null
-            }
+            debugLog("알림: 진짜 주소 탐색에 실패하였으며, 가짜 더미 링크(atob) 자동 우회 재생을 차단했습니다.")
+            debugLog("================= [DDL EXTRACT END] =================")
+            return null
         } catch (e: Exception) {
             debugLog("오류: 추출 중 예외가 발생했습니다: ${e.message}")
             e.printStackTrace()
