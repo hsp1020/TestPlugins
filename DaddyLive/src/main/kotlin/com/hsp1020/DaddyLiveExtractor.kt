@@ -30,15 +30,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         println("[DDL-DEBUG] $message")
     }
 
-    private fun printLargeLog(tag: String, message: String) {
-        var i = 0
-        while (i < message.length) {
-            val end = (i + 3500).coerceAtMost(message.length)
-            Log.d(tag, "[BODY-CHUNK] ${message.substring(i, end)}")
-            i += 3500
-        }
-    }
-
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -88,11 +79,10 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             val resp = app.get(url, headers = headers)
-            debugLog("2. 플레이어 페이지 응답 코드: ${resp.code}")
             if (!resp.isSuccessful) return null
             val html = resp.text
             
-            // 모든 iframe 주소를 수집합니다.
+            // 본문 내의 모든 iframe 주소를 일괄 수집합니다.
             val iframeMatches = Regex("""<iframe\s+[^>]*src=["']((?:https?:)?//[^"']+)["']""", RegexOption.IGNORE_CASE)
                 .findAll(html)
                 .map { it.groupValues[1] }
@@ -136,71 +126,55 @@ class DaddyLiveExtractor : ExtractorApi() {
                         "Origin" to "${parsedIframe.protocol}://${parsedIframe.host}"
                     )
                     
-                    debugLog("[IGNITE-DEBUG] 진짜 플레이어 페이지 요청 -> $playerUrl")
                     val playerResp = app.get(playerUrl, headers = playerHeaders)
-                    val playerHtml = playerResp.text
-                    
-                    // [중요 디버깅 로그 추가]
-                    // wiki.php가 실제로 돌려준 웹방화벽 상태, 헤더 구조, 바디 전체를 출력합니다.
-                    debugLog("[IGNITE-DEBUG] wiki.php 응답 코드: ${playerResp.code}")
-                    debugLog("[IGNITE-DEBUG] wiki.php 응답 헤더: ${playerResp.headers}")
-                    debugLog("[IGNITE-DEBUG] wiki.php 바디 길이: ${playerHtml.length}")
-                    printLargeLog("IGNITE-BODY", playerHtml)
-
-                    // 혹시 플레이어 페이지 본문 내부에도 atob 구문이 존재하는지 미리 매칭해 봅니다.
-                    val atobInPlayer = Regex("""atob\(['"](.*?)['"]\)""").findAll(playerHtml).map { it.groupValues[1] }.toList()
-                    debugLog("[IGNITE-DEBUG] 플레이어 본문 내 발견된 atob 목록: $atobInPlayer")
-
-                    val streamUrl = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(playerHtml)?.groupValues?.get(1)?.replace("\\", "")
-                    
-                    if (!streamUrl.isNullOrEmpty()) {
-                        debugLog("[IGNITE-우회] 진짜 m3u8 주소 추출 성공 -> $streamUrl")
+                    if (playerResp.isSuccessful) {
+                        val playerHtml = playerResp.text
                         
-                        val finalHeaders = mapOf(
-                            "Referer" to "$igniteHost/",
-                            "Origin" to igniteHost,
-                            "User-Agent" to userAgent,
-                            "Accept" to "*/*",
-                            "X-Direct-Connection" to "1",
-                            "Sec-Fetch-Dest" to "empty",
-                            "Sec-Fetch-Mode" to "cors",
-                            "Sec-Fetch-Site" to "same-site"
-                        )
-                        debugLog("================= [DDL EXTRACT END] =================")
-                        return ExtractorLink(
-                            source = sourceName, name = sourceName, url = streamUrl,
-                            referer = "$igniteHost/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
-                            headers = finalHeaders
-                        )
-                    } else {
-                        debugLog("[IGNITE-DEBUG] m3u8 단순 문자열 매칭 실패. 수집된 atob 디코딩 자가 분석 가동.")
-                        for (b64 in atobInPlayer) {
-                            try {
-                                val decoded = base64Decode(b64).replace("\"", "").trim()
-                                if (decoded.contains(".m3u8")) {
-                                    debugLog("[IGNITE-우회] 자가 역디코딩 발견 및 성공 -> $decoded")
-                                    val finalHeaders = mapOf(
-                                        "Referer" to "$igniteHost/",
-                                        "Origin" to igniteHost,
-                                        "User-Agent" to userAgent,
-                                        "Accept" to "*/*",
-                                        "X-Direct-Connection" to "1",
-                                        "Sec-Fetch-Dest" to "empty",
-                                        "Sec-Fetch-Mode" to "cors",
-                                        "Sec-Fetch-Site" to "same-site"
-                                    )
-                                    return ExtractorLink(
-                                        source = sourceName, name = sourceName, url = decoded,
-                                        referer = "$igniteHost/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
-                                        headers = finalHeaders
-                                    )
-                                }
-                            } catch (e: Exception) {}
+                        // [핵심] 쪼개진 문자 배열 파싱 및 복구
+                        val arrayMatch = Regex("""\["h"\s*,\s*"t"\s*,\s*"t"\s*,\s*"p"\s*,\s*"s"\s*,[^\]]+\]""").find(playerHtml)
+                        if (arrayMatch != null) {
+                            var streamUrl = arrayMatch.groupValues[0]
+                                .replace("[", "")
+                                .replace("]", "")
+                                .replace("\"", "")
+                                .replace("\\/", "/")
+                                .replace(",", "")
+                                .trim()
+                            
+                            // [핵심] getElementById로 지정된 동적 span 태그 내의 추가 토큰값을 결합
+                            val idMatch = Regex("""document\.getElementById\(["']([^"']+)["']\)""").find(playerHtml)?.groupValues?.get(1)
+                            val spanMatch = if (idMatch != null) {
+                                Regex("""id=["']?$idMatch["']?[^>]*>([^<]*)""").find(playerHtml)?.groupValues?.get(1) ?: ""
+                            } else {
+                                ""
+                            }
+                            streamUrl += spanMatch
+
+                            if (streamUrl.startsWith("http")) {
+                                debugLog("[IGNITE-우회] 진짜 m3u8 최종 주소 추출 성공 -> $streamUrl")
+                                
+                                val finalHeaders = mapOf(
+                                    "Referer" to "$igniteHost/",
+                                    "Origin" to igniteHost,
+                                    "User-Agent" to userAgent,
+                                    "Accept" to "*/*",
+                                    "X-Direct-Connection" to "1",
+                                    "Sec-Fetch-Dest" to "empty",
+                                    "Sec-Fetch-Mode" to "cors",
+                                    "Sec-Fetch-Site" to "same-site"
+                                )
+                                debugLog("================= [DDL EXTRACT END] =================")
+                                return ExtractorLink(
+                                    source = sourceName, name = sourceName, url = streamUrl,
+                                    referer = "$igniteHost/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
+                                    headers = finalHeaders
+                                )
+                            }
                         }
                     }
                 }
                 
-                // Freeshot/Popcdn 분기
+                // Freeshot/Popcdn은 도메인 자체가 고정이므로 기존 흐름대로 처리합니다.
                 if (iframeUrl.contains("freeshot.live") || iframeUrl.contains("popcdn.day")) {
                     debugLog("Freeshot / Popcdn 분기 감지")
                     var channelCode = ""
