@@ -152,14 +152,20 @@ class DaddyLiveExtractor : ExtractorApi() {
             val iframeHtml = iframeResp.text
 
             // =======================================================
-            // [신규 우회 분기] igniteandship 감지 로직
+            // [보완] 동적 자바스크립트 수집기 파싱 분기 (CORS 우회 우회)
             // =======================================================
-            val igniteHostMatch = Regex("""(https?://[a-zA-Z0-9.-]*igniteandship\.com)""").find(iframeHtml)
-            if (igniteHostMatch != null) {
-                val igniteHost = igniteHostMatch.groupValues[1]
+            // wiki.js를 불러오는 도메인이 유동적이어도 감지하도록 설계
+            val wikiJsMatch = Regex("""src=["'](https?://[^"']+|//[^"']+)wiki\.js""").find(iframeHtml)
+            if (wikiJsMatch != null) {
+                var rawWikiHost = wikiJsMatch.groupValues[1]
+                if (rawWikiHost.startsWith("//")) {
+                    rawWikiHost = "https:$rawWikiHost"
+                }
+                val igniteHost = rawWikiHost.trimEnd('/')
+                
                 val parsedIframe = URL(iframeUrl)
                 val pageName = parsedIframe.path.substringAfterLast("/").substringBefore(".php")
-                debugLog("[IGNITE] 우회 플레이어 감지됨! 호스트: $igniteHost, pageName: $pageName")
+                debugLog("[IGNITE] 동적 스트림 플레이어 감지! 호스트: $igniteHost, pageName: $pageName")
 
                 // 진짜 토큰 정보가 실리는 플레이어 페이지 조립 및 요청
                 val playerUrl = "$igniteHost/wiki.php?player=desktop&live=$pageName"
@@ -178,7 +184,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 if (!streamUrl.isNullOrEmpty()) {
                     debugLog("[IGNITE] 진짜 m3u8 최종 주소 추출 성공 -> $streamUrl")
                     
-                    // 스크린샷 데이터 증명 헤더 그대로 이식 (세션 쿠키 필요 없음, Referer/Origin 필수 검증)
                     val finalHeaders = mapOf(
                         "Referer" to "$igniteHost/",
                         "Origin" to igniteHost,
