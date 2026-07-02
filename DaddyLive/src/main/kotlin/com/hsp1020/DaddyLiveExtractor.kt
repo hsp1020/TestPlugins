@@ -92,7 +92,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (!resp.isSuccessful) return null
             val html = resp.text
             
-            // [우회 반영] 큰따옴표, 작은따옴표, 따옴표가 없는 비규격 주소까지 모두 추출하는 통합 수집기
+            // 따옴표 규격 유무 상관없이 전체 iframe src 속성을 수집합니다.
             val iframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
                 .findAll(html)
                 .map { match ->
@@ -134,15 +134,21 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
-    // 중첩된 가짜 페이지 및 다중 iframe 깊이를 재귀적으로 파고들며 wiki.js를 탐색하는 핵심 유닛
+    // 중첩된 껍데기 페이지들을 재귀적으로 파고들며 탐색하는 수집 엔진
     private suspend fun crawlIframe(iframeUrl: String, iframeHeaders: Map<String, String>, depth: Int, sourceName: String): ExtractorLink? {
-        if (depth > 3) return null // 무한 루프 방지용 깊이 제한
+        if (depth > 3) return null // 깊이 제한
         
         try {
             debugLog("[$depth 단계] Iframe 로드 검사 중 -> $iframeUrl")
             val iframeResp = app.get(iframeUrl, headers = iframeHeaders)
+            debugLog("[$depth 단계] Iframe 응답 코드: ${iframeResp.code}")
             if (!iframeResp.isSuccessful) return null
             val iframeHtml = iframeResp.text
+            
+            // [정밀 모니터링 출력]
+            // 수집된 임의의 iframe 페이지 소스 코드를 완벽하게 통째로 출력합니다.
+            debugLog("[$depth 단계] 본문 크기: ${iframeHtml.length}")
+            printLargeLog("DDL-IFRAME-BODY-DEPTH-$depth", iframeHtml)
             
             // 1. 해당 HTML 본문 내에 wiki.js가 탑재되어 있는지 확인
             val wikiJsMatch = Regex("""src=["'](https?://[^"']+|//[^"']+)wiki\.js""").find(iframeHtml)
@@ -226,7 +232,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val parsedParent = URL(iframeUrl)
                 val parentOrigin = "${parsedParent.protocol}://${parsedParent.host}"
                 
-                // 상대 경로 복정 처리 수행
+                // 상대 경로 복원 처리
                 if (nestedRawSrc.startsWith("//")) {
                     nestedIframeUrl = "https:$nestedRawSrc"
                 } else if (nestedRawSrc.startsWith("/")) {
