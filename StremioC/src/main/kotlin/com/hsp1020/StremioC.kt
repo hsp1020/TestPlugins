@@ -1173,8 +1173,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         if (!isIntegrationEnabled("cinestream_integration_enabled")) return
 
 
-        // [방어 코드 추가] 타입이 "other"이면서 동시에 공식 미디어 식별 ID가 하나도 없는 경우에만 탐색 차단
-        if (targetType == "other" &&
+        // [방어 코드] movie 와 series 가 아니면서 동시에 공식 미디어 식별 ID가 하나도 없는 경우에만 탐색 차단
+        if (targetType != "movie" && targetType != "series" &&
             loadData.imdbId.isNullOrBlank() &&
             loadData.tmdbId == null &&
             loadData.malId == null &&
@@ -1183,8 +1183,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         ) {
             return
         }
-
-
+        
         try {
             val cineStreamProvider = getCineStreamProvider() ?: return
             syncCineStreamSettings()
@@ -1218,9 +1217,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         callback: (ExtractorLink) -> Unit
     ) {
         if (!isIntegrationEnabled("streamplay_integration_enabled")) return
-               
-        // [방어 코드 추가] 타입이 "other"이면서 동시에 공식 미디어 식별 ID가 하나도 없는 경우에만 탐색 차단
-        if (targetType == "other" &&
+
+        // [방어 코드] movie 와 series 가 아니면서 동시에 공식 미디어 식별 ID가 하나도 없는 경우에만 탐색 차단
+        if (targetType != "movie" && targetType != "series" &&
             loadData.imdbId.isNullOrBlank() &&
             loadData.tmdbId == null &&
             loadData.malId == null &&
@@ -1229,8 +1228,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         ) {
             return
         }
-        
-
+       
         try {
             val streamPlayProvider = getStreamPlayProvider() ?: return
 
@@ -1470,7 +1468,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val customPosterBase = prefs?.getString("custom_poster_url", "") ?: ""
             
             coroutineScope {
-                val shouldFocusEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType == "other" && !isMovie)
+                // movie 와 series 가 아닌 비표준 실시간 스트림/기타 타입 전체에 대해 에피소드 포커싱 처리
+                val shouldFocusEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType != "movie" && stremioType != "series" && !isMovie)
                 
                 val episodeDeferred = if (shouldFocusEpisodes) {
                     var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
@@ -1776,7 +1775,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 finalDescription = tmdbData.fetchedOverview?.takeIf { it.isNotBlank() } ?: finalDescription
             }
             
-            if (finalType == "other") {
+            // movie 와 series 가 아닌 비표준 타입들의 메인 플롯(줄거리)이 비어있으면 이름으로 대체
+            if (finalType != "movie" && finalType != "series") {
                 finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription<br>$originalName"
             }
 
@@ -2000,9 +2000,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
 
                 var finalEpDesc = (tmdbEp?.overview ?: this@Video.overview ?: this@Video.description)?.takeIf { it != "null" }
-                if (type == "other") {
+                // movie 와 series 가 아닐 경우 개별 비디오 제목으로 설명란 채우기
+                if (type != "movie" && type != "series") {
                     finalEpDesc = if (finalEpDesc.isNullOrBlank()) cleanOriginalTitle else "$finalEpDesc<br>$cleanOriginalTitle"
                 }
+                
                 this.description = finalEpDesc
                 this.season = displaySeason
                 this.episode = displayEpisode
