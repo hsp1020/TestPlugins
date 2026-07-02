@@ -163,7 +163,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val parsedIframe = URL(iframeUrl)
                 val iframeOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
                 
-                // [핵심] iframe 주소에서 파일 이름(예: t14, t3)을 안전하게 추출합니다.
+                // [핵심] iframe 주소에서 파일 이름(예: t14, t3)을 추출합니다.
                 val pageName = parsedIframe.path.substringAfterLast("/").substringBefore(".php")
                 debugLog("7. 파싱된 iframe 파일명: $pageName")
                 
@@ -186,26 +186,47 @@ class DaddyLiveExtractor : ExtractorApi() {
                     streamUrl = "$iframeOrigin/$resolvedPath"
                 }
                 debugLog("9. 최종 조합 완료된 Stream URL -> $streamUrl")
+
+                // [보완] 플레이어 응답 및 iframe 응답 헤더로부터 쿠키(Cookie)를 정밀 수집합니다.
+                val cookiesList = mutableListOf<String>()
+                resp.headers.values("set-cookie").forEach {
+                    cookiesList.add(it.substringBefore(";"))
+                }
+                iframeResp.headers.values("set-cookie").forEach {
+                    cookiesList.add(it.substringBefore(";"))
+                }
+                val cookieHeader = cookiesList.distinct().filter { it.isNotEmpty() }.joinToString("; ")
+                debugLog("10. 수집 완료된 Cookie 헤더 -> $cookieHeader")
                 
-                val refOrigin = if (isRelative) iframeOrigin else (if (entryOrigin.isNotEmpty()) entryOrigin else iframeOrigin)
-                debugLog("10. 적용할 Referer/Origin -> $refOrigin")
+                // [보완] 상대 경로인 경우 Referer는 루트 도메인이 아닌 플레이어 풀 주소(iframeUrl)여야 정상 승인됩니다.
+                val finalReferer = if (isRelative) iframeUrl else "$iframeOrigin/"
+                val finalOrigin = iframeOrigin
                 
-                val finalHeaders = mapOf(
-                    "Referer" to "$refOrigin/",
-                    "Origin" to refOrigin,
+                // [보완] 동일 호스트로의 m3u8 호출은 same-origin, 타 주소 호출은 cross-site로 세팅하여 웹방화벽 우회
+                val fetchSite = if (isRelative) "same-origin" else "cross-site"
+                debugLog("11. 보안 정책 세팅 -> Referer: $finalReferer, Origin: $finalOrigin, Site: $fetchSite")
+                
+                val finalHeaders = mutableMapOf(
+                    "Referer" to finalReferer,
+                    "Origin" to finalOrigin,
                     "User-Agent" to userAgent,
                     "Accept" to "*/*",
                     "X-Direct-Connection" to "1",
                     "Sec-Fetch-Dest" to "empty",
                     "Sec-Fetch-Mode" to "cors",
-                    "Sec-Fetch-Site" to "cross-site"
+                    "Sec-Fetch-Site" to fetchSite
                 )
-                debugLog("11. 최종 전송될 ExtractorLink 헤더 설정 -> $finalHeaders")
+                
+                if (cookieHeader.isNotEmpty()) {
+                    finalHeaders["Cookie"] = cookieHeader
+                }
+                
+                debugLog("12. 최종 전송될 ExtractorLink 헤더 설정 -> $finalHeaders")
                 debugLog("================= [DDL EXTRACT END] =================")
                 
                 return ExtractorLink(
                     source = sourceName, name = sourceName, url = streamUrl,
-                    referer = "$refOrigin/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
+                    referer = finalReferer, quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
                     headers = finalHeaders
                 )
             } else {
