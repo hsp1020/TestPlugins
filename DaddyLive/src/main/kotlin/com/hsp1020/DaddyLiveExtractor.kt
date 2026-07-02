@@ -144,7 +144,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 return null
             }
 
-            // =======================================================
             // [분기 B] dlstreams.py 로직 (atob 베이스64 디코딩 계열)
             // =======================================================
             val parsedUrl = URL(url)
@@ -160,12 +159,23 @@ class DaddyLiveExtractor : ExtractorApi() {
             val atobMatch = Regex("""atob\(['"](.*?)['"]\)""").find(iframeHtml)
             if (atobMatch != null) {
                 val b64Url = atobMatch.groupValues[1]
-                val streamUrl = base64Decode(b64Url).replace("\"", "").trim()
+                var streamUrl = base64Decode(b64Url).replace("\"", "").trim()
                 debugLog("atob Base64 디코딩 성공 -> $streamUrl")
                 
                 val parsedIframe = URL(iframeUrl)
                 val iframeOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
                 val refOrigin = if (entryOrigin.isNotEmpty()) entryOrigin else iframeOrigin
+                
+                // ---------------- [ 수정 및 보완 부분 ] ----------------
+                // 상대 경로 주소를 iframe의 origin을 기준으로 절대 경로로 보정합니다.
+                streamUrl = when {
+                    streamUrl.startsWith("//") -> "https:$streamUrl"
+                    streamUrl.startsWith("/") -> "$iframeOrigin$streamUrl"
+                    !streamUrl.startsWith("http://") && !streamUrl.startsWith("https://") -> "$iframeOrigin/$streamUrl"
+                    else -> streamUrl
+                }
+                debugLog("절대 경로 변환 완료 -> $streamUrl")
+                // ------------------------------------------------------
                 
                 // provider_hooks.py 핵심: 특수 우회 헤더
                 return ExtractorLink(
@@ -183,6 +193,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                     )
                 )
             } else {
+                
+            
                 debugLog("이 iframe($iframeUrl)에는 atob 평문이 없습니다. 다음 후보를 찾습니다.")
                 return null
             }
