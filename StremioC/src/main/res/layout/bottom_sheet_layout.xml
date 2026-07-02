@@ -140,7 +140,44 @@
                 android:clickable="true" />
         </LinearLayout>
 
-        <!-- TMDb API Key Input -->
+        <ImageView
+            android:src="@android:drawable/divider_horizontal_dark"
+            android:layout_width="fill_parent"
+            android:layout_height="wrap_content"
+            android:scaleType="fitXY"
+            android:paddingLeft="2dp"
+            android:paddingRight="2dp"
+            android:layout_marginBottom="10dp"
+            android:layout_marginTop="10dp" />
+
+        <!-- TMDb Language Selection (위치 변경 완료) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="10dp"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="TMDB Language"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <ImageView
+                android:id="@+id/btnSelectLanguage"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="5dp"
+                android:focusable="true"
+                android:background="?android:attr/selectableItemBackground"
+                android:clickable="true" />
+        </LinearLayout>
+
+        <!-- TMDb API Key Input (위치 변경 완료) -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -169,89 +206,17 @@
                 android:singleLine="true" />
         </LinearLayout>
 
-        <!-- TMDb Language Selection -->
-        <LinearLayout
-            android:layout_width="match_parent"
+        <ImageView
+            android:src="@android:drawable/divider_horizontal_dark"
+            android:layout_width="fill_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="10dp"
-            android:gravity="center_vertical">
+            android:scaleType="fitXY"
+            android:paddingLeft="2dp"
+            android:paddingRight="2dp"
+            android:layout_marginBottom="10dp"
+            android:layout_marginTop="10dp" />
 
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="TMDB Language"
-                android:textColor="#FFFFFF"
-                android:textSize="18sp"
-                android:textStyle="bold" />
-
-            <ImageView
-                android:id="@+id/btnSelectLanguage"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:padding="5dp"
-                android:focusable="true"
-                android:background="?android:attr/selectableItemBackground"
-                android:clickable="true" />
-        </LinearLayout>
-
-        <!-- MdbList Ratings Toggle -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="10dp"
-            android:gravity="center_vertical">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="MDBList Ratings"
-                android:textColor="#FFFFFF"
-                android:textSize="18sp"
-                android:textStyle="bold" />
-
-            <Switch
-                android:id="@+id/switchMdbList"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:focusable="true"
-                android:padding="5dp" />
-        </LinearLayout>
-
-        <!-- MdbList API Key Input -->
-        <LinearLayout
-            android:id="@+id/layoutMdbList"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:layout_marginTop="5dp"
-            android:visibility="gone">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="MDBList API Key (Required)"
-                android:textColor="#AAAAAA"
-                android:textSize="14sp" />
-
-            <EditText
-                android:id="@+id/etMdbListApiKey"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:hint="Enter MdbList API Key"
-                android:textColor="#FFFFFF"
-                android:textColorHint="#555555"
-                android:textSize="14sp"
-                android:padding="10dp"
-                android:layout_marginTop="5dp"
-                android:background="@android:color/transparent"
-                android:singleLine="true" />
-        </LinearLayout>
-
-        <!-- History & Library Sync URL Input (상시 노출) -->
+        <!-- History & Library Sync URL Input (위치 변경 완료 - 상시 노출) -->
         <LinearLayout
             android:id="@+id/layoutHistorySyncUrl"
             android:layout_width="match_parent"
@@ -288,6 +253,71 @@
                 android:background="@android:color/transparent"
                 android:singleLine="true" />
         </LinearLayout>
+
+        <!-- MdbList Ratings Toggle (위치 변경 완료) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="10dp"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="MDBList Ratings"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <Switch
+                android:id="@+id/switchMdbList"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:focusable="true"
+                android:padding="5dp" />
+        </LinearLayout>
+
+        <!-- MdbList API Key Input (위치 변경 완료) -->
+        <LinearLayout
+            android:id="@+id/layoutMdbList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="5dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="MDBList API Key (Required)"
+                android:textColor="#AAAAAA"
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/etMdbListApiKey"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Enter MdbList API Key"
+                android:textColor="#FFFFFF"
+                android:textColorHint="#555555"
+                android:textSize="14sp"
+                android:padding="10dp"
+                android:layout_marginTop="5dp"
+                android:background="@android:color/transparent"
+                android:singleLine="true" />
+        </LinearLayout>
+
+        <ImageView
+            android:src="@android:drawable/divider_horizontal_dark"
+            android:layout_width="fill_parent"
+            android:layout_height="wrap_content"
+            android:scaleType="fitXY"
+            android:paddingLeft="2dp"
+            android:paddingRight="2dp"
+            android:layout_marginBottom="10dp"
+            android:layout_marginTop="10dp" />
 
         <!-- XRDB Poster Toggle -->
         <LinearLayout
