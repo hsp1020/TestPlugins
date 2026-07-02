@@ -14,7 +14,7 @@ import com.lagradost.cloudstream3.utils.Qualities
 import java.net.URL
 
 class DaddyLiveExtractor : ExtractorApi() {
-    override val mainUrl = "https://dlhd.st"
+    override val mainUrl = "https://dlhd.pk"
     override val name = "DaddyLive"
     override val requiresReferer = false
     private val userAgent =
@@ -92,7 +92,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (!resp.isSuccessful) return null
             val html = resp.text
             
-            // 따옴표 규격 유무 상관없이 전체 iframe src 속성을 수집합니다.
+            // 모든 iframe 주소를 일괄 수집합니다. (따옴표 누락 규격 포함)
             val iframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
                 .findAll(html)
                 .map { match ->
@@ -134,7 +134,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
-    // 중첩된 껍데기 페이지들을 재귀적으로 파고들며 탐색하는 수집 엔진
+    // 중첩된 껍데기 페이지 및 동적 JS 생성 아이프레임을 역추적하는 재귀 수집 유닛
     private suspend fun crawlIframe(iframeUrl: String, iframeHeaders: Map<String, String>, depth: Int, sourceName: String): ExtractorLink? {
         if (depth > 3) return null // 깊이 제한
         
@@ -145,8 +145,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (!iframeResp.isSuccessful) return null
             val iframeHtml = iframeResp.text
             
-            // [정밀 모니터링 출력]
-            // 수집된 임의의 iframe 페이지 소스 코드를 완벽하게 통째로 출력합니다.
+            // 본문 내용을 분할 출력합니다.
             debugLog("[$depth 단계] 본문 크기: ${iframeHtml.length}")
             printLargeLog("DDL-IFRAME-BODY-DEPTH-$depth", iframeHtml)
             
@@ -218,7 +217,19 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             }
 
-            // 2. 만약 해당 페이지에 wiki.js가 없고 또 다른 iframe들이 존재하면 재귀적으로 진입하여 검사합니다.
+            // [핵심 보완] 자바스크립트 변수로 위장한 동적 iframe 생성 감지 (embedsports.me 동적 생성 우회)
+            val edm = Regex("""edm\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
+            val zmid = Regex("""zmid\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
+            if (!edm.isNullOrEmpty() && !zmid.isNullOrEmpty()) {
+                val constructedIframeUrl = "https://$edm/court/$zmid.php"
+                debugLog("[$depth 단계] 동적 JS Iframe 가상 복원 성공 -> URL: $constructedIframeUrl")
+                
+                // 가상 조립된 중첩 iframe 주소로 재귀 진입하여 탐색
+                val link = crawlIframe(constructedIframeUrl, iframeHeaders, depth + 1, sourceName)
+                if (link != null) return link
+            }
+
+            // 2. 일반적인 static 중첩 iframe들을 순회하며 재귀적으로 진입 검사합니다.
             val nestedIframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
                 .findAll(iframeHtml)
                 .map { match ->
