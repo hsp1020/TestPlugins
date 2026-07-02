@@ -1375,7 +1375,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val fetchedOriginCountry: List<String>?,
         val fetchedOriginalTitle: String?,
         val fetchedEnglishTitle: String?,
-        val fetchedVoteAverage: Double? // ★ 이 줄 추가 (평점 보관용)
+        val fetchedVoteAverage: Double? = null// ★ 이 줄 추가 (평점 보관용)
     )
 
     private data class CatalogEntry(
@@ -1458,7 +1458,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
             
             if (detailRes == null) {
-                return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null)
+                return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null, null)
             }
 
             val episodeTmdbMeta = ConcurrentHashMap<String, TmdbEpisode>()
