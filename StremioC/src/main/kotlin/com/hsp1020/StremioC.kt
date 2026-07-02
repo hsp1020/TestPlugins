@@ -723,8 +723,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             if (seenIds.contains(extractedId)) false else { seenIds.add(extractedId); true }
         }
     }
-
-override suspend fun load(url: String): LoadResponse = coroutineScope {
+    
+    override suspend fun load(url: String): LoadResponse = coroutineScope {
         val res: CatalogEntry = if (url.startsWith("{")) {
             parseJson<CatalogEntry>(url)
         } else {
