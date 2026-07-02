@@ -724,7 +724,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
     }
 
-    override suspend fun load(url: String): LoadResponse = coroutineScope {
+override suspend fun load(url: String): LoadResponse = coroutineScope {
         val res: CatalogEntry = if (url.startsWith("{")) {
             parseJson<CatalogEntry>(url)
         } else {
@@ -802,22 +802,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
         }
 
-        val primaryMdbId = resolvedTmdbId ?: resolvedImdbId ?: when {
-            res.id?.startsWith("tt") == true -> res.id
-            res.id?.startsWith("tmdb:") == true -> res.id.removePrefix("tmdb:")
-            res.moviedb_id != null -> res.moviedb_id.toString()
-            res.tmdbIdExt != null -> res.tmdbIdExt
-            else -> null
-        }
-        
-        val primaryMdbIsTmdb = (primaryMdbId == resolvedTmdbId) || (primaryMdbId?.startsWith("tt") == false)
-
-        val mdbDeferred: Deferred<List<String>>? = primaryMdbId?.let { id ->
-            async(Dispatchers.IO) {
-                runSuspendCatching { fetchMdbListRatings(id, primaryMdbIsTmdb) }.onFailure { it.printStackTrace() }.getOrDefault(emptyList())
-            }
-        }
-
         val addonDeferred = async(Dispatchers.IO) {
             runSuspendCatching {
                 val syncMetaUrl = this@StremioC.getUnifiedMetaUrl(res.type ?: "movie", res.id ?: "")
@@ -827,7 +811,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }.onFailure { it.printStackTrace() }.getOrNull()
         }
              
-        
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val targetTmdbId = resolvedTmdbId ?: if (res.id?.startsWith("tmdb:") == true) res.id.removePrefix("tmdb:") else tmdbIdFromRes
         
@@ -852,6 +835,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             finalProcessedId = imdbId
         }
 
+        // 뒤늦게 파싱이 완료될 ID를 안전하게 외부로 가져올 홀더 선언
+        val resolvedIdHolder = arrayOf<String?>(null, null)
+
         val loadRes = res.toLoadResponse(
             provider = this@StremioC, 
             imdbId = finalProcessedId, 
@@ -860,16 +846,43 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             fetchedAniListId = fetchedAniListId, 
             fetchedMalId = fetchedMalId, 
             resolvedTmdbId = resolvedTmdbId,
-            kitsuVideos = kitsuVideos
+            kitsuVideos = kitsuVideos,
+            resolvedIdHolder = resolvedIdHolder // 홀더 전달
         )
         
-        val mdbRatings = mdbDeferred?.await() ?: emptyList()
-        if (mdbRatings.isNotEmpty()) {
-            val ratingStr = mdbRatings.joinToString("  ")
-            val currentPlot = loadRes.plot 
-            
-            loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr<br>$currentPlot" else ratingStr
-            loadRes.score = null 
+        // 정교한 MDBList 평점 지연 조회 실행
+        val primaryMdbId = resolvedTmdbId ?: resolvedImdbId ?: when {
+            res.id?.startsWith("tt") == true -> res.id
+            res.id?.startsWith("tmdb:") == true -> res.id.removePrefix("tmdb:")
+            res.moviedb_id != null -> res.moviedb_id.toString()
+            res.tmdbIdExt != null -> res.tmdbIdExt
+            else -> null
+        }
+        val primaryMdbIsTmdb = (primaryMdbId == resolvedTmdbId) || (primaryMdbId?.startsWith("tt") == false)
+
+        var actualMdbId = primaryMdbId
+        var actualIsTmdb = primaryMdbIsTmdb
+
+        // 1차 시도에서 ID가 확보되지 않았다면, toLoadResponse 가 동적으로 정규식 추출해낸 ID를 넘겨받아 사용
+        if (actualMdbId == null) {
+            val resolvedImdb = resolvedIdHolder[0]?.takeIf { it.startsWith("tt") }
+            val resolvedTmdb = resolvedIdHolder[1]?.takeIf { it.isNotBlank() }
+            actualMdbId = resolvedImdb ?: resolvedTmdb
+            actualIsTmdb = (actualMdbId == resolvedTmdb)
+        }
+
+        if (actualMdbId != null && isIntegrationEnabled("mdblist_enabled")) {
+            val mdbRatings = runSuspendCatching { 
+                fetchMdbListRatings(actualMdbId, actualIsTmdb) 
+            }.onFailure { it.printStackTrace() }.getOrDefault(emptyList())
+
+            if (mdbRatings.isNotEmpty()) {
+                val ratingStr = mdbRatings.joinToString("  ")
+                val currentPlot = loadRes.plot 
+                
+                loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr<br>$currentPlot" else ratingStr
+                loadRes.score = null // ★ 기존 영화/시리즈 로직과 완벽히 동일하게 MDBList 출력 시 스코어 null화 처리 적용
+            }
         }
         
         return@coroutineScope loadRes
@@ -1361,7 +1374,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val fetchedYear: Int?, val fetchedStatus: ShowStatus?, val episodeTmdbMeta: Map<String, TmdbEpisode>,
         val fetchedOriginCountry: List<String>?,
         val fetchedOriginalTitle: String?,
-        val fetchedEnglishTitle: String?
+        val fetchedEnglishTitle: String?,
+        val fetchedVoteAverage: Double? // ★ 이 줄 추가 (평점 보관용)
     )
 
     private data class CatalogEntry(
@@ -1585,7 +1599,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 (detailRes.releaseDate ?: detailRes.firstAirDate)?.split("-")?.first()?.toIntOrNull(),
                 if (detailRes.status == "Returning Series") ShowStatus.Ongoing else ShowStatus.Completed, episodeTmdbMeta, detailRes.origin_country,
                 detailRes.original_title ?: detailRes.original_name,
-                extractedEnglishTitle
+                extractedEnglishTitle,
+                detailRes.vote_average // ★ 이 줄 추가
             )
         }
 
@@ -1691,7 +1706,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             fetchedAniListId: Int? = null, 
             fetchedMalId: Int? = null, 
             resolvedTmdbId: String? = null,
-            kitsuVideos: List<Video>? = null
+            kitsuVideos: List<Video>? = null,
+            resolvedIdHolder: Array<String?>? = null // 파싱 완료된 ID를 밖으로 꺼내주기 위한 홀더 추가
         ): LoadResponse = coroutineScope {
             val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
 
@@ -1841,14 +1857,22 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
             val cleanTmdbId = tmdbIdStr?.substringBefore(":")
 
+            // 파싱 완료된 ID 정보를 외부 홀더 배열에 수집
+            resolvedIdHolder?.let {
+                it[0] = cleanImdbId
+                it[1] = cleanTmdbId
+            }
+
+            // 애드온 자체 평점이 존재하지 않을 경우, TMDB API를 통해 파싱해 낸 평점(vote_average)을 대체 사용합니다.
+            val finalRatingValue = finalImdbRating?.takeIf { it.isNotBlank() && it != "null" } 
+                                   ?: tmdbData?.fetchedVoteAverage?.toString()
+
             val hasAnimeTrackerIds = finalMalId != null || finalAniId != null || this@CatalogEntry.kitsuIdExt != null
             val finalMovieType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.AnimeMovie else TvType.Movie
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id ?: "")
-                
-                // 타입이 "other"이며 단일 파일(1개) 정보가 있을 때, 실제 스트림 주소가 포함된 비디오 ID를 바인딩합니다.
                 val resolvedMovieId = if (finalType == "other" && finalVideos?.size == 1) {
                     finalVideos[0].id ?: movieId
                 } else {
@@ -1875,7 +1899,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         englishTitle = tmdbData?.fetchedEnglishTitle
                     )
                 ) {
-                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
+                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
                     this.plot = finalDescription
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
@@ -1901,7 +1925,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 return@coroutineScope provider.newTvSeriesLoadResponse(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
                 ) {
-                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
+                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
                     this.plot = finalDescription
                     this.actors = tmdbData?.fetchedActors
@@ -2092,7 +2116,8 @@ private data class TmdbDetailResponse(
     @JsonProperty("images") val images: TmdbImages? = null, 
     @JsonProperty("videos") val videos: ResultsTrailer? = null, 
     @JsonProperty("external_ids") val external_ids: ExternalIds? = null, 
-    @JsonProperty("translations") val translations: TmdbTranslations? = null
+    @JsonProperty("translations") val translations: TmdbTranslations? = null,
+    @JsonProperty("vote_average") val vote_average: Double? = null // ★ 이 줄 추가 (평점 파싱용)
 ) {
     fun toTmdbMedia(mediaType: String): TmdbMedia {
         return TmdbMedia(
