@@ -30,6 +30,15 @@ class DaddyLiveExtractor : ExtractorApi() {
         println("[DDL-DEBUG] $message")
     }
 
+    private fun printLargeLog(tag: String, message: String) {
+        var i = 0
+        while (i < message.length) {
+            val end = (i + 3500).coerceAtMost(message.length)
+            Log.d(tag, "[BODY-CHUNK] ${message.substring(i, end)}")
+            i += 3500
+        }
+    }
+
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -95,123 +104,14 @@ class DaddyLiveExtractor : ExtractorApi() {
             iframeHeaders["Referer"] = url
             iframeHeaders["Origin"] = entryOrigin
 
-            // 수집된 iframe들을 순회하며 내부 검사합니다.
+            // 수집된 iframe들을 순회하며 재귀적으로 내부를 검사합니다.
             for (rawSrc in iframeMatches) {
                 val iframeUrl = if (rawSrc.startsWith("//")) "https:$rawSrc" else rawSrc
-                
-                // 광고 자바스크립트나 스타일시트 등 명백한 비-웹페이지 파일은 패스합니다.
                 if (iframeUrl.endsWith(".js") || iframeUrl.endsWith(".css") || iframeUrl.contains("tag.min")) continue
                 
-                debugLog("Iframe 로드 및 wiki.js 탑재 여부 검사 중 -> $iframeUrl")
-                val iframeHtml = app.get(iframeUrl, headers = iframeHeaders).text
-                
-                // 수집된 iframe 내부에서 wiki.js가 포함되어 있는지 검증합니다.
-                val wikiJsMatch = Regex("""src=["'](https?://[^"']+|//[^"']+)wiki\.js""").find(iframeHtml)
-                if (wikiJsMatch != null) {
-                    var rawWikiHost = wikiJsMatch.groupValues[1]
-                    if (rawWikiHost.startsWith("//")) {
-                        rawWikiHost = "https:$rawWikiHost"
-                    }
-                    val igniteHost = rawWikiHost.trimEnd('/')
-                    
-                    val parsedIframe = URL(iframeUrl)
-                    val pageName = parsedIframe.path.substringAfterLast("/").substringBefore(".php")
-                    debugLog("[IGNITE-우회] 진짜 중계 플레이어 감지! 호스트: $igniteHost, pageName: $pageName")
-
-                    // 진짜 영상 토큰이 탑재될 플레이어 페이지 호출
-                    val playerUrl = "$igniteHost/wiki.php?player=desktop&live=$pageName"
-                    val playerHeaders = mapOf(
-                        "User-Agent" to userAgent,
-                        "Referer" to iframeUrl,
-                        "Origin" to "${parsedIframe.protocol}://${parsedIframe.host}"
-                    )
-                    
-                    val playerResp = app.get(playerUrl, headers = playerHeaders)
-                    if (playerResp.isSuccessful) {
-                        val playerHtml = playerResp.text
-                        
-                        // [핵심] 쪼개진 문자 배열 파싱 및 복구
-                        val arrayMatch = Regex("""\["h"\s*,\s*"t"\s*,\s*"t"\s*,\s*"p"\s*,\s*"s"\s*,[^\]]+\]""").find(playerHtml)
-                        if (arrayMatch != null) {
-                            var streamUrl = arrayMatch.groupValues[0]
-                                .replace("[", "")
-                                .replace("]", "")
-                                .replace("\"", "")
-                                .replace("\\/", "/")
-                                .replace(",", "")
-                                .trim()
-                            
-                            // [핵심] getElementById로 지정된 동적 span 태그 내의 추가 토큰값을 결합
-                            val idMatch = Regex("""document\.getElementById\(["']([^"']+)["']\)""").find(playerHtml)?.groupValues?.get(1)
-                            val spanMatch = if (idMatch != null) {
-                                Regex("""id=["']?$idMatch["']?[^>]*>([^<]*)""").find(playerHtml)?.groupValues?.get(1) ?: ""
-                            } else {
-                                ""
-                            }
-                            streamUrl += spanMatch
-
-                            if (streamUrl.startsWith("http")) {
-                                debugLog("[IGNITE-우회] 진짜 m3u8 최종 주소 추출 성공 -> $streamUrl")
-                                
-                                val finalHeaders = mapOf(
-                                    "Referer" to "$igniteHost/",
-                                    "Origin" to igniteHost,
-                                    "User-Agent" to userAgent,
-                                    "Accept" to "*/*",
-                                    "X-Direct-Connection" to "1",
-                                    "Sec-Fetch-Dest" to "empty",
-                                    "Sec-Fetch-Mode" to "cors",
-                                    "Sec-Fetch-Site" to "same-site"
-                                )
-                                debugLog("================= [DDL EXTRACT END] =================")
-                                return ExtractorLink(
-                                    source = sourceName, name = sourceName, url = streamUrl,
-                                    referer = "$igniteHost/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
-                                    headers = finalHeaders
-                                )
-                            }
-                        }
-                    }
-                }
-                
-                // Freeshot/Popcdn은 도메인 자체가 고정이므로 기존 흐름대로 처리합니다.
-                if (iframeUrl.contains("freeshot.live") || iframeUrl.contains("popcdn.day")) {
-                    debugLog("Freeshot / Popcdn 분기 감지")
-                    var channelCode = ""
-                    val embedMatch = Regex("""embed/([^/.]+)\.php""").find(iframeUrl)
-                    if (embedMatch != null) {
-                        channelCode = embedMatch.groupValues[1]
-                    } else {
-                        channelCode = iframeUrl.split("/").last().split("?").first()
-                    }
-                    
-                    val targetUrl = "https://popcdn.day/player/$channelCode"
-                    val popResp = app.get(targetUrl, headers = headers)
-                    val popBody = popResp.text
-                    
-                    var finalM3u8 = ""
-                    val streamUrlMatch = Regex("""streamUrl\s*:\s*"([^"]+)"""").find(popBody)
-                    if (streamUrlMatch != null) {
-                        finalM3u8 = streamUrlMatch.groupValues[1].replace("\\", "")
-                    } else {
-                        val tokenMatch = Regex("""token=([^&"']+)""").find(popBody)
-                        if (tokenMatch != null) {
-                            val token = tokenMatch.groupValues[1]
-                            finalM3u8 = "https://planetary.lovecdn.ru/$channelCode/tracks-v1a1/mono.m3u8?token=$token"
-                        }
-                    }
-                    
-                    if (finalM3u8.isNotEmpty()) {
-                        debugLog("Freeshot 추출 성공 -> $finalM3u8")
-                        return ExtractorLink(
-                            source = sourceName, name = "Freeshot Server", url = finalM3u8,
-                            referer = "https://popcdn.day/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
-                            headers = mapOf(
-                                "Referer" to "https://popcdn.day/", "Origin" to "https://popcdn.day", "User-Agent" to userAgent
-                            )
-                        )
-                    }
-                }
+                // depth = 1 단계부터 재귀 탐색 시작
+                val link = crawlIframe(iframeUrl, iframeHeaders, 1, sourceName)
+                if (link != null) return link
             }
 
             debugLog("알림: 수집된 모든 iframe 내부에서 진짜 스트림 주소를 획득하지 못했습니다.")
@@ -221,5 +121,143 @@ class DaddyLiveExtractor : ExtractorApi() {
             debugLog("오류: ${e.message}")
             return null
         }
+    }
+
+    // 중첩된 가짜 페이지 및 다중 iframe 깊이를 재귀적으로 파고들며 wiki.js를 탐색하는 유닛
+    private suspend fun crawlIframe(iframeUrl: String, iframeHeaders: Map<String, String>, depth: Int, sourceName: String): ExtractorLink? {
+        if (depth > 3) return null // 무한 루프 방지용 깊이 제한
+        
+        try {
+            debugLog("[$depth 단계] Iframe 로드 검사 중 -> $iframeUrl")
+            val iframeResp = app.get(iframeUrl, headers = iframeHeaders)
+            if (!iframeResp.isSuccessful) return null
+            val iframeHtml = iframeResp.text
+            
+            // 1. 해당 HTML 본문 내에 wiki.js가 탑재되어 있는지 확인
+            val wikiJsMatch = Regex("""src=["'](https?://[^"']+|//[^"']+)wiki\.js""").find(iframeHtml)
+            if (wikiJsMatch != null) {
+                var rawWikiHost = wikiJsMatch.groupValues[1]
+                if (rawWikiHost.startsWith("//")) {
+                    rawWikiHost = "https:$rawWikiHost"
+                }
+                val igniteHost = rawWikiHost.trimEnd('/')
+                
+                val parsedIframe = URL(iframeUrl)
+                val pageName = parsedIframe.path.substringAfterLast("/").substringBefore(".php")
+                debugLog("[IGNITE-우회] 진짜 중계 플레이어 감지! 호스트: $igniteHost, pageName: $pageName")
+
+                // 진짜 영상 토큰이 탑재될 플레이어 페이지 호출
+                val playerUrl = "$igniteHost/wiki.php?player=desktop&live=$pageName"
+                val playerHeaders = mapOf(
+                    "User-Agent" to userAgent,
+                    "Referer" to iframeUrl,
+                    "Origin" to "${parsedIframe.protocol}://${parsedIframe.host}"
+                )
+                
+                val playerResp = app.get(playerUrl, headers = playerHeaders)
+                if (playerResp.isSuccessful) {
+                    val playerHtml = playerResp.text
+                    
+                    // 쪼개진 문자 배열 파싱 및 복구
+                    val arrayMatch = Regex("""\["h"\s*,\s*"t"\s*,\s*"t"\s*,\s*"p"\s*,\s*"s"\s*,[^\]]+\]""").find(playerHtml)
+                    if (arrayMatch != null) {
+                        var streamUrl = arrayMatch.groupValues[0]
+                            .replace("[", "")
+                            .replace("]", "")
+                            .replace("\"", "")
+                            .replace("\\/", "/")
+                            .replace(",", "")
+                            .trim()
+                        
+                        // getElementById로 지정된 동적 span 태그 내의 추가 토큰값을 결합
+                        val idMatch = Regex("""document\.getElementById\(["']([^"']+)["']\)""").find(playerHtml)?.groupValues?.get(1)
+                        val spanMatch = if (idMatch != null) {
+                            Regex("""id=["']?$idMatch["']?[^>]*>([^<]*)""").find(playerHtml)?.groupValues?.get(1) ?: ""
+                        } else {
+                            ""
+                        }
+                        streamUrl += spanMatch
+
+                        if (streamUrl.startsWith("http")) {
+                            debugLog("[IGNITE-우회] 진짜 m3u8 주소 추출 성공 -> $streamUrl")
+                            
+                            val finalHeaders = mapOf(
+                                "Referer" to "$igniteHost/",
+                                "Origin" to igniteHost,
+                                "User-Agent" to userAgent,
+                                "Accept" to "*/*",
+                                "X-Direct-Connection" to "1",
+                                "Sec-Fetch-Dest" to "empty",
+                                "Sec-Fetch-Mode" to "cors",
+                                "Sec-Fetch-Site" to "same-site"
+                            )
+                            return ExtractorLink(
+                                source = sourceName, name = sourceName, url = streamUrl,
+                                referer = "$igniteHost/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
+                                headers = finalHeaders
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 2. 만약 해당 페이지에 wiki.js가 없고 또 다른 iframe들이 존재하면 재귀적으로 진입하여 검사합니다.
+            val nestedIframeMatches = Regex("""<iframe\s+[^>]*src=["']((?:https?:)?//[^"']+)["']""", RegexOption.IGNORE_CASE)
+                .findAll(iframeHtml)
+                .map { it.groupValues[1] }
+                .distinct()
+                .toList()
+                
+            for (nestedRawSrc in nestedIframeMatches) {
+                val nestedIframeUrl = if (nestedRawSrc.startsWith("//")) "https:$nestedRawSrc" else nestedRawSrc
+                if (nestedIframeUrl.endsWith(".js") || nestedIframeUrl.endsWith(".css") || nestedIframeUrl.contains("tag.min")) continue
+                
+                // 더 깊은 단계로 재귀 탐색
+                val link = crawlIframe(nestedIframeUrl, iframeHeaders, depth + 1, sourceName)
+                if (link != null) return link
+            }
+            
+            // Popcdn 분기 지원
+            if (iframeUrl.contains("freeshot.live") || iframeUrl.contains("popcdn.day")) {
+                debugLog("Freeshot / Popcdn 분기 감지")
+                var channelCode = ""
+                val embedMatch = Regex("""embed/([^/.]+)\.php""").find(iframeUrl)
+                if (embedMatch != null) {
+                    channelCode = embedMatch.groupValues[1]
+                } else {
+                    channelCode = iframeUrl.split("/").last().split("?").first()
+                }
+                
+                val targetUrl = "https://popcdn.day/player/$channelCode"
+                val popResp = app.get(targetUrl, headers = iframeHeaders)
+                val popBody = popResp.text
+                
+                var finalM3u8 = ""
+                val streamUrlMatch = Regex("""streamUrl\s*:\s*"([^"]+)"""").find(popBody)
+                if (streamUrlMatch != null) {
+                    finalM3u8 = streamUrlMatch.groupValues[1].replace("\\", "")
+                } else {
+                    val tokenMatch = Regex("""token=([^&"']+)""").find(popBody)
+                    if (tokenMatch != null) {
+                        val token = tokenMatch.groupValues[1]
+                        finalM3u8 = "https://planetary.lovecdn.ru/$channelCode/tracks-v1a1/mono.m3u8?token=$token"
+                    }
+                }
+                
+                if (finalM3u8.isNotEmpty()) {
+                    debugLog("Freeshot 추출 성공 -> $finalM3u8")
+                    return ExtractorLink(
+                        source = sourceName, name = "Freeshot Server", url = finalM3u8,
+                        referer = "https://popcdn.day/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
+                        headers = mapOf(
+                            "Referer" to "https://popcdn.day/", "Origin" to "https://popcdn.day", "User-Agent" to userAgent
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            debugLog("crawlIframe depth=$depth 에서 예외 발생: ${e.message}")
+        }
+        return null
     }
 }
