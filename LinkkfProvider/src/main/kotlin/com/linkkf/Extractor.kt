@@ -6,9 +6,17 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mapper
 
 class LinkkfExtractor {
-    private val SUBTITLE_BASE_URL = "https://k1.sub1.top/s"
+    // 최신 자막 도메인 (기본)
+    private val SUBTITLE_BASE_URL = "https://subk.xyk2.top/s"
+    // 기존 자막 도메인 (Fallback)
+    private val SUBTITLE_FALLBACK_BASE_URL = "https://k1.sub1.top/s"
 
-    data class LinkkfResult(val m3u8Url: String, val subtitleUrl: String, val needsWebView: Boolean = false)
+    data class LinkkfResult(
+        val m3u8Url: String, 
+        val subtitleUrl: String, 
+        val fallbackSubtitleUrl: String = "", 
+        val needsWebView: Boolean = false
+    )
 
     suspend fun extract(url: String, referer: String): LinkkfResult? {
         try {
@@ -26,10 +34,15 @@ class LinkkfExtractor {
             val playerData = mapper.readValue(jsonString, object : TypeReference<PlayerData>() {})
             
             val actualUrl = playerData.actualUrl ?: return null
-            val subUrl = if (playerData.url != null) "$SUBTITLE_BASE_URL/${playerData.url}.vtt" else ""
+            val urlParam = playerData.url
+            
+            val subUrl = if (urlParam != null) "$SUBTITLE_BASE_URL/$urlParam.vtt" else ""
+            val fallbackSubUrl = if (urlParam != null) "$SUBTITLE_FALLBACK_BASE_URL/$urlParam.vtt" else ""
 
-            if (actualUrl.contains(".m3u8")) return LinkkfResult(actualUrl, subUrl, needsWebView = false)
-            return LinkkfResult(actualUrl, subUrl, needsWebView = true)
+            if (actualUrl.contains(".m3u8")) {
+                return LinkkfResult(actualUrl, subUrl, fallbackSubUrl, needsWebView = false)
+            }
+            return LinkkfResult(actualUrl, subUrl, fallbackSubUrl, needsWebView = true)
         } catch (e: Exception) { return null }
     }
 
