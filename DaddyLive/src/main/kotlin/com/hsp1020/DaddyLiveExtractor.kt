@@ -36,35 +36,30 @@ class DaddyLiveExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // AppUtils.tryParseJson 대신 mapper 직접 사용
         val links = try {
             mapper.readValue(url, object : TypeReference<List<Pair<String, String>>>() {})
         } catch (e: Exception) {
             null
         }
         
-        // 단일 URL로 인입된 경우의 예외 처리
         if (links == null) {
             val link = extractVideo(url, this.name)
             if (link != null) callback(link)
             return
         }
 
-        // 1. "채널명 - 플레이어타입"을 기준으로 그룹화 (예: "Sky Sports" 단위로 묶음)
         val groupedLinks = links.groupBy { it.first.substringBefore(" - ") }
 
-        // 2. 각 채널마다 독립적으로 추출 시도
         groupedLinks.forEach { (channelName, playerPairs) ->
             debugLog("[$channelName] 채널의 스트림 추출 시작 (총 ${playerPairs.size}개 후보)")
             
             for (playerPair in playerPairs) {
-                val sourceName = playerPair.first // UI에 표시될 이름 (예: "Sky Sports - stream")
+                val sourceName = playerPair.first 
                 val streamUrl = playerPair.second
 
                 val link = extractVideo(streamUrl, sourceName)
                 if (link != null) {
                     callback(link)
-                    // 해당 채널의 주소를 하나 찾았으므로, 이 채널의 나머지 백업 플레이어(cast, watch 등) 탐색만 중지함
                     debugLog("[$channelName] 성공적으로 추출 완료. 해당 채널의 나머지 백업 플레이어 탐색 중지.")
                     break 
                 }
@@ -82,12 +77,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                 "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
             )
 
-            // 1. 플레이어 페이지 가져오기
             val resp = app.get(url, headers = headers)
             if (!resp.isSuccessful) return null
             val html = resp.text
             
-            // 2. iframe src 추출 (dlstreams.py: id="thatframe" 우선 탐색)
             var iframeSrc = Regex("""<iframe[^>]*id=["']thatframe["'][^>]*src=["'](.*?)["']""").find(html)?.groupValues?.get(1)
             if (iframeSrc.isNullOrEmpty()) {
                 iframeSrc = Regex("""<iframe\s+[^>]*src=["'](https?://[^"']+)["']""", RegexOption.IGNORE_CASE).find(html)?.groupValues?.get(1)
@@ -100,9 +93,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             val iframeUrl = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
             debugLog("발견된 iframe 주소 -> $iframeUrl")
 
-            // =======================================================
-            // [분기 A] freeshot.py 로직 (popcdn.day / freeshot.live 계열)
-            // =======================================================
             if (iframeUrl.contains("freeshot.live") || iframeUrl.contains("popcdn.day")) {
                 debugLog("Freeshot / Popcdn 로직 가동")
                 var channelCode = ""
@@ -118,12 +108,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val popBody = app.get(targetUrl, headers = headers).text
                 
                 var finalM3u8 = ""
-                // 1) streamUrl : "..." 패턴 탐색
                 val streamUrlMatch = Regex("""streamUrl\s*:\s*"([^"]+)"""").find(popBody)
                 if (streamUrlMatch != null) {
                     finalM3u8 = streamUrlMatch.groupValues[1].replace("\\", "")
                 } else {
-                    // 2) fallback token 탐색
                     val tokenMatch = Regex("""token=([^&"']+)""").find(popBody)
                     if (tokenMatch != null) {
                         val token = tokenMatch.groupValues[1]
@@ -144,8 +132,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 return null
             }
 
-            // [분기 B] dlstreams.py 로직 (atob 베이스64 디코딩 계열)
-            // =======================================================
             val parsedUrl = URL(url)
             val entryOrigin = "${parsedUrl.protocol}://${parsedUrl.host}"
             
@@ -155,29 +141,34 @@ class DaddyLiveExtractor : ExtractorApi() {
             
             val iframeHtml = app.get(iframeUrl, headers = iframeHeaders).text
             
-            // dlstreams.py 핵심: atob 파싱
             val atobMatch = Regex("""atob\(['"](.*?)['"]\)""").find(iframeHtml)
             if (atobMatch != null) {
                 val b64Url = atobMatch.groupValues[1]
-                var streamUrl = base64Decode(b64Url).replace("\"", "").trim()
-                debugLog("atob Base64 디코딩 성공 -> $streamUrl")
+                val decodedUrl = base64Decode(b64Url).replace("\"", "").trim()
+                debugLog("atob Base64 디코딩 성공 -> $decodedUrl")
                 
                 val parsedIframe = URL(iframeUrl)
                 val iframeOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
-                val refOrigin = if (entryOrigin.isNotEmpty()) entryOrigin else iframeOrigin
                 
-                // ---------------- [ 수정 및 보완 부분 ] ----------------
-                // 상대 경로 주소를 iframe의 origin을 기준으로 절대 경로로 보정합니다.
-                streamUrl = when {
-                    streamUrl.startsWith("//") -> "https:$streamUrl"
-                    streamUrl.startsWith("/") -> "$iframeOrigin$streamUrl"
-                    !streamUrl.startsWith("http://") && !streamUrl.startsWith("https://") -> "$iframeOrigin/$streamUrl"
-                    else -> streamUrl
+                // 디코딩된 주소가 상대 경로 형태인지 판별합니다.
+                val isRelative = decodedUrl.startsWith("/") || (!decodedUrl.startsWith("http://") && !decodedUrl.startsWith("https://"))
+                
+                var streamUrl = decodedUrl
+                if (decodedUrl.startsWith("//")) {
+                    streamUrl = "https:$decodedUrl"
+                } else if (decodedUrl.startsWith("/")) {
+                    streamUrl = "$iframeOrigin$decodedUrl"
+                } else if (!decodedUrl.startsWith("http://") && !decodedUrl.startsWith("https://")) {
+                    streamUrl = "$iframeOrigin/$decodedUrl"
                 }
                 debugLog("절대 경로 변환 완료 -> $streamUrl")
-                // ------------------------------------------------------
                 
-                // provider_hooks.py 핵심: 특수 우회 헤더
+                // [동적 헤더 보정 적용]
+                // 1. 상대 경로 스트림인 경우: Referer와 Origin을 iframe 도메인으로 설정하여 404 방지 필터를 우회합니다.
+                // 2. 외부 절대 경로 스트림인 경우: 기존과 같이 dlhd.pk(entryOrigin)로 요청해야 정상 승인됩니다.
+                val refOrigin = if (isRelative) iframeOrigin else (if (entryOrigin.isNotEmpty()) entryOrigin else iframeOrigin)
+                debugLog("최종 설정된 refOrigin -> $refOrigin")
+                
                 return ExtractorLink(
                     source = sourceName, name = sourceName, url = streamUrl,
                     referer = "$refOrigin/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
@@ -193,8 +184,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                     )
                 )
             } else {
-                
-            
                 debugLog("이 iframe($iframeUrl)에는 atob 평문이 없습니다. 다음 후보를 찾습니다.")
                 return null
             }
