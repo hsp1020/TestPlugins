@@ -2033,7 +2033,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             if (url != null) {
                 val lowerUrl = url.lowercase()
                 val linkType = when {
-                    lowerUrl.contains(".m3u8") || name?.contains("m3u8", true) == true || title?.contains("m3u8", true) == true -> ExtractorLinkType.M3U8
+                    lowerUrl.contains(".m3u8") || 
+                    lowerUrl.contains("m3u8") || 
+                    lowerUrl.contains("playlist") || // ★ 이 줄 추가 (스포츠프리 등 프록시 재생 시 HLS 인식용)
+                    name?.contains("m3u8", true) == true || 
+                    title?.contains("m3u8", true) == true -> ExtractorLinkType.M3U8
+                    
                     lowerUrl.contains(".mpd") -> ExtractorLinkType.DASH
                     lowerUrl.contains(".torrent") -> ExtractorLinkType.TORRENT
                     else -> ExtractorLinkType.VIDEO 
