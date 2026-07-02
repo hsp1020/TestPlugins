@@ -140,17 +140,7 @@
                 android:clickable="true" />
         </LinearLayout>
 
-        <ImageView
-            android:src="@android:drawable/divider_horizontal_dark"
-            android:layout_width="fill_parent"
-            android:layout_height="wrap_content"
-            android:scaleType="fitXY"
-            android:paddingLeft="2dp"
-            android:paddingRight="2dp"
-            android:layout_marginBottom="10dp"
-            android:layout_marginTop="10dp" />
-
-        <!-- TMDb Language Selection (위치 변경 완료) -->
+        <!-- TMDb Language Selection (TMDB API Key 위로 이동 완료) -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -177,7 +167,7 @@
                 android:clickable="true" />
         </LinearLayout>
 
-        <!-- TMDb API Key Input (위치 변경 완료) -->
+        <!-- TMDb API Key Input -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -206,17 +196,7 @@
                 android:singleLine="true" />
         </LinearLayout>
 
-        <ImageView
-            android:src="@android:drawable/divider_horizontal_dark"
-            android:layout_width="fill_parent"
-            android:layout_height="wrap_content"
-            android:scaleType="fitXY"
-            android:paddingLeft="2dp"
-            android:paddingRight="2dp"
-            android:layout_marginBottom="10dp"
-            android:layout_marginTop="10dp" />
-
-        <!-- History & Library Sync URL Input (위치 변경 완료 - 상시 노출) -->
+        <!-- History & Library Sync URL Input (MDBList Ratings 위로 이동 완료) -->
         <LinearLayout
             android:id="@+id/layoutHistorySyncUrl"
             android:layout_width="match_parent"
@@ -254,7 +234,7 @@
                 android:singleLine="true" />
         </LinearLayout>
 
-        <!-- MdbList Ratings Toggle (위치 변경 완료) -->
+        <!-- MdbList Ratings Toggle -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -279,7 +259,7 @@
                 android:padding="5dp" />
         </LinearLayout>
 
-        <!-- MdbList API Key Input (위치 변경 완료) -->
+        <!-- MdbList API Key Input -->
         <LinearLayout
             android:id="@+id/layoutMdbList"
             android:layout_width="match_parent"
@@ -308,16 +288,6 @@
                 android:background="@android:color/transparent"
                 android:singleLine="true" />
         </LinearLayout>
-
-        <ImageView
-            android:src="@android:drawable/divider_horizontal_dark"
-            android:layout_width="fill_parent"
-            android:layout_height="wrap_content"
-            android:scaleType="fitXY"
-            android:paddingLeft="2dp"
-            android:paddingRight="2dp"
-            android:layout_marginBottom="10dp"
-            android:layout_marginTop="10dp" />
 
         <!-- XRDB Poster Toggle -->
         <LinearLayout
@@ -374,7 +344,7 @@
                 android:singleLine="true" />
         </LinearLayout>
 
-       <!-- CineStream Toggle -->
+        <!-- CineStream Toggle -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
