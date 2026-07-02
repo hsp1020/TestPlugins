@@ -127,27 +127,19 @@ class Linkkf : MainAPI() {
         try {
             val result = LinkkfExtractor().extract(fullUrl, "$mainUrl/") ?: return false
 
-            // 자막 서버 보안 차단을 해제하기 위해 Referer 및 User-Agent 동봉 설정
-            val subtitleHeaders = mapOf(
-                "Referer" to "$mainUrl/",
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-            )
-
             // 1. 기본 자막 등록 (subk.xyk2.top)
             if (result.subtitleUrl.isNotEmpty()) {
                 subtitleCallback.invoke(newSubtitleFile(
                     lang = "Korean", 
-                    url = result.subtitleUrl, 
-                    headers = subtitleHeaders
+                    url = result.subtitleUrl
                 ))
             }
 
-            // 2. 보조 자막 등록 (k1.sub1.top)
+            // 2. 예비 자막 등록 (k1.sub1.top)
             if (result.fallbackSubtitleUrl.isNotEmpty()) {
                 subtitleCallback.invoke(newSubtitleFile(
-                    lang = "Korean (Fallback)", 
-                    url = result.fallbackSubtitleUrl, 
-                    headers = subtitleHeaders
+                    lang = "Korean", 
+                    url = result.fallbackSubtitleUrl
                 ))
             }
 
