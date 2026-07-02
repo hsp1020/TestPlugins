@@ -147,13 +147,64 @@ class DaddyLiveExtractor : ExtractorApi() {
             iframeHeaders["Origin"] = entryOrigin
             
             debugLog("4. Iframe 페이지 요청 시작 -> URL: $iframeUrl")
-            debugLog("   - 요청 헤더: $iframeHeaders")
-            
             val iframeResp = app.get(iframeUrl, headers = iframeHeaders)
             debugLog("5. Iframe 페이지 응답 코드: ${iframeResp.code}")
-            debugLog("   - 응답 헤더: ${iframeResp.headers}")
             val iframeHtml = iframeResp.text
-            
+
+            // =======================================================
+            // [신규 우회 분기] igniteandship 감지 로직
+            // =======================================================
+            val igniteHostMatch = Regex("""(https?://[a-zA-Z0-9.-]*igniteandship\.com)""").find(iframeHtml)
+            if (igniteHostMatch != null) {
+                val igniteHost = igniteHostMatch.groupValues[1]
+                val parsedIframe = URL(iframeUrl)
+                val pageName = parsedIframe.path.substringAfterLast("/").substringBefore(".php")
+                debugLog("[IGNITE] 우회 플레이어 감지됨! 호스트: $igniteHost, pageName: $pageName")
+
+                // 진짜 토큰 정보가 실리는 플레이어 페이지 조립 및 요청
+                val playerUrl = "$igniteHost/wiki.php?player=desktop&live=$pageName"
+                val playerHeaders = mapOf(
+                    "User-Agent" to userAgent,
+                    "Referer" to iframeUrl,
+                    "Origin" to "${parsedIframe.protocol}://${parsedIframe.host}"
+                )
+                debugLog("[IGNITE] 진짜 플레이어 페이지 요청 -> $playerUrl")
+                val playerResp = app.get(playerUrl, headers = playerHeaders)
+                val playerHtml = playerResp.text
+
+                // 플레이어 본문 내부에서 md5, expires 가 완벽히 삽입된 진짜 m3u8 주소 추출
+                val streamUrl = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(playerHtml)?.groupValues?.get(1)?.replace("\\", "")
+                
+                if (!streamUrl.isNullOrEmpty()) {
+                    debugLog("[IGNITE] 진짜 m3u8 최종 주소 추출 성공 -> $streamUrl")
+                    
+                    // 스크린샷 데이터 증명 헤더 그대로 이식 (세션 쿠키 필요 없음, Referer/Origin 필수 검증)
+                    val finalHeaders = mapOf(
+                        "Referer" to "$igniteHost/",
+                        "Origin" to igniteHost,
+                        "User-Agent" to userAgent,
+                        "Accept" to "*/*",
+                        "X-Direct-Connection" to "1",
+                        "Sec-Fetch-Dest" to "empty",
+                        "Sec-Fetch-Mode" to "cors",
+                        "Sec-Fetch-Site" to "same-site"
+                    )
+                    debugLog("[IGNITE] ExtractorLink 탑재 헤더 -> $finalHeaders")
+                    debugLog("================= [DDL EXTRACT END] =================")
+                    
+                    return ExtractorLink(
+                        source = sourceName, name = sourceName, url = streamUrl,
+                        referer = "$igniteHost/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
+                        headers = finalHeaders
+                    )
+                } else {
+                    debugLog("[IGNITE] 플레이어 소스 내부에서 m3u8 주소 탐색 실패.")
+                }
+            }
+
+            // =======================================================
+            // [기존 분기 레거시 백업] (atob 로직)
+            // =======================================================
             val atobMatch = Regex("""atob\(['"](.*?)['"]\)""").find(iframeHtml)
             if (atobMatch != null) {
                 val b64Url = atobMatch.groupValues[1]
@@ -163,17 +214,12 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val parsedIframe = URL(iframeUrl)
                 val iframeOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
                 
-                // [핵심] iframe 주소에서 파일 이름(예: t14, t3)을 추출합니다.
                 val pageName = parsedIframe.path.substringAfterLast("/").substringBefore(".php")
-                debugLog("7. 파싱된 iframe 파일명: $pageName")
-                
-                // [핵심] 해독된 주소 안의 'stream' 키워드를 실제 파일명으로 치환하여 404를 회피합니다.
                 val resolvedPath = if (decodedUrl.contains("stream") && pageName.isNotEmpty() && pageName != "stream") {
                     decodedUrl.replace("stream", pageName)
                 } else {
                     decodedUrl
                 }
-                debugLog("8. 파일명 치환 결과 -> $resolvedPath")
                 
                 val isRelative = resolvedPath.startsWith("/") || (!resolvedPath.startsWith("http://") && !resolvedPath.startsWith("https://"))
                 
@@ -185,26 +231,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                 } else if (!resolvedPath.startsWith("http://") && !resolvedPath.startsWith("https://")) {
                     streamUrl = "$iframeOrigin/$resolvedPath"
                 }
-                debugLog("9. 최종 조합 완료된 Stream URL -> $streamUrl")
-
-                // [보완] 플레이어 응답 및 iframe 응답 헤더로부터 쿠키(Cookie)를 정밀 수집합니다.
-                val cookiesList = mutableListOf<String>()
-                resp.headers.values("set-cookie").forEach {
-                    cookiesList.add(it.substringBefore(";"))
-                }
-                iframeResp.headers.values("set-cookie").forEach {
-                    cookiesList.add(it.substringBefore(";"))
-                }
-                val cookieHeader = cookiesList.distinct().filter { it.isNotEmpty() }.joinToString("; ")
-                debugLog("10. 수집 완료된 Cookie 헤더 -> $cookieHeader")
                 
-                // [보완] 상대 경로인 경우 Referer는 루트 도메인이 아닌 플레이어 풀 주소(iframeUrl)여야 정상 승인됩니다.
                 val finalReferer = if (isRelative) iframeUrl else "$iframeOrigin/"
                 val finalOrigin = iframeOrigin
-                
-                // [보완] 동일 호스트로의 m3u8 호출은 same-origin, 타 주소 호출은 cross-site로 세팅하여 웹방화벽 우회
                 val fetchSite = if (isRelative) "same-origin" else "cross-site"
-                debugLog("11. 보안 정책 세팅 -> Referer: $finalReferer, Origin: $finalOrigin, Site: $fetchSite")
                 
                 val finalHeaders = mutableMapOf(
                     "Referer" to finalReferer,
@@ -217,11 +247,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                     "Sec-Fetch-Site" to fetchSite
                 )
                 
-                if (cookieHeader.isNotEmpty()) {
-                    finalHeaders["Cookie"] = cookieHeader
-                }
-                
-                debugLog("12. 최종 전송될 ExtractorLink 헤더 설정 -> $finalHeaders")
                 debugLog("================= [DDL EXTRACT END] =================")
                 
                 return ExtractorLink(
