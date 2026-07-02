@@ -1159,6 +1159,19 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     ) {
         if (!isIntegrationEnabled("cinestream_integration_enabled")) return
 
+
+        // [방어 코드 추가] 타입이 "other"이면서 동시에 공식 미디어 식별 ID가 하나도 없는 경우에만 탐색 차단
+        if (targetType == "other" &&
+            loadData.imdbId.isNullOrBlank() &&
+            loadData.tmdbId == null &&
+            loadData.malId == null &&
+            loadData.anilistId == null &&
+            loadData.kitsuId.isNullOrBlank()
+        ) {
+            return
+        }
+
+
         try {
             val cineStreamProvider = getCineStreamProvider() ?: return
             syncCineStreamSettings()
@@ -1192,6 +1205,18 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         callback: (ExtractorLink) -> Unit
     ) {
         if (!isIntegrationEnabled("streamplay_integration_enabled")) return
+               
+        // [방어 코드 추가] 타입이 "other"이면서 동시에 공식 미디어 식별 ID가 하나도 없는 경우에만 탐색 차단
+        if (targetType == "other" &&
+            loadData.imdbId.isNullOrBlank() &&
+            loadData.tmdbId == null &&
+            loadData.malId == null &&
+            loadData.anilistId == null &&
+            loadData.kitsuId.isNullOrBlank()
+        ) {
+            return
+        }
+        
 
         try {
             val streamPlayProvider = getStreamPlayProvider() ?: return
