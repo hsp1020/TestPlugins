@@ -69,7 +69,8 @@ class DaddyLiveExtractor : ExtractorApi() {
 
     private suspend fun extractVideo(url: String, sourceName: String): ExtractorLink? {
         try {
-            debugLog("파이썬 로직 탐색 시작 -> $url")
+            debugLog("================= [DDL EXTRACT START] =================")
+            debugLog("1. 소스 정보 -> Name: $sourceName, Target URL: $url")
             
             val headers = mapOf(
                 "User-Agent" to userAgent,
@@ -78,6 +79,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             )
 
             val resp = app.get(url, headers = headers)
+            debugLog("2. 플레이어 페이지 응답 코드: ${resp.code}")
             if (!resp.isSuccessful) return null
             val html = resp.text
             
@@ -89,12 +91,15 @@ class DaddyLiveExtractor : ExtractorApi() {
                 iframeSrc = Regex("""<iframe[^>]*src=["'](.*?)["']""").find(html)?.groupValues?.get(1)
             }
             
-            if (iframeSrc.isNullOrEmpty()) return null
+            if (iframeSrc.isNullOrEmpty()) {
+                debugLog("오류: iframe 주소를 찾지 못했습니다.")
+                return null
+            }
             val iframeUrl = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
-            debugLog("발견된 iframe 주소 -> $iframeUrl")
+            debugLog("3. 발견된 iframe 주소 -> $iframeUrl")
 
             if (iframeUrl.contains("freeshot.live") || iframeUrl.contains("popcdn.day")) {
-                debugLog("Freeshot / Popcdn 로직 가동")
+                debugLog("Freeshot / Popcdn 분기 감지")
                 var channelCode = ""
                 
                 val embedMatch = Regex("""embed/([^/.]+)\.php""").find(iframeUrl)
@@ -105,7 +110,9 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
                 
                 val targetUrl = "https://popcdn.day/player/$channelCode"
-                val popBody = app.get(targetUrl, headers = headers).text
+                val popResp = app.get(targetUrl, headers = headers)
+                debugLog("Freeshot Player 페이지 응답 코드: ${popResp.code}")
+                val popBody = popResp.text
                 
                 var finalM3u8 = ""
                 val streamUrlMatch = Regex("""streamUrl\s*:\s*"([^"]+)"""").find(popBody)
@@ -139,56 +146,77 @@ class DaddyLiveExtractor : ExtractorApi() {
             iframeHeaders["Referer"] = url
             iframeHeaders["Origin"] = entryOrigin
             
-            val iframeHtml = app.get(iframeUrl, headers = iframeHeaders).text
+            debugLog("4. Iframe 페이지 요청 시작 -> URL: $iframeUrl")
+            debugLog("   - 요청 헤더: $iframeHeaders")
+            
+            val iframeResp = app.get(iframeUrl, headers = iframeHeaders)
+            debugLog("5. Iframe 페이지 응답 코드: ${iframeResp.code}")
+            debugLog("   - 응답 헤더: ${iframeResp.headers}")
+            val iframeHtml = iframeResp.text
             
             val atobMatch = Regex("""atob\(['"](.*?)['"]\)""").find(iframeHtml)
             if (atobMatch != null) {
                 val b64Url = atobMatch.groupValues[1]
                 val decodedUrl = base64Decode(b64Url).replace("\"", "").trim()
-                debugLog("atob Base64 디코딩 성공 -> $decodedUrl")
+                debugLog("6. atob Base64 원본 해독 성공 -> $decodedUrl")
                 
                 val parsedIframe = URL(iframeUrl)
                 val iframeOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
                 
-                // 디코딩된 주소가 상대 경로 형태인지 판별합니다.
-                val isRelative = decodedUrl.startsWith("/") || (!decodedUrl.startsWith("http://") && !decodedUrl.startsWith("https://"))
+                // [핵심] iframe 주소에서 파일 이름(예: t14, t3)을 안전하게 추출합니다.
+                val pageName = parsedIframe.path.substringAfterLast("/").substringBefore(".php")
+                debugLog("7. 파싱된 iframe 파일명: $pageName")
                 
-                var streamUrl = decodedUrl
-                if (decodedUrl.startsWith("//")) {
-                    streamUrl = "https:$decodedUrl"
-                } else if (decodedUrl.startsWith("/")) {
-                    streamUrl = "$iframeOrigin$decodedUrl"
-                } else if (!decodedUrl.startsWith("http://") && !decodedUrl.startsWith("https://")) {
-                    streamUrl = "$iframeOrigin/$decodedUrl"
+                // [핵심] 해독된 주소 안의 'stream' 키워드를 실제 파일명으로 치환하여 404를 회피합니다.
+                val resolvedPath = if (decodedUrl.contains("stream") && pageName.isNotEmpty() && pageName != "stream") {
+                    decodedUrl.replace("stream", pageName)
+                } else {
+                    decodedUrl
                 }
-                debugLog("절대 경로 변환 완료 -> $streamUrl")
+                debugLog("8. 파일명 치환 결과 -> $resolvedPath")
                 
-                // [동적 헤더 보정 적용]
-                // 1. 상대 경로 스트림인 경우: Referer와 Origin을 iframe 도메인으로 설정하여 404 방지 필터를 우회합니다.
-                // 2. 외부 절대 경로 스트림인 경우: 기존과 같이 dlhd.pk(entryOrigin)로 요청해야 정상 승인됩니다.
+                val isRelative = resolvedPath.startsWith("/") || (!resolvedPath.startsWith("http://") && !resolvedPath.startsWith("https://"))
+                
+                var streamUrl = resolvedPath
+                if (resolvedPath.startsWith("//")) {
+                    streamUrl = "https:$resolvedPath"
+                } else if (resolvedPath.startsWith("/")) {
+                    streamUrl = "$iframeOrigin$resolvedPath"
+                } else if (!resolvedPath.startsWith("http://") && !resolvedPath.startsWith("https://")) {
+                    streamUrl = "$iframeOrigin/$resolvedPath"
+                }
+                debugLog("9. 최종 조합 완료된 Stream URL -> $streamUrl")
+                
                 val refOrigin = if (isRelative) iframeOrigin else (if (entryOrigin.isNotEmpty()) entryOrigin else iframeOrigin)
-                debugLog("최종 설정된 refOrigin -> $refOrigin")
+                debugLog("10. 적용할 Referer/Origin -> $refOrigin")
+                
+                val finalHeaders = mapOf(
+                    "Referer" to "$refOrigin/",
+                    "Origin" to refOrigin,
+                    "User-Agent" to userAgent,
+                    "Accept" to "*/*",
+                    "X-Direct-Connection" to "1",
+                    "Sec-Fetch-Dest" to "empty",
+                    "Sec-Fetch-Mode" to "cors",
+                    "Sec-Fetch-Site" to "cross-site"
+                )
+                debugLog("11. 최종 전송될 ExtractorLink 헤더 설정 -> $finalHeaders")
+                debugLog("================= [DDL EXTRACT END] =================")
                 
                 return ExtractorLink(
                     source = sourceName, name = sourceName, url = streamUrl,
                     referer = "$refOrigin/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
-                    headers = mapOf(
-                        "Referer" to "$refOrigin/",
-                        "Origin" to refOrigin,
-                        "User-Agent" to userAgent,
-                        "Accept" to "*/*",
-                        "X-Direct-Connection" to "1",
-                        "Sec-Fetch-Dest" to "empty",
-                        "Sec-Fetch-Mode" to "cors",
-                        "Sec-Fetch-Site" to "cross-site"
-                    )
+                    headers = finalHeaders
                 )
             } else {
-                debugLog("이 iframe($iframeUrl)에는 atob 평문이 없습니다. 다음 후보를 찾습니다.")
+                debugLog("알림: 이 iframe($iframeUrl)에는 atob 구문이 존재하지 않습니다. 다음 후보로 넘어갑니다.")
+                debugLog("================= [DDL EXTRACT END] =================")
                 return null
             }
         } catch (e: Exception) {
-            debugLog("추출 중 예외 발생: ${e.message}")
+            debugLog("오류: 추출 중 예외가 발생했습니다: ${e.message}")
+            e.printStackTrace()
+            debugLog("================= [DDL EXTRACT END] =================")
             return null
         }
     }
