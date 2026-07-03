@@ -92,7 +92,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (!resp.isSuccessful) return null
             val html = resp.text
             
-            // 모든 iframe 주소를 일괄 수집합니다. (따옴표 누락 규격 포함)
+            // 모든 iframe 주소를 수집합니다.
             val iframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
                 .findAll(html)
                 .map { match ->
@@ -120,8 +120,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                 
                 if (iframeUrl.endsWith(".js") || iframeUrl.endsWith(".css") || iframeUrl.contains("tag.min")) continue
                 
-                // depth = 1 단계부터 재귀 탐색 시작
-                val link = crawlIframe(iframeUrl, iframeHeaders, 1, sourceName)
+                // depth = 1 단계부터 재귀 탐색 시작 (entryOrigin 전달하여 프리미엄 채널 헤더 보장)
+                val link = crawlIframe(iframeUrl, iframeHeaders, 1, sourceName, entryOrigin)
                 if (link != null) return link
             }
 
@@ -134,8 +134,8 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
-    // 중첩된 껍데기 페이지 및 동적 JS 생성 아이프레임을 역추적하는 재귀 수집 유닛
-    private suspend fun crawlIframe(iframeUrl: String, iframeHeaders: Map<String, String>, depth: Int, sourceName: String): ExtractorLink? {
+    // 중첩된 껍데기 페이지 및 다중 iframe 깊이를 재귀적으로 탐색하는 유닛
+    private suspend fun crawlIframe(iframeUrl: String, iframeHeaders: Map<String, String>, depth: Int, sourceName: String, entryOrigin: String): ExtractorLink? {
         if (depth > 3) return null // 깊이 제한
         
         try {
@@ -145,9 +145,44 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (!iframeResp.isSuccessful) return null
             val iframeHtml = iframeResp.text
             
-            // 본문 내용을 분할 출력합니다.
+            // 수집된 iframe의 소스 코드를 분할 출력합니다.
             debugLog("[$depth 단계] 본문 크기: ${iframeHtml.length}")
             printLargeLog("DDL-IFRAME-BODY-DEPTH-$depth", iframeHtml)
+            
+            val parsedIframe = URL(iframeUrl)
+            val iframeOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
+
+            // =======================================================
+            // [복구 및 가짜 거름 필터] 프리미엄 채널 전용 정석 atob 복구
+            // =======================================================
+            val atobMatch = Regex("""atob\(['"](.*?)['"]\)""").find(iframeHtml)
+            if (atobMatch != null) {
+                val b64Url = atobMatch.groupValues[1]
+                val decodedUrl = base64Decode(b64Url).replace("\"", "").trim()
+                
+                // 해독된 주소가 정상적인 외부 절대 경로 CDN 주소(http로 시작)인 경우에만 정식으로 재생 반환
+                if (decodedUrl.startsWith("http")) {
+                    debugLog("[PREMIUM] 프리미엄 정석 스트림 해독 성공 -> $decodedUrl")
+                    
+                    val refOrigin = if (entryOrigin.isNotEmpty()) entryOrigin else iframeOrigin
+                    return ExtractorLink(
+                        source = sourceName, name = sourceName, url = decodedUrl,
+                        referer = "$refOrigin/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
+                        headers = mapOf(
+                            "Referer" to "$refOrigin/",
+                            "Origin" to refOrigin,
+                            "User-Agent" to userAgent,
+                            "Accept" to "*/*",
+                            "X-Direct-Connection" to "1",
+                            "Sec-Fetch-Dest" to "empty",
+                            "Sec-Fetch-Mode" to "cors",
+                            "Sec-Fetch-Site" to "cross-site"
+                        )
+                    )
+                } else {
+                    debugLog("[atob-필터링] 감지된 주소($decodedUrl)는 가짜 허니팟 주소이므로 우회를 지속합니다.")
+                }
+            }
             
             // 1. 해당 HTML 본문 내에 wiki.js가 탑재되어 있는지 확인
             val wikiJsMatch = Regex("""src=["'](https?://[^"']+|//[^"']+)wiki\.js""").find(iframeHtml)
@@ -158,12 +193,21 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
                 val igniteHost = rawWikiHost.trimEnd('/')
                 
-                val parsedIframe = URL(iframeUrl)
                 val pageName = parsedIframe.path.substringAfterLast("/").substringBefore(".php")
-                debugLog("[IGNITE-우회] 진짜 중계 플레이어 감지! 호스트: $igniteHost, pageName: $pageName")
+                
+                val fid = Regex("""fid\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
+                val zmidVar = Regex("""zmid\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
+                
+                val liveId = when {
+                    !fid.isNullOrEmpty() -> fid
+                    !zmidVar.isNullOrEmpty() -> zmidVar
+                    else -> pageName
+                }
+                
+                debugLog("[IGNITE-우회] 진짜 중계 플레이어 감지! 호스트: $igniteHost, liveId: $liveId")
 
                 // 진짜 영상 토큰이 탑재될 플레이어 페이지 호출
-                val playerUrl = "$igniteHost/wiki.php?player=desktop&live=$pageName"
+                val playerUrl = "$igniteHost/wiki.php?player=desktop&live=$liveId"
                 val playerHeaders = mapOf(
                     "User-Agent" to userAgent,
                     "Referer" to iframeUrl,
@@ -174,7 +218,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 if (playerResp.isSuccessful) {
                     val playerHtml = playerResp.text
                     
-                    // 쪼개진 문자 배열 파싱 및 복구
+                    // 쪼개진 m3u8 문자 배열 파싱 및 복구
                     val arrayMatch = Regex("""\["h"\s*,\s*"t"\s*,\s*"t"\s*,\s*"p"\s*,\s*"s"\s*,[^\]]+\]""").find(playerHtml)
                     if (arrayMatch != null) {
                         var streamUrl = arrayMatch.groupValues[0]
@@ -217,7 +261,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             }
 
-            // [핵심 보완] 자바스크립트 변수로 위장한 동적 iframe 생성 감지 (embedsports.me 동적 생성 우회)
+            // [우회] 자바스크립트 변수로 위장한 동적 iframe 생성 감지 (embedsports.me 동적 생성 우회)
             val edm = Regex("""edm\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
             val zmid = Regex("""zmid\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
             if (!edm.isNullOrEmpty() && !zmid.isNullOrEmpty()) {
@@ -225,7 +269,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 debugLog("[$depth 단계] 동적 JS Iframe 가상 복원 성공 -> URL: $constructedIframeUrl")
                 
                 // 가상 조립된 중첩 iframe 주소로 재귀 진입하여 탐색
-                val link = crawlIframe(constructedIframeUrl, iframeHeaders, depth + 1, sourceName)
+                val link = crawlIframe(constructedIframeUrl, iframeHeaders, depth + 1, sourceName, entryOrigin)
                 if (link != null) return link
             }
 
@@ -240,8 +284,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 
             for (nestedRawSrc in nestedIframeMatches) {
                 var nestedIframeUrl = nestedRawSrc
-                val parsedParent = URL(iframeUrl)
-                val parentOrigin = "${parsedParent.protocol}://${parsedParent.host}"
+                val parentOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
                 
                 // 상대 경로 복원 처리
                 if (nestedRawSrc.startsWith("//")) {
@@ -255,7 +298,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 if (nestedIframeUrl.endsWith(".js") || nestedIframeUrl.endsWith(".css") || nestedIframeUrl.contains("tag.min")) continue
                 
                 // 더 깊은 단계로 재귀 탐색 진행
-                val link = crawlIframe(nestedIframeUrl, iframeHeaders, depth + 1, sourceName)
+                val link = crawlIframe(nestedIframeUrl, iframeHeaders, depth + 1, sourceName, entryOrigin)
                 if (link != null) return link
             }
             
