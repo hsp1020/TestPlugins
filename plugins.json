@@ -60,10 +60,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/KotbcProvider/ktblogo.png",
-        "fileHash": "sha256-909ea163fd3c0512517af3f8d83251b68b85baa5b44dbacba861ddf5336471ea",
+        "fileHash": "sha256-eee83c118c5ac1d48e72187daadeaefc735b319711ab154ae600fe229bdf9407",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 30858,
+        "fileSize": 30860,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -103,10 +103,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/MoviekingProvider/image-4.png",
-        "fileHash": "sha256-d245b57a84e79361e44764471babd607e89f147986216e4fd28ee7c39a891c2f",
+        "fileHash": "sha256-1ccf951b03257b7020c7bc7e13a820e07f50268cb1c0da4337364a96828779f0",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 40506,
+        "fileSize": 40505,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -232,10 +232,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/TVMONProvider/111.png",
-        "fileHash": "sha256-83d57f72eaf77507b29c50491808724725df021be13c46245a569c12ccddb7bc",
+        "fileHash": "sha256-f1f0184207505a52ddd29328c9dc41c145a8d105e60c483809d446b1665415ad",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 51110,
+        "fileSize": 51108,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -255,10 +255,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/TVWikiProvider/logo.png",
-        "fileHash": "sha256-744fad5ae92aaacd6125f4a513ad25feb36a08b65adbdfb47e33e9b4d713873f",
+        "fileHash": "sha256-f48837daea52126ad141f41e68da65700edcab9c32cffa2a18d9cb2e496fc684",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 52932,
+        "fileSize": 52924,
         "status": 1,
         "language": "ko",
         "authors": [
