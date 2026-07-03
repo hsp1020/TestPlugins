@@ -107,7 +107,7 @@ class TVMon : MainAPI() {
             
             var foundDomain: String? = null
             coroutineScope {
-                val candidates = (startNum..startNum + 100).map { "https://tvmon$it.com" }
+                val candidates = (startNum..startNum + 200).map { "https://tvmon$it.com" }
                 val chunks = candidates.chunked(5) 
                 
                 for (chunk in chunks) {
