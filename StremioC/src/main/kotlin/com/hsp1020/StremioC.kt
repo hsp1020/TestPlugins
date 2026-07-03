@@ -1776,10 +1776,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
 
             if (finalType != "movie" && finalType != "series") {
-                // 비어있지 않으면 순수 설명만 그대로 보여주고, 비어있으면 '\u200b'를 대입합니다.
-                finalDescription = if (finalDescription.isNotBlank()) finalDescription else "\u200b"
+                // !finalDescription.isNullOrBlank()를 사용하여 널 에러를 방지합니다.
+                finalDescription = if (!finalDescription.isNullOrBlank()) finalDescription else "\u200b"
             }
-            
+
             val movieId = this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id ?: ""
             if (tmdbData != null && finalVideos.isNullOrEmpty() && tmdbData.episodeTmdbMeta.isNotEmpty()) {
                 val generatedVideos = tmdbData.episodeTmdbMeta.mapNotNull { (key, tmdbEp) ->
