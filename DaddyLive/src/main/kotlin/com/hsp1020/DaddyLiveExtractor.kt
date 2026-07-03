@@ -156,7 +156,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }.mapNotNull { it.await() }
             }
 
-            // 병렬 로드가 완료된 HTML 소스들을 CPU로 고속 파싱 진행
             for ((iframeUrl, iframeHtml) in loadedIframeBodies) {
                 val link = parseAndExtract(iframeUrl, iframeHtml, iframeHeaders, entryOrigin, sourceName)
                 if (link != null) return link
@@ -192,7 +191,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             val parsedIframe = URL(iframeUrl)
             val iframeOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
 
-            // [정밀 스크립트 추적 모니터] 
             // 643KB의 무거운 라이브러리는 거르고, 오직 변수들이 선언된 설정값 코드 블록만 선별 출력
             val scriptBlocks = Regex("""<script[^>]*>([\s\S]*?)</script>""").findAll(iframeHtml).map { it.groupValues[1] }.toList()
             for ((index, script) in scriptBlocks.withIndex()) {
@@ -319,9 +317,29 @@ class DaddyLiveExtractor : ExtractorApi() {
             val zmid = Regex("""zmid\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
             if (!edm.isNullOrEmpty() && !zmid.isNullOrEmpty()) {
                 
-                // [정밀 보완] 등호와 콜론을 모두 완벽히 수용하도록 정형화하여 변수가 누락되지 않도록 조치
-                val csrfVal = if (!metaCsrf.isNullOrEmpty()) metaCsrf else {
-                    Regex("""(?:csrf|token|auth|key)["']?\s*[:=]\s*["']([a-zA-Z0-9_.-]{50,250})["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
+                // [정량 보정 - 누락 선언부 탑재 완료] JSON 객체 내부의 변수를 직접 파싱하는 최우선 복호화 엔진 변수 선언
+                val configMatch = Regex("""const\s+siteConfig\s*=\s*(\{[\s\S]*?\});""").find(iframeHtml)
+                val configMap = if (configMatch != null) {
+                    try {
+                        mapper.readValue(configMatch.groupValues[1], object : TypeReference<Map<String, Any>>() {})
+                    } catch (e: Exception) {
+                        null
+                    }
+                } else null
+                
+                // 수집된 JSON 객체 맵핑 분석을 통해 세션 토큰 및 클라이언트 IP를 실시간 할당
+                val configCsrf = configMap?.get("csrf") as? String
+                val configCsrfIp = configMap?.get("csrf_ip") as? String
+                val trackerStr = configMap?.get("tracker") as? String ?: ""
+                val gname = Regex("""gname=([^&]+)""").find(trackerStr)?.groupValues?.get(1)?.let {
+                    try { URLDecoder.decode(it, "UTF-8") } catch (e: Exception) { it.replace("+", " ") }
+                } ?: ""
+                
+                // [온점(.) 정형화 수집 필터] 온점을 온전히 매칭하여 가로채는 범용 정규식 필터로 2순위 수집
+                val csrfVal = when {
+                    !configCsrf.isNullOrEmpty() -> configCsrf
+                    !metaCsrf.isNullOrEmpty() -> metaCsrf
+                    else -> Regex("""(?:csrf|token|auth|key)["']?\s*[:=]\s*["']([a-zA-Z0-9_.-]{50,250})["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
                 }
                 
                 val csrfIpVal = when {
@@ -347,7 +365,14 @@ class DaddyLiveExtractor : ExtractorApi() {
                     val gacatEnc = URLEncoder.encode(gacat, "UTF-8")
                     val gatxtEnc = URLEncoder.encode(gatxtVal, "UTF-8")
                     
-                    "https://$edm/sd0embed/$gatxtVal?pid=$pid&gacat=$gacatEnc&gatxt=$gatxtEnc&v=$vVal&csrf=$csrfVal&csrf_ip=$csrfIpVal"
+                    // [정밀 보완] Wimbledon Highlight 등 최신 2세대 sd0embed 세션 주소를 가치 있게 동적 자동 조립
+                    val pathElement = if (gatxtVal.isNotEmpty()) {
+                        URLEncoder.encode(gatxtVal, "UTF-8")
+                    } else {
+                        zmid
+                    }
+                    
+                    "https://$edm/sd0embed/$pathElement?pid=$pid&gacat=$gacatEnc&gatxt=$gatxtEnc&v=$vVal&csrf=$csrfVal&csrf_ip=$csrfIpVal"
                 } else {
                     "https://$edm/court/$zmid.php"
                 }
