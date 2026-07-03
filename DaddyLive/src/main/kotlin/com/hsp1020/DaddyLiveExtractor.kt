@@ -39,7 +39,6 @@ class DaddyLiveExtractor : ExtractorApi() {
     }
 
     private fun printLargeLog(tag: String, message: String) {
-        // 안드로이드 로그캣 버퍼 오염을 완벽히 방지하기 위해 30,000자 이하의 실제 플레이어 코드만 출력 필터링합니다.
         if (message.length > 30000) {
             Log.d(tag, "[SKIP] 이 파일은 너무 거대한 자바스크립트 파일(크기: ${message.length})이므로 버퍼 오염 방지를 위해 생략합니다.")
             return
@@ -94,7 +93,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             debugLog("================= [DDL EXTRACT START] =================")
             debugLog("1. 소스 정보 -> Name: $sourceName, Target URL: $url")
             
-            // Extractor의 입력 URL에 맞춰 mainUrl 및 Origin 도메인을 실시간으로 동적 바인딩합니다.
             val parsedUrl = URL(url)
             val entryOrigin = "${parsedUrl.protocol}://${parsedUrl.host}"
             mainUrl = entryOrigin
@@ -105,7 +103,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 "accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
             )
 
-            // UI 스레드 차단 방지를 위해 백그라운드 스레드풀에서 페이지 호출
             val resp = withContext(Dispatchers.IO) {
                 app.get(url, headers = requestHeaders, timeout = 3000)
             }
@@ -113,7 +110,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (!resp.isSuccessful) return null
             val html = resp.text
             
-            // CORS 및 화이트리스트 기반 중계 전용 iframe 주소만 안전하게 획득
             val iframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
                 .findAll(html)
                 .map { match -> match.groupValues[1].ifEmpty { match.groupValues[2] } }
@@ -155,7 +151,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }.mapNotNull { it.await() }
             }
 
-            // 병렬 로드가 완료된 HTML 소스들을 CPU로 고속 파싱 진행
             for ((iframeUrl, iframeHtml) in loadedIframeBodies) {
                 val link = parseAndExtract(iframeUrl, iframeHtml, iframeHeaders, entryOrigin, sourceName)
                 if (link != null) return link
@@ -176,7 +171,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
-    // 중첩된 페이지 및 다중 iframe 깊이를 재귀적으로 파고들며 탐색하는 핵심 유닛 (더미 출력 로그 전면 제거 완료)
     private suspend fun parseAndExtract(
         iframeUrl: String, 
         iframeHtml: String, 
@@ -191,15 +185,28 @@ class DaddyLiveExtractor : ExtractorApi() {
             val parsedIframe = URL(iframeUrl)
             val iframeOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
 
-            // =======================================================
-            // [복구 및 보안 필터] 프리미엄 채널용 정석 atob 복구 (가짜 허니팟은 필터링)
-            // =======================================================
+            // [보완 - 정밀 스크립트 추적 모니터] 
+            // 643KB의 무거운 라이브러리는 거르고, 오직 변수들이 선언된 설정값 코드 블록만 선별 출력하여 원인을 정확히 수집합니다.
+            val scriptBlocks = Regex("""<script[^>]*>([\s\S]*?)</script>""").findAll(iframeHtml).map { it.groupValues[1] }.toList()
+            for ((index, script) in scriptBlocks.withIndex()) {
+                val hasConfigVars = script.contains("zmid") || script.contains("edm") || script.contains("csrf") || script.contains("v")
+                if (hasConfigVars && script.length < 30000) {
+                    debugLog("[WIMBLEDON-SCRIPT-$index] 감지됨! 크기: ${script.length}")
+                    printLargeLog("WIMBLEDON-SCRIPT-$index", script)
+                }
+            }
+            
+            // 메타 태그 영역에서 CSRF 방어 토큰 수집 검사 진행
+            val metaCsrf = Regex("""<meta[^>]+(?:csrf|token|auth)[^>]+content=["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
+            if (!metaCsrf.isNullOrEmpty()) {
+                debugLog("[WIMBLEDON-META-CSRF] 메타 태그 토큰 발견 -> $metaCsrf")
+            }
+
+            // 1. 프리미엄 채널용 정석 atob 복구 (가짜 허니팟은 필터링)
             val atobMatch = Regex("""atob\(['"](.*?)['"]\)""").find(iframeHtml)
             if (atobMatch != null) {
                 val b64Url = atobMatch.groupValues[1]
                 val decodedUrl = base64Decode(b64Url).replace("\"", "").trim()
-                
-                // 해독 결과가 가짜 허니팟 주소(/hls/stream...)가 아니고, 정상적인 외부 절대 경로 CDN 주소인 경우에만 승인
                 if (decodedUrl.startsWith("http")) {
                     debugLog("[PREMIUM] 프리미엄 정석 스트림 해독 성공 -> $decodedUrl")
                     val refOrigin = if (entryOrigin.isNotEmpty()) entryOrigin else iframeOrigin
@@ -222,7 +229,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             }
             
-            // 1. 해당 HTML 본문 내에 wiki.js가 탑재되어 있는지 확인
+            // 2. wiki.js 플레이어 감지 및 처리
             val wikiJsMatch = Regex("""src=["'](https?://[^"']+|//[^"']+)wiki\.js""").find(iframeHtml)
             if (wikiJsMatch != null) {
                 var rawWikiHost = wikiJsMatch.groupValues[1]
@@ -296,15 +303,17 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             }
 
-            // 2. [완전 보완] 자바스크립트 변수로 위장한 동적 iframe 생성 감지 (embedsports.me 동적 생성 우회 및 2세대 sd0embed 구조 우회)
+            // 3. 자바스크립트 변수로 위장한 동적 iframe 생성 감지 (embedsports.me 동적 생성 우회 및 2세대 sd0embed 구조 우회)
             val edm = Regex("""edm\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
             val zmid = Regex("""zmid\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
             if (!edm.isNullOrEmpty() && !zmid.isNullOrEmpty()) {
                 
-                // [정밀 보완] 등호(=)와 콜론(:)을 모두 지원하는 초정밀 통합 정규식을 사용하여 csrf 값이 절대 누락되지 않도록 조치합니다.
-                val csrf = Regex("""(?:csrf|token|auth|key)["']?\s*[:=]\s*["']([a-zA-Z0-9_-]{50,150})["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
+                // [정밀 보완] 등호와 콜론을 모두 완벽히 수용하도록 정형화하여 변수가 누락되지 않도록 조치
+                val csrfVal = if (!metaCsrf.isNullOrEmpty()) metaCsrf else {
+                    Regex("""(?:csrf|token|auth|key)["']?\s*[:=]\s*["']([a-zA-Z0-9_-]{50,150})["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
+                }
                 
-                val constructedIframeUrl = if (!csrf.isNullOrEmpty()) {
+                val constructedIframeUrl = if (!csrfVal.isNullOrEmpty()) {
                     val pid = Regex("""pid\s*[:=]\s*["']?([^"';\s]+)["']?""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1) ?: "5"
                     val gacat = Regex("""gacat\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1) ?: ""
                     val gatxt = Regex("""gatxt\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1) ?: ""
@@ -314,9 +323,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                     val gacatEnc = java.net.URLEncoder.encode(gacat, "UTF-8")
                     val gatxtEnc = java.net.URLEncoder.encode(gatxt, "UTF-8")
                     
-                    // [정밀 보완] 스크린샷 3&4의 진짜 sd0embed 경로로 동적 변수를 결합하여 완벽한 플레이어 주소를 복원합니다.
                     val pathElement = if (gatxt.isNotEmpty()) gatxt else zmid
-                    "https://$edm/sd0embed/$pathElement?pid=$pid&gacat=$gacatEnc&gatxt=$gatxtEnc&v=$v&csrf=$csrf&csrf_ip=$csrfIp"
+                    "https://$edm/sd0embed/$pathElement?pid=$pid&gacat=$gacatEnc&gatxt=$gatxtEnc&v=$v&csrf=$csrfVal&csrf_ip=$csrfIp"
                 } else {
                     "https://$edm/court/$zmid.php"
                 }
@@ -330,7 +338,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             }
 
-            // 3. 일반적인 중첩 static iframe 수집 및 순회 (재귀적)
+            // 4. 일반적인 중첩 static iframe 수집 및 순회 (재귀적)
             val nestedIframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
                 .findAll(iframeHtml)
                 .map { match -> match.groupValues[1].ifEmpty { match.groupValues[2] } }
@@ -362,7 +370,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             }
             
-            // 4. Popcdn / Freeshot 분기
+            // 5. Popcdn / Freeshot 분기
             if (iframeUrl.contains("freeshot.live") || iframeUrl.contains("popcdn.day")) {
                 debugLog("Freeshot / Popcdn 분기 감지")
                 var channelCode = ""
