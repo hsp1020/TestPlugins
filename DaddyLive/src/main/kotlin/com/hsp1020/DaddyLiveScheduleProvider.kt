@@ -28,14 +28,14 @@ import java.util.Locale
 import java.util.TimeZone
 
 class DaddyLiveScheduleProvider : MainAPI() {
-    override var mainUrl = "https://dlhd.st" // Extractor와 일치하도록 통일
+    override var mainUrl = "https://dlhd.st" // Extractor의 동적Origin 대응과 완벽 매치
     override var name = "DaddyLive"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "en"
     override val hasMainPage = true
     override val hasDownloadSupport = false
     
-    // Extractor와 통일된 안정적인 Chrome 브라우저 User-Agent 탑재
+    // Extractor와 완벽히 통일된 표준 Chrome 브라우저 User-Agent 탑재
     private val userAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
 
@@ -73,6 +73,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
 
             return localFormat.format(date)
         }
+        // 사용하지 않던 더미 함수 'convertStringToLocalDate'를 완전히 제거하여 소스 용량 다이어트 완료
     }
 
     private fun searchResponseBuilder(doc: Element): List<LiveSearchResponse> {
@@ -100,7 +101,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         debugLog("getMainPage: Initiating call for main page: $mainUrl")
         return try {
-            // UI 스레드를 차단하여 프레임 드랍(렉)이 일어나지 않도록 입출력 및 파싱 작업을 IO 스레드풀로 전면 격리
+            // UI 스레드 정지 및 드랍 현상(렉)을 원천 차단하기 위해 IO 비동기 컨텍스트 격리 지정
             withContext(Dispatchers.IO) {
                 val response = app.get(mainUrl)
                 debugLog("getMainPage: Received response with status ${response.code}")
