@@ -20,17 +20,36 @@ import java.net.SocketTimeoutException
 import java.net.URL
 
 class DaddyLiveExtractor : ExtractorApi() {
-    override var mainUrl = "https://dlhd.st" // 기본 주소 설정 (초기 바인딩용)
+    override var mainUrl = "https://dlhd.st" // Provider와 통일
     override val name = "DaddyLive"
     override val requiresReferer = false
     
-    // 스케줄러와 완전 통일된 Chrome 표준 UA 사용
+    // 글로벌 통일된 Chrome 브라우저 User-Agent 정의
     private val userAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+    private val headers = mapOf(
+        "referer" to mainUrl,
+        "user-agent" to userAgent,
+        "accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+    )
 
     private fun debugLog(message: String) {
         Log.d("DDL-DEBUG", "[DDL-DEBUG] $message")
         println("[DDL-DEBUG] $message")
+    }
+
+    private fun printLargeLog(tag: String, message: String) {
+        // 안드로이드 로그캣 버퍼 오염을 완벽히 방지하기 위해 30,000자 이하의 실제 플레이어 코드만 출력 필터링합니다.
+        if (message.length > 30000) {
+            Log.d(tag, "[SKIP] 이 파일은 너무 거대한 자바스크립트 파일(크기: ${message.length})이므로 버퍼 오염 방지를 위해 생략합니다.")
+            return
+        }
+        var i = 0
+        while (i < message.length) {
+            val end = (i + 3500).coerceAtMost(message.length)
+            Log.d(tag, "[BODY-CHUNK] ${message.substring(i, end)}")
+            i += 3500
+        }
     }
 
     override suspend fun getUrl(
@@ -75,7 +94,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             debugLog("================= [DDL EXTRACT START] =================")
             debugLog("1. 소스 정보 -> Name: $sourceName, Target URL: $url")
             
-            // [개선 - 동적 도메인 바인딩] 인입된 도메인에 맞춰 mainUrl 및 Origin 오리진 도메인을 즉시 바인딩하여 핫링크 우회 보장
+            // Extractor의 입력 URL에 맞춰 mainUrl 및 Origin 도메인을 실시간으로 동적 바인딩합니다.
             val parsedUrl = URL(url)
             val entryOrigin = "${parsedUrl.protocol}://${parsedUrl.host}"
             mainUrl = entryOrigin
@@ -86,7 +105,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 "accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
             )
 
-            // UI 스레드 차단 방지를 위해 IO 비동기 스레드 컨텍스트 지정 및 타임아웃 단축
+            // UI 스레드 차단 방지를 위해 백그라운드 스레드풀에서 페이지 호출
             val resp = withContext(Dispatchers.IO) {
                 app.get(url, headers = requestHeaders, timeout = 3000)
             }
@@ -94,7 +113,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (!resp.isSuccessful) return null
             val html = resp.text
             
-            // [CORS 및 화이트리스트 최적화] 무단 광고 iframe 수집을 원천 차단하고 순수 중계용 iframe 주소만 안전하게 획득
+            // 수집되는 주소 중 광고성 파일은 패스하고 진짜 중계용 iframe 주소만 동적으로 수집
             val iframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
                 .findAll(html)
                 .map { match -> match.groupValues[1].ifEmpty { match.groupValues[2] } }
@@ -111,7 +130,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             iframeHeaders["referer"] = url
             iframeHeaders["origin"] = entryOrigin
 
-            // [로딩 속도 대폭 단축 - 비동기 병렬 네트워크 통신]
+            // [비동기 병렬 네트워크 통신]
             // 수집된 중계 iframe 페이지들을 비동기 코루틴(async)으로 병렬 동시 호출하여 획득 대기 지연 시간을 비약적으로 축소
             val loadedIframeBodies = coroutineScope {
                 iframeMatches.map { rawSrc ->
@@ -158,7 +177,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
-    // 중첩된 껍데기 페이지 및 다중 iframe 깊이를 파고들며 탐색하는 수집 엔진 (더미 출력 로그 전면 제거 완료)
+    // 중첩된 페이지 및 다중 iframe 깊이를 재귀적으로 파고들며 탐색하는 핵심 유닛
     private suspend fun parseAndExtract(
         iframeUrl: String, 
         iframeHtml: String, 
@@ -181,7 +200,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val b64Url = atobMatch.groupValues[1]
                 val decodedUrl = base64Decode(b64Url).replace("\"", "").trim()
                 
-                // 해독 결과가 가짜 허니팟(/hls/stream...)이 아닌 진짜 절대 경로 CDN 주소일 때만 정상 반환
+                // 해독 결과가 가짜 허니팟 주소(/hls/stream...)가 아니고, 정상적인 외부 절대 경로 CDN 주소일 때만 정상 반환
                 if (decodedUrl.startsWith("http")) {
                     debugLog("[PREMIUM] 프리미엄 정석 스트림 해독 성공 -> $decodedUrl")
                     val refOrigin = if (entryOrigin.isNotEmpty()) entryOrigin else iframeOrigin
@@ -212,8 +231,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                     rawWikiHost = "https:$rawWikiHost"
                 }
                 var igniteHost = rawWikiHost.trimEnd('/')
-                
-                // stellarthread.com 차단 도메인 감지 시, 현재 정상 동작하는 igniteandship.com으로 동적 자동 치환
                 if (igniteHost.contains("stellarthread.com")) {
                     debugLog("[우회] 차단된 도메인(stellarthread) 감지! 활성 도메인(igniteandship.com)으로 자동 교체합니다.")
                     igniteHost = "https://igniteandship.com"
@@ -230,7 +247,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
                 debugLog("[IGNITE-우회] 진짜 중계 플레이어 감지! 호스트: $igniteHost, liveId: $liveId")
 
-                // 진짜 영상 토큰이 탑재될 플레이어 페이지 호출
                 val playerUrl = "$igniteHost/wiki.php?player=desktop&live=$liveId"
                 val playerHeaders = mapOf(
                     "user-agent" to userAgent,
@@ -238,7 +254,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     "origin" to iframeOrigin
                 )
                 
-                val playerResp = app.get(playerUrl, headers = playerHeaders, timeout = 3000)
+                val playerResp = app.get(playerUrl, headers = playerHeaders)
                 if (playerResp.isSuccessful) {
                     val playerHtml = playerResp.text
                     val arrayMatch = Regex("""\["h"\s*,\s*"t"\s*,\s*"t"\s*,\s*"p"\s*,\s*"s"\s*,[^\]]+\]""").find(playerHtml)
@@ -281,11 +297,28 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             }
 
-            // 2. 자바스크립트 변수로 위장한 동적 iframe 생성 감지 (embedsports.me 동적 생성 우회)
+            // 2. [완전 보완] 자바스크립트 변수로 위장한 동적 iframe 생성 감지 (embedsports.me 동적 생성 우회 및 2세대 sd0embed 구조 우회)
             val edm = Regex("""edm\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
             val zmid = Regex("""zmid\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
             if (!edm.isNullOrEmpty() && !zmid.isNullOrEmpty()) {
-                val constructedIframeUrl = "https://$edm/court/$zmid.php"
+                val csrf = Regex("""csrf\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
+                
+                // [핵심] 스크린샷 3&4가 증명하는 sd0embed 세션 주소를 자바스크립트 런타임과 똑같은 방식으로 가상 동적 조립합니다.
+                val constructedIframeUrl = if (!csrf.isNullOrEmpty()) {
+                    val pid = Regex("""pid\s*=\s*["']?([^"';\s]+)["']?""").find(iframeHtml)?.groupValues?.get(1) ?: "5"
+                    val gacat = Regex("""gacat\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1) ?: ""
+                    val gatxt = Regex("""gatxt\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1) ?: ""
+                    val v = Regex("""v\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1) ?: ""
+                    val csrfIp = Regex("""csrf_ip\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1) ?: ""
+                    
+                    val gacatEnc = java.net.URLEncoder.encode(gacat, "UTF-8")
+                    val gatxtEnc = java.net.URLEncoder.encode(gatxt, "UTF-8")
+                    
+                    "https://$edm/sd0embed/$zmid?pid=$pid&gacat=$gacatEnc&gatxt=$gatxtEnc&v=$v&csrf=$csrf&csrf_ip=$csrfIp"
+                } else {
+                    "https://$edm/court/$zmid.php"
+                }
+                
                 debugLog("[$depth 단계] 동적 JS Iframe 가상 복원 성공 -> URL: $constructedIframeUrl")
                 
                 val nestedResp = app.get(constructedIframeUrl, headers = iframeHeaders, timeout = 3000)
