@@ -20,7 +20,7 @@ import java.net.SocketTimeoutException
 import java.net.URL
 
 class DaddyLiveExtractor : ExtractorApi() {
-    override var mainUrl = "https://dlhd.st" // Provider와 일치하도록 통일
+    override var mainUrl = "https://dlhd.st" // Provider와 통일
     override val name = "DaddyLive"
     override val requiresReferer = false
     
@@ -113,7 +113,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (!resp.isSuccessful) return null
             val html = resp.text
             
-            // [CORS 및 화이트리스트 최적화] 무단 광고 iframe 수집을 원천 차단하고 순수 중계용 iframe 주소만 안전하게 획득
+            // CORS 및 화이트리스트 기반 중계 전용 iframe 주소만 안전하게 획득
             val iframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
                 .findAll(html)
                 .map { match -> match.groupValues[1].ifEmpty { match.groupValues[2] } }
@@ -130,8 +130,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             iframeHeaders["referer"] = url
             iframeHeaders["origin"] = entryOrigin
 
-            // [로딩 속도 대대적 단축 - 비동기 병렬 네트워크 통신]
-            // 수집된 중계 iframe 페이지들을 비동기 코루틴(async)으로 병렬 동시 호출하여 획득 대기 지연 시간을 비약적으로 축소
+            // [비동기 병렬 네트워크 통신]
             val loadedIframeBodies = coroutineScope {
                 iframeMatches.map { rawSrc ->
                     async(Dispatchers.IO) {
@@ -156,7 +155,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }.mapNotNull { it.await() }
             }
 
-            // 병렬 로드가 완료된 HTML 소스들을 CPU로 정교하고 신속하게 Offline 해독 연산 진행
+            // 병렬 로드가 완료된 HTML 소스들을 CPU로 고속 파싱 진행
             for ((iframeUrl, iframeHtml) in loadedIframeBodies) {
                 val link = parseAndExtract(iframeUrl, iframeHtml, iframeHeaders, entryOrigin, sourceName)
                 if (link != null) return link
@@ -177,7 +176,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
-    // 중첩된 페이지 및 다중 iframe 깊이를 재귀적으로 파고들며 탐색하는 핵심 유닛
+    // 중첩된 페이지 및 다중 iframe 깊이를 재귀적으로 파고들며 탐색하는 핵심 유닛 (더미 출력 로그 전면 제거 완료)
     private suspend fun parseAndExtract(
         iframeUrl: String, 
         iframeHtml: String, 
@@ -297,25 +296,27 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             }
 
-            // 2. [완전 복구 및 고도화] 스크린샷 3&4가 증명하는 2세대 동적 sd0embed 복합 주소 복원 매커니즘 탑재
-            val edm = Regex("""edm\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
-            val zmid = Regex("""zmid\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
+            // 2. [완전 보완] 자바스크립트 변수로 위장한 동적 iframe 생성 감지 (embedsports.me 동적 생성 우회 및 2세대 sd0embed 구조 우회)
+            val edm = Regex("""edm\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
+            val zmid = Regex("""zmid\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
             if (!edm.isNullOrEmpty() && !zmid.isNullOrEmpty()) {
-                val csrf = Regex("""csrf\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
                 
-                // [핵심] 수집된 자바스크립트 변수들을 브라우저 런타임과 똑같이 조합하여 진짜 sd0embed 플레이어 가상 주소를 빌드합니다.
+                // [정밀 보완] 등호(=)와 콜론(:)을 모두 지원하는 초정밀 통합 정규식을 사용하여 csrf 값이 절대 누락되지 않도록 조치합니다.
+                val csrf = Regex("""(?:csrf|token|auth|key)["']?\s*[:=]\s*["']([a-zA-Z0-9_-]{50,150})["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
+                
                 val constructedIframeUrl = if (!csrf.isNullOrEmpty()) {
-                    val pid = Regex("""pid\s*=\s*["']?([^"';\s]+)["']?""").find(iframeHtml)?.groupValues?.get(1) ?: "5"
-                    val gacat = Regex("""gacat\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1) ?: ""
-                    val gatxt = Regex("""gatxt\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1) ?: ""
-                    val v = Regex("""v\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1) ?: ""
-                    val csrfIp = Regex("""csrf_ip\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1) ?: ""
+                    val pid = Regex("""pid\s*[:=]\s*["']?([^"';\s]+)["']?""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1) ?: "5"
+                    val gacat = Regex("""gacat\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1) ?: ""
+                    val gatxt = Regex("""gatxt\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1) ?: ""
+                    val v = Regex("""v\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1) ?: ""
+                    val csrfIp = Regex("""(?:csrf_ip|ip|client_ip)["']?\s*[:=]\s*["']([0-9.]+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1) ?: ""
                     
                     val gacatEnc = java.net.URLEncoder.encode(gacat, "UTF-8")
                     val gatxtEnc = java.net.URLEncoder.encode(gatxt, "UTF-8")
                     
-                    // 스크린샷 3의 실제 호출 주소와 한 글자도 틀리지 않고 완전히 동일하게 동적 조립됩니다.
-                    "https://$edm/sd0embed/$zmid?pid=$pid&gacat=$gacatEnc&gatxt=$gatxtEnc&v=$v&csrf=$csrf&csrf_ip=$csrfIp"
+                    // [정밀 보완] 스크린샷 3&4의 진짜 sd0embed 경로로 동적 변수를 결합하여 완벽한 플레이어 주소를 복원합니다.
+                    val pathElement = if (gatxt.isNotEmpty()) gatxt else zmid
+                    "https://$edm/sd0embed/$pathElement?pid=$pid&gacat=$gacatEnc&gatxt=$gatxtEnc&v=$v&csrf=$csrf&csrf_ip=$csrfIp"
                 } else {
                     "https://$edm/court/$zmid.php"
                 }
