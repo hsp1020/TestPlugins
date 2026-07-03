@@ -18,6 +18,8 @@ import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.URL
+import java.net.URLDecoder
+import java.net.URLEncoder
 
 class DaddyLiveExtractor : ExtractorApi() {
     override var mainUrl = "https://dlhd.st" // Provider와 통일
@@ -130,7 +132,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             iframeHeaders["origin"] = entryOrigin
 
             // [비동기 병렬 네트워크 통신]
-            // 수집된 중계 iframe 페이지들을 비동기 코루틴(async)으로 병렬 동시 호출하여 획득 대기 지연 시간을 비약적으로 축소
             val loadedIframeBodies = coroutineScope {
                 iframeMatches.map { rawSrc ->
                     async(Dispatchers.IO) {
@@ -176,7 +177,7 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
-    // 중첩된 페이지 및 다중 iframe 깊이를 재귀적으로 파고들며 탐색하는 핵심 유닛 (더미 출력 로그 전면 제거 완료)
+    // 중첩된 페이지 및 다중 iframe 깊이를 재귀적으로 파고들며 탐색하는 핵심 유닛
     private suspend fun parseAndExtract(
         iframeUrl: String, 
         iframeHtml: String, 
@@ -191,10 +192,11 @@ class DaddyLiveExtractor : ExtractorApi() {
             val parsedIframe = URL(iframeUrl)
             val iframeOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
 
-            // [정밀 모니터링 출력]
+            // [정밀 스크립트 추적 모니터] 
+            // 643KB의 무거운 라이브러리는 거르고, 오직 변수들이 선언된 설정값 코드 블록만 선별 출력
             val scriptBlocks = Regex("""<script[^>]*>([\s\S]*?)</script>""").findAll(iframeHtml).map { it.groupValues[1] }.toList()
             for ((index, script) in scriptBlocks.withIndex()) {
-                val hasConfigVars = script.contains("zmid") || script.contains("edm") || script.contains("csrf") || script.contains("v")
+                val hasConfigVars = script.contains("zmid") || script.contains("edm") || script.contains("csrf") || script.contains("v") || script.contains("gatxt")
                 if (hasConfigVars && script.length < 30000) {
                     debugLog("[WIMBLEDON-SCRIPT-$index] 감지됨! 크기: ${script.length}")
                     printLargeLog("WIMBLEDON-SCRIPT-$index", script)
@@ -317,27 +319,9 @@ class DaddyLiveExtractor : ExtractorApi() {
             val zmid = Regex("""zmid\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
             if (!edm.isNullOrEmpty() && !zmid.isNullOrEmpty()) {
                 
-                // [정밀 보완] 수집된 iframe의 JSON 본문을 직접 파싱하는 최우선 엔진
-                val configMatch = Regex("""const\s+siteConfig\s*=\s*(\{[\s\S]*?\});""").find(iframeHtml)
-                val configMap = if (configMatch != null) {
-                    try {
-                        mapper.readValue(configMatch.groupValues[1], object : TypeReference<Map<String, Any>>() {})
-                    } catch (e: Exception) {
-                        null
-                    }
-                } else null
-                
-                // 수집된 JSON 객체 맵핑 분석을 1순위로 세션 토큰(csrf) 및 클라이언트 IP를 수집합니다.
-                val configCsrf = configMap?.get("csrf") as? String
-                val configCsrfIp = configMap?.get("csrf_ip") as? String
-                val trackerStr = configMap?.get("tracker") as? String ?: ""
-                val gname = Regex("""gname=([^&]+)""").find(trackerStr)?.groupValues?.get(1) ?: ""
-                
-                // [온점(.) 우회] 온점을 온전히 매칭하여 가로채는 범용 정규식 필터로 2순위 예비 수집
-                val csrfVal = when {
-                    !configCsrf.isNullOrEmpty() -> configCsrf
-                    !metaCsrf.isNullOrEmpty() -> metaCsrf
-                    else -> Regex("""(?:csrf|token|auth|key)["']?\s*[:=]\s*["']([a-zA-Z0-9_.-]{50,250})["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
+                // [정밀 보완] 등호와 콜론을 모두 완벽히 수용하도록 정형화하여 변수가 누락되지 않도록 조치
+                val csrfVal = if (!metaCsrf.isNullOrEmpty()) metaCsrf else {
+                    Regex("""(?:csrf|token|auth|key)["']?\s*[:=]\s*["']([a-zA-Z0-9_.-]{50,250})["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
                 }
                 
                 val csrfIpVal = when {
@@ -348,19 +332,22 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val constructedIframeUrl = if (!csrfVal.isNullOrEmpty()) {
                     val pid = Regex("""pid\s*[:=]\s*["']?([^"';\s]+)["']?""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1) ?: "5"
                     val gacat = Regex("""gacat\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1) ?: gname
-                    val gatxt = Regex("""gatxt\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1) ?: ""
-                    val v = Regex("""v\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1) ?: zmid
                     
-                    val gacatEnc = java.net.URLEncoder.encode(gacat, "UTF-8")
-                    
-                    // [정밀 보완] Wimbledon Highlight 등 최신 2세대 sd0embed 세션 주소를 가치 있게 동적 자동 조립
-                    val pathElement = if (gatxt.isNotEmpty()) {
-                        java.net.URLEncoder.encode(gatxt, "UTF-8")
-                    } else {
-                        zmid
+                    // [정밀 동적 파라미터 복구] 
+                    // 웹 브라우저에서 'Tennis'나 'Football'로 실시간 전달되는 카테고리 텍스트를 HTML 내에서 직접 긁어와 동적 조립합니다.
+                    val gatxtHtml = Regex("""gatxt\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
+                    val gatxtVal = when {
+                        !gatxtHtml.isNullOrEmpty() -> gatxtHtml
+                        sourceName.contains("tennis", ignoreCase = true) -> "Tennis"
+                        sourceName.contains("football", ignoreCase = true) -> "Football"
+                        else -> "Tennis" 
                     }
+                    val vVal = zmid // 변수 v의 실체는 항상 zmid(tc83 등) 값과 1:1 대응합니다.
                     
-                    "https://$edm/sd0embed/$pathElement?pid=$pid&gacat=$gacatEnc&gatxt=$pathElement&v=$v&csrf=$csrfVal&csrf_ip=$csrfIpVal"
+                    val gacatEnc = URLEncoder.encode(gacat, "UTF-8")
+                    val gatxtEnc = URLEncoder.encode(gatxtVal, "UTF-8")
+                    
+                    "https://$edm/sd0embed/$gatxtVal?pid=$pid&gacat=$gacatEnc&gatxt=$gatxtEnc&v=$vVal&csrf=$csrfVal&csrf_ip=$csrfIpVal"
                 } else {
                     "https://$edm/court/$zmid.php"
                 }
