@@ -85,7 +85,7 @@ class Kotbc : MainAPI() {
             
             var foundDomain: String? = null
             coroutineScope {
-                val candidates = (startNum..startNum + 100).map { "https://m$it.kotbc2.com" }
+                val candidates = (startNum..startNum + 200).map { "https://m$it.kotbc2.com" }
                 val chunks = candidates.chunked(5) // 원활한 병렬 처리를 위해 chunk를 5로 하향 조정
                 
                 for (chunk in chunks) {
