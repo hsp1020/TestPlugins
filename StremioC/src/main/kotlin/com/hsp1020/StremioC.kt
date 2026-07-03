@@ -1774,12 +1774,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 if (!tmdbData.fetchedTitle.isNullOrBlank()) finalName = tmdbData.fetchedTitle
                 finalDescription = tmdbData.fetchedOverview?.takeIf { it.isNotBlank() } ?: finalDescription
             }
-            
-            // movie 와 series 가 아닌 비표준 타입들의 메인 플롯(줄거리)이 비어있으면 이름으로 대체
-            if (finalType != "movie" && finalType != "series") {
-                finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription<br>$originalName"
-            }
 
+            if (finalType != "movie" && finalType != "series") {
+                // 비어있을 때는 제목으로 채우지 않고 제로 너비 공백(\u200b)으로 처리하여 빈 값으로 유지하며, 내용이 있을 때만 하단에 제목을 결합합니다.
+                finalDescription = if (finalDescription.isNullOrBlank()) "\u200b" else "$finalDescription<br>$originalName"
+            }
             val movieId = this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id ?: ""
             if (tmdbData != null && finalVideos.isNullOrEmpty() && tmdbData.episodeTmdbMeta.isNotEmpty()) {
                 val generatedVideos = tmdbData.episodeTmdbMeta.mapNotNull { (key, tmdbEp) ->
