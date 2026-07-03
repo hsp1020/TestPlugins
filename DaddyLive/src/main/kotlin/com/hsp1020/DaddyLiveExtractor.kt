@@ -317,7 +317,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             val zmid = Regex("""zmid\s*[:=]\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(iframeHtml)?.groupValues?.get(1)
             if (!edm.isNullOrEmpty() && !zmid.isNullOrEmpty()) {
                 
-                // [정량 보정 - 누락 선언부 탑재 완료] JSON 객체 내부의 변수를 직접 파싱하는 최우선 복호화 엔진 변수 선언
+                // 수집된 iframe의 JSON 본문을 직접 파싱하는 최우선 엔진
                 val configMatch = Regex("""const\s+siteConfig\s*=\s*(\{[\s\S]*?\});""").find(iframeHtml)
                 val configMap = if (configMatch != null) {
                     try {
@@ -365,14 +365,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     val gacatEnc = URLEncoder.encode(gacat, "UTF-8")
                     val gatxtEnc = URLEncoder.encode(gatxtVal, "UTF-8")
                     
-                    // [정밀 보완] Wimbledon Highlight 등 최신 2세대 sd0embed 세션 주소를 가치 있게 동적 자동 조립
-                    val pathElement = if (gatxtVal.isNotEmpty()) {
-                        URLEncoder.encode(gatxtVal, "UTF-8")
-                    } else {
-                        zmid
-                    }
-                    
-                    "https://$edm/sd0embed/$pathElement?pid=$pid&gacat=$gacatEnc&gatxt=$gatxtEnc&v=$vVal&csrf=$csrfVal&csrf_ip=$csrfIpVal"
+                    "https://$edm/sd0embed/$gatxtVal?pid=$pid&gacat=$gacatEnc&gatxt=$gatxtEnc&v=$vVal&csrf=$csrfVal&csrf_ip=$csrfIpVal"
                 } else {
                     "https://$edm/court/$zmid.php"
                 }
@@ -462,6 +455,40 @@ class DaddyLiveExtractor : ExtractorApi() {
             debugLog("crawlIframe 네트워크 에러 (depth=$depth): ${e.message}")
         } catch (e: Exception) {
             debugLog("crawlIframe 일반 예외 발생 (depth=$depth): ${e.message}")
+        }
+        return null
+    }
+    
+    // [최종 완성 - 이스케이프 정화 복원 필터]
+    // ningunon.cc 서버가 반환하는 play.m3u8 주소는 JSON 이스케이프가 포함되어 "https:\/\/s-c2.owledge.cc\/viktor\/..." 형태로 숨겨져 있습니다.
+    // 슬래시 혼용 패턴인 'https?:[\\/]+'를 완벽 매칭하여 획득한 후, 백슬래시(\)를 일괄 공백 정화하여 정상적인 주소로 온전히 복원시킵니다.
+    private suspend fun parseAndExtractRealStream(playerHtml: String, igniteHost: String, sourceName: String): ExtractorLink? {
+        try {
+            val streamUrlMatch = Regex("""["'](https?:[\\/]+[^"']+\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE).find(playerHtml)
+            if (streamUrlMatch != null) {
+                val rawUrl = streamUrlMatch.groupValues[1]
+                val cleanStreamUrl = rawUrl.replace("\\", "").trim()
+                debugLog("[IGNITE-우회] 이스케이프 정화 및 m3u8 최종 주소 복원 성공 -> $cleanStreamUrl")
+                
+                val finalHeaders = mapOf(
+                    "referer" to "$igniteHost/",
+                    "origin" to igniteHost,
+                    "user-agent" to userAgent,
+                    "accept" to "*/*",
+                    "x-direct-connection" to "1",
+                    "sec-fetch-dest" to "empty",
+                    "sec-fetch-mode" to "cors",
+                    "sec-fetch-site" to "cross-site" // 브라우저 검증 헤더 cross-site 일치 완료
+                )
+                
+                return ExtractorLink(
+                    source = sourceName, name = sourceName, url = cleanStreamUrl,
+                    referer = "$igniteHost/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
+                    headers = finalHeaders
+                )
+            }
+        } catch (e: Exception) {
+            debugLog("parseAndExtractRealStream 예외 발생: ${e.message}")
         }
         return null
     }
