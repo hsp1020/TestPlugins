@@ -24,14 +24,8 @@ class DaddyLiveExtractor : ExtractorApi() {
     override val name = "DaddyLive"
     override val requiresReferer = false
     
-    // 글로벌 통일된 Chrome 브라우저 User-Agent 정의
     private val userAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
-    private val headers = mapOf(
-        "referer" to mainUrl,
-        "user-agent" to userAgent,
-        "accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
-    )
 
     private fun debugLog(message: String) {
         Log.d("DDL-DEBUG", "[DDL-DEBUG] $message")
@@ -97,7 +91,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (!resp.isSuccessful) return null
             val html = resp.text
             
-            // 미디어와 무관한 정적 에셋 주소는 수집에서 자동 패스하는 정밀 화이트리스트 주소 검증기
             val iframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
                 .findAll(html)
                 .map { match -> match.groupValues[1].ifEmpty { match.groupValues[2] } }
@@ -116,7 +109,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             iframeHeaders["referer"] = url
             iframeHeaders["origin"] = entryOrigin
 
-            // [로딩 속도 혁신] 비동기 병렬 대칭 수집기를 통해 통신 지연 타임아웃을 전면 무력화
             val loadedIframeBodies = coroutineScope {
                 iframeMatches.map { rawSrc ->
                     async(Dispatchers.IO) {
@@ -141,7 +133,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }.mapNotNull { it.await() }
             }
 
-            // 고속 CPU 내부 구문 해독 연산 진행
             for ((iframeUrl, iframeHtml) in loadedIframeBodies) {
                 val link = parseAndExtract(iframeUrl, iframeHtml, iframeHeaders, entryOrigin, sourceName)
                 if (link != null) return link
@@ -162,7 +153,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
-    // 중첩된 껍데기 페이지 및 동적 JS 생성 아이프레임을 역추적하는 정밀 수집 유닛 (디버깅 로그 고도화)
     private suspend fun parseAndExtract(
         iframeUrl: String, 
         iframeHtml: String, 
@@ -205,17 +195,20 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             }
             
-            // 2. wiki.js 또는 pavel.js 플레이어 감지 및 동적 처리
-            val wikiJsMatch = Regex("""src=["'](https?://[^"']+|//[^"']+)((?:wiki|pavel))\.js""").find(iframeHtml)
-            if (wikiJsMatch != null) {
-                var rawWikiHost = wikiJsMatch.groupValues[1]
+            // 2. [완전 자동화 필터] 모든 동적 플레이어 자바스크립트 수집 (wiki, pavel, viktor 및 향후 생성될 모든 임의의 파일명 자동 대응)
+            val jsMatches = Regex("""src=["'](https?://[^"']+|//[^"']+)(([a-zA-Z0-9_-]+))\.js""", RegexOption.IGNORE_CASE).findAll(iframeHtml)
+            for (match in jsMatches) {
+                var rawWikiHost = match.groupValues[1]
                 if (rawWikiHost.startsWith("//")) {
                     rawWikiHost = "https:$rawWikiHost"
                 }
                 var igniteHost = rawWikiHost.trimEnd('/')
-                val jsName = wikiJsMatch.groupValues[2] // wiki 또는 pavel 동적 추출
+                val jsName = match.groupValues[2] // wiki, pavel, viktor 등 추출
                 
-                // 차단된 stellarthread.com 도메인 감지 시 활성 미러 도메인으로 동적 치환
+                // 광고 플랫폼 및 무관한 스크립트는 원천 제외
+                if (jsName == "suv4" || jsName == "js15_as" || jsName == "beacon" || jsName == "tag" || jsName == "embed" || jsName == "adcashign" || jsName.contains("analytics")) continue
+                
+                // 차단된 stellarthread.com / igniteandship.com 감지 시 예비 미러 서버군을 순차 경합 탐색하도록 지능형 분기 구성
                 val hostCandidates = if (igniteHost.contains("stellarthread.com") || igniteHost.contains("igniteandship.com") || igniteHost.contains("owledge.cc")) {
                     listOf("https://igniteandship.com", "https://owledge.cc")
                 } else {
@@ -289,14 +282,14 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             }
 
-            // [우회 - Referer/Origin 동적 교정 필수 적용] 자바스크립트 변수 위장 동적 iframe 생성 감지 (ninguno.cc 등)
+            // [우회 - Referer/Origin 동적 교정 필수 적용] 자바스크립트 변수 위장 동적 iframe 생성 감지 (tc12.php 등)
             val edm = Regex("""edm\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
             val zmid = Regex("""zmid\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
             if (!edm.isNullOrEmpty() && !zmid.isNullOrEmpty()) {
                 val constructedIframeUrl = "https://$edm/court/$zmid.php"
                 debugLog("[Tennis-Iframe] [$depth 단계] 동적 JS Iframe 가상 복원 성공 -> URL: $constructedIframeUrl")
                 
-                // [CORS 우회 통과 적용] Referer와 Origin 헤더를 직전 부모의 주소(iframeUrl)로 정밀 치환하여 403 차단 해제
+                // [CORS 우회 통과 적용] Referer와 Origin 헤더를 직전 부모의 주소(iframeUrl)로 정밀 치환하여 403/404 차단 해제
                 val nextHeaders = iframeHeaders.toMutableMap()
                 nextHeaders["referer"] = iframeUrl
                 nextHeaders["origin"] = iframeOrigin
@@ -388,11 +381,11 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             }
         } catch (e: SocketTimeoutException) {
-            debugLog("[Tennis-Error] crawlIframe 타임아웃 발생 (depth=$depth): ${e.message}")
+            debugLog("crawlIframe depth=$depth 에서 예외 발생: ${e.message}")
         } catch (e: IOException) {
-            debugLog("[Tennis-Error] crawlIframe 네트워크 에러 (depth=$depth): ${e.message}")
+            debugLog("crawlIframe depth=$depth 에서 예외 발생: ${e.message}")
         } catch (e: Exception) {
-            debugLog("[Tennis-Error] crawlIframe 일반 예외 발생 (depth=$depth): ${e.message}")
+            debugLog("crawlIframe depth=$depth 에서 예외 발생: ${e.message}")
         }
         return null
     }
