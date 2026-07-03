@@ -41,10 +41,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/live-streaming.png",
-        "fileHash": "sha256-51719a4876afef9d57924c684d16e7e2cccbe8ef8735bef8bd38ab3e67e04504",
+        "fileHash": "sha256-b24f56aabe287f1200cdd2bbcb27b4985e575963246594e6e7a49cd2235f90cf",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 41457,
+        "fileSize": 41711,
         "status": 1,
         "authors": [
             "hsp1020"
