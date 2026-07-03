@@ -14,7 +14,7 @@ import com.lagradost.cloudstream3.utils.Qualities
 import java.net.URL
 
 class DaddyLiveExtractor : ExtractorApi() {
-    override val mainUrl = "https://dlhd.st"
+    override val mainUrl = "https://dlhd.pk"
     override val name = "DaddyLive"
     override val requiresReferer = false
     private val userAgent =
@@ -31,6 +31,11 @@ class DaddyLiveExtractor : ExtractorApi() {
     }
 
     private fun printLargeLog(tag: String, message: String) {
+        // 안드로이드 로그캣 버퍼 오염을 완벽히 방지하기 위해 30,000자 이하의 실제 플레이어 코드만 출력 필터링합니다.
+        if (message.length > 30000) {
+            Log.d(tag, "[SKIP] 이 파일은 너무 거대한 자바스크립트 파일(크기: ${message.length})이므로 버퍼 오염 방지를 위해 생략합니다.")
+            return
+        }
         var i = 0
         while (i < message.length) {
             val end = (i + 3500).coerceAtMost(message.length)
@@ -92,7 +97,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             if (!resp.isSuccessful) return null
             val html = resp.text
             
-            // 모든 iframe 주소를 수집합니다.
+            // 큰따옴표, 작은따옴표, 따옴표가 없는 비규격 주소까지 전체 iframe src를 수집합니다.
             val iframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
                 .findAll(html)
                 .map { match ->
@@ -120,7 +125,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 
                 if (iframeUrl.endsWith(".js") || iframeUrl.endsWith(".css") || iframeUrl.contains("tag.min")) continue
                 
-                // depth = 1 단계부터 재귀 탐색 시작 (entryOrigin 전달하여 프리미엄 채널 헤더 보장)
+                // depth = 1 단계부터 재귀 탐색 시작
                 val link = crawlIframe(iframeUrl, iframeHeaders, 1, sourceName, entryOrigin)
                 if (link != null) return link
             }
@@ -134,9 +139,9 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
-    // 중첩된 껍데기 페이지 및 다중 iframe 깊이를 재귀적으로 탐색하는 유닛
+    // 중첩된 페이지 및 다중 iframe 깊이를 재귀적으로 파고들며 탐색하는 핵심 유닛
     private suspend fun crawlIframe(iframeUrl: String, iframeHeaders: Map<String, String>, depth: Int, sourceName: String, entryOrigin: String): ExtractorLink? {
-        if (depth > 3) return null // 깊이 제한
+        if (depth > 3) return null // 무한 루프 방지용 깊이 제한
         
         try {
             debugLog("[$depth 단계] Iframe 로드 검사 중 -> $iframeUrl")
@@ -153,14 +158,14 @@ class DaddyLiveExtractor : ExtractorApi() {
             val iframeOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
 
             // =======================================================
-            // [복구 및 가짜 거름 필터] 프리미엄 채널 전용 정석 atob 복구
+            // [복구 및 보안 필터] 프리미엄 채널용 정석 atob 복구 (가짜 허니팟은 필터링)
             // =======================================================
             val atobMatch = Regex("""atob\(['"](.*?)['"]\)""").find(iframeHtml)
             if (atobMatch != null) {
                 val b64Url = atobMatch.groupValues[1]
                 val decodedUrl = base64Decode(b64Url).replace("\"", "").trim()
                 
-                // 해독된 주소가 정상적인 외부 절대 경로 CDN 주소(http로 시작)인 경우에만 정식으로 재생 반환
+                // 해독된 주소가 가짜 허니팟 주소(/hls/stream...)가 아니고, 정상적인 외부 절대 경로 CDN 주소인 경우에만 승인
                 if (decodedUrl.startsWith("http")) {
                     debugLog("[PREMIUM] 프리미엄 정석 스트림 해독 성공 -> $decodedUrl")
                     
@@ -191,10 +196,19 @@ class DaddyLiveExtractor : ExtractorApi() {
                 if (rawWikiHost.startsWith("//")) {
                     rawWikiHost = "https:$rawWikiHost"
                 }
-                val igniteHost = rawWikiHost.trimEnd('/')
+                var igniteHost = rawWikiHost.trimEnd('/')
+                
+                // [대박 보완 핵심]
+                // stellarthread.com 도메인은 현재 완전히 차단/압류(Sinkholed)되어 접속할 수 없는 상태입니다.
+                // 하지만 이들은 동일한 서버군이므로, 차단된 도메인이 검출되면 현재 정상 작동 중인 활성 도메인(igniteandship.com)으로 동적 대체합니다.
+                if (igniteHost.contains("stellarthread.com")) {
+                    debugLog("[우회] 차단된 도메인(stellarthread) 감지! 활성 도메인(igniteandship.com)으로 자동 교체합니다.")
+                    igniteHost = "https://igniteandship.com"
+                }
                 
                 val pageName = parsedIframe.path.substringAfterLast("/").substringBefore(".php")
                 
+                // 파일이름 대신 본문 자바스크립트 내에 박힌 진짜 채널 ID인 fid 및 zmid 변수값을 1순위로 추출합니다.
                 val fid = Regex("""fid\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
                 val zmidVar = Regex("""zmid\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
                 
