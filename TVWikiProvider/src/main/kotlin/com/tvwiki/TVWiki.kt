@@ -124,12 +124,12 @@ class TVWiki : MainAPI() {
             } catch (e: Exception) { println("[TVWiki DBG] ❌ 현재 도메인 접속 실패: ${e.message}") }
 
             val match = Regex("tvwiki(\\d+)").find(currentMainUrl)
-            val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 7
+            val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 35
             println("[TVWiki DBG] 🚀 브루트포스 탐색 시작 (시작번호: $startNum)")
             
             var foundDomain: String? = null
             coroutineScope {
-                val candidates = (startNum..startNum + 100).map { "https://tvwiki$it.net" }
+                val candidates = (startNum..startNum + 200).map { "https://tvwiki$it.net" }
                 val chunks = candidates.chunked(5) 
                 
                 for (chunk in chunks) {
