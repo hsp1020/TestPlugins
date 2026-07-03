@@ -92,7 +92,7 @@ class MovieKing : MainAPI() {
 
             try {
                 coroutineScope {
-                    val candidates = (startNum..startNum + 100).map { "https://mvking$it.$tld" }
+                    val candidates = (startNum..startNum + 200).map { "https://mvking$it.$tld" }
                     val chunks = candidates.chunked(5)
                     
                     for (chunk in chunks) {
