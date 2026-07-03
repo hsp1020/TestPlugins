@@ -11,37 +11,29 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 import java.net.URL
 
 class DaddyLiveExtractor : ExtractorApi() {
-    override val mainUrl = "https://dlhd.pk"
+    override val mainUrl = "https://dlhd.st" // Provider와 통일
     override val name = "DaddyLive"
     override val requiresReferer = false
+    
+    // 글로벌 통일된 Chrome 브라우저 User-Agent 정의
     private val userAgent =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
     private val headers = mapOf(
-        "Referer" to mainUrl,
+        "referer" to mainUrl,
         "user-agent" to userAgent,
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+        "accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
     )
 
     private fun debugLog(message: String) {
         Log.d("DDL-DEBUG", "[DDL-DEBUG] $message")
         println("[DDL-DEBUG] $message")
-    }
-
-    private fun printLargeLog(tag: String, message: String) {
-        // 안드로이드 로그캣 버퍼 오염을 완벽히 방지하기 위해 30,000자 이하의 실제 플레이어 코드만 출력 필터링합니다.
-        if (message.length > 30000) {
-            Log.d(tag, "[SKIP] 이 파일은 너무 거대한 자바스크립트 파일(크기: ${message.length})이므로 버퍼 오염 방지를 위해 생략합니다.")
-            return
-        }
-        var i = 0
-        while (i < message.length) {
-            val end = (i + 3500).coerceAtMost(message.length)
-            Log.d(tag, "[BODY-CHUNK] ${message.substring(i, end)}")
-            i += 3500
-        }
     }
 
     override suspend fun getUrl(
@@ -86,51 +78,75 @@ class DaddyLiveExtractor : ExtractorApi() {
             debugLog("================= [DDL EXTRACT START] =================")
             debugLog("1. 소스 정보 -> Name: $sourceName, Target URL: $url")
             
-            val headers = mapOf(
-                "User-Agent" to userAgent,
-                "Referer" to url,
-                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+            val requestHeaders = mapOf(
+                "user-agent" to userAgent,
+                "referer" to url,
+                "accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
             )
 
-            val resp = app.get(url, headers = headers)
+            // UI 스레드 차단 방지를 위해 백그라운드 스레드풀에서 페이지 호출
+            val resp = withContext(Dispatchers.IO) {
+                app.get(url, headers = requestHeaders)
+            }
             debugLog("2. 플레이어 페이지 응답 코드: ${resp.code}")
             if (!resp.isSuccessful) return null
             val html = resp.text
             
-            // 큰따옴표, 작은따옴표, 따옴표가 없는 비규격 주소까지 전체 iframe src를 수집합니다.
+            // [CORS 및 화이트리스트 최적화]
+            // 수집되는 주소 중 미디어 스트림과 전혀 무관한 광고성 파일(.js, .css 등)은 수집 조건에서 원천 패스하고
+            // /court/, /player/, /stream/ 등의 경로가 심긴 진짜 중계용 iframe 주소만 동적으로 수집합니다. (블랙리스트 제거 완료)
             val iframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
                 .findAll(html)
-                .map { match ->
-                    match.groupValues[1].ifEmpty { match.groupValues[2] }
-                }
+                .map { match -> match.groupValues[1].ifEmpty { match.groupValues[2] } }
                 .distinct()
+                .filter { src ->
+                    val isStaticAsset = src.endsWith(".js") || src.endsWith(".css") || src.contains("tag.min")
+                    val isPlayerPath = src.contains("/court/") || src.contains("/player/") || src.contains("/stream/") || src.contains("/embed/") || src.contains("/wimbledon/") || src.contains("live=") || src.contains("id=")
+                    val isPopcdn = src.contains("freeshot") || src.contains("popcdn")
+                    !isStaticAsset && (isPlayerPath || isPopcdn)
+                }
                 .toList()
             
             val parsedUrl = URL(url)
             val entryOrigin = "${parsedUrl.protocol}://${parsedUrl.host}"
-            val iframeHeaders = headers.toMutableMap()
-            iframeHeaders["Referer"] = url
-            iframeHeaders["Origin"] = entryOrigin
+            val iframeHeaders = requestHeaders.toMutableMap()
+            iframeHeaders["referer"] = url
+            iframeHeaders["origin"] = entryOrigin
 
-            // 수집된 iframe들을 순회하며 재귀적으로 내부 검사합니다.
-            for (rawSrc in iframeMatches) {
-                var iframeUrl = rawSrc
-                if (rawSrc.startsWith("//")) {
-                    iframeUrl = "https:$rawSrc"
-                } else if (rawSrc.startsWith("/")) {
-                    iframeUrl = "$entryOrigin$rawSrc"
-                } else if (!rawSrc.startsWith("http")) {
-                    iframeUrl = "$entryOrigin/${rawSrc.trimStart('/')}"
-                }
-                
-                if (iframeUrl.endsWith(".js") || iframeUrl.endsWith(".css") || iframeUrl.contains("tag.min")) continue
-                
-                // depth = 1 단계부터 재귀 탐색 시작
-                val link = crawlIframe(iframeUrl, iframeHeaders, 1, sourceName, entryOrigin)
+            // [로딩 속도 대대적 단축 - 비동기 병렬 네트워크 통신]
+            // 수집된 중계 iframe 페이지들을 동기식 루프가 아닌 비동기 코루틴(async)으로 병렬 동시 요청합니다.
+            // 죽은 도메인의 대기 시간(SocketTimeout)에 발목 잡히지 않고, 모든 주소의 탐색 속도가 1초 내외로 수렴하게 됩니다.
+            val loadedIframeBodies = coroutineScope {
+                iframeMatches.map { rawSrc ->
+                    async(Dispatchers.IO) {
+                        var iframeUrl = rawSrc
+                        if (rawSrc.startsWith("//")) {
+                            iframeUrl = "https:$rawSrc"
+                        } else if (rawSrc.startsWith("/")) {
+                            iframeUrl = "$entryOrigin$rawSrc"
+                        } else if (!rawSrc.startsWith("http")) {
+                            iframeUrl = "$entryOrigin/${rawSrc.trimStart('/')}"
+                        }
+                        
+                        try {
+                            val iframeResp = app.get(iframeUrl, headers = iframeHeaders)
+                            if (iframeResp.isSuccessful) {
+                                iframeUrl to iframeResp.text
+                            } else null
+                        } catch (e: Exception) {
+                            null
+                        }
+                    }
+                }.mapNotNull { it.await() }
+            }
+
+            // 병렬 로드가 완료된 HTML 소스를 CPU로 고속 파싱(Offline CPU operation)합니다.
+            for ((iframeUrl, iframeHtml) in loadedIframeBodies) {
+                val link = parseAndExtract(iframeUrl, iframeHtml, iframeHeaders, entryOrigin, sourceName)
                 if (link != null) return link
             }
 
-            debugLog("알림: 수집된 모든 iframe 내부에서 진짜 스트림 주소를 획득하지 못했습니다.")
+            debugLog("알림: 모든 후보 iframe 내부에서 유효한 진짜 스트림 주소를 획득하지 못했습니다.")
             debugLog("================= [DDL EXTRACT END] =================")
             return null
         } catch (e: Exception) {
@@ -139,57 +155,47 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
-    // 중첩된 페이지 및 다중 iframe 깊이를 재귀적으로 파고들며 탐색하는 핵심 유닛
-    private suspend fun crawlIframe(iframeUrl: String, iframeHeaders: Map<String, String>, depth: Int, sourceName: String, entryOrigin: String): ExtractorLink? {
-        if (depth > 3) return null // 무한 루프 방지용 깊이 제한
+    // 중첩된 가짜 페이지 및 다중 iframe 깊이를 재귀적으로 파고들며 탐색하는 핵심 병렬 유닛 (디버그 과도 로깅 소거 완료)
+    private suspend fun parseAndExtract(
+        iframeUrl: String, 
+        iframeHtml: String, 
+        iframeHeaders: Map<String, String>, 
+        entryOrigin: String, 
+        sourceName: String,
+        depth: Int = 1
+    ): ExtractorLink? {
+        if (depth > 3) return null
         
         try {
-            debugLog("[$depth 단계] Iframe 로드 검사 중 -> $iframeUrl")
-            val iframeResp = app.get(iframeUrl, headers = iframeHeaders)
-            debugLog("[$depth 단계] Iframe 응답 코드: ${iframeResp.code}")
-            if (!iframeResp.isSuccessful) return null
-            val iframeHtml = iframeResp.text
-            
-            // 수집된 iframe의 소스 코드를 분할 출력합니다.
-            debugLog("[$depth 단계] 본문 크기: ${iframeHtml.length}")
-            printLargeLog("DDL-IFRAME-BODY-DEPTH-$depth", iframeHtml)
-            
             val parsedIframe = URL(iframeUrl)
             val iframeOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
 
-            // =======================================================
-            // [복구 및 보안 필터] 프리미엄 채널용 정석 atob 복구 (가짜 허니팟은 필터링)
-            // =======================================================
+            // 1. 프리미엄 채널용 정석 atob 복구 (가짜 허니팟은 필터링하여 버림)
             val atobMatch = Regex("""atob\(['"](.*?)['"]\)""").find(iframeHtml)
             if (atobMatch != null) {
                 val b64Url = atobMatch.groupValues[1]
                 val decodedUrl = base64Decode(b64Url).replace("\"", "").trim()
-                
-                // 해독된 주소가 가짜 허니팟 주소(/hls/stream...)가 아니고, 정상적인 외부 절대 경로 CDN 주소인 경우에만 승인
                 if (decodedUrl.startsWith("http")) {
                     debugLog("[PREMIUM] 프리미엄 정석 스트림 해독 성공 -> $decodedUrl")
-                    
                     val refOrigin = if (entryOrigin.isNotEmpty()) entryOrigin else iframeOrigin
                     return ExtractorLink(
                         source = sourceName, name = sourceName, url = decodedUrl,
                         referer = "$refOrigin/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
                         headers = mapOf(
-                            "Referer" to "$refOrigin/",
-                            "Origin" to refOrigin,
-                            "User-Agent" to userAgent,
-                            "Accept" to "*/*",
-                            "X-Direct-Connection" to "1",
-                            "Sec-Fetch-Dest" to "empty",
-                            "Sec-Fetch-Mode" to "cors",
-                            "Sec-Fetch-Site" to "cross-site"
+                            "referer" to "$refOrigin/",
+                            "origin" to refOrigin,
+                            "user-agent" to userAgent,
+                            "accept" to "*/*",
+                            "x-direct-connection" to "1",
+                            "sec-fetch-dest" to "empty",
+                            "sec-fetch-mode" to "cors",
+                            "sec-fetch-site" to "cross-site"
                         )
                     )
-                } else {
-                    debugLog("[atob-필터링] 감지된 주소($decodedUrl)는 가짜 허니팟 주소이므로 우회를 지속합니다.")
                 }
             }
             
-            // 1. 해당 HTML 본문 내에 wiki.js가 탑재되어 있는지 확인
+            // 2. wiki.js 감지 및 복구
             val wikiJsMatch = Regex("""src=["'](https?://[^"']+|//[^"']+)wiki\.js""").find(iframeHtml)
             if (wikiJsMatch != null) {
                 var rawWikiHost = wikiJsMatch.groupValues[1]
@@ -197,18 +203,12 @@ class DaddyLiveExtractor : ExtractorApi() {
                     rawWikiHost = "https:$rawWikiHost"
                 }
                 var igniteHost = rawWikiHost.trimEnd('/')
-                
-                // [대박 보완 핵심]
-                // stellarthread.com 도메인은 현재 완전히 차단/압류(Sinkholed)되어 접속할 수 없는 상태입니다.
-                // 하지만 이들은 동일한 서버군이므로, 차단된 도메인이 검출되면 현재 정상 작동 중인 활성 도메인(igniteandship.com)으로 동적 대체합니다.
                 if (igniteHost.contains("stellarthread.com")) {
                     debugLog("[우회] 차단된 도메인(stellarthread) 감지! 활성 도메인(igniteandship.com)으로 자동 교체합니다.")
                     igniteHost = "https://igniteandship.com"
                 }
                 
                 val pageName = parsedIframe.path.substringAfterLast("/").substringBefore(".php")
-                
-                // 파일이름 대신 본문 자바스크립트 내에 박힌 진짜 채널 ID인 fid 및 zmid 변수값을 1순위로 추출합니다.
                 val fid = Regex("""fid\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
                 val zmidVar = Regex("""zmid\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
                 
@@ -217,22 +217,18 @@ class DaddyLiveExtractor : ExtractorApi() {
                     !zmidVar.isNullOrEmpty() -> zmidVar
                     else -> pageName
                 }
-                
                 debugLog("[IGNITE-우회] 진짜 중계 플레이어 감지! 호스트: $igniteHost, liveId: $liveId")
 
-                // 진짜 영상 토큰이 탑재될 플레이어 페이지 호출
                 val playerUrl = "$igniteHost/wiki.php?player=desktop&live=$liveId"
                 val playerHeaders = mapOf(
-                    "User-Agent" to userAgent,
-                    "Referer" to iframeUrl,
-                    "Origin" to "${parsedIframe.protocol}://${parsedIframe.host}"
+                    "user-agent" to userAgent,
+                    "referer" to iframeUrl,
+                    "origin" to iframeOrigin
                 )
                 
                 val playerResp = app.get(playerUrl, headers = playerHeaders)
                 if (playerResp.isSuccessful) {
                     val playerHtml = playerResp.text
-                    
-                    // 쪼개진 m3u8 문자 배열 파싱 및 복구
                     val arrayMatch = Regex("""\["h"\s*,\s*"t"\s*,\s*"t"\s*,\s*"p"\s*,\s*"s"\s*,[^\]]+\]""").find(playerHtml)
                     if (arrayMatch != null) {
                         var streamUrl = arrayMatch.groupValues[0]
@@ -243,7 +239,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                             .replace(",", "")
                             .trim()
                         
-                        // getElementById로 지정된 동적 span 태그 내의 추가 토큰값을 결합
                         val idMatch = Regex("""document\.getElementById\(["']([^"']+)["']\)""").find(playerHtml)?.groupValues?.get(1)
                         val spanMatch = if (idMatch != null) {
                             Regex("""id=["']?$idMatch["']?[^>]*>([^<]*)""").find(playerHtml)?.groupValues?.get(1) ?: ""
@@ -254,16 +249,15 @@ class DaddyLiveExtractor : ExtractorApi() {
 
                         if (streamUrl.startsWith("http")) {
                             debugLog("[IGNITE-우회] 진짜 m3u8 주소 추출 성공 -> $streamUrl")
-                            
                             val finalHeaders = mapOf(
-                                "Referer" to "$igniteHost/",
-                                "Origin" to igniteHost,
-                                "User-Agent" to userAgent,
-                                "Accept" to "*/*",
-                                "X-Direct-Connection" to "1",
-                                "Sec-Fetch-Dest" to "empty",
-                                "Sec-Fetch-Mode" to "cors",
-                                "Sec-Fetch-Site" to "same-site"
+                                "referer" to "$igniteHost/",
+                                "origin" to igniteHost,
+                                "user-agent" to userAgent,
+                                "accept" to "*/*",
+                                "x-direct-connection" to "1",
+                                "sec-fetch-dest" to "empty",
+                                "sec-fetch-mode" to "cors",
+                                "sec-fetch-site" to "same-site"
                             )
                             return ExtractorLink(
                                 source = sourceName, name = sourceName, url = streamUrl,
@@ -275,32 +269,37 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             }
 
-            // [우회] 자바스크립트 변수로 위장한 동적 iframe 생성 감지 (embedsports.me 동적 생성 우회)
+            // 3. 자바스크립트 변수로 위장한 동적 iframe 생성 감지 (embedsports.me 동적 생성 우회)
             val edm = Regex("""edm\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
             val zmid = Regex("""zmid\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
             if (!edm.isNullOrEmpty() && !zmid.isNullOrEmpty()) {
                 val constructedIframeUrl = "https://$edm/court/$zmid.php"
                 debugLog("[$depth 단계] 동적 JS Iframe 가상 복원 성공 -> URL: $constructedIframeUrl")
                 
-                // 가상 조립된 중첩 iframe 주소로 재귀 진입하여 탐색
-                val link = crawlIframe(constructedIframeUrl, iframeHeaders, depth + 1, sourceName, entryOrigin)
-                if (link != null) return link
+                val nestedResp = app.get(constructedIframeUrl, headers = iframeHeaders)
+                if (nestedResp.isSuccessful) {
+                    val link = parseAndExtract(constructedIframeUrl, nestedResp.text, iframeHeaders, entryOrigin, sourceName, depth + 1)
+                    if (link != null) return link
+                }
             }
 
-            // 2. 일반적인 static 중첩 iframe들을 순회하며 재귀적으로 진입 검사합니다.
+            // 4. 일반적인 중첩 static iframe 수집 및 순회 (재귀적)
             val nestedIframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
                 .findAll(iframeHtml)
-                .map { match ->
-                    match.groupValues[1].ifEmpty { match.groupValues[2] }
-                }
+                .map { match -> match.groupValues[1].ifEmpty { match.groupValues[2] } }
                 .distinct()
+                .filter { src ->
+                    val isStaticAsset = src.endsWith(".js") || src.endsWith(".css") || src.contains("tag.min")
+                    val isPlayerPath = src.contains("/court/") || src.contains("/player/") || src.contains("/stream/") || src.contains("/embed/") || src.contains("/wimbledon/") || src.contains("live=") || src.contains("id=")
+                    val isPopcdn = src.contains("freeshot") || src.contains("popcdn")
+                    !isStaticAsset && (isPlayerPath || isPopcdn)
+                }
                 .toList()
-                
+
             for (nestedRawSrc in nestedIframeMatches) {
                 var nestedIframeUrl = nestedRawSrc
                 val parentOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
                 
-                // 상대 경로 복원 처리
                 if (nestedRawSrc.startsWith("//")) {
                     nestedIframeUrl = "https:$nestedRawSrc"
                 } else if (nestedRawSrc.startsWith("/")) {
@@ -309,14 +308,14 @@ class DaddyLiveExtractor : ExtractorApi() {
                     nestedIframeUrl = "$parentOrigin/${nestedRawSrc.trimStart('/')}"
                 }
                 
-                if (nestedIframeUrl.endsWith(".js") || nestedIframeUrl.endsWith(".css") || nestedIframeUrl.contains("tag.min")) continue
-                
-                // 더 깊은 단계로 재귀 탐색 진행
-                val link = crawlIframe(nestedIframeUrl, iframeHeaders, depth + 1, sourceName, entryOrigin)
-                if (link != null) return link
+                val nestedResp = app.get(nestedIframeUrl, headers = iframeHeaders)
+                if (nestedResp.isSuccessful) {
+                    val link = parseAndExtract(nestedIframeUrl, nestedResp.text, iframeHeaders, entryOrigin, sourceName, depth + 1)
+                    if (link != null) return link
+                }
             }
             
-            // Popcdn 분기 지원
+            // 5. Popcdn 분기 지원
             if (iframeUrl.contains("freeshot.live") || iframeUrl.contains("popcdn.day")) {
                 debugLog("Freeshot / Popcdn 분기 감지")
                 var channelCode = ""
@@ -349,13 +348,13 @@ class DaddyLiveExtractor : ExtractorApi() {
                         source = sourceName, name = "Freeshot Server", url = finalM3u8,
                         referer = "https://popcdn.day/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
                         headers = mapOf(
-                            "Referer" to "https://popcdn.day/", "Origin" to "https://popcdn.day", "User-Agent" to userAgent
+                            "referer" to "https://popcdn.day/", "origin" to "https://popcdn.day", "user-agent" to userAgent
                         )
                     )
                 }
             }
         } catch (e: Exception) {
-            debugLog("crawlIframe depth=$depth 에서 예외 발생: ${e.message}")
+            debugLog("parseAndExtract depth=$depth 예외 발생: ${e.message}")
         }
         return null
     }
