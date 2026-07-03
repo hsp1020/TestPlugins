@@ -1774,10 +1774,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 if (!tmdbData.fetchedTitle.isNullOrBlank()) finalName = tmdbData.fetchedTitle
                 finalDescription = tmdbData.fetchedOverview?.takeIf { it.isNotBlank() } ?: finalDescription
             }
-
+            
+            // movie 와 series 가 아닌 비표준 타입들의 메인 플롯(줄거리)이 비어있으면 이름으로 대체
             if (finalType != "movie" && finalType != "series") {
-                // !finalDescription.isNullOrBlank()를 사용하여 널 에러를 방지합니다.
-                finalDescription = if (!finalDescription.isNullOrBlank()) finalDescription else "\u200b"
+                finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription<br>$originalName"
             }
 
             val movieId = this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id ?: ""
