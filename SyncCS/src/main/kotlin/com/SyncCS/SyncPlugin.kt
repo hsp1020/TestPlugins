@@ -20,14 +20,18 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @CloudstreamPlugin
 class SyncPlugin : Plugin() {
     private var lastResumeWatching: String? = null
     
     private var syncJob: Job? = null
-    private var backupJob: Job? = null
     private var backgroundDelayJob: Job? = null
+    
+    // ★ 업로드 중간 네트워크 중단(Cancellation) 버그 수정을 위한 비동기 상태 제어자 분리
+    private var debounceJob: Job? = null
+    private val backupMutex = kotlinx.coroutines.sync.Mutex()
     
     private var isAppInForeground = true
     private var currentDelay = 5000L
@@ -36,7 +40,7 @@ class SyncPlugin : Plugin() {
     // 램 리소스 누수 방지용 Activity Lifecycle Callback 참조 변수
     private var lifecycleCallbacks: Application.ActivityLifecycleCallbacks? = null
 
-    // 빌드 에러 해결: Boolean 파라미터를 수용하도록 함수 타입을 (Boolean) -> Unit 규격으로 정밀 매핑합니다.
+    // 비동기 빌드 규격 매핑
     private val bookmarksListener = { _: Boolean -> backupDevice() }
     private val afterPluginsListener = { _: Boolean -> backupDevice() }
     private val mainPluginsListener = { _: Boolean -> backupDevice() }
@@ -121,29 +125,32 @@ class SyncPlugin : Plugin() {
     @Synchronized
     private fun backupDevice() {
         Log.d("SYNC", "[SyncPlugin] backupDevice() called. Debouncing for 3 seconds...")
-        backupJob?.cancel()
-        backupJob = CoroutineScope(Dispatchers.IO).launch {
+        debounceJob?.cancel() // 오직 대기 중인 3초 디바운스 타이머만 리셋 취소합니다.
+        debounceJob = CoroutineScope(Dispatchers.IO).launch {
             delay(3000L) 
             
-            try {
-                Log.d("SYNC", "[SyncPlugin] Executing backupDevice() logic...")
-                val context = AcraApplication.context ?: return@launch
-                val prefs = with(DataStore) { context.getSharedPrefs() }
-                
-                val isBackupEnabled = prefs.getString("backup_device", null)?.let {
-                    mapper.readValue<String>(it)
+            // ★ 이미 깃허브 네트워크 전송이 시작된 인스턴스는 취소하지 않고 안전하게 뮤텍스 동시성 대기열에 진입시킵니다.
+            backupMutex.withLock {
+                try {
+                    Log.d("SYNC", "[SyncPlugin] Executing backupDevice() logic...")
+                    val context = AcraApplication.context ?: return@launch
+                    val prefs = with(DataStore) { context.getSharedPrefs() }
+                    
+                    val isBackupEnabled = prefs.getString("backup_device", null)?.let {
+                        mapper.readValue<String>(it)
+                    }
+                    
+                    if (isBackupEnabled == "true") {
+                        val backupFile = BackupUtils.getBackup(context)
+                        val backupJson = mapper.writeValueAsString(backupFile)
+                        Log.d("SYNC", "[SyncPlugin] Backup JSON created. Calling ApiUtils.syncThisDevice().")
+                        ApiUtils.syncThisDevice(backupJson, context)
+                    } else {
+                        Log.d("SYNC", "[SyncPlugin] Backup is disabled in settings.")
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
-                
-                if (isBackupEnabled == "true") {
-                    val backupFile = BackupUtils.getBackup(context)
-                    val backupJson = mapper.writeValueAsString(backupFile)
-                    Log.d("SYNC", "[SyncPlugin] Backup JSON created. Calling ApiUtils.syncThisDevice().")
-                    ApiUtils.syncThisDevice(backupJson, context)
-                } else {
-                    Log.d("SYNC", "[SyncPlugin] Backup is disabled in settings.")
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
             }
         }
     }
@@ -170,7 +177,6 @@ class SyncPlugin : Plugin() {
                     null
                 } ?: UtilKt.getDeviceId(context.packageName, context)
 
-                // ★ 다른 기기의 백업 데이터가 성공적으로 내 로컬 DB로 머지되었는지 감지하는 플래그
                 var dataRestored = false
 
                 for (device in devices) {
@@ -192,7 +198,6 @@ class SyncPlugin : Plugin() {
                                 BackupUtils.restore(context, backupFile, restoreSettings = true, restoreDataStore = true)
                                 prefs.edit().putString(lastHashKey, currentHash).apply()
                                 
-                                // ★ 다른 기기 데이터 머지 성공 시 플래그 갱신
                                 dataRestored = true
                                 Log.d("SYNC", "[SyncPlugin] Restore merge successful for ${device.name}")
                             }
@@ -202,10 +207,18 @@ class SyncPlugin : Plugin() {
                     }
                 }
 
-                // ★ [동기화 핵심 복원] 다른 기기의 새로운 데이터가 내 로컬에 안전하게 머지되었다면,
-                // 내 기기도 병합된 최신 통합 데이터를 Gist 원격지에 즉각 재백업하여 Gist 상에서도 파일 내용을 일치시킵니다.
                 if (dataRestored) {
-                    Log.d("SYNC", "[SyncPlugin] Data restored successfully. Relying on native UI binding. Skipping manual reload.")
+                    Log.d("SYNC", "[SyncPlugin] Data restored successfully. Triggering UI refresh and auto backup.")
+                    
+                    withContext(Dispatchers.Main) {
+                        try {
+                            MainActivity.reloadHomeEvent.invoke(true)
+                            MainActivity.bookmarksUpdatedEvent.invoke(true)
+                        } catch (e: Exception) {
+                            Log.e("SYNC", "Failed to trigger UI reload events: ${e.message}")
+                        }
+                    }
+
                     backupDevice()
                 }
             } catch (e: Exception) {
@@ -214,7 +227,6 @@ class SyncPlugin : Plugin() {
         }
     }
 
-    // 빌드 에러 해결: 베이스 클래스 Plugin에 해당 lifecycle 메서드가 없으므로 override 키워드를 해제합니다.
     fun onUnload() {
         unload()
     }
@@ -224,7 +236,7 @@ class SyncPlugin : Plugin() {
         
         // 1. 코루틴 작업 해제
         syncJob?.cancel()
-        backupJob?.cancel()
+        debounceJob?.cancel()
         backgroundDelayJob?.cancel()
 
         // 2. Activity Lifecycle Callback 해제
