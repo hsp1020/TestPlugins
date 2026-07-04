@@ -33,6 +33,15 @@ class SyncPlugin : Plugin() {
     private var currentDelay = 5000L
     private var lastRestoreTime = 0L
 
+    // ★ 램 리소스 누수 해결: Activity Lifecycle Callback과 글로벌 리스너를 보존하여 정밀 해제합니다.
+    private var lifecycleCallbacks: Application.ActivityLifecycleCallbacks? = null
+
+    private val bookmarksListener = { backupDevice() }
+    private val afterPluginsListener = { backupDevice() }
+    private val mainPluginsListener = { backupDevice() }
+    private val reloadHomeListener = { backupDevice() }
+    private val reloadAccountListener = { backupDevice() }
+
     companion object {
         private var isLifecycleRegistered = false 
     }
@@ -43,36 +52,34 @@ class SyncPlugin : Plugin() {
         val app = context.applicationContext as? Application
         if (app != null && !isLifecycleRegistered) {
             isLifecycleRegistered = true
-            app.registerActivityLifecycleCallbacks(
-                object : Application.ActivityLifecycleCallbacks {
-                    private var activeActivities = 0
-                    override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
-                    override fun onActivityStarted(activity: Activity) {
-                        backgroundDelayJob?.cancel() 
-                        activeActivities++
-                        isAppInForeground = true
-                        currentDelay = 5000L 
-                        
-                        restoreDevice() 
-                    }
-                    override fun onActivityResumed(activity: Activity) {}
-                    override fun onActivityPaused(activity: Activity) {}
-                    override fun onActivityStopped(activity: Activity) {
-                        activeActivities = maxOf(0, activeActivities - 1)
-                        if (activeActivities <= 0) {
-                            backgroundDelayJob?.cancel()
-                            backgroundDelayJob = CoroutineScope(Dispatchers.Main).launch {
-                                delay(10000L)
-                                isAppInForeground = false
-                                currentDelay = 60000L 
-                                Log.d("SYNC", "[SyncPlugin] App entered background. Suspending active sync loop to save battery.")
-                            }
+            lifecycleCallbacks = object : Application.ActivityLifecycleCallbacks {
+                private var activeActivities = 0
+                override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+                override fun onActivityStarted(activity: Activity) {
+                    backgroundDelayJob?.cancel() 
+                    activeActivities++
+                    isAppInForeground = true
+                    currentDelay = 5000L 
+                    restoreDevice() 
+                }
+                override fun onActivityResumed(activity: Activity) {}
+                override fun onActivityPaused(activity: Activity) {}
+                override fun onActivityStopped(activity: Activity) {
+                    activeActivities = maxOf(0, activeActivities - 1)
+                    if (activeActivities <= 0) {
+                        backgroundDelayJob?.cancel()
+                        backgroundDelayJob = CoroutineScope(Dispatchers.Main).launch {
+                            delay(10000L)
+                            isAppInForeground = false
+                            currentDelay = 60000L 
+                            Log.d("SYNC", "[SyncPlugin] App entered background. Suspending active sync loop to save battery.")
                         }
                     }
-                    override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
-                    override fun onActivityDestroyed(activity: Activity) {}
                 }
-            )
+                override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+                override fun onActivityDestroyed(activity: Activity) {}
+            }
+            app.registerActivityLifecycleCallbacks(lifecycleCallbacks!!)
         }
 
         syncJob?.cancel()
@@ -115,13 +122,27 @@ class SyncPlugin : Plugin() {
         Log.d("SYNC", "[SyncPlugin] backupDevice() called. Debouncing for 3 seconds...")
         backupJob?.cancel()
         backupJob = CoroutineScope(Dispatchers.IO).launch {
-            val backupFile = BackupUtils.getBackup(AcraApplication.context ?: return@launch)
-            val backupJson = mapper.writeValueAsString(backupFile)
-            val (syncSuccess, syncMsg) = ApiUtils.syncThisDevice(backupJson, AcraApplication.context)
-            if (syncSuccess) {
-                Log.d("SYNC", "[SyncPlugin] Auto Backup successful.")
-            } else {
-                Log.d("SYNC", "[SyncPlugin] Auto Backup failed: $syncMsg")
+            delay(3000L) 
+            
+            try {
+                Log.d("SYNC", "[SyncPlugin] Executing backupDevice() logic...")
+                val context = AcraApplication.context ?: return@launch
+                val prefs = with(DataStore) { context.getSharedPrefs() }
+                
+                val isBackupEnabled = prefs.getString("backup_device", null)?.let {
+                    mapper.readValue<String>(it)
+                }
+                
+                if (isBackupEnabled == "true") {
+                    val backupFile = BackupUtils.getBackup(context)
+                    val backupJson = mapper.writeValueAsString(backupFile)
+                    Log.d("SYNC", "[SyncPlugin] Backup JSON created. Calling ApiUtils.syncThisDevice().")
+                    ApiUtils.syncThisDevice(backupJson, context)
+                } else {
+                    Log.d("SYNC", "[SyncPlugin] Backup is disabled in settings.")
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
     }
@@ -179,16 +200,45 @@ class SyncPlugin : Plugin() {
         }
     }
 
+    // ★ 언로드 생명주기 완벽 지원 (가장 극적인 RAM 메모리 누수 원천 진압)
+    override fun onUnload() {
+        unload()
+    }
+
+    override fun unload() {
+        Log.d("SYNC", "[SyncPlugin] Unloading plugin. Cancelling active coroutine jobs and unregistering callbacks...")
+        
+        // 1. 코루틴 작업 해제
+        syncJob?.cancel()
+        backupJob?.cancel()
+        backgroundDelayJob?.cancel()
+
+        // 2. Activity Lifecycle Callback 해제
+        val app = AcraApplication.context?.applicationContext as? Application
+        lifecycleCallbacks?.let { callbacks ->
+            app?.unregisterActivityLifecycleCallbacks(callbacks)
+            lifecycleCallbacks = null
+            isLifecycleRegistered = false
+        }
+
+        // 3. 글로벌 이벤트 버스 구독 해제
+        MainActivity.bookmarksUpdatedEvent -= bookmarksListener
+        MainActivity.afterPluginsLoadedEvent -= afterPluginsListener
+        MainActivity.mainPluginsLoadedEvent -= mainPluginsListener
+        MainActivity.reloadHomeEvent -= reloadHomeListener
+        MainActivity.reloadAccountEvent -= reloadAccountListener
+    }
+
     override fun load(context: Context) {
         AcraApplication.setKey("device_id", UtilKt.getDeviceId(context.packageName, context))
         restoreDevice()
         startSyncLoop(context)
 
-        MainActivity.bookmarksUpdatedEvent += { backupDevice() }
-        MainActivity.afterPluginsLoadedEvent += { backupDevice() }
-        MainActivity.mainPluginsLoadedEvent += { backupDevice() }
-        MainActivity.reloadHomeEvent += { backupDevice() }
-        MainActivity.reloadAccountEvent += { backupDevice() }
+        MainActivity.bookmarksUpdatedEvent += bookmarksListener
+        MainActivity.afterPluginsLoadedEvent += afterPluginsListener
+        MainActivity.mainPluginsLoadedEvent += mainPluginsListener
+        MainActivity.reloadHomeEvent += reloadHomeListener
+        MainActivity.reloadAccountEvent += reloadAccountListener
 
         openSettings = { activityContext ->
             val appCompatActivity = activityContext as? AppCompatActivity
