@@ -20,7 +20,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 @CloudstreamPlugin
 class SyncPlugin : Plugin() {
@@ -217,18 +216,9 @@ class SyncPlugin : Plugin() {
                     }
                 }
 
+                // 동적 새로고침 로직을 완전히 제거하고, 원래 작성되어 있던 고유의 백업 플로우만 수행하도록 원상복구했습니다.
                 if (dataRestored) {
-                    Log.d("SYNC", "[SyncPlugin] Data restored successfully. Triggering UI refresh and auto backup.")
-                    
-                    withContext(Dispatchers.Main) {
-                        try {
-                            MainActivity.reloadHomeEvent.invoke(true)
-                            MainActivity.bookmarksUpdatedEvent.invoke(true)
-                        } catch (e: Exception) {
-                            Log.e("SYNC", "Failed to trigger UI reload events: ${e.message}")
-                        }
-                    }
-
+                    Log.d("SYNC", "[SyncPlugin] Data restored successfully. Relying on native UI binding. Skipping manual reload.")
                     backupDevice()
                 }
             } catch (e: Exception) {
