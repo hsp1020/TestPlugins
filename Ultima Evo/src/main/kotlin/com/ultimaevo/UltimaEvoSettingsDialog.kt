@@ -1147,7 +1147,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         updateVisibleCatalogs()
 
-        val footer = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; setPadding(0, 30, 0, 0) }
+        val footer = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 30, 0, 0) }
         val cancelBtn = Button(ctx).apply { text = "Cancel"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg(); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0,0,15,0) } }
         val applyBtn = Button(ctx).apply { text = "Save"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg(); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15,0,0,0) } }
         footer.addView(cancelBtn); footer.addView(applyBtn); mainContainer.addView(footer)
