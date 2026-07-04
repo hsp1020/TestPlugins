@@ -125,6 +125,9 @@ class Editor(private val editor: SharedPreferences.Editor) {
 // ==========================================
 // Backup Utilities (지능형 복원 및 가변 필터 탑재)
 // ==========================================
+// ==========================================
+// Backup Utilities (지능형 복원 및 가변 필터 탑재)
+// ==========================================
 
 object BackupUtils {
     private val whitelistKeys = listOf(
@@ -373,6 +376,111 @@ object BackupUtils {
             datastoreEditor.apply()
         }
         Log.d("SYNC", "[BackupUtils] restore() finished.")
+    }
+
+    // ★ 데이터 정밀 분석을 위해 새롭게 삽입되는 진단용 메서드입니다.
+    fun analyzeBackupData(context: Context) {
+        val sharedPrefs = with(DataStore) { context.getSharedPrefs() }
+        val prefs = sharedPrefs.all
+
+        val resumeKeys = prefs.keys.filter { it.contains("result_resume_watching_2/", ignoreCase = true) }
+        val resumeEntries = resumeKeys.mapNotNull { key ->
+            val value = prefs[key]
+            if (value !is String) return@mapNotNull null
+            try {
+                val match = Regex("\"updateTime\"\\s*:\\s*(\\d+)").find(value)
+                val time = match?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                val parentId = key.substringAfter("result_resume_watching_2/", "").trim()
+                if (parentId.isEmpty()) null else Triple(key, parentId, time)
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+        val topEntries = resumeEntries.sortedByDescending { it.third }.take(100)
+        val allowedResumeKeys = topEntries.map { it.first }.toSet()
+        val activeParentIds = topEntries.map { it.second }.toSet()
+
+        val bookmarkKeys = prefs.keys.filter { it.contains("result_watch_state_data/", ignoreCase = true) }
+        val bookmarkParentIds = bookmarkKeys.map { key ->
+            key.substringAfter("result_watch_state_data/", "").trim()
+        }.filter { it.isNotEmpty() }.toSet()
+
+        val currentActiveIds = (activeParentIds + bookmarkParentIds)
+
+        // 실제로 화이트리스트 필터를 거쳤을 때 포함되는 키 목록 빌드
+        val filteredPrefs = prefs.filter { (key, _) ->
+            when {
+                key.contains("download_header_cache/", ignoreCase = true) -> {
+                    val id = key.substringAfter("download_header_cache/", "").trim()
+                    activeParentIds.contains(id)
+                }
+                key.contains("result_resume_watching_2/", ignoreCase = true) -> {
+                    allowedResumeKeys.contains(key)
+                }
+                else -> isAllowed(key)
+            }
+        }
+
+        Log.d("SYNC_DEBUG", "==================================================")
+        Log.d("SYNC_DEBUG", "             [백업 데이터 정밀 분석 시작]            ")
+        Log.d("SYNC_DEBUG", "==================================================")
+        Log.d("SYNC_DEBUG", "필터 적용 후 총 백업 대상 키 개수: ${filteredPrefs.size} 개")
+
+        // 1. 카테고리별 누적 문자열 크기 및 개수 집계
+        val categorySizes = mutableMapOf<String, Int>()
+        val categoryCounts = mutableMapOf<String, Int>()
+        val keySizeList = mutableListOf<Pair<String, Int>>()
+
+        filteredPrefs.forEach { (key, value) ->
+            val valueStr = value.toString()
+            val valLen = valueStr.length
+            keySizeList.add(key to valLen)
+
+            var matchedCategory = "기타 (분류 안 됨)"
+            for (prefix in whitelistKeys) {
+                if (key.contains(prefix, ignoreCase = true)) {
+                    matchedCategory = prefix
+                    break
+                }
+            }
+
+            categorySizes[matchedCategory] = categorySizes.getOrDefault(matchedCategory, 0) + valLen
+            categoryCounts[matchedCategory] = categoryCounts.getOrDefault(matchedCategory, 0) + 1
+        }
+
+        Log.d("SYNC_DEBUG", "--------------------------------------------------")
+        Log.d("SYNC_DEBUG", " [1] 카테고리별 점유 현황 (점유율 순)")
+        Log.d("SYNC_DEBUG", "--------------------------------------------------")
+        categoryCounts.keys.sortedByDescending { categorySizes[it] }.forEach { cat ->
+            val rawCharCount = categorySizes[cat] ?: 0
+            Log.d("SYNC_DEBUG", "분류: $cat -> 데이터 개수: ${categoryCounts[cat]}개, 누적 문자 수: $rawCharCount 자")
+        }
+
+        Log.d("SYNC_DEBUG", "--------------------------------------------------")
+        Log.d("SYNC_DEBUG", " [2] 개별 키 중 가장 용량이 큰 Top 20")
+        Log.d("SYNC_DEBUG", "--------------------------------------------------")
+        keySizeList.sortedByDescending { it.second }.take(20).forEachIndexed { index, pair ->
+            val originalVal = filteredPrefs[pair.first].toString()
+            val preview = if (originalVal.length > 120) originalVal.take(120) + "..." else originalVal
+            Log.d("SYNC_DEBUG", "#${index + 1}: ${pair.first} -> 크기: ${pair.second} 자")
+            Log.d("SYNC_DEBUG", "     └ 미리보기: $preview")
+        }
+
+        // 3. 실제 압축 후 변환 크기 테스트 예측
+        try {
+            val backupFile = getBackup(context)
+            val backupJson = mapper.writeValueAsString(backupFile)
+            val compressedData = UtilKt.compressJsonToString(backupJson)
+            Log.d("SYNC_DEBUG", "--------------------------------------------------")
+            Log.d("SYNC_DEBUG", " [3] 최종 압축 결과 예측")
+            Log.d("SYNC_DEBUG", "--------------------------------------------------")
+            Log.d("SYNC_DEBUG", "압축 전 순수 JSON 크기: ${backupJson.length} 자")
+            Log.d("SYNC_DEBUG", "압축 후 Base64 결과물 크기: ${compressedData.length} 자 (한계치: 65,000자)")
+        } catch (e: Exception) {
+            Log.d("SYNC_DEBUG", "최종 예측 실패: ${e.message}")
+        }
+        Log.d("SYNC_DEBUG", "==================================================")
     }
 }
 
