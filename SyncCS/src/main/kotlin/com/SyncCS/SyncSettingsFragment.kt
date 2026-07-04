@@ -71,7 +71,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         val buttonConfig = findView<ImageView>(layout, "button_config")
         buttonConfig.setImageDrawable(getDrawable("edit_icon"))
         makeTvCompatible(buttonConfig)
-        
+
         buttonConfig.setOnClickListener {
             Log.d("SYNC", "[SyncSettingsFragment] Config button clicked.")
             val configLayout = getLayout("config", inflater, container) as ViewGroup
@@ -81,9 +81,13 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             val backupSwitch = findView<Switch>(configLayout, "backup_device")
             val restoreSwitch = findView<Switch>(configLayout, "restore_device")
 
-            // ★ XML 변경 없이 코드에서 동적으로 힌트 문구를 Gist 컨셉으로 재정의합니다.
+            // UI 힌트 문구 동적 변경
             tokenEdit.hint = "GitHub Token"
             projectNumEdit.hint = "Gist ID (Optional, blank to auto-create)"
+
+            // ★ [추가] 기존 XML 리소스에 고정되어 있던 숫자 전용 제약을 해제하고 영문 텍스트 키 리스너로 재정의합니다.
+            projectNumEdit.inputType = android.text.InputType.TYPE_CLASS_TEXT
+            projectNumEdit.keyListener = android.text.method.TextKeyListener.getInstance()
 
             val ctx = AcraApplication.context
             if (ctx != null) {
@@ -97,7 +101,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 backupSwitch.isChecked = prefs.getString("backup_device", null)?.let { mapper.readValue<String>(it) } == "true"
                 restoreSwitch.isChecked = prefs.getString("restore_device", null)?.let { mapper.readValue<String>(it) } == "true"
             }
-
+            
             backupSwitch.text = "Backup data to the cloud"
             restoreSwitch.text = "Recover data from cloud"
 
