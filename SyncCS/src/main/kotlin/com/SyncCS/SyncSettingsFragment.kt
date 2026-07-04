@@ -71,7 +71,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         val buttonConfig = findView<ImageView>(layout, "button_config")
         buttonConfig.setImageDrawable(getDrawable("edit_icon"))
         makeTvCompatible(buttonConfig)
-
+        
         buttonConfig.setOnClickListener {
             Log.d("SYNC", "[SyncSettingsFragment] Config button clicked.")
             val configLayout = getLayout("config", inflater, container) as ViewGroup
@@ -81,11 +81,11 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             val backupSwitch = findView<Switch>(configLayout, "backup_device")
             val restoreSwitch = findView<Switch>(configLayout, "restore_device")
 
-            // UI 힌트 문구 동적 변경
+            // ★ XML 뷰 변경 없이 코드 레벨에서 동적으로 Gist 입력란 규격 변경
             tokenEdit.hint = "GitHub Token"
             projectNumEdit.hint = "Gist ID (Optional, blank to auto-create)"
 
-            // ★ [추가] 기존 XML 리소스에 고정되어 있던 숫자 전용 제약을 해제하고 영문 텍스트 키 리스너로 재정의합니다.
+            // ★ [필수 해결] 기존 XML에 박혀있던 숫자 전용 제약(inputType="number")을 동적으로 제거하여 알파벳 입력을 허용합니다.
             projectNumEdit.inputType = android.text.InputType.TYPE_CLASS_TEXT
             projectNumEdit.keyListener = android.text.method.TextKeyListener.getInstance()
 
@@ -101,7 +101,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 backupSwitch.isChecked = prefs.getString("backup_device", null)?.let { mapper.readValue<String>(it) } == "true"
                 restoreSwitch.isChecked = prefs.getString("restore_device", null)?.let { mapper.readValue<String>(it) } == "true"
             }
-            
+
             backupSwitch.text = "Backup data to the cloud"
             restoreSwitch.text = "Recover data from cloud"
 
@@ -112,7 +112,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 .create()
 
             AlertDialog.Builder(requireContext())
-                .setTitle("Gist Sync Config") // 기존 Config에서 변경
+                .setTitle("Gist Sync Config")
                 .setView(configLayout)
                 .setPositiveButton("Save") { _, _ ->
                     val token = tokenEdit.text.toString().trim()
@@ -127,7 +127,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                     Log.d("SYNC", "[SyncSettingsFragment] Save clicked. Token/GistID provided.")
                     loadingDialog.show()
 
-                    // 동기화 이전 데이터 백업 상태 진단 분석 실행
+                    // 동기화 이전 백업 데이터 상태 분석용 진단 호출
                     try {
                         BackupUtils.analyzeBackupData(requireContext())
                     } catch (e: Exception) {
@@ -135,7 +135,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                     }
                     
                     AcraApplication.setKey("sync_token", token)
-                    AcraApplication.setKey("sync_project_num", projectNum) // Gist ID 매핑 보존
+                    AcraApplication.setKey("sync_project_num", projectNum) // Gist ID 매핑 등록
                     AcraApplication.setKey("device_name", deviceName)
                     AcraApplication.setKey("backup_device", backupSwitch.isChecked.toString())
                     AcraApplication.setKey("restore_device", restoreSwitch.isChecked.toString())
@@ -270,7 +270,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 deleteBtn.setOnClickListener {
                     Log.d("SYNC", "[SyncSettingsFragment] Delete clicked for device: ${device.name} (${device.deviceId})")
                     CoroutineScope(Dispatchers.IO).launch {
-                        // Gist 삭제의 경우, 1번째 매개변수(projectId)를 완전히 빈 문자열로 위임하여 파일 직접 삭제 처리
                         val success = ApiUtils.deleteDevice("", device.itemId)
                         withContext(Dispatchers.Main) {
                             if (success) {
