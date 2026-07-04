@@ -53,7 +53,6 @@ class SyncPlugin : Plugin() {
                         isAppInForeground = true
                         currentDelay = 5000L 
                         
-                        // 앱 화면 활성화 즉시 다른 기기의 변경 사항을 조회해 머지합니다.
                         restoreDevice() 
                     }
                     override fun onActivityResumed(activity: Activity) {}
@@ -61,7 +60,6 @@ class SyncPlugin : Plugin() {
                     override fun onActivityStopped(activity: Activity) {
                         activeActivities = maxOf(0, activeActivities - 1)
                         if (activeActivities <= 0) {
-                            // 액티비티 일시 전환 시의 백그라운드 오판 예방을 위해 10초의 넉넉한 디바운스 유예 보장
                             backgroundDelayJob?.cancel()
                             backgroundDelayJob = CoroutineScope(Dispatchers.Main).launch {
                                 delay(10000L)
@@ -117,82 +115,63 @@ class SyncPlugin : Plugin() {
         Log.d("SYNC", "[SyncPlugin] backupDevice() called. Debouncing for 3 seconds...")
         backupJob?.cancel()
         backupJob = CoroutineScope(Dispatchers.IO).launch {
-            delay(3000L) 
-            
-            try {
-                Log.d("SYNC", "[SyncPlugin] Executing backupDevice() logic...")
-                val context = AcraApplication.context ?: return@launch
-                val prefs = with(DataStore) { context.getSharedPrefs() }
-                
-                val isBackupEnabled = prefs.getString("backup_device", null)?.let {
-                    mapper.readValue<String>(it)
-                }
-                
-                if (isBackupEnabled == "true") {
-                    val backupFile = BackupUtils.getBackup(context)
-                    val backupJson = mapper.writeValueAsString(backupFile)
-                    Log.d("SYNC", "[SyncPlugin] Backup JSON created. Calling ApiUtils.syncThisDevice().")
-                    ApiUtils.syncThisDevice(backupJson, context)
-                } else {
-                    Log.d("SYNC", "[SyncPlugin] Backup is disabled in settings.")
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
+            val backupFile = BackupUtils.getBackup(AcraApplication.context ?: return@launch)
+            val backupJson = mapper.writeValueAsString(backupFile)
+            val (syncSuccess, syncMsg) = ApiUtils.syncThisDevice(backupJson, AcraApplication.context)
+            if (syncSuccess) {
+                Log.d("SYNC", "[SyncPlugin] Auto Backup successful.")
+            } else {
+                Log.d("SYNC", "[SyncPlugin] Auto Backup failed: $syncMsg")
             }
         }
     }
 
     private fun restoreDevice() {
         Log.d("SYNC", "[SyncPlugin] restoreDevice() called.")
+        val context = AcraApplication.context ?: return
+        val prefs = with(DataStore) { context.getSharedPrefs() }
+        val restoreEnabled = prefs.getString("restore_device", null)?.let {
+            try { mapper.readValue<String>(it) } catch (e: Exception) { "false" }
+        } == "true"
+
+        if (!restoreEnabled) {
+            Log.d("SYNC", "[SyncPlugin] Restore disabled. Skipping.")
+            return
+        }
+
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val context = AcraApplication.context ?: return@launch
-                val prefs = with(DataStore) { context.getSharedPrefs() }
-                
-                val isRestoreEnabled = prefs.getString("restore_device", null)?.let {
-                    mapper.readValue<String>(it)
-                }
-                
-                if (isRestoreEnabled == "true") {
-                    val devices = ApiUtils.fetchDevices()
-                    val currentDeviceId = UtilKt.getDeviceId(context.packageName, context)
-                    var dataRestored = false
-                    
-                    devices.forEach { device ->
-                        if (device.deviceId == currentDeviceId) {
-                            Log.d("SYNC", "[SyncPlugin] Skipping own device: ${device.name}")
-                            return@forEach
-                        }
-                        
-                        val lastHashKey = "sync_last_hash_${device.deviceId}"
-                        val lastHash = prefs.getString(lastHashKey, "")
-                        val currentHash = UtilKt.md5(device.syncedData ?: "")
-                        
-                        if (lastHash != currentHash) {
-                            Log.d("SYNC", "[SyncPlugin] New data found for device: ${device.name} (Hash changed). Merging...")
-                            device.syncedData?.let { encoded ->
-                                val decoded = UtilKt.decompressJsonFromString(encoded)
-                                if (decoded.isNotBlank()) {
-                                    val backupFile = mapper.readValue<BackupFile>(decoded)
-                                    BackupUtils.restore(context, backupFile, restoreSettings = true, restoreDataStore = true)
-                                    
-                                    // 해시 정상 보존 주입
-                                    prefs.edit().putString(lastHashKey, currentHash).apply()
-                                    dataRestored = true
-                                    Log.d("SYNC", "[SyncPlugin] Merge successful for device: ${device.name}")
-                                }
-                            }
-                        } else {
-                            Log.d("SYNC", "[SyncPlugin] Device ${device.name} is already up-to-date.")
-                        }
+                val devices = ApiUtils.fetchDevices()
+                val currentDeviceId = try {
+                    prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) }
+                } catch (e: Exception) {
+                    null
+                } ?: UtilKt.getDeviceId(context.packageName, context)
+
+                for (device in devices) {
+                    if (device.deviceId == currentDeviceId) {
+                        Log.d("SYNC", "[SyncPlugin] Skipping own device: ${device.name}")
+                        continue
                     }
 
-                    if (dataRestored) {
-                        Log.d("SYNC", "[SyncPlugin] Data restored successfully. Relying on native UI binding. Skipping manual reload.")
-                        backupDevice()
+                    val lastHashKey = "sync_last_hash_${device.deviceId}"
+                    val lastHash = prefs.getString(lastHashKey, "")
+                    val currentHash = UtilKt.md5(device.syncedData ?: "")
+
+                    if (lastHash != currentHash) {
+                        Log.d("SYNC", "[SyncPlugin] New data found for device: ${device.name}. Merging...")
+                        device.syncedData?.let { encoded ->
+                            val decoded = UtilKt.decompressJsonFromString(encoded)
+                            if (decoded.isNotBlank()) {
+                                val backupFile = mapper.readValue<BackupFile>(decoded)
+                                BackupUtils.restore(context, backupFile, restoreSettings = true, restoreDataStore = true)
+                                prefs.edit().putString(lastHashKey, currentHash).apply()
+                                Log.d("SYNC", "[SyncPlugin] Restore merge successful for ${device.name}")
+                            }
+                        }
+                    } else {
+                        Log.d("SYNC", "[SyncPlugin] Device ${device.name} is already up-to-date.")
                     }
-                } else {
-                    Log.d("SYNC", "[SyncPlugin] Restore is disabled in settings.")
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
