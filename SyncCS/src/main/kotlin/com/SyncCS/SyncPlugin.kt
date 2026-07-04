@@ -29,7 +29,7 @@ class SyncPlugin : Plugin() {
     private var syncJob: Job? = null
     private var backgroundDelayJob: Job? = null
     
-    // ★ 업로드 중간 네트워크 중단(Cancellation) 버그 수정을 위한 비동기 상태 제어자 분리
+    // 업로드 중간 네트워크 중단(Cancellation) 버그 수정을 위한 비동기 상태 제어자 분리
     private var debounceJob: Job? = null
     private val backupMutex = kotlinx.coroutines.sync.Mutex()
     
@@ -40,7 +40,7 @@ class SyncPlugin : Plugin() {
     // 램 리소스 누수 방지용 Activity Lifecycle Callback 참조 변수
     private var lifecycleCallbacks: Application.ActivityLifecycleCallbacks? = null
 
-    // 비동기 빌드 규격 매핑
+    // Boolean 파라미터를 수용하도록 함수 타입을 (Boolean) -> Unit 규격으로 정밀 매핑합니다.
     private val bookmarksListener = { _: Boolean -> backupDevice() }
     private val afterPluginsListener = { _: Boolean -> backupDevice() }
     private val mainPluginsListener = { _: Boolean -> backupDevice() }
@@ -129,11 +129,15 @@ class SyncPlugin : Plugin() {
         debounceJob = CoroutineScope(Dispatchers.IO).launch {
             delay(3000L) 
             
-            // ★ 이미 깃허브 네트워크 전송이 시작된 인스턴스는 취소하지 않고 안전하게 뮤텍스 동시성 대기열에 진입시킵니다.
-            backupMutex.withLock {
-                try {
-                    Log.d("SYNC", "[SyncPlugin] Executing backupDevice() logic...")
-                    val context = AcraApplication.context ?: return@launch
+            var isLocked = false
+            try {
+                // 수동으로 Lock을 획득하여 코루틴 중단 함수 호출 범위를 온전히 확보합니다.
+                backupMutex.lock()
+                isLocked = true
+                
+                Log.d("SYNC", "[SyncPlugin] Executing backupDevice() logic...")
+                val context = AcraApplication.context
+                if (context != null) {
                     val prefs = with(DataStore) { context.getSharedPrefs() }
                     
                     val isBackupEnabled = prefs.getString("backup_device", null)?.let {
@@ -148,8 +152,13 @@ class SyncPlugin : Plugin() {
                     } else {
                         Log.d("SYNC", "[SyncPlugin] Backup is disabled in settings.")
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                // 예외가 발생하더라도 락이 확보된 상태라면 완벽하게 Unlock하여 교착 상태(Deadlock)를 차단합니다.
+                if (isLocked) {
+                    backupMutex.unlock()
                 }
             }
         }
@@ -177,6 +186,7 @@ class SyncPlugin : Plugin() {
                     null
                 } ?: UtilKt.getDeviceId(context.packageName, context)
 
+                // 다른 기기의 백업 데이터가 성공적으로 내 로컬 DB로 머지되었는지 감지하는 플래그
                 var dataRestored = false
 
                 for (device in devices) {
