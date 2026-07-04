@@ -81,11 +81,11 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             val backupSwitch = findView<Switch>(configLayout, "backup_device")
             val restoreSwitch = findView<Switch>(configLayout, "restore_device")
 
-            // ★ XML 뷰 변경 없이 코드 레벨에서 동적으로 Gist 입력란 규격 변경
+            // XML 변경 없이 코드 레벨에서 동적으로 Gist 입력란 규격 변경
             tokenEdit.hint = "GitHub Token"
             projectNumEdit.hint = "Gist ID (Optional, blank to auto-create)"
 
-            // ★ [필수 해결] 기존 XML에 박혀있던 숫자 전용 제약(inputType="number")을 동적으로 제거하여 알파벳 입력을 허용합니다.
+            // 기존 XML에 지정되어 있던 숫자 전용 제한(inputType="number")을 제거하여 Gist ID 알파벳 입력을 정상 허용합니다.
             projectNumEdit.inputType = android.text.InputType.TYPE_CLASS_TEXT
             projectNumEdit.keyListener = android.text.method.TextKeyListener.getInstance()
 
@@ -126,13 +126,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                     
                     Log.d("SYNC", "[SyncSettingsFragment] Save clicked. Token/GistID provided.")
                     loadingDialog.show()
-
-                    // 동기화 이전 백업 데이터 상태 분석용 진단 호출
-                    try {
-                        BackupUtils.analyzeBackupData(requireContext())
-                    } catch (e: Exception) {
-                        Log.e("SYNC", "진단 분석 실행 중 오류 발생: ${e.message}", e)
-                    }
                     
                     AcraApplication.setKey("sync_token", token)
                     AcraApplication.setKey("sync_project_num", projectNum) // Gist ID 매핑 등록
