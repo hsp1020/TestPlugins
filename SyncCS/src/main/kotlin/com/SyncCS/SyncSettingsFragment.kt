@@ -118,6 +118,13 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                     
                     Log.d("SYNC", "[SyncSettingsFragment] Save clicked. Token/ProjectNum provided.")
                     loadingDialog.show()
+
+                    // ★ [진단 코드 추가] 데이터를 수집 및 압축하기 전, 현재 로컬 저장소 상태를 분석하여 로그캣에 출력합니다.
+                    try {
+                        BackupUtils.analyzeBackupData(requireContext())
+                    } catch (e: Exception) {
+                        Log.e("SYNC", "진단 분석 실행 중 오류 발생: ${e.message}", e)
+                    }
                     
                     AcraApplication.setKey("sync_token", token)
                     AcraApplication.setKey("sync_project_num", projectNum)
@@ -141,7 +148,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
 
                             val devices = ApiUtils.fetchDevices()
                             
-                            // 기기 ID 판정 방식 통일 (SharedPreferences 값 우선, 차선으로 호스트 패키지 기반 계산)
                             val currentDeviceId = try {
                                 val prefs = with(DataStore) { requireContext().getSharedPrefs() }
                                 prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) }
@@ -225,7 +231,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         val listLayout = getLayout("device_list", inflater, container)
         val containerLayout = findView<LinearLayout>(listLayout, "device_list_container")
 
-        // 현재 사용 중인 기기의 ID를 확인합니다. (SharedPreferences 우선, 차선으로 호스트 패키지 기반 계산)
         val ctx = requireContext()
         val currentDeviceId = try {
             val prefs = with(DataStore) { ctx.getSharedPrefs() }
@@ -248,7 +253,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
 
                 val isCurrentDevice = device.deviceId == currentDeviceId
                 if (isCurrentDevice) {
-                    // 기기명 (Current) 형태로 변경하고, Bold 스타일을 적용합니다.
                     nameText.text = "${device.name} (Current)\n(${device.deviceId})"
                     nameText.setTypeface(null, android.graphics.Typeface.BOLD)
                 } else {
