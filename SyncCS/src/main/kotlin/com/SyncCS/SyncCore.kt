@@ -22,7 +22,7 @@ import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
 // ==========================================
-// Gist Data Models (GQL 더미 삭제 및 Gist REST 수렴)
+// Gist Data Models
 // ==========================================
 
 data class GistRes(
@@ -125,7 +125,13 @@ object BackupUtils {
         return this.filter { isAllowed(it.key) }
     }
 
-    // ★ 성능 최적화: 무거운 Regex 파싱을 걷어내고 초고속 substring 파싱 방식을 적용합니다.
+    // 성능 최적화: 인덱스 기반 경량 문자열 자르기 파서
+    private fun isCoreSyncKeyOnly(key: String): Boolean {
+        return key.contains("result_resume_watching_2/", ignoreCase = true) ||
+               key.contains("result_watch_state/", ignoreCase = true) ||
+               key.contains("result_watch_state_data/", ignoreCase = true)
+    }
+
     private fun extractUpdateTime(jsonStr: String): Long {
         val target = "\"updateTime\""
         val index = jsonStr.indexOf(target)
@@ -171,6 +177,7 @@ object BackupUtils {
             key.substringAfter("result_watch_state_data/", "").trim()
         }.filter { it.isNotEmpty() }.toSet()
 
+        // 최근 시청한 100개 아이템과 북마크 등록 아이템의 통합 미디어 ID 세트
         val currentActiveIds = (activeParentIds + bookmarkParentIds)
 
         // 2. 툼스톤(삭제 이력) 제어 및 2주 만료 청소
@@ -211,10 +218,14 @@ object BackupUtils {
         sharedPrefs.edit().putString("sync_last_known_keys", mapper.writeValueAsString(currentKeys)).apply()
         sharedPrefs.edit().putString("sync_deleted_keys_map", mapper.writeValueAsString(deletedMap)).apply()
 
-        // 3. 필터링 로직 (download_header_cache 배제, 시청기록 및 설정 백업)
+        // 3. 필터링 로직 (최근 시청 중이거나 북마크에 지정된 미디어의 포스터/제목 캐시 메타데이터는 복원 보존)
         val filteredPrefs = prefs.filter { (key, _) ->
             when {
-                key.contains("download_header_cache/", ignoreCase = true) -> false
+                // ★ [핵심 복원] 무거운 다운로드 캐시는 필터링하되, 현재 계속 시청이나 북마크에 필요한 포스터 캐시는 Gist로 안전하게 전송합니다.
+                key.contains("download_header_cache/", ignoreCase = true) -> {
+                    val id = key.substringAfter("download_header_cache/", "").trim()
+                    currentActiveIds.contains(id)
+                }
                 key.contains("result_resume_watching_2/", ignoreCase = true) -> {
                     allowedResumeKeys.contains(key)
                 }
@@ -222,6 +233,7 @@ object BackupUtils {
             }
         }
 
+        // 4. 삭제된 구체적인 개별 키 주소들에만 "-9"를 채워 매립합니다.
         val mutableFilteredPrefs = filteredPrefs.toMutableMap()
         deletedMap.forEach { (deletedKey, deleteTime) ->
             mutableFilteredPrefs[deletedKey] = (-deleteTime).toString()
@@ -234,7 +246,7 @@ object BackupUtils {
         fun buildVars(map: Map<String, Any?>): BackupVars {
             val cleanedMap = map.mapValues { (key, value) ->
                 val unpacked = if (value is String) UtilKt.unpackMultipleSerialization(value) else value
-                val isTombstone = unpacked is String && isCoreSyncKey(key) && unpacked.toLongOrNull()?.let { it < 0L } == true
+                val isTombstone = unpacked is String && isCoreSyncKeyOnly(key) && unpacked.toLongOrNull()?.let { it < 0L } == true
                 if (unpacked is String && !isTombstone) UtilKt.compressValueProperties(unpacked) else unpacked
             }
             
@@ -347,100 +359,10 @@ object BackupUtils {
         }
         Log.d("SYNC", "[SyncBackup] restore() finished.")
     }
-
-    fun analyzeBackupData(context: Context) {
-        val sharedPrefs = with(DataStore) { context.getSharedPrefs() }
-        val prefs = sharedPrefs.all
-
-        val resumeKeys = prefs.keys.filter { it.contains("result_resume_watching_2/", ignoreCase = true) }
-        val resumeEntries = resumeKeys.mapNotNull { key ->
-            val value = prefs[key]
-            if (value !is String) return@mapNotNull null
-            try {
-                val time = extractUpdateTime(value)
-                val parentId = key.substringAfter("result_resume_watching_2/", "").trim()
-                if (parentId.isEmpty()) null else Triple(key, parentId, time)
-            } catch (e: Exception) {
-                null
-            }
-        }
-
-        val topEntries = resumeEntries.sortedByDescending { it.third }.take(100)
-        val allowedResumeKeys = topEntries.map { it.first }.toSet()
-        val activeParentIds = topEntries.map { it.second }.toSet()
-
-        val filteredPrefs = prefs.filter { (key, _) ->
-            when {
-                key.contains("download_header_cache/", ignoreCase = true) -> false
-                key.contains("result_resume_watching_2/", ignoreCase = true) -> {
-                    allowedResumeKeys.contains(key)
-                }
-                else -> isAllowed(key)
-            }
-        }
-
-        Log.d("SYNC_DEBUG", "==================================================")
-        Log.d("SYNC_DEBUG", "             [백업 데이터 정밀 분석 시작]            ")
-        Log.d("SYNC_DEBUG", "==================================================")
-        Log.d("SYNC_DEBUG", "필터 적용 후 총 백업 대상 키 개수: ${filteredPrefs.size} 개")
-
-        val categorySizes = mutableMapOf<String, Int>()
-        val categoryCounts = mutableMapOf<String, Int>()
-        val keySizeList = mutableListOf<Pair<String, Int>>()
-
-        filteredPrefs.forEach { (key, value) ->
-            val valueStr = value.toString()
-            val valLen = valueStr.length
-            keySizeList.add(key to valLen)
-
-            var matchedCategory = "기타 (분류 안 됨)"
-            for (prefix in whitelistKeys) {
-                if (key.contains(prefix, ignoreCase = true)) {
-                    matchedCategory = prefix
-                    break
-                }
-            }
-
-            categorySizes[matchedCategory] = categorySizes.getOrDefault(matchedCategory, 0) + valLen
-            categoryCounts[matchedCategory] = categoryCounts.getOrDefault(matchedCategory, 0) + 1
-        }
-
-        Log.d("SYNC_DEBUG", "--------------------------------------------------")
-        Log.d("SYNC_DEBUG", " [1] 카테고리별 점유 현황 (점유율 순)")
-        Log.d("SYNC_DEBUG", "--------------------------------------------------")
-        categoryCounts.keys.sortedByDescending { categorySizes[it] }.forEach { cat ->
-            val rawCharCount = categorySizes[cat] ?: 0
-            Log.d("SYNC_DEBUG", "분류: $cat -> 데이터 개수: ${categoryCounts[cat]}개, 누적 문자 수: $rawCharCount 자")
-        }
-
-        Log.d("SYNC_DEBUG", "--------------------------------------------------")
-        Log.d("SYNC_DEBUG", " [2] 개별 키 중 가장 용량이 큰 Top 20")
-        Log.d("SYNC_DEBUG", "--------------------------------------------------")
-        keySizeList.sortedByDescending { it.second }.take(20).forEachIndexed { index, pair ->
-            val originalVal = filteredPrefs[pair.first].toString()
-            val preview = if (originalVal.length > 120) originalVal.take(120) + "..." else originalVal
-            Log.d("SYNC_DEBUG", "#${index + 1}: ${pair.first} -> 크기: ${pair.second} 자")
-            Log.d("SYNC_DEBUG", "     └ 미리보기: $preview")
-        }
-
-        try {
-            val backupFile = getBackup(context)
-            val backupJson = mapper.writeValueAsString(backupFile)
-            val compressedData = UtilKt.compressJsonToString(backupJson)
-            Log.d("SYNC_DEBUG", "--------------------------------------------------")
-            Log.d("SYNC_DEBUG", " [3] 최종 압축 결과 예측")
-            Log.d("SYNC_DEBUG", "--------------------------------------------------")
-            Log.d("SYNC_DEBUG", "압축 전 순수 JSON 크기: ${backupJson.length} 자")
-            Log.d("SYNC_DEBUG", "압축 후 Base64 결과물 크기: ${compressedData.length} 자 (한계치: 65,000자)")
-        } catch (e: Exception) {
-            Log.d("SYNC_DEBUG", "최종 예측 실패: ${e.message}")
-        }
-        Log.d("SYNC_DEBUG", "==================================================")
-    }
 }
 
 // ==========================================
-// API Utilities (Gist REST API 구현)
+// API Utilities
 // ==========================================
 
 object ApiUtils {
@@ -505,7 +427,7 @@ object ApiUtils {
             val existingGist = gists.find { it.description == "Cloudstream Sync Backup" }
             if (existingGist != null) {
                 val gistId = existingGist.id ?: return Pair(false, "Found Gist but it has no ID.")
-                AcraApplication.setKey("sync_project_num", gistId)
+                AcraApplication.setKey("sync_project_num", gistId) 
                 AcraApplication.setKey("sync_gist_id", gistId)
                 Log.d("SYNC", "[ApiUtils] Connected to existing Gist: $gistId")
                 return Pair(true, "Successfully connected to existing GitHub Gist!")
@@ -577,7 +499,7 @@ object ApiUtils {
                 SyncDevice(
                     name = payload.deviceName,
                     deviceId = payload.deviceId,
-                    itemId = gistFile.filename ?: "",
+                    itemId = gistFile.filename ?: "", 
                     syncedData = payload.data,
                     updatedAt = payload.updatedAt,
                     draftIssueId = gistFile.filename ?: ""
@@ -654,7 +576,7 @@ object ApiUtils {
 }
 
 // ==========================================
-// String & Compression Utilities
+// String & Compression Utilities (완벽 복구 완료)
 // ==========================================
 
 object UtilKt {
