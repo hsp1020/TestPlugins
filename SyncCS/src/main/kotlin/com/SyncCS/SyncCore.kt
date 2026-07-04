@@ -22,7 +22,7 @@ import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
 // ==========================================
-// Gist Data Models
+// Gist Data Models (GQL 더미 삭제 및 Gist REST 수렴)
 // ==========================================
 
 data class GistRes(
@@ -95,7 +95,7 @@ class Editor(private val editor: SharedPreferences.Editor) {
 }
 
 // ==========================================
-// Backup Utilities (지능형 복원 및 가변 필터 탑재)
+// Backup Utilities (지능형 복원 및 성능 최적화)
 // ==========================================
 
 object BackupUtils {
@@ -125,8 +125,22 @@ object BackupUtils {
         return this.filter { isAllowed(it.key) }
     }
 
+    // ★ 성능 최적화: 무거운 Regex 파싱을 걷어내고 초고속 substring 파싱 방식을 적용합니다.
+    private fun extractUpdateTime(jsonStr: String): Long {
+        val target = "\"updateTime\""
+        val index = jsonStr.indexOf(target)
+        if (index == -1) return 0L
+        val colonIndex = jsonStr.indexOf(":", index + target.length)
+        if (colonIndex == -1) return 0L
+        var commaIndex = jsonStr.indexOf(",", colonIndex)
+        if (commaIndex == -1) {
+            commaIndex = jsonStr.indexOf("}", colonIndex)
+        }
+        if (commaIndex == -1) return 0L
+        return jsonStr.substring(colonIndex + 1, commaIndex).trim().replace("\"", "").toLongOrNull() ?: 0L
+    }
 
-@Suppress("UNCHECKED_CAST")
+    @Suppress("UNCHECKED_CAST")
     fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
         Log.d("SYNC", "[SyncBackup] getBackup() called (Strict Whitelist Mode).")
         
@@ -137,17 +151,16 @@ object BackupUtils {
         // 1. 최근 시청 100개 ID 선별
         val resumeKeys = prefs.keys.filter { it.contains("result_resume_watching_2/", ignoreCase = true) }
         val resumeEntries = resumeKeys.mapNotNull { key ->
-                val value = prefs[key]
-                if (value !is String) return@mapNotNull null
-                try {
-                    val match = Regex("\"updateTime\"\\s*:\\s*(\\d+)").find(value)
-                    val time = match?.groupValues?.get(1)?.toLongOrNull() ?: 0L
-                    val parentId = key.substringAfter("result_resume_watching_2/", "").trim()
-                    if (parentId.isEmpty()) null else Triple(key, parentId, time)
-                } catch (e: Exception) {
-                    null
-                }
+            val value = prefs[key]
+            if (value !is String) return@mapNotNull null
+            try {
+                val time = extractUpdateTime(value)
+                val parentId = key.substringAfter("result_resume_watching_2/", "").trim()
+                if (parentId.isEmpty()) null else Triple(key, parentId, time)
+            } catch (e: Exception) {
+                null
             }
+        }
 
         val topEntries = resumeEntries.sortedByDescending { it.third }.take(100)
         val allowedResumeKeys = topEntries.map { it.first }.toSet()
@@ -173,23 +186,19 @@ object BackupUtils {
             emptySet()
         }
 
-        // 로컬에 누적 저장되어 있던 삭제 히스토리 맵 로드
         val deletedMap = sharedPrefs.getString("sync_deleted_keys_map", null)?.let {
             try { mapper.readValue<MutableMap<String, Long>>(it) } catch(e: Exception) { mutableMapOf<String, Long>() }
         } ?: mutableMapOf()
 
-        // 지웠던 키를 다시 사용하기 시작했다면, 삭제 히스토리 맵에서 즉시 소멸시킵니다.
         currentKeys.forEach { activeKey ->
             deletedMap.remove(activeKey)
         }
 
-        // 신규 삭제 발생 건 등록
         val now = System.currentTimeMillis()
         newlyDeletedKeys.forEach { key ->
             deletedMap[key] = now
         }
 
-        // 삭제된 지 14일(2주일)이 지난 툼스톤 데이터는 리스트에서 영구 소멸시켜 용량 백업 한계를 방어합니다.
         val iterator = deletedMap.entries.iterator()
         while (iterator.hasNext()) {
             val entry = iterator.next()
@@ -199,29 +208,20 @@ object BackupUtils {
             }
         }
 
-        // 다음 동기화를 위해 상태 갱신 보존
         sharedPrefs.edit().putString("sync_last_known_keys", mapper.writeValueAsString(currentKeys)).apply()
         sharedPrefs.edit().putString("sync_deleted_keys_map", mapper.writeValueAsString(deletedMap)).apply()
 
-        // ★ [핵심 필터링 로직 수정] 
-        // 용량 낭비가 가장 심하면서 복원 시 필요 없는 다운로드 캐시는 원천 차단하고,
-        // 나머지 재생 위치(video_pos_dur/) 및 세부 시청 메타데이터들은 필터 차단 없이 100% 보존합니다.
+        // 3. 필터링 로직 (download_header_cache 배제, 시청기록 및 설정 백업)
         val filteredPrefs = prefs.filter { (key, _) ->
             when {
-                // 다운로드 헤더 캐시는 링크 만료 특성상 타 기기 복원 시 무용하므로 백업 대상에서 통째로 예외 처리합니다.
                 key.contains("download_header_cache/", ignoreCase = true) -> false
-
-                // 최근 시청 목록(UI 메인화면 노출 제한용)은 기존 설계대로 상위 100개 유지
                 key.contains("result_resume_watching_2/", ignoreCase = true) -> {
                     allowedResumeKeys.contains(key)
                 }
-
-                // 나머지 시청기록(재생 위치, 시즌, 에피소드, 더빙 정보, 북마크 등)은 누적된 데이터 전부 허용하여 복원 보존
                 else -> isAllowed(key)
             }
         }
 
-        // 4. 삭제된 구체적인 개별 키 주소들에만 "-9"를 채워 매립합니다.
         val mutableFilteredPrefs = filteredPrefs.toMutableMap()
         deletedMap.forEach { (deletedKey, deleteTime) ->
             mutableFilteredPrefs[deletedKey] = (-deleteTime).toString()
@@ -229,12 +229,11 @@ object BackupUtils {
 
         val filteredDefaultPrefs = defaultPrefs.filterKeys { isAllowed(it) }
 
-        Log.d("SYNC", "[SyncBackup] Whitelist Filtered -> Datastore: ${mutableFilteredPrefs.size} keys, DefaultPrefs: ${filteredDefaultPrefs.size} keys")
+        Log.d("SYNC", "[BackupUtils] Whitelist Filtered -> Datastore: ${mutableFilteredPrefs.size} keys, DefaultPrefs: ${filteredDefaultPrefs.size} keys")
 
         fun buildVars(map: Map<String, Any?>): BackupVars {
             val cleanedMap = map.mapValues { (key, value) ->
                 val unpacked = if (value is String) UtilKt.unpackMultipleSerialization(value) else value
-                // 오직 핵심 시청 기록 관련 키(isCoreSyncKey)일 때만 음수 툼스톤 체크를 실행합니다.
                 val isTombstone = unpacked is String && isCoreSyncKey(key) && unpacked.toLongOrNull()?.let { it < 0L } == true
                 if (unpacked is String && !isTombstone) UtilKt.compressValueProperties(unpacked) else unpacked
             }
@@ -255,7 +254,7 @@ object BackupUtils {
     }
 
     fun restore(context: Context, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean) {
-        Log.d("SYNC", "[SyncBackup] restore() started (Strict Whitelist Mode).")
+        Log.d("SYNC", "[BackupUtils] restore() started (Strict Whitelist Mode).")
         
         if (restoreSettings) {
             val settingsEditor = with(DataStore) { context.getDefaultSharedPrefs() }.edit()
@@ -302,21 +301,19 @@ object BackupUtils {
                 val dk = UtilKt.decompressKey(k)
                 if (isAllowed(dk)) {
                     val valueLong = v.toLongOrNull()
-                    // 오직 핵심 시청 기록 키(isCoreSyncKey)일 때만 음수 값을 툼스톤 삭제 신호로 인지합니다.
                     if (isCoreSyncKey(dk) && valueLong != null && valueLong < 0L) {
                         val deletionTime = -valueLong
                         
                         val localValue = localPrefs[dk] as? String
                         val localTime = if (localValue != null) {
-                            val match = Regex("\"updateTime\"\\s*:\\s*(\\d+)").find(localValue)
-                            match?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                            extractUpdateTime(localValue)
                         } else 0L
                         
                         if (localTime <= deletionTime) {
                             datastoreEditor.remove(dk)
-                            Log.d("SYNC", "[SyncBackup] Pinpoint delete triggered for key: $dk (Deletion: $deletionTime, Local: $localTime)")
+                            Log.d("SYNC", "[BackupUtils] Pinpoint delete triggered for key: $dk (Deletion: $deletionTime, Local: $localTime)")
                         } else {
-                            Log.d("SYNC", "[SyncBackup] Skip delete for key: $dk because local data is newer. (Local: $localTime, Deletion: $deletionTime)")
+                            Log.d("SYNC", "[BackupUtils] Skip delete for key: $dk because local data is newer. (Local: $localTime, Deletion: $deletionTime)")
                         }
                     } else {
                         val rv = UtilKt.decompressValueProperties(v)
@@ -348,10 +345,9 @@ object BackupUtils {
             
             datastoreEditor.apply()
         }
-        Log.d("SYNC", "[SyncBackup] restore() finished.")
+        Log.d("SYNC", "[BackupUtils] restore() finished.")
     }
 
-    // 진단용 데이터 크기 분석 메서드
     fun analyzeBackupData(context: Context) {
         val sharedPrefs = with(DataStore) { context.getSharedPrefs() }
         val prefs = sharedPrefs.all
@@ -361,8 +357,7 @@ object BackupUtils {
             val value = prefs[key]
             if (value !is String) return@mapNotNull null
             try {
-                val match = Regex("\"updateTime\"\\s*:\\s*(\\d+)").find(value)
-                val time = match?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                val time = extractUpdateTime(value)
                 val parentId = key.substringAfter("result_resume_watching_2/", "").trim()
                 if (parentId.isEmpty()) null else Triple(key, parentId, time)
             } catch (e: Exception) {
@@ -373,13 +368,6 @@ object BackupUtils {
         val topEntries = resumeEntries.sortedByDescending { it.third }.take(100)
         val allowedResumeKeys = topEntries.map { it.first }.toSet()
         val activeParentIds = topEntries.map { it.second }.toSet()
-
-        val bookmarkKeys = prefs.keys.filter { it.contains("result_watch_state_data/", ignoreCase = true) }
-        val bookmarkParentIds = bookmarkKeys.map { key ->
-            key.substringAfter("result_watch_state_data/", "").trim()
-        }.filter { it.isNotEmpty() }.toSet()
-
-        val currentActiveIds = (activeParentIds + bookmarkParentIds)
 
         val filteredPrefs = prefs.filter { (key, _) ->
             when {
@@ -452,7 +440,7 @@ object BackupUtils {
 }
 
 // ==========================================
-// API Utilities (★ Gist REST API 전면 교체 완료)
+// API Utilities (Gist REST API 구현)
 // ==========================================
 
 object ApiUtils {
@@ -517,7 +505,7 @@ object ApiUtils {
             val existingGist = gists.find { it.description == "Cloudstream Sync Backup" }
             if (existingGist != null) {
                 val gistId = existingGist.id ?: return Pair(false, "Found Gist but it has no ID.")
-                AcraApplication.setKey("sync_project_num", gistId) // UI와 SharedPref 호환성 유지를 위해 동일 변수에 매핑
+                AcraApplication.setKey("sync_project_num", gistId)
                 AcraApplication.setKey("sync_gist_id", gistId)
                 Log.d("SYNC", "[ApiUtils] Connected to existing Gist: $gistId")
                 return Pair(true, "Successfully connected to existing GitHub Gist!")
@@ -589,7 +577,7 @@ object ApiUtils {
                 SyncDevice(
                     name = payload.deviceName,
                     deviceId = payload.deviceId,
-                    itemId = gistFile.filename ?: "", // Gist 파일 이름을 itemId 자리에 매핑하여 삭제 호환성 유지
+                    itemId = gistFile.filename ?: "",
                     syncedData = payload.data,
                     updatedAt = payload.updatedAt,
                     draftIssueId = gistFile.filename ?: ""
@@ -598,19 +586,16 @@ object ApiUtils {
     }
 
     suspend fun deleteDevice(projectId: String, itemId: String): Boolean {
-        // Gist에서 특정 파일을 삭제하려면 PATCH 통신으로 해당 파일 이름을 Key로 잡고 Value에 null을 전달합니다.
         val context = AcraApplication.context ?: return false
         val prefs = with(DataStore) { context.getSharedPrefs() }
         val gistId = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return false
 
-        // 잭슨 설정에 따른 null 필드 생략 오작동 방지를 위해 수동 JSON 구조 작성
         val deletePayload = """{"files":{"$itemId":null}}"""
         val resJson = apiCall("https://api.github.com/gists/$gistId", "PATCH", deletePayload)
         return resJson != null
     }
 
     suspend fun updateDevice(draftIssueId: String, title: String, body: String): Boolean {
-        // 덤프 규격 맞춤용 메서드 보존 (Gist 이식으로 동기화 로직은 syncThisDevice에서 자동 처리됩니다)
         return true
     }
 
@@ -625,12 +610,15 @@ object ApiUtils {
         try {
             val prefs = with(DataStore) { context?.getSharedPrefs() } ?: return Pair(false, "Context error")
             val gistId = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Gist ID missing. Please save config again.")
-            val deviceId = prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Device ID missing")
+            val deviceId = try {
+                prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) }
+            } catch (e: Exception) {
+                null
+            } ?: UtilKt.getDeviceId(context?.packageName ?: "", context ?: AcraApplication.context!!)
             val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
             
             val compressedData = UtilKt.compressJsonToString(backupData)
             
-            // Gist의 기본 업로드 한계 용량인 10MB 중 여유분을 감안하여 5MB(5,000,000자)로 제한을 수십 배 이상 상향합니다.
             if (compressedData.length > 5000000) {
                 return Pair(false, "Data too large (${compressedData.length} chars).")
             }
@@ -666,7 +654,7 @@ object ApiUtils {
 }
 
 // ==========================================
-// String & Compression Utilities (완벽 복구 완료)
+// String & Compression Utilities
 // ==========================================
 
 object UtilKt {
