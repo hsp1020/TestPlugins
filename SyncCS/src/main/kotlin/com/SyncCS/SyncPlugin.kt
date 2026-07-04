@@ -36,7 +36,7 @@ class SyncPlugin : Plugin() {
     // 램 리소스 누수 방지용 Activity Lifecycle Callback 참조 변수
     private var lifecycleCallbacks: Application.ActivityLifecycleCallbacks? = null
 
-    // ★ 빌드 에러 해결: Boolean 파라미터를 수용하도록 함수 타입을 (Boolean) -> Unit 규격으로 정밀 매핑합니다.
+    // 빌드 에러 해결: Boolean 파라미터를 수용하도록 함수 타입을 (Boolean) -> Unit 규격으로 정밀 매핑합니다.
     private val bookmarksListener = { _: Boolean -> backupDevice() }
     private val afterPluginsListener = { _: Boolean -> backupDevice() }
     private val mainPluginsListener = { _: Boolean -> backupDevice() }
@@ -170,6 +170,9 @@ class SyncPlugin : Plugin() {
                     null
                 } ?: UtilKt.getDeviceId(context.packageName, context)
 
+                // ★ 다른 기기의 백업 데이터가 성공적으로 내 로컬 DB로 머지되었는지 감지하는 플래그
+                var dataRestored = false
+
                 for (device in devices) {
                     if (device.deviceId == currentDeviceId) {
                         Log.d("SYNC", "[SyncPlugin] Skipping own device: ${device.name}")
@@ -188,6 +191,9 @@ class SyncPlugin : Plugin() {
                                 val backupFile = mapper.readValue<BackupFile>(decoded)
                                 BackupUtils.restore(context, backupFile, restoreSettings = true, restoreDataStore = true)
                                 prefs.edit().putString(lastHashKey, currentHash).apply()
+                                
+                                // ★ 다른 기기 데이터 머지 성공 시 플래그 갱신
+                                dataRestored = true
                                 Log.d("SYNC", "[SyncPlugin] Restore merge successful for ${device.name}")
                             }
                         }
@@ -195,13 +201,20 @@ class SyncPlugin : Plugin() {
                         Log.d("SYNC", "[SyncPlugin] Device ${device.name} is already up-to-date.")
                     }
                 }
+
+                // ★ [동기화 핵심 복원] 다른 기기의 새로운 데이터가 내 로컬에 안전하게 머지되었다면,
+                // 내 기기도 병합된 최신 통합 데이터를 Gist 원격지에 즉각 재백업하여 Gist 상에서도 파일 내용을 일치시킵니다.
+                if (dataRestored) {
+                    Log.d("SYNC", "[SyncPlugin] Data restored successfully. Relying on native UI binding. Skipping manual reload.")
+                    backupDevice()
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
         }
     }
 
-    // ★ 빌드 에러 해결: 베이스 클래스 Plugin에 규격이 존재하지 않으므로 override 키워드를 무력화 해제합니다.
+    // 빌드 에러 해결: 베이스 클래스 Plugin에 해당 lifecycle 메서드가 없으므로 override 키워드를 해제합니다.
     fun onUnload() {
         unload()
     }
