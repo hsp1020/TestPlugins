@@ -22,55 +22,27 @@ import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
 // ==========================================
-// Data Models
+// Gist Data Models
 // ==========================================
 
-data class APIRes(
-    @JsonProperty("data") var data: Data? = null,
-    @JsonProperty("errors") var errors: List<Error>? = null
+data class GistRes(
+    @JsonProperty("id") val id: String? = null,
+    @JsonProperty("description") val description: String? = null,
+    @JsonProperty("files") val files: Map<String, GistFile>? = null
 ) {
-    data class Data(
-        @JsonProperty("viewer") var viewer: Viewer? = null,
-        @JsonProperty("addProjectV2DraftIssue") var issue: Issue? = null,
-        @JsonProperty("updateProjectV2DraftIssue") var updateIssue: Issue? = null,
-        @JsonProperty("deleteProjectV2Item") var delItem: DelItem? = null
-    ) {
-        data class Viewer(@JsonProperty("projectV2") var projectV2: ProjectV2?) {
-            data class ProjectV2(
-                @JsonProperty("id") var id: String? = null,
-                @JsonProperty("items") var items: Items? = null
-            ) {
-                data class Items(@JsonProperty("nodes") var nodes: List<Node>? = null) {
-                    data class Node(
-                        @JsonProperty("id") var id: String? = null,
-                        @JsonProperty("updatedAt") var updatedAt: String? = null,
-                        @JsonProperty("content") var content: Content? = null
-                    ) {
-                        data class Content(
-                            @JsonProperty("id") var id: String? = null,
-                            @JsonProperty("title") var title: String? = null,
-                            @JsonProperty("bodyText") var bodyText: String? = null
-                        )
-                    }
-                }
-            }
-        }
-        data class Issue(@JsonProperty("projectItem") var projectItem: ProjectItem?) {
-            data class ProjectItem(
-                @JsonProperty("id") var id: String? = null,
-                @JsonProperty("content") var content: Content? = null
-            ) {
-                @JsonProperty("draftIssue") var draftIssue: Content? = null
-
-                data class Content(
-                    @JsonProperty("id") var id: String? = null
-                )
-            }
-        }
-        data class DelItem(@JsonProperty("deletedItemId") var deletedItemId: String? = null)
-    }
-    data class Error(@JsonProperty("message") var message: String? = null)
+    data class GistFile(
+        @JsonProperty("filename") val filename: String? = null,
+        @JsonProperty("content") val content: String? = null,
+        @JsonProperty("raw_url") val rawUrl: String? = null
+    )
 }
+
+data class GistPayload(
+    @JsonProperty("deviceName") val deviceName: String,
+    @JsonProperty("deviceId") val deviceId: String,
+    @JsonProperty("updatedAt") val updatedAt: String,
+    @JsonProperty("data") val data: String
+)
 
 data class BackupFile(
     @JsonProperty("datastore") val datastore: BackupVars,
@@ -257,7 +229,7 @@ object BackupUtils {
 
         val filteredDefaultPrefs = defaultPrefs.filterKeys { isAllowed(it) }
 
-        Log.d("SYNC", "[SyncBackup] Whitelist Filtered -> Datastore: ${mutableFilteredPrefs.size} keys, DefaultPrefs: ${filteredDefaultPrefs.size} keys")
+        Log.d("SYNC", "[BackupUtils] Whitelist Filtered -> Datastore: ${mutableFilteredPrefs.size} keys, DefaultPrefs: ${filteredDefaultPrefs.size} keys")
 
         fun buildVars(map: Map<String, Any?>): BackupVars {
             val cleanedMap = map.mapValues { (key, value) ->
@@ -283,7 +255,7 @@ object BackupUtils {
     }
 
     fun restore(context: Context, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean) {
-        Log.d("SYNC", "[SyncBackup] restore() started (Strict Whitelist Mode).")
+        Log.d("SYNC", "[BackupUtils] restore() started (Strict Whitelist Mode).")
         
         if (restoreSettings) {
             val settingsEditor = with(DataStore) { context.getDefaultSharedPrefs() }.edit()
@@ -342,9 +314,9 @@ object BackupUtils {
                         
                         if (localTime <= deletionTime) {
                             datastoreEditor.remove(dk)
-                            Log.d("SYNC", "[SyncBackup] Pinpoint delete triggered for key: $dk (Deletion: $deletionTime, Local: $localTime)")
+                            Log.d("SYNC", "[BackupUtils] Pinpoint delete triggered for key: $dk (Deletion: $deletionTime, Local: $localTime)")
                         } else {
-                            Log.d("SYNC", "[SyncBackup] Skip delete for key: $dk because local data is newer. (Local: $localTime, Deletion: $deletionTime)")
+                            Log.d("SYNC", "[BackupUtils] Skip delete for key: $dk because local data is newer. (Local: $localTime, Deletion: $deletionTime)")
                         }
                     } else {
                         val rv = UtilKt.decompressValueProperties(v)
@@ -376,10 +348,10 @@ object BackupUtils {
             
             datastoreEditor.apply()
         }
-        Log.d("SYNC", "[SyncBackup] restore() finished.")
+        Log.d("SYNC", "[BackupUtils] restore() finished.")
     }
 
-    // 진단용 분석 메서드 (필요시 그대로 남겨두거나 삭제하셔도 무방합니다)
+    // 진단용 데이터 크기 분석 메서드
     fun analyzeBackupData(context: Context) {
         val sharedPrefs = with(DataStore) { context.getSharedPrefs() }
         val prefs = sharedPrefs.all
@@ -401,6 +373,13 @@ object BackupUtils {
         val topEntries = resumeEntries.sortedByDescending { it.third }.take(100)
         val allowedResumeKeys = topEntries.map { it.first }.toSet()
         val activeParentIds = topEntries.map { it.second }.toSet()
+
+        val bookmarkKeys = prefs.keys.filter { it.contains("result_watch_state_data/", ignoreCase = true) }
+        val bookmarkParentIds = bookmarkKeys.map { key ->
+            key.substringAfter("result_watch_state_data/", "").trim()
+        }.filter { it.isNotEmpty() }.toSet()
+
+        val currentActiveIds = (activeParentIds + bookmarkParentIds)
 
         val filteredPrefs = prefs.filter { (key, _) ->
             when {
@@ -473,7 +452,7 @@ object BackupUtils {
 }
 
 // ==========================================
-// API Utilities (★ 긴급 완벽 복구 완료)
+// API Utilities (★ Gist REST API 전면 교체 완료)
 // ==========================================
 
 object ApiUtils {
@@ -482,57 +461,105 @@ object ApiUtils {
     private fun isLoggedIn(): Boolean {
         val context = AcraApplication.context ?: return false
         val prefs = with(DataStore) { context.getSharedPrefs() }
-        
         val token = prefs.getString("sync_token", null)?.let { mapper.readValue<String>(it) }
-        val projectNum = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) }
-        
-        return !token.isNullOrEmpty() && !projectNum.isNullOrEmpty()
+        return !token.isNullOrEmpty()
     }
 
-    private suspend fun apiCall(query: String, variables: Map<String, Any>? = null): APIRes? {
+    private suspend fun apiCall(url: String, method: String, body: Any? = null): String? {
         val context = AcraApplication.context ?: return null
         val prefs = with(DataStore) { context.getSharedPrefs() }
         val token = prefs.getString("sync_token", null)?.let { mapper.readValue<String>(it) } ?: return null
-        
-        val payload = mutableMapOf<String, Any>("query" to query)
-        if (variables != null) {
-            payload["variables"] = variables
-        }
-        
+
+        val headers = mapOf(
+            "Authorization" to "Bearer $token",
+            "Accept" to "application/vnd.github+json",
+            "X-GitHub-Api-Version" to "2022-11-28"
+        )
+
         return try {
-            Log.d("SYNC", "[ApiUtils] Sending GraphQL request...")
-            val response = app.post(
-                "https://api.github.com/graphql",
-                headers = mapOf("Authorization" to "Bearer $token"),
-                json = payload
-            )
-            response.parsedSafe<APIRes>()
+            Log.d("SYNC", "[ApiUtils] Sending Gist API $method request to $url...")
+            val response = when (method.uppercase()) {
+                "GET" -> app.get(url, headers = headers)
+                "POST" -> app.post(url, headers = headers, json = body)
+                "PATCH" -> app.patch(url, headers = headers, json = body)
+                "DELETE" -> app.delete(url, headers = headers)
+                else -> null
+            }
+            response?.text
         } catch (e: Exception) {
+            Log.e("SYNC", "[ApiUtils] Gist API Call failed: ${e.message}")
             null
         }
     }
 
     suspend fun syncProjectDetails(context: Context?): Pair<Boolean, String> {
-        if (!isLoggedIn()) return Pair(false, "Please enter Token and Project Number.")
+        if (!isLoggedIn()) return Pair(false, "Please enter Token.")
         
         val prefs = with(DataStore) { context?.getSharedPrefs() } ?: return Pair(false, "Context error")
-        val numStr = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Project Number missing")
-        val num = numStr.toIntOrNull() ?: return Pair(false, "Invalid Project Number")
-        
-        val query = """query(${'$'}num: Int!) { viewer { projectV2(number: ${'$'}num) { id } } }"""
-        val res = apiCall(query, mapOf("num" to num))
-        
-        if (res?.errors?.isNotEmpty() == true) {
-            return Pair(false, "GitHub Error: ${res.errors!!.first().message}")
+        val customGistId = prefs.getString("sync_project_num", null)?.let { 
+            try { mapper.readValue<String>(it) } catch(e: Exception) { "" }
+        }?.trim() ?: ""
+
+        if (customGistId.isEmpty()) {
+            // 1. 자동으로 기존 Gist 검색
+            Log.d("SYNC", "[ApiUtils] Gist ID not provided. Searching for existing Sync Gist...")
+            val listJson = apiCall("https://api.github.com/gists", "GET")
+            if (listJson == null) {
+                return Pair(false, "Failed to authenticate or fetch Gists. Check your Token.")
+            }
+
+            val gists: List<GistRes> = try {
+                mapper.readValue(listJson)
+            } catch (e: Exception) {
+                emptyList()
+            }
+
+            val existingGist = gists.find { it.description == "Cloudstream Sync Backup" }
+            if (existingGist != null) {
+                val gistId = existingGist.id ?: return Pair(false, "Found Gist but it has no ID.")
+                AcraApplication.setKey("sync_project_num", gistId) // UI와 SharedPref 호환성 유지를 위해 동일 변수에 매핑
+                AcraApplication.setKey("sync_gist_id", gistId)
+                Log.d("SYNC", "[ApiUtils] Connected to existing Gist: $gistId")
+                return Pair(true, "Successfully connected to existing GitHub Gist!")
+            } else {
+                // 2. 검색에 실패했으므로 새로 생성
+                Log.d("SYNC", "[ApiUtils] No existing Gist found. Creating a new one...")
+                val createPayload = mapOf(
+                    "description" to "Cloudstream Sync Backup",
+                    "public" to false,
+                    "files" to mapOf(
+                        "init.txt" to mapOf(
+                            "content" to "Cloudstream Sync Initialized"
+                        )
+                    )
+                )
+                val createJson = apiCall("https://api.github.com/gists", "POST", createPayload)
+                if (createJson == null) {
+                    return Pair(false, "Failed to create a new Gist. Check Gist scopes in your Token.")
+                }
+
+                val newGist: GistRes = try {
+                    mapper.readValue(createJson)
+                } catch (e: Exception) {
+                    return Pair(false, "Failed to parse created Gist response.")
+                }
+
+                val gistId = newGist.id ?: return Pair(false, "Created Gist has no ID.")
+                AcraApplication.setKey("sync_project_num", gistId)
+                AcraApplication.setKey("sync_gist_id", gistId)
+                Log.d("SYNC", "[ApiUtils] Created new Gist ID: $gistId")
+                return Pair(true, "Successfully auto-created a new GitHub Gist!")
+            }
+        } else {
+            // 사용자가 수동으로 Gist ID를 입력한 경우 유효성 검증
+            Log.d("SYNC", "[ApiUtils] Verifying specified Gist ID: $customGistId")
+            val gistJson = apiCall("https://api.github.com/gists/$customGistId", "GET")
+            if (gistJson == null) {
+                return Pair(false, "Gist ID is invalid or Token has no access to it.")
+            }
+            AcraApplication.setKey("sync_gist_id", customGistId)
+            return Pair(true, "Successfully connected to GitHub Gist!")
         }
-        
-        val projectId = res?.data?.viewer?.projectV2?.id
-        if (projectId != null) {
-            AcraApplication.setKey("sync_project_id", projectId)
-            return Pair(true, "Successfully connected to GitHub Project!")
-        }
-        
-        return Pair(false, "Failed to find project. Check your Token and Project Number.")
     }
 
     suspend fun fetchDevices(): List<SyncDevice> {
@@ -540,40 +567,51 @@ object ApiUtils {
         
         val context = AcraApplication.context ?: return emptyList()
         val prefs = with(DataStore) { context.getSharedPrefs() }
-        val numStr = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return emptyList()
-        val num = numStr.toIntOrNull() ?: return emptyList()
+        val gistId = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return emptyList()
         
-        val query = """query(${'$'}num: Int!) { viewer { projectV2(number: ${'$'}num) { id items(first: 100) { nodes { id updatedAt content { ... on DraftIssue { id title bodyText } } } } } } }"""
-        val res = apiCall(query, mapOf("num" to num))
-        
-        val nodes = res?.data?.viewer?.projectV2?.items?.nodes ?: return emptyList()
-        
-        return nodes.mapNotNull { node ->
-            val title = node.content?.title ?: "Unknown"
-            val body = node.content?.bodyText ?: ""
-            val itemId = node.id ?: return@mapNotNull null
-            val updatedAt = node.updatedAt ?: ""
-            val draftIssueId = node.content?.id ?: ""
-            
-            val parts = title.split("|")
-            if (parts.size >= 2) {
-                SyncDevice(name = parts[0], deviceId = parts[1], itemId = itemId, syncedData = body, updatedAt = updatedAt, draftIssueId = draftIssueId)
-            } else {
-                SyncDevice(name = title, deviceId = "", itemId = itemId, syncedData = body, updatedAt = updatedAt, draftIssueId = draftIssueId)
-            }
-        }.sortedBy { it.updatedAt }
+        val gistJson = apiCall("https://api.github.com/gists/$gistId", "GET") ?: return emptyList()
+        val gist: GistRes = try {
+            mapper.readValue(gistJson)
+        } catch (e: Exception) {
+            return emptyList()
+        }
+
+        val files = gist.files ?: return emptyList()
+        return files.filter { it.key.startsWith("device_") && it.key.endsWith(".json") }
+            .mapNotNull { (_, gistFile) ->
+                val content = gistFile.content ?: return@mapNotNull null
+                val payload: GistPayload = try {
+                    mapper.readValue(content)
+                } catch (e: Exception) {
+                    return@mapNotNull null
+                }
+                
+                SyncDevice(
+                    name = payload.deviceName,
+                    deviceId = payload.deviceId,
+                    itemId = gistFile.filename ?: "", // Gist 파일 이름을 itemId 자리에 매핑하여 삭제 호환성 유지
+                    syncedData = payload.data,
+                    updatedAt = payload.updatedAt,
+                    draftIssueId = gistFile.filename ?: ""
+                )
+            }.sortedBy { it.updatedAt }
     }
 
     suspend fun deleteDevice(projectId: String, itemId: String): Boolean {
-        val delQuery = """mutation(${'$'}projectId: ID!, ${'$'}itemId: ID!) { deleteProjectV2Item(input: {projectId: ${'$'}projectId, itemId: ${'$'}itemId}) { deletedItemId } }"""
-        val res = apiCall(delQuery, mapOf("projectId" to projectId, "itemId" to itemId))
-        return res?.errors.isNullOrEmpty()
+        // Gist에서 특정 파일을 삭제하려면 PATCH 통신으로 해당 파일 이름을 Key로 잡고 Value에 null을 전달합니다.
+        val context = AcraApplication.context ?: return false
+        val prefs = with(DataStore) { context.getSharedPrefs() }
+        val gistId = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return false
+
+        // 잭슨 설정에 따른 null 필드 생략 오작동 방지를 위해 수동 JSON 구조 작성
+        val deletePayload = """{"files":{"$itemId":null}}"""
+        val resJson = apiCall("https://api.github.com/gists/$gistId", "PATCH", deletePayload)
+        return resJson != null
     }
 
     suspend fun updateDevice(draftIssueId: String, title: String, body: String): Boolean {
-        val updateQuery = """mutation(${'$'}draftIssueId: ID!, ${'$'}title: String!, ${'$'}body: String!) { updateProjectV2DraftIssue(input: {draftIssueId: ${'$'}draftIssueId, title: ${'$'}title, body: ${'$'}body}) { draftIssue { id } } }"""
-        val res = apiCall(updateQuery, mapOf("draftIssueId" to draftIssueId, "title" to title, "body" to body))
-        return res != null && res.errors.isNullOrEmpty()
+        // 덤프 규격 맞춤용 메서드 보존 (Gist 이식으로 동기화 로직은 syncThisDevice에서 자동 처리됩니다)
+        return true
     }
 
     suspend fun syncThisDevice(backupData: String, context: Context? = AcraApplication.context): Pair<Boolean, String> {
@@ -586,61 +624,40 @@ object ApiUtils {
         
         try {
             val prefs = with(DataStore) { context?.getSharedPrefs() } ?: return Pair(false, "Context error")
-            val projectId = prefs.getString("sync_project_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Project ID missing. Please save config again.")
+            val gistId = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Gist ID missing. Please save config again.")
             val deviceId = prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Device ID missing")
             val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
             
-            Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA START ==========")
-            val chunkSize = 3000
-            for (i in 0..backupData.length / chunkSize) {
-                val start = i * chunkSize
-                val end = minOf((i + 1) * chunkSize, backupData.length)
-                if (start < end) {
-                    
-                }
-            }
-            Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
-
             val compressedData = UtilKt.compressJsonToString(backupData)
             
-            if (compressedData.length > 65000) {
+            // Gist의 기본 업로드 한계 용량인 10MB 중 여유분을 감안하여 5MB(5,000,000자)로 제한을 수십 배 이상 상향합니다.
+            if (compressedData.length > 5000000) {
                 return Pair(false, "Data too large (${compressedData.length} chars).")
             }
 
-            val devices = fetchDevices()
-            val existingDevices = devices.filter { it.deviceId == deviceId }
-            val title = "$deviceName|$deviceId"
+            val payload = GistPayload(
+                deviceName = deviceName,
+                deviceId = deviceId,
+                updatedAt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US).apply {
+                    timeZone = java.util.TimeZone.getTimeZone("UTC")
+                }.format(java.util.Date()),
+                data = compressedData
+            )
 
-            if (existingDevices.isNotEmpty()) {
-                val target = existingDevices.first()
-                Log.d("SYNC", "[ApiUtils] Existing card found. Updating card in place: ${target.name}")
-                val updateSuccess = updateDevice(target.draftIssueId ?: "", title, compressedData)
-                if (!updateSuccess) {
-                    return Pair(false, "Failed to update existing card.")
-                }
+            val payloadStr = mapper.writeValueAsString(payload)
+            val updatePayload = mapOf(
+                "files" to mapOf(
+                    "device_${deviceId}.json" to mapOf(
+                        "content" to payloadStr
+                    )
+                )
+            )
 
-                if (existingDevices.size > 1) {
-                    existingDevices.drop(1).forEach { duplicate ->
-                        deleteDevice(projectId, duplicate.itemId)
-                    }
-                }
-                return Pair(true, "Data updated successfully in place!")
+            val responseJson = apiCall("https://api.github.com/gists/$gistId", "PATCH", updatePayload)
+            return if (responseJson != null) {
+                Pair(true, "Data updated successfully in place!")
             } else {
-                val addQuery = """mutation(${'$'}projectId: ID!, ${'$'}title: String!, ${'$'}body: String!) { addProjectV2DraftIssue(input: {projectId: ${'$'}projectId, title: ${'$'}title, body: ${'$'}body}) { projectItem { id } } }"""
-                val addRes = apiCall(addQuery, mapOf("projectId" to projectId, "title" to title, "body" to compressedData))
-                
-                if (addRes?.errors?.isNotEmpty() == true) {
-                    Log.d("SYNC", "[ApiUtils] Upload Error: ${addRes.errors!!.first().message}")
-                    return Pair(false, "Upload Error: ${addRes.errors!!.first().message}")
-                }
-                
-                val newItemId = addRes?.data?.issue?.projectItem?.id
-                if (newItemId != null) {
-                    AcraApplication.setKey("sync_item_id", newItemId)
-                    Log.d("SYNC", "[ApiUtils] Upload successful! New Item ID: $newItemId")
-                    return Pair(true, "Data synced successfully to GitHub!")
-                }
-                return Pair(false, "Failed to upload data to GitHub.")
+                Pair(false, "Failed to upload data to GitHub Gist.")
             }
         } finally {
             isSyncing.set(false)
