@@ -1316,12 +1316,19 @@ private fun showLanguageSelectDialog() {
 
         viewLifecycleOwner.lifecycleScope.launch {
             val manifestText = withContext(Dispatchers.IO) {
-                try { com.lagradost.cloudstream3.app.get(item.link, timeout = 30L).text } catch (e: Exception) { e.printStackTrace(); null }
+                try { 
+                    // 1. 제한시간을 30초에서 15초로 변경
+                    com.lagradost.cloudstream3.app.get(item.link, timeout = 10L).text 
+                } catch (e: Exception) { 
+                    e.printStackTrace(); 
+                    null 
+                }
             }
             progressDialog.dismiss()
 
             if (manifestText.isNullOrBlank()) {
-                Toast.makeText(context, "Failed to load manifest. Check link.", Toast.LENGTH_LONG).show()
+                // 2. 토스트 대신 기존 테마 맞춤형 팝업(showSavedPopup) 표시
+                showSavedPopup(context, "Error", "Failed to load manifest. Check link.")
                 return@launch
             }
 
@@ -1369,7 +1376,11 @@ private fun showLanguageSelectDialog() {
                 }
             } catch (e: Exception) { e.printStackTrace() }
 
-            if (flatTabs.isEmpty()) { Toast.makeText(context, "No catalogs found in manifest.", Toast.LENGTH_LONG).show(); return@launch }
+            if (flatTabs.isEmpty()) { 
+                // 3. 토스트 대신 기존 테마 맞춤형 팝업(showSavedPopup) 표시
+                showSavedPopup(context, "Error", "No catalogs found in manifest.")
+                return@launch 
+            }
             displayCatalogListDialog(item.name, flatTabs, item.link)
         }
     }
