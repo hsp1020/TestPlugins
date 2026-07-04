@@ -81,6 +81,10 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             val backupSwitch = findView<Switch>(configLayout, "backup_device")
             val restoreSwitch = findView<Switch>(configLayout, "restore_device")
 
+            // ★ XML 변경 없이 코드에서 동적으로 힌트 문구를 Gist 컨셉으로 재정의합니다.
+            tokenEdit.hint = "GitHub Token"
+            projectNumEdit.hint = "Gist ID (Optional, blank to auto-create)"
+
             val ctx = AcraApplication.context
             if (ctx != null) {
                 val prefs = with(DataStore) { ctx.getSharedPrefs() }
@@ -104,22 +108,22 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 .create()
 
             AlertDialog.Builder(requireContext())
-                .setTitle("Config")
+                .setTitle("Gist Sync Config") // 기존 Config에서 변경
                 .setView(configLayout)
                 .setPositiveButton("Save") { _, _ ->
                     val token = tokenEdit.text.toString().trim()
                     val projectNum = projectNumEdit.text.toString().trim()
                     val deviceName = deviceNameEdit.text.toString().trim().ifEmpty { Build.MODEL }
                     
-                    if (token.isEmpty() || projectNum.isEmpty()) {
-                        CommonActivity.showToast("Please fill in all information", null)
+                    if (token.isEmpty()) {
+                        CommonActivity.showToast("Please enter your GitHub Token.", null)
                         return@setPositiveButton
                     }
                     
-                    Log.d("SYNC", "[SyncSettingsFragment] Save clicked. Token/ProjectNum provided.")
+                    Log.d("SYNC", "[SyncSettingsFragment] Save clicked. Token/GistID provided.")
                     loadingDialog.show()
 
-                    // ★ [진단 코드 추가] 데이터를 수집 및 압축하기 전, 현재 로컬 저장소 상태를 분석하여 로그캣에 출력합니다.
+                    // 동기화 이전 데이터 백업 상태 진단 분석 실행
                     try {
                         BackupUtils.analyzeBackupData(requireContext())
                     } catch (e: Exception) {
@@ -127,17 +131,17 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                     }
                     
                     AcraApplication.setKey("sync_token", token)
-                    AcraApplication.setKey("sync_project_num", projectNum)
+                    AcraApplication.setKey("sync_project_num", projectNum) // Gist ID 매핑 보존
                     AcraApplication.setKey("device_name", deviceName)
                     AcraApplication.setKey("backup_device", backupSwitch.isChecked.toString())
                     AcraApplication.setKey("restore_device", restoreSwitch.isChecked.toString())
 
                     CoroutineScope(Dispatchers.IO).launch {
                         try {
-                            Log.d("SYNC", "[SyncSettingsFragment] Verifying project details...")
+                            Log.d("SYNC", "[SyncSettingsFragment] Verifying Gist details...")
                             val (success, msg) = ApiUtils.syncProjectDetails(context)
                             if (!success) {
-                                Log.d("SYNC", "[SyncSettingsFragment] Project verification failed: $msg")
+                                Log.d("SYNC", "[SyncSettingsFragment] Gist verification failed: $msg")
                                 withContext(Dispatchers.Main) {
                                     loadingDialog.dismiss()
                                     CommonActivity.showToast(msg, null)
@@ -175,7 +179,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                                 loadingDialog.dismiss()
                                 if (syncSuccess) {
                                     Log.d("SYNC", "[SyncSettingsFragment] Immediate sync successful.")
-                                    CommonActivity.showToast("Successfully synced to GitHub!", null)
+                                    CommonActivity.showToast("Successfully synced to GitHub Gist!", null)
                                     dismiss()
                                 } else {
                                     Log.d("SYNC", "[SyncSettingsFragment] Immediate sync failed: $syncMsg")
@@ -262,8 +266,8 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 deleteBtn.setOnClickListener {
                     Log.d("SYNC", "[SyncSettingsFragment] Delete clicked for device: ${device.name} (${device.deviceId})")
                     CoroutineScope(Dispatchers.IO).launch {
-                        val projectId = AcraApplication.getKey<String>("sync_project_id") ?: return@launch
-                        val success = ApiUtils.deleteDevice(projectId, device.itemId)
+                        // Gist 삭제의 경우, 1번째 매개변수(projectId)를 완전히 빈 문자열로 위임하여 파일 직접 삭제 처리
+                        val success = ApiUtils.deleteDevice("", device.itemId)
                         withContext(Dispatchers.Main) {
                             if (success) {
                                 Log.d("SYNC", "[SyncSettingsFragment] Device deleted successfully.")
