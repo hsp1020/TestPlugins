@@ -100,23 +100,32 @@ object VixSrcExtractor {
             val bParam = if (bVal != null) "b=$bVal&" else ""
             val masterPlaylistUrl = "$baseUrl/playlist/$actualVid?${bParam}token=$token&expires=$expires&h=1&lang=en"
 
-            // === [STEP 3] 초고속 쿠키 파싱 (메모리 할당 없는 인덱스 기반 파싱) ===
+            // === [STEP 3] 초고속 쿠키 파싱 (타입 에러 방지 및 메모리 할당 없는 인덱스 기반 파싱) ===
             val cookiesMap = mutableMapOf<String, String>()
-            val extractCookies = { headers: List<Pair<String, String>> ->
-                for ((key, value) in headers) {
-                    if (key.equals("Set-Cookie", ignoreCase = true)) {
-                        val semiColonIndex = value.indexOf(';')
-                        val cookiePart = if (semiColonIndex > 0) value.substring(0, semiColonIndex) else value
-                        val equalsIndex = cookiePart.indexOf('=')
-                        if (equalsIndex > 0) {
-                            cookiesMap[cookiePart.substring(0, equalsIndex).trim()] = cookiePart.substring(equalsIndex + 1).trim()
-                        }
+            
+            apiResponseObj.headers.forEach { pair ->
+                if (pair.first.equals("Set-Cookie", ignoreCase = true)) {
+                    val value = pair.second
+                    val semiColonIndex = value.indexOf(';')
+                    val cookiePart = if (semiColonIndex > 0) value.substring(0, semiColonIndex) else value
+                    val equalsIndex = cookiePart.indexOf('=')
+                    if (equalsIndex > 0) {
+                        cookiesMap[cookiePart.substring(0, equalsIndex).trim()] = cookiePart.substring(equalsIndex + 1).trim()
                     }
                 }
             }
             
-            extractCookies(apiResponseObj.headers)
-            extractCookies(embedHtmlResponse.headers)
+            embedHtmlResponse.headers.forEach { pair ->
+                if (pair.first.equals("Set-Cookie", ignoreCase = true)) {
+                    val value = pair.second
+                    val semiColonIndex = value.indexOf(';')
+                    val cookiePart = if (semiColonIndex > 0) value.substring(0, semiColonIndex) else value
+                    val equalsIndex = cookiePart.indexOf('=')
+                    if (equalsIndex > 0) {
+                        cookiesMap[cookiePart.substring(0, equalsIndex).trim()] = cookiePart.substring(equalsIndex + 1).trim()
+                    }
+                }
+            }
 
             val cookieHeaderValue = cookiesMap.entries.joinToString("; ") { "${it.key}=${it.value}" }
 
