@@ -94,15 +94,18 @@ object VixSrcExtractor {
             if (masterPlaylistUrl != null) {
                 println("[STREMIOSUB-VIXSRC] ⚡ SUCCESS! Final Playlist URL: $masterPlaylistUrl")
                 
-                // [변경] ExoPlayer가 영상 파일을 요청할 때는 부모 페이지가 아닌 실제 iframe인 embedUrl을 Referer로 설정합니다.
-                val playerHeaders = commonHeaders.toMutableMap().apply {
-                    put("Referer", embedUrl)
-                }
+                // [변경] 브라우저 DevTools 헤더 매칭 결과에 기반하여 헤더 프로필을 수정합니다.
+                // 스크래퍼로 오해받을 수 있는 Origin 헤더를 배제하고, Accept 헤더를 */* 로 교정합니다.
+                val playerHeaders = mapOf(
+                    "Referer" to embedUrl,
+                    "Accept" to "*/*",
+                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
 
                 callback.invoke(
                     newExtractorLink("VixSrc", "VixSrc", masterPlaylistUrl, ExtractorLinkType.M3U8) {
                         this.quality = Qualities.P1080.value
-                        this.headers = playerHeaders // 변경된 헤더 적용
+                        this.headers = playerHeaders // 교정된 헤더 적용
                     }
                 )
             } else {
