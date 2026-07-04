@@ -125,9 +125,6 @@ class Editor(private val editor: SharedPreferences.Editor) {
 // ==========================================
 // Backup Utilities (지능형 복원 및 가변 필터 탑재)
 // ==========================================
-// ==========================================
-// Backup Utilities (지능형 복원 및 가변 필터 탑재)
-// ==========================================
 
 object BackupUtils {
     private val whitelistKeys = listOf(
@@ -234,16 +231,20 @@ object BackupUtils {
         sharedPrefs.edit().putString("sync_last_known_keys", mapper.writeValueAsString(currentKeys)).apply()
         sharedPrefs.edit().putString("sync_deleted_keys_map", mapper.writeValueAsString(deletedMap)).apply()
 
-        // 3. download_header_cache 필터링
+        // ★ [핵심 필터링 로직 수정] 
+        // 용량 낭비가 가장 심하면서 복원 시 필요 없는 다운로드 캐시는 원천 차단하고,
+        // 나머지 재생 위치(video_pos_dur/) 및 세부 시청 메타데이터들은 필터 차단 없이 100% 보존합니다.
         val filteredPrefs = prefs.filter { (key, _) ->
             when {
-                key.contains("download_header_cache/", ignoreCase = true) -> {
-                    val id = key.substringAfter("download_header_cache/", "").trim()
-                    activeParentIds.contains(id)
-                }
+                // 다운로드 헤더 캐시는 링크 만료 특성상 타 기기 복원 시 무용하므로 백업 대상에서 통째로 예외 처리합니다.
+                key.contains("download_header_cache/", ignoreCase = true) -> false
+
+                // 최근 시청 목록(UI 메인화면 노출 제한용)은 기존 설계대로 상위 100개 유지
                 key.contains("result_resume_watching_2/", ignoreCase = true) -> {
                     allowedResumeKeys.contains(key)
                 }
+
+                // 나머지 시청기록(재생 위치, 시즌, 에피소드, 더빙 정보, 북마크 등)은 누적된 데이터 전부 허용하여 복원 보존
                 else -> isAllowed(key)
             }
         }
@@ -261,7 +262,7 @@ object BackupUtils {
         fun buildVars(map: Map<String, Any?>): BackupVars {
             val cleanedMap = map.mapValues { (key, value) ->
                 val unpacked = if (value is String) UtilKt.unpackMultipleSerialization(value) else value
-                // ★ 핵심 수정: 오직 핵심 시청 기록 관련 키(isCoreSyncKey)일 때만 음수 툼스톤 체크를 실행합니다.
+                // 오직 핵심 시청 기록 관련 키(isCoreSyncKey)일 때만 음수 툼스톤 체크를 실행합니다.
                 val isTombstone = unpacked is String && isCoreSyncKey(key) && unpacked.toLongOrNull()?.let { it < 0L } == true
                 if (unpacked is String && !isTombstone) UtilKt.compressValueProperties(unpacked) else unpacked
             }
@@ -329,7 +330,7 @@ object BackupUtils {
                 val dk = UtilKt.decompressKey(k)
                 if (isAllowed(dk)) {
                     val valueLong = v.toLongOrNull()
-                    // ★ 핵심 해결책: 오직 핵심 시청 기록 키(isCoreSyncKey)일 때만 음수 값을 툼스톤 삭제 신호로 인지합니다.
+                    // 오직 핵심 시청 기록 키(isCoreSyncKey)일 때만 음수 값을 툼스톤 삭제 신호로 인지합니다.
                     if (isCoreSyncKey(dk) && valueLong != null && valueLong < 0L) {
                         val deletionTime = -valueLong
                         
@@ -378,7 +379,7 @@ object BackupUtils {
         Log.d("SYNC", "[BackupUtils] restore() finished.")
     }
 
-    // ★ 데이터 정밀 분석을 위해 새롭게 삽입되는 진단용 메서드입니다.
+    // 진단용 분석 메서드 (필요시 그대로 남겨두거나 삭제하셔도 무방합니다)
     fun analyzeBackupData(context: Context) {
         val sharedPrefs = with(DataStore) { context.getSharedPrefs() }
         val prefs = sharedPrefs.all
@@ -401,20 +402,9 @@ object BackupUtils {
         val allowedResumeKeys = topEntries.map { it.first }.toSet()
         val activeParentIds = topEntries.map { it.second }.toSet()
 
-        val bookmarkKeys = prefs.keys.filter { it.contains("result_watch_state_data/", ignoreCase = true) }
-        val bookmarkParentIds = bookmarkKeys.map { key ->
-            key.substringAfter("result_watch_state_data/", "").trim()
-        }.filter { it.isNotEmpty() }.toSet()
-
-        val currentActiveIds = (activeParentIds + bookmarkParentIds)
-
-        // 실제로 화이트리스트 필터를 거쳤을 때 포함되는 키 목록 빌드
         val filteredPrefs = prefs.filter { (key, _) ->
             when {
-                key.contains("download_header_cache/", ignoreCase = true) -> {
-                    val id = key.substringAfter("download_header_cache/", "").trim()
-                    activeParentIds.contains(id)
-                }
+                key.contains("download_header_cache/", ignoreCase = true) -> false
                 key.contains("result_resume_watching_2/", ignoreCase = true) -> {
                     allowedResumeKeys.contains(key)
                 }
@@ -427,7 +417,6 @@ object BackupUtils {
         Log.d("SYNC_DEBUG", "==================================================")
         Log.d("SYNC_DEBUG", "필터 적용 후 총 백업 대상 키 개수: ${filteredPrefs.size} 개")
 
-        // 1. 카테고리별 누적 문자열 크기 및 개수 집계
         val categorySizes = mutableMapOf<String, Int>()
         val categoryCounts = mutableMapOf<String, Int>()
         val keySizeList = mutableListOf<Pair<String, Int>>()
@@ -467,7 +456,6 @@ object BackupUtils {
             Log.d("SYNC_DEBUG", "     └ 미리보기: $preview")
         }
 
-        // 3. 실제 압축 후 변환 크기 테스트 예측
         try {
             val backupFile = getBackup(context)
             val backupJson = mapper.writeValueAsString(backupFile)
