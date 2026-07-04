@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.CancellationException
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 object VixSrcExtractor {
 
@@ -39,8 +40,8 @@ object VixSrcExtractor {
             println("[STREMIOSUB-VIXSRC] ℹ️ Media Info: TargetType=$targetType, TMDB/IMDB ID=$tmdbId, isMovie=$isMovie")
             println("[STREMIOSUB-VIXSRC] ℹ️ Parent Page Request URL: $requestUrl")
 
-            // 브라우저 환경과 일관되도록 헤더 세트를 용도별로 독립 선언합니다.
-            val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            // 브라우저의 실제 환경에 맞춘 최신 Chromium User-Agent 매칭
+            val userAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 
             // 1. API 호출 전용 헤더 (JSON 수신)
             val apiHeaders = mapOf(
@@ -49,18 +50,30 @@ object VixSrcExtractor {
                 "User-Agent" to userAgent
             )
 
-            // 2. Embed HTML 소스코드 호출 전용 헤더 (HTML 문서 수신용, Origin 제거)
+            // 2. Embed HTML 호출 전용 헤더 (브라우저 문서 탐색 환경 세팅)
             val embedHeaders = mapOf(
                 "Referer" to requestUrl,
                 "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "User-Agent" to userAgent
+                "User-Agent" to userAgent,
+                "Sec-Ch-Ua" to """"Chromium";v="137", "Not/A)Brand";v="24"""",
+                "Sec-Ch-Ua-Mobile" to "?0",
+                "Sec-Ch-Ua-Platform" to """"Linux"""",
+                "Sec-Fetch-Dest" to "iframe",
+                "Sec-Fetch-Mode" to "navigate",
+                "Sec-Fetch-Site" to "same-origin"
             )
 
-            // 3. 비디오 플레이리스트 호출 전용 헤더 프로필 (미디어 수신용, Accept */* 및 Origin/JSON 성격 완전 배제)
+            // 3. 비디오 플레이리스트 호출 전용 헤더 프로필 (ExoPlayer 및 미디어 분석기가 보낼 브라우저 기준 헤더 세팅)
             val playerHeaders = mapOf(
-                "Referer" to "", // 하단에서 embedUrl로 동적 적용됩니다.
+                "Referer" to "", // 하단에서 embedUrl로 유동적으로 세팅됩니다.
                 "Accept" to "*/*",
-                "User-Agent" to userAgent
+                "User-Agent" to userAgent,
+                "Sec-Ch-Ua" to """"Chromium";v="137", "Not/A)Brand";v="24"""",
+                "Sec-Ch-Ua-Mobile" to "?0",
+                "Sec-Ch-Ua-Platform" to """"Linux"""",
+                "Sec-Fetch-Dest" to "empty",
+                "Sec-Fetch-Mode" to "cors",
+                "Sec-Fetch-Site" to "same-origin"
             )
 
             // 1. API 호출로 Embed URL 및 비디오 ID 획득
@@ -83,7 +96,7 @@ object VixSrcExtractor {
             val embedUrl = baseUrl + embedPath
             println("[STREMIOSUB-VIXSRC] 🔗 Step 1 Success: embedUrl = $embedUrl, actualVid = $actualVid")
             
-            // 2. Embed HTML 소스코드 가져오기 및 전처리 (독립된 HTML 문서 헤더 사용)
+            // 2. Embed HTML 소스코드 가져오기 (문서 수신용 헤더 사용)
             println("[STREMIOSUB-VIXSRC] 🛰️ Step 2: Requesting Embed HTML...")
             val embedHtmlResponse = StremioC.customSession.get(embedUrl.replace("\\u0026", "&"), headers = embedHeaders)
             val embedHtml = embedHtmlResponse.text
@@ -122,15 +135,66 @@ object VixSrcExtractor {
                 masterPlaylistUrl = "$baseUrl/playlist/$actualVid?${bParam}token=$token&expires=$expires&h=1&lang=en"
             }
 
+            // [추가] 403 우회 목적의 수동 세션 쿠키 추출 및 병합 과정 진행
+            val cookiesMap = mutableMapOf<String, String>()
+
+            // 1단계 API 응답 헤더의 쿠키 수집
+            try {
+                apiResponseObj.okhttp.headers("Set-Cookie").forEach { cookieHeader ->
+                    val parts = cookieHeader.substringBefore(";").split("=", limit = 2)
+                    if (parts.size == 2) {
+                        cookiesMap[parts[0].trim()] = parts[1].trim()
+                    }
+                }
+            } catch (e: Exception) {
+                println("[STREMIOSUB-VIXSRC] ⚠️ Failed to extract cookies from API response: ${e.message}")
+            }
+
+            // 2단계 HTML iframe 응답 헤더의 쿠키 수집 (laravel_session 획득용)
+            try {
+                embedHtmlResponse.okhttp.headers("Set-Cookie").forEach { cookieHeader ->
+                    val parts = cookieHeader.substringBefore(";").split("=", limit = 2)
+                    if (parts.size == 2) {
+                        cookiesMap[parts[0].trim()] = parts[1].trim()
+                    }
+                }
+            } catch (e: Exception) {
+                println("[STREMIOSUB-VIXSRC] ⚠️ Failed to extract cookies from Embed response: ${e.message}")
+            }
+
+            // okhttp 세션 내에 동기화된 시스템 내부 쿠키가 있는 경우 추가 병합
+            try {
+                val httpUrl = "https://vixsrc.to".toHttpUrlOrNull()
+                if (httpUrl != null) {
+                    val jarCookies = StremioC.customSession.okHttpClient.cookieJar.loadForRequest(httpUrl)
+                    jarCookies.forEach { cookie ->
+                        cookiesMap[cookie.name] = cookie.value
+                    }
+                }
+            } catch (e: Exception) {
+                println("[STREMIOSUB-VIXSRC] ⚠️ Failed to load cookies from CookieJar: ${e.message}")
+            }
+
+            // 수집된 쿠키를 문자열로 직렬화
+            val cookieHeaderValue = cookiesMap.map { "${it.key}=${it.value}" }.joinToString("; ")
+            if (cookieHeaderValue.isNotBlank()) {
+                println("[STREMIOSUB-VIXSRC] 🍪 Successfully Extracted Session Cookies: $cookieHeaderValue")
+            } else {
+                println("[STREMIOSUB-VIXSRC] 🍪 No cookies were captured from target domain.")
+            }
+
             // 4. 플레이어 통신 헤더 확정 및 사전 검증 테스트 수행
             if (masterPlaylistUrl != null) {
                 println("[STREMIOSUB-VIXSRC] ⚡ Final Playlist URL generated: $masterPlaylistUrl")
                 
+                // 수동 파싱된 쿠키 세션을 헤더에 직접 전파하여 백엔드 토큰 일치성 검사를 우회합니다.
                 val finalPlayerHeaders = playerHeaders.toMutableMap().apply {
                     put("Referer", embedUrl)
+                    if (cookieHeaderValue.isNotBlank()) {
+                        put("Cookie", cookieHeaderValue)
+                    }
                 }
 
-                // [디버깅 추가] 실제 앱 플레이어가 호출하기 전, OkHttp 세션 상에서 사전 검증 요청을 날려 로그를 확보합니다.
                 println("[STREMIOSUB-VIXSRC] 🔬 Step 4: Simulating pre-verification request to playlist URL...")
                 try {
                     val testResponse = StremioC.customSession.get(masterPlaylistUrl, headers = finalPlayerHeaders)
