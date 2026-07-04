@@ -33,14 +33,15 @@ class SyncPlugin : Plugin() {
     private var currentDelay = 5000L
     private var lastRestoreTime = 0L
 
-    // ★ 램 리소스 누수 해결: Activity Lifecycle Callback과 글로벌 리스너를 보존하여 정밀 해제합니다.
+    // 램 리소스 누수 방지용 Activity Lifecycle Callback 참조 변수
     private var lifecycleCallbacks: Application.ActivityLifecycleCallbacks? = null
 
-    private val bookmarksListener = { backupDevice() }
-    private val afterPluginsListener = { backupDevice() }
-    private val mainPluginsListener = { backupDevice() }
-    private val reloadHomeListener = { backupDevice() }
-    private val reloadAccountListener = { backupDevice() }
+    // ★ 빌드 에러 해결: Boolean 파라미터를 수용하도록 함수 타입을 (Boolean) -> Unit 규격으로 정밀 매핑합니다.
+    private val bookmarksListener = { _: Boolean -> backupDevice() }
+    private val afterPluginsListener = { _: Boolean -> backupDevice() }
+    private val mainPluginsListener = { _: Boolean -> backupDevice() }
+    private val reloadHomeListener = { _: Boolean -> backupDevice() }
+    private val reloadAccountListener = { _: Boolean -> backupDevice() }
 
     companion object {
         private var isLifecycleRegistered = false 
@@ -200,12 +201,12 @@ class SyncPlugin : Plugin() {
         }
     }
 
-    // ★ 언로드 생명주기 완벽 지원 (가장 극적인 RAM 메모리 누수 원천 진압)
-    override fun onUnload() {
+    // ★ 빌드 에러 해결: 베이스 클래스 Plugin에 규격이 존재하지 않으므로 override 키워드를 무력화 해제합니다.
+    fun onUnload() {
         unload()
     }
 
-    override fun unload() {
+    fun unload() {
         Log.d("SYNC", "[SyncPlugin] Unloading plugin. Cancelling active coroutine jobs and unregistering callbacks...")
         
         // 1. 코루틴 작업 해제
