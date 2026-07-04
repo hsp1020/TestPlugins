@@ -229,7 +229,7 @@ object BackupUtils {
 
         val filteredDefaultPrefs = defaultPrefs.filterKeys { isAllowed(it) }
 
-        Log.d("SYNC", "[BackupUtils] Whitelist Filtered -> Datastore: ${mutableFilteredPrefs.size} keys, DefaultPrefs: ${filteredDefaultPrefs.size} keys")
+        Log.d("SYNC", "[SyncBackup] Whitelist Filtered -> Datastore: ${mutableFilteredPrefs.size} keys, DefaultPrefs: ${filteredDefaultPrefs.size} keys")
 
         fun buildVars(map: Map<String, Any?>): BackupVars {
             val cleanedMap = map.mapValues { (key, value) ->
@@ -254,7 +254,7 @@ object BackupUtils {
     }
 
     fun restore(context: Context, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean) {
-        Log.d("SYNC", "[BackupUtils] restore() started (Strict Whitelist Mode).")
+        Log.d("SYNC", "[SyncBackup] restore() started (Strict Whitelist Mode).")
         
         if (restoreSettings) {
             val settingsEditor = with(DataStore) { context.getDefaultSharedPrefs() }.edit()
@@ -311,9 +311,9 @@ object BackupUtils {
                         
                         if (localTime <= deletionTime) {
                             datastoreEditor.remove(dk)
-                            Log.d("SYNC", "[BackupUtils] Pinpoint delete triggered for key: $dk (Deletion: $deletionTime, Local: $localTime)")
+                            Log.d("SYNC", "[SyncBackup] Pinpoint delete triggered for key: $dk (Deletion: $deletionTime, Local: $localTime)")
                         } else {
-                            Log.d("SYNC", "[BackupUtils] Skip delete for key: $dk because local data is newer. (Local: $localTime, Deletion: $deletionTime)")
+                            Log.d("SYNC", "[SyncBackup] Skip delete for key: $dk because local data is newer. (Local: $localTime, Deletion: $deletionTime)")
                         }
                     } else {
                         val rv = UtilKt.decompressValueProperties(v)
@@ -345,7 +345,7 @@ object BackupUtils {
             
             datastoreEditor.apply()
         }
-        Log.d("SYNC", "[BackupUtils] restore() finished.")
+        Log.d("SYNC", "[SyncBackup] restore() finished.")
     }
 
     fun analyzeBackupData(context: Context) {
