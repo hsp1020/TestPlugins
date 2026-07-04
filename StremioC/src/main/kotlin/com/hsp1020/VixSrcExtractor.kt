@@ -7,7 +7,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.CancellationException
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 object VixSrcExtractor {
 
@@ -135,12 +134,12 @@ object VixSrcExtractor {
                 masterPlaylistUrl = "$baseUrl/playlist/$actualVid?${bParam}token=$token&expires=$expires&h=1&lang=en"
             }
 
-            // [추가] 403 우회 목적의 수동 세션 쿠키 추출 및 병합 과정 진행
+            // [추가/수정] 빌드 에러 방지를 위해, okhttp 내부 객체를 통하지 않고 headers 컬렉션을 직접 순회하여 안전하게 파싱합니다.
             val cookiesMap = mutableMapOf<String, String>()
 
-            // 1단계 API 응답 헤더의 쿠키 수집
             try {
-                apiResponseObj.okhttp.headers("Set-Cookie").forEach { cookieHeader ->
+                apiResponseObj.headers.filter { it.first.equals("Set-Cookie", ignoreCase = true) }.forEach { pair ->
+                    val cookieHeader = pair.second
                     val parts = cookieHeader.substringBefore(";").split("=", limit = 2)
                     if (parts.size == 2) {
                         cookiesMap[parts[0].trim()] = parts[1].trim()
@@ -150,9 +149,9 @@ object VixSrcExtractor {
                 println("[STREMIOSUB-VIXSRC] ⚠️ Failed to extract cookies from API response: ${e.message}")
             }
 
-            // 2단계 HTML iframe 응답 헤더의 쿠키 수집 (laravel_session 획득용)
             try {
-                embedHtmlResponse.okhttp.headers("Set-Cookie").forEach { cookieHeader ->
+                embedHtmlResponse.headers.filter { it.first.equals("Set-Cookie", ignoreCase = true) }.forEach { pair ->
+                    val cookieHeader = pair.second
                     val parts = cookieHeader.substringBefore(";").split("=", limit = 2)
                     if (parts.size == 2) {
                         cookiesMap[parts[0].trim()] = parts[1].trim()
@@ -160,19 +159,6 @@ object VixSrcExtractor {
                 }
             } catch (e: Exception) {
                 println("[STREMIOSUB-VIXSRC] ⚠️ Failed to extract cookies from Embed response: ${e.message}")
-            }
-
-            // okhttp 세션 내에 동기화된 시스템 내부 쿠키가 있는 경우 추가 병합
-            try {
-                val httpUrl = "https://vixsrc.to".toHttpUrlOrNull()
-                if (httpUrl != null) {
-                    val jarCookies = StremioC.customSession.okHttpClient.cookieJar.loadForRequest(httpUrl)
-                    jarCookies.forEach { cookie ->
-                        cookiesMap[cookie.name] = cookie.value
-                    }
-                }
-            } catch (e: Exception) {
-                println("[STREMIOSUB-VIXSRC] ⚠️ Failed to load cookies from CookieJar: ${e.message}")
             }
 
             // 수집된 쿠키를 문자열로 직렬화
