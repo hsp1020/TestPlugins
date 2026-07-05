@@ -107,8 +107,14 @@ private fun JsonNode?.intOrNull(): Int? {
 }
 
 open class StremioC(override var mainUrl: String, override var name: String) : MainAPI() {
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Others)
-    override val hasMainPage = true
+    override val supportedTypes = if (mainUrl.isNotBlank()) {
+        setOf(TvType.Movie, TvType.TvSeries, TvType.Others)
+    } else {
+        emptySet()
+    }
+    
+    // 주소가 있는 실제 애드온만 홈 화면 탭 목록에 표시되도록 설정
+    override val hasMainPage = mainUrl.isNotBlank()
      
     private var cachedManifest: Manifest? = null
     private var lastManifestUrl: String = ""
