@@ -20,7 +20,6 @@ import com.fasterxml.jackson.module.kotlin.readValue
 class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
     override var mainUrl = "https://cu-tv.com"
     override var name = "CUTV"
-    override val hasQuickSearch = false
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "ko"
     override val hasMainPage = true
