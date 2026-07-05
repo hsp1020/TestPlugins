@@ -424,40 +424,42 @@ class SettingsBottomFragment(
                         json.put("cine_stream_enabled", isCineStreamExportActive)
                         if (isCineStreamExportActive) {
                             val cineStreamJson = JSONObject()
-                            val dynamicKeys = getCineStreamDynamicKeys()
-                            
-                            dynamicKeys.forEach { cKey ->
-                                var found = false
-                                try { 
-                                    val strVal = CloudStreamApp.getKey<String>(cKey)
-                                    if (strVal != null) {
-                                        cineStreamJson.put(cKey, strVal)
-                                        found = true
+                            try {
+                                val possibleNames = listOf(
+                                    "CineStream", "CineStream_preferences", "plugin_CineStream", "plugin_CineStream_preferences", 
+                                    "com.megix", "com.megix_preferences", appContext.packageName + "_preferences"
+                                )
+                                var targetPrefName = appContext.packageName + "_preferences"
+                                for (name in possibleNames) {
+                                    val p = appContext.getSharedPreferences(name, Context.MODE_PRIVATE)
+                                    if (p.contains("seen_providers") || p.contains("provider_order") || p.contains("ScrapeConcurrency")) {
+                                        targetPrefName = name
+                                        break
                                     }
-                                } catch (_: Throwable) {}
-                                
-                                if (!found) {
-                                    try {
-                                        val boolVal = CloudStreamApp.getKey<Boolean>(cKey)
-                                        if (boolVal != null) {
-                                            cineStreamJson.put(cKey, boolVal)
-                                            found = true
-                                        }
-                                    } catch (_: Throwable) {}
                                 }
-                                
-                                if (!found) {
-                                    try {
-                                        val intVal = CloudStreamApp.getKey<Int>(cKey)
-                                        if (intVal != null) {
-                                            cineStreamJson.put(cKey, intVal)
-                                        }
-                                    } catch (_: Throwable) {}
+                                val cinePrefs = appContext.getSharedPreferences(targetPrefName, Context.MODE_PRIVATE)
+                                cinePrefs.all.forEach { (key, value) ->
+                                    val isCineStreamKey = key == "ScrapeConcurrency" || 
+                                                         key == "DownloadEnable" || 
+                                                         key == "seen_providers" || 
+                                                         key == "provider_order" || 
+                                                         key == "showbox_ui_token" ||
+                                                         key == "wyzie_subs_api_key" ||
+                                                         key == "gramcinema_bearer_token" ||
+                                                         key == "new_provider_default_on" ||
+                                                         key == "stremio_addons" ||
+                                                         key.startsWith("p_") || 
+                                                         key.startsWith("stremio_")
+                                    if (isCineStreamKey && value != null) {
+                                        cineStreamJson.put(key, value)
+                                    }
                                 }
+                            } catch (e: Exception) {
+                                e.printStackTrace()
                             }
                             json.put("cine_stream_data", cineStreamJson)
                         }
-
+                        
                         val jsonString = json.toString()
                         val bos = java.io.ByteArrayOutputStream()
                         java.util.zip.GZIPOutputStream(bos).use { it.write(jsonString.toByteArray(Charsets.UTF_8)) }
