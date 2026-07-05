@@ -168,10 +168,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/StremioC/stremio.png",
-        "fileHash": "sha256-cb9f1af9a1fe008171ed36171c3c4c49c1b57a94d1e6ec356e768af050276911",
+        "fileHash": "sha256-16c02947b4419530304e02754594c5ef58efc0e8768742854d9ceeff8c352f6b",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 247772,
+        "fileSize": 249300,
         "status": 1,
         "language": "en",
         "authors": [
