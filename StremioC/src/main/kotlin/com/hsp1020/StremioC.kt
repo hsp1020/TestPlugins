@@ -1296,7 +1296,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("imdbEpisode") val imdbEpisode: Int? = null,
         @JsonProperty("anilistId") val anilistId: Int? = null,
         @JsonProperty("malId") val malId: Int? = null,
-        @JsonProperty("kitsuId") val kitsuId: String? = null
+        @JsonProperty("kitsuId") val kitsuId: String? = null,
+        @JsonProperty("addonUrl") val addonUrl: String? = null // <- 추가됨
+        
     )
     
     data class Manifest(val catalogs: List<Catalog>)
@@ -1709,7 +1711,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         displaySeason, displayEpisode, showTitle, tmdbId, 
                         isAnime, isBollywood, isAsian, isCartoon, 
                         imdbSeason, imdbEpisode, originalTitle, englishTitle, 
-                        aniListId, malId, kitsuId
+                        aniListId, malId, kitsuId,
+                        provider.mainUrl // <- 마지막 인자로 추가
                     )
                     processedEpisodes.add(ep)
                 }
@@ -1918,7 +1921,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         malId = finalMalId,
                         kitsuId = this@CatalogEntry.kitsuIdExt,
                         originalTitle = tmdbData?.fetchedOriginalTitle,
-                        englishTitle = tmdbData?.fetchedEnglishTitle
+                        englishTitle = tmdbData?.fetchedEnglishTitle,
+                        addonUrl = provider.mainUrl // <- 주입 추가
                     )
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
@@ -2013,7 +2017,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 englishTitle = englishTitle,
                 anilistId = aniListId,
                 malId = malId,
-                kitsuId = kitsuId
+                kitsuId = kitsuId,
+                addonUrl = addonUrl // <- 주입 추가
             )) {
                 val rawTitle = this@Video.name ?: this@Video.title ?: "Episode $displayEpisode"
                 val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
