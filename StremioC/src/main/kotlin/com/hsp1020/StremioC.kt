@@ -159,7 +159,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private fun cachedCustomStreamPlayProvider(): MainAPI? = cachedStreamPlayProvider
 
-    fun getUnifiedMetaUrl(type: String, id: String, originalPoster: String? = null): String {
+    fun getUnifiedMetaUrl(type: String, id: String): String {
         val context = CloudStreamApp.context ?: return "${mainUrl.cleanBaseUrl()}/meta/$type/${id.urlEncode()}.json"
         val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
         val syncUrl = prefs.getString("history_sync_url", "") ?: ""
@@ -187,19 +187,15 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             false
         }
 
-        val baseEndpoint = if (isSyncEnabled && syncUrl.isNotBlank()) {
-            syncUrl.cleanBaseUrl()
+        return if (isSyncEnabled && syncUrl.isNotBlank()) {
+            val cleanBase = syncUrl.cleanBaseUrl()
+            "$cleanBase/meta/$type/${id.urlEncode()}.json"
         } else {
-            mainUrl.cleanBaseUrl()
-        }
-
-        return if (!originalPoster.isNullOrBlank()) {
-            "$baseEndpoint/meta/$type/${id.urlEncode()}.json?poster=${originalPoster.urlEncode()}"
-        } else {
-            "$baseEndpoint/meta/$type/${id.urlEncode()}.json"
+            val cleanBase = mainUrl.cleanBaseUrl()
+            "$cleanBase/meta/$type/${id.urlEncode()}.json"
         }
     }
-    
+
     fun getTargetApiName(): String {
         val context = CloudStreamApp.context ?: return name
         val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
@@ -733,14 +729,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             if (seenIds.contains(extractedId)) false else { seenIds.add(extractedId); true }
         }
     }
-
+    
     override suspend fun load(url: String): LoadResponse = coroutineScope {
-        val fallbackPoster = if (url.contains("poster=")) {
-            url.substringAfter("poster=")
-                .substringBefore("&")
-                .let { runCatching { java.net.URLDecoder.decode(it, "UTF-8") }.getOrNull() }
-        } else null
-
         val res: CatalogEntry = if (url.startsWith("{")) {
             parseJson<CatalogEntry>(url)
         } else {
@@ -755,7 +745,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 throw IllegalStateException("Metadata not found or parsing failed: $url", e)
             }
         }
-                
+        
         val normalizedId = try { normalizeId(res.id ?: "") } catch (e: Exception) { e.printStackTrace(); res.id ?: "" }
         val encodedId = normalizedId.urlEncode()
 
@@ -863,8 +853,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             fetchedMalId = fetchedMalId, 
             resolvedTmdbId = resolvedTmdbId,
             kitsuVideos = kitsuVideos,
-            resolvedIdHolder = resolvedIdHolder, // 홀더 전달
-            fallbackPoster = fallbackPoster // 원본 포스터 보존용으로 이 줄 추가
+            resolvedIdHolder = resolvedIdHolder // 홀더 전달
         )
         
         // 정교한 MDBList 평점 지연 조회 실행
@@ -1421,7 +1410,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             typeName: String? = null
         ): SearchResponse {
             val targetType = this.type ?: typeName ?: "movie"
-            val metaUrl = provider.getUnifiedMetaUrl(targetType, this.id ?: "", originalPoster = poster)
+            val metaUrl = provider.getUnifiedMetaUrl(targetType, this.id ?: "")
 
             val baseName = if (!name.isNullOrBlank()) {
                 name
@@ -1445,7 +1434,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 posterUrl = poster 
             }
         }
-                
+        
         private fun isSingleMovie(finalType: String?, finalVideos: List<Video>?): Boolean {
             return (finalType == "movie" && finalVideos?.size == 1 && finalVideos[0].seasonNumber == 1 && (finalVideos[0].episode == 1 || finalVideos[0].number == 1)) ||
                    (finalVideos?.size == 1 && (finalVideos[0].seasonNumber ?: 0) == 0 && (finalVideos[0].episode ?: finalVideos[0].number ?: 0) == 0)
@@ -1713,7 +1702,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             // 최종 에피소드 리스트를 시즌과 에피소드 번호 순으로 정렬하여 UI에 일관되게 보여줍니다.
             return processedEpisodes.sortedWith(compareBy({ it.season }, { it.episode }))
         }
-
+        
         suspend fun toLoadResponse(
             provider: StremioC, 
             imdbId: String?, 
@@ -1723,8 +1712,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             fetchedMalId: Int? = null, 
             resolvedTmdbId: String? = null,
             kitsuVideos: List<Video>? = null,
-            resolvedIdHolder: Array<String?>? = null, // 파싱 완료된 ID를 밖으로 꺼내주기 위한 홀더 추가
-            fallbackPoster: String? = null // 복원용 포스터 매개변수 이 줄 추가
+            resolvedIdHolder: Array<String?>? = null // 파싱 완료된 ID를 밖으로 꺼내주기 위한 홀더 추가
         ): LoadResponse = coroutineScope {
             val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
 
@@ -1766,17 +1754,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val finalTrailerStreams = detailedEntry.trailerStreams ?: this@CatalogEntry.trailerStreams
             val originalName = detailedEntry.name ?: this@CatalogEntry.name
             val finalGenre = detailedEntry.genre ?: detailedEntry.genres ?: this@CatalogEntry.genre ?: this@CatalogEntry.genres
-            
-            // [Poster] 원본 포스터(fallbackPoster)가 전달되었다면 최우선 적용, 없으면 프록시 JSON에서 수집한 포스터를 사용합니다.
-            val finalPoster = if (!fallbackPoster.isNullOrBlank()) {
-                fallbackPoster
-            } else {
-                detailedEntry.poster ?: this@CatalogEntry.poster
-            }
-            
+            val finalPoster = detailedEntry.poster ?: this@CatalogEntry.poster
             val finalBackground = detailedEntry.background ?: this@CatalogEntry.background
             val finalImdbRating = detailedEntry.imdbRating ?: this@CatalogEntry.imdbRating
-            val finalType = detailedEntry.type ?: this@CatalogEntry.type 
+            val finalType = detailedEntry.type ?: this@CatalogEntry.type
 
             var foundMediaType: String? = null
             if (findApiDeferred != null) {
