@@ -1297,9 +1297,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("anilistId") val anilistId: Int? = null,
         @JsonProperty("malId") val malId: Int? = null,
         @JsonProperty("kitsuId") val kitsuId: String? = null,
-        @JsonProperty("addonUrl") val addonUrl: String? = null // <- 추가됨
-        
-    )
+        @JsonProperty("addonUrl") val addonUrl: String? = null
+    )    
     
     data class Manifest(val catalogs: List<Catalog>)
     
@@ -1991,7 +1990,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("imdbEpisode") val imdbEpisode: Int? = null,
         @JsonProperty("imdb_id") val imdb_id: String? = null
     ) {
-        fun toEpisode(provider: StremioC, type: String?, imdbId: String?, tmdbMetaMap: Map<String, TmdbEpisode>, displaySeason: Int, displayEpisode: Int, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, imdbSeason: Int?, imdbEpisode: Int?, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): Episode {
+        fun toEpisode(provider: StremioC, type: String?, imdbId: String?, tmdbMetaMap: Map<String, TmdbEpisode>, displaySeason: Int, displayEpisode: Int, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, imdbSeason: Int?, imdbEpisode: Int?, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?, addonUrl: String? = null): Episode {
             val tmdbEp = tmdbMetaMap["${displaySeason}_${displayEpisode}"] ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
             val finalAirDate = tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@Video.firstAired ?: this@Video.released
             val airedYearInt = finalAirDate?.split("-")?.first()?.toIntOrNull()
@@ -2017,7 +2016,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 anilistId = aniListId,
                 malId = malId,
                 kitsuId = kitsuId,
-                addonUrl = addonUrl // <- 주입 추가
+                addonUrl = addonUrl
             )) {
                 val rawTitle = this@Video.name ?: this@Video.title ?: "Episode $displayEpisode"
                 val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
@@ -2026,7 +2025,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
 
                 var finalEpDesc = (tmdbEp?.overview ?: this@Video.overview ?: this@Video.description)?.takeIf { it != "null" }
-                // movie 와 series 가 아닐 경우 개별 비디오 제목으로 설명란 채우기
                 if (type != "movie" && type != "series") {
                     finalEpDesc = if (finalEpDesc.isNullOrBlank()) cleanOriginalTitle else "$finalEpDesc<br>$cleanOriginalTitle"
                 }
