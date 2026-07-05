@@ -692,7 +692,7 @@ class SettingsBottomFragment(
                                         if (cineStreamData != null) {
                                             val dynamicKeys = getCineStreamDynamicKeys()
                                             
-                                            // 1. CloudStreamApp 전역 데이터베이스 복원
+                                            // 1. CloudStreamApp 전역 데이터베이스 복원 (호환성 유지)
                                             dynamicKeys.forEach { cKey ->
                                                 if (cineStreamData.has(cKey)) {
                                                     val cValue = cineStreamData.get(cKey)
@@ -708,13 +708,12 @@ class SettingsBottomFragment(
                                                 }
                                             }
 
-                                            // 2. CineStream SharedPreferences 로컬 파일 동기화 (기본타겟 보완)
+                                            // 2. CineStream SharedPreferences 파일 복원 (jsonToPrefs 적용)
                                             try {
                                                 val possibleNames = listOf(
                                                     "CineStream", "CineStream_preferences", "plugin_CineStream", "plugin_CineStream_preferences", 
                                                     "com.megix", "com.megix_preferences", appContext.packageName + "_preferences"
                                                 )
-                                                // 기기에 파일이 없는 초기 상태라면 메인 앱 기본 SharedPreferences를 기본 타겟으로 지정합니다.
                                                 var targetPrefName = appContext.packageName + "_preferences"
                                                 for (name in possibleNames) {
                                                     val p = appContext.getSharedPreferences(name, Context.MODE_PRIVATE)
@@ -725,18 +724,7 @@ class SettingsBottomFragment(
                                                 }
                                                 val cinePrefs = appContext.getSharedPreferences(targetPrefName, Context.MODE_PRIVATE)
                                                 val editorCS = cinePrefs.edit()
-                                                dynamicKeys.forEach { cKey ->
-                                                    if (cineStreamData.has(cKey)) {
-                                                        val cValue = cineStreamData.get(cKey)
-                                                        try {
-                                                            when (cValue) {
-                                                                is Boolean -> editorCS.putBoolean(cKey, cValue)
-                                                                is String -> editorCS.putString(cKey, cValue)
-                                                                is Int -> editorCS.putInt(cKey, cValue)
-                                                            }
-                                                        } catch (_: Throwable) {}
-                                                    }
-                                                }
+                                                jsonToPrefs(cineStreamData, editorCS)
                                                 editorCS.commit()
                                             } catch (t: Throwable) {
                                                 t.printStackTrace()
