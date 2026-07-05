@@ -1711,8 +1711,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         displaySeason, displayEpisode, showTitle, tmdbId, 
                         isAnime, isBollywood, isAsian, isCartoon, 
                         imdbSeason, imdbEpisode, originalTitle, englishTitle, 
-                        aniListId, malId, kitsuId,
-                        provider.mainUrl // <- 마지막 인자로 추가
+                        aniListId, malId, kitsuId, provider.mainUrl
                     )
                     processedEpisodes.add(ep)
                 }
