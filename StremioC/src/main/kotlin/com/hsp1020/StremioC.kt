@@ -1078,48 +1078,58 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         if (hasSyncedCineStreamSettings) return@withContext
         try {
             val context = CloudStreamApp.context ?: return@withContext
-            println("[Cinestream_Write] syncCineStreamSettings() 가 호출되었습니다.")
             val possibleNames = listOf(
                 "CineStream", "CineStream_preferences", "plugin_CineStream", "plugin_CineStream_preferences", 
                 "com.megix", "com.megix_preferences", context.packageName + "_preferences"
             )
             
             var sourcePrefs: android.content.SharedPreferences? = null
-            var selectedName = "None"
             for (name in possibleNames) {
                 val p = context.getSharedPreferences(name, Context.MODE_PRIVATE)
                 if (p.contains("seen_providers") || p.contains("provider_order") || p.contains("ScrapeConcurrency")) {
                     sourcePrefs = p
-                    selectedName = name
                     break
                 }
             }
-            println("[Cinestream_Write] Sync: 검색 결과 선택된 SharedPreferences 파일명 -> '$selectedName'")
             val source = sourcePrefs ?: return@withContext
 
             source.all.forEach { (key, value) ->
-                try {
-                    val currentValue = try { CloudStreamApp.getKey<Any>(key) } catch (t: Throwable) { null }
-                    if (currentValue != value) {
-                        println("[Cinestream_Write] Sync 덮어쓰기 감지! -> Key: '$key' | 현재 전역 DB값: '$currentValue' -> 로컬 파일값인 '$value'로 강제 복원합니다.")
-                        try {
-                            when (value) {
-                                is Boolean -> CloudStreamApp.setKey(key, value)
-                                is String -> CloudStreamApp.setKey(key, value)
-                                is Int -> CloudStreamApp.setKey(key, value)
-                                is Long -> CloudStreamApp.setKey(key, value)
-                                is Float -> CloudStreamApp.setKey(key, value)
-                            }
-                        } catch (t: Throwable) {}
-                    }
-                } catch (e: Exception) { e.printStackTrace() }
+                // 메인 앱 전체 설정의 간섭을 방지하기 위해, 오직 CineStream 관련 Key만 필터링하여 복원합니다.
+                val isCineStreamKey = key == "ScrapeConcurrency" || 
+                                     key == "DownloadEnable" || 
+                                     key == "seen_providers" || 
+                                     key == "provider_order" || 
+                                     key == "showbox_ui_token" ||
+                                     key == "wyzie_subs_api_key" ||
+                                     key == "gramcinema_bearer_token" ||
+                                     key == "new_provider_default_on" ||
+                                     key == "stremio_addons" ||
+                                     key.startsWith("p_") || 
+                                     key.startsWith("stremio_")
+
+                if (isCineStreamKey && value != null) {
+                    try {
+                        val currentValue = try { CloudStreamApp.getKey<Any>(key) } catch (t: Throwable) { null }
+                        if (currentValue != value) {
+                            try {
+                                when (value) {
+                                    is Boolean -> CloudStreamApp.setKey(key, value)
+                                    is String -> CloudStreamApp.setKey(key, value)
+                                    is Int -> CloudStreamApp.setKey(key, value)
+                                    is Long -> CloudStreamApp.setKey(key, value)
+                                    is Float -> CloudStreamApp.setKey(key, value)
+                                }
+                            } catch (t: Throwable) {}
+                        }
+                    } catch (e: Exception) { e.printStackTrace() }
+                }
             }
             hasSyncedCineStreamSettings = true 
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
-    
+
     private fun buildBasePayload(
         loadData: LoadData,
         targetType: String,
