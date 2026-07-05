@@ -425,18 +425,8 @@ class SettingsBottomFragment(
                         if (isCineStreamExportActive) {
                             val cineStreamJson = JSONObject()
                             try {
-                                val possibleNames = listOf(
-                                    "CineStream", "CineStream_preferences", "plugin_CineStream", "plugin_CineStream_preferences", 
-                                    "com.megix", "com.megix_preferences", appContext.packageName + "_preferences"
-                                )
-                                var targetPrefName = appContext.packageName + "_preferences"
-                                for (name in possibleNames) {
-                                    val p = appContext.getSharedPreferences(name, Context.MODE_PRIVATE)
-                                    if (p.contains("seen_providers") || p.contains("provider_order") || p.contains("ScrapeConcurrency")) {
-                                        targetPrefName = name
-                                        break
-                                    }
-                                }
+                                // 루프를 제거하고 실제 설정이 기록되는 메인 앱의 SharedPreferences를 다이렉트로 타겟팅합니다.
+                                val targetPrefName = appContext.packageName + "_preferences"
                                 val cinePrefs = appContext.getSharedPreferences(targetPrefName, Context.MODE_PRIVATE)
                                 cinePrefs.all.forEach { (key, value) ->
                                     val isCineStreamKey = key == "ScrapeConcurrency" || 
@@ -458,7 +448,7 @@ class SettingsBottomFragment(
                                 e.printStackTrace()
                             }
                             json.put("cine_stream_data", cineStreamJson)
-                        }
+                        }                       
                         
                         val jsonString = json.toString()
                         val bos = java.io.ByteArrayOutputStream()
@@ -692,7 +682,7 @@ class SettingsBottomFragment(
                                         if (cineStreamData != null) {
                                             val dynamicKeys = getCineStreamDynamicKeys()
                                             
-                                            // 1. CloudStreamApp 전역 데이터베이스 복원 (호환성 유지)
+                                            // 1. CloudStreamApp 전역 데이터베이스 복원
                                             dynamicKeys.forEach { cKey ->
                                                 if (cineStreamData.has(cKey)) {
                                                     val cValue = cineStreamData.get(cKey)
@@ -708,20 +698,9 @@ class SettingsBottomFragment(
                                                 }
                                             }
 
-                                            // 2. CineStream SharedPreferences 파일 복원 (jsonToPrefs 적용)
+                                            // 2. CineStream SharedPreferences 파일 복원 (대상을 메인 설정 파일로 고정)
                                             try {
-                                                val possibleNames = listOf(
-                                                    "CineStream", "CineStream_preferences", "plugin_CineStream", "plugin_CineStream_preferences", 
-                                                    "com.megix", "com.megix_preferences", appContext.packageName + "_preferences"
-                                                )
-                                                var targetPrefName = appContext.packageName + "_preferences"
-                                                for (name in possibleNames) {
-                                                    val p = appContext.getSharedPreferences(name, Context.MODE_PRIVATE)
-                                                    if (p.contains("seen_providers") || p.contains("provider_order") || p.contains("ScrapeConcurrency")) {
-                                                        targetPrefName = name
-                                                        break
-                                                    }
-                                                }
+                                                val targetPrefName = appContext.packageName + "_preferences"
                                                 val cinePrefs = appContext.getSharedPreferences(targetPrefName, Context.MODE_PRIVATE)
                                                 val editorCS = cinePrefs.edit()
                                                 jsonToPrefs(cineStreamData, editorCS)
@@ -730,7 +709,7 @@ class SettingsBottomFragment(
                                                 t.printStackTrace()
                                             }
                                         }
-                                    }                                
+                                    }                                    
                                 } else {
                                     editor.clear()
                                     jsonToPrefs(parsedJson, editor)
