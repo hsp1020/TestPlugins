@@ -894,6 +894,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return@coroutineScope loadRes
     }
 
+
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { e.printStackTrace(); null } ?: return false
         
@@ -934,6 +935,34 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         this.quality = 2160
                     }
             )
+        }
+
+        // [추가] Sync 라이브러리 & 히스토리 설정 불러오기
+        val context = CloudStreamApp.context
+        val prefs = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+        val syncUrl = prefs?.getString("history_sync_url", "") ?: ""
+
+        val isSyncEnabled = try {
+            val json = prefs?.getString("stremio_saved_links", null)
+            if (json != null) {
+                val arr = org.json.JSONArray(json)
+                var matched = false
+                val currentCleanUrl = mainUrl.cleanBaseUrl().lowercase()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    val link = obj.optString("link", "").cleanBaseUrl().lowercase()
+                    if (link == currentCleanUrl) {
+                        matched = obj.optBoolean("isSyncEnabled", true)
+                        break
+                    }
+                }
+                matched
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
         }
 
         val customHosts = withContext(Dispatchers.IO) {
@@ -1023,9 +1052,15 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val isBuiltIn = builtInHosts.contains(host)
                 val isContainsStrem = host.contains("strem", ignoreCase = true)
                 
-                println("[STREMIOSUB] Match Check -> host: '$host', isCustom: $isCustom, isBuiltIn: $isBuiltIn, isContainsStrem: $isContainsStrem")
+                // [추가] history_sync_url이 사용자 도메인일 경우에도 Stremio 자막으로 식별되도록 방어 코드 설정
+                val isSyncHost = if (syncUrl.isNotBlank()) {
+                    val syncHost = runCatching { URI(syncUrl).host }.getOrNull() ?: ""
+                    syncHost.isNotBlank() && host.equals(syncHost, ignoreCase = true)
+                } else false
                 
-                val isStremio = isCustom || isBuiltIn || isContainsStrem
+                println("[STREMIOSUB] Match Check -> host: '$host', isCustom: $isCustom, isBuiltIn: $isBuiltIn, isContainsStrem: $isContainsStrem, isSyncHost: $isSyncHost")
+                
+                val isStremio = isCustom || isBuiltIn || isContainsStrem || isSyncHost
                 
                 if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
                     val newLang = "${sub.lang} (Stremio)"
@@ -1055,6 +1090,35 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     }
                 }.onFailure { it.printStackTrace() }
             },
+            // [추가] Sync 메타데이터 프록시 주소에서 추가 자막 추출 (aiometadata 자막 애드온 지원)
+            {
+                if (isSyncEnabled && syncUrl.isNotBlank()) {
+                    runSuspendCatching {
+                        // Stremio 자막 규격 ID 매핑 (isSubtitle = true로 전달하여 tt1234567:1:1 또는 kitsu:1234:1:1 규격 추출)
+                        val subId = buildStremioId(targetType, globalId ?: primaryId, globalSeason, globalEpisode, isSubtitle = true) ?: globalId ?: primaryId
+                        val encodedSubId = subId.urlEncode()
+                        
+                        val cleanBase = syncUrl.cleanBaseUrl()
+                        val suffix = syncUrl.substringAfter("?", "")
+                            .takeIf { it.isNotEmpty() }
+                            ?.let { "?$it" }
+                            ?: ""
+                        val subtitleRequestUrl = "$cleanBase/subtitles/$targetType/${encodedSubId}.json$suffix"
+                        
+                        println("[STREMIOSUB] Requesting subtitles from sync url: $subtitleRequestUrl")
+                        val text = customSession.get(subtitleRequestUrl, timeout = 30L).text
+                        val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
+                        println("[STREMIOSUB] Sync subtitles count returned: ${res?.subtitles?.size ?: 0}")
+                        
+                        res?.subtitles?.forEach { sub ->
+                            val lang = sub.lang ?: sub.lang_code ?: "Unknown"
+                            val parsedLang = SubtitleHelper.fromTagToEnglishLanguageName(lang) ?: lang
+                            println("[STREMIOSUB] Sync subtitles invoking subtitleCallback with parsedLang: '$parsedLang', url: '${sub.url}'")
+                            subtitleInterceptor.invoke(newSubtitleFile(parsedLang, sub.url ?: return@forEach))
+                        }
+                    }.onFailure { it.printStackTrace() }
+                }
+            },
             { invokeWatchsomuch(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
             { invokeOpenSubs(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
             { 
@@ -1073,7 +1137,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         )
         return true
     }
-
+    
     
     private fun buildBasePayload(
         loadData: LoadData,
@@ -1979,7 +2043,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
     }
 
-    private data class StreamsResponse(@JsonProperty("streams") val streams: List<Stream>)    
+    private data class StreamsResponse(@JsonProperty("streams") val streams: List<Stream>)
+    private data class SubtitlesResponse(@JsonProperty("subtitles") val subtitles: List<Subtitle>?)
     private data class Subtitle(@JsonProperty("url") val url: String?, @JsonProperty("lang") val lang: String?, @JsonProperty("lang_code") val lang_code: String?, @JsonProperty("id") val id: String?)    
     private data class ProxyHeaders(@JsonProperty("request") val request: Map<String, String>?)   
     private data class BehaviorHints(@JsonProperty("proxyHeaders") val proxyHeaders: ProxyHeaders?, @JsonProperty("headers") val headers: Map<String, String>?)
