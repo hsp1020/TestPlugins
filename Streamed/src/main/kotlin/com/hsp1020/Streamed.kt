@@ -15,7 +15,7 @@ class Streamed() : MainAPI() {
     override var name = "Streamed"
     override val hasMainPage = true
     override var lang = "en"
-    override val hasQuickSearch = false
+    override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.Live)
 
 
