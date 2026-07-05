@@ -425,10 +425,15 @@ class SettingsBottomFragment(
                         if (isCineStreamExportActive) {
                             val cineStreamJson = JSONObject()
                             try {
-                                // 루프를 제거하고 실제 설정이 기록되는 메인 앱의 SharedPreferences를 다이렉트로 타겟팅합니다.
                                 val targetPrefName = appContext.packageName + "_preferences"
+                                println("[Setting_Write] Export: Target package name is '${appContext.packageName}'")
+                                println("[Setting_Write] Export: Attempting to read SharedPreferences file '$targetPrefName'")
+                                
                                 val cinePrefs = appContext.getSharedPreferences(targetPrefName, Context.MODE_PRIVATE)
-                                cinePrefs.all.forEach { (key, value) ->
+                                val allEntries = cinePrefs.all
+                                println("[Setting_Write] Export: Total entries in SharedPreferences: ${allEntries.size}")
+                                
+                                allEntries.forEach { (key, value) ->
                                     val isCineStreamKey = key == "ScrapeConcurrency" || 
                                                          key == "DownloadEnable" || 
                                                          key == "seen_providers" || 
@@ -441,15 +446,21 @@ class SettingsBottomFragment(
                                                          key.startsWith("p_") || 
                                                          key.startsWith("stremio_")
                                     if (isCineStreamKey && value != null) {
+                                        val typeName = value.javaClass.simpleName
+                                        println("[Setting_Write] Export Match: Key = '$key' | Value = '$value' | Type = $typeName")
                                         cineStreamJson.put(key, value)
+                                    } else if (isCineStreamKey) {
+                                        println("[Setting_Write] Export Match (Null Value): Key = '$key'")
                                     }
                                 }
                             } catch (e: Exception) {
+                                println("[Setting_Write] Export Error: ${e.message}")
                                 e.printStackTrace()
                             }
+                            println("[Setting_Write] Export Done: Generated JSON data = $cineStreamJson")
                             json.put("cine_stream_data", cineStreamJson)
-                        }                       
-                        
+                        }
+                                              
                         val jsonString = json.toString()
                         val bos = java.io.ByteArrayOutputStream()
                         java.util.zip.GZIPOutputStream(bos).use { it.write(jsonString.toByteArray(Charsets.UTF_8)) }
@@ -679,10 +690,12 @@ class SettingsBottomFragment(
                                     val isCineStreamEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, false) ?: false
                                     if (parsedJson.has("cine_stream_data") && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
                                         val cineStreamData = parsedJson.optJSONObject("cine_stream_data")
+                                        println("[Setting_Write] Import: parsedJson has 'cine_stream_data'. Data = $cineStreamData")
                                         if (cineStreamData != null) {
                                             val dynamicKeys = getCineStreamDynamicKeys()
                                             
                                             // 1. CloudStreamApp 전역 데이터베이스 복원
+                                            println("[Setting_Write] Import: Restoring to CloudStreamApp database...")
                                             dynamicKeys.forEach { cKey ->
                                                 if (cineStreamData.has(cKey)) {
                                                     val cValue = cineStreamData.get(cKey)
@@ -692,24 +705,52 @@ class SettingsBottomFragment(
                                                             is String -> CloudStreamApp.setKey(cKey, cValue)
                                                             is Int -> CloudStreamApp.setKey(cKey, cValue)
                                                         }
-                                                    } catch (_: Throwable) {}
+                                                        println("[Setting_Write] Import: CloudStreamApp setKey Success -> '$cKey' = '$cValue'")
+                                                    } catch (t: Throwable) {
+                                                        println("[Setting_Write] Import: CloudStreamApp setKey Error for '$cKey' -> ${t.message}")
+                                                    }
                                                 } else {
                                                     try { CloudStreamApp.setKey(cKey, null as String?) } catch (_: Throwable) {}
                                                 }
                                             }
 
-                                            // 2. CineStream SharedPreferences 파일 복원 (대상을 메인 설정 파일로 고정)
+                                            // 2. CineStream SharedPreferences 파일 복원
                                             try {
                                                 val targetPrefName = appContext.packageName + "_preferences"
+                                                println("[Setting_Write] Import: Writing to SharedPreferences file '$targetPrefName'")
+                                                
                                                 val cinePrefs = appContext.getSharedPreferences(targetPrefName, Context.MODE_PRIVATE)
                                                 val editorCS = cinePrefs.edit()
-                                                jsonToPrefs(cineStreamData, editorCS)
-                                                editorCS.commit()
+                                                
+                                                val keys = cineStreamData.keys()
+                                                while (keys.hasNext()) {
+                                                    val key = keys.next()
+                                                    val rawValue = cineStreamData.get(key)
+                                                    if (rawValue != null && rawValue != JSONObject.NULL) {
+                                                        val typeName = rawValue.javaClass.simpleName
+                                                        println("[Setting_Write] Import SharedPreferences: Key = '$key' | RawValue = '$rawValue' | Type = $typeName")
+                                                        try {
+                                                            when (rawValue) {
+                                                                is Boolean -> editorCS.putBoolean(key, rawValue)
+                                                                is String -> editorCS.putString(key, rawValue)
+                                                                is Int -> editorCS.putInt(key, rawValue)
+                                                                is Long -> editorCS.putLong(key, rawValue)
+                                                                is Double -> editorCS.putFloat(key, rawValue.toFloat())
+                                                                else -> println("[Setting_Write] Import SharedPreferences: Key = '$key' has unhandled type $typeName")
+                                                            }
+                                                        } catch (t: Throwable) {
+                                                            println("[Setting_Write] Import SharedPreferences Put Error for '$key' -> ${t.message}")
+                                                        }
+                                                    }
+                                                }
+                                                val commitResult = editorCS.commit()
+                                                println("[Setting_Write] Import: SharedPreferences commit() result = $commitResult")
                                             } catch (t: Throwable) {
+                                                println("[Setting_Write] Import SharedPreferences Error: ${t.message}")
                                                 t.printStackTrace()
                                             }
                                         }
-                                    }                                    
+                                    }           
                                 } else {
                                     editor.clear()
                                     jsonToPrefs(parsedJson, editor)
