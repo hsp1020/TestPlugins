@@ -425,32 +425,46 @@ class SettingsBottomFragment(
                         if (isCineStreamExportActive) {
                             val cineStreamJson = JSONObject()
                             try {
-                                val targetPrefName = appContext.packageName + "_preferences"
-                                println("[Setting_Write] Export: Target package name is '${appContext.packageName}'")
-                                println("[Setting_Write] Export: Attempting to read SharedPreferences file '$targetPrefName'")
+                                println("[Setting_Write] Export: Attempting to read directly from CloudStreamApp DB")
+                                val dynamicKeys = getCineStreamDynamicKeys()
+                                println("[Setting_Write] Export: Total dynamic keys to scan: ${dynamicKeys.size}")
                                 
-                                val cinePrefs = appContext.getSharedPreferences(targetPrefName, Context.MODE_PRIVATE)
-                                val allEntries = cinePrefs.all
-                                println("[Setting_Write] Export: Total entries in SharedPreferences: ${allEntries.size}")
-                                
-                                allEntries.forEach { (key, value) ->
-                                    val isCineStreamKey = key == "ScrapeConcurrency" || 
-                                                         key == "DownloadEnable" || 
-                                                         key == "seen_providers" || 
-                                                         key == "provider_order" || 
-                                                         key == "showbox_ui_token" ||
-                                                         key == "wyzie_subs_api_key" ||
-                                                         key == "gramcinema_bearer_token" ||
-                                                         key == "new_provider_default_on" ||
-                                                         key == "stremio_addons" ||
-                                                         key.startsWith("p_") || 
-                                                         key.startsWith("stremio_")
-                                    if (isCineStreamKey && value != null) {
-                                        val typeName = value.javaClass.simpleName
-                                        println("[Setting_Write] Export Match: Key = '$key' | Value = '$value' | Type = $typeName")
-                                        cineStreamJson.put(key, value)
-                                    } else if (isCineStreamKey) {
-                                        println("[Setting_Write] Export Match (Null Value): Key = '$key'")
+                                dynamicKeys.forEach { cKey ->
+                                    var found = false
+                                    try { 
+                                        val strVal = CloudStreamApp.getKey<String>(cKey)
+                                        if (strVal != null) {
+                                            cineStreamJson.put(cKey, strVal)
+                                            found = true
+                                            println("[Setting_Write] Export Match: Key = '$cKey' | Value = '$strVal' | Type = String (via CloudStreamApp)")
+                                        }
+                                    } catch (t: Throwable) {
+                                        println("[Setting_Write] Export Debug: Key = '$cKey' is not String -> ${t.message}")
+                                    }
+                                    
+                                    if (!found) {
+                                        try {
+                                            val boolVal = CloudStreamApp.getKey<Boolean>(cKey)
+                                            if (boolVal != null) {
+                                                cineStreamJson.put(cKey, boolVal)
+                                                found = true
+                                                println("[Setting_Write] Export Match: Key = '$cKey' | Value = '$boolVal' | Type = Boolean (via CloudStreamApp)")
+                                            }
+                                        } catch (t: Throwable) {
+                                            println("[Setting_Write] Export Debug: Key = '$cKey' is not Boolean -> ${t.message}")
+                                        }
+                                    }
+                                    
+                                    if (!found) {
+                                        try {
+                                            val intVal = CloudStreamApp.getKey<Int>(cKey)
+                                            if (intVal != null) {
+                                                cineStreamJson.put(cKey, intVal)
+                                                println("[Setting_Write] Export Match: Key = '$cKey' | Value = '$intVal' | Type = Int (via CloudStreamApp)")
+                                            }
+                                        } catch (t: Throwable) {
+                                            println("[Setting_Write] Export Debug: Key = '$cKey' is not Int -> ${t.message}")
+                                        }
                                     }
                                 }
                             } catch (e: Exception) {
@@ -459,7 +473,7 @@ class SettingsBottomFragment(
                             }
                             println("[Setting_Write] Export Done: Generated JSON data = $cineStreamJson")
                             json.put("cine_stream_data", cineStreamJson)
-                        }
+                        }                        
                                               
                         val jsonString = json.toString()
                         val bos = java.io.ByteArrayOutputStream()
@@ -705,7 +719,7 @@ class SettingsBottomFragment(
                                                             is String -> CloudStreamApp.setKey(cKey, cValue)
                                                             is Int -> CloudStreamApp.setKey(cKey, cValue)
                                                         }
-                                                        println("[Setting_Write] Import: CloudStreamApp setKey Success -> '$cKey' = '$cValue'")
+                                                        println("[Setting_Write] Import: CloudStreamApp setKey Success -> '$cKey' = '$cValue' | Type = ${cValue?.javaClass?.simpleName}")
                                                     } catch (t: Throwable) {
                                                         println("[Setting_Write] Import: CloudStreamApp setKey Error for '$cKey' -> ${t.message}")
                                                     }
@@ -713,44 +727,8 @@ class SettingsBottomFragment(
                                                     try { CloudStreamApp.setKey(cKey, null as String?) } catch (_: Throwable) {}
                                                 }
                                             }
-
-                                            // 2. CineStream SharedPreferences 파일 복원
-                                            try {
-                                                val targetPrefName = appContext.packageName + "_preferences"
-                                                println("[Setting_Write] Import: Writing to SharedPreferences file '$targetPrefName'")
-                                                
-                                                val cinePrefs = appContext.getSharedPreferences(targetPrefName, Context.MODE_PRIVATE)
-                                                val editorCS = cinePrefs.edit()
-                                                
-                                                val keys = cineStreamData.keys()
-                                                while (keys.hasNext()) {
-                                                    val key = keys.next()
-                                                    val rawValue = cineStreamData.get(key)
-                                                    if (rawValue != null && rawValue != JSONObject.NULL) {
-                                                        val typeName = rawValue.javaClass.simpleName
-                                                        println("[Setting_Write] Import SharedPreferences: Key = '$key' | RawValue = '$rawValue' | Type = $typeName")
-                                                        try {
-                                                            when (rawValue) {
-                                                                is Boolean -> editorCS.putBoolean(key, rawValue)
-                                                                is String -> editorCS.putString(key, rawValue)
-                                                                is Int -> editorCS.putInt(key, rawValue)
-                                                                is Long -> editorCS.putLong(key, rawValue)
-                                                                is Double -> editorCS.putFloat(key, rawValue.toFloat())
-                                                                else -> println("[Setting_Write] Import SharedPreferences: Key = '$key' has unhandled type $typeName")
-                                                            }
-                                                        } catch (t: Throwable) {
-                                                            println("[Setting_Write] Import SharedPreferences Put Error for '$key' -> ${t.message}")
-                                                        }
-                                                    }
-                                                }
-                                                val commitResult = editorCS.commit()
-                                                println("[Setting_Write] Import: SharedPreferences commit() result = $commitResult")
-                                            } catch (t: Throwable) {
-                                                println("[Setting_Write] Import SharedPreferences Error: ${t.message}")
-                                                t.printStackTrace()
-                                            }
                                         }
-                                    }           
+                                    }
                                 } else {
                                     editor.clear()
                                     jsonToPrefs(parsedJson, editor)
