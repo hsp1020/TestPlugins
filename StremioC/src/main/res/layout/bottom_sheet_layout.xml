@@ -215,7 +215,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Globally for active addon syncs (Required)"
+                android:text="Aiometadata addon URL (Required)"
                 android:textColor="#AAAAAA"
                 android:textSize="12sp"
                 android:layout_marginTop="2dp" />
