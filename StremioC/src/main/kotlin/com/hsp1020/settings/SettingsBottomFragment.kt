@@ -688,6 +688,7 @@ class SettingsBottomFragment(
                                     if (parsedJson.has("cine_stream_data") && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
                                         val cineStreamData = parsedJson.optJSONObject("cine_stream_data")
                                         if (cineStreamData != null) {
+                                            println("[Cinestream_Write] Import: cine_stream_data 복원이 시작되었습니다.")
                                             val dynamicKeys = getCineStreamDynamicKeys()
                                             
                                             // 1. CloudStreamApp 전역 데이터베이스 복원
@@ -700,13 +701,14 @@ class SettingsBottomFragment(
                                                             is String -> CloudStreamApp.setKey(cKey, cValue)
                                                             is Int -> CloudStreamApp.setKey(cKey, cValue)
                                                         }
+                                                        println("[Cinestream_Write] Import: 전역 DB 쓰기 성공 -> $cKey = $cValue")
                                                     } catch (_: Throwable) {}
                                                 } else {
                                                     try { CloudStreamApp.setKey(cKey, null as String?) } catch (_: Throwable) {}
                                                 }
                                             }
 
-                                            // 2. CineStream SharedPreferences 로컬 파일 동기화 (역덮어쓰기 방지)
+                                            // 2. CineStream SharedPreferences 파일 동기화 및 선택된 파일명 출력
                                             try {
                                                 val possibleNames = listOf(
                                                     "CineStream", "CineStream_preferences", "plugin_CineStream", "plugin_CineStream_preferences", 
@@ -720,6 +722,7 @@ class SettingsBottomFragment(
                                                         break
                                                     }
                                                 }
+                                                println("[Cinestream_Write] Import: 타겟 SharedPreferences 파일이 결정되었습니다 -> '$targetPrefName'")
                                                 val cinePrefs = appContext.getSharedPreferences(targetPrefName, Context.MODE_PRIVATE)
                                                 val editorCS = cinePrefs.edit()
                                                 dynamicKeys.forEach { cKey ->
@@ -731,15 +734,17 @@ class SettingsBottomFragment(
                                                                 is String -> editorCS.putString(cKey, cValue)
                                                                 is Int -> editorCS.putInt(cKey, cValue)
                                                             }
+                                                            println("[Cinestream_Write] Import: SharedPreferences '$targetPrefName' 파일 쓰기 -> $cKey = $cValue")
                                                         } catch (_: Throwable) {}
                                                     }
                                                 }
                                                 editorCS.commit()
+                                                println("[Cinestream_Write] Import: SharedPreferences 파일 트랜잭션이 완료(commit)되었습니다.")
                                             } catch (t: Throwable) {
                                                 t.printStackTrace()
                                             }
                                         }
-                                    }
+                                    }                                   
                                 } else {
                                     editor.clear()
                                     jsonToPrefs(parsedJson, editor)
