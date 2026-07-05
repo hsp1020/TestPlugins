@@ -30,7 +30,8 @@ import java.util.TimeZone
 class DaddyLiveScheduleProvider : MainAPI() {
     override var mainUrl = "https://dlhd.st" // Extractor의 동적Origin 대응과 완벽 매치
     override var name = "DaddyLive"
-    override val supportedTypes = emptySet<TvType>()
+    override val hasQuickSearch = false
+    override val supportedTypes = setOf(TvType.Live)
     override var lang = "en"
     override val hasMainPage = true
     override val hasDownloadSupport = false
