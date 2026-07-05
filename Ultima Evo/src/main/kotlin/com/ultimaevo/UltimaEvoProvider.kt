@@ -144,8 +144,23 @@ object UltimaEvoSyncManager {
 class UltimaEvoProvider(private val instanceId: Int, private val customName: String) : MainAPI() {
     override var mainUrl = "ultima_evo_$instanceId"
     override var name = customName
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.Live)
 
+    // 설정 프래그먼트의 "Enable Search" 토글 상태를 실시간으로 읽어와 지원 타입을 결정합니다.
+    override val supportedTypes: Set<TvType>
+        get() {
+            val context = UltimaEvoPlugin.pluginContext ?: return setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.Live)
+            val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
+            val isSearchEnabled = prefs.getBoolean("evo_search_enabled_$instanceId", true)
+            
+            return if (isSearchEnabled) {
+                // 검색이 켜져 있을 때는 정상적으로 지원하는 미디어 타입 노출
+                setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.Live)
+            } else {
+                // ★ 검색을 껐을 때는 지원 타입을 빈 값으로 선언하여 서치 탭 체크박스 목록에서 완전히 숨김
+                emptySet()
+            }
+        }
+        
     private var cachedMainPageList: List<MainPageData> = emptyList()
 
     fun invalidateCache() {
