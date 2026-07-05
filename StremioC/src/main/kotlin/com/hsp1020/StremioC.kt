@@ -894,6 +894,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return@coroutineScope loadRes
     }
 
+
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { e.printStackTrace(); null } ?: return false
         
@@ -936,6 +937,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             )
         }
 
+        // StremioC 공백 인스턴스 대응용 addonUrl 주소 복원 및 주소 빌더 구현
+        val currentMainUrl = loadData.addonUrl?.takeIf { it.isNotBlank() } ?: mainUrl
+        val cleanBaseUrl = currentMainUrl.fixSourceUrl().cleanBaseUrl()
+        val querySuffix = currentMainUrl.substringAfter("?", "").takeIf { it.isNotEmpty() }?.let { "?$it" } ?: ""
+
         val context = CloudStreamApp.context
         val prefs = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
         val syncUrl = prefs?.getString("history_sync_url", "") ?: ""
@@ -945,7 +951,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             if (json != null) {
                 val arr = org.json.JSONArray(json)
                 var matched = false
-                val currentCleanUrl = mainUrl.cleanBaseUrl().lowercase()
+                val currentCleanUrl = currentMainUrl.cleanBaseUrl().lowercase()
                 for (i in 0 until arr.length()) {
                     val obj = arr.getJSONObject(i)
                     val link = obj.optString("link", "").cleanBaseUrl().lowercase()
@@ -1019,6 +1025,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
             }
             
+            // 원본 파일과 완전 동일한 무수정 상태 유지
             val hosts = raw.lines()
                 .filter { it.isNotBlank() }
                 .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.onFailure { it.printStackTrace() }.getOrNull() }
@@ -1072,7 +1079,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         runAllAsync(
             {
                 runSuspendCatching {
-                    val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
+                    val url = "$cleanBaseUrl/stream/$targetType/$encodedPrimaryId.json$querySuffix"
                     println("[STREMIOSUB] Requesting primary streams from url: $url")
                     val text = customSession.get(url, timeout = 120L).text
                     val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
@@ -1095,6 +1102,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             ?: ""
                         val subtitleRequestUrl = "$cleanBase/subtitles/$targetType/${encodedSubId}.json$suffix"
                         
+                        println("[STREMIOSUB] Requesting subtitles from sync url: $subtitleRequestUrl")
                         val text = customSession.get(subtitleRequestUrl, timeout = 15L).text
                         val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
                         
@@ -1123,7 +1131,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         )
         return true
     }
-    
     
     private fun buildBasePayload(
         loadData: LoadData,
