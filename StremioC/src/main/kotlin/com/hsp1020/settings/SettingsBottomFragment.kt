@@ -235,16 +235,6 @@ class SettingsBottomFragment(
             }
         } catch (e: Exception) { }
 
-        try {
-            CloudStreamApp.getKey<String>("stremio_addons")?.lines()?.forEach { line ->
-                val name = line.split("|").firstOrNull()?.trim()
-                if (!name.isNullOrBlank()) {
-                    val formatted = name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
-                    keys.add("stremio_$formatted")
-                }
-            }
-        } catch (e: Exception) { }
-
         val hardcoded = listOf(
             "ScrapeConcurrency", "DownloadEnable", "ProviderCineStream", "ProviderSimkl", 
             "ProviderTmdb", "showbox_ui_token", "wyzie_subs_api_key", "gramcinema_bearer_token", 
@@ -424,57 +414,40 @@ class SettingsBottomFragment(
                         json.put("cine_stream_enabled", isCineStreamExportActive)
                         if (isCineStreamExportActive) {
                             val cineStreamJson = JSONObject()
-                            try {
-                                println("[Setting_Write] Export: Attempting to read directly from CloudStreamApp DB")
-                                val dynamicKeys = getCineStreamDynamicKeys()
-                                println("[Setting_Write] Export: Total dynamic keys to scan: ${dynamicKeys.size}")
+                            val dynamicKeys = getCineStreamDynamicKeys()
+                            
+                            dynamicKeys.forEach { cKey ->
+                                var found = false
+                                try { 
+                                    val strVal = CloudStreamApp.getKey<String>(cKey)
+                                    if (strVal != null) {
+                                        cineStreamJson.put(cKey, strVal)
+                                        found = true
+                                    }
+                                } catch (_: Throwable) {}
                                 
-                                dynamicKeys.forEach { cKey ->
-                                    var found = false
-                                    try { 
-                                        val strVal = CloudStreamApp.getKey<String>(cKey)
-                                        if (strVal != null) {
-                                            cineStreamJson.put(cKey, strVal)
+                                if (!found) {
+                                    try {
+                                        val boolVal = CloudStreamApp.getKey<Boolean>(cKey)
+                                        if (boolVal != null) {
+                                            cineStreamJson.put(cKey, boolVal)
                                             found = true
-                                            println("[Setting_Write] Export Match: Key = '$cKey' | Value = '$strVal' | Type = String (via CloudStreamApp)")
                                         }
-                                    } catch (t: Throwable) {
-                                        println("[Setting_Write] Export Debug: Key = '$cKey' is not String -> ${t.message}")
-                                    }
-                                    
-                                    if (!found) {
-                                        try {
-                                            val boolVal = CloudStreamApp.getKey<Boolean>(cKey)
-                                            if (boolVal != null) {
-                                                cineStreamJson.put(cKey, boolVal)
-                                                found = true
-                                                println("[Setting_Write] Export Match: Key = '$cKey' | Value = '$boolVal' | Type = Boolean (via CloudStreamApp)")
-                                            }
-                                        } catch (t: Throwable) {
-                                            println("[Setting_Write] Export Debug: Key = '$cKey' is not Boolean -> ${t.message}")
-                                        }
-                                    }
-                                    
-                                    if (!found) {
-                                        try {
-                                            val intVal = CloudStreamApp.getKey<Int>(cKey)
-                                            if (intVal != null) {
-                                                cineStreamJson.put(cKey, intVal)
-                                                println("[Setting_Write] Export Match: Key = '$cKey' | Value = '$intVal' | Type = Int (via CloudStreamApp)")
-                                            }
-                                        } catch (t: Throwable) {
-                                            println("[Setting_Write] Export Debug: Key = '$cKey' is not Int -> ${t.message}")
-                                        }
-                                    }
+                                    } catch (_: Throwable) {}
                                 }
-                            } catch (e: Exception) {
-                                println("[Setting_Write] Export Error: ${e.message}")
-                                e.printStackTrace()
+                                
+                                if (!found) {
+                                    try {
+                                        val intVal = CloudStreamApp.getKey<Int>(cKey)
+                                        if (intVal != null) {
+                                            cineStreamJson.put(cKey, intVal)
+                                        }
+                                    } catch (_: Throwable) {}
+                                }
                             }
-                            println("[Setting_Write] Export Done: Generated JSON data = $cineStreamJson")
                             json.put("cine_stream_data", cineStreamJson)
-                        }                        
-                                              
+                        }
+
                         val jsonString = json.toString()
                         val bos = java.io.ByteArrayOutputStream()
                         java.util.zip.GZIPOutputStream(bos).use { it.write(jsonString.toByteArray(Charsets.UTF_8)) }
@@ -704,12 +677,10 @@ class SettingsBottomFragment(
                                     val isCineStreamEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, false) ?: false
                                     if (parsedJson.has("cine_stream_data") && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
                                         val cineStreamData = parsedJson.optJSONObject("cine_stream_data")
-                                        println("[Setting_Write] Import: parsedJson has 'cine_stream_data'. Data = $cineStreamData")
                                         if (cineStreamData != null) {
                                             val dynamicKeys = getCineStreamDynamicKeys()
                                             
-                                            // 1. CloudStreamApp 전역 데이터베이스 복원
-                                            println("[Setting_Write] Import: Restoring to CloudStreamApp database...")
+                                            // CloudStreamApp 전역 데이터베이스 복원 (CineStream 자체 기본 연동)
                                             dynamicKeys.forEach { cKey ->
                                                 if (cineStreamData.has(cKey)) {
                                                     val cValue = cineStreamData.get(cKey)
@@ -719,10 +690,7 @@ class SettingsBottomFragment(
                                                             is String -> CloudStreamApp.setKey(cKey, cValue)
                                                             is Int -> CloudStreamApp.setKey(cKey, cValue)
                                                         }
-                                                        println("[Setting_Write] Import: CloudStreamApp setKey Success -> '$cKey' = '$cValue' | Type = ${cValue?.javaClass?.simpleName}")
-                                                    } catch (t: Throwable) {
-                                                        println("[Setting_Write] Import: CloudStreamApp setKey Error for '$cKey' -> ${t.message}")
-                                                    }
+                                                    } catch (_: Throwable) {}
                                                 } else {
                                                     try { CloudStreamApp.setKey(cKey, null as String?) } catch (_: Throwable) {}
                                                 }
@@ -1450,7 +1418,7 @@ private fun showLanguageSelectDialog() {
 
         val rv = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, :600, 1f).apply {
                 setMargins(0, 0, 0, 20)
             }
             isVerticalFadingEdgeEnabled = true
@@ -1811,4 +1779,3 @@ private fun showLanguageSelectDialog() {
         }
     }
 }
-
