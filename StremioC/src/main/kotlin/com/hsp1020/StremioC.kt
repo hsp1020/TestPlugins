@@ -1050,7 +1050,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             .takeIf { it.isNotEmpty() }
                             ?.let { "?$it" }
                             ?: ""
-                        val subtitleRequestUrl = "$cleanBase/subtitles/$targetType/$encodedSubId.json$suffix"
+                        val subtitleRequestUrl = "$cleanBase/subtitles/$targetType/${encodedSubId}.json$suffix"
                         
                         println("[STREMIOSUB] Requesting subtitles from sync url: $subtitleRequestUrl")
                         val text = customSession.get(subtitleRequestUrl, timeout = 15L).text
