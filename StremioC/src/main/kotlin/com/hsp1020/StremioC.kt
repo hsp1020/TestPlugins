@@ -1040,20 +1040,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         runAllAsync(
             {
-                if (cleanBaseUrl.isNotBlank()) {
-                    runSuspendCatching {
-                        val url = "$cleanBaseUrl/stream/$targetType/$encodedPrimaryId.json$querySuffix"
-                        println("[STREMIOSUB] Requesting primary streams from url: $url")
-                        val text = customSession.get(url, timeout = 120L).text
-                        val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
-                        println("[STREMIOSUB] Primary streams count returned: ${res?.streams?.size ?: 0}")
-                        res?.streams?.forEach { stream -> 
-                            stream.runCallback(this@StremioC, subtitleInterceptor, wrappedCallback) 
-                        }
-                    }.onFailure { it.printStackTrace() }
-                }
-            },
-            {
                 if (isSyncEnabled && syncUrl.isNotBlank()) {
                     runSuspendCatching {
                         val subId = buildStremioId(targetType, globalId ?: primaryId, globalSeason, globalEpisode, isSubtitle = true) ?: globalId ?: primaryId
@@ -1064,7 +1050,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             .takeIf { it.isNotEmpty() }
                             ?.let { "?$it" }
                             ?: ""
-                        val subtitleRequestUrl = "$cleanBase/subtitles/$targetType/${encodedSubId}.json$suffix"
+                        val subtitleRequestUrl = "$cleanBase/subtitles/$targetType/$encodedSubId.json$suffix"
                         
                         println("[STREMIOSUB] Requesting subtitles from sync url: $subtitleRequestUrl")
                         val text = customSession.get(subtitleRequestUrl, timeout = 15L).text
@@ -1077,8 +1063,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     }.onFailure { it.printStackTrace() }
                 }
             },
-            { invokeWatchsomuch(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
-            { invokeOpenSubs(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
             { 
                 println("[STREMIOSUB] Initiating invokeCineStream")
                 invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) 
@@ -1095,7 +1079,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         )
         return true
     }
-
+        
     private fun buildBasePayload(
         loadData: LoadData,
         targetType: String,
