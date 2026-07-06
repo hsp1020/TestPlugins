@@ -1529,7 +1529,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                               .replace("recTmdbId", rec.id.toString())
                               .replace("{tmdb_id}", rec.id.toString())
                     } else {
-                        if (!rec.posterPath.isNullOrBlank()) "https://image.tmdb.org/t/p/w500${rec.posterPath}" else TRANSPARENT_PIXEL
+                        // rec.posterPath -> rec.poster_path로 교정
+                        if (!rec.poster_path.isNullOrBlank()) "https://image.tmdb.org/t/p/w500${rec.poster_path}" else TRANSPARENT_PIXEL
                     }
                     
                     val thinData = LoadData(id = "tmdb:${rec.id}", type = recTypeStr, addonUrl = provider.mainUrl)
