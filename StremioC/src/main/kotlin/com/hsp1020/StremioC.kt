@@ -1010,39 +1010,30 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
 
         val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
-            println("[STREMIOSUB] Interceptor Triggered -> lang: '${sub.lang}', url: '${sub.url}'")
             try {
-                val host = try {
-                    sub.url.toHttpUrlOrNull()?.host ?: URI(sub.url).host ?: ""
-                } catch (t: Throwable) {
-                    val fallback = try {
-                        sub.url.substringAfter("://").substringBefore("/").substringBefore(":")
-                    } catch (ex: Exception) {
-                        ""
-                    }
-                    println("[STREMIOSUB] Host Parse Error, Fallback parsing used: '$fallback'. Error: ${t.message}")
-                    fallback
-                }
-                
+                val url = sub.url
+                val start = url.indexOf("://")
+                val host = if (start != -1) {
+                    val hostStart = start + 3
+                    val end = url.indexOf('/', hostStart)
+                    val hostPort = if (end == -1) url.substring(hostStart) else url.substring(hostStart, end)
+                    val portIdx = hostPort.indexOf(':')
+                    if (portIdx == -1) hostPort else hostPort.substring(0, portIdx)
+                } else ""
+
                 val isCustom = customHosts.contains(host)
                 val isBuiltIn = builtInHosts.contains(host)
                 val isContainsStrem = host.contains("strem", ignoreCase = true)
-                
-                println("[STREMIOSUB] Match Check -> host: '$host', isCustom: $isCustom, isBuiltIn: $isBuiltIn, isContainsStrem: $isContainsStrem")
-                
+
                 val isStremio = isCustom || isBuiltIn || isContainsStrem
-                
+
                 if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
                     val newLang = "${sub.lang} (Stremio)"
-                    println("[STREMIOSUB] Target Matched! Renaming subtitle label: '${sub.lang}' -> '$newLang'")
-                    subtitleCallback.invoke(SubtitleFile(newLang, sub.url))
+                    subtitleCallback.invoke(SubtitleFile(newLang, url))
                 } else {
-                    println("[STREMIOSUB] Target Skipped -> Passing raw subtitle")
                     subtitleCallback.invoke(sub)
                 }
             } catch (e: Exception) {
-                println("[STREMIOSUB] Interceptor Crash: ${e.message}")
-                e.printStackTrace()
                 subtitleCallback.invoke(sub)
             }
         }
