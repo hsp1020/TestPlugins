@@ -152,7 +152,7 @@ object VixSrcExtractor {
                 println("[STREMIOSUB-VIXSRC] 🍪 Successfully Extracted Session Cookies")
             }
 
-            // === [STEP 4] 플레이어 전송 ===
+            // === [STEP 4] 플레이어 전송 및 개별 해상도 파싱 ===
             println("[STREMIOSUB-VIXSRC] ⚡ Final Playlist URL: $masterPlaylistUrl")
             
             val playerHeaders = mapOf(
@@ -170,12 +170,62 @@ object VixSrcExtractor {
                 if (cookieHeaderValue.isNotEmpty()) put("Cookie", cookieHeaderValue)
             }
 
+            // 1. 기존 로직 유지: 오디오가 온전히 포함된 'Auto' 마스터 링크를 최우선 송출
             callback.invoke(
-                newExtractorLink("VixSrc", "VixSrc", masterPlaylistUrl, ExtractorLinkType.M3U8) {
-                    this.quality = Qualities.P1080.value
+                newExtractorLink("VixSrc", "VixSrc Auto", masterPlaylistUrl, ExtractorLinkType.M3U8) {
+                    this.quality = Qualities.Unknown.value // Auto 화질은 Unknown으로 설정하여 앱 UI에서 자동(Auto)으로 인식되게 함
                     this.headers = playerHeaders
                 }
             )
+
+            // 2. 추가 로직: 마스터 플레이리스트 내부를 긁어와 해상도별 개별 링크 추출
+            try {
+                println("[STREMIOSUB-VIXSRC] 📡 Fetching master playlist to extract specific resolutions...")
+                val m3u8Response = StremioC.customSession.get(masterPlaylistUrl, headers = playerHeaders)
+                
+                if (m3u8Response.code == 200) {
+                    val m3u8Text = m3u8Response.text
+                    // M3U8 구조에서 해상도 라인(RESOLUTION=1920x1080)과 그 바로 다음 줄(URL)을 추출하는 정규식
+                    val resolutionRegex = """RESOLUTION=\d+x(\d+)[^\n]*\r?\n([^\r\n]+)""".toRegex()
+                    
+                    resolutionRegex.findAll(m3u8Text).forEach { match ->
+                        val height = match.groupValues[1].toIntOrNull() ?: return@forEach
+                        val urlLine = match.groupValues[2].trim()
+                        
+                        // URL이 상대경로 파라미터(?type=video...)로 시작할 경우 절대 경로로 조립
+                        val directUrl = if (urlLine.startsWith("http")) {
+                            urlLine
+                        } else if (urlLine.startsWith("?")) {
+                            "$baseUrl/playlist/$actualVid$urlLine"
+                        } else if (urlLine.startsWith("/")) {
+                            "$baseUrl$urlLine"
+                        } else {
+                            urlLine
+                        }
+
+                        // Cloudstream 규격에 맞게 해상도 Enum 값 매핑
+                        val qualityValue = when (height) {
+                            1080 -> Qualities.P1080.value
+                            720 -> Qualities.P720.value
+                            480 -> Qualities.P480.value
+                            360 -> Qualities.P360.value
+                            else -> height
+                        }
+
+                        // 각 해상도별 링크 송출
+                        callback.invoke(
+                            newExtractorLink("VixSrc", "VixSrc ${height}p", directUrl, ExtractorLinkType.M3U8) {
+                                this.quality = qualityValue
+                                this.headers = playerHeaders
+                            }
+                        )
+                    }
+                    println("[STREMIOSUB-VIXSRC] ✅ Specific resolutions successfully extracted.")
+                }
+            } catch (e: Exception) {
+                // 개별 링크 추출에 실패하더라도 메인 링크(Auto)가 이미 전송되었으므로 재생 자체에는 문제 없음
+                println("[STREMIOSUB-VIXSRC] ⚠️ Failed to extract specific resolutions: ${e.message}")
+            }
 
         } catch (c: CancellationException) {
             throw c
