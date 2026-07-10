@@ -240,14 +240,17 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             null
         } ?: UtilKt.getDeviceId(ctx.packageName, ctx)
 
-        if (devices.isEmpty()) {
+        // 현재 디바이스 ID와 일치하는 기기를 리스트 맨 위로 정렬합니다.
+        val sortedDevices = devices.sortedByDescending { it.deviceId == currentDeviceId }
+
+        if (sortedDevices.isEmpty()) {
             val emptyText = TextView(ctx).apply {
                 text = "No devices synced yet."
                 setPadding(16, 16, 16, 16)
             }
             containerLayout.addView(emptyText)
         } else {
-            for (device in devices) {
+            for (device in sortedDevices) {
                 val itemLayout = getLayout("device_item", inflater, containerLayout)
                 val nameText = findView<TextView>(itemLayout, "device_name_text")
                 val deleteBtn = findView<Button>(itemLayout, "btn_delete_device")
@@ -285,5 +288,5 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             .setView(listLayout)
             .setPositiveButton("Close", null)
             .show()
-    }
-}
+    }    
+  }
