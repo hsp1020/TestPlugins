@@ -184,7 +184,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                 // 해독 결과가 가짜 허니팟(/hls/stream...)이 아닌 진짜 절대 경로 CDN 주소일 때만 정상 반환
                 if (decodedUrl.startsWith("http")) {
                     debugLog("[PREMIUM] 프리미엄 정석 스트림 해독 성공 -> $decodedUrl")
-                    val refOrigin = if (entryOrigin.isNotEmpty()) entryOrigin else iframeOrigin
+                    
+                    // [수정] 메인 도메인(entryOrigin) 대신 실제 플레이어가 삽입된 iframe 호스트(iframeOrigin)를 강제 사용합니다.
+                    val refOrigin = iframeOrigin
+                    
                     return ExtractorLink(
                         source = sourceName, name = sourceName, url = decodedUrl,
                         referer = "$refOrigin/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
