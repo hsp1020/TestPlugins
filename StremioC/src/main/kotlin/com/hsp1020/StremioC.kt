@@ -1585,7 +1585,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             englishTitle: String?, 
             aniListId: Int?, 
             malId: Int?,
-            malId: Int?, 
             kitsuId: String?,
             year: Int? = null // ★ year 매개변수 추가
         ): List<Episode> {
@@ -1967,7 +1966,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             kitsuId: String?, 
             addonUrl: String? = null,
             year: Int? = null // ★ year 매개변수 추가
-                    
+        ): Episode { // ★ 누락되었던 닫는 괄호, 반환 타입, 시작 중괄호 추가
             val tmdbEp = tmdbMetaMap["${displaySeason}_${displayEpisode}"] ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
             val finalAirDate = tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@Video.firstAired ?: this@Video.released
             val airedYearInt = finalAirDate?.split("-")?.first()?.toIntOrNull()
