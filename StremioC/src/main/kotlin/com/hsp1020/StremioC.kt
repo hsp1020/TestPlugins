@@ -1105,8 +1105,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return mutableMapOf(
             "title" to scrapingTitle,
             "orgTitle" to loadData.originalTitle,
+            "originalTitle" to loadData.originalTitle, // CineStream AllLoadLinksData 바인딩 보정용 추가
             "jpTitle" to loadData.originalTitle,
-            "year" to finalYear,
+            "year" to finalYear, // Int 타입으로 전송하여 역직렬화 안정성 개선
             "airedYear" to loadData.airedYear,
             "date" to loadData.firstAired,
             "airedDate" to loadData.firstAired,
@@ -1125,9 +1126,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             "isBollywood" to loadData.isBollywood,
             "isAsian" to loadData.isAsian,
             "isCartoon" to loadData.isCartoon,
-            "malId" to loadData.malId
+            "malId" to loadData.malId,
+            
+            // CineStream Anime/Kitsu 모델 호환용 메타데이터 보정
+            "imdbTitle" to (loadData.englishTitle ?: loadData.originalTitle ?: loadData.title),
+            "imdbYear" to loadData.year
         )
     }
+    
     
     private suspend fun invokeCineStream(
         loadData: LoadData,
@@ -1198,9 +1204,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val streamPlayProvider = getStreamPlayProvider() ?: return
 
             val payload = buildBasePayload(loadData, targetType, globalId, globalSeason, globalEpisode)
-            
-            payload["id"] = loadData.tmdbId ?: loadData.imdbId ?: loadData.id
+
+            // 수집측 id(Int? 타입) 규격에 맞게 순수 숫자 형식(TMDB ID)만 대입하여 Jackson 크래시 예방
+            payload["id"] = loadData.tmdbId ?: loadData.id?.filter { it.isDigit() }?.toIntOrNull()
             payload["year"] = loadData.year ?: loadData.airedYear
+            
             
             if (payload["title"] == null || payload["title"] == "Unknown") {
                 payload["title"] = loadData.id ?: payload["id"]?.toString() ?: "Unknown Title"
@@ -1576,8 +1584,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             originalTitle: String?, 
             englishTitle: String?, 
             aniListId: Int?, 
+            malId: Int?,
             malId: Int?, 
-            kitsuId: String?
+            kitsuId: String?,
+            year: Int? = null // ★ year 매개변수 추가
         ): List<Episode> {
             val videos = targetVideos ?: emptyList()
             
@@ -1639,7 +1649,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         isAnime, isBollywood, isAsian, isCartoon, 
                         imdbSeason, imdbEpisode, originalTitle, englishTitle, 
                         aniListId, malId, kitsuId,
-                        provider.mainUrl
+                        provider.mainUrl,
+                        year // ★ toEpisode 메서드로 year 매개변수 위임 전달
                     )
                     processedEpisodes.add(ep)
                 }
@@ -1870,7 +1881,25 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
 
             } else {
-                val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
+                val finalEpisodes = processEpisodes(
+                    provider, 
+                    cleanImdbId, 
+                    tmdbData?.episodeTmdbMeta ?: emptyMap(), 
+                    finalVideos, 
+                    finalType, 
+                    finalName, 
+                    cleanTmdbId?.toIntOrNull(), 
+                    isAnimeMedia, 
+                    isBollywood, 
+                    isAsian, 
+                    isCartoon, 
+                    tmdbData?.fetchedOriginalTitle, 
+                    tmdbData?.fetchedEnglishTitle, 
+                    finalAniId, 
+                    finalMalId, 
+                    this@CatalogEntry.kitsuIdExt,
+                    tmdbData?.fetchedYear // ★ 수집된 출시 연도(year) 인자 전달 추가
+                )
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 return@coroutineScope provider.newTvSeriesLoadResponse(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
@@ -1916,7 +1945,29 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("imdbEpisode") val imdbEpisode: Int? = null,
         @JsonProperty("imdb_id") val imdb_id: String? = null
     ) {
-        fun toEpisode(provider: StremioC, type: String?, imdbId: String?, tmdbMetaMap: Map<String, TmdbEpisode>, displaySeason: Int, displayEpisode: Int, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, imdbSeason: Int?, imdbEpisode: Int?, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?, addonUrl: String? = null): Episode {
+        fun toEpisode(
+            provider: StremioC, 
+            type: String?, 
+            imdbId: String?, 
+            tmdbMetaMap: Map<String, TmdbEpisode>, 
+            displaySeason: Int, 
+            displayEpisode: Int, 
+            showTitle: String?, 
+            tmdbId: Int?, 
+            isAnime: Boolean, 
+            isBollywood: Boolean, 
+            isAsian: Boolean, 
+            isCartoon: Boolean, 
+            imdbSeason: Int?, 
+            imdbEpisode: Int?, 
+            originalTitle: String?, 
+            englishTitle: String?, 
+            aniListId: Int?, 
+            malId: Int?, 
+            kitsuId: String?, 
+            addonUrl: String? = null,
+            year: Int? = null // ★ year 매개변수 추가
+                    
             val tmdbEp = tmdbMetaMap["${displaySeason}_${displayEpisode}"] ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
             val finalAirDate = tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@Video.firstAired ?: this@Video.released
             val airedYearInt = finalAirDate?.split("-")?.first()?.toIntOrNull()
@@ -1927,6 +1978,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 season = displaySeason, 
                 episode = displayEpisode, 
                 imdbId = imdbId, 
+                year = year, // ★ null 대신 전달받은 정수형 year 바인딩
                 title = showTitle, 
                 tmdbId = tmdbId, 
                 isAnime = isAnime,
