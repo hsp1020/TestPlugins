@@ -18,7 +18,7 @@ import kotlin.coroutines.resume
 import com.fasterxml.jackson.module.kotlin.readValue
 
 class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
-    override var mainUrl = "https://cu-tv.com"
+    override var mainUrl = "https://cu-tv01.com"
     override var name = "CUTV"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "ko"
