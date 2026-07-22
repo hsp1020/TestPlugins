@@ -36,6 +36,9 @@ class MovieKing : MainAPI() {
         private const val PREFS_NAME = "MovieKing_Domain_Cache"
         private const val PREF_KEY = "current_domain"
 
+        @Volatile
+        private var sharedWebView: android.webkit.WebView? = null
+
         fun saveDomain(newDomain: String) {
             currentMainUrl = newDomain
             AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -89,10 +92,26 @@ class MovieKing : MainAPI() {
         }
     }
 
-    // 루트 도메인 세션 확보 후 JS fetch로 서브 경로 HTML을 가져오는 최적화 파서
+    // 싱글톤 WebView 제공 (매번 생성/파기하지 않고 재사용)
+    private suspend fun getSharedWebView(context: Context): android.webkit.WebView = withContext(Dispatchers.Main) {
+        if (sharedWebView == null) {
+            println("[MovieKing DBG] 🛠️ 싱글톤 WebView 최초 생성")
+            sharedWebView = android.webkit.WebView(context).apply {
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.databaseEnabled = true
+                settings.userAgentString = userAgent
+            }
+            try {
+                android.webkit.CookieManager.getInstance().setAcceptCookie(true)
+            } catch (e: Exception) {}
+        }
+        sharedWebView!!
+    }
+
     private suspend fun fetchDocViaWebView(url: String, timeoutMs: Long = 10000L): SafeDocResponse = withContext(Dispatchers.Main) {
         val rootUrl = Regex("^https?://[^/]+").find(url)?.value ?: mainUrl
-        println("[MovieKing DBG] 🌐 WebView 세션 생성 - 루트: $rootUrl | 대상: $url")
+        println("[MovieKing DBG] 🌐 fetchDocViaWebView - 루트: $rootUrl | 대상: $url")
 
         val context = try {
             Class.forName("android.app.ActivityThread")
@@ -104,28 +123,11 @@ class MovieKing : MainAPI() {
 
         suspendCancellableCoroutine { continuation ->
             val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
-            var webView: android.webkit.WebView? = null
-
-            fun cleanup() {
-                mainHandler.post {
-                    try {
-                        webView?.stopLoading()
-                        webView?.destroy()
-                        webView = null
-                    } catch (e: Exception) {}
-                }
-            }
-
-            try {
-                val cookieManager = android.webkit.CookieManager.getInstance()
-                cookieManager.setAcceptCookie(true)
-            } catch (e: Exception) {}
-
-            webView = android.webkit.WebView(context).apply {
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.databaseEnabled = true
-                settings.userAgentString = userAgent
+            val webView = try {
+                getSharedWebView(context)
+            } catch (e: Exception) {
+                continuation.resume(SafeDocResponse(url, "", Jsoup.parse(""), 500, false))
+                return@suspendCancellableCoroutine
             }
 
             var solved = false
@@ -154,14 +156,13 @@ class MovieKing : MainAPI() {
                         println("[MovieKing DBG] 🎉 JS fetch로 HTML 획득 성공! (길이: ${html.length})")
                         val doc = Jsoup.parse(html, targetUrl)
                         continuation.resume(SafeDocResponse(targetUrl, html, doc, 200, true))
-                        cleanup()
                     } else {
                         println("[MovieKing DBG] ⚠️ JS fetch 응답 미흡 (내용: ${html.take(80)})")
                     }
                 }
             }
 
-            webView?.webViewClient = object : android.webkit.WebViewClient() {
+            webView.webViewClient = object : android.webkit.WebViewClient() {
                 override fun onPageStarted(view: android.webkit.WebView?, pageUrl: String?, favicon: android.graphics.Bitmap?) {
                     println("[MovieKing DBG] 🚀 WebView 루트 접속 시작: $pageUrl")
                 }
@@ -177,7 +178,6 @@ class MovieKing : MainAPI() {
                     val cleanRoot = rootUrl.trimEnd('/')
 
                     if (cleanTarget == cleanRoot) {
-                        // 루트 도메인 자체가 대상일 때는 outerHTML 추출
                         view.evaluateJavascript("(function() { return document.documentElement.outerHTML; })();") { rawHtml ->
                             if (solved || isFailed || !continuation.isActive) return@evaluateJavascript
                             val html = unescapeJsString(rawHtml ?: "")
@@ -186,11 +186,9 @@ class MovieKing : MainAPI() {
                                 println("[MovieKing DBG] 🎉 루트 DOM 추출 성공! (길이: ${html.length})")
                                 val doc = Jsoup.parse(html, rootUrl)
                                 continuation.resume(SafeDocResponse(rootUrl, html, doc, 200, true))
-                                cleanup()
                             }
                         }
                     } else {
-                        // 서브 경로일 경우 루트 인증 세션 상에서 JS fetch 실행
                         println("[MovieKing DBG] ⚡ 루트 세션 확립 완료 -> 서브 경로 JS fetch 실행: $url")
                         executeJsFetch(view, url)
                     }
@@ -211,20 +209,18 @@ class MovieKing : MainAPI() {
                         if (!solved && continuation.isActive) {
                             println("[MovieKing DBG] 🛑 WebView 네트워크 에러 감지 - 중단: $failingUrl")
                             continuation.resume(SafeDocResponse(url, "", Jsoup.parse(""), 500, false))
-                            cleanup()
                         }
                     }
                 }
             }
 
             println("[MovieKing DBG] 📡 WebView 루트 도메인 로드 실행 -> $rootUrl")
-            webView?.loadUrl(rootUrl)
+            webView.loadUrl(rootUrl)
 
             val timeoutRunnable = Runnable {
                 if (!solved && !isFailed && continuation.isActive) {
                     println("[MovieKing DBG] ⏱️ WebView 타임아웃 (10초)")
                     continuation.resume(SafeDocResponse(url, "", Jsoup.parse(""), 500, false))
-                    cleanup()
                 }
             }
             mainHandler.postDelayed(timeoutRunnable, timeoutMs)
@@ -232,7 +228,6 @@ class MovieKing : MainAPI() {
             continuation.invokeOnCancellation {
                 solved = true
                 mainHandler.removeCallbacksAndMessages(null)
-                cleanup()
             }
         }
     }
