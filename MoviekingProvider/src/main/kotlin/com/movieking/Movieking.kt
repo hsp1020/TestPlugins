@@ -37,7 +37,7 @@ class MovieKing : MainAPI() {
         fun clearDomainCache() {
             AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 ?.edit()?.remove(PREF_KEY)?.apply()
-            println("[MovieKing DBG] 🧹 도메인 캐시 삭제 완료")
+            println("[MovieKing DBG] 🧹 캐시 도메인 초기화 완료")
         }
     }
 
@@ -86,7 +86,6 @@ class MovieKing : MainAPI() {
         return code == 202 || code == 403 || code == 503 || hasAwsWaf || hasCf
     }
 
-    // WAF 쿠키 발급용 함수: 반드시 루트 도메인(mainUrl)으로만 접근
     private suspend fun solveWaf(targetUrl: String = mainUrl): Pair<String, String>? = withContext(Dispatchers.Main) {
         val rootUrl = Regex("^https?://[^/]+").find(targetUrl)?.value ?: mainUrl
         println("[MovieKing DBG] 🌐 solveWaf 실행 (루트 도메인 쿠키 획득): $rootUrl")
@@ -124,12 +123,12 @@ class MovieKing : MainAPI() {
             }
 
             var solved = false
+            var isFailed = false
 
             val checkRunnable = object : Runnable {
                 override fun run() {
-                    if (solved || !continuation.isActive) return
+                    if (solved || isFailed || !continuation.isActive) return
                     val cookies = try { android.webkit.CookieManager.getInstance().getCookie(rootUrl) ?: "" } catch (e: Exception) { "" }
-                    println("[MovieKing DBG] 🔍 [WebView 쿠키 확인] \"$cookies\"")
 
                     val hasToken = cookies.contains("BlazingWebCookie") ||
                                    cookies.contains("aws-waf-token") || 
@@ -155,11 +154,27 @@ class MovieKing : MainAPI() {
 
                 override fun onPageFinished(view: android.webkit.WebView?, finishedUrl: String?) {
                     println("[MovieKing DBG] 🏁 WebView 로딩 완료: $finishedUrl")
-                    mainHandler.post(checkRunnable)
+                    if (!isFailed) mainHandler.post(checkRunnable)
+                }
+
+                override fun onReceivedSslError(view: android.webkit.WebView?, handler: android.webkit.SslErrorHandler?, error: android.net.http.SslError?) {
+                    println("[MovieKing DBG] ⚠️ WebView SSL 에러 발생 -> 강제 진행 처리: $error")
+                    handler?.proceed()
                 }
 
                 override fun onReceivedError(view: android.webkit.WebView?, errorCode: Int, description: String?, failingUrl: String?) {
-                    println("[MovieKing DBG] ⚠️ WebView 에러: code=$errorCode, desc=$description, url=$failingUrl")
+                    println("[MovieKing DBG] ⚠️ WebView 에러 발생: code=$errorCode, desc=$description, url=$failingUrl")
+                    if (errorCode == -6 || errorCode == -2 || errorCode == -101 || 
+                        description?.contains("CONNECTION_RESET") == true || 
+                        description?.contains("NAME_NOT_RESOLVED") == true) {
+                        
+                        isFailed = true
+                        if (!solved && continuation.isActive) {
+                            println("[MovieKing DBG] 🛑 네트워크 차단/연결 실패 감지 - solveWaf 즉시 취소: $failingUrl")
+                            continuation.resume(null)
+                            cleanup()
+                        }
+                    }
                 }
             }
 
@@ -168,8 +183,8 @@ class MovieKing : MainAPI() {
             mainHandler.postDelayed(checkRunnable, 1000)
 
             val timeoutRunnable = Runnable {
-                if (!solved && continuation.isActive) {
-                    println("[MovieKing DBG] ⏱️ WebView 타임아웃 (10초)")
+                if (!solved && !isFailed && continuation.isActive) {
+                    println("[MovieKing DBG] ⏱️ WebView 타임아웃 (8초)")
                     val cookies = try { android.webkit.CookieManager.getInstance().getCookie(rootUrl) ?: "" } catch (e: Exception) { "" }
                     if (cookies.isNotBlank()) {
                         continuation.resume(Pair(cookies, userAgent))
@@ -179,7 +194,7 @@ class MovieKing : MainAPI() {
                     cleanup()
                 }
             }
-            mainHandler.postDelayed(timeoutRunnable, 10000)
+            mainHandler.postDelayed(timeoutRunnable, 8000)
 
             continuation.invokeOnCancellation {
                 solved = true
@@ -189,21 +204,20 @@ class MovieKing : MainAPI() {
         }
     }
 
-    private suspend fun safeGet(url: String, referer: String? = null, timeout: Long = 15L): NiceResponse {
+    private suspend fun safeGet(url: String, referer: String? = null, timeout: Long = 10L): NiceResponse {
         println("[MovieKing DBG] 🌐 safeGet 요청 시작: $url")
         
-        // 쿠키가 없으면 서브 경로 요청 전에 루트 도메인에서 먼저 쿠키 발급
         if (cfCookies.isNullOrBlank()) {
             cfMutex.withLock {
                 if (cfCookies.isNullOrBlank()) {
-                    println("[MovieKing DBG] 🔑 쿠키 없음. 루트 도메인($mainUrl)에서 WAF 쿠키 먼저 발급 시도...")
+                    println("[MovieKing DBG] 🔑 쿠키 없음. 루트 도메인($mainUrl)에서 WAF 쿠키 발급 시도...")
                     val bypass = solveWaf(mainUrl)
                     if (bypass != null) {
                         cfCookies = bypass.first
                         cfUserAgent = bypass.second
                         println("[MovieKing DBG] 🟢 루트 도메인 WAF 쿠키 획득 성공")
                     } else {
-                        println("[MovieKing DBG] ❌ 루트 도메인 WAF 쿠키 획득 실패")
+                        println("[MovieKing DBG] ❌ 루트 도메인 WAF 쿠키 획득 실패 (다음 단계 진행)")
                     }
                 }
             }
@@ -229,17 +243,6 @@ class MovieKing : MainAPI() {
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             println("[MovieKing DBG] 💥 safeGet 예외 발생: ${e.javaClass.simpleName} - ${e.message}")
-            
-            cfMutex.withLock {
-                println("[MovieKing DBG] 🧱 네트워크 예외로 인해 루트 도메인($mainUrl) 쿠키 재발급 시도...")
-                val bypass = solveWaf(mainUrl)
-                if (bypass != null) {
-                    cfCookies = bypass.first
-                    cfUserAgent = bypass.second
-                    println("[MovieKing DBG] 🟢 쿠키 재발급 완료. OkHttp 재요청 시도...")
-                    return app.get(url, headers = getHeaders(referer), timeout = timeout)
-                }
-            }
             throw e
         }
     }
@@ -270,9 +273,8 @@ class MovieKing : MainAPI() {
             // 1단계: 현재/캐시된 도메인 검사
             try {
                 println("[MovieKing DBG] 🔍 [1단계] 현재 도메인 체크 -> $currentMainUrl")
-                val res = safeGet(currentMainUrl, timeout = 5L)
+                val res = safeGet(currentMainUrl, timeout = 4L)
                 val finalUrl = res.url.trimEnd('/')
-                println("[MovieKing DBG] 📥 [1단계] 결과: HTTP ${res.code}, 최종URL=$finalUrl")
                 if (res.isSuccessful && res.text.contains("video-card")) {
                     if (currentMainUrl != finalUrl) {
                         println("[MovieKing DBG] 🔄 리다이렉트 감지됨: $currentMainUrl -> $finalUrl")
@@ -290,42 +292,44 @@ class MovieKing : MainAPI() {
                 clearDomainCache()
             }
 
-            // 2단계: 브루트포스 순차 탐색 적용
-            val match = Regex("mvking(\\d+)\\.(\\w+)").find(currentMainUrl)
+            // 2단계: 브루트포스 순차 탐색 적용 (org, net, com, top, cc)
+            val match = Regex("mvking(\\d+)").find(currentMainUrl)
             val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 7
-            val tld = match?.groupValues?.get(2) ?: "org"
-            println("[MovieKing DBG] 🚀 [2단계] 브루트포스 탐색 시작 (시작번호: $startNum, TLD: $tld)")
+            val tldList = listOf("org", "net", "com", "top", "cc")
+            println("[MovieKing DBG] 🚀 [2단계] 브루트포스 탐색 시작 (시작번호: $startNum)")
 
             try {
                 coroutineScope {
-                    val candidates = (startNum..startNum + 200).map { "https://mvking$it.$tld" }
-                    val chunks = candidates.chunked(5)
-                    
-                    for (chunk in chunks) {
-                        println("[MovieKing DBG] 🔎 브루트포스 묶음 검사: ${chunk.first()} ~ ${chunk.last()}")
-                        val deferreds = chunk.map { testDomain ->
-                            async {
-                                try {
-                                    val res = safeGet(testDomain, timeout = 3L)
-                                    val extractedTestUrl = Regex("^https?://[^/]+").find(res.url)?.value ?: testDomain
-                                    val testFinalUrl = extractedTestUrl.replace("http://", "https://")
-                                    
-                                    if (res.isSuccessful && res.text.contains("video-card")) {
-                                        println("[MovieKing DBG] 🎯 후보 도메인 유효 확인: $testFinalUrl")
-                                        return@async testFinalUrl
-                                    }
-                                } catch (e: Exception) {}
-                                null
-                            }
-                        }
+                    for (tld in tldList) {
+                        val candidates = (startNum..startNum + 100).map { "https://mvking$it.$tld" }
+                        val chunks = candidates.chunked(5)
                         
-                        val foundDomain = deferreds.awaitAll().firstOrNull { it != null }
-                        if (foundDomain != null) {
-                            println("[MovieKing DBG] ✨ [2단계] 브루트포스 탐색 성공: $foundDomain")
-                            saveDomain(foundDomain)
-                            mainUrl = currentMainUrl
-                            isDomainChecked = true
-                            return@coroutineScope
+                        for (chunk in chunks) {
+                            println("[MovieKing DBG] 🔎 브루트포스 묶음 검사 ($tld): ${chunk.first()} ~ ${chunk.last()}")
+                            val deferreds = chunk.map { testDomain ->
+                                async {
+                                    try {
+                                        val res = safeGet(testDomain, timeout = 3L)
+                                        val extractedTestUrl = Regex("^https?://[^/]+").find(res.url)?.value ?: testDomain
+                                        val testFinalUrl = extractedTestUrl.replace("http://", "https://")
+                                        
+                                        if (res.isSuccessful && res.text.contains("video-card")) {
+                                            println("[MovieKing DBG] 🎯 후보 도메인 유효 확인: $testFinalUrl")
+                                            return@async testFinalUrl
+                                        }
+                                    } catch (e: Exception) {}
+                                    null
+                                }
+                            }
+                            
+                            val foundDomain = deferreds.awaitAll().firstOrNull { it != null }
+                            if (foundDomain != null) {
+                                println("[MovieKing DBG] ✨ [2단계] 브루트포스 탐색 성공: $foundDomain")
+                                saveDomain(foundDomain)
+                                mainUrl = currentMainUrl
+                                isDomainChecked = true
+                                return@coroutineScope
+                            }
                         }
                     }
                 }
@@ -337,7 +341,7 @@ class MovieKing : MainAPI() {
             // 3단계: 베이스 주소 폴백 시도
             try {
                 println("[MovieKing DBG] 🌐 [3단계] 베이스 도메인(mvking7.org) 폴백 시도")
-                val baseRes = safeGet("https://mvking7.org", timeout = 5L)
+                val baseRes = safeGet("https://mvking7.org", timeout = 4L)
                 val baseFinalUrl = baseRes.url.trimEnd('/')
                 if (baseRes.isSuccessful && baseRes.text.contains("video-card")) {
                     println("[MovieKing DBG] ✨ [3단계] 베이스 도메인 폴백 성공: $baseFinalUrl")
