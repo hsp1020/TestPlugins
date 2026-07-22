@@ -92,8 +92,8 @@ class MovieKing : MainAPI() {
         }
     }
 
-    // 싱글톤 WebView 제공 (매번 생성/파기하지 않고 재사용)
-    private suspend fun getSharedWebView(context: Context): android.webkit.WebView = withContext(Dispatchers.Main) {
+    // suspend 키워드 제거로 컴파일 에러 해결
+    private fun getSharedWebView(context: Context): android.webkit.WebView {
         if (sharedWebView == null) {
             println("[MovieKing DBG] 🛠️ 싱글톤 WebView 최초 생성")
             sharedWebView = android.webkit.WebView(context).apply {
@@ -106,7 +106,7 @@ class MovieKing : MainAPI() {
                 android.webkit.CookieManager.getInstance().setAcceptCookie(true)
             } catch (e: Exception) {}
         }
-        sharedWebView!!
+        return sharedWebView!!
     }
 
     private suspend fun fetchDocViaWebView(url: String, timeoutMs: Long = 10000L): SafeDocResponse = withContext(Dispatchers.Main) {
