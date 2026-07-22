@@ -165,24 +165,25 @@ class MovieKing : MainAPI() {
         }
     }
 
-    // 영화/드라마 등 요청 직전에 메인 주소에서 쿠키가 구워졌는지 확인하고 검증하는 사전 로직
+    // 영화/드라마 등 요청 직전에 메인 주소 쿠키 검증 및 구우기
     private suspend fun ensureCookie(): Boolean {
         if (!cfCookies.isNullOrBlank() && (cfCookies!!.contains("BlazingWebCookie") || cfCookies!!.contains("cf_clearance"))) {
-            return true // 이미 검증된 쿠키 존재함
+            println("[MovieKing DBG] 🔍 쿠키 사전 검증: 기존 쿠키 유효함 -> ${cfCookies!!.take(35)}...")
+            return true
         }
 
         return cfMutex.withLock {
-            // 이중 체크
             if (!cfCookies.isNullOrBlank() && (cfCookies!!.contains("BlazingWebCookie") || cfCookies!!.contains("cf_clearance"))) {
+                println("[MovieKing DBG] 🔍 쿠키 사전 검증: 기존 쿠키 유효함 (동기화)")
                 return@withLock true
             }
 
-            println("[MovieKing DBG] 🔑 쿠키 사전 검증: 쿠키 없음. 메인주소($mainUrl)에서 쿠키 사전 구우기 실행...")
+            println("[MovieKing DBG] 🔑 쿠키 사전 검증: 유효 쿠키 없음! 메인주소($mainUrl) 쿠키 구우기 실행...")
             val bypass = solveWaf(mainUrl)
             if (bypass != null) {
                 cfCookies = bypass.first
                 cfUserAgent = bypass.second
-                println("[MovieKing DBG] 🟢 메인주소 쿠키 구우기 검증 성공! 쿠키: $cfCookies")
+                println("[MovieKing DBG] 🟢 메인주소 쿠키 구우기 검증 완료! 쿠키: $cfCookies")
                 true
             } else {
                 println("[MovieKing DBG] ❌ 메인주소 쿠키 구우기 실패")
@@ -198,7 +199,6 @@ class MovieKing : MainAPI() {
         return try {
             var res = app.get(url, headers = getHeaders(referer), timeout = timeout)
 
-            // 만약 전송 후 방화벽 재차단 챌린지가 뜨면 재발급 후 1회 재시도
             if (isChallenge(res.text, res.code)) {
                 cfMutex.withLock {
                     println("[MovieKing DBG] 🧱 WAF Challenge 감지됨. 메인주소 쿠키 재발급 시도...")
@@ -215,6 +215,19 @@ class MovieKing : MainAPI() {
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             println("[MovieKing DBG] 💥 safeGet 예외 발생: ${e.javaClass.simpleName} - ${e.message}")
+
+            // OkHttp 소켓이 Connection reset 등으로 끊겼을 때 쿠키 재발급 후 1회 자동 재시도
+            if (e is java.net.SocketException || e is java.io.IOException) {
+                cfMutex.withLock {
+                    println("[MovieKing DBG] 🧱 OkHttp 소켓 차단 감지. 쿠키 재발급 및 재요청 진행...")
+                    val bypass = solveWaf(mainUrl)
+                    if (bypass != null) {
+                        cfCookies = bypass.first
+                        cfUserAgent = bypass.second
+                        return app.get(url, headers = getHeaders(referer), timeout = timeout)
+                    }
+                }
+            }
             throw e
         }
     }
