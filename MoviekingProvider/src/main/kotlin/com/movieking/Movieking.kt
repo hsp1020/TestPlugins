@@ -89,9 +89,11 @@ class MovieKing : MainAPI() {
         }
     }
 
-    // OkHttp 소켓 차단을 우회하기 위해 WebView가 직접 페이지를 렌더링하고 HTML을 추출하는 핵심 함수
+    // 루트 도메인 세션 확보 후 JS fetch로 서브 경로 HTML을 가져오는 최적화 파서
     private suspend fun fetchDocViaWebView(url: String, timeoutMs: Long = 10000L): SafeDocResponse = withContext(Dispatchers.Main) {
-        println("[MovieKing DBG] 🌐 WebView 직접 DOM 파싱 요청: $url")
+        val rootUrl = Regex("^https?://[^/]+").find(url)?.value ?: mainUrl
+        println("[MovieKing DBG] 🌐 WebView 세션 생성 - 루트: $rootUrl | 대상: $url")
+
         val context = try {
             Class.forName("android.app.ActivityThread")
                 .getMethod("currentApplication")
@@ -129,33 +131,68 @@ class MovieKing : MainAPI() {
             var solved = false
             var isFailed = false
 
+            fun executeJsFetch(view: android.webkit.WebView, targetUrl: String) {
+                val script = """
+                    (async function() {
+                        try {
+                            let resp = await fetch("$targetUrl", {
+                                headers: { "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" }
+                            });
+                            return await resp.text();
+                        } catch(e) {
+                            return "FETCH_ERR: " + e;
+                        }
+                    })();
+                """.trimIndent()
+
+                view.evaluateJavascript(script) { rawResult ->
+                    if (solved || isFailed || !continuation.isActive) return@evaluateJavascript
+                    val html = unescapeJsString(rawResult ?: "")
+
+                    if (html.length > 200 && !isChallenge(html, 200) && !html.startsWith("FETCH_ERR:")) {
+                        solved = true
+                        println("[MovieKing DBG] 🎉 JS fetch로 HTML 획득 성공! (길이: ${html.length})")
+                        val doc = Jsoup.parse(html, targetUrl)
+                        continuation.resume(SafeDocResponse(targetUrl, html, doc, 200, true))
+                        cleanup()
+                    } else {
+                        println("[MovieKing DBG] ⚠️ JS fetch 응답 미흡 (내용: ${html.take(80)})")
+                    }
+                }
+            }
+
             webView?.webViewClient = object : android.webkit.WebViewClient() {
-                override fun onPageStarted(view: android.webkit.WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                    println("[MovieKing DBG] 🚀 WebView 로딩 시작: $url")
+                override fun onPageStarted(view: android.webkit.WebView?, pageUrl: String?, favicon: android.graphics.Bitmap?) {
+                    println("[MovieKing DBG] 🚀 WebView 루트 접속 시작: $pageUrl")
                 }
 
                 override fun onPageFinished(view: android.webkit.WebView?, finishedUrl: String?) {
-                    println("[MovieKing DBG] 🏁 WebView 로딩 완료: $finishedUrl")
-                    if (solved || isFailed || !continuation.isActive) return
+                    println("[MovieKing DBG] 🏁 WebView 루트 접속 완료: $finishedUrl")
+                    if (solved || isFailed || !continuation.isActive || view == null) return
 
-                    val targetUrl = finishedUrl ?: url
-                    val cookies = try { android.webkit.CookieManager.getInstance().getCookie(targetUrl) ?: "" } catch (e: Exception) { "" }
+                    val cookies = try { android.webkit.CookieManager.getInstance().getCookie(rootUrl) ?: "" } catch (e: Exception) { "" }
                     if (cookies.isNotBlank()) cfCookies = cookies
 
-                    // 자바스크립트를 실행하여 렌더링이 완료된 최종 DOM HTML 획득
-                    view?.evaluateJavascript("(function() { return document.documentElement.outerHTML; })();") { rawHtml ->
-                        if (solved || isFailed || !continuation.isActive) return@evaluateJavascript
-                        val html = unescapeJsString(rawHtml ?: "")
+                    val cleanTarget = url.trimEnd('/')
+                    val cleanRoot = rootUrl.trimEnd('/')
 
-                        if (html.length > 200 && !isChallenge(html, 200)) {
-                            solved = true
-                            println("[MovieKing DBG] 🎉 WebView DOM 추출 성공! (HTML 길이: ${html.length})")
-                            val doc = Jsoup.parse(html, targetUrl)
-                            continuation.resume(SafeDocResponse(targetUrl, html, doc, 200, true))
-                            cleanup()
-                        } else {
-                            println("[MovieKing DBG] ⏳ WebView 챌린지 페이지 상태 유지 중...")
+                    if (cleanTarget == cleanRoot) {
+                        // 루트 도메인 자체가 대상일 때는 outerHTML 추출
+                        view.evaluateJavascript("(function() { return document.documentElement.outerHTML; })();") { rawHtml ->
+                            if (solved || isFailed || !continuation.isActive) return@evaluateJavascript
+                            val html = unescapeJsString(rawHtml ?: "")
+                            if (html.length > 200 && !isChallenge(html, 200)) {
+                                solved = true
+                                println("[MovieKing DBG] 🎉 루트 DOM 추출 성공! (길이: ${html.length})")
+                                val doc = Jsoup.parse(html, rootUrl)
+                                continuation.resume(SafeDocResponse(rootUrl, html, doc, 200, true))
+                                cleanup()
+                            }
                         }
+                    } else {
+                        // 서브 경로일 경우 루트 인증 세션 상에서 JS fetch 실행
+                        println("[MovieKing DBG] ⚡ 루트 세션 확립 완료 -> 서브 경로 JS fetch 실행: $url")
+                        executeJsFetch(view, url)
                     }
                 }
 
@@ -172,7 +209,7 @@ class MovieKing : MainAPI() {
                         
                         isFailed = true
                         if (!solved && continuation.isActive) {
-                            println("[MovieKing DBG] 🛑 WebView 네트워크 에러 감지 - 즉시 중단: $failingUrl")
+                            println("[MovieKing DBG] 🛑 WebView 네트워크 에러 감지 - 중단: $failingUrl")
                             continuation.resume(SafeDocResponse(url, "", Jsoup.parse(""), 500, false))
                             cleanup()
                         }
@@ -180,8 +217,8 @@ class MovieKing : MainAPI() {
                 }
             }
 
-            println("[MovieKing DBG] 📡 WebView loadUrl 실행 -> $url")
-            webView?.loadUrl(url)
+            println("[MovieKing DBG] 📡 WebView 루트 도메인 로드 실행 -> $rootUrl")
+            webView?.loadUrl(rootUrl)
 
             val timeoutRunnable = Runnable {
                 if (!solved && !isFailed && continuation.isActive) {
