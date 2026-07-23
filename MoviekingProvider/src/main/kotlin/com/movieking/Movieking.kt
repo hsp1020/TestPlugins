@@ -22,7 +22,6 @@ class MovieKing : MainAPI() {
         private val domainMutex = Mutex()
         private const val PREFS_NAME = "MovieKing_Domain_Cache"
         private const val PREF_KEY = "current_domain"
-        private const val PORTAL_URL = "https://linkroom.top" 
 
         fun saveDomain(newDomain: String) {
             currentMainUrl = newDomain
@@ -139,48 +138,6 @@ class MovieKing : MainAPI() {
                     isDomainChecked = true; return@withLock
                 }
             } catch (e: Exception) {}
-
-            // 4단계: 링크룸 대피소 포털 스크래핑 시도
-            try {
-                println("[MovieKing DBG] 🕵️ 링크룸 대피소 포털 스크래핑 시도")
-                val mainDoc = app.get(PORTAL_URL, timeout = 10L).document
-                
-                val categoryBox = mainDoc.select(".link-box").firstOrNull { box ->
-                    box.select(".link-head").text().contains("다시보기")
-                }
-                
-                var channelHref = categoryBox?.select("a")?.firstOrNull { 
-                    it.text().contains("무비킹") || it.attr("href").contains("mvking") || it.attr("href").contains("movieking")
-                }?.attr("href")
-
-                if (channelHref.isNullOrBlank()) {
-                    channelHref = mainDoc.select(".link-box a").firstOrNull { 
-                        it.text().trim() == "무비킹" 
-                    }?.attr("href")
-                }
-
-                if (!channelHref.isNullOrBlank()) {
-                    val detailUrl = if (channelHref.startsWith("http")) channelHref else "$PORTAL_URL$channelHref"
-                    println("[MovieKing DBG] 📂 무비킹 상세페이지 주소 발견: $detailUrl")
-                    
-                    val detailDoc = app.get(detailUrl, timeout = 10L).document
-                    
-                    val latestUrl = detailDoc.select(".paybody-zbinfo a").firstOrNull {
-                        it.attr("href").contains("mvking") || it.attr("href").contains("movieking")
-                    }?.attr("href")?.trimEnd('/') ?: detailDoc.selectFirst("ul.paybody-zbinfo span.data a")?.attr("href")?.trimEnd('/')
-
-                    if (!latestUrl.isNullOrBlank()) {
-                        val newTarget = if (latestUrl.startsWith("http")) latestUrl else "https://$latestUrl"
-                        println("[MovieKing DBG] ✨ 링크룸 대피소 최종 도메인 파싱 성공: $newTarget")
-                        saveDomain(newTarget)
-                        mainUrl = currentMainUrl
-                        isDomainChecked = true; return@withLock
-                    }
-                }
-            } catch (e: Exception) { 
-                if (e is CancellationException) throw e
-                println("[MovieKing DBG] ❌ 링크룸 대피소 파싱 실패: ${e.message}") 
-            }
             
             isDomainChecked = true 
         }
