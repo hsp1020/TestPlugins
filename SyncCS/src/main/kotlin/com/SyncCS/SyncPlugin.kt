@@ -34,12 +34,11 @@ class SyncPlugin : Plugin() {
     private val backupMutex = Mutex()
     
     private var isAppInForeground = true
-    private var isRestoring = false // 복원 중 백업 피드백 루프 방지 플래그
+    private var isRestoring = false
     private var lastRestoreTime = 0L
 
     private var lifecycleCallbacks: Application.ActivityLifecycleCallbacks? = null
 
-    // 사용자의 명확한 액션 시에만 백업 트리거
     private val bookmarksListener = { _: Boolean -> triggerBackup(2000L) }
     private val afterPluginsListener = { _: Boolean -> triggerBackup(5000L) }
     private val mainPluginsListener = { _: Boolean -> triggerBackup(5000L) }
@@ -71,7 +70,7 @@ class SyncPlugin : Plugin() {
                 }
                 override fun onActivityResumed(activity: Activity) {}
                 override fun onActivityPaused(activity: Activity) {
-                    // 화면 정지/이탈 시 시청 중이던 기록 1회성 백업
+                    // 일시정지/화면이탈 시 시청 중이던 위치를 1회 백업
                     triggerBackup(500L)
                 }
                 override fun onActivityStopped(activity: Activity) {
@@ -91,7 +90,6 @@ class SyncPlugin : Plugin() {
             app.registerActivityLifecycleCallbacks(lifecycleCallbacks!!)
         }
 
-        // 재생 중 매초 감시하던 폴링 루프를 제거하고 5분 간격의 아이들(Idle) 동기화만 유지
         syncJob?.cancel()
         syncJob = pluginScope.launch {
             lastRestoreTime = System.currentTimeMillis()
@@ -99,7 +97,7 @@ class SyncPlugin : Plugin() {
                 try {
                     if (isAppInForeground) {
                         val now = System.currentTimeMillis()
-                        if (now - lastRestoreTime >= 300000L) { // 5분 주기 복원 확인
+                        if (now - lastRestoreTime >= 300000L) { // 5분 주기 복원
                             restoreDevice()
                             lastRestoreTime = now
                         }
@@ -107,7 +105,7 @@ class SyncPlugin : Plugin() {
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
-                delay(60000L) // 1분 간격으로 루프 체크
+                delay(60000L)
             }
         }
     }
@@ -136,8 +134,10 @@ class SyncPlugin : Plugin() {
                 if (isBackupEnabled) {
                     val backupFile = BackupUtils.getBackup(context)
                     val backupJson = mapper.writeValueAsString(backupFile)
-                    Log.d("SYNC", "[SyncPlugin] Backup JSON created. Uploading to Gist...")
+                    Log.d("SYNC", "[SyncPlugin] Backup JSON created. Calling ApiUtils.syncThisDevice().")
                     ApiUtils.syncThisDevice(backupJson, context)
+                } else {
+                    Log.d("SYNC", "[SyncPlugin] Backup is disabled in settings.")
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -146,13 +146,17 @@ class SyncPlugin : Plugin() {
     }
 
     private fun restoreDevice() {
+        Log.d("SYNC", "[SyncPlugin] restoreDevice() called.")
         val context = AcraApplication.context ?: return
         val prefs = with(DataStore) { context.getSharedPrefs() }
         val restoreEnabled = prefs.getString("restore_device", null)?.let {
             try { mapper.readValue<String>(it) } catch (e: Exception) { "false" }
         } == "true"
 
-        if (!restoreEnabled) return
+        if (!restoreEnabled) {
+            Log.d("SYNC", "[SyncPlugin] Restore disabled. Skipping.")
+            return
+        }
 
         pluginScope.launch {
             try {
@@ -164,18 +168,21 @@ class SyncPlugin : Plugin() {
                 } ?: UtilKt.getDeviceId(context.packageName, context)
 
                 for (device in devices) {
-                    if (device.deviceId == currentDeviceId) continue
+                    if (device.deviceId == currentDeviceId) {
+                        Log.d("SYNC", "[SyncPlugin] Skipping own device: ${device.name}")
+                        continue
+                    }
 
                     val lastHashKey = "sync_last_hash_${device.deviceId}"
                     val lastHash = prefs.getString(lastHashKey, "")
                     val currentHash = UtilKt.md5(device.syncedData ?: "")
 
                     if (lastHash != currentHash) {
-                        Log.d("SYNC", "[SyncPlugin] New data from ${device.name}. Merging...")
+                        Log.d("SYNC", "[SyncPlugin] New data found for device: ${device.name}. Merging...")
                         device.syncedData?.let { encoded ->
                             val decoded = UtilKt.decompressJsonFromString(encoded)
                             if (decoded.isNotBlank()) {
-                                isRestoring = true // 복원 시작 플래그 ON (재백업 루프 차단)
+                                isRestoring = true
                                 try {
                                     val backupFile = mapper.readValue<BackupFile>(decoded)
                                     BackupUtils.restore(context, backupFile, restoreSettings = true, restoreDataStore = true)
@@ -183,10 +190,12 @@ class SyncPlugin : Plugin() {
                                     Log.d("SYNC", "[SyncPlugin] Restore merge successful for ${device.name}")
                                 } finally {
                                     delay(1000L)
-                                    isRestoring = false // 복원 완료 후 플래그 OFF
+                                    isRestoring = false
                                 }
                             }
                         }
+                    } else {
+                        Log.d("SYNC", "[SyncPlugin] Device ${device.name} is already up-to-date.")
                     }
                 }
             } catch (e: Exception) {
@@ -200,7 +209,7 @@ class SyncPlugin : Plugin() {
     }
 
     fun unload() {
-        Log.d("SYNC", "[SyncPlugin] Unloading plugin...")
+        Log.d("SYNC", "[SyncPlugin] Unloading plugin. Cancelling active coroutine jobs and unregistering callbacks...")
         pluginScope.cancel()
 
         val app = AcraApplication.context?.applicationContext as? Application
