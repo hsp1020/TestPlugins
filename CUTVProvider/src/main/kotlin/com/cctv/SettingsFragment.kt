@@ -143,7 +143,7 @@ class SettingsFragment(
             }
             setOnClickListener {
                 webView.visibility = View.VISIBLE
-                webView.loadUrl("https://cu-tv.com")
+                webView.loadUrl("https://cu-tv01.com")
                 showToast("우회 페이지를 새로고침합니다.")
             }
         }
