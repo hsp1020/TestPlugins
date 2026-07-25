@@ -272,6 +272,41 @@ class YoutubeProvider(
     @Volatile
     private var lastCustomSectionsJson: String? = null
 
+    private fun getMembershipLabel(data: Map<*, *>?): String? {
+        if (data == null) return null
+
+        val rawString = data.toString()
+        if (!rawString.contains("MEMBERS_ONLY", ignoreCase = true) &&
+            !rawString.contains("members-only", ignoreCase = true) &&
+            !rawString.contains("멤버 전용", ignoreCase = true)) {
+            return null
+        }
+
+        val badges = data["badges"] as? List<*> 
+            ?: data.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")?.getListKey("badges")
+
+        badges?.forEach { badge ->
+            val badgeMap = badge as? Map<*, *>
+            val style = badgeMap?.getMapKey("metadataBadgeRenderer")?.getString("style")
+                ?: badgeMap?.getMapKey("metadataBadgeViewModel")?.getString("style")
+
+            if (style == "BADGE_STYLE_TYPE_MEMBERS_ONLY" || style?.contains("MEMBERS_ONLY") == true) {
+                val label = getText(badgeMap.getMapKey("metadataBadgeRenderer")?.getMapKey("label"))
+                    .ifBlank { getText(badgeMap.getMapKey("metadataBadgeViewModel")?.getMapKey("text")) }
+                    .ifBlank { getText(badgeMap.getMapKey("metadataBadgeRenderer")?.getMapKey("accessibilityData")) }
+
+                if (label.isNotBlank()) return label
+            }
+        }
+
+        val overlayText = getText(data.getMapKey("overlayMetadata")?.getMapKey("primaryText"))
+        if (overlayText.isNotBlank() && overlayText.contains("MEMBERS_ONLY", ignoreCase = true)) {
+            return overlayText
+        }
+
+        return null
+    }
+    
     override var mainUrl = "https://www.youtube.com"
     override var name = "YouTube"
     override val hasMainPage = true
@@ -903,14 +938,32 @@ class YoutubeProvider(
 
                 val views = viewText.ifBlank { "N/A" }
 
+                val membershipLabel = getMembershipLabel(videoData)
+                val isMembership = !membershipLabel.isNullOrBlank()
+
                 val finalTitle = when {
-                    channel.isNotBlank() && views.isNotBlank() && views != "N/A" -> "[$channel | $views] $title"
-                    channel.isNotBlank() -> "[$channel] $title"
-                    views.isNotBlank() && views != "N/A" && dateText.isNotBlank() -> "[$views | $dateText] $title"
-                    views.isNotBlank() && views != "N/A" -> "[$views] $title"
-                    else -> title
+                    channel.isNotBlank() && views.isNotBlank() && views != "N/A" -> {
+                        if (isMembership) "[$channel | $views | $membershipLabel] $title"
+                        else "[$channel | $views] $title"
+                    }
+                    channel.isNotBlank() -> {
+                        if (isMembership) "[$channel | $membershipLabel] $title"
+                        else "[$channel] $title"
+                    }
+                    views.isNotBlank() && views != "N/A" && dateText.isNotBlank() -> {
+                        if (isMembership) "[$views | $dateText | $membershipLabel] $title"
+                        else "[$views | $dateText] $title"
+                    }
+                    views.isNotBlank() && views != "N/A" -> {
+                        if (isMembership) "[$views | $membershipLabel] $title"
+                        else "[$views] $title"
+                    }
+                    else -> {
+                        if (isMembership) "[$membershipLabel] $title"
+                        else title
+                    }
                 }
-                
+
                 var poster = YoutubeUtils.getBestThumbnail(videoData.getMapKey("thumbnail"))
                 if (poster.isNullOrBlank()) poster = YoutubeUtils.buildThumbnailFromId(videoId)
                 
@@ -930,7 +983,7 @@ class YoutubeProvider(
             }
             return null
         }
-
+        
         val richContent = renderer.getMapKey("richItemRenderer")?.getMapKey("content")
         val shortsData = renderer.getMapKey("reelItemRenderer")
             ?: renderer.getMapKey("shortsLockupViewModel")
@@ -2013,26 +2066,24 @@ class YoutubeProvider(
                         if (vidTitle.isBlank()) vidTitle = getText(safeGet(renderer, "metadata", "lockupMetadataViewModel", "title"))
                         if (vidTitle.isBlank()) vidTitle = "Video"
 
+                        val membershipLabel = getMembershipLabel(renderer)
+                        if (!membershipLabel.isNullOrBlank()) {
+                            vidTitle = "[$membershipLabel] $vidTitle"
+                        }
+
                         val thumb = YoutubeUtils.getBestThumbnail(renderer["thumbnail"]) 
                             ?: YoutubeUtils.getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
                             ?: YoutubeUtils.buildThumbnailFromId(vidId)
 
                         var metaString = getEpisodeMetaString(renderer)
                         if (metaString.isBlank()) {
-                            // 1단계: 쇼츠 오버레이 메타데이터 텍스트에서 조회수 추출 시도
                             var viewRaw = getText(safeGet(renderer, "overlayMetadata", "secondaryText"))
-                            
-                            // 2단계: 표준 뷰카운트 필드들에서 조회수 추출 시도
                             if (viewRaw.isBlank()) {
                                 viewRaw = getText(renderer["viewCountText"] ?: renderer["shortViewCountText"])
                             }
-                            
-                            // 3단계: 락업 메타데이터 뷰카운트 전용 데이터에서 추출 시도
                             if (viewRaw.isBlank()) {
                                 viewRaw = getText(safeGet(renderer, "metadata", "lockupMetadataViewModel", "viewCount"))
                             }
-                            
-                            // 4단계: 구조화된 메타데이터 행(metadataRows)에서 조회수 조각 추출 시도
                             if (viewRaw.isBlank()) {
                                 try {
                                     val rows = safeGet(renderer, "metadata", "lockupMetadataViewModel", "metadata", "contentMetadataViewModel", "metadataRows") as? List<*>
@@ -2044,8 +2095,6 @@ class YoutubeProvider(
                                     }
                                 } catch (_: Exception) {}
                             }
-                            
-                            // [개선] 지저분한 "N/A" 대신, 데이터 수집 실패 시 완전히 빈 칸("")을 내려보내 UI 설명란을 숨깁니다.
                             metaString = viewRaw.stripWhitespace().ifBlank { "\u200b" }
                         }
 
@@ -2056,7 +2105,7 @@ class YoutubeProvider(
                         })
                         break 
                     }
-                }
+                }                        
             } catch (e: Exception) {
             }
         }
