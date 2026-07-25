@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -16,7 +17,6 @@ import kotlinx.coroutines.coroutineScope
 
 class MovieKing : MainAPI() {
     companion object {
-        // 기본 도메인을 mvking7.org로 변경
         var currentMainUrl = "https://mvking7.org"
         var isDomainChecked = false 
         private val domainMutex = Mutex()
@@ -38,7 +38,6 @@ class MovieKing : MainAPI() {
 
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama, TvType.Anime)
     
-    // 도메인 갱신 시 Referer 헤더가 유기적으로 업데이트되도록 커스텀 게터 적용
     private val commonHeaders: Map<String, String>
         get() = mapOf("Referer" to "$mainUrl/")
         
@@ -139,7 +138,8 @@ class MovieKing : MainAPI() {
                 }
             } catch (e: Exception) {}
             
-            isDomainChecked = true 
+            // 모든 탐색 실패 시 isDomainChecked = true 구문을 지워 false로 유지!
+            println("[MovieKing DBG] 💀 도메인 탐색 실패 - 다음 요청 시 재탐색 수행")
         }
     }
 
@@ -180,7 +180,14 @@ class MovieKing : MainAPI() {
             val items = res.document.select(".video-card").mapNotNull { it.toSearchResponse() }
             println("[MovieKing DBG] 🔍 검색 결과 수: ${items.size}")
             items
-        } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
+        } catch (e: Exception) { 
+            if (e is CancellationException) throw e
+            if (e is IOException) {
+                println("[MovieKing DBG] ❌ 검색 중 네트워크 에러 감지 (${e.javaClass.simpleName}) -> isDomainChecked = false")
+                isDomainChecked = false
+            }
+            emptyList() 
+        }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -213,6 +220,10 @@ class MovieKing : MainAPI() {
             newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
         } catch (e: Exception) {
             if (e is CancellationException) throw e 
+            if (e is IOException) {
+                println("[MovieKing DBG] ❌ 메인페이지 네트워크 에러 감지 (${e.javaClass.simpleName}) -> isDomainChecked = false")
+                isDomainChecked = false
+            }
             newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
     }
@@ -260,21 +271,30 @@ class MovieKing : MainAPI() {
             cleanUrl
         }
         
-        val doc = app.get(finalUrl, headers = commonHeaders).document
-        val title = (doc.selectFirst("h3.title")?.text() ?: doc.selectFirst("h1.text-secondary")?.text() ?: "Unknown").replace(titleRegex, "").trim()
-        val poster = passedPoster ?: doc.selectFirst(".single-video-left img")?.attr("src") ?: ""
-        val intro = doc.selectFirst(".single-video-info-content h6:contains(소개)")?.nextElementSibling()?.text()?.trim() ?: "설명이 없습니다."
-        
-        val episodeList = doc.select(".video-slider-right-list .eps_a").map { 
-            newEpisode(fixUrl(it.attr("href"))) { this.name = it.text().trim() } 
-        }.reversed()
+        return try {
+            val doc = app.get(finalUrl, headers = commonHeaders).document
+            val title = (doc.selectFirst("h3.title")?.text() ?: doc.selectFirst("h1.text-secondary")?.text() ?: "Unknown").replace(titleRegex, "").trim()
+            val poster = passedPoster ?: doc.selectFirst(".single-video-left img")?.attr("src") ?: ""
+            val intro = doc.selectFirst(".single-video-info-content h6:contains(소개)")?.nextElementSibling()?.text()?.trim() ?: "설명이 없습니다."
+            
+            val episodeList = doc.select(".video-slider-right-list .eps_a").map { 
+                newEpisode(fixUrl(it.attr("href"))) { this.name = it.text().trim() } 
+            }.reversed()
 
-        println("[MovieKing DBG] 🎬 파싱 완료: 에피소드 수=${episodeList.size}")
+            println("[MovieKing DBG] 🎬 파싱 완료: 에피소드 수=${episodeList.size}")
 
-        return if (episodeList.size <= 1) {
-            newMovieLoadResponse(title, finalUrl, TvType.Movie, finalUrl) { this.posterUrl = fixUrl(poster); this.plot = intro }
-        } else {
-            newTvSeriesLoadResponse(title, finalUrl, TvType.TvSeries, episodeList) { this.posterUrl = fixUrl(poster); this.plot = intro }
+            if (episodeList.size <= 1) {
+                newMovieLoadResponse(title, finalUrl, TvType.Movie, finalUrl) { this.posterUrl = fixUrl(poster); this.plot = intro }
+            } else {
+                newTvSeriesLoadResponse(title, finalUrl, TvType.TvSeries, episodeList) { this.posterUrl = fixUrl(poster); this.plot = intro }
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            if (e is IOException) {
+                println("[MovieKing DBG] ❌ 상세페이지 네트워크 에러 감지 (${e.javaClass.simpleName}) -> isDomainChecked = false")
+                isDomainChecked = false
+            }
+            throw e
         }
     }
 
@@ -289,7 +309,13 @@ class MovieKing : MainAPI() {
         try {
             val src = app.get(targetData, headers = commonHeaders).document.selectFirst("iframe#view_iframe")?.attr("src")
             if (src != null) { loadExtractor(fixUrl(src), targetData, subtitleCallback, callback); return true }
-        } catch (e: Exception) { if (e is CancellationException) throw e }
+        } catch (e: Exception) { 
+            if (e is CancellationException) throw e
+            if (e is IOException) {
+                println("[MovieKing DBG] ❌ 영상 링크 네트워크 에러 감지 (${e.javaClass.simpleName}) -> isDomainChecked = false")
+                isDomainChecked = false
+            }
+        }
         return false
     }
 }
