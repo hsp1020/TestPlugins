@@ -106,6 +106,8 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             val ctx = requireContext()
+            val defaultPrefs = PreferenceManager.getDefaultSharedPreferences(ctx)
+
             preferenceManager.preferenceDataStore = null
             preferenceScreen = preferenceManager.createPreferenceScreen(ctx)
 
@@ -129,7 +131,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 entryValues = Loc.availableLanguages.map { it.first }.toTypedArray()
                 entries = Loc.availableLanguages.map { "${it.third} (${it.second})" }.toTypedArray()
                 
-                val defaultPrefs = PreferenceManager.getDefaultSharedPreferences(ctx)
                 val currentLang = if (sharedPref.contains(KEY_LANGUAGE)) {
                     sharedPref.getString(KEY_LANGUAGE, null as String?)
                 } else {
@@ -180,7 +181,8 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 setOnPreferenceClickListener {
                     val webDialog = WebViewCaptureDialog(sharedPref) { success ->
                         if (success) {
-                            visitorPref.text = sharedPref.getString(KEY_VISITOR, "")
+                            val visitorVal = sharedPref.getString(KEY_VISITOR, "")
+                            visitorPref.text = visitorVal
                             Toast.makeText(ctx, Loc.getString(sharedPref, "saved_msg"), Toast.LENGTH_SHORT).show()
                             updateTexts()
                         }
@@ -200,7 +202,9 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 setOnBindEditTextListener { it.setText(sharedPref.getString(KEY_VISITOR, "")) }
                 summaryProvider = EditTextPreference.SimpleSummaryProvider.getInstance()
                 setOnPreferenceChangeListener { _, newVal ->
-                    sharedPref.edit().putString(KEY_VISITOR, newVal as String).apply()
+                    val visitorVal = newVal as String
+                    sharedPref.edit().putString(KEY_VISITOR, visitorVal).apply()
+                    defaultPrefs.edit().putString(KEY_VISITOR, visitorVal).apply()
                     true
                 }
             }
@@ -212,18 +216,19 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                         .setTitle(Loc.getString(sharedPref, "logout_confirm_title"))
                         .setMessage(Loc.getString(sharedPref, "logout_confirm_msg"))
                         .setPositiveButton(Loc.getString(sharedPref, "delete")) { _, _ ->
-                            sharedPref.edit().apply {
-                                remove(KEY_VISITOR)
-                                remove("VISITOR_INFO1_LIVE")
-                                remove("SID")
-                                remove("HSID")
-                                remove("SSID")
-                                remove("APISID")
-                                remove("SAPISID")
-                                remove("__Secure-1PSID") 
-                                remove("__Secure-3PAPISID")
-                                remove("yt_cached_chips")
-                            }.apply()
+                            val keysToRemove = listOf(
+                                KEY_VISITOR, "VISITOR_INFO1_LIVE", "SID", "HSID", "SSID", 
+                                "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PAPISID", "yt_cached_chips"
+                            )
+                            
+                            val spEditor = sharedPref.edit()
+                            val defEditor = defaultPrefs.edit()
+                            keysToRemove.forEach { k ->
+                                spEditor.remove(k)
+                                defEditor.remove(k)
+                            }
+                            spEditor.apply()
+                            defEditor.apply()
 
                             val json = sharedPref.getString("custom_homepages_v3", "[]") ?: "[]"
                             try {
@@ -233,7 +238,9 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                                 val filteredList = currentList.filterNot { 
                                     it.url == "Home" || it.url.startsWith("chip_name_") 
                                 }
-                                sharedPref.edit().putString("custom_homepages_v3", mapper.writeValueAsString(filteredList)).apply()
+                                val serialized = mapper.writeValueAsString(filteredList)
+                                sharedPref.edit().putString("custom_homepages_v3", serialized).apply()
+                                defaultPrefs.edit().putString("custom_homepages_v3", serialized).apply()
                             } catch (e: Exception) {
                                 e.printStackTrace()
                             }
@@ -264,8 +271,12 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                     true
                 }
             }
-                      
-            pagesPref.value = sharedPref.getInt(KEY_PAGES, 6)
+            val currentPages = if (sharedPref.contains(KEY_PAGES)) {
+                sharedPref.getInt(KEY_PAGES, 6)
+            } else {
+                defaultPrefs.getInt(KEY_PAGES, 6)
+            }
+            pagesPref.value = currentPages
             customCategory.addPreference(pagesPref)
 
             playlistTagPref = EditTextPreference(ctx).apply {
@@ -277,12 +288,16 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                     if (value.isNullOrBlank()) "{p}" else "$currentTxt$value"
                 }
                 setOnPreferenceChangeListener { _, newVal ->
-                    val v = (newVal as String).trim()
-                    sharedPref.edit().putString(KEY_PLAYLIST_TAG, v.ifEmpty { "{p}" }).apply()
+                    val v = (newVal as String).trim().ifEmpty { "{p}" }
+                    sharedPref.edit().putString(KEY_PLAYLIST_TAG, v).apply()
+                    defaultPrefs.edit().putString(KEY_PLAYLIST_TAG, v).apply()
                     true
                 }
             }
-            if (!sharedPref.contains(KEY_PLAYLIST_TAG)) sharedPref.edit().putString(KEY_PLAYLIST_TAG, "{p}").apply()
+            if (!sharedPref.contains(KEY_PLAYLIST_TAG)) {
+                sharedPref.edit().putString(KEY_PLAYLIST_TAG, "{p}").apply()
+                defaultPrefs.edit().putString(KEY_PLAYLIST_TAG, "{p}").apply()
+            }
             playlistTagPref.text = sharedPref.getString(KEY_PLAYLIST_TAG, "{p}")
             customCategory.addPreference(playlistTagPref)
 
@@ -298,12 +313,14 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                     
                     if (selectedValue == "custom") {
                         sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, selectedValue).apply()
+                        defaultPrefs.edit().putString(KEY_DOWNLOADER_TYPE, selectedValue).apply()
                         customPackagePref.isVisible = true
                         return@setOnPreferenceChangeListener true
                     }
                     
                     if (selectedValue == "none") {
                         sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, selectedValue).apply()
+                        defaultPrefs.edit().putString(KEY_DOWNLOADER_TYPE, selectedValue).apply()
                         customPackagePref.isVisible = false
                         return@setOnPreferenceChangeListener true
                     }
@@ -317,6 +334,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
                     if (isAppInstalled(ctx, packageName)) {
                         sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, selectedValue).apply()
+                        defaultPrefs.edit().putString(KEY_DOWNLOADER_TYPE, selectedValue).apply()
                         customPackagePref.isVisible = false
                         true
                     } else {
@@ -333,6 +351,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 setOnPreferenceChangeListener { _, newVal ->
                     val pkg = (newVal as String).trim()
                     sharedPref.edit().putString(KEY_CUSTOM_PKG, pkg).apply()
+                    defaultPrefs.edit().putString(KEY_CUSTOM_PKG, pkg).apply()
                     
                     if (pkg.isNotEmpty() && !isAppInstalled(ctx, pkg)) {
                         val langCode = sharedPref.getString("youtube_language", "ar") ?: "ar"
@@ -569,7 +588,12 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         }
 
         private fun loadSections() {
-            val json = sharedPref.getString("custom_homepages_v3", "[]") ?: "[]"
+            val defaultPrefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
+            val json = if (sharedPref.contains("custom_homepages_v3")) {
+                sharedPref.getString("custom_homepages_v3", "[]") ?: "[]"
+            } else {
+                defaultPrefs.getString("custom_homepages_v3", "[]") ?: "[]"
+            }
             sectionsList = try {
                 mapper.readValue(json)
             } catch (e: Exception) {
@@ -578,8 +602,11 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         }
 
         private fun saveSections() {
+            val ctx = context ?: return
+            val defaultPrefs = PreferenceManager.getDefaultSharedPreferences(ctx)
             val json = mapper.writeValueAsString(sectionsList)
             sharedPref.edit().putString("custom_homepages_v3", json).apply()
+            defaultPrefs.edit().putString("custom_homepages_v3", json).apply()
         }
 
         private fun createSvgIcon(pathData: String, colorHex: String): android.graphics.drawable.Drawable {
@@ -639,10 +666,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                         loadingIndicator.visibility = View.VISIBLE
                         fetchJob = dialogScope.launch {
                             try {
-                                // =========================================================================
-                                // [개선 완료] 무거운 HTML 구문 분석(Jsoup.parse)을 Dispatchers.IO 영역으로 
-                                // 완전 이관하여 대화상자 추가 시 UI 버벅임(Jank) 현상 소멸
-                                // =========================================================================
                                 val title = withContext(Dispatchers.IO) {
                                     val response = app.get(url).text
                                     val doc = org.jsoup.Jsoup.parse(response)
@@ -653,7 +676,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                                     inputName.setText(title)
                                 }
                             } catch (e: Exception) {
-                                // Task 취소 또는 통신 장애 대응
                             } finally {
                                 loadingIndicator.visibility = View.GONE
                             }
@@ -928,17 +950,24 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             try {
                 CookieManager.getInstance().flush()
                 val cookieStr = CookieManager.getInstance().getCookie(webView.url ?: "https://www.youtube.com") ?: ""
-                val editor = sharedPref.edit()
+                val defaultPrefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
+                
+                val spEditor = sharedPref.edit()
+                val defEditor = defaultPrefs.edit()
                 var found = 0
 
                 cookieStr.split(";").forEach {
                     val parts = it.split("=", limit = 2)
                     if (parts.size == 2 && targetCookies.contains(parts[0].trim())) {
-                        editor.putString(parts[0].trim(), parts[1].trim())
+                        val key = parts[0].trim()
+                        val value = parts[1].trim()
+                        spEditor.putString(key, value)
+                        defEditor.putString(key, value)
                         found++
                     }
                 }
-                editor.apply()
+                spEditor.apply()
+                defEditor.apply()
 
                 if (found > 0) {
                     onFinish(true)
