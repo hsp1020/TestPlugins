@@ -298,31 +298,38 @@ class YoutubeProvider(
         if (obj == null || depth > 20) return null
 
         if (obj is Map<*, *>) {
-            val style = obj["style"] as? String
-                ?: obj["badgeStyle"] as? String
+            val style = obj["badgeStyle"] as? String
+                ?: obj["style"] as? String
                 ?: (obj["metadataBadgeRenderer"] as? Map<*, *>)?.get("style") as? String
                 ?: (obj["metadataBadgeViewModel"] as? Map<*, *>)?.get("badgeStyle") as? String
+                ?: (obj["badgeViewModel"] as? Map<*, *>)?.get("badgeStyle") as? String
 
             val iconType = (obj["icon"] as? Map<*, *>)?.get("iconType") as? String
                 ?: obj["iconType"] as? String
+                ?: obj["iconName"] as? String
                 ?: (obj["metadataBadgeRenderer"] as? Map<*, *>)?.getMapKey("icon")?.get("iconType") as? String
 
-            // 배지/스타일 관련 노드가 발견되면 Logcat에 구조 출력
-            if (style != null || iconType != null || obj.containsKey("metadataBadgeRenderer") || obj.containsKey("metadataBadgeViewModel") || obj.containsKey("badgeViewModel")) {
+            if (style != null || iconType != null || obj.containsKey("badgeViewModel") || obj.containsKey("badgeText")) {
                 Log.d("YOUTUBE-MEMBER", "[$videoId] Inspecting Badge Node (depth $depth): style=$style, iconType=$iconType, keys=${obj.keys}")
             }
 
-            val isMembersBadge = style == "BADGE_STYLE_TYPE_MEMBERS_ONLY" || iconType == "MEMBERS_ONLY"
+            // 로그로 확인된 BADGE_MEMBERS_ONLY 규격 포함 검사
+            val isMembersBadge = style == "BADGE_MEMBERS_ONLY" ||
+                    style == "BADGE_STYLE_TYPE_MEMBERS_ONLY" ||
+                    style?.contains("MEMBERS_ONLY", ignoreCase = true) == true ||
+                    iconType == "MEMBERS_ONLY" ||
+                    iconType?.contains("MEMBERS", ignoreCase = true) == true
 
             if (isMembersBadge) {
                 Log.d("YOUTUBE-MEMBER", "[$videoId] MATCHED MEMBERS BADGE! Raw Node Data = $obj")
 
-                val label = getText(obj["label"])
-                    .ifBlank { getText(obj["text"]) }
-                    .ifBlank { getText(obj["badgeText"]) }
-                    .ifBlank { getText(obj["tooltip"]) }
-                    .ifBlank { getText(obj["accessibilityData"]) }
-                    .ifBlank { getText(obj["accessibility"]) }
+                // 로그로 확인된 badgeText 키 최우선 추출
+                var label = getText(obj["badgeText"])
+                if (label.isBlank()) label = getText(obj["label"])
+                if (label.isBlank()) label = getText(obj["text"])
+                if (label.isBlank()) label = getText(obj["tooltip"])
+                if (label.isBlank()) label = getText(obj["accessibilityData"])
+                if (label.isBlank()) label = getText(obj["accessibility"])
 
                 Log.d("YOUTUBE-MEMBER", "[$videoId] Extracted Dynamic Label = '$label'")
 
@@ -343,7 +350,7 @@ class YoutubeProvider(
         }
 
         return null
-    }   
+    }
     
     override var mainUrl = "https://www.youtube.com"
     override var name = "YouTube"
