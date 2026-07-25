@@ -258,10 +258,13 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 setDefaultValue(6)
                 showSeekBarValue = true
                 setOnPreferenceChangeListener { _, newVal ->
-                    sharedPref.edit().putInt(KEY_PAGES, newVal as Int).apply()
+                    val pagesVal = newVal as Int
+                    sharedPref.edit().putInt(KEY_PAGES, pagesVal).apply()
+                    defaultPrefs.edit().putInt(KEY_PAGES, pagesVal).apply()
                     true
                 }
             }
+                      
             pagesPref.value = sharedPref.getInt(KEY_PAGES, 6)
             customCategory.addPreference(pagesPref)
 
