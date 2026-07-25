@@ -274,38 +274,42 @@ class YoutubeProvider(
 
     private fun getMembershipLabel(data: Map<*, *>?): String? {
         if (data == null) return null
+        return findMembersBadgeRecursive(data)
+    }
 
-        val rawString = data.toString()
-        if (!rawString.contains("MEMBERS_ONLY", ignoreCase = true) &&
-            !rawString.contains("members-only", ignoreCase = true) &&
-            !rawString.contains("멤버 전용", ignoreCase = true)) {
-            return null
-        }
+    private fun findMembersBadgeRecursive(obj: Any?, depth: Int = 0): String? {
+        if (obj == null || depth > 20) return null
 
-        val badges = data["badges"] as? List<*> 
-            ?: data.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")?.getListKey("badges")
+        if (obj is Map<*, *>) {
+            val style = obj["style"] as? String
+                ?: obj["badgeStyle"] as? String
+            
+            val iconType = (obj["icon"] as? Map<*, *>)?.get("iconType") as? String
+                ?: obj["iconType"] as? String
 
-        badges?.forEach { badge ->
-            val badgeMap = badge as? Map<*, *>
-            if (badgeMap != null) {
-                val renderer = badgeMap.getMapKey("metadataBadgeRenderer")
-                val viewModel = badgeMap.getMapKey("metadataBadgeViewModel")
+            // API의 구조적 Enum 값만 식별 (언어/텍스트 하드코딩 제로)
+            val isMembersBadge = style == "BADGE_STYLE_TYPE_MEMBERS_ONLY" || iconType == "MEMBERS_ONLY"
 
-                val style = renderer?.getString("style") ?: viewModel?.getString("style")
+            if (isMembersBadge) {
+                val label = getText(obj["label"])
+                    .ifBlank { getText(obj["text"]) }
+                    .ifBlank { getText(obj["badgeText"]) }
+                    .ifBlank { (obj["accessibilityData"] as? Map<*, *>)?.get("label") as? String }
 
-                if (style == "BADGE_STYLE_TYPE_MEMBERS_ONLY" || style?.contains("MEMBERS_ONLY") == true) {
-                    val label = getText(renderer?.getMapKey("label"))
-                        .ifBlank { getText(viewModel?.getMapKey("text")) }
-                        .ifBlank { getText(renderer?.getMapKey("accessibilityData")) }
-
-                    if (label.isNotBlank()) return label
+                if (label.isNotBlank()) {
+                    return label
                 }
             }
-        }
 
-        val overlayText = getText(data.getMapKey("overlayMetadata")?.getMapKey("primaryText"))
-        if (overlayText.isNotBlank() && overlayText.contains("MEMBERS_ONLY", ignoreCase = true)) {
-            return overlayText
+            for (value in obj.values) {
+                val found = findMembersBadgeRecursive(value, depth + 1)
+                if (found != null) return found
+            }
+        } else if (obj is List<*>) {
+            for (item in obj) {
+                val found = findMembersBadgeRecursive(item, depth + 1)
+                if (found != null) return found
+            }
         }
 
         return null
@@ -1056,51 +1060,6 @@ class YoutubeProvider(
                 return null
             }
 
-            if (contentType == "LOCKUP_CONTENT_TYPE_PLAYLIST") {
-                val playlistId = lockup.getString("contentId")
-                if (!playlistId.isNullOrBlank() && seenIds.add(playlistId)) {
-                    var title = lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
-                        ?.getMapKey("title")?.getString("content") ?: "Playlist"
-
-                    if (playlistId.startsWith("RD") || playlistId.startsWith("UL") || playlistId.startsWith("MM") || playlistId.startsWith("RDMM")) {
-                        title = YoutubeUtils.cleanMixTitle(title)
-                    }
-
-                    val episodeCount =
-                        lockup.getMapKey("contentImage")?.getMapKey("collectionThumbnailViewModel")
-                            ?.getMapKey("primaryThumbnail")?.getMapKey("thumbnailViewModel")
-                            ?.getListKey("overlays")?.firstOrNull()
-                            ?.getMapKey("thumbnailOverlayBadgeViewModel")
-                            ?.getListKey("thumbnailBadges")?.firstOrNull()
-                            ?.getMapKey("thumbnailBadgeViewModel")?.getString("text") ?: ""
-                    val poster =
-                        lockup.getMapKey("contentImage")?.getMapKey("collectionThumbnailViewModel")
-                            ?.getMapKey("primaryThumbnail")?.getMapKey("thumbnailViewModel")
-                            ?.getMapKey("image")?.getListKey("sources")?.lastOrNull()
-                            ?.getString("url")
-
-                    val extractedUrl = YoutubeUtils.extractUrlFromLockup(lockup)
-                    val targetPath = if (!extractedUrl.isNullOrBlank()) {
-                        extractedUrl.removePrefix("/")
-                    } else {
-                        if (playlistId.startsWith("RD") || playlistId.startsWith("UL") || playlistId.startsWith("MM") || playlistId.startsWith("RDMM")) {
-                            "watch?list=$playlistId"
-                        } else {
-                            "playlist?list=$playlistId"
-                        }
-                    }
-
-                    return newTvSeriesSearchResponse(
-                        if (episodeCount.isNotEmpty()) "$title ($episodeCount)" else title,
-                        "$mainUrl/$targetPath",
-                        TvType.TvSeries
-                    ) {
-                        // [개선 사항 2] 포스터 단일 함수 구성 대체
-                        this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
-                    }
-                }
-            }
-
             val videoId = lockup.getString("contentId")
                 ?: lockup.getMapKey("content")?.getString("videoId")
                 ?: (lockup.getMapKey("content")?.getMapKey("videoRenderer")?.getString("videoId"))
@@ -1128,6 +1087,9 @@ class YoutubeProvider(
 
                 val metaString = getEpisodeMetaString(lockup.getMapKey("content") ?: lockup)
                 if (metaString.isNotBlank()) epMetaMapCache[videoId] = metaString
+
+                val membershipLabel = getMembershipLabel(lockup) ?: getMembershipLabel(renderer)
+                val isMembership = !membershipLabel.isNullOrBlank()
 
                 if (isShorts) {
                     val currentList = if (isSearch) searchShorts else homeShorts
@@ -1158,11 +1120,26 @@ class YoutubeProvider(
                     ) { this.posterUrl = poster }
                 } else {
                     finalTitle = when {
-                        channel.isNotBlank() && views.isNotBlank() -> "[$channel | $views] $title"
-                        channel.isNotBlank() -> "[$channel] $title"
-                        views.isNotBlank() && date.isNotBlank() -> "[$views | $date] $title"
-                        views.isNotBlank() -> "[$views] $title"
-                        else -> title
+                        channel.isNotBlank() && views.isNotBlank() -> {
+                            if (isMembership) "[$channel | $views | $membershipLabel] $title"
+                            else "[$channel | $views] $title"
+                        }
+                        channel.isNotBlank() -> {
+                            if (isMembership) "[$channel | $membershipLabel] $title"
+                            else "[$channel] $title"
+                        }
+                        views.isNotBlank() && date.isNotBlank() -> {
+                            if (isMembership) "[$views | $date | $membershipLabel] $title"
+                            else "[$views | $date] $title"
+                        }
+                        views.isNotBlank() -> {
+                            if (isMembership) "[$views | $membershipLabel] $title"
+                            else "[$views] $title"
+                        }
+                        else -> {
+                            if (isMembership) "[$membershipLabel] $title"
+                            else title
+                        }
                     }
                     poster = YoutubeUtils.getBestThumbnail(
                         lockup.getMapKey("contentImage")?.getMapKey("image")?.getListKey("sources")
@@ -1172,13 +1149,12 @@ class YoutubeProvider(
                         "$mainUrl/watch?v=$videoId",
                         TvType.Movie
                     ) {
-                        // [개선 사항 2] 포스터 단일 함수 구성 대체
                         this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                     }
                 }
             }
         }
-
+        
         val channelData = renderer.getMapKey("channelRenderer")
         if (channelData != null) {
             val id = channelData.getString("channelId")
@@ -2070,11 +2046,18 @@ class YoutubeProvider(
                         if (vidTitle.isBlank()) vidTitle = getText(safeGet(renderer, "metadata", "lockupMetadataViewModel", "title"))
                         if (vidTitle.isBlank()) vidTitle = "Video"
 
-                        val membershipLabel = getMembershipLabel(renderer)
+                        val membershipLabel = getMembershipLabel(renderer) ?: getMembershipLabel(item as? Map<*, *>)
                         if (!membershipLabel.isNullOrBlank()) {
                             vidTitle = "[$membershipLabel] $vidTitle"
                         }
 
+                        collectTo.add(newEpisode("$mainUrl/watch?v=$vidId") {
+                            this.name = vidTitle
+                            this.posterUrl = thumb
+                            this.description = metaString
+                        })
+                        
+                        
                         val thumb = YoutubeUtils.getBestThumbnail(renderer["thumbnail"]) 
                             ?: YoutubeUtils.getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
                             ?: YoutubeUtils.buildThumbnailFromId(vidId)
