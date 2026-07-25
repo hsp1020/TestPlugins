@@ -275,10 +275,26 @@ class YoutubeProvider(
 
     private fun getMembershipLabel(data: Map<*, *>?): String? {
         if (data == null) return null
-        return findMembersBadgeRecursive(data)
+
+        val videoId = data.getString("videoId")
+            ?: data.getString("contentId")
+            ?: data.getMapKey("content")?.getString("videoId")
+            ?: "Unknown"
+
+        Log.d("YOUTUBE-MEMBER", "--- Checking item: $videoId ---")
+
+        val result = findMembersBadgeRecursive(data, videoId)
+
+        if (result != null) {
+            Log.d("YOUTUBE-MEMBER", ">>> SUCCESS [$videoId]: Membership Badge Detected = '$result'")
+        } else {
+            Log.d("YOUTUBE-MEMBER", "x FAIL [$videoId]: No Membership Badge Found")
+        }
+
+        return result
     }
 
-    private fun findMembersBadgeRecursive(obj: Any?, depth: Int = 0): String? {
+    private fun findMembersBadgeRecursive(obj: Any?, videoId: String, depth: Int = 0): String? {
         if (obj == null || depth > 20) return null
 
         if (obj is Map<*, *>) {
@@ -291,10 +307,16 @@ class YoutubeProvider(
                 ?: obj["iconType"] as? String
                 ?: (obj["metadataBadgeRenderer"] as? Map<*, *>)?.getMapKey("icon")?.get("iconType") as? String
 
-            // 유튜브 API의 프로토콜 규격 상수만 확인 (단어/언어 하드코딩 일절 없음)
+            // 배지/스타일 관련 노드가 발견되면 Logcat에 구조 출력
+            if (style != null || iconType != null || obj.containsKey("metadataBadgeRenderer") || obj.containsKey("metadataBadgeViewModel") || obj.containsKey("badgeViewModel")) {
+                Log.d("YOUTUBE-MEMBER", "[$videoId] Inspecting Badge Node (depth $depth): style=$style, iconType=$iconType, keys=${obj.keys}")
+            }
+
             val isMembersBadge = style == "BADGE_STYLE_TYPE_MEMBERS_ONLY" || iconType == "MEMBERS_ONLY"
 
             if (isMembersBadge) {
+                Log.d("YOUTUBE-MEMBER", "[$videoId] MATCHED MEMBERS BADGE! Raw Node Data = $obj")
+
                 val label = getText(obj["label"])
                     .ifBlank { getText(obj["text"]) }
                     .ifBlank { getText(obj["badgeText"]) }
@@ -302,26 +324,26 @@ class YoutubeProvider(
                     .ifBlank { getText(obj["accessibilityData"]) }
                     .ifBlank { getText(obj["accessibility"]) }
 
-                // 유튜브 API가 동적으로 전달한 텍스트가 있을 때만 해당 텍스트 반환
+                Log.d("YOUTUBE-MEMBER", "[$videoId] Extracted Dynamic Label = '$label'")
+
                 if (label.isNotBlank()) {
                     return label
                 }
             }
 
-            for (value in obj.values) {
-                val found = findMembersBadgeRecursive(value, depth + 1)
+            for ((_, value) in obj) {
+                val found = findMembersBadgeRecursive(value, videoId, depth + 1)
                 if (found != null) return found
             }
         } else if (obj is List<*>) {
             for (item in obj) {
-                val found = findMembersBadgeRecursive(item, depth + 1)
+                val found = findMembersBadgeRecursive(item, videoId, depth + 1)
                 if (found != null) return found
             }
         }
 
         return null
-    }
-   
+    }   
     
     override var mainUrl = "https://www.youtube.com"
     override var name = "YouTube"
