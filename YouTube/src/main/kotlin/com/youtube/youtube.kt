@@ -272,6 +272,7 @@ class YoutubeProvider(
     @Volatile
     private var lastCustomSectionsJson: String? = null
 
+
     private fun getMembershipLabel(data: Map<*, *>?): String? {
         if (data == null) return null
         return findMembersBadgeRecursive(data)
@@ -283,19 +284,25 @@ class YoutubeProvider(
         if (obj is Map<*, *>) {
             val style = obj["style"] as? String
                 ?: obj["badgeStyle"] as? String
-            
+                ?: (obj["metadataBadgeRenderer"] as? Map<*, *>)?.get("style") as? String
+                ?: (obj["metadataBadgeViewModel"] as? Map<*, *>)?.get("badgeStyle") as? String
+
             val iconType = (obj["icon"] as? Map<*, *>)?.get("iconType") as? String
                 ?: obj["iconType"] as? String
+                ?: (obj["metadataBadgeRenderer"] as? Map<*, *>)?.getMapKey("icon")?.get("iconType") as? String
 
+            // 유튜브 API의 프로토콜 규격 상수만 확인 (단어/언어 하드코딩 일절 없음)
             val isMembersBadge = style == "BADGE_STYLE_TYPE_MEMBERS_ONLY" || iconType == "MEMBERS_ONLY"
 
             if (isMembersBadge) {
-                var label = getText(obj["label"])
-                if (label.isBlank()) label = getText(obj["text"])
-                if (label.isBlank()) label = getText(obj["badgeText"])
-                if (label.isBlank()) label = getText(obj["accessibilityData"])
-                if (label.isBlank()) label = getText(obj["accessibility"])
+                val label = getText(obj["label"])
+                    .ifBlank { getText(obj["text"]) }
+                    .ifBlank { getText(obj["badgeText"]) }
+                    .ifBlank { getText(obj["tooltip"]) }
+                    .ifBlank { getText(obj["accessibilityData"]) }
+                    .ifBlank { getText(obj["accessibility"]) }
 
+                // 유튜브 API가 동적으로 전달한 텍스트가 있을 때만 해당 텍스트 반환
                 if (label.isNotBlank()) {
                     return label
                 }
@@ -314,6 +321,7 @@ class YoutubeProvider(
 
         return null
     }
+   
     
     override var mainUrl = "https://www.youtube.com"
     override var name = "YouTube"
@@ -946,7 +954,8 @@ class YoutubeProvider(
 
                 val views = viewText.ifBlank { "N/A" }
 
-                val membershipLabel = getMembershipLabel(videoData)
+                // videoData 및 상위 renderer 객체 2중 검사
+                val membershipLabel = getMembershipLabel(videoData) ?: getMembershipLabel(renderer)
                 val isMembership = !membershipLabel.isNullOrBlank()
 
                 val finalTitle = when {
@@ -991,7 +1000,7 @@ class YoutubeProvider(
             }
             return null
         }
-        
+               
         val richContent = renderer.getMapKey("richItemRenderer")?.getMapKey("content")
         val shortsData = renderer.getMapKey("reelItemRenderer")
             ?: renderer.getMapKey("shortsLockupViewModel")
@@ -1060,51 +1069,6 @@ class YoutubeProvider(
                 return null
             }
 
-            if (contentType == "LOCKUP_CONTENT_TYPE_PLAYLIST") {
-                val playlistId = lockup.getString("contentId")
-                if (!playlistId.isNullOrBlank() && seenIds.add(playlistId)) {
-                    var title = lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
-                        ?.getMapKey("title")?.getString("content") ?: "Playlist"
-
-                    if (playlistId.startsWith("RD") || playlistId.startsWith("UL") || playlistId.startsWith("MM") || playlistId.startsWith("RDMM")) {
-                        title = YoutubeUtils.cleanMixTitle(title)
-                    }
-
-                    val episodeCount =
-                        lockup.getMapKey("contentImage")?.getMapKey("collectionThumbnailViewModel")
-                            ?.getMapKey("primaryThumbnail")?.getMapKey("thumbnailViewModel")
-                            ?.getListKey("overlays")?.firstOrNull()
-                            ?.getMapKey("thumbnailOverlayBadgeViewModel")
-                            ?.getListKey("thumbnailBadges")?.firstOrNull()
-                            ?.getMapKey("thumbnailBadgeViewModel")?.getString("text") ?: ""
-                    val poster =
-                        lockup.getMapKey("contentImage")?.getMapKey("collectionThumbnailViewModel")
-                            ?.getMapKey("primaryThumbnail")?.getMapKey("thumbnailViewModel")
-                            ?.getMapKey("image")?.getListKey("sources")?.lastOrNull()
-                            ?.getString("url")
-
-                    val extractedUrl = YoutubeUtils.extractUrlFromLockup(lockup)
-                    val targetPath = if (!extractedUrl.isNullOrBlank()) {
-                        extractedUrl.removePrefix("/")
-                    } else {
-                        if (playlistId.startsWith("RD") || playlistId.startsWith("UL") || playlistId.startsWith("MM") || playlistId.startsWith("RDMM")) {
-                            "watch?list=$playlistId"
-                        } else {
-                            "playlist?list=$playlistId"
-                        }
-                    }
-
-                    return newTvSeriesSearchResponse(
-                        if (episodeCount.isNotEmpty()) "$title ($episodeCount)" else title,
-                        "$mainUrl/$targetPath",
-                        TvType.TvSeries
-                    ) {
-                        // [개선 사항 2] 포스터 단일 함수 구성 대체
-                        this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
-                    }
-                }
-            }
-                        
             val videoId = lockup.getString("contentId")
                 ?: lockup.getMapKey("content")?.getString("videoId")
                 ?: (lockup.getMapKey("content")?.getMapKey("videoRenderer")?.getString("videoId"))
@@ -1133,6 +1097,7 @@ class YoutubeProvider(
                 val metaString = getEpisodeMetaString(lockup.getMapKey("content") ?: lockup)
                 if (metaString.isNotBlank()) epMetaMapCache[videoId] = metaString
 
+                // lockup 및 상위 renderer 객체 2중 검사
                 val membershipLabel = getMembershipLabel(lockup) ?: getMembershipLabel(renderer)
                 val isMembership = !membershipLabel.isNullOrBlank()
 
@@ -1199,6 +1164,7 @@ class YoutubeProvider(
                 }
             }
         }
+        
         
         val channelData = renderer.getMapKey("channelRenderer")
         if (channelData != null) {
