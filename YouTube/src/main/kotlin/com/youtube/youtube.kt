@@ -287,15 +287,19 @@ class YoutubeProvider(
 
         badges?.forEach { badge ->
             val badgeMap = badge as? Map<*, *>
-            val style = badgeMap?.getMapKey("metadataBadgeRenderer")?.getString("style")
-                ?: badgeMap?.getMapKey("metadataBadgeViewModel")?.getString("style")
+            if (badgeMap != null) {
+                val renderer = badgeMap.getMapKey("metadataBadgeRenderer")
+                val viewModel = badgeMap.getMapKey("metadataBadgeViewModel")
 
-            if (style == "BADGE_STYLE_TYPE_MEMBERS_ONLY" || style?.contains("MEMBERS_ONLY") == true) {
-                val label = getText(badgeMap.getMapKey("metadataBadgeRenderer")?.getMapKey("label"))
-                    .ifBlank { getText(badgeMap.getMapKey("metadataBadgeViewModel")?.getMapKey("text")) }
-                    .ifBlank { getText(badgeMap.getMapKey("metadataBadgeRenderer")?.getMapKey("accessibilityData")) }
+                val style = renderer?.getString("style") ?: viewModel?.getString("style")
 
-                if (label.isNotBlank()) return label
+                if (style == "BADGE_STYLE_TYPE_MEMBERS_ONLY" || style?.contains("MEMBERS_ONLY") == true) {
+                    val label = getText(renderer?.getMapKey("label"))
+                        .ifBlank { getText(viewModel?.getMapKey("text")) }
+                        .ifBlank { getText(renderer?.getMapKey("accessibilityData")) }
+
+                    if (label.isNotBlank()) return label
+                }
             }
         }
 
@@ -305,7 +309,7 @@ class YoutubeProvider(
         }
 
         return null
-    }
+    }    
     
     override var mainUrl = "https://www.youtube.com"
     override var name = "YouTube"
