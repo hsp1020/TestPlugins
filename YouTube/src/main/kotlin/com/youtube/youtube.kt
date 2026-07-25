@@ -287,14 +287,14 @@ class YoutubeProvider(
             val iconType = (obj["icon"] as? Map<*, *>)?.get("iconType") as? String
                 ?: obj["iconType"] as? String
 
-            // API의 구조적 Enum 값만 식별 (언어/텍스트 하드코딩 제로)
             val isMembersBadge = style == "BADGE_STYLE_TYPE_MEMBERS_ONLY" || iconType == "MEMBERS_ONLY"
 
             if (isMembersBadge) {
-                val label = getText(obj["label"])
-                    .ifBlank { getText(obj["text"]) }
-                    .ifBlank { getText(obj["badgeText"]) }
-                    .ifBlank { (obj["accessibilityData"] as? Map<*, *>)?.get("label") as? String }
+                var label = getText(obj["label"])
+                if (label.isBlank()) label = getText(obj["text"])
+                if (label.isBlank()) label = getText(obj["badgeText"])
+                if (label.isBlank()) label = getText(obj["accessibilityData"])
+                if (label.isBlank()) label = getText(obj["accessibility"])
 
                 if (label.isNotBlank()) {
                     return label
@@ -313,7 +313,7 @@ class YoutubeProvider(
         }
 
         return null
-    }    
+    }
     
     override var mainUrl = "https://www.youtube.com"
     override var name = "YouTube"
@@ -2096,13 +2096,6 @@ class YoutubeProvider(
                             vidTitle = "[$membershipLabel] $vidTitle"
                         }
 
-                        collectTo.add(newEpisode("$mainUrl/watch?v=$vidId") {
-                            this.name = vidTitle
-                            this.posterUrl = thumb
-                            this.description = metaString
-                        })
-                        
-                        
                         val thumb = YoutubeUtils.getBestThumbnail(renderer["thumbnail"]) 
                             ?: YoutubeUtils.getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
                             ?: YoutubeUtils.buildThumbnailFromId(vidId)
@@ -2137,7 +2130,7 @@ class YoutubeProvider(
                         })
                         break 
                     }
-                }                        
+                }
             } catch (e: Exception) {
             }
         }
