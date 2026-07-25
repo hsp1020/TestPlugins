@@ -103,10 +103,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/MoviekingProvider/image-4.png",
-        "fileHash": "sha256-4c82192b943ff9ed3b8bdb9fc19fcd74f64ee48b6f531dfebec58c6734d23491",
+        "fileHash": "sha256-aac951672289264eb810e6399712fd1e53624843bce507a68b69f17a5671c2d4",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 37024,
+        "fileSize": 37508,
         "status": 1,
         "language": "ko",
         "authors": [
