@@ -1069,6 +1069,51 @@ class YoutubeProvider(
                 return null
             }
 
+                        if (contentType == "LOCKUP_CONTENT_TYPE_PLAYLIST") {
+                val playlistId = lockup.getString("contentId")
+                if (!playlistId.isNullOrBlank() && seenIds.add(playlistId)) {
+                    var title = lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
+                        ?.getMapKey("title")?.getString("content") ?: "Playlist"
+
+                    if (playlistId.startsWith("RD") || playlistId.startsWith("UL") || playlistId.startsWith("MM") || playlistId.startsWith("RDMM")) {
+                        title = YoutubeUtils.cleanMixTitle(title)
+                    }
+
+                    val episodeCount =
+                        lockup.getMapKey("contentImage")?.getMapKey("collectionThumbnailViewModel")
+                            ?.getMapKey("primaryThumbnail")?.getMapKey("thumbnailViewModel")
+                            ?.getListKey("overlays")?.firstOrNull()
+                            ?.getMapKey("thumbnailOverlayBadgeViewModel")
+                            ?.getListKey("thumbnailBadges")?.firstOrNull()
+                            ?.getMapKey("thumbnailBadgeViewModel")?.getString("text") ?: ""
+                    val poster =
+                        lockup.getMapKey("contentImage")?.getMapKey("collectionThumbnailViewModel")
+                            ?.getMapKey("primaryThumbnail")?.getMapKey("thumbnailViewModel")
+                            ?.getMapKey("image")?.getListKey("sources")?.lastOrNull()
+                            ?.getString("url")
+
+                    val extractedUrl = YoutubeUtils.extractUrlFromLockup(lockup)
+                    val targetPath = if (!extractedUrl.isNullOrBlank()) {
+                        extractedUrl.removePrefix("/")
+                    } else {
+                        if (playlistId.startsWith("RD") || playlistId.startsWith("UL") || playlistId.startsWith("MM") || playlistId.startsWith("RDMM")) {
+                            "watch?list=$playlistId"
+                        } else {
+                            "playlist?list=$playlistId"
+                        }
+                    }
+
+                    return newTvSeriesSearchResponse(
+                        if (episodeCount.isNotEmpty()) "$title ($episodeCount)" else title,
+                        "$mainUrl/$targetPath",
+                        TvType.TvSeries
+                    ) {
+                        // [개선 사항 2] 포스터 단일 함수 구성 대체
+                        this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
+                    }
+                }
+            }
+                        
             val videoId = lockup.getString("contentId")
                 ?: lockup.getMapKey("content")?.getString("videoId")
                 ?: (lockup.getMapKey("content")?.getMapKey("videoRenderer")?.getString("videoId"))
