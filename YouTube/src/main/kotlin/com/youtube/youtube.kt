@@ -1013,7 +1013,7 @@ class YoutubeProvider(
                 val poster = YoutubeUtils.getShortsSearchPoster(videoId)
 
                 val currentList = if (isSearch) searchShorts else homeShorts
-                val contextTag = if (isSearch) "&ctx=search" else "&ctx=home"
+                val contextTag = if (isSearch) "?ctx=search" else "?ctx=home"
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
 
                 val descText = views.replace("\r", "").replace("\n", "").trim()
@@ -1122,7 +1122,7 @@ class YoutubeProvider(
 
                 if (isShorts) {
                     val currentList = if (isSearch) searchShorts else homeShorts
-                    val contextTag = if (isSearch) "&ctx=search" else "&ctx=home"
+                    val contextTag = if (isSearch) "?ctx=search" else "?ctx=home"
                     val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
                     
                     poster = YoutubeUtils.getShortsSearchPoster(videoId)
