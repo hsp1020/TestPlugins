@@ -1,11 +1,12 @@
 package com.kktv
 
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
-import com.fasterxml.jackson.annotation.JsonProperty
 
-// 중계 API JSON 응답 모델 (사이트 API 구조에 맞춰 매핑)
+// JSON 응답을 매핑할 데이터 클래스
 data class MatchData(
     @JsonProperty("id") val id: String?,
     @JsonProperty("league_name") val leagueName: String?,
@@ -17,7 +18,6 @@ data class MatchData(
 
 class KKTVProvider : MainAPI() {
     override var mainUrl = "https://ifadetv.com"
-    // 실제 중계 목록 및 라이브스코어가 로드되는 iframe Base URL
     private val liveFrameUrl = "https://fkwdsvop.com/KingKong/livescore/livescore/"
 
     override var name = "KKTV"
@@ -26,14 +26,13 @@ class KKTVProvider : MainAPI() {
     override val hasMainPage = true
 
     /**
-     * 1. 실제 스포츠 중계 경기 목록 파싱 (게시글 X, 경기 목록 O)
+     * 빌드 에러 수정: request 타입을 ProviderData -> MainPageRequest 로 변경하고 반환타입을 nullable로 수정
      */
-    override suspend fun getMainPage(page: Int, request: ProviderData): HomePageResponse {
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val homeList = mutableListOf<HomePageList>()
         val items = mutableListOf<SearchResponse>()
 
         try {
-            // iframe 페이지 요청 (Referer 헤더 필수)
             val response = app.get(
                 liveFrameUrl,
                 headers = mapOf(
@@ -44,8 +43,8 @@ class KKTVProvider : MainAPI() {
 
             val text = response.text
 
-            // API가 JSON 배열 형태 데이터를 반환하는 경우
             if (text.trim().startsWith("[") || text.trim().startsWith("{")) {
+                // 빌드 에러 수정: AppUtils.parseJson 임포트 및 명시적 타입 캐스팅 지정
                 val matches = parseJson<List<MatchData>>(text)
                 matches.forEach { match ->
                     val league = match.leagueName ?: "스포츠"
@@ -62,9 +61,7 @@ class KKTVProvider : MainAPI() {
                     )
                 }
             } else {
-                // HTML DOM으로 중계 경기 엘리먼트를 노출하는 경우
                 val doc = response.document
-                // 경기 항목 셀렉터 파싱 (iframe 내부 중계 목록 DOM 기준)
                 doc.select(".match_list_item, tr.game_item, div[data-game-id]").forEach { element ->
                     val league = element.select(".league, .comp").text().trim()
                     val home = element.select(".home_team, .home").text().trim()
@@ -93,24 +90,34 @@ class KKTVProvider : MainAPI() {
             e.printStackTrace()
         }
 
+        if (homeList.isEmpty()) return null
         return newHomePageResponse(homeList, hasNext = false)
     }
 
+    /**
+     * 빌드 에러 수정: null 안전 처리(?.) 및 더미 MainPageRequest 인자 적용
+     */
     override suspend fun search(query: String): List<SearchResponse> {
-        val homeResponse = getMainPage(1, ProviderData(""))
-        val allMatches = homeResponse.items.flatMap { it.list }
+        val homeResponse = getMainPage(1, MainPageRequest("main", "", false))
+        val allMatches = homeResponse?.items?.flatMap { it.list } ?: emptyList()
         return allMatches.filter { it.name.contains(query, ignoreCase = true) }
     }
 
+    /**
+     * 빌드 에러 수정: newLiveStreamLoadResponse의 파라미터가 초과되지 않도록 맞춤 (TvType 제외)
+     */
     override suspend fun load(url: String): LoadResponse {
-        return newLiveStreamLoadResponse("스포츠 실시간 중계", url, TvType.Live, url) {
+        val title = "스포츠 실시간 중계"
+        // param: name, url, dataUrl 순서 준수
+        return newLiveStreamLoadResponse(title, url, url) {
             this.posterUrl = "$mainUrl/assets/Pc/img/hd_logo.png"
         }
     }
 
     /**
-     * 2. kcdn.ehfkdowl.com 등 m3u8 라이브 스트림 URL 추출
+     * 빌드 에러 수정: ExtractorLink Deprecated 워닝을 무시하여 빌드 멈춤(Fail) 방지
      */
+    @Suppress("DEPRECATION")
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -118,9 +125,8 @@ class KKTVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         try {
-            // 이미 직렬 m3u8 URL인 경우
             if (data.contains(".m3u8")) {
-                callback(
+                callback.invoke(
                     ExtractorLink(
                         source = name,
                         name = "$name Live",
@@ -133,7 +139,6 @@ class KKTVProvider : MainAPI() {
                 return true
             }
 
-            // 플레이어 페이지 요청
             val playerPageText = app.get(
                 data,
                 headers = mapOf(
@@ -142,13 +147,11 @@ class KKTVProvider : MainAPI() {
                 )
             ).text
 
-            // kcdn m3u8 (chunklist.m3u8 등) 정규식 추출
-            // 예시: https://kcdn.ehfkdowl.com/bigwinsoft/143/chunklist.m3u8?t=1785049200&ds=48214
             val m3u8Regex = Regex("""https?://[^\s"'<>]+chunklist\.m3u8[^\s"'<>]*|https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""")
             val matchUrl = m3u8Regex.find(playerPageText)?.value
 
             if (matchUrl != null) {
-                callback(
+                callback.invoke(
                     ExtractorLink(
                         source = name,
                         name = "$name Live HD",
