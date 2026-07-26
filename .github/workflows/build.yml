@@ -25,7 +25,7 @@ jobs:
         with:
           repository: "hsp1020/TestPlugins-build" # 새로 만든 공개 배포용 레포 주소
           token: ${{ secrets.BUILD_REPO_TOKEN }}   # 등록해 둔 비밀 토큰 사용
-          ref: "main"                             # 공개 레포의 기본 브랜치 (main 또는 master)
+          ref: "main"                             # 공개 레포의 브랜치를 'main'으로 설정
           path: "builds"
       
       - name: Clean old builds
@@ -42,6 +42,8 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Build Plugins
+        env:
+          GITHUB_REPOSITORY: "hsp1020/TestPlugins-build" # 빌드 도구가 공개 레포용 주소를 자동 생성하도록 환경변수 강제 주입
         run: |
           cd $GITHUB_WORKSPACE/src
           chmod +x gradlew
@@ -49,7 +51,7 @@ jobs:
           cp **/build/*.cs3 $GITHUB_WORKSPACE/builds/ || true
           cp **/build/*.jar $GITHUB_WORKSPACE/builds || true
           cp build/plugins.json $GITHUB_WORKSPACE/builds || true
-          cp repo.json $GITHUB_WORKSPACE/builds/ || true # repo.json 복사 명령어 추가됨
+          cp repo.json $GITHUB_WORKSPACE/builds/ || true
 
       - name: Push builds
         run: |
@@ -59,5 +61,5 @@ jobs:
           git add .
           if ! git diff-index --quiet HEAD; then
             git commit -m "Build $GITHUB_SHA"
-            git push origin main --force # 외부 공개 레포의 main 브랜치로 강제 push
+            git push origin main --force # 공개 레포의 'main' 브랜치로 강제 push
           fi
