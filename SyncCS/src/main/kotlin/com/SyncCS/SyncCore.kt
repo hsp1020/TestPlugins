@@ -8,7 +8,7 @@ import android.util.Base64
 import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.module.kotlin.readValue
-import com.lagradost.cloudstream3.AcraApplication
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.utils.DataStore
@@ -355,14 +355,14 @@ object ApiUtils {
     private val isSyncing = AtomicBoolean(false)
 
     private fun isLoggedIn(): Boolean {
-        val context = AcraApplication.context ?: return false
+        val context = CloudStreamApp.context ?: return false
         val prefs = with(DataStore) { context.getSharedPrefs() }
         val token = prefs.getString("sync_token", null)?.let { mapper.readValue<String>(it) }
         return !token.isNullOrEmpty()
     }
 
     private suspend fun apiCall(url: String, method: String, body: Any? = null): String? {
-        val context = AcraApplication.context ?: return null
+        val context = CloudStreamApp.context ?: return null
         val prefs = with(DataStore) { context.getSharedPrefs() }
         val token = prefs.getString("sync_token", null)?.let { mapper.readValue<String>(it) } ?: return null
 
@@ -412,8 +412,8 @@ object ApiUtils {
             val existingGist = gists.find { it.description == "Cloudstream Sync Backup" }
             if (existingGist != null) {
                 val gistId = existingGist.id ?: return Pair(false, "Found Gist but it has no ID.")
-                AcraApplication.setKey("sync_project_num", gistId) 
-                AcraApplication.setKey("sync_gist_id", gistId)
+                CloudStreamApp.setKey("sync_project_num", gistId) 
+                CloudStreamApp.setKey("sync_gist_id", gistId)
                 Log.d("SYNC", "[ApiUtils] Connected to existing Gist: $gistId")
                 return Pair(true, "Successfully connected to existing GitHub Gist!")
             } else {
@@ -439,8 +439,8 @@ object ApiUtils {
                 }
 
                 val gistId = newGist.id ?: return Pair(false, "Created Gist has no ID.")
-                AcraApplication.setKey("sync_project_num", gistId)
-                AcraApplication.setKey("sync_gist_id", gistId)
+                CloudStreamApp.setKey("sync_project_num", gistId)
+                CloudStreamApp.setKey("sync_gist_id", gistId)
                 Log.d("SYNC", "[ApiUtils] Created new Gist ID: $gistId")
                 return Pair(true, "Successfully auto-created a new GitHub Gist!")
             }
@@ -450,7 +450,7 @@ object ApiUtils {
             if (gistJson == null) {
                 return Pair(false, "Gist ID is invalid or Token has no access to it.")
             }
-            AcraApplication.setKey("sync_gist_id", customGistId)
+            CloudStreamApp.setKey("sync_gist_id", customGistId)
             return Pair(true, "Successfully connected to GitHub Gist!")
         }
     }
@@ -458,7 +458,7 @@ object ApiUtils {
     suspend fun fetchDevices(): List<SyncDevice> {
         if (!isLoggedIn()) return emptyList()
         
-        val context = AcraApplication.context ?: return emptyList()
+        val context = CloudStreamApp.context ?: return emptyList()
         val prefs = with(DataStore) { context.getSharedPrefs() }
         val gistId = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return emptyList()
         
@@ -491,7 +491,7 @@ object ApiUtils {
     }
 
     suspend fun deleteDevice(projectId: String, itemId: String): Boolean {
-        val context = AcraApplication.context ?: return false
+        val context = CloudStreamApp.context ?: return false
         val prefs = with(DataStore) { context.getSharedPrefs() }
         val gistId = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return false
 
@@ -504,7 +504,7 @@ object ApiUtils {
         return true
     }
 
-    suspend fun syncThisDevice(backupData: String, context: Context? = AcraApplication.context): Pair<Boolean, String> {
+    suspend fun syncThisDevice(backupData: String, context: Context? = CloudStreamApp.context): Pair<Boolean, String> {
         if (!isLoggedIn()) return Pair(false, "Not logged in")
         
         if (!isSyncing.compareAndSet(false, true)) {
@@ -519,7 +519,7 @@ object ApiUtils {
                 prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) }
             } catch (e: Exception) {
                 null
-            } ?: UtilKt.getDeviceId(context?.packageName ?: "", context ?: AcraApplication.context!!)
+            } ?: UtilKt.getDeviceId(context?.packageName ?: "", context ?: CloudStreamApp.context!!)
             val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
             
             val compressedData = UtilKt.compressJsonToString(backupData)
