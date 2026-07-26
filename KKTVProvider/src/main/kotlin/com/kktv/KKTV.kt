@@ -12,6 +12,7 @@ import kotlinx.coroutines.*
 import org.jsoup.Jsoup
 import java.net.URLEncoder
 import java.net.URLDecoder
+import kotlin.coroutines.resume
 
 class KKTVProvider : MainAPI() {
     override var mainUrl = "https://ifadetv.com"
@@ -31,7 +32,6 @@ class KKTVProvider : MainAPI() {
     private fun getNoMatchesResponse(requestName: String, msg: String): HomePageResponse {
         println("[KKTV DEBUG] ❌ 에러 반환: $msg")
         val errorItem = newLiveSearchResponse(name = msg, url = mainUrl) {
-            // 🚨 기본 로고 완전 제거
             this.posterUrl = "" 
         }
         return newHomePageResponse(
@@ -75,7 +75,6 @@ class KKTVProvider : MainAPI() {
             webView.webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
-                    // 🚨 수정: JS 로딩 속도를 고려해 setInterval로 함수가 생길 때까지 0.5초마다 감시하며 실행
                     val jsHook = """
                         javascript:(function() {
                             var originalSend = XMLHttpRequest.prototype.send;
@@ -106,7 +105,6 @@ class KKTVProvider : MainAPI() {
             println("[KKTV DEBUG] 🔍 WebView 로드 시작: $url")
             webView.loadUrl(url)
 
-            // 타임아웃 12초 (JS 연산 시간 고려)
             val handler = Handler(Looper.getMainLooper())
             val timeoutRunnable = Runnable {
                 if (!isResumed) {
@@ -135,8 +133,15 @@ class KKTVProvider : MainAPI() {
 
         try {
             val iframeHtml = app.get(iframeUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent)).text
+            
+            // 🚨 하드코딩 삭제: targetId를 못 찾으면 469를 강제로 박는 게 아니라 깔끔하게 에러 반환
             val targetIdRegex = Regex("""targetId\s*=\s*['"]?(\d+)['"]?""")
-            val dynamicTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1) ?: "469"
+            val dynamicTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1)
+            
+            if (dynamicTargetId == null) {
+                println("[KKTV DEBUG] ❌ targetId 동적 추출 실패! HTML 구조 변경 의심.")
+                return getNoMatchesResponse(request.name, "targetId 동적 추출 실패")
+            }
 
             if (cachedAuToken == null) {
                 cachedAuToken = getDynamicTokenViaWebView(iframeUrl)
@@ -219,7 +224,7 @@ class KKTVProvider : MainAPI() {
                         val posterUrlFromJson = if (thumbnail.isNotBlank() && thumbnail.startsWith("//")) {
                             "https:$thumbnail"
                         } else {
-                            "" // 로고 이미지 제거
+                            ""
                         }
 
                         val channelId = thumbnail.substringAfterLast("/")
@@ -277,9 +282,6 @@ class KKTVProvider : MainAPI() {
         }
     }
 
-    // =========================================================================
-    // 🔥 [핵심기술] 코루틴 병렬(Async) 처리로 26+개 CDN을 한 번에 스캔
-    // =========================================================================
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -297,20 +299,18 @@ class KKTVProvider : MainAPI() {
                 val alphabetCdns = ('a'..'z').map { "${it}cdn" }.filterNot { it in primaryCdns }
                 val allCdns = primaryCdns + alphabetCdns
 
-                // 🚨 수정: for 루프(순차) 폐기 -> coroutineScope async (병렬) 스캔 도입!
                 val validM3u8Url = coroutineScope {
                     allCdns.map { cdn ->
                         async {
                             val m3u8Url = "https://$cdn.ehfkdowl.com/bigwinsoft/$channelId/chunklist.m3u8?t=$tParam&ds=$seq"
                             try {
-                                // 2.5초 타임아웃으로 동시에 찌릅니다.
                                 val response = app.get(m3u8Url, headers = mapOf("User-Agent" to userAgent), timeout = 2500L)
                                 if (response.code == 200) m3u8Url else null
                             } catch (e: Exception) {
                                 null
                             }
                         }
-                    }.awaitAll().firstOrNull { it != null } // 👈 병렬로 전부 돌린 후 가장 먼저 살아있는(null이 아닌) 1개만 건져옵니다.
+                    }.awaitAll().firstOrNull { it != null }
                 }
 
                 if (validM3u8Url != null) {
