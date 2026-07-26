@@ -91,7 +91,7 @@ class KKTVProvider : MainAPI() {
                     val jsResponse = app.get(jsUrl, headers = mapOf("Referer" to iframeUrl, "User-Agent" to userAgent))
                     val jsContent = jsResponse.text
                     
-                    // [개선] getEcodeData 함수 정의가 완전히 다 보일 수 있도록 뒤쪽 출력 범위를 4,000자로 확장
+                    // [개선] getEcodeData 발견 시 안드로이드 로그캣 한계 우회를 위해 1,000자씩 분할 출력 수행
                     var lastIndex = 0
                     var matchCount = 1
                     while (true) {
@@ -100,13 +100,40 @@ class KKTVProvider : MainAPI() {
                         
                         println("[KKTV DEBUG] 🔍 getEcodeData 발견 #$matchCount ($jsUrl) - index: $index")
                         val start = (index - 200).coerceAtLeast(0)
-                        val end = (index + 4000).coerceAtMost(jsContent.length) // 출력 길이 4000자로 조정
+                        val end = (index + 8000).coerceAtMost(jsContent.length) // 8,000자 수집
+                        
                         println("[KKTV DEBUG] 📋 주변 소스코드 #$matchCount ---------------------------------")
-                        println(jsContent.substring(start, end))
+                        val fullSubstring = jsContent.substring(start, end)
+                        
+                        // 1000자 조각으로 쪼개서 줄 단위로 출력 (로그캣 잘림 우회 완료)
+                        fullSubstring.chunked(1000).forEachIndexed { chunkIndex, chunk ->
+                            println("[KKTV DEBUG] 📋 [파트 ${chunkIndex + 1}] $chunk")
+                        }
                         println("[KKTV DEBUG] 📋 -------------------------------------------------------------")
                         
                         lastIndex = index + "getEcodeData".length
                         matchCount++
+                    }
+
+                    // [추가] 시간 추출 포맷 확인을 위해 getLocalTime 함수 정의도 함께 추적 출력합니다.
+                    var lastLtIndex = 0
+                    var ltMatchCount = 1
+                    while (true) {
+                        val index = jsContent.indexOf("getLocalTime", lastLtIndex)
+                        if (index == -1) break
+                        
+                        println("[KKTV DEBUG] 🔍 getLocalTime 발견 #$ltMatchCount ($jsUrl) - index: $index")
+                        val start = (index - 200).coerceAtLeast(0)
+                        val end = (index + 1500).coerceAtMost(jsContent.length)
+                        val ltSubstring = jsContent.substring(start, end)
+                        
+                        ltSubstring.chunked(1000).forEachIndexed { chunkIndex, chunk ->
+                            println("[KKTV DEBUG] 📋 [getLocalTime 파트 ${chunkIndex + 1}] $chunk")
+                        }
+                        println("[KKTV DEBUG] 📋 -------------------------------------------------------------")
+                        
+                        lastLtIndex = index + "getLocalTime".length
+                        ltMatchCount++
                     }
 
                     // JS 본문 안에서 "auToken" 키워드 위치 추적
