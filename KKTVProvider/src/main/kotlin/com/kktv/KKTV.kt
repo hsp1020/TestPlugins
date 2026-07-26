@@ -21,7 +21,6 @@ class KKTVProvider : MainAPI() {
         "live_matches" to "실시간 스포츠 중계"
     )
 
-    // 차단 우회를 위한 트렌디한 브라우저 User-Agent 교체
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
     private fun getNoMatchesResponse(requestName: String, msg: String): HomePageResponse {
@@ -49,48 +48,75 @@ class KKTVProvider : MainAPI() {
             
             println("[KKTV DEBUG] 2. iframe 응답 결과 | HTTP Code: ${iframeResponse.code} | 본문 길이: ${iframeHtml.length}")
             
-            // 본문이 1000자 미만으로 유난히 짧으면, 차단이나 에러 내용 확인을 위해 HTML 본문 원본 전체를 로그에 즉시 표시합니다.
             if (iframeHtml.length < 1000) {
-                println("[KKTV DEBUG] ⚠️ 본문이 너무 짧습니다. 아래는 수신된 실제 HTML 전체 내용입니다:")
+                println("[KKTV DEBUG] ⚠️ 본문이 지나치게 짧습니다. 아래는 수신된 실제 HTML 전체 내용입니다:")
                 println(iframeHtml)
             }
 
-            // 개선된 정규식 패턴
-            val tokenRegex = Regex("""['"]?auToken['"]?\s*[:=]\s*['"]([^'"]+)['"]""")
-            val targetIdRegex = Regex("""['"]?c_targetId['"]?\s*[:=]\s*['"]?(\d+)['"]?""")
-            
-            val parsedToken = tokenRegex.find(iframeHtml)?.groupValues?.get(1)
+            // 1. targetId 추출 (HTML 내의 var targetId=469; 매칭)
+            val targetIdRegex = Regex("""targetId\s*=\s*(\d+)""")
             val parsedTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1)
 
-            // 파싱 실패 시, 정규식 매칭이 어긋난 것인지 HTML 자체가 누락된 것인지 로그에 상세 표시합니다.
-            if (parsedToken == null) {
-                println("[KKTV DEBUG] ⚠️ auToken 정규식 매칭 실패!")
-                val auTokenIndex = iframeHtml.indexOf("auToken")
-                if (auTokenIndex != -1) {
-                    val start = (auTokenIndex - 100).coerceAtLeast(0)
-                    val end = (auTokenIndex + 200).coerceAtMost(iframeHtml.length)
-                    println("[KKTV DEBUG] 🔍 auToken 단어 감지됨! 주변 코드 부분 출력: ${iframeHtml.substring(start, end)}")
-                } else {
-                    println("[KKTV DEBUG] 🔍 HTML 본문 내에 'auToken' 문자열 자체가 없습니다. 문제 분석용 소스코드 상위 3000자 대량 덤프:")
-                    val logLimit = iframeHtml.length.coerceAtMost(3000)
-                    println(iframeHtml.substring(0, logLimit))
-                }
+            if (parsedTargetId == null) {
+                println("[KKTV DEBUG] ⚠️ targetId 추출 실패! 기본값 469 사용.")
             } else {
-                println("[KKTV DEBUG] ✅ auToken 추출 성공: $parsedToken")
+                println("[KKTV DEBUG] ✅ targetId 추출 성공: $parsedTargetId")
             }
 
-            if (parsedTargetId == null) {
-                println("[KKTV DEBUG] ⚠️ c_targetId 정규식 매칭 실패!")
-                val targetIdIndex = iframeHtml.indexOf("c_targetId")
-                if (targetIdIndex != -1) {
-                    val start = (targetIdIndex - 100).coerceAtLeast(0)
-                    val end = (targetIdIndex + 200).coerceAtMost(iframeHtml.length)
-                    println("[KKTV DEBUG] 🔍 c_targetId 단어 감지됨! 주변 코드 부분 출력: ${iframeHtml.substring(start, end)}")
-                } else {
-                    println("[KKTV DEBUG] 🔍 HTML 본문 내에 'c_targetId' 문자열 자체가 없습니다.")
+            // 2. 외부 JS 파일을 추적하여 auToken 추출 진행
+            var parsedToken: String? = null
+
+            // HTML 내부에서 /def_iframe_v2/ 경로를 포함하는 JS 스크립트 소스 주소들을 동적 추출
+            val scriptRegex = Regex("""src=["']([^"']+/def_iframe_v2/[^"']+)["']""")
+            var jsUrls = scriptRegex.findAll(iframeHtml).map { match ->
+                val path = match.groupValues[1]
+                if (path.startsWith("http")) path else "https://fkwdsvop.com$path"
+            }.toList()
+
+            // 추출에 실패했을 경우를 대비한 하드코딩 대체 경로 구성
+            if (jsUrls.isEmpty()) {
+                println("[KKTV DEBUG] ⚠️ HTML에서 JS 파일 경로 추출 실패. 기본 경로 목록을 대입합니다.")
+                jsUrls = listOf(
+                    "https://fkwdsvop.com/static/common/js/def_iframe_v2/common.js?v=202603251115671",
+                    "https://fkwdsvop.com/static/common/js/def_iframe_v2/sports.min.js?v=202603251115671"
+                )
+            }
+
+            // auToken 형식을 식별할 256자 Hex 정규식
+            val hexRegex = Regex("""[0-9a-fA-F]{256}""")
+
+            for (jsUrl in jsUrls) {
+                try {
+                    println("[KKTV DEBUG] 🔍 외부 JS 파일 다운로드 및 토큰 검색 중: $jsUrl")
+                    val jsResponse = app.get(jsUrl, headers = mapOf("Referer" to iframeUrl, "User-Agent" to userAgent))
+                    val jsContent = jsResponse.text
+                    
+                    // JS 본문 안에서 "auToken" 키워드 위치 추적
+                    val auTokenKeyIndex = jsContent.indexOf("auToken")
+                    if (auTokenKeyIndex != -1) {
+                        println("[KKTV DEBUG] 🔍 JS 내부에서 'auToken' 키워드 위치 감지 성공!")
+                        val searchArea = jsContent.substring(
+                            (auTokenKeyIndex - 50).coerceAtLeast(0),
+                            (auTokenKeyIndex + 500).coerceAtMost(jsContent.length)
+                        )
+                        val tokenMatch = hexRegex.find(searchArea)?.value
+                        if (tokenMatch != null) {
+                            parsedToken = tokenMatch
+                            println("[KKTV DEBUG] ✅ JS 키워드 타겟팅 auToken 파싱 완료: $parsedToken")
+                            break
+                        }
+                    }
+                    
+                    // 키워드가 없더라도 JS 파일 전역에서 256자리 Hex 토큰 패턴이 보이면 수집
+                    val generalMatch = hexRegex.find(jsContent)?.value
+                    if (generalMatch != null) {
+                        parsedToken = generalMatch
+                        println("[KKTV DEBUG] ✅ JS 전역 256자 Hex 패턴 auToken 파싱 완료: $parsedToken")
+                        break
+                    }
+                } catch (e: Exception) {
+                    println("[KKTV DEBUG] ⚠️ JS 파일 ($jsUrl) 다운로드 실패: ${e.message}")
                 }
-            } else {
-                println("[KKTV DEBUG] ✅ c_targetId 추출 성공: $parsedTargetId")
             }
 
             val dynamicToken = parsedToken 
