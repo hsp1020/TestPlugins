@@ -91,7 +91,7 @@ class KKTVProvider : MainAPI() {
                     val jsResponse = app.get(jsUrl, headers = mapOf("Referer" to iframeUrl, "User-Agent" to userAgent))
                     val jsContent = jsResponse.text
                     
-                    // [대폭 보강] JS 파일 전체에서 "getEcodeData" 문자열이 발견되는 모든 위치를 찾아 순차 로깅합니다.
+                    // [개선] getEcodeData 함수 정의가 완전히 다 보일 수 있도록 뒤쪽 출력 범위를 4,000자로 확장
                     var lastIndex = 0
                     var matchCount = 1
                     while (true) {
@@ -100,7 +100,7 @@ class KKTVProvider : MainAPI() {
                         
                         println("[KKTV DEBUG] 🔍 getEcodeData 발견 #$matchCount ($jsUrl) - index: $index")
                         val start = (index - 200).coerceAtLeast(0)
-                        val end = (index + 1000).coerceAtMost(jsContent.length)
+                        val end = (index + 4000).coerceAtMost(jsContent.length) // 출력 길이 4000자로 조정
                         println("[KKTV DEBUG] 📋 주변 소스코드 #$matchCount ---------------------------------")
                         println(jsContent.substring(start, end))
                         println("[KKTV DEBUG] 📋 -------------------------------------------------------------")
