@@ -1,6 +1,6 @@
 package com.hsp1020.youtube
 
-import com.lagradost.cloudstream3.AcraApplication
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mvvm.logError
@@ -171,7 +171,7 @@ open class YoutubeExtractor : ExtractorApi() {
         }
 
         private fun openInExternalApp(packageName: String, targetUrl: String) {
-            val context = AcraApplication.context ?: return
+            val context = CloudStreamApp.context ?: return
             android.os.Handler(android.os.Looper.getMainLooper()).post {
                 try {
                     val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
@@ -575,7 +575,7 @@ open class YoutubeExtractor : ExtractorApi() {
         
         println("[TRACK] 1. Initial HTML Fetch & Cached Metadata Config Retrieval")
         
-        val context = com.lagradost.cloudstream3.AcraApplication.context
+        val context = com.lagradost.cloudstream3.CloudStreamApp.context
         val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
         val prefs = (provider as? com.hsp1020.youtube.YoutubeProvider)?.appPrefs 
             ?: context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
@@ -1046,7 +1046,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         val isDirectDubbed = url.contains("direct_dub=true")
 
-        val context = com.lagradost.cloudstream3.AcraApplication.context
+        val context = com.lagradost.cloudstream3.CloudStreamApp.context
         val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
         
         val prefs = context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
