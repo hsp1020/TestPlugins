@@ -1,10 +1,19 @@
 package com.kktv
 
+import android.os.Handler
+import android.os.Looper
+import android.webkit.ConsoleMessage
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import java.net.URLEncoder
 import java.net.URLDecoder
+import kotlin.coroutines.resume
 
 class KKTVProvider : MainAPI() {
     override var mainUrl = "https://ifadetv.com"
@@ -19,6 +28,8 @@ class KKTVProvider : MainAPI() {
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
+    private var cachedAuToken: String? = null
+
     private fun getNoMatchesResponse(requestName: String, msg: String): HomePageResponse {
         println("[KKTV DEBUG] ❌ 에러/빈화면 반환 사유: $msg")
         val errorItem = newLiveSearchResponse(name = msg, url = mainUrl) {
@@ -30,37 +41,109 @@ class KKTVProvider : MainAPI() {
         )
     }
 
+    private suspend fun getDynamicTokenViaWebView(url: String): String? = withContext(kotlinx.coroutines.Dispatchers.Main) {
+        val context = try {
+            Class.forName("android.app.ActivityThread")
+                .getMethod("currentApplication")
+                .invoke(null) as? android.content.Context
+        } catch (e: Exception) { null }
+
+        if (context == null) {
+            println("[KKTV DEBUG] ❌ Android Context를 가져올 수 없습니다.")
+            return@withContext null
+        }
+
+        suspendCancellableCoroutine<String?> { continuation ->
+            var isResumed = false
+            val webView = WebView(context)
+            webView.settings.javaScriptEnabled = true
+            webView.settings.domStorageEnabled = true
+            webView.settings.userAgentString = userAgent
+
+            webView.webChromeClient = object : WebChromeClient() {
+                override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                    val msg = consoleMessage?.message() ?: ""
+                    if (msg.startsWith("KKTV_TOKEN:")) {
+                        val token = msg.substringAfter("KKTV_TOKEN:")
+                        if (!isResumed) {
+                            println("[KKTV DEBUG] 🔓 WebView에서 동적 토큰 스틸 성공! 길이: ${token.length}")
+                            isResumed = true
+                            continuation.resume(token)
+                            try { webView.stopLoading(); webView.destroy() } catch (e: Exception) {}
+                        }
+                    }
+                    return super.onConsoleMessage(consoleMessage)
+                }
+            }
+
+            webView.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    val jsHook = """
+                        javascript:(function() {
+                            var originalSend = XMLHttpRequest.prototype.send;
+                            XMLHttpRequest.prototype.send = function(data) {
+                                if (data && typeof data === 'string') {
+                                    var match = data.match(/auToken=([^&]+)/);
+                                    if(match && match[1]) {
+                                        console.log('KKTV_TOKEN:' + match[1]);
+                                    }
+                                }
+                                return originalSend.apply(this, arguments);
+                            };
+                            if (typeof loadLivescoreData === 'function') {
+                                loadLivescoreData();
+                            }
+                        })();
+                    """.trimIndent()
+                    view?.evaluateJavascript(jsHook, null)
+                }
+            }
+
+            println("[KKTV DEBUG] 🔍 WebView 로드 시작: $url")
+            webView.loadUrl(url)
+
+            val handler = Handler(Looper.getMainLooper())
+            val timeoutRunnable = Runnable {
+                if (!isResumed) {
+                    println("[KKTV DEBUG] ⏱️ WebView 토큰 추출 타임아웃 (10초)")
+                    isResumed = true
+                    continuation.resume(null)
+                    try { webView.stopLoading(); webView.destroy() } catch (e: Exception) {}
+                }
+            }
+            handler.postDelayed(timeoutRunnable, 10000)
+
+            continuation.invokeOnCancellation {
+                if (!isResumed) {
+                    isResumed = true
+                    handler.removeCallbacks(timeoutRunnable)
+                    try { webView.stopLoading(); webView.destroy() } catch (e: Exception) {}
+                }
+            }
+        }
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        println("[KKTV DEBUG] =========================================")
-        println("[KKTV DEBUG] 1. getMainPage 시작 | request.data: ${request.data}")
-        
         val items = mutableListOf<SearchResponse>()
         val iframeUrl = "https://fkwdsvop.com/KingKong/livescore/livescore/"
         val apiUrl = "https://fkwdsvop.com/ajax/getLivescoreListV3"
 
         try {
             val iframeHtml = app.get(iframeUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent)).text
-            
-            // 🚨 1. targetId 정규식 완벽 수정 (var targetId=469; 감지)
             val targetIdRegex = Regex("""targetId\s*=\s*['"]?(\d+)['"]?""")
-            var dynamicTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1)
-            
-            if (dynamicTargetId == null) {
-                dynamicTargetId = "469"
-                println("[KKTV DEBUG] ⚠️ targetId를 찾지 못해 기본값 469 사용")
-            } else {
-                println("[KKTV DEBUG] ✅ targetId 동적 추출 성공: $dynamicTargetId")
+            val dynamicTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1) ?: "469"
+
+            if (cachedAuToken == null) {
+                cachedAuToken = getDynamicTokenViaWebView(iframeUrl)
             }
 
-            // 🚨 2. 토큰은 JS(aes.min.js)가 동적으로 생성하므로 제공해주신 마스터키를 적용합니다.
-            val masterToken = "3113b57e00d91c434ae2d3062c0723f3a5c1640ad062845e9f0ab5056d83574794045fad9947198d6a6e33fa44852bdd2b6ebabc84ae436d762c56bae8341624456b001f393b5c4ca8e235c402e86f48ad75cb6b5e4d51c37f458dbb55fc3f5b5d37ec2574af1a0180aee522b902ce96"
-
-            val postData = mapOf(
-                "sportsType" to "all",
-                "status" to "",
-                "c_targetId" to dynamicTargetId,
-                "auToken" to masterToken
-            )
+            // 🚨 하드코딩 찌꺼기 완벽 제거! 토큰 못 훔쳐왔으면 강제 종료.
+            val currentToken = cachedAuToken
+            if (currentToken.isNullOrBlank()) {
+                println("[KKTV DEBUG] ❌ 하드코딩 없음. 동적 토큰을 추출하지 못해 파싱을 중단합니다.")
+                return getNoMatchesResponse(request.name, "동적 토큰 추출 실패 (WebView 타임아웃)")
+            }
 
             val postHeaders = mapOf(
                 "Accept" to "application/json, text/javascript, */*; q=0.01",
@@ -71,29 +154,40 @@ class KKTVProvider : MainAPI() {
                 "User-Agent" to userAgent
             )
 
-            println("[KKTV DEBUG] 3. API POST 통신 시도: $apiUrl")
-            val response = app.post(apiUrl, headers = postHeaders, data = postData)
+            var response = app.post(apiUrl, headers = postHeaders, data = mapOf(
+                "sportsType" to "all", "status" to "", "c_targetId" to dynamicTargetId, "auToken" to currentToken
+            ))
+
+            // 🚨 토큰이 만료되어 거부당했다면 즉시 새로 뽑아옴 (하드코딩 X)
+            if (response.code != 200) {
+                println("[KKTV DEBUG] ⚠️ 토큰 만료 감지됨 (HTTP ${response.code}). WebView로 토큰 100% 재생성 시도!")
+                val freshToken = getDynamicTokenViaWebView(iframeUrl)
+                if (freshToken != null) {
+                    cachedAuToken = freshToken
+                    println("[KKTV DEBUG] 🔄 신규 토큰으로 API 재요청...")
+                    response = app.post(apiUrl, headers = postHeaders, data = mapOf(
+                        "sportsType" to "all", "status" to "", "c_targetId" to dynamicTargetId, "auToken" to freshToken
+                    ))
+                } else {
+                    return getNoMatchesResponse(request.name, "토큰 재발급 실패")
+                }
+            }
 
             if (response.code != 200) {
-                println("[KKTV DEBUG] ❌ API 통신 에러 발생. HTTP 상태 코드: ${response.code}")
                 return getNoMatchesResponse(request.name, "API 통신 에러 (HTTP ${response.code})")
             }
 
             val responseText = response.text
-            
             if (!responseText.trim().startsWith("{") && !responseText.trim().startsWith("[")) {
-                println("[KKTV DEBUG] ❌ 잘못된 응답 데이터 수신. 앞부분: ${responseText.take(200)}")
                 return getNoMatchesResponse(request.name, "잘못된 응답 데이터 (JSON이 아님)")
             }
 
-            println("[KKTV DEBUG] 4. API 응답 성공! JSON 파싱 시작...")
             val jsonTree = mapper.readTree(responseText)
             val dataArray = jsonTree.get("data")
 
             if (dataArray != null && dataArray.isArray) {
-                
-                // 중요경기(title_color != N)와 일반경기를 분리하여 정렬
                 val matchList = dataArray.toList()
+                
                 val importantMatches = matchList.filter { 
                     val color = it.get("title_color")?.asText()
                     color != null && color != "N" && color.isNotBlank()
@@ -141,11 +235,9 @@ class KKTVProvider : MainAPI() {
                         )
                     }
                 }
-                println("[KKTV DEBUG] 5. 최종 추출된 진행중(ING) 경기 수: ${items.size}")
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[KKTV DEBUG] ❌ Exception 발생: ${e.message}")
             return getNoMatchesResponse(request.name, "파싱 중 치명적 오류 발생")
         }
 
@@ -191,14 +283,12 @@ class KKTVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         try {
-            println("[KKTV DEBUG] 6. 플레이어 페이지 로드 시도: $data")
             val playerHtml = app.get(data, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent)).text
             
             val m3u8Regex = """https?://[^\s"'<>]+chunklist\.m3u8[^\s"'<>]*|https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""".toRegex()
             var matchUrl = m3u8Regex.find(playerHtml)?.value
 
             if (matchUrl == null) {
-                println("[KKTV DEBUG] ⚠️ 1차 m3u8 추출 실패. 이중 iframe 내부 탐색 시도...")
                 val iframeSrc = Jsoup.parse(playerHtml).select("iframe").attr("src")
                 if (iframeSrc.isNotBlank()) {
                     val iframeUrl = if (iframeSrc.startsWith("http")) iframeSrc else "https://fkwdsvop.com$iframeSrc"
@@ -208,7 +298,6 @@ class KKTVProvider : MainAPI() {
             }
 
             if (matchUrl != null) {
-                println("[KKTV DEBUG] ✅ 최종 m3u8 스트림 추출 성공: $matchUrl")
                 callback.invoke(
                     newExtractorLink(
                         source = this.name,
@@ -221,12 +310,9 @@ class KKTVProvider : MainAPI() {
                     }
                 )
                 return true
-            } else {
-                println("[KKTV DEBUG] ❌ m3u8 스트림을 찾지 못했습니다.")
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[KKTV DEBUG] ❌ loadLinks 에러: ${e.message}")
         }
         return false
     }
