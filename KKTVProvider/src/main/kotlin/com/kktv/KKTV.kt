@@ -82,7 +82,7 @@ class KKTVProvider : MainAPI() {
                 )
             }
 
-            // 실제 토큰 길이(224자)에 맞춰 탐색 범위를 200~240자로 구성
+            // 토큰 추출용 224자 Hex 정규식
             val hexRegex = Regex("""[0-9a-fA-F]{200,240}""")
 
             for (jsUrl in jsUrls) {
@@ -91,6 +91,17 @@ class KKTVProvider : MainAPI() {
                     val jsResponse = app.get(jsUrl, headers = mapOf("Referer" to iframeUrl, "User-Agent" to userAgent))
                     val jsContent = jsResponse.text
                     
+                    // [핵심 추가] 암호화 연산을 지배하는 getEcodeData 함수 정의 찾기 및 로깅
+                    val eCodeIndex = jsContent.indexOf("getEcodeData")
+                    if (eCodeIndex != -1) {
+                        println("[KKTV DEBUG] 🔍 JS 파일 내부에서 'getEcodeData' 함수 정의 발견! ($jsUrl)")
+                        val start = (eCodeIndex - 200).coerceAtLeast(0)
+                        val end = (eCodeIndex + 2000).coerceAtMost(jsContent.length)
+                        println("[KKTV DEBUG] 📋 'getEcodeData' 연산부 주변 소스코드 대량 출력 시작 ------------")
+                        println(jsContent.substring(start, end))
+                        println("[KKTV DEBUG] 📋 -------------------------------------------------------------")
+                    }
+
                     // JS 본문 안에서 "auToken" 키워드 위치 추적
                     val auTokenKeyIndex = jsContent.indexOf("auToken")
                     if (auTokenKeyIndex != -1) {
@@ -101,7 +112,6 @@ class KKTVProvider : MainAPI() {
                             (auTokenKeyIndex + 1000).coerceAtMost(jsContent.length)
                         )
                         
-                        // [추가] 정규식이 어긋나더라도 원인을 시각적으로 파악할 수 있도록 키워드 앞뒤 1100자 코드 강제 출력
                         println("[KKTV DEBUG] 📋 'auToken' 키워드 기준 주변 소스코드 대량 출력 시작 -----------------")
                         println(searchArea)
                         println("[KKTV DEBUG] 📋 -------------------------------------------------------------")
