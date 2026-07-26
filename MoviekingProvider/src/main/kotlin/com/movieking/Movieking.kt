@@ -2,6 +2,7 @@ package com.movieking
 
 import android.content.Context
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Element
@@ -25,7 +26,7 @@ class MovieKing : MainAPI() {
 
         fun saveDomain(newDomain: String) {
             currentMainUrl = newDomain
-            AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            CloudStreamApp.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 ?.edit()?.putString(PREF_KEY, newDomain)?.apply()
             println("[MovieKing DBG] 💾 영구 도메인 저장 완료: $newDomain")
         }
@@ -58,7 +59,7 @@ class MovieKing : MainAPI() {
         domainMutex.withLock {
             if (isDomainChecked) return@withLock
             
-            val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val prefs = CloudStreamApp.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val cachedDomain = prefs?.getString(PREF_KEY, null)
             
             if (cachedDomain != null) {
