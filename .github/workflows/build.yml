@@ -20,7 +20,6 @@ jobs:
         with:
           path: "src"
 
-      # 이 부분이 새로 만든 외부 공개 레포지토리를 가져오도록 수정되었습니다.
       - name: Checkout builds
         uses: actions/checkout@v4
         with:
@@ -50,8 +49,8 @@ jobs:
           cp **/build/*.cs3 $GITHUB_WORKSPACE/builds/ || true
           cp **/build/*.jar $GITHUB_WORKSPACE/builds || true
           cp build/plugins.json $GITHUB_WORKSPACE/builds || true
+          cp repo.json $GITHUB_WORKSPACE/builds/ || true # repo.json 복사 명령어 추가됨
 
-      # 새로 만든 외부 공개 레포의 main 브랜치로 빌드 결과물을 밀어 넣습니다.
       - name: Push builds
         run: |
           cd $GITHUB_WORKSPACE/builds
