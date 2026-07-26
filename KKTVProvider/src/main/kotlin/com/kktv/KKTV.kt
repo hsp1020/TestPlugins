@@ -27,7 +27,7 @@ class KKTVProvider : MainAPI() {
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-    // [완성] 해독된 알고리즘을 기반으로 로컬에서 최신 auToken을 0.001초 만에 구워내는 자체 엔진
+    // 해독된 알고리즘을 기반으로 로컬에서 최신 auToken을 0.001초 만에 구워내는 자체 엔진
     private fun generateAuToken(): String {
         val basePlaintext = "https://fkwdsvop.com/KingKong/livescore/livescore/@${System.currentTimeMillis()}@"
         val hexChars = "abcdef0123456789"
@@ -76,7 +76,6 @@ class KKTVProvider : MainAPI() {
         val apiUrl = "https://fkwdsvop.com/ajax/getLivescoreListV3"
 
         try {
-            // [속도 최적화] 복잡한 외부 JS 로드 작업을 생략하고 곧바로 아이프레임만 초고속 조회합니다.
             val iframeResponse = app.get(iframeUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
             val iframeHtml = iframeResponse.text
             
@@ -161,8 +160,11 @@ class KKTVProvider : MainAPI() {
                         val seq = match.get("seq")?.asText() ?: ""
                         val thumbnail = match.get("thumbnail")?.asText() ?: ""
                         
-                        val posterUrlFromJson = if (thumbnail.isNotBlank() && thumbnail.startsWith("//")) {
-                            "https:$thumbnail"
+                        // [개선] 캐시 우회 기법(Cache Busting)을 위해 썸네일 URL 뒤에 분단위 타임스탬프를 덧붙여 전송합니다.
+                        val currentTimestamp = System.currentTimeMillis() / 60000
+                        val posterUrlFromJson = if (thumbnail.isNotBlank()) {
+                            val cleanThumb = if (thumbnail.startsWith("//")) "https:$thumbnail" else thumbnail
+                            "$cleanThumb?t=$currentTimestamp"
                         } else {
                             ""
                         }
