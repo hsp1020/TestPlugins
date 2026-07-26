@@ -39,80 +39,27 @@ class KKTVProvider : MainAPI() {
         val apiUrl = "https://fkwdsvop.com/ajax/getLivescoreListV3"
 
         try {
-            println("[KKTV DEBUG] 2. Iframe HTML 로드 시도: $iframeUrl")
             val iframeHtml = app.get(iframeUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent)).text
-            println("[KKTV DEBUG] 3. Iframe HTML 로드 성공 (길이: ${iframeHtml.length})")
             
-            // 정규식 정의
-            val tokenRegex = Regex("""auToken\s*[:=]\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
-            val hexRegex = Regex("""['"]([a-fA-F0-9]{200,})['"]""")
-            val targetIdRegex = Regex("""c_targetId\s*[:=]\s*['"]?(\d+)['"]?""")
-            
-            println("[KKTV DEBUG] 4. HTML 내부 토큰/해시값 검색 시작...")
-            var dynamicToken = tokenRegex.find(iframeHtml)?.groupValues?.get(1)
-            
-            if (dynamicToken != null) {
-                println("[KKTV DEBUG] ✅ HTML 내부에서 auToken 직접 발견!")
-            } else {
-                println("[KKTV DEBUG] ⚠️ HTML 내부 auToken 직접 발견 실패. 긴 해시(Hex) 문자열로 재검색...")
-                dynamicToken = hexRegex.find(iframeHtml)?.groupValues?.get(1)
-                
-                if (dynamicToken != null) {
-                    println("[KKTV DEBUG] ✅ HTML 내부에서 긴 해시 문자열 발견!")
-                } else {
-                    println("[KKTV DEBUG] ⚠️ HTML 내부 해시 발견 실패. 외부 JS 스크립트 추적 시작...")
-                    val scripts = Jsoup.parse(iframeHtml).select("script[src]")
-                    println("[KKTV DEBUG] 🔍 발견된 외부 스크립트 개수: ${scripts.size}개")
-                    
-                    for (script in scripts) {
-                        val src = script.attr("src")
-                        if (src.isNotBlank()) {
-                            val scriptUrl = if (src.startsWith("http")) src else "https://fkwdsvop.com$src"
-                            println("[KKTV DEBUG] 🔍 스크립트 스캔 중: $scriptUrl")
-                            try {
-                                val scriptText = app.get(scriptUrl, headers = mapOf("Referer" to iframeUrl, "User-Agent" to userAgent)).text
-                                
-                                var scriptTokenMatch = tokenRegex.find(scriptText)?.groupValues?.get(1)
-                                if (scriptTokenMatch == null) {
-                                    scriptTokenMatch = hexRegex.find(scriptText)?.groupValues?.get(1)
-                                }
-                                
-                                if (scriptTokenMatch != null) {
-                                    dynamicToken = scriptTokenMatch
-                                    println("[KKTV DEBUG] ✅ 외부 JS에서 토큰 발견 성공!")
-                                    break
-                                }
-                            } catch (e: Exception) {
-                                println("[KKTV DEBUG] ❌ 스크립트 로드 실패: ${e.message}")
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 🚨 하드코딩 제거: 샅샅이 뒤졌는데도 토큰이 없으면 즉시 파싱을 중단하고 HTML을 덤프합니다.
-            if (dynamicToken == null) {
-                println("[KKTV DEBUG] ❌ 모든 동적 토큰 추출 실패! 디버깅을 위해 HTML 전체를 덤프합니다.")
-                iframeHtml.chunked(3000).forEachIndexed { index, chunk ->
-                    println("[KKTV DEBUG HTML DUMP $index] $chunk")
-                }
-                return getNoMatchesResponse(request.name, "토큰 추출 실패 (로그캣 확인 요망)")
-            }
-
-            // Target ID 추출 (실패 시 기본 469도 동적으로 찾게끔 설정)
+            // 🚨 1. targetId 정규식 완벽 수정 (var targetId=469; 감지)
+            val targetIdRegex = Regex("""targetId\s*=\s*['"]?(\d+)['"]?""")
             var dynamicTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1)
+            
             if (dynamicTargetId == null) {
-                println("[KKTV DEBUG] ⚠️ targetId를 찾지 못해 기본값 469 사용")
                 dynamicTargetId = "469"
+                println("[KKTV DEBUG] ⚠️ targetId를 찾지 못해 기본값 469 사용")
+            } else {
+                println("[KKTV DEBUG] ✅ targetId 동적 추출 성공: $dynamicTargetId")
             }
 
-            println("[KKTV DEBUG] 5. 최종 추출 데이터 -> TargetId: $dynamicTargetId | Token 길이: ${dynamicToken.length}")
+            // 🚨 2. 토큰은 JS(aes.min.js)가 동적으로 생성하므로 제공해주신 마스터키를 적용합니다.
+            val masterToken = "3113b57e00d91c434ae2d3062c0723f3a5c1640ad062845e9f0ab5056d83574794045fad9947198d6a6e33fa44852bdd2b6ebabc84ae436d762c56bae8341624456b001f393b5c4ca8e235c402e86f48ad75cb6b5e4d51c37f458dbb55fc3f5b5d37ec2574af1a0180aee522b902ce96"
 
             val postData = mapOf(
                 "sportsType" to "all",
                 "status" to "",
                 "c_targetId" to dynamicTargetId,
-                "auToken" to dynamicToken
+                "auToken" to masterToken
             )
 
             val postHeaders = mapOf(
@@ -124,7 +71,7 @@ class KKTVProvider : MainAPI() {
                 "User-Agent" to userAgent
             )
 
-            println("[KKTV DEBUG] 6. API POST 통신 시도: $apiUrl")
+            println("[KKTV DEBUG] 3. API POST 통신 시도: $apiUrl")
             val response = app.post(apiUrl, headers = postHeaders, data = postData)
 
             if (response.code != 200) {
@@ -139,11 +86,11 @@ class KKTVProvider : MainAPI() {
                 return getNoMatchesResponse(request.name, "잘못된 응답 데이터 (JSON이 아님)")
             }
 
+            println("[KKTV DEBUG] 4. API 응답 성공! JSON 파싱 시작...")
             val jsonTree = mapper.readTree(responseText)
             val dataArray = jsonTree.get("data")
 
             if (dataArray != null && dataArray.isArray) {
-                println("[KKTV DEBUG] 7. JSON 배열 내 경기 개수: ${dataArray.size()}")
                 
                 // 중요경기(title_color != N)와 일반경기를 분리하여 정렬
                 val matchList = dataArray.toList()
@@ -194,7 +141,7 @@ class KKTVProvider : MainAPI() {
                         )
                     }
                 }
-                println("[KKTV DEBUG] 8. 최종 필터링된 'ING' 경기 개수: ${items.size}")
+                println("[KKTV DEBUG] 5. 최종 추출된 진행중(ING) 경기 수: ${items.size}")
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -206,7 +153,6 @@ class KKTVProvider : MainAPI() {
             return getNoMatchesResponse(request.name, "현재 진행중인 중계가 없습니다")
         }
 
-        println("[KKTV DEBUG] ✅ 카탈로그 반환 준비 완료.")
         return newHomePageResponse(
             list = listOf(HomePageList(request.name, items, isHorizontalImages = true)),
             hasNext = false
@@ -245,7 +191,7 @@ class KKTVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         try {
-            println("[KKTV DEBUG] 9. 플레이어 페이지 로드 시도: $data")
+            println("[KKTV DEBUG] 6. 플레이어 페이지 로드 시도: $data")
             val playerHtml = app.get(data, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent)).text
             
             val m3u8Regex = """https?://[^\s"'<>]+chunklist\.m3u8[^\s"'<>]*|https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""".toRegex()
