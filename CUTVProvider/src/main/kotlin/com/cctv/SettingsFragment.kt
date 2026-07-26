@@ -168,7 +168,7 @@ class SettingsFragment(
                 cookieManager.removeAllCookies(null)
                 cookieManager.flush()
                 
-                webView.loadUrl("https://cu-tv.com")
+                webView.loadUrl("https://cu-tv01.com")
                 showToast("저장된 쿠키가 초기화되었습니다.")
             }
         }
@@ -235,6 +235,6 @@ class SettingsFragment(
                 }
             }
         }
-        webView.loadUrl("https://cu-tv.com")
+        webView.loadUrl("https://cu-tv01.com")
     }
 }
