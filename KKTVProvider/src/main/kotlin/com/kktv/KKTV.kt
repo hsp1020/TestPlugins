@@ -20,7 +20,6 @@ class KKTVProvider : MainAPI() {
     private fun getNoMatchesResponse(requestName: String, msg: String): HomePageResponse {
         println("[KKTV DEBUG] ❌ 에러/빈화면 반환 사유: $msg")
         val errorItem = newLiveSearchResponse(name = msg, url = mainUrl) {
-            this.posterUrl = "$mainUrl/assets/Pc/img/hd_logo.png"
         }
         return newHomePageResponse(
             list = listOf(HomePageList(requestName, listOf(errorItem), isHorizontalImages = true)),
