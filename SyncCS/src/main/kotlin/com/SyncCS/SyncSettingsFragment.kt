@@ -19,7 +19,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.core.content.res.ResourcesCompat
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
-import com.lagradost.cloudstream3.AcraApplication
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.plugins.Plugin
@@ -89,7 +89,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             projectNumEdit.inputType = android.text.InputType.TYPE_CLASS_TEXT
             projectNumEdit.keyListener = android.text.method.TextKeyListener.getInstance()
 
-            val ctx = AcraApplication.context
+            val ctx = CloudStreamApp.context
             if (ctx != null) {
                 val prefs = with(DataStore) { ctx.getSharedPrefs() }
                 tokenEdit.setText(prefs.getString("sync_token", null)?.let { mapper.readValue<String>(it) })
@@ -127,11 +127,11 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                     Log.d("SYNC", "[SyncSettingsFragment] Save clicked. Token/GistID provided.")
                     loadingDialog.show()
                     
-                    AcraApplication.setKey("sync_token", token)
-                    AcraApplication.setKey("sync_project_num", projectNum) // Gist ID 매핑 등록
-                    AcraApplication.setKey("device_name", deviceName)
-                    AcraApplication.setKey("backup_device", backupSwitch.isChecked.toString())
-                    AcraApplication.setKey("restore_device", restoreSwitch.isChecked.toString())
+                    CloudStreamApp.setKey("sync_token", token)
+                    CloudStreamApp.setKey("sync_project_num", projectNum) // Gist ID 매핑 등록
+                    CloudStreamApp.setKey("device_name", deviceName)
+                    CloudStreamApp.setKey("backup_device", backupSwitch.isChecked.toString())
+                    CloudStreamApp.setKey("restore_device", restoreSwitch.isChecked.toString())
 
                     CoroutineScope(Dispatchers.IO).launch {
                         try {
@@ -142,7 +142,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                                 withContext(Dispatchers.Main) {
                                     loadingDialog.dismiss()
                                     CommonActivity.showToast(msg, null)
-                                    AcraApplication.setKey("sync_token", "")
+                                    CloudStreamApp.setKey("sync_token", "")
                                 }
                                 return@launch
                             }
@@ -194,8 +194,8 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 }
                 .setNegativeButton("Reset") { _, _ ->
                     Log.d("SYNC", "[SyncSettingsFragment] Reset clicked. Clearing credentials.")
-                    AcraApplication.setKey("sync_token", "")
-                    AcraApplication.setKey("sync_project_num", "")
+                    CloudStreamApp.setKey("sync_token", "")
+                    CloudStreamApp.setKey("sync_project_num", "")
                     CommonActivity.showToast("Credentials removed", null)
                     dismiss()
                 }
