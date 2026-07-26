@@ -21,10 +21,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/CUTVProvider/biglogo.png",
-        "fileHash": "sha256-b11b71859102135a39c100bdb310cb84dbbc334e250b5392e93d8f1186074584",
+        "fileHash": "sha256-647d43264e5ef2d9d0bd1d08fbecf0dde8e4a994706a0a7dcee3e8d3a940ae23",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 32238,
+        "fileSize": 32246,
         "status": 1,
         "language": "ko",
         "authors": [
