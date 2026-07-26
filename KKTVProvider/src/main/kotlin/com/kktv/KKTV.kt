@@ -27,20 +27,51 @@ class KKTVProvider : MainAPI() {
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-    // [추가] AES 복호화 함수 (테스트 토큰 검증용)
+    // [개선] 모든 경우의 수(ECB/CBC 및 Key/IV 스왑)를 시도하여 성공한 모드와 평문을 함께 반환합니다.
     private fun decryptAes(cipherTextHex: String, keyStr: String, ivStr: String): String {
         val keyBytes = keyStr.toByteArray(Charsets.UTF_8)
         val ivBytes = ivStr.toByteArray(Charsets.UTF_8)
         val cipherTextBytes = cipherTextHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-        
-        val secretKey = SecretKeySpec(keyBytes, "AES")
-        val ivSpec = IvParameterSpec(ivBytes)
-        
-        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-        cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
-        
-        val decryptedBytes = cipher.doFinal(cipherTextBytes)
-        return String(decryptedBytes, Charsets.UTF_8)
+
+        // 경우의 수 1: ECB 모드 (Key = 뒤쪽 16자)
+        try {
+            val secretKey = SecretKeySpec(keyBytes, "AES")
+            val cipher = Cipher.getInstance("AES/ECB/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, secretKey)
+            val decryptedBytes = cipher.doFinal(cipherTextBytes)
+            return "정답 발견! [AES-128-ECB (Key=keyStr)] -> " + String(decryptedBytes, Charsets.UTF_8)
+        } catch (e: Exception) { /* 패스 */ }
+
+        // 경우의 수 2: ECB 모드 (Key = 앞쪽 16자)
+        try {
+            val secretKey = SecretKeySpec(ivBytes, "AES")
+            val cipher = Cipher.getInstance("AES/ECB/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, secretKey)
+            val decryptedBytes = cipher.doFinal(cipherTextBytes)
+            return "정답 발견! [AES-128-ECB (Key=ivStr)] -> " + String(decryptedBytes, Charsets.UTF_8)
+        } catch (e: Exception) { /* 패스 */ }
+
+        // 경우의 수 3: CBC 모드 (Key = 뒤쪽 16자, IV = 앞쪽 16자)
+        try {
+            val secretKey = SecretKeySpec(keyBytes, "AES")
+            val ivSpec = IvParameterSpec(ivBytes)
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
+            val decryptedBytes = cipher.doFinal(cipherTextBytes)
+            return "정답 발견! [AES-128-CBC (Key=keyStr, IV=ivStr)] -> " + String(decryptedBytes, Charsets.UTF_8)
+        } catch (e: Exception) { /* 패스 */ }
+
+        // 경우의 수 4: CBC 모드 (Key = 앞쪽 16자, IV = 뒤쪽 16자)
+        try {
+            val secretKey = SecretKeySpec(ivBytes, "AES")
+            val ivSpec = IvParameterSpec(keyBytes)
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
+            val decryptedBytes = cipher.doFinal(cipherTextBytes)
+            return "정답 발견! [AES-128-CBC (Key=ivStr, IV=keyStr)] -> " + String(decryptedBytes, Charsets.UTF_8)
+        } catch (e: Exception) { /* 패스 */ }
+
+        throw Exception("모든 정규 규격 AES 복호화 패턴 실패 (BAD_DECRYPT)")
     }
 
     private fun getNoMatchesResponse(requestName: String, msg: String): HomePageResponse {
@@ -58,7 +89,7 @@ class KKTVProvider : MainAPI() {
         println("[KKTV DEBUG] =========================================")
         println("[KKTV DEBUG] 1. getMainPage 시작 | request.data: ${request.data}")
         
-        // [검증 프로세스] 이전 유효했던 토큰을 복호화하여 평문(정확한 시간 포맷) 로그 출력
+        // [테스트 프로세스 실행]
         try {
             val testToken = "20a5271810b0854b3b70e2557663f1c593f25010708fb8aae02285120f8a35693d579a7930fd779057b86cc72ff9ac59022a46ccd0bc3938ad3aa9597ae8eb086b1415241f9d99a7507a783d08849bfc2e6f33b00d7dbde9de6962efbd6429c9c319475a89bee246f548fce39a0daa96"
             val ivStr = testToken.substring(0, 16)
