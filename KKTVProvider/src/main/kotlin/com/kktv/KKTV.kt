@@ -1,23 +1,11 @@
 package com.kktv
 
-import android.os.Handler
-import android.os.Looper
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.DelicateCoroutinesApi
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlin.coroutines.resume
+import org.jsoup.Jsoup
 
 class KKTVProvider : MainAPI() {
     override var mainUrl = "https://ifadetv.com"
-    private val liveFrameUrl = "https://fkwdsvop.com/KingKong/livescore/livescore/"
-    
     override var name = "KKTV"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "ko"
@@ -29,93 +17,105 @@ class KKTVProvider : MainAPI() {
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-    private suspend fun sniffApiUrlViaWebView(url: String) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-        val context = try {
-            Class.forName("android.app.ActivityThread")
-                .getMethod("currentApplication")
-                .invoke(null) as? android.content.Context
-        } catch (e: Exception) { null }
-
-        if (context == null) {
-            println("[KKTV API FINDER] 안드로이드 Context 획득 실패.")
-            return@withContext
+    // 빈 화면 방지용 함수 (여기서도 가로 썸네일 속성 유지)
+    private fun getNoMatchesResponse(requestName: String, msg: String = "진행중인 중계가 없습니다"): HomePageResponse {
+        val errorItem = newLiveSearchResponse(name = msg, url = mainUrl) {
+            this.posterUrl = "$mainUrl/assets/Pc/img/hd_logo.png"
         }
-
-        suspendCancellableCoroutine<Unit> { continuation ->
-            val webView = WebView(context)
-            webView.settings.javaScriptEnabled = true
-            webView.settings.domStorageEnabled = true
-            webView.settings.userAgentString = userAgent
-
-            webView.webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(
-                    view: WebView?,
-                    request: WebResourceRequest?
-                ): WebResourceResponse? {
-                    val reqUrl = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
-                    
-                    if (reqUrl.contains(".json") || reqUrl.contains("api") || reqUrl.contains("ajax") || reqUrl.contains("list") || reqUrl.contains("data")) {
-                        println("[KKTV API FINDER] 🚨 유력 API/JSON 발견!!! -> $reqUrl")
-                    } else {
-                        println("[KKTV API FINDER] 일반 네트워크 요청 -> $reqUrl")
-                    }
-                    
-                    return super.shouldInterceptRequest(view, request)
-                }
-            }
-            
-            println("[KKTV API FINDER] 백그라운드 웹뷰 추적 시작: $url")
-            webView.loadUrl(url)
-
-            val handler = Handler(Looper.getMainLooper())
-            val timeoutRunnable = Runnable {
-                if (continuation.isActive) {
-                    println("[KKTV API FINDER] 10초 대기 종료. 추적 완료.")
-                    continuation.resume(Unit)
-                    try { webView.stopLoading(); webView.destroy() } catch (e: Exception) {}
-                }
-            }
-            
-            handler.postDelayed(timeoutRunnable, 10000)
-
-            continuation.invokeOnCancellation {
-                handler.removeCallbacks(timeoutRunnable)
-                try { webView.stopLoading(); webView.destroy() } catch (e: Exception) {}
-            }
-        }
-    }
-
-    @OptIn(DelicateCoroutinesApi::class)
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val items = mutableListOf<SearchResponse>()
-        
-        // 🚨 수정: UI가 멈추지 않도록(로딩 지연 없음) 백그라운드 비동기로 스니퍼를 몰래 던져놓습니다.
-        GlobalScope.launch {
-            try {
-                sniffApiUrlViaWebView(liveFrameUrl)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-
-        // 화면에는 대기 시간 없이 즉시(0.1초 컷) 아래 메시지가 뜹니다.
-        items.add(
-            newLiveSearchResponse(name = "화면이 켜졌습니다. 로그캣에서 [KKTV API FINDER]를 검색하세요!", url = mainUrl) {
-                this.posterUrl = "$mainUrl/assets/Pc/img/hd_logo.png"
-            }
-        )
-
         return newHomePageResponse(
-            list = listOf(HomePageList(request.name, items)),
+            // 🚨 수정: 에러 메시지도 가로 썸네일 규격에 맞게 노출
+            list = listOf(HomePageList(requestName, listOf(errorItem), isHorizontalImages = true)),
             hasNext = false
         )
     }
 
-    override suspend fun search(query: String): List<SearchResponse> = emptyList()
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val items = mutableListOf<SearchResponse>()
+        val apiUrl = "https://fkwdsvop.com/ajax/getLivescoreListV3"
+
+        try {
+            val postHeaders = mapOf(
+                "Accept" to "application/json, text/javascript, */*; q=0.01",
+                "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8",
+                "Origin" to "https://fkwdsvop.com",
+                "Referer" to "https://fkwdsvop.com/KingKong/livescore/livescore/",
+                "X-Requested-With" to "XMLHttpRequest",
+                "User-Agent" to userAgent
+            )
+
+            val response = app.post(
+                apiUrl,
+                headers = postHeaders,
+                data = emptyMap()
+            )
+
+            val responseText = response.text
+            val jsonTree = mapper.readTree(responseText)
+            val dataArray = jsonTree.get("data")
+
+            if (dataArray != null && dataArray.isArray) {
+                dataArray.forEach { match ->
+                    val states = match.get("states")?.asText() ?: ""
+                    
+                    if (states == "ING") {
+                        val rawTitle = match.get("title")?.asText() ?: ""
+                        val cleanTitle = Jsoup.parse(rawTitle).text().ifEmpty {
+                            val home = match.get("home_name")?.asText() ?: "홈"
+                            val away = match.get("away_name")?.asText() ?: "원정"
+                            "$home vs $away"
+                        }
+                        
+                        val league = match.get("leagueName")?.asText() ?: "스포츠"
+                        val displayTitle = "[$league] $cleanTitle"
+
+                        val seq = match.get("seq")?.asText() ?: ""
+                        val thumbnail = match.get("thumbnail")?.asText() ?: ""
+                        
+                        // 🚨 수정: JSON에서 받아온 썸네일 주소(//image...)를 완성된 https 주소로 매핑
+                        val posterUrlFromJson = if (thumbnail.isNotBlank() && thumbnail.startsWith("//")) {
+                            "https:$thumbnail"
+                        } else {
+                            "$mainUrl/assets/Pc/img/hd_logo.png" // 썸네일 없을 때 기본 로고
+                        }
+
+                        val channelId = thumbnail.substringAfterLast("/")
+                        val tParam = (System.currentTimeMillis() / 1000) + 86400
+                        val m3u8Url = "https://kcdn.ehfkdowl.com/bigwinsoft/$channelId/chunklist.m3u8?t=$tParam&ds=$seq"
+
+                        items.add(
+                            newLiveSearchResponse(name = displayTitle, url = m3u8Url) {
+                                // 🚨 포스터(썸네일) 세팅
+                                this.posterUrl = posterUrlFromJson
+                            }
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        if (items.isEmpty()) {
+            return getNoMatchesResponse(request.name, "진행중인 중계가 없습니다")
+        }
+
+        return newHomePageResponse(
+            // 🚨 수정: isHorizontalImages = true 속성을 부여하여 썸네일을 가로형(16:9 비율)으로 배치
+            list = listOf(HomePageList(request.name, items, isHorizontalImages = true)),
+            hasNext = false
+        )
+    }
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        val homeResponse = getMainPage(1, MainPageRequest("live_matches", "main", false))
+        val allMatches = homeResponse.items.flatMap { it.list }
+        return allMatches.filter { it.name.contains(query, ignoreCase = true) }
+    }
 
     override suspend fun load(url: String): LoadResponse {
         return newLiveStreamLoadResponse("스포츠 실시간 중계", url, url) {
             this.posterUrl = "$mainUrl/assets/Pc/img/hd_logo.png"
+            this.plot = "실시간 스포츠 중계"
         }
     }
 
@@ -127,22 +127,22 @@ class KKTVProvider : MainAPI() {
     ): Boolean {
         try {
             if (data.contains(".m3u8")) {
-                callback.invoke(newExtractorLink(name, "$name Live", data, type = ExtractorLinkType.M3U8) { 
-                    this.referer = mainUrl; this.headers = mapOf("User-Agent" to userAgent) 
-                })
+                callback.invoke(
+                    newExtractorLink(
+                        source = this.name,
+                        name = "${this.name} Live",
+                        url = data,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = "https://fkwdsvop.com/"
+                        this.headers = mapOf("User-Agent" to userAgent)
+                    }
+                )
                 return true
             }
-
-            val playerText = app.get(data, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent)).text
-            val matchUrl = """https?://[^\s"'<>]+chunklist\.m3u8[^\s"'<>]*|https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""".toRegex().find(playerText)?.value
-
-            if (matchUrl != null) {
-                callback.invoke(newExtractorLink(name, "$name Live HD", matchUrl, type = ExtractorLinkType.M3U8) { 
-                    this.referer = data; this.headers = mapOf("User-Agent" to userAgent) 
-                })
-                return true
-            }
-        } catch (e: Exception) { e.printStackTrace() }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         return false
     }
 }
