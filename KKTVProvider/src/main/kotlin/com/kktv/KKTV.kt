@@ -95,15 +95,24 @@ class KKTVProvider : MainAPI() {
                     val auTokenKeyIndex = jsContent.indexOf("auToken")
                     if (auTokenKeyIndex != -1) {
                         println("[KKTV DEBUG] 🔍 JS 내부에서 'auToken' 키워드 위치 감지 성공!")
+                        
                         val searchArea = jsContent.substring(
                             (auTokenKeyIndex - 100).coerceAtLeast(0),
                             (auTokenKeyIndex + 1000).coerceAtMost(jsContent.length)
                         )
+                        
+                        // [추가] 정규식이 어긋나더라도 원인을 시각적으로 파악할 수 있도록 키워드 앞뒤 1100자 코드 강제 출력
+                        println("[KKTV DEBUG] 📋 'auToken' 키워드 기준 주변 소스코드 대량 출력 시작 -----------------")
+                        println(searchArea)
+                        println("[KKTV DEBUG] 📋 -------------------------------------------------------------")
+
                         val tokenMatch = hexRegex.find(searchArea)?.value
                         if (tokenMatch != null) {
                             parsedToken = tokenMatch
                             println("[KKTV DEBUG] ✅ JS 키워드 기반 auToken 추출 성공: $parsedToken")
                             break
+                        } else {
+                            println("[KKTV DEBUG] ⚠️ 키워드 감지는 했으나, 주변 1100자 이내에서 200~240자리 Hex 문자열 매칭 실패")
                         }
                     }
                     
@@ -120,7 +129,7 @@ class KKTVProvider : MainAPI() {
                 }
             }
 
-            // [개선] 하드코딩 토큰을 완전히 지우고, 추출 실패 시 바로 에러를 띄워 헛수고 요청을 차단합니다.
+            // 하드코딩 토큰을 완전히 지우고, 추출 실패 시 바로 에러를 띄워 헛수고 요청을 차단합니다.
             val dynamicToken = parsedToken ?: return getNoMatchesResponse(request.name, "인증 토큰(auToken) 실시간 추출 실패")
             val dynamicTargetId = parsedTargetId ?: "469"
 
