@@ -65,7 +65,7 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
             "Sec-Fetch-Mode" to "no-cors",
             "Sec-Fetch-Site" to "cross-site"
         )
-        if (posterUrl.contains("cu-tv.com")) {
+        if (posterUrl.contains("cu-tv01.com")) {
             cfCookies?.let { headers["Cookie"] = it }
         }
         return headers
