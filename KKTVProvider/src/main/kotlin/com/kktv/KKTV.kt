@@ -15,12 +15,12 @@ data class MatchData(
     @JsonProperty("stream_url") val streamUrl: String?
 )
 
-class KingKongTVProvider : MainAPI() {
+class KKTVProvider : MainAPI() {
     override var mainUrl = "https://ifadetv.com"
     // 실제 중계 목록 및 라이브스코어가 로드되는 iframe Base URL
     private val liveFrameUrl = "https://fkwdsvop.com/KingKong/livescore/livescore/"
 
-    override var name = "킹콩티비"
+    override var name = "KKTV"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "ko"
     override val hasMainPage = true
