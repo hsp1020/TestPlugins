@@ -3,6 +3,8 @@ package com.kktv
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
+import java.net.URLEncoder
+import java.net.URLDecoder
 
 class KKTVProvider : MainAPI() {
     override var mainUrl = "https://ifadetv.com"
@@ -37,18 +39,14 @@ class KKTVProvider : MainAPI() {
         val apiUrl = "https://fkwdsvop.com/ajax/getLivescoreListV3"
 
         try {
-            println("[KKTV DEBUG] 2. Iframe HTML 로드 및 토큰 추출 시도...")
             val iframeHtml = app.get(iframeUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent)).text
             
-            // 🚨 오타 수정 완료: """ 세 개로 정확히 열고 닫음
             val tokenRegex = Regex("""auToken\s*[:=]\s*['"]([^'"]+)['"]""")
             val targetIdRegex = Regex("""c_targetId\s*[:=]\s*['"]?(\d+)['"]?""")
             
             val dynamicToken = tokenRegex.find(iframeHtml)?.groupValues?.get(1) 
                 ?: "3113b57e00d91c434ae2d3062c0723f3a5c1640ad062845e9f0ab5056d83574794045fad9947198d6a6e33fa44852bdd2b6ebabc84ae436d762c56bae8341624456b001f393b5c4ca8e235c402e86f48ad75cb6b5e4d51c37f458dbb55fc3f5b5d37ec2574af1a0180aee522b902ce96"
             val dynamicTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1) ?: "469"
-
-            println("[KKTV DEBUG] 3. 추출된 Token: $dynamicToken | TargetId: $dynamicTargetId")
 
             val postData = mapOf(
                 "sportsType" to "all",
@@ -66,34 +64,39 @@ class KKTVProvider : MainAPI() {
                 "User-Agent" to userAgent
             )
 
-            println("[KKTV DEBUG] 4. API POST 통신 시도: $apiUrl")
             val response = app.post(apiUrl, headers = postHeaders, data = postData)
 
-            println("[KKTV DEBUG] 5. HTTP 응답 코드: ${response.code}")
             if (response.code != 200) {
                 return getNoMatchesResponse(request.name, "API 통신 에러 (HTTP ${response.code})")
             }
 
             val responseText = response.text
-            println("[KKTV DEBUG] 6. API 원본 응답 텍스트 길이: ${responseText.length}")
-            if (responseText.length > 300) {
-                println("[KKTV DEBUG] 7. API 응답 미리보기: ${responseText.substring(0, 300)}")
-            } else {
-                println("[KKTV DEBUG] 7. API 응답 전체: $responseText")
-            }
-
+            
             if (!responseText.trim().startsWith("{") && !responseText.trim().startsWith("[")) {
                 return getNoMatchesResponse(request.name, "잘못된 응답 데이터 (JSON이 아님)")
             }
 
-            println("[KKTV DEBUG] 8. JSON 파싱 시작")
             val jsonTree = mapper.readTree(responseText)
             val dataArray = jsonTree.get("data")
 
             if (dataArray != null && dataArray.isArray) {
-                println("[KKTV DEBUG] 9. JSON 배열 내 전체 경기 개수: ${dataArray.size()}")
                 
-                dataArray.forEach { match ->
+                // 🚨 추가요건 2: 배열을 리스트로 변환 후 중요경기(title_color != N)와 일반경기를 분리
+                val matchList = dataArray.toList()
+                
+                val importantMatches = matchList.filter { 
+                    val color = it.get("title_color")?.asText()
+                    color != null && color != "N" 
+                }
+                val normalMatches = matchList.filter { 
+                    val color = it.get("title_color")?.asText()
+                    color == null || color == "N" 
+                }
+                
+                // 분리된 두 그룹을 더해서 중요경기가 상단에, 일반경기가 하단에 오게 병합 (각 그룹 내 순서는 그대로 유지됨)
+                val sortedMatches = importantMatches + normalMatches
+                
+                sortedMatches.forEach { match ->
                     val states = match.get("states")?.asText() ?: ""
                     
                     if (states == "ING") {
@@ -120,29 +123,28 @@ class KKTVProvider : MainAPI() {
                         val tParam = (System.currentTimeMillis() / 1000) + 86400
                         val m3u8Url = "https://kcdn.ehfkdowl.com/bigwinsoft/$channelId/chunklist.m3u8?t=$tParam&ds=$seq"
 
+                        // 🚨 추가요건 1: 제목과 썸네일을 상세 페이지로 넘기기 위해 URL 뒤에 인코딩해서 붙임
+                        val encodedTitle = URLEncoder.encode(displayTitle, "UTF-8")
+                        val encodedPoster = URLEncoder.encode(posterUrlFromJson, "UTF-8")
+                        val fakeUrl = "$m3u8Url&kktv_title=$encodedTitle&kktv_poster=$encodedPoster"
+
                         items.add(
-                            newLiveSearchResponse(name = displayTitle, url = m3u8Url) {
+                            newLiveSearchResponse(name = displayTitle, url = fakeUrl) {
                                 this.posterUrl = posterUrlFromJson
                             }
                         )
                     }
                 }
-                println("[KKTV DEBUG] 10. 최종 필터링된 'ING(진행중)' 경기 개수: ${items.size}")
-            } else {
-                println("[KKTV DEBUG] ❌ JSON 내 'data' 배열을 찾을 수 없습니다.")
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[KKTV DEBUG] ❌ Exception 발생: ${e.message}")
             return getNoMatchesResponse(request.name, "파싱 중 치명적 오류 발생")
         }
 
         if (items.isEmpty()) {
-            println("[KKTV DEBUG] ❌ 최종 카탈로그에 담을 아이템이 0개입니다.")
             return getNoMatchesResponse(request.name, "현재 진행중인 중계가 없습니다")
         }
 
-        println("[KKTV DEBUG] ✅ 카탈로그 렌더링 성공! 반환 준비 완료.")
         return newHomePageResponse(
             list = listOf(HomePageList(request.name, items, isHorizontalImages = true)),
             hasNext = false
@@ -156,9 +158,23 @@ class KKTVProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        return newLiveStreamLoadResponse("스포츠 실시간 중계", url, url) {
-            this.posterUrl = "$mainUrl/assets/Pc/img/hd_logo.png"
-            this.plot = "실시간 스포츠 중계"
+        // 🚨 추가요건 1: 넘겨받은 url에서 숨겨둔 제목과 썸네일을 디코딩하여 추출
+        val titleParam = Regex("""&kktv_title=([^&]+)""").find(url)?.groupValues?.get(1)
+        val posterParam = Regex("""&kktv_poster=([^&]+)""").find(url)?.groupValues?.get(1)
+
+        val title = if (titleParam != null) URLDecoder.decode(titleParam, "UTF-8") else "스포츠 실시간 중계"
+        val poster = if (posterParam != null) URLDecoder.decode(posterParam, "UTF-8") else "$mainUrl/assets/Pc/img/hd_logo.png"
+
+        // 🚨 영상 재생부(loadLinks)로 넘길 때는 붙여둔 찌꺼기를 다시 잘라내고 순수 m3u8 주소(dataUrl)만 넘김
+        val cleanUrl = url.substringBefore("&kktv_title=")
+
+        return newLiveStreamLoadResponse(
+            name = title,
+            url = url,
+            dataUrl = cleanUrl
+        ) {
+            this.posterUrl = poster
+            this.plot = title
         }
     }
 
@@ -169,7 +185,7 @@ class KKTVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         try {
-            println("[KKTV DEBUG] loadLinks 호출됨 | data(url): $data")
+            // 전달받은 data(cleanUrl)가 실제 m3u8 주소입니다.
             if (data.contains(".m3u8")) {
                 callback.invoke(
                     newExtractorLink(
@@ -185,7 +201,6 @@ class KKTVProvider : MainAPI() {
                 return true
             }
         } catch (e: Exception) {
-            println("[KKTV DEBUG] loadLinks 에러: ${e.message}")
             e.printStackTrace()
         }
         return false
