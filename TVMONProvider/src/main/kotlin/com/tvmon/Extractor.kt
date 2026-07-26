@@ -13,7 +13,7 @@ import android.webkit.WebViewClient
 import android.webkit.CookieManager
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.AcraApplication
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -184,7 +184,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
         handler.post {
             try {
-                val context: Context = (AcraApplication.context ?: app) as Context
+                val context: Context = (CloudStreamApp.context ?: app) as Context
                 webView = WebView(context)
                 webView?.settings?.apply { javaScriptEnabled = true; domStorageEnabled = true; userAgentString = DESKTOP_UA }
 
