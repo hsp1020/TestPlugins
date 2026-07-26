@@ -5,6 +5,10 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import java.net.URLEncoder
 import java.net.URLDecoder
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 
 class KKTVProvider : MainAPI() {
     override var mainUrl = "https://ifadetv.com"
@@ -81,7 +85,6 @@ class KKTVProvider : MainAPI() {
 
             if (dataArray != null && dataArray.isArray) {
                 
-                // 🚨 추가요건 2: 배열을 리스트로 변환 후 중요경기(title_color != N)와 일반경기를 분리
                 val matchList = dataArray.toList()
                 
                 val importantMatches = matchList.filter { 
@@ -93,7 +96,6 @@ class KKTVProvider : MainAPI() {
                     color == null || color == "N" 
                 }
                 
-                // 분리된 두 그룹을 더해서 중요경기가 상단에, 일반경기가 하단에 오게 병합 (각 그룹 내 순서는 그대로 유지됨)
                 val sortedMatches = importantMatches + normalMatches
                 
                 sortedMatches.forEach { match ->
@@ -123,7 +125,6 @@ class KKTVProvider : MainAPI() {
                         val tParam = (System.currentTimeMillis() / 1000) + 86400
                         val m3u8Url = "https://kcdn.ehfkdowl.com/bigwinsoft/$channelId/chunklist.m3u8?t=$tParam&ds=$seq"
 
-                        // 🚨 추가요건 1: 제목과 썸네일을 상세 페이지로 넘기기 위해 URL 뒤에 인코딩해서 붙임
                         val encodedTitle = URLEncoder.encode(displayTitle, "UTF-8")
                         val encodedPoster = URLEncoder.encode(posterUrlFromJson, "UTF-8")
                         val fakeUrl = "$m3u8Url&kktv_title=$encodedTitle&kktv_poster=$encodedPoster"
@@ -158,14 +159,12 @@ class KKTVProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        // 🚨 추가요건 1: 넘겨받은 url에서 숨겨둔 제목과 썸네일을 디코딩하여 추출
         val titleParam = Regex("""&kktv_title=([^&]+)""").find(url)?.groupValues?.get(1)
         val posterParam = Regex("""&kktv_poster=([^&]+)""").find(url)?.groupValues?.get(1)
 
         val title = if (titleParam != null) URLDecoder.decode(titleParam, "UTF-8") else "스포츠 실시간 중계"
         val poster = if (posterParam != null) URLDecoder.decode(posterParam, "UTF-8") else ""
 
-        // 🚨 영상 재생부(loadLinks)로 넘길 때는 붙여둔 찌꺼기를 다시 잘라내고 순수 m3u8 주소(dataUrl)만 넘김
         val cleanUrl = url.substringBefore("&kktv_title=")
 
         return newLiveStreamLoadResponse(
@@ -178,6 +177,24 @@ class KKTVProvider : MainAPI() {
         }
     }
 
+    // 주소의 정상 여부(HTTP 200 OK)를 판단하는 비동기 헬퍼 함수
+    private suspend fun checkUrl(url: String): Boolean {
+        return try {
+            withTimeoutOrNull(2500) { // 개별 연결 타임아웃 2.5초 설정
+                val response = app.get(
+                    url,
+                    headers = mapOf(
+                        "Referer" to "https://fkwdsvop.com/",
+                        "User-Agent" to userAgent
+                    )
+                )
+                response.code == 200
+            } ?: false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -185,19 +202,60 @@ class KKTVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         try {
-            // 전달받은 data(cleanUrl)가 실제 m3u8 주소입니다.
             if (data.contains(".m3u8")) {
-                callback.invoke(
-                    newExtractorLink(
-                        source = this.name,
-                        name = "${this.name} Live",
-                        url = data,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = "https://fkwdsvop.com/"
-                        this.headers = mapOf("User-Agent" to userAgent)
-                    }
+                // K, S, W 세 가지 CDN 주소 후보군 생성
+                val kcdnUrl = data
+                val scdnUrl = data.replace("kcdn.ehfkdowl.com", "scdn.ehfkdowl.com")
+                val wcdnUrl = data.replace("kcdn.ehfkdowl.com", "wcdn.ehfkdowl.com")
+
+                val candidates = listOf(
+                    "K-CDN" to kcdnUrl,
+                    "S-CDN" to scdnUrl,
+                    "W-CDN" to wcdnUrl
                 )
+
+                // 3개 주소를 병렬로 조회 (속도 지연 최소화)
+                val validLinks = coroutineScope {
+                    candidates.map { (cdnName, url) ->
+                        async {
+                            if (checkUrl(url)) {
+                                cdnName to url
+                            } else {
+                                null
+                            }
+                        }
+                    }.awaitAll().filterNotNull()
+                }
+
+                if (validLinks.isNotEmpty()) {
+                    // 정상적인 CDN 주소만 추출하여 전달
+                    for ((cdnName, url) in validLinks) {
+                        callback.invoke(
+                            newExtractorLink(
+                                source = this.name,
+                                name = "${this.name} $cdnName",
+                                url = url,
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.referer = "https://fkwdsvop.com/"
+                                this.headers = mapOf("User-Agent" to userAgent)
+                            }
+                        )
+                    }
+                } else {
+                    // 모든 검사 실패 혹은 일시적인 타임아웃 발생 시, Fallback 예외 조치로 원본 K-CDN 추가
+                    callback.invoke(
+                        newExtractorLink(
+                            source = this.name,
+                            name = "${this.name} K-CDN (Fallback)",
+                            url = kcdnUrl,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = "https://fkwdsvop.com/"
+                            this.headers = mapOf("User-Agent" to userAgent)
+                        }
+                    )
+                }
                 return true
             }
         } catch (e: Exception) {
