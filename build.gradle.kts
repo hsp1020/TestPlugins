@@ -49,7 +49,7 @@ subprojects {
     cloudstream {
         println("[Debug] ${project.name} cloudstream 확장 설정")
         // when running through github workflow, GITHUB_REPOSITORY should contain current repository name
-        setRepo("hsp1020", "TestPlugins-build", "main") // 아이디, 레포명, 브랜치명을 각각 따로 입력합니다!
+        setRepo("hsp1020/TestPlugins-build") 
     }
 
     android {
