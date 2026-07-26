@@ -26,11 +26,9 @@ class KKTVProvider : MainAPI() {
     override var lang = "ko"
     override val hasMainPage = true
 
-    // =========================================================
-    // 🚨 핵심 수정: 앱 홈 화면에 띄울 카탈로그(행)를 먼저 정의해야 합니다.
-    // =========================================================
+    // 메인 페이지 카탈로그 정의
     override val mainPage = mainPageOf(
-        "live_matches" to "실시간 스포츠 중계" // ("요청에 쓰일 데이터/식별자" to "화면에 노출될 카탈로그 이름")
+        "live_matches" to "실시간 스포츠 중계"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
@@ -57,8 +55,9 @@ class KKTVProvider : MainAPI() {
                     
                     val playUrl = match.streamUrl ?: "$liveFrameUrl?id=${match.id}"
 
+                    // 🚨 수정: 인자 갯수 에러 방지 (TvType.Live 생략)
                     items.add(
-                        newLiveSearchResponse(title, playUrl, TvType.Live) {
+                        newLiveSearchResponse(title, playUrl) {
                             this.posterUrl = "$mainUrl/assets/Pc/img/hd_logo.png"
                         }
                     )
@@ -77,8 +76,9 @@ class KKTVProvider : MainAPI() {
                         val title = if (league.isNotEmpty()) "[$league] $home vs $away" else "$home vs $away"
                         val playUrl = if (gameId.startsWith("http")) gameId else "$liveFrameUrl?id=$gameId"
 
+                        // 🚨 수정: 인자 갯수 에러 방지 (TvType.Live 생략)
                         items.add(
-                            newLiveSearchResponse(title, playUrl, TvType.Live) {
+                            newLiveSearchResponse(title, playUrl) {
                                 this.posterUrl = "$mainUrl/assets/Pc/img/hd_logo.png"
                             }
                         )
@@ -91,14 +91,15 @@ class KKTVProvider : MainAPI() {
 
         if (items.isEmpty()) return null
 
-        // 🚨 핵심 수정: request.name ("실시간 스포츠 중계") 이름으로 해당 카탈로그 아이템을 묶어서 반환합니다.
-        return newHomePageResponse(request.name, items, hasNext = false)
+        // 🚨 수정: HomePageList로 명확하게 묶어서 모호함/타입 에러 방지
+        return newHomePageResponse(listOf(HomePageList(request.name, items)), hasNext = false)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // 검색 시 request 객체를 생성해서 임시 전달
         val homeResponse = getMainPage(1, MainPageRequest("live_matches", "main", false))
-        val allMatches = homeResponse?.items ?: emptyList()
+        
+        // 🚨 수정: List<HomePageList>를 List<SearchResponse>로 풀어줌 (Type Mismatch 에러 해결)
+        val allMatches = homeResponse?.items?.flatMap { it.list } ?: emptyList()
         return allMatches.filter { it.name.contains(query, ignoreCase = true) }
     }
 
