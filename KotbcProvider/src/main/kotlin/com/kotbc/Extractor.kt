@@ -13,7 +13,7 @@ import android.webkit.WebViewClient
 import android.webkit.CookieManager
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.AcraApplication
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -139,7 +139,7 @@ class KotbcExtractor : ExtractorApi() {
 
         handler.post {
             try {
-                val context: Context = (AcraApplication.context ?: app) as Context
+                val context: Context = (CloudStreamApp.context ?: app) as Context
                 // [수정: 변수 섀도잉 방어] val을 제거하여 외부 생명주기 변수와 동기화 보장
                 webView = WebView(context)
                 
