@@ -18,7 +18,7 @@ import java.nio.charset.StandardCharsets
 import java.util.Collections
 import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
-import com.lagradost.cloudstream3.AcraApplication
+import com.lagradost.cloudstream3.CloudStreamApp
 import androidx.preference.PreferenceManager
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineScope
@@ -239,7 +239,7 @@ class YoutubeProvider(
 ) : MainAPI() {
 
     val appPrefs: SharedPreferences?
-        get() = sharedPref ?: AcraApplication.context?.let { PreferenceManager.getDefaultSharedPreferences(it) }
+        get() = sharedPref ?: CloudStreamApp.context?.let { PreferenceManager.getDefaultSharedPreferences(it) }
 
     data class CustomSection(
         @JsonProperty("name") var name: String = "",
