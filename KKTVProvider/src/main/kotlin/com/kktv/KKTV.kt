@@ -45,12 +45,29 @@ class KKTVProvider : MainAPI() {
         try {
             val iframeHtml = app.get(iframeUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent)).text
             
-            val tokenRegex = Regex("""auToken\s*[:=]\s*['"]([^'"]+)['"]""")
-            val targetIdRegex = Regex("""c_targetId\s*[:=]\s*['"]?(\d+)['"]?""")
+            // [개선] JSON 객체나 일반 선언문 모두 매칭할 수 있도록 유연해진 정규식 패턴
+            val tokenRegex = Regex("""['"]?auToken['"]?\s*[:=]\s*['"]([^'"]+)['"]""")
+            val targetIdRegex = Regex("""['"]?c_targetId['"]?\s*[:=]\s*['"]?(\d+)['"]?""")
             
-            val dynamicToken = tokenRegex.find(iframeHtml)?.groupValues?.get(1) 
+            val parsedToken = tokenRegex.find(iframeHtml)?.groupValues?.get(1)
+            val parsedTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1)
+
+            // [추가] 추출 성공 여부 디버깅을 위한 Logcat용 콘솔 로그 출력
+            if (parsedToken != null) {
+                println("[KKTV DEBUG]  auToken 추출 성공: ${parsedToken.take(15)}... (길이: ${parsedToken.length})")
+            } else {
+                println("[KKTV DEBUG] ⚠️ auToken 추출 실패! 패턴 비매칭 혹은 요청 차단 의심. 임시 하드코딩 값 사용.")
+            }
+
+            if (parsedTargetId != null) {
+                println("[KKTV DEBUG]  c_targetId 추출 성공: $parsedTargetId")
+            } else {
+                println("[KKTV DEBUG] ⚠️ c_targetId 추출 실패! 임시 하드코딩 값 사용.")
+            }
+
+            val dynamicToken = parsedToken 
                 ?: "3113b57e00d91c434ae2d3062c0723f3a5c1640ad062845e9f0ab5056d83574794045fad9947198d6a6e33fa44852bdd2b6ebabc84ae436d762c56bae8341624456b001f393b5c4ca8e235c402e86f48ad75cb6b5e4d51c37f458dbb55fc3f5b5d37ec2574af1a0180aee522b902ce96"
-            val dynamicTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1) ?: "469"
+            val dynamicTargetId = parsedTargetId ?: "469"
 
             val postData = mapOf(
                 "sportsType" to "all",
@@ -177,10 +194,10 @@ class KKTVProvider : MainAPI() {
         }
     }
 
-    // 주소의 정상 여부(HTTP 200 OK)를 판단하는 비동기 헬퍼 함수
+    // [추가] 각 CDN 링크의 정상 작동 여부(HTTP 200 OK)를 판단하는 비동기 요청 함수
     private suspend fun checkUrl(url: String): Boolean {
         return try {
-            withTimeoutOrNull(2500) { // 개별 연결 타임아웃 2.5초 설정
+            withTimeoutOrNull(2500) { // 응답 제한 시간 2.5초 설정
                 val response = app.get(
                     url,
                     headers = mapOf(
@@ -203,7 +220,7 @@ class KKTVProvider : MainAPI() {
     ): Boolean {
         try {
             if (data.contains(".m3u8")) {
-                // K, S, W 세 가지 CDN 주소 후보군 생성
+                // K, S, W 세 가지 CDN 주소 후보군 대입
                 val kcdnUrl = data
                 val scdnUrl = data.replace("kcdn.ehfkdowl.com", "scdn.ehfkdowl.com")
                 val wcdnUrl = data.replace("kcdn.ehfkdowl.com", "wcdn.ehfkdowl.com")
@@ -214,7 +231,7 @@ class KKTVProvider : MainAPI() {
                     "W-CDN" to wcdnUrl
                 )
 
-                // 3개 주소를 병렬로 조회 (속도 지연 최소화)
+                // [추가] 코루틴 병렬 처리를 활용하여 세 주소를 동시에 비동기 검사
                 val validLinks = coroutineScope {
                     candidates.map { (cdnName, url) ->
                         async {
@@ -228,7 +245,7 @@ class KKTVProvider : MainAPI() {
                 }
 
                 if (validLinks.isNotEmpty()) {
-                    // 정상적인 CDN 주소만 추출하여 전달
+                    // 유효성이 검증된 실시간 CDN 링크들만 필터링하여 플레이어에 반환
                     for ((cdnName, url) in validLinks) {
                         callback.invoke(
                             newExtractorLink(
@@ -243,7 +260,7 @@ class KKTVProvider : MainAPI() {
                         )
                     }
                 } else {
-                    // 모든 검사 실패 혹은 일시적인 타임아웃 발생 시, Fallback 예외 조치로 원본 K-CDN 추가
+                    // 세 도메인 모두 확인이 실패했거나 일시적 네트워크 타임아웃 발생 시, 기본 K-CDN 제공
                     callback.invoke(
                         newExtractorLink(
                             source = this.name,
