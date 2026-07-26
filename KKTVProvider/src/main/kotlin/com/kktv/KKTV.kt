@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.*
 import org.jsoup.Jsoup
+import java.net.URI
 import java.net.URLEncoder
 import java.net.URLDecoder
 import kotlin.coroutines.resume
@@ -21,12 +22,13 @@ class KKTVProvider : MainAPI() {
     override var lang = "ko"
     override val hasMainPage = true
 
+    // 메인 홈 화면 카탈로그 요청
     override val mainPage = mainPageOf(
-        "live_matches" to "실시간 스포츠 중계"
+        "/live/sportstv" to "스포츠중계A",
+        "/live/sportstv2" to "스포츠중계B"
     )
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-
     private var cachedAuToken: String? = null
 
     private fun getNoMatchesResponse(requestName: String, msg: String): HomePageResponse {
@@ -40,7 +42,7 @@ class KKTVProvider : MainAPI() {
         )
     }
 
-    private suspend fun getDynamicTokenViaWebView(url: String): String? = withContext(Dispatchers.Main) {
+    private suspend fun getDynamicTokenViaWebView(iframeUrl: String, refererUrl: String): String? = withContext(Dispatchers.Main) {
         val context = try {
             Class.forName("android.app.ActivityThread")
                 .getMethod("currentApplication")
@@ -79,12 +81,18 @@ class KKTVProvider : MainAPI() {
                         javascript:(function() {
                             var originalSend = XMLHttpRequest.prototype.send;
                             XMLHttpRequest.prototype.send = function(data) {
-                                if (data && typeof data === 'string') {
-                                    var match = data.match(/auToken=([^&]+)/);
-                                    if(match && match[1]) {
-                                        console.log('KKTV_TOKEN:' + match[1]);
+                                try {
+                                    if (data) {
+                                        var str = '';
+                                        if(typeof data === 'string') str = data;
+                                        else if(data instanceof URLSearchParams) str = data.toString();
+                                        
+                                        var match = str.match(/auToken=([^&]+)/);
+                                        if(match && match[1]) {
+                                            console.log('KKTV_TOKEN:' + match[1]);
+                                        }
                                     }
-                                }
+                                } catch(e) {}
                                 return originalSend.apply(this, arguments);
                             };
                             
@@ -102,8 +110,9 @@ class KKTVProvider : MainAPI() {
                 }
             }
 
-            println("[KKTV DEBUG] 🔍 WebView 로드 시작: $url")
-            webView.loadUrl(url)
+            println("[KKTV DEBUG] 🔍 WebView 로드 시작: $iframeUrl")
+            // 🚨 핵심: iframe에 직접 쳐들어가되, 메인 사이트에서 접속한 척 Referer를 위장
+            webView.loadUrl(iframeUrl, mutableMapOf("Referer" to refererUrl))
 
             val handler = Handler(Looper.getMainLooper())
             val timeoutRunnable = Runnable {
@@ -128,23 +137,42 @@ class KKTVProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val items = mutableListOf<SearchResponse>()
-        val iframeUrl = "https://fkwdsvop.com/KingKong/livescore/livescore/"
-        val apiUrl = "https://fkwdsvop.com/ajax/getLivescoreListV3"
-
+        
         try {
-            val iframeHtml = app.get(iframeUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent)).text
+            // 🚨 1. 하드코딩 폐기: 메인 페이지에 접속해 iframe 주소 동적 추출
+            val mainPageUrl = "$mainUrl${request.data}"
+            val doc = app.get(mainPageUrl, headers = mapOf("User-Agent" to userAgent)).document
             
-            // 🚨 하드코딩 삭제: targetId를 못 찾으면 469를 강제로 박는 게 아니라 깔끔하게 에러 반환
+            var iframeSrc = doc.select("iframe#broadcastFrame").attr("src").ifEmpty {
+                doc.select("iframe").mapNotNull { it.attr("src") }.firstOrNull { it.contains("livescore") } ?: ""
+            }
+
+            if (iframeSrc.isBlank()) {
+                return getNoMatchesResponse(request.name, "iframe 추출 실패 (사이트 구조 변경 의심)")
+            }
+
+            // 상대 경로일 경우 절대 경로로 조립
+            val targetIframeUrl = if (iframeSrc.startsWith("http")) iframeSrc 
+                                  else if (iframeSrc.startsWith("//")) "https:$iframeSrc" 
+                                  else "$mainUrl${if (iframeSrc.startsWith("/")) "" else "/"}$iframeSrc"
+
+            // 🚨 2. 하드코딩 폐기: 추출한 iframe 도메인을 바탕으로 API 주소 동적 생성
+            val uri = URI(targetIframeUrl)
+            val apiUrl = "${uri.scheme}://${uri.host}/ajax/getLivescoreListV3"
+
+            println("[KKTV DEBUG] 동적 추출 Iframe: $targetIframeUrl")
+            println("[KKTV DEBUG] 동적 생성 API: $apiUrl")
+
+            val iframeHtml = app.get(targetIframeUrl, headers = mapOf("Referer" to mainPageUrl, "User-Agent" to userAgent)).text
             val targetIdRegex = Regex("""targetId\s*=\s*['"]?(\d+)['"]?""")
             val dynamicTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1)
-            
+
             if (dynamicTargetId == null) {
-                println("[KKTV DEBUG] ❌ targetId 동적 추출 실패! HTML 구조 변경 의심.")
-                return getNoMatchesResponse(request.name, "targetId 동적 추출 실패")
+                return getNoMatchesResponse(request.name, "targetId 추출 실패")
             }
 
             if (cachedAuToken == null) {
-                cachedAuToken = getDynamicTokenViaWebView(iframeUrl)
+                cachedAuToken = getDynamicTokenViaWebView(targetIframeUrl, mainPageUrl)
             }
 
             val currentToken = cachedAuToken
@@ -155,8 +183,8 @@ class KKTVProvider : MainAPI() {
             val postHeaders = mapOf(
                 "Accept" to "application/json, text/javascript, */*; q=0.01",
                 "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8",
-                "Origin" to "https://fkwdsvop.com",
-                "Referer" to iframeUrl,
+                "Origin" to "${uri.scheme}://${uri.host}",
+                "Referer" to targetIframeUrl,
                 "X-Requested-With" to "XMLHttpRequest",
                 "User-Agent" to userAgent
             )
@@ -165,9 +193,8 @@ class KKTVProvider : MainAPI() {
                 "sportsType" to "all", "status" to "", "c_targetId" to dynamicTargetId, "auToken" to currentToken
             ))
 
-            // 만료 시 재생성
             if (response.code != 200) {
-                val freshToken = getDynamicTokenViaWebView(iframeUrl)
+                val freshToken = getDynamicTokenViaWebView(targetIframeUrl, mainPageUrl)
                 if (freshToken != null) {
                     cachedAuToken = freshToken
                     response = app.post(apiUrl, headers = postHeaders, data = mapOf(
@@ -184,7 +211,7 @@ class KKTVProvider : MainAPI() {
 
             val responseText = response.text
             if (!responseText.trim().startsWith("{") && !responseText.trim().startsWith("[")) {
-                return getNoMatchesResponse(request.name, "잘못된 응답 데이터 (JSON 아님)")
+                return getNoMatchesResponse(request.name, "잘못된 응답 데이터")
             }
 
             val jsonTree = mapper.readTree(responseText)
@@ -224,11 +251,11 @@ class KKTVProvider : MainAPI() {
                         val posterUrlFromJson = if (thumbnail.isNotBlank() && thumbnail.startsWith("//")) {
                             "https:$thumbnail"
                         } else {
-                            ""
+                            "" 
                         }
 
                         val channelId = thumbnail.substringAfterLast("/")
-                        val playerUrl = "kktv://play?channelId=$channelId&seq=$seq"
+                        val playerUrl = "kktv://play?channelId=$channelId&seq=$seq&iframe=${URLEncoder.encode(targetIframeUrl, "UTF-8")}"
 
                         val encodedTitle = URLEncoder.encode(displayTitle, "UTF-8")
                         val encodedPoster = URLEncoder.encode(posterUrlFromJson, "UTF-8")
@@ -258,7 +285,7 @@ class KKTVProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val homeResponse = getMainPage(1, MainPageRequest("live_matches", "main", false))
+        val homeResponse = getMainPage(1, MainPageRequest("/live/sportstv", "스포츠중계A", false))
         val allMatches = homeResponse.items.flatMap { it.list }
         return allMatches.filter { it.name.contains(query, ignoreCase = true) }
     }
@@ -291,13 +318,13 @@ class KKTVProvider : MainAPI() {
         try {
             val channelId = Regex("""channelId=([^&]+)""").find(data)?.groupValues?.get(1)
             val seq = Regex("""seq=([^&]+)""").find(data)?.groupValues?.get(1)
+            val encodedIframe = Regex("""iframe=([^&]+)""").find(data)?.groupValues?.get(1)
+            val refererUrl = if (encodedIframe != null) URLDecoder.decode(encodedIframe, "UTF-8") else mainUrl
 
             if (channelId != null && seq != null && channelId.isNotBlank() && seq.isNotBlank()) {
                 val tParam = (System.currentTimeMillis() / 1000) + 86400
                 
-                val primaryCdns = listOf("kcdn", "wcdn", "scdn")
-                val alphabetCdns = ('a'..'z').map { "${it}cdn" }.filterNot { it in primaryCdns }
-                val allCdns = primaryCdns + alphabetCdns
+                val allCdns = ('a'..'z').map { "${it}cdn" }
 
                 val validM3u8Url = coroutineScope {
                     allCdns.map { cdn ->
@@ -322,7 +349,7 @@ class KKTVProvider : MainAPI() {
                             url = validM3u8Url,
                             type = ExtractorLinkType.M3U8
                         ) {
-                            this.referer = "https://fkwdsvop.com/"
+                            this.referer = refererUrl
                             this.headers = mapOf("User-Agent" to userAgent)
                         }
                     )
