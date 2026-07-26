@@ -59,11 +59,31 @@
         "name": "DaddyLive"
     },
     {
-        "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/KotbcProvider/ktblogo.png",
-        "fileHash": "sha256-eee83c118c5ac1d48e72187daadeaefc735b319711ab154ae600fe229bdf9407",
+        "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/KKTVProvider/KKTV.jpg",
+        "fileHash": "sha256-5ced3a2de0b63ac0c382c5026e12ebd0d419623fa702e6a824449bf5a6e01b7f",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 30860,
+        "fileSize": 14337,
+        "status": 1,
+        "language": "ko",
+        "authors": [
+            "hsp1020"
+        ],
+        "tvTypes": [
+            "Live"
+        ],
+        "version": 1,
+        "internalName": "KKTVProvider",
+        "description": "\uc2a4\ud3ec\uce20 \uc0dd\uc911\uacc4 \uc81c\uacf5",
+        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/KKTVProvider.cs3",
+        "name": "KKTVProvider"
+    },
+    {
+        "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/KotbcProvider/ktblogo.png",
+        "fileHash": "sha256-2536d3256bd37447840bfef862f464736a14ba4eb1ef34e71c87b3ce93f667f9",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
+        "fileSize": 30852,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -103,10 +123,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/MoviekingProvider/image-4.png",
-        "fileHash": "sha256-4c82192b943ff9ed3b8bdb9fc19fcd74f64ee48b6f531dfebec58c6734d23491",
+        "fileHash": "sha256-4f66f8c286013e601fe4f9bb960229f578c06b0ebc1c7e10fb0e214ef1780182",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 37024,
+        "fileSize": 37027,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -189,10 +209,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/SyncCS/cloud-sync.png",
-        "fileHash": "sha256-07feccbe471eaf6d13f1ec992a7447b9217e8f9ab34e1a24cd001acb13ad2c16",
+        "fileHash": "sha256-2074c26b0dd97afc3f9ea445d9d68a6f8e52ccf5725e9f31da43d75a10cbdede",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 69169,
+        "fileSize": 69173,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -209,10 +229,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/TvchakProvider/logo.png",
-        "fileHash": "sha256-50ef41081abf18b594d1fd6d16a3745ee9268797c2d06504009547929254b082",
+        "fileHash": "sha256-948a0ed9595f8a2d291d39b0c1771d92a47885a86a067534758f5ffa8cfb8ec1",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 30106,
+        "fileSize": 30096,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -232,10 +252,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/TVMONProvider/111.png",
-        "fileHash": "sha256-f1f0184207505a52ddd29328c9dc41c145a8d105e60c483809d446b1665415ad",
+        "fileHash": "sha256-1b42161c5acf156b7fab26d4644f84409d5196f815b238bab901ccb0159c5a69",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 51108,
+        "fileSize": 51110,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -255,10 +275,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/TVWikiProvider/logo.png",
-        "fileHash": "sha256-f48837daea52126ad141f41e68da65700edcab9c32cffa2a18d9cb2e496fc684",
+        "fileHash": "sha256-02e4947ad5cf5018b8f8bb829204ac70e1ac088ca20f1e3145b50a9d2e78dbe9",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 52924,
+        "fileSize": 52913,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -300,10 +320,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Youtube_logo.png",
-        "fileHash": "sha256-978ec9c664c95847c7ab74cff47ec4ce66fcf646f9ed59495c26f31eba0140ae",
+        "fileHash": "sha256-32ca03da37ffe0e61f6c8ad382b71e6073b7cb05d59f1973a46ed2ef7bbd2ec2",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 216137,
+        "fileSize": 216139,
         "status": 1,
         "authors": [
             "hsp1020"
