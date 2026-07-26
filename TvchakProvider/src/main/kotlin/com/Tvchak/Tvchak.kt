@@ -2,6 +2,7 @@ package com.lagradost.cloudstream3.plugins.tvchak
 
 import android.content.Context
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
@@ -26,7 +27,7 @@ class TvchakProvider : MainAPI() {
 
         fun saveDomain(newDomain: String) {
             currentMainUrl = newDomain
-            AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            CloudStreamApp.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 ?.edit()?.putString(PREF_KEY, newDomain)?.apply()
             println("[ChakPlay DBG] 💾 도메인 로컬 저장 완료 -> $newDomain")
         }
@@ -189,7 +190,7 @@ class TvchakProvider : MainAPI() {
         domainMutex.withLock {
             if (isDomainChecked) return@withLock
 
-            val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val prefs = CloudStreamApp.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             currentMainUrl = prefs?.getString(PREF_KEY, null)?.replace("http://", "https://") ?: currentMainUrl
             mainUrl = currentMainUrl
 
