@@ -1,8 +1,8 @@
 {
-  "name": "HSP1020 Repository",
+  "name": "TVMON Repository",
   "description": "한국 드라마 및 TV 프로그램 다시보기",
   "manifestVersion": 1,
   "pluginLists": [
-    "https://raw.githubusercontent.com/hsp1020/TestPlugins-build/refs/heads/main/plugins.json"
+    "https://raw.githubusercontent.com/hsp1020/TestPlugins-build/refs/heads/builds/plugins.json"
   ]
 }
