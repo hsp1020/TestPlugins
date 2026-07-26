@@ -31,7 +31,7 @@ class TVWiki : MainAPI() {
 
         fun saveDomain(newDomain: String) {
             currentMainUrl = newDomain
-            AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            CloudStreamApp.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 ?.edit()?.putString(PREF_KEY, newDomain)?.apply()
             println("[TVWiki DBG] 💾 영구 도메인 저장 완료: $newDomain")
         }
@@ -91,7 +91,7 @@ class TVWiki : MainAPI() {
         domainMutex.withLock {
             if (isDomainChecked) return@withLock
 
-            val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val prefs = CloudStreamApp.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val cachedDomain = prefs?.getString(PREF_KEY, null)?.replace("http://", "https://")
             
             if (cachedDomain != null) {
