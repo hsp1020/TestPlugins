@@ -5,6 +5,10 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
 import java.net.URLEncoder
 import java.net.URLDecoder
+import java.security.SecureRandom
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -23,6 +27,22 @@ class KKTVProvider : MainAPI() {
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
+    // [추가] AES 복호화 함수 (테스트 토큰 검증용)
+    private fun decryptAes(cipherTextHex: String, keyStr: String, ivStr: String): String {
+        val keyBytes = keyStr.toByteArray(Charsets.UTF_8)
+        val ivBytes = ivStr.toByteArray(Charsets.UTF_8)
+        val cipherTextBytes = cipherTextHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        
+        val secretKey = SecretKeySpec(keyBytes, "AES")
+        val ivSpec = IvParameterSpec(ivBytes)
+        
+        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
+        
+        val decryptedBytes = cipher.doFinal(cipherTextBytes)
+        return String(decryptedBytes, Charsets.UTF_8)
+    }
+
     private fun getNoMatchesResponse(requestName: String, msg: String): HomePageResponse {
         println("[KKTV DEBUG] ❌ 에러/빈화면 반환 사유: $msg")
         val errorItem = newLiveSearchResponse(name = msg, url = mainUrl) {
@@ -38,6 +58,19 @@ class KKTVProvider : MainAPI() {
         println("[KKTV DEBUG] =========================================")
         println("[KKTV DEBUG] 1. getMainPage 시작 | request.data: ${request.data}")
         
+        // [검증 프로세스] 이전 유효했던 토큰을 복호화하여 평문(정확한 시간 포맷) 로그 출력
+        try {
+            val testToken = "20a5271810b0854b3b70e2557663f1c593f25010708fb8aae02285120f8a35693d579a7930fd779057b86cc72ff9ac59022a46ccd0bc3938ad3aa9597ae8eb086b1415241f9d99a7507a783d08849bfc2e6f33b00d7dbde9de6962efbd6429c9c319475a89bee246f548fce39a0daa96"
+            val ivStr = testToken.substring(0, 16)
+            val keyStr = testToken.substring(16, 32)
+            val cipherHex = testToken.substring(32)
+            
+            val decrypted = decryptAes(cipherHex, keyStr, ivStr)
+            println("[KKTV DEBUG] 🔓 테스트 토큰 복호화 결과: $decrypted")
+        } catch (e: Exception) {
+            println("[KKTV DEBUG] ⚠️ 테스트 토큰 복호화 실패: ${e.message}")
+        }
+
         val items = mutableListOf<SearchResponse>()
         val iframeUrl = "https://fkwdsvop.com/KingKong/livescore/livescore/"
         val apiUrl = "https://fkwdsvop.com/ajax/getLivescoreListV3"
@@ -47,11 +80,6 @@ class KKTVProvider : MainAPI() {
             val iframeHtml = iframeResponse.text
             
             println("[KKTV DEBUG] 2. iframe 응답 결과 | HTTP Code: ${iframeResponse.code} | 본문 길이: ${iframeHtml.length}")
-            
-            if (iframeHtml.length < 1000) {
-                println("[KKTV DEBUG] ⚠️ 본문이 지나치게 짧습니다. 아래는 수신된 실제 HTML 전체 내용입니다:")
-                println(iframeHtml)
-            }
 
             // 1. targetId 추출 (var targetId=469; 매칭)
             val targetIdRegex = Regex("""targetId\s*=\s*(\d+)""")
@@ -66,106 +94,43 @@ class KKTVProvider : MainAPI() {
             // 2. 외부 JS 파일 추적 및 실시간 auToken 추출 진행
             var parsedToken: String? = null
 
-            // HTML 내부에서 /def_iframe_v2/ 경로를 포함하는 JS 스크립트 소스 주소들을 동적 추출
             val scriptRegex = Regex("""src=["']([^"']+/def_iframe_v2/[^"']+)["']""")
             var jsUrls = scriptRegex.findAll(iframeHtml).map { match ->
                 val path = match.groupValues[1]
                 if (path.startsWith("http")) path else "https://fkwdsvop.com$path"
             }.toList()
 
-            // 추출 실패 시 대비용 대체 경로
             if (jsUrls.isEmpty()) {
-                println("[KKTV DEBUG] ⚠️ HTML에서 JS 파일 경로 추출 실패. 기본 경로 목록을 대입합니다.")
                 jsUrls = listOf(
                     "https://fkwdsvop.com/static/common/js/def_iframe_v2/common.js?v=202603251115671",
                     "https://fkwdsvop.com/static/common/js/def_iframe_v2/sports.min.js?v=202603251115671"
                 )
             }
 
-            // 토큰 추출용 224자 Hex 정규식
             val hexRegex = Regex("""[0-9a-fA-F]{200,240}""")
 
             for (jsUrl in jsUrls) {
                 try {
-                    println("[KKTV DEBUG] 🔍 외부 JS 파일 다운로드 및 토큰 검색 중: $jsUrl")
                     val jsResponse = app.get(jsUrl, headers = mapOf("Referer" to iframeUrl, "User-Agent" to userAgent))
                     val jsContent = jsResponse.text
                     
-                    // [개선] getEcodeData 발견 시 안드로이드 로그캣 한계 우회를 위해 1,000자씩 분할 출력 수행
-                    var lastIndex = 0
-                    var matchCount = 1
-                    while (true) {
-                        val index = jsContent.indexOf("getEcodeData", lastIndex)
-                        if (index == -1) break
-                        
-                        println("[KKTV DEBUG] 🔍 getEcodeData 발견 #$matchCount ($jsUrl) - index: $index")
-                        val start = (index - 200).coerceAtLeast(0)
-                        val end = (index + 8000).coerceAtMost(jsContent.length) // 8,000자 수집
-                        
-                        println("[KKTV DEBUG] 📋 주변 소스코드 #$matchCount ---------------------------------")
-                        val fullSubstring = jsContent.substring(start, end)
-                        
-                        // 1000자 조각으로 쪼개서 줄 단위로 출력 (로그캣 잘림 우회 완료)
-                        fullSubstring.chunked(1000).forEachIndexed { chunkIndex, chunk ->
-                            println("[KKTV DEBUG] 📋 [파트 ${chunkIndex + 1}] $chunk")
-                        }
-                        println("[KKTV DEBUG] 📋 -------------------------------------------------------------")
-                        
-                        lastIndex = index + "getEcodeData".length
-                        matchCount++
-                    }
-
-                    // [추가] 시간 추출 포맷 확인을 위해 getLocalTime 함수 정의도 함께 추적 출력합니다.
-                    var lastLtIndex = 0
-                    var ltMatchCount = 1
-                    while (true) {
-                        val index = jsContent.indexOf("getLocalTime", lastLtIndex)
-                        if (index == -1) break
-                        
-                        println("[KKTV DEBUG] 🔍 getLocalTime 발견 #$ltMatchCount ($jsUrl) - index: $index")
-                        val start = (index - 200).coerceAtLeast(0)
-                        val end = (index + 1500).coerceAtMost(jsContent.length)
-                        val ltSubstring = jsContent.substring(start, end)
-                        
-                        ltSubstring.chunked(1000).forEachIndexed { chunkIndex, chunk ->
-                            println("[KKTV DEBUG] 📋 [getLocalTime 파트 ${chunkIndex + 1}] $chunk")
-                        }
-                        println("[KKTV DEBUG] 📋 -------------------------------------------------------------")
-                        
-                        lastLtIndex = index + "getLocalTime".length
-                        ltMatchCount++
-                    }
-
-                    // JS 본문 안에서 "auToken" 키워드 위치 추적
                     val auTokenKeyIndex = jsContent.indexOf("auToken")
                     if (auTokenKeyIndex != -1) {
-                        println("[KKTV DEBUG] 🔍 JS 내부에서 'auToken' 키워드 위치 감지 성공!")
-                        
                         val searchArea = jsContent.substring(
                             (auTokenKeyIndex - 100).coerceAtLeast(0),
                             (auTokenKeyIndex + 1000).coerceAtMost(jsContent.length)
                         )
-                        
-                        println("[KKTV DEBUG] 📋 'auToken' 키워드 기준 주변 소스코드 대량 출력 시작 -----------------")
-                        println(searchArea)
-                        println("[KKTV DEBUG] 📋 -------------------------------------------------------------")
-
                         val tokenMatch = hexRegex.find(searchArea)?.value
                         if (tokenMatch != null) {
                             parsedToken = tokenMatch
-                            println("[KKTV DEBUG] ✅ JS 키워드 기반 auToken 추출 성공: $parsedToken")
                             break
-                        } else {
-                            println("[KKTV DEBUG] ⚠️ 키워드 감지는 했으나, 주변 1100자 이내에서 200~240자리 Hex 문자열 매칭 실패")
                         }
                     }
                     
-                    // 성능 병목 해결: 대용량 JS 전문 스캔 대신 상위 100KB 범위에서만 고속 매칭 테스트
                     val scanLimit = jsContent.substring(0, 100000.coerceAtMost(jsContent.length))
                     val generalMatch = hexRegex.find(scanLimit)?.value
                     if (generalMatch != null) {
                         parsedToken = generalMatch
-                        println("[KKTV DEBUG] ✅ JS 전역 224자 Hex 패턴 auToken 파싱 완료: $parsedToken")
                         break
                     }
                 } catch (e: Exception) {
@@ -173,7 +138,7 @@ class KKTVProvider : MainAPI() {
                 }
             }
 
-            // 하드코딩 토큰을 완전히 지우고, 추출 실패 시 바로 에러를 띄워 헛수고 요청을 차단합니다.
+            // 실시간 추출에 실패할 경우 에러 반환
             val dynamicToken = parsedToken ?: return getNoMatchesResponse(request.name, "인증 토큰(auToken) 실시간 추출 실패")
             val dynamicTargetId = parsedTargetId ?: "469"
 
