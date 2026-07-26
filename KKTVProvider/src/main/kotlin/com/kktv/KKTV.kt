@@ -39,14 +39,74 @@ class KKTVProvider : MainAPI() {
         val apiUrl = "https://fkwdsvop.com/ajax/getLivescoreListV3"
 
         try {
+            println("[KKTV DEBUG] 2. Iframe HTML 로드 시도: $iframeUrl")
             val iframeHtml = app.get(iframeUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent)).text
+            println("[KKTV DEBUG] 3. Iframe HTML 로드 성공 (길이: ${iframeHtml.length})")
             
-            val tokenRegex = Regex("""auToken\s*[:=]\s*['"]([^'"]+)['"]""")
+            // 정규식 정의
+            val tokenRegex = Regex("""auToken\s*[:=]\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
+            val hexRegex = Regex("""['"]([a-fA-F0-9]{200,})['"]""")
             val targetIdRegex = Regex("""c_targetId\s*[:=]\s*['"]?(\d+)['"]?""")
             
-            // 🚨 지적해주신 하드코딩 삭제. 정규식으로 찾고 없으면 빈 값 전송
-            val dynamicToken = tokenRegex.find(iframeHtml)?.groupValues?.get(1) ?: ""
-            val dynamicTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1) ?: ""
+            println("[KKTV DEBUG] 4. HTML 내부 토큰/해시값 검색 시작...")
+            var dynamicToken = tokenRegex.find(iframeHtml)?.groupValues?.get(1)
+            
+            if (dynamicToken != null) {
+                println("[KKTV DEBUG] ✅ HTML 내부에서 auToken 직접 발견!")
+            } else {
+                println("[KKTV DEBUG] ⚠️ HTML 내부 auToken 직접 발견 실패. 긴 해시(Hex) 문자열로 재검색...")
+                dynamicToken = hexRegex.find(iframeHtml)?.groupValues?.get(1)
+                
+                if (dynamicToken != null) {
+                    println("[KKTV DEBUG] ✅ HTML 내부에서 긴 해시 문자열 발견!")
+                } else {
+                    println("[KKTV DEBUG] ⚠️ HTML 내부 해시 발견 실패. 외부 JS 스크립트 추적 시작...")
+                    val scripts = Jsoup.parse(iframeHtml).select("script[src]")
+                    println("[KKTV DEBUG] 🔍 발견된 외부 스크립트 개수: ${scripts.size}개")
+                    
+                    for (script in scripts) {
+                        val src = script.attr("src")
+                        if (src.isNotBlank()) {
+                            val scriptUrl = if (src.startsWith("http")) src else "https://fkwdsvop.com$src"
+                            println("[KKTV DEBUG] 🔍 스크립트 스캔 중: $scriptUrl")
+                            try {
+                                val scriptText = app.get(scriptUrl, headers = mapOf("Referer" to iframeUrl, "User-Agent" to userAgent)).text
+                                
+                                var scriptTokenMatch = tokenRegex.find(scriptText)?.groupValues?.get(1)
+                                if (scriptTokenMatch == null) {
+                                    scriptTokenMatch = hexRegex.find(scriptText)?.groupValues?.get(1)
+                                }
+                                
+                                if (scriptTokenMatch != null) {
+                                    dynamicToken = scriptTokenMatch
+                                    println("[KKTV DEBUG] ✅ 외부 JS에서 토큰 발견 성공!")
+                                    break
+                                }
+                            } catch (e: Exception) {
+                                println("[KKTV DEBUG] ❌ 스크립트 로드 실패: ${e.message}")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 🚨 하드코딩 제거: 샅샅이 뒤졌는데도 토큰이 없으면 즉시 파싱을 중단하고 HTML을 덤프합니다.
+            if (dynamicToken == null) {
+                println("[KKTV DEBUG] ❌ 모든 동적 토큰 추출 실패! 디버깅을 위해 HTML 전체를 덤프합니다.")
+                iframeHtml.chunked(3000).forEachIndexed { index, chunk ->
+                    println("[KKTV DEBUG HTML DUMP $index] $chunk")
+                }
+                return getNoMatchesResponse(request.name, "토큰 추출 실패 (로그캣 확인 요망)")
+            }
+
+            // Target ID 추출 (실패 시 기본 469도 동적으로 찾게끔 설정)
+            var dynamicTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1)
+            if (dynamicTargetId == null) {
+                println("[KKTV DEBUG] ⚠️ targetId를 찾지 못해 기본값 469 사용")
+                dynamicTargetId = "469"
+            }
+
+            println("[KKTV DEBUG] 5. 최종 추출 데이터 -> TargetId: $dynamicTargetId | Token 길이: ${dynamicToken.length}")
 
             val postData = mapOf(
                 "sportsType" to "all",
@@ -64,15 +124,18 @@ class KKTVProvider : MainAPI() {
                 "User-Agent" to userAgent
             )
 
+            println("[KKTV DEBUG] 6. API POST 통신 시도: $apiUrl")
             val response = app.post(apiUrl, headers = postHeaders, data = postData)
 
             if (response.code != 200) {
+                println("[KKTV DEBUG] ❌ API 통신 에러 발생. HTTP 상태 코드: ${response.code}")
                 return getNoMatchesResponse(request.name, "API 통신 에러 (HTTP ${response.code})")
             }
 
             val responseText = response.text
             
             if (!responseText.trim().startsWith("{") && !responseText.trim().startsWith("[")) {
+                println("[KKTV DEBUG] ❌ 잘못된 응답 데이터 수신. 앞부분: ${responseText.take(200)}")
                 return getNoMatchesResponse(request.name, "잘못된 응답 데이터 (JSON이 아님)")
             }
 
@@ -80,16 +143,17 @@ class KKTVProvider : MainAPI() {
             val dataArray = jsonTree.get("data")
 
             if (dataArray != null && dataArray.isArray) {
+                println("[KKTV DEBUG] 7. JSON 배열 내 경기 개수: ${dataArray.size()}")
                 
                 // 중요경기(title_color != N)와 일반경기를 분리하여 정렬
                 val matchList = dataArray.toList()
                 val importantMatches = matchList.filter { 
                     val color = it.get("title_color")?.asText()
-                    color != null && color != "N" 
+                    color != null && color != "N" && color.isNotBlank()
                 }
                 val normalMatches = matchList.filter { 
                     val color = it.get("title_color")?.asText()
-                    color == null || color == "N" 
+                    color == null || color == "N" || color.isBlank()
                 }
                 
                 val sortedMatches = importantMatches + normalMatches
@@ -117,8 +181,6 @@ class KKTVProvider : MainAPI() {
                             "$mainUrl/assets/Pc/img/hd_logo.png"
                         }
 
-                        // 🚨 지적해주신 kcdn 강제 하드코딩 삭제. 
-                        // 대신 실제 플레이어 페이지 URL을 넘겨서 loadLinks에서 동적으로 추출하게 만듦.
                         val playerUrl = "$iframeUrl?id=$seq"
 
                         val encodedTitle = URLEncoder.encode(displayTitle, "UTF-8")
@@ -132,9 +194,11 @@ class KKTVProvider : MainAPI() {
                         )
                     }
                 }
+                println("[KKTV DEBUG] 8. 최종 필터링된 'ING' 경기 개수: ${items.size}")
             }
         } catch (e: Exception) {
             e.printStackTrace()
+            println("[KKTV DEBUG] ❌ Exception 발생: ${e.message}")
             return getNoMatchesResponse(request.name, "파싱 중 치명적 오류 발생")
         }
 
@@ -142,6 +206,7 @@ class KKTVProvider : MainAPI() {
             return getNoMatchesResponse(request.name, "현재 진행중인 중계가 없습니다")
         }
 
+        println("[KKTV DEBUG] ✅ 카탈로그 반환 준비 완료.")
         return newHomePageResponse(
             list = listOf(HomePageList(request.name, items, isHorizontalImages = true)),
             hasNext = false
@@ -173,7 +238,6 @@ class KKTVProvider : MainAPI() {
         }
     }
 
-    // 🚨 여기서 kcdn, wcdn, scdn 상관없이 알아서 m3u8을 추출합니다.
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -181,25 +245,24 @@ class KKTVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         try {
-            // data는 이제 "https://fkwdsvop.com/KingKong/livescore/livescore/?id=48214" 와 같은 플레이어 주소입니다.
+            println("[KKTV DEBUG] 9. 플레이어 페이지 로드 시도: $data")
             val playerHtml = app.get(data, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent)).text
             
-            // HTML 소스 내부에 박혀있는 m3u8 링크를 정규식으로 모조리 잡아냅니다.
             val m3u8Regex = """https?://[^\s"'<>]+chunklist\.m3u8[^\s"'<>]*|https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""".toRegex()
             var matchUrl = m3u8Regex.find(playerHtml)?.value
 
-            // 혹시라도 플레이어 페이지 안에 또 iframe으로 영상을 띄운 구조라면, 그 안까지 타고 들어갑니다.
             if (matchUrl == null) {
+                println("[KKTV DEBUG] ⚠️ 1차 m3u8 추출 실패. 이중 iframe 내부 탐색 시도...")
                 val iframeSrc = Jsoup.parse(playerHtml).select("iframe").attr("src")
                 if (iframeSrc.isNotBlank()) {
                     val iframeUrl = if (iframeSrc.startsWith("http")) iframeSrc else "https://fkwdsvop.com$iframeSrc"
-                    val iframeHtml = app.get(iframeUrl, headers = mapOf("Referer" to data, "User-Agent" to userAgent)).text
-                    matchUrl = m3u8Regex.find(iframeHtml)?.value
+                    val iframeHtml2 = app.get(iframeUrl, headers = mapOf("Referer" to data, "User-Agent" to userAgent)).text
+                    matchUrl = m3u8Regex.find(iframeHtml2)?.value
                 }
             }
 
-            // 동적으로 찾은 찐 m3u8 링크를 재생기에 던져줍니다.
             if (matchUrl != null) {
+                println("[KKTV DEBUG] ✅ 최종 m3u8 스트림 추출 성공: $matchUrl")
                 callback.invoke(
                     newExtractorLink(
                         source = this.name,
@@ -212,9 +275,12 @@ class KKTVProvider : MainAPI() {
                     }
                 )
                 return true
+            } else {
+                println("[KKTV DEBUG] ❌ m3u8 스트림을 찾지 못했습니다.")
             }
         } catch (e: Exception) {
             e.printStackTrace()
+            println("[KKTV DEBUG] ❌ loadLinks 에러: ${e.message}")
         }
         return false
     }
