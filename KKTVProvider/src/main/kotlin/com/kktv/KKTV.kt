@@ -17,11 +17,9 @@ class KKTVProvider : MainAPI() {
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-    // 빈 화면(먹통) 방지 및 UI 화면에 직접 에러 사유를 띄워버리는 함수
     private fun getNoMatchesResponse(requestName: String, msg: String): HomePageResponse {
         println("[KKTV DEBUG] ❌ 에러/빈화면 반환 사유: $msg")
         val errorItem = newLiveSearchResponse(name = msg, url = mainUrl) {
-            // 🚨 요청하신 대로 에러 아이템의 썸네일은 빈 값으로 비웁니다.
             this.posterUrl = "" 
         }
         return newHomePageResponse(
@@ -42,8 +40,9 @@ class KKTVProvider : MainAPI() {
             println("[KKTV DEBUG] 2. Iframe HTML 로드 및 토큰 추출 시도...")
             val iframeHtml = app.get(iframeUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent)).text
             
+            // 🚨 오타 수정 완료: """ 세 개로 정확히 열고 닫음
             val tokenRegex = Regex("""auToken\s*[:=]\s*['"]([^'"]+)['"]""")
-            val targetIdRegex = Regex("""c_targetId\s*[:=]\s*['"]?(\d+)['"]?"")
+            val targetIdRegex = Regex("""c_targetId\s*[:=]\s*['"]?(\d+)['"]?""")
             
             val dynamicToken = tokenRegex.find(iframeHtml)?.groupValues?.get(1) 
                 ?: "3113b57e00d91c434ae2d3062c0723f3a5c1640ad062845e9f0ab5056d83574794045fad9947198d6a6e33fa44852bdd2b6ebabc84ae436d762c56bae8341624456b001f393b5c4ca8e235c402e86f48ad75cb6b5e4d51c37f458dbb55fc3f5b5d37ec2574af1a0180aee522b902ce96"
