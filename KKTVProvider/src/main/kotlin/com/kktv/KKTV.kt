@@ -8,7 +8,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 
-// JSON 응답을 매핑할 데이터 클래스
 data class MatchData(
     @JsonProperty("id") val id: String?,
     @JsonProperty("league_name") val leagueName: String?,
@@ -27,8 +26,14 @@ class KKTVProvider : MainAPI() {
     override var lang = "ko"
     override val hasMainPage = true
 
+    // =========================================================
+    // 🚨 핵심 수정: 앱 홈 화면에 띄울 카탈로그(행)를 먼저 정의해야 합니다.
+    // =========================================================
+    override val mainPage = mainPageOf(
+        "live_matches" to "실시간 스포츠 중계" // ("요청에 쓰일 데이터/식별자" to "화면에 노출될 카탈로그 이름")
+    )
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        val homeList = mutableListOf<HomePageList>()
         val items = mutableListOf<SearchResponse>()
 
         try {
@@ -80,21 +85,20 @@ class KKTVProvider : MainAPI() {
                     }
                 }
             }
-
-            if (items.isNotEmpty()) {
-                homeList.add(HomePageList("실시간 스포츠 중계 목록", items))
-            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
 
-        if (homeList.isEmpty()) return null
-        return newHomePageResponse(homeList, hasNext = false)
+        if (items.isEmpty()) return null
+
+        // 🚨 핵심 수정: request.name ("실시간 스포츠 중계") 이름으로 해당 카탈로그 아이템을 묶어서 반환합니다.
+        return newHomePageResponse(request.name, items, hasNext = false)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val homeResponse = getMainPage(1, MainPageRequest("main", "", false))
-        val allMatches = homeResponse?.items?.flatMap { it.list } ?: emptyList()
+        // 검색 시 request 객체를 생성해서 임시 전달
+        val homeResponse = getMainPage(1, MainPageRequest("live_matches", "main", false))
+        val allMatches = homeResponse?.items ?: emptyList()
         return allMatches.filter { it.name.contains(query, ignoreCase = true) }
     }
 
@@ -105,9 +109,6 @@ class KKTVProvider : MainAPI() {
         }
     }
 
-    /**
-     * 빌드 에러 수정: CloudStream 3 최신 사양인 newExtractorLink + 람다 초기화 방식 적용
-     */
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -115,13 +116,12 @@ class KKTVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         try {
-            // URL 자체가 바로 .m3u8 일 경우
             if (data.contains(".m3u8")) {
                 callback.invoke(
                     newExtractorLink(
-                        name,               // source
-                        "$name Live",       // name
-                        url = data,         // url
+                        name,
+                        "$name Live",
+                        url = data,
                         type = ExtractorLinkType.M3U8
                     ) {
                         this.referer = liveFrameUrl
@@ -131,7 +131,6 @@ class KKTVProvider : MainAPI() {
                 return true
             }
 
-            // HTML 페이지 내에서 Regex로 .m3u8 혹은 chunklist.m3u8 추출할 경우
             val playerPageText = app.get(
                 data,
                 headers = mapOf(
@@ -146,14 +145,13 @@ class KKTVProvider : MainAPI() {
             if (matchUrl != null) {
                 callback.invoke(
                     newExtractorLink(
-                        name,                 // source
-                        "$name Live HD",      // name
-                        url = matchUrl,       // url
+                        name,
+                        "$name Live HD",
+                        url = matchUrl,
                         type = ExtractorLinkType.M3U8
                     ) {
                         this.referer = data
                         this.quality = Qualities.Unknown.value
-                        // this.headers = mapOf(...) 필요시 추가 가능
                     }
                 )
                 return true
