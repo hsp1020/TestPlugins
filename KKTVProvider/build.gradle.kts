@@ -9,6 +9,6 @@ cloudstream {
     tvTypes = listOf(
         "Live"
     )
-    iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/CUTVProvider/biglogo.png"
+    iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/KKTVProvider/KKTV.jpg"
     
 }
