@@ -44,9 +44,9 @@ class KKTVProvider : MainAPI() {
             val tokenRegex = Regex("""auToken\s*[:=]\s*['"]([^'"]+)['"]""")
             val targetIdRegex = Regex("""c_targetId\s*[:=]\s*['"]?(\d+)['"]?""")
             
-            val dynamicToken = tokenRegex.find(iframeHtml)?.groupValues?.get(1) 
-                ?: "3113b57e00d91c434ae2d3062c0723f3a5c1640ad062845e9f0ab5056d83574794045fad9947198d6a6e33fa44852bdd2b6ebabc84ae436d762c56bae8341624456b001f393b5c4ca8e235c402e86f48ad75cb6b5e4d51c37f458dbb55fc3f5b5d37ec2574af1a0180aee522b902ce96"
-            val dynamicTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1) ?: "469"
+            // 🚨 지적해주신 하드코딩 삭제. 정규식으로 찾고 없으면 빈 값 전송
+            val dynamicToken = tokenRegex.find(iframeHtml)?.groupValues?.get(1) ?: ""
+            val dynamicTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1) ?: ""
 
             val postData = mapOf(
                 "sportsType" to "all",
@@ -81,9 +81,8 @@ class KKTVProvider : MainAPI() {
 
             if (dataArray != null && dataArray.isArray) {
                 
-                // 🚨 추가요건 2: 배열을 리스트로 변환 후 중요경기(title_color != N)와 일반경기를 분리
+                // 중요경기(title_color != N)와 일반경기를 분리하여 정렬
                 val matchList = dataArray.toList()
-                
                 val importantMatches = matchList.filter { 
                     val color = it.get("title_color")?.asText()
                     color != null && color != "N" 
@@ -93,7 +92,6 @@ class KKTVProvider : MainAPI() {
                     color == null || color == "N" 
                 }
                 
-                // 분리된 두 그룹을 더해서 중요경기가 상단에, 일반경기가 하단에 오게 병합 (각 그룹 내 순서는 그대로 유지됨)
                 val sortedMatches = importantMatches + normalMatches
                 
                 sortedMatches.forEach { match ->
@@ -119,14 +117,13 @@ class KKTVProvider : MainAPI() {
                             "$mainUrl/assets/Pc/img/hd_logo.png"
                         }
 
-                        val channelId = thumbnail.substringAfterLast("/")
-                        val tParam = (System.currentTimeMillis() / 1000) + 86400
-                        val m3u8Url = "https://kcdn.ehfkdowl.com/bigwinsoft/$channelId/chunklist.m3u8?t=$tParam&ds=$seq"
+                        // 🚨 지적해주신 kcdn 강제 하드코딩 삭제. 
+                        // 대신 실제 플레이어 페이지 URL을 넘겨서 loadLinks에서 동적으로 추출하게 만듦.
+                        val playerUrl = "$iframeUrl?id=$seq"
 
-                        // 🚨 추가요건 1: 제목과 썸네일을 상세 페이지로 넘기기 위해 URL 뒤에 인코딩해서 붙임
                         val encodedTitle = URLEncoder.encode(displayTitle, "UTF-8")
                         val encodedPoster = URLEncoder.encode(posterUrlFromJson, "UTF-8")
-                        val fakeUrl = "$m3u8Url&kktv_title=$encodedTitle&kktv_poster=$encodedPoster"
+                        val fakeUrl = "$playerUrl&kktv_title=$encodedTitle&kktv_poster=$encodedPoster"
 
                         items.add(
                             newLiveSearchResponse(name = displayTitle, url = fakeUrl) {
@@ -158,14 +155,12 @@ class KKTVProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        // 🚨 추가요건 1: 넘겨받은 url에서 숨겨둔 제목과 썸네일을 디코딩하여 추출
         val titleParam = Regex("""&kktv_title=([^&]+)""").find(url)?.groupValues?.get(1)
         val posterParam = Regex("""&kktv_poster=([^&]+)""").find(url)?.groupValues?.get(1)
 
         val title = if (titleParam != null) URLDecoder.decode(titleParam, "UTF-8") else "스포츠 실시간 중계"
         val poster = if (posterParam != null) URLDecoder.decode(posterParam, "UTF-8") else "$mainUrl/assets/Pc/img/hd_logo.png"
 
-        // 🚨 영상 재생부(loadLinks)로 넘길 때는 붙여둔 찌꺼기를 다시 잘라내고 순수 m3u8 주소(dataUrl)만 넘김
         val cleanUrl = url.substringBefore("&kktv_title=")
 
         return newLiveStreamLoadResponse(
@@ -178,6 +173,7 @@ class KKTVProvider : MainAPI() {
         }
     }
 
+    // 🚨 여기서 kcdn, wcdn, scdn 상관없이 알아서 m3u8을 추출합니다.
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -185,16 +181,33 @@ class KKTVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         try {
-            // 전달받은 data(cleanUrl)가 실제 m3u8 주소입니다.
-            if (data.contains(".m3u8")) {
+            // data는 이제 "https://fkwdsvop.com/KingKong/livescore/livescore/?id=48214" 와 같은 플레이어 주소입니다.
+            val playerHtml = app.get(data, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent)).text
+            
+            // HTML 소스 내부에 박혀있는 m3u8 링크를 정규식으로 모조리 잡아냅니다.
+            val m3u8Regex = """https?://[^\s"'<>]+chunklist\.m3u8[^\s"'<>]*|https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""".toRegex()
+            var matchUrl = m3u8Regex.find(playerHtml)?.value
+
+            // 혹시라도 플레이어 페이지 안에 또 iframe으로 영상을 띄운 구조라면, 그 안까지 타고 들어갑니다.
+            if (matchUrl == null) {
+                val iframeSrc = Jsoup.parse(playerHtml).select("iframe").attr("src")
+                if (iframeSrc.isNotBlank()) {
+                    val iframeUrl = if (iframeSrc.startsWith("http")) iframeSrc else "https://fkwdsvop.com$iframeSrc"
+                    val iframeHtml = app.get(iframeUrl, headers = mapOf("Referer" to data, "User-Agent" to userAgent)).text
+                    matchUrl = m3u8Regex.find(iframeHtml)?.value
+                }
+            }
+
+            // 동적으로 찾은 찐 m3u8 링크를 재생기에 던져줍니다.
+            if (matchUrl != null) {
                 callback.invoke(
                     newExtractorLink(
                         source = this.name,
-                        name = "${this.name} Live",
-                        url = data,
+                        name = "${this.name} Live HD",
+                        url = matchUrl,
                         type = ExtractorLinkType.M3U8
                     ) {
-                        this.referer = "https://fkwdsvop.com/"
+                        this.referer = data
                         this.headers = mapOf("User-Agent" to userAgent)
                     }
                 )
