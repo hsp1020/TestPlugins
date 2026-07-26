@@ -60,10 +60,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/KKTVProvider/KKTV.jpg",
-        "fileHash": "sha256-3e12845975fec3f3f29e6669959308fd07d90d2c17f1154d4609bcaa154eeda5",
+        "fileHash": "sha256-74b020ba791ebc51195db3ca2ba3b4acb69f4722f4ca49b1f4c0eadb7cab29cc",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 13817,
+        "fileSize": 14179,
         "status": 1,
         "language": "ko",
         "authors": [
