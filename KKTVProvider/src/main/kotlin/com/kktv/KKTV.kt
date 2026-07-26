@@ -91,15 +91,22 @@ class KKTVProvider : MainAPI() {
                     val jsResponse = app.get(jsUrl, headers = mapOf("Referer" to iframeUrl, "User-Agent" to userAgent))
                     val jsContent = jsResponse.text
                     
-                    // [핵심 추가] 암호화 연산을 지배하는 getEcodeData 함수 정의 찾기 및 로깅
-                    val eCodeIndex = jsContent.indexOf("getEcodeData")
-                    if (eCodeIndex != -1) {
-                        println("[KKTV DEBUG] 🔍 JS 파일 내부에서 'getEcodeData' 함수 정의 발견! ($jsUrl)")
-                        val start = (eCodeIndex - 200).coerceAtLeast(0)
-                        val end = (eCodeIndex + 2000).coerceAtMost(jsContent.length)
-                        println("[KKTV DEBUG] 📋 'getEcodeData' 연산부 주변 소스코드 대량 출력 시작 ------------")
+                    // [대폭 보강] JS 파일 전체에서 "getEcodeData" 문자열이 발견되는 모든 위치를 찾아 순차 로깅합니다.
+                    var lastIndex = 0
+                    var matchCount = 1
+                    while (true) {
+                        val index = jsContent.indexOf("getEcodeData", lastIndex)
+                        if (index == -1) break
+                        
+                        println("[KKTV DEBUG] 🔍 getEcodeData 발견 #$matchCount ($jsUrl) - index: $index")
+                        val start = (index - 200).coerceAtLeast(0)
+                        val end = (index + 1000).coerceAtMost(jsContent.length)
+                        println("[KKTV DEBUG] 📋 주변 소스코드 #$matchCount ---------------------------------")
                         println(jsContent.substring(start, end))
                         println("[KKTV DEBUG] 📋 -------------------------------------------------------------")
+                        
+                        lastIndex = index + "getEcodeData".length
+                        matchCount++
                     }
 
                     // JS 본문 안에서 "auToken" 키워드 위치 추적
