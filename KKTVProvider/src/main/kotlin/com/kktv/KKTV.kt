@@ -53,7 +53,7 @@ class KKTVProvider : MainAPI() {
                 println(iframeHtml)
             }
 
-            // 1. targetId 추출 (HTML 내의 var targetId=469; 매칭)
+            // 1. targetId 추출 (var targetId=469; 매칭)
             val targetIdRegex = Regex("""targetId\s*=\s*(\d+)""")
             val parsedTargetId = targetIdRegex.find(iframeHtml)?.groupValues?.get(1)
 
@@ -63,7 +63,7 @@ class KKTVProvider : MainAPI() {
                 println("[KKTV DEBUG] ✅ targetId 추출 성공: $parsedTargetId")
             }
 
-            // 2. 외부 JS 파일을 추적하여 auToken 추출 진행
+            // 2. 외부 JS 파일 추적 및 실시간 auToken 추출 진행
             var parsedToken: String? = null
 
             // HTML 내부에서 /def_iframe_v2/ 경로를 포함하는 JS 스크립트 소스 주소들을 동적 추출
@@ -73,7 +73,7 @@ class KKTVProvider : MainAPI() {
                 if (path.startsWith("http")) path else "https://fkwdsvop.com$path"
             }.toList()
 
-            // 추출에 실패했을 경우를 대비한 하드코딩 대체 경로 구성
+            // 추출 실패 시 대비용 대체 경로
             if (jsUrls.isEmpty()) {
                 println("[KKTV DEBUG] ⚠️ HTML에서 JS 파일 경로 추출 실패. 기본 경로 목록을 대입합니다.")
                 jsUrls = listOf(
@@ -82,8 +82,8 @@ class KKTVProvider : MainAPI() {
                 )
             }
 
-            // auToken 형식을 식별할 256자 Hex 정규식
-            val hexRegex = Regex("""[0-9a-fA-F]{256}""")
+            // 실제 토큰 길이(224자)에 맞춰 탐색 범위를 200~240자로 구성
+            val hexRegex = Regex("""[0-9a-fA-F]{200,240}""")
 
             for (jsUrl in jsUrls) {
                 try {
@@ -96,22 +96,23 @@ class KKTVProvider : MainAPI() {
                     if (auTokenKeyIndex != -1) {
                         println("[KKTV DEBUG] 🔍 JS 내부에서 'auToken' 키워드 위치 감지 성공!")
                         val searchArea = jsContent.substring(
-                            (auTokenKeyIndex - 50).coerceAtLeast(0),
-                            (auTokenKeyIndex + 500).coerceAtMost(jsContent.length)
+                            (auTokenKeyIndex - 100).coerceAtLeast(0),
+                            (auTokenKeyIndex + 1000).coerceAtMost(jsContent.length)
                         )
                         val tokenMatch = hexRegex.find(searchArea)?.value
                         if (tokenMatch != null) {
                             parsedToken = tokenMatch
-                            println("[KKTV DEBUG] ✅ JS 키워드 타겟팅 auToken 파싱 완료: $parsedToken")
+                            println("[KKTV DEBUG] ✅ JS 키워드 기반 auToken 추출 성공: $parsedToken")
                             break
                         }
                     }
                     
-                    // 키워드가 없더라도 JS 파일 전역에서 256자리 Hex 토큰 패턴이 보이면 수집
-                    val generalMatch = hexRegex.find(jsContent)?.value
+                    // 성능 병목 해결: 대용량 JS 전문 스캔 대신 상위 100KB 범위에서만 고속 매칭 테스트
+                    val scanLimit = jsContent.substring(0, 100000.coerceAtMost(jsContent.length))
+                    val generalMatch = hexRegex.find(scanLimit)?.value
                     if (generalMatch != null) {
                         parsedToken = generalMatch
-                        println("[KKTV DEBUG] ✅ JS 전역 256자 Hex 패턴 auToken 파싱 완료: $parsedToken")
+                        println("[KKTV DEBUG] ✅ JS 전역 224자 Hex 패턴 auToken 파싱 완료: $parsedToken")
                         break
                     }
                 } catch (e: Exception) {
@@ -119,8 +120,8 @@ class KKTVProvider : MainAPI() {
                 }
             }
 
-            val dynamicToken = parsedToken 
-                ?: "3113b57e00d91c434ae2d3062c0723f3a5c1640ad062845e9f0ab5056d83574794045fad9947198d6a6e33fa44852bdd2b6ebabc84ae436d762c56bae8341624456b001f393b5c4ca8e235c402e86f48ad75cb6b5e4d51c37f458dbb55fc3f5b5d37ec2574af1a0180aee522b902ce96"
+            // [개선] 하드코딩 토큰을 완전히 지우고, 추출 실패 시 바로 에러를 띄워 헛수고 요청을 차단합니다.
+            val dynamicToken = parsedToken ?: return getNoMatchesResponse(request.name, "인증 토큰(auToken) 실시간 추출 실패")
             val dynamicTargetId = parsedTargetId ?: "469"
 
             val postData = mapOf(
