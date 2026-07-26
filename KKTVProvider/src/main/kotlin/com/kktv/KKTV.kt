@@ -4,7 +4,9 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 
 // JSON 응답을 매핑할 데이터 클래스
 data class MatchData(
@@ -25,9 +27,6 @@ class KKTVProvider : MainAPI() {
     override var lang = "ko"
     override val hasMainPage = true
 
-    /**
-     * 빌드 에러 수정: request 타입을 ProviderData -> MainPageRequest 로 변경하고 반환타입을 nullable로 수정
-     */
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val homeList = mutableListOf<HomePageList>()
         val items = mutableListOf<SearchResponse>()
@@ -44,7 +43,6 @@ class KKTVProvider : MainAPI() {
             val text = response.text
 
             if (text.trim().startsWith("[") || text.trim().startsWith("{")) {
-                // 빌드 에러 수정: AppUtils.parseJson 임포트 및 명시적 타입 캐스팅 지정
                 val matches = parseJson<List<MatchData>>(text)
                 matches.forEach { match ->
                     val league = match.leagueName ?: "스포츠"
@@ -94,30 +92,22 @@ class KKTVProvider : MainAPI() {
         return newHomePageResponse(homeList, hasNext = false)
     }
 
-    /**
-     * 빌드 에러 수정: null 안전 처리(?.) 및 더미 MainPageRequest 인자 적용
-     */
     override suspend fun search(query: String): List<SearchResponse> {
         val homeResponse = getMainPage(1, MainPageRequest("main", "", false))
         val allMatches = homeResponse?.items?.flatMap { it.list } ?: emptyList()
         return allMatches.filter { it.name.contains(query, ignoreCase = true) }
     }
 
-    /**
-     * 빌드 에러 수정: newLiveStreamLoadResponse의 파라미터가 초과되지 않도록 맞춤 (TvType 제외)
-     */
     override suspend fun load(url: String): LoadResponse {
         val title = "스포츠 실시간 중계"
-        // param: name, url, dataUrl 순서 준수
         return newLiveStreamLoadResponse(title, url, url) {
             this.posterUrl = "$mainUrl/assets/Pc/img/hd_logo.png"
         }
     }
 
     /**
-     * 빌드 에러 수정: ExtractorLink Deprecated 워닝을 무시하여 빌드 멈춤(Fail) 방지
+     * 빌드 에러 수정: CloudStream 3 최신 사양인 newExtractorLink + 람다 초기화 방식 적용
      */
-    @Suppress("DEPRECATION")
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -125,20 +115,23 @@ class KKTVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         try {
+            // URL 자체가 바로 .m3u8 일 경우
             if (data.contains(".m3u8")) {
                 callback.invoke(
-                    ExtractorLink(
-                        source = name,
-                        name = "$name Live",
-                        url = data,
-                        referer = liveFrameUrl,
-                        quality = Qualities.Unknown.value,
-                        isM3u8 = true
-                    )
+                    newExtractorLink(
+                        name,               // source
+                        "$name Live",       // name
+                        url = data,         // url
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = liveFrameUrl
+                        this.quality = Qualities.Unknown.value
+                    }
                 )
                 return true
             }
 
+            // HTML 페이지 내에서 Regex로 .m3u8 혹은 chunklist.m3u8 추출할 경우
             val playerPageText = app.get(
                 data,
                 headers = mapOf(
@@ -152,14 +145,16 @@ class KKTVProvider : MainAPI() {
 
             if (matchUrl != null) {
                 callback.invoke(
-                    ExtractorLink(
-                        source = name,
-                        name = "$name Live HD",
-                        url = matchUrl,
-                        referer = data,
-                        quality = Qualities.Unknown.value,
-                        isM3u8 = true
-                    )
+                    newExtractorLink(
+                        name,                 // source
+                        "$name Live HD",      // name
+                        url = matchUrl,       // url
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = data
+                        this.quality = Qualities.Unknown.value
+                        // this.headers = mapOf(...) 필요시 추가 가능
+                    }
                 )
                 return true
             }
