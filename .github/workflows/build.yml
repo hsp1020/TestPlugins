@@ -25,7 +25,7 @@ jobs:
         with:
           repository: "hsp1020/TestPlugins-build" # 새로 만든 공개 배포용 레포 주소
           token: ${{ secrets.BUILD_REPO_TOKEN }}   # 등록해 둔 비밀 토큰 사용
-          ref: "main"                             # 공개 레포의 브랜치를 'main'으로 설정
+          ref: "builds"                           # 공개 레포의 'builds' 브랜치를 체크아웃
           path: "builds"
       
       - name: Clean old builds
@@ -61,5 +61,5 @@ jobs:
           git add .
           if ! git diff-index --quiet HEAD; then
             git commit -m "Build $GITHUB_SHA"
-            git push origin main --force # 공개 레포의 'main' 브랜치로 강제 push
+            git push origin builds --force # 공개 레포의 'builds' 브랜치로 강제 push
           fi
