@@ -7,7 +7,7 @@ import android.os.Bundle
 import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 import com.fasterxml.jackson.module.kotlin.readValue
-import com.lagradost.cloudstream3.AcraApplication
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
@@ -124,7 +124,7 @@ class SyncPlugin : Plugin() {
         backupMutex.withLock {
             try {
                 Log.d("SYNC", "[SyncPlugin] Executing backupDevice() logic...")
-                val context = AcraApplication.context ?: return@withLock
+                val context = CloudStreamApp.context ?: return@withLock
                 val prefs = with(DataStore) { context.getSharedPrefs() }
                 
                 val isBackupEnabled = prefs.getString("backup_device", null)?.let {
@@ -147,7 +147,7 @@ class SyncPlugin : Plugin() {
 
     private fun restoreDevice() {
         Log.d("SYNC", "[SyncPlugin] restoreDevice() called.")
-        val context = AcraApplication.context ?: return
+        val context = CloudStreamApp.context ?: return
         val prefs = with(DataStore) { context.getSharedPrefs() }
         val restoreEnabled = prefs.getString("restore_device", null)?.let {
             try { mapper.readValue<String>(it) } catch (e: Exception) { "false" }
@@ -212,7 +212,7 @@ class SyncPlugin : Plugin() {
         Log.d("SYNC", "[SyncPlugin] Unloading plugin. Cancelling active coroutine jobs and unregistering callbacks...")
         pluginScope.cancel()
 
-        val app = AcraApplication.context?.applicationContext as? Application
+        val app = CloudStreamApp.context?.applicationContext as? Application
         lifecycleCallbacks?.let { callbacks ->
             app?.unregisterActivityLifecycleCallbacks(callbacks)
             lifecycleCallbacks = null
@@ -227,7 +227,7 @@ class SyncPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
-        AcraApplication.setKey("device_id", UtilKt.getDeviceId(context.packageName, context))
+        CloudStreamApp.setKey("device_id", UtilKt.getDeviceId(context.packageName, context))
         restoreDevice()
         startSyncLoop(context)
 
