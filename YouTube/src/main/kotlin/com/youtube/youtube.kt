@@ -299,6 +299,16 @@ class YoutubeProvider(
             }
         )
 
+        // 추천 영상들의 비디오 ID별 멤버십 라벨 텍스트를 실시간 기록하는 캐시 맵
+        private val videoMembershipCache: MutableMap<String, String> = Collections.synchronizedMap(
+            object : LinkedHashMap<String, String>(128, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
+                    return size > 500
+                }
+            }
+        )
+        
+
         @Volatile
         private var savedVisitorData: String? = null
         @Volatile
@@ -934,6 +944,11 @@ class YoutubeProvider(
                 val membershipLabel = getMembershipLabel(videoData) ?: getMembershipLabel(renderer)
                 val isMembership = !membershipLabel.isNullOrBlank()
 
+                // 후속 에피소드 화면 구성을 위해 메모리 맵에 멤버십 상태 기록
+                if (isMembership && !videoId.isNullOrBlank()) {
+                    videoMembershipCache[videoId] = membershipLabel!!
+                }
+
                 val finalTitle = when {
                     channel.isNotBlank() && views.isNotBlank() && views != "N/A" -> {
                         if (isMembership) "[$channel | $views | $membershipLabel] $title"
@@ -1119,6 +1134,11 @@ class YoutubeProvider(
 
                 val membershipLabel = getMembershipLabel(lockup) ?: getMembershipLabel(renderer)
                 val isMembership = !membershipLabel.isNullOrBlank()
+
+                // 후속 에피소드 화면 구성을 위해 메모리 맵에 멤버십 상태 기록
+                if (isMembership && !videoId.isNullOrBlank()) {
+                    videoMembershipCache[videoId] = membershipLabel!!
+                }
 
                 if (isShorts) {
                     val currentList = if (isSearch) searchShorts else homeShorts
@@ -2415,9 +2435,18 @@ class YoutubeProvider(
                         if (rec.url.contains("/shorts/")) {
                             val recVidId = YoutubeUtils.extractYoutubeId(rec.url)
                             val cleanName = rec.name.replaceFirst(Regex("^\\[.*?\\]\\s*"), "")
+                            
+                            // 쇼츠 에피소드 리스트 멤버십 대괄호 복원 적용
+                            val recMembership = if (recVidId != null) videoMembershipCache[recVidId] else null
+                            val finalShortsName = if (!recMembership.isNullOrBlank()) {
+                                "[$recMembership] $cleanName"
+                            } else {
+                                cleanName
+                            }
+
                             val recUrl = "$mainUrl/shorts/$recVidId?ctx=home"
                             recEpisodes.add(newEpisode(recUrl) {
-                                this.name = cleanName
+                                this.name = finalShortsName
                                 this.posterUrl = recVidId?.let { YoutubeUtils.getShortsEpisodeThumbnail(it) } ?: rec.posterUrl
                                 this.episode = epCount++
                                 val extraMeta = if (recVidId != null) epMetaMapCache[recVidId] else ""
@@ -2620,7 +2649,7 @@ class YoutubeProvider(
                 fun findContinuationFromItems(items: List<*>?): String? {
                     if (items == null) return null
                     for (it in items) {
-                        val m = it as? Map<*, *> ?: continue
+                        val m = i as? Map<*, *> ?: continue
                         val token = findTokenRecursive(m)
                         if (!token.isNullOrBlank()) return token
                     }
@@ -3048,8 +3077,11 @@ class YoutubeProvider(
         val delimiter = if (url.contains("?")) "&" else "?"
         val episodeUrl = "$url${delimiter}direct_dub=$isDirectDubbed"
 
+        val mainMembershipLabel = getMembershipLabel(data)
+        val firstEpisodeName = if (!mainMembershipLabel.isNullOrBlank()) "[$mainMembershipLabel] $title" else title
+
         episodes.add(newEpisode(episodeUrl) {
-            this.name = title
+            this.name = firstEpisodeName
             this.posterUrl = poster
             this.episode = 1
             this.description = mainDescStr.ifBlank { cChannel.ifBlank { "Playing" } }
@@ -3061,6 +3093,11 @@ class YoutubeProvider(
                 val recVidId = YoutubeUtils.extractYoutubeId(rec.url)
                 val extraMeta = if (recVidId != null) epMetaMapCache[recVidId] else ""
                 var cleanName = rec.name.replaceFirst(Regex("^\\[.*?\\]\\s*"), "")
+
+                val recMembership = if (recVidId != null) videoMembershipCache[recVidId] else null
+                if (!recMembership.isNullOrBlank()) {
+                    cleanName = "[$recMembership] $cleanName"
+                }
 
                 episodes.add(newEpisode(rec.url) {
                     this.name = cleanName
@@ -3084,7 +3121,7 @@ class YoutubeProvider(
 
             val actorList = mutableListOf<ActorData>()
             if (npActor != null) {
-                actorList.add(npActor!!)
+                npActor?.let { actorList.add(it) }
             } else if (channelName.isNotBlank()) {
                 actorList.add(ActorData(Actor(channelName, channelAvatar)))
             }
