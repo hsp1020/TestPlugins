@@ -2957,8 +2957,6 @@ class YoutubeProvider(
         val html = response?.text ?: ""
         val data = extractYtInitialData(html)
 
-        val isDirectDubbed = html.split("\"audioTrack\"").size - 1 > 3 && !html.contains("\"isAutoDubbed\"\\s*:\\s*true".toRegex())
-
         var title = "YouTube Video"
         var plot = npPlot 
         var poster = YoutubeUtils.buildThumbnailFromId(videoId)
@@ -3082,9 +3080,9 @@ class YoutubeProvider(
         val mainDescParts = listOf(cDur, cViews, cDate, cChannel).filter { it.isNotBlank() && it != "N/A" }
         val mainDescStr = mainDescParts.joinToString(" • ")
 
-        val delimiter = if (url.contains("?")) "&" else "?"
-        val episodeUrl = "$url${delimiter}direct_dub=$isDirectDubbed"
-
+        // direct_dub 쿼리를 붙이지 않고 오리지널 URL 그대로 사용
+        val episodeUrl = url
+    
         // 페이지 전체(data)가 아닌 메인 영상 본문 노드(primaryMap)만 검사하여 가입 버튼/추천 영상 오인 감지 방지
         val mainMembershipLabel = getMembershipLabel(primaryMap)
         val firstEpisodeName = if (!mainMembershipLabel.isNullOrBlank()) "[$mainMembershipLabel] $title" else title
@@ -3154,11 +3152,7 @@ class YoutubeProvider(
         val videoId = YoutubeUtils.extractYoutubeId(data) ?: data
         val isShort = data.contains("/shorts/")
 
-        val extraParams = if (data.contains("direct_dub=")) {
-            "&" + data.substringAfter("direct_dub=").substringBefore("&").let { "direct_dub=$it" }
-        } else ""
-
-        val fullUrl = "https://www.youtube.com/watch?v=$videoId$extraParams"
+        val fullUrl = "https://www.youtube.com/watch?v=$videoId"
 
         var playerResponseJson: String? = null
         try {
