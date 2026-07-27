@@ -2798,10 +2798,10 @@ class YoutubeProvider(
                     actorList.add(ActorData(Actor(title, poster ?: "")))
                     
                     if (subscriberCount.isNotBlank()) {
-                        actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
+                        actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins-build/refs/heads/builds/Subscribe.jpg")))
                     }
                     if (videoCount.isNotBlank()) {
-                        actorList.add(ActorData(Actor(videoCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Videos.jpg")))
+                        actorList.add(ActorData(Actor(videoCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins-build/refs/heads/builds/Videos.jpg")))
                     }
                     if (actorList.isNotEmpty()) {
                         this.actors = actorList
@@ -2885,10 +2885,10 @@ class YoutubeProvider(
                         actorList.add(ActorData(Actor(author, playlistMeta.channelAvatar)))
                     }
                     if (playlistMeta.subscriberCount.isNotBlank()) {
-                        actorList.add(ActorData(Actor(playlistMeta.subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
+                        actorList.add(ActorData(Actor(playlistMeta.subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins-build/refs/heads/builds/Subscribe.jpg")))
                     }
                     if (playlistMeta.videoCount.isNotBlank()) {
-                        actorList.add(ActorData(Actor(playlistMeta.videoCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Videos.jpg")))
+                        actorList.add(ActorData(Actor(playlistMeta.videoCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins-build/refs/heads/builds/Videos.jpg")))
                     }
                     if (actorList.isNotEmpty()) {
                         this.actors = actorList
