@@ -2649,7 +2649,7 @@ class YoutubeProvider(
                 fun findContinuationFromItems(items: List<*>?): String? {
                     if (items == null) return null
                     for (it in items) {
-                        val m = i as? Map<*, *> ?: continue
+                        val m = it as? Map<*, *> ?: continue
                         val token = findTokenRecursive(m)
                         if (!token.isNullOrBlank()) return token
                     }
