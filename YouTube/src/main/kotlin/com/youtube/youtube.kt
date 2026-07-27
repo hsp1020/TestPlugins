@@ -2900,6 +2900,10 @@ class YoutubeProvider(
             }
         }          
 
+        // ==========================================
+        // 4. [기본 에피소드(단일 비디오) 처리 블록]
+        // ==========================================
+
         val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
 
         epMetaMapCache.clear()
@@ -2966,6 +2970,9 @@ class YoutubeProvider(
 
         val recommendations = mutableListOf<SearchResponse>()
         val seenRecIds = mutableSetOf<String>()
+        
+        // 1화 메인 영상 본문의 정보 노드만 따로 담을 변수
+        var primaryMap: Map<*, *>? = null
 
         if (data != null) {
             val resultsContents = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
@@ -2975,6 +2982,7 @@ class YoutubeProvider(
 
                 val primary = m?.get("videoPrimaryInfoRenderer") as? Map<*, *>
                 if (primary != null) {
+                    primaryMap = primary // 1화 메인 영상 노드 저장
                     val t = extractTitle(primary["title"] as? Map<*, *>)
                     if (!t.isNullOrBlank()) title = t
                 }
@@ -3051,9 +3059,9 @@ class YoutubeProvider(
             if (vCount.isNotBlank()) ep1Views = vCount.stripWhitespace()
         }
 
-        val primary = foundRenderers.firstOrNull { it.containsKey("dateText") }
-        if (primary != null) {
-            val dText = getText(primary["dateText"])
+        val primaryRenderer = foundRenderers.firstOrNull { it.containsKey("dateText") }
+        if (primaryRenderer != null) {
+            val dText = getText(primaryRenderer["dateText"])
             if (dText.isNotBlank()) ep1Date = dText.stripWhitespace()
         }
 
@@ -3077,7 +3085,8 @@ class YoutubeProvider(
         val delimiter = if (url.contains("?")) "&" else "?"
         val episodeUrl = "$url${delimiter}direct_dub=$isDirectDubbed"
 
-        val mainMembershipLabel = getMembershipLabel(data)
+        // 페이지 전체(data)가 아닌 메인 영상 본문 노드(primaryMap)만 검사하여 가입 버튼/추천 영상 오인 감지 방지
+        val mainMembershipLabel = getMembershipLabel(primaryMap)
         val firstEpisodeName = if (!mainMembershipLabel.isNullOrBlank()) "[$mainMembershipLabel] $title" else title
 
         episodes.add(newEpisode(episodeUrl) {
@@ -3109,7 +3118,7 @@ class YoutubeProvider(
                 })
             }
         }
-
+        
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
             this.plot = plot.ifBlank { "\u200b" }
