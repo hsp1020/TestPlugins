@@ -2535,7 +2535,7 @@ class YoutubeProvider(
                     actorList.add(ActorData(Actor(channelName, channelAvatar)))
                 }
                 if (subscriberCount.isNotBlank()) {
-                    actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
+                    actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins-build/refs/heads/master/YouTube/Subscribe.jpg")))
                 }
                 if (actorList.isNotEmpty()) {
                     this.actors = actorList
@@ -3134,7 +3134,7 @@ class YoutubeProvider(
             }
 
             if (subscriberCount.isNotBlank()) {
-                actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
+                actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins-build/refs/heads/master/YouTube/Subscribe.jpg")))
             }
 
             if (actorList.isNotEmpty()) {
