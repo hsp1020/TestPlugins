@@ -3172,24 +3172,24 @@ class YoutubeProvider(
                     playerResponseJson = extractBalancedJson(htmlResponse.substring(startIdx + marker2.length))
                 }
             }
-            
+
             if (playerResponseJson == null) {
-                val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
-                val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$androidApiKey"
+                val desktopApiKey = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+                val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$desktopApiKey"
                 val payload = mapOf(
                     "videoId" to videoId,
                     "context" to mapOf(
-                        "client" to mapOf("clientName" to "ANDROID_VR", "clientVersion" to "1.65.10", "hl" to lang)
+                        "client" to mapOf("clientName" to "WEB", "clientVersion" to "2.20240725.01.00", "hl" to lang)
                     )
                 )
-                val vrHeaders = mapOf(
-                    "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
-                    "X-YouTube-Client-Name" to "28",
-                    "X-YouTube-Client-Version" to "1.65.10",
-                    "Origin" to "https://www.youtube.com"
+                val webHeaders = mapOf(
+                    "User-Agent" to YoutubeUtils.CHROME_USER_AGENT,
+                    "Origin" to "https://www.youtube.com",
+                    "Referer" to "https://www.youtube.com/"
                 )
-                playerResponseJson = app.post(apiUrl, json = payload, headers = vrHeaders).text
-            }
+                playerResponseJson = app.post(apiUrl, json = payload, headers = webHeaders).text
+            }            
+            
         } catch (e: Exception) {
             logError(e)
         }
