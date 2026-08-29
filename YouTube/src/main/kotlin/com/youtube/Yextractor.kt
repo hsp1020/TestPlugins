@@ -144,9 +144,38 @@ open class YoutubeExtractor : ExtractorApi() {
 
         const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
         const val DESKTOP_API_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
-                                               
-        init {
-            println("[YT_PROXY_INIT] 안드로이드 VR 단독 우회 가속 모드로 구동 중")
+
+        fun extractBalancedJson(input: String): String? {
+            var braceCount = 0
+            var inString = false
+            var escape = false
+            val len = input.length
+            for (i in 0 until len) {
+                val char = input[i]
+                if (escape) {
+                    escape = false
+                    continue
+                }
+                if (char == '\\') {
+                    escape = true
+                    continue
+                }
+                if (char == '"') {
+                    inString = !inString
+                    continue
+                }
+                if (!inString) {
+                    if (char == '{') {
+                        braceCount++
+                    } else if (char == '}') {
+                        braceCount--
+                        if (braceCount == 0) {
+                            return input.substring(0, i + 1)
+                        }
+                    }
+                }
+            }
+            return null
         }
 
         private fun generateCpn(): String {
@@ -323,7 +352,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     output.flush()
                 }
             } catch (e: Exception) {
-                // 불필요 로그 생략
             }
         }
 
@@ -370,7 +398,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 val request = okhttp3.Request.Builder()
                     .url(urlBuilder.toString())
-                    .header("User-Agent", "PipePipe/4.9.0")
+                    .header("User-Agent", "PipePipe/5.3.0")
                     .build()
 
                 proxyHttpClient.newCall(request).await().use { response ->
@@ -543,6 +571,7 @@ open class YoutubeExtractor : ExtractorApi() {
         videoId: String
     ): Triple<JSONObject?, Long, String> = withContext(Dispatchers.IO) {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+        
         val context = CloudStreamApp.context
         val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
         val prefs = (provider as? YoutubeProvider)?.appPrefs 
@@ -576,6 +605,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     } else null
                 }
             } catch (e: Exception) {
+                println("[TRACK] 🚨 플레이어 버전 스캔 실패: ${e.message}")
                 null
             }
         }
@@ -749,7 +779,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val langPart = audioContentId.split(".")[0]
                     locale = langPart.split("-")[0].lowercase()
                     if (locale == defaultHlsLang) {
-                        continue
+                        isOriginal = true
                     }
                 } else {
                     isOriginal = true
@@ -758,9 +788,8 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 val langLabel = if (locale != "und") getLanguageLabel(locale, langCode) else ""
                 val suffix = if (isOriginal) "Original" else "Dubbed"
-                
                 val displayName = if (langLabel.isNotEmpty()) "$langLabel($suffix)" else ""
-                val labelName = if (displayName.isNotEmpty()) "YouTube ${height}p [$displayName]" else "YouTube ${height}p"
+                val labelName = if (displayName.isNotEmpty()) "YouTube ${height}p (HLS) [$displayName]" else "YouTube ${height}p (HLS)"
 
                 hlsStreamsParsedLocal.add(HlsParsedStream(labelName, streamUrl, height, isOriginal, locale))
             }
@@ -781,12 +810,12 @@ open class YoutubeExtractor : ExtractorApi() {
                     ) {
                         this.referer = mainUrl
                         this.quality = stream.height
-                        this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                        this.headers = mapOf("User-Agent" to SAFARI_USER_AGENT)
                     }
                 )
             }
         } catch (e: Exception) {
-            println("[TRACK] 🚨 HLS 분석 오류: ${e.message}")
+            println("[YT_EXTRACTOR] 🚨 HLS 파싱 예외: ${e.message}")
         }
     }
 
@@ -986,8 +1015,7 @@ open class YoutubeExtractor : ExtractorApi() {
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
 
-        val context = com.lagradost.cloudstream3.CloudStreamApp.context
-        val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
+        val context = CloudStreamApp.context
         val prefs = context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
             
         val langCode = prefs?.getString("youtube_language", "en") ?: "en"
@@ -1004,7 +1032,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
         withContext(Dispatchers.IO) {
             try {
-                // 더빙 추출 트리거 제거하고 VR 단독 쿼리
                 val (playerResponse, durationSeconds, playerId) = fetchPlayerResponse(videoId)
                 
                 if (playerResponse == null) {
@@ -1075,7 +1102,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         ) {
                             this.referer = mainUrl
                             this.quality = Qualities.Unknown.value
-                            this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                            this.headers = mapOf("User-Agent" to SAFARI_USER_AGENT)
                         }
                     )
                     return@withContext
@@ -1083,7 +1110,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 println("[TRACK] 4. Executing Pure Coroutine Parallel Parsing")
 
-                // [보완 완료] HLS 파싱 작업 비동기 정상 복구
                 val hlsJob = launch {
                     if (hlsUrl.isNotBlank()) {
                         parseHlsManifest(hlsUrl, playerId, langCode, callback)
