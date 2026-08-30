@@ -926,7 +926,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     ExtractorLinkType.VIDEO
                 )
                 {
-                    this.quality = 2160
+                    this.quality = Qualities.Unknown.value
                 }
             )
         }
@@ -1038,6 +1038,21 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         runAllAsync(
             {
+                // 무비와 시리즈가 아닌 경우(other, 클라우드 저장소 등)에만 애드온 본체 스트림 요청
+                val isNotMovieOrSeries = targetType != "movie" && targetType != "series"
+                if (isNotMovieOrSeries && cleanBaseUrl.isNotBlank() && encodedPrimaryId.isNotBlank()) {
+                    runSuspendCatching {
+                        val streamRequestUrl = "$cleanBaseUrl/stream/$targetType/${encodedPrimaryId}.json$querySuffix"
+                        println("[STREMIOSUB] Requesting streams from addon (Non-Movie/Series): $streamRequestUrl")
+                        val text = customSession.get(streamRequestUrl, timeout = 25L).text
+                        val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
+                        res?.streams?.forEach { stream ->
+                            stream.runCallback(this@StremioC, subtitleInterceptor, wrappedCallback)
+                        }
+                    }.onFailure { it.printStackTrace() }
+                }
+            },
+            {
                 if (isSyncEnabled && syncUrl.isNotBlank()) {
                     runSuspendCatching {
                         val subId = buildStremioId(targetType, globalId ?: primaryId, globalSeason, globalEpisode, isSubtitle = true) ?: globalId ?: primaryId
@@ -1074,7 +1089,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     VixSrcExtractor.invokeVixSrc(loadData, targetType, globalSeason, globalEpisode, subtitleInterceptor, wrappedCallback)
                 }
             }
-        )
+        )        
         return true
     }
         
