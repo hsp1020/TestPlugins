@@ -1,21 +1,19 @@
 package com.hsp1020
 
+import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.base64Decode
 import com.lagradost.cloudstream3.mapper
-import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.URL
@@ -30,8 +28,8 @@ class DaddyLiveExtractor : ExtractorApi() {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
 
     /*
-     * 사용자 지정 fallback 순서.
-     * 선택된 채널 하나에 대해서만 아래 순서로 탐색한다.
+     * 사용자 지정 우선순서. 순서 변경 금지.
+     * 선택된 채널 하나에 대해서만 사용한다.
      */
     private val players = listOf(
         "stream",
@@ -47,6 +45,11 @@ class DaddyLiveExtractor : ExtractorApi() {
         val eventTitle: String,
         val channelName: String,
         val streamId: String
+    )
+
+    private data class PlayerCandidate(
+        val player: String,
+        val url: String
     )
 
     private fun debugLog(message: String) {
@@ -68,136 +71,239 @@ class DaddyLiveExtractor : ExtractorApi() {
             null
         }
 
-        /*
-         * 예전처럼 List<Pair<channel, url>> 전체를 받지 않는다.
-         * Provider의 Episode.data에서 사용자가 선택한 채널 하나만 받는다.
-         */
-        if (selected != null) {
-            val entryOrigin = selected.origin.trimEnd('/').ifEmpty { mainUrl }
-            mainUrl = entryOrigin
-
-            debugLog(
-                "[${selected.channelName}] 선택 채널 단일 추출 시작 " +
-                    "(streamId=${selected.streamId}, 후보=${players.size})"
+        if (selected == null) {
+            val direct = extractVideo(
+                url = url,
+                sourceName = name,
+                parentReferer = referer
             )
-
-            for (player in players) {
-                currentCoroutineContext().ensureActive()
-
-                val candidateUrl =
-                    "$entryOrigin/$player/stream-${selected.streamId}.php"
-
-                val sourceName =
-                    "${selected.channelName} - $player"
-
-                debugLog(
-                    "[${selected.channelName}] fallback '$player' 시도 -> $candidateUrl"
-                )
-
-                val link = extractVideo(
-                    candidateUrl,
-                    sourceName
-                )
-
-                if (link != null) {
-                    debugLog(
-                        "[${selected.channelName}] '$player' 성공. " +
-                            "나머지 fallback 탐색 중지."
-                    )
-
-                    callback(link)
-                    return
-                }
-            }
-
-            debugLog(
-                "[${selected.channelName}] 모든 fallback 후보에서 " +
-                    "재생 가능한 링크를 찾지 못했습니다."
-            )
+            if (direct != null) callback(direct)
             return
         }
 
-        /*
-         * 직접 URL 호출에 대한 최소 호환성.
-         * JSON Episode.data가 아닌 실제 URL이 들어오면 한 번만 추출한다.
-         */
-        val directLink = extractVideo(
-            url,
-            this.name
+        val entryOrigin = selected.origin.trimEnd('/').ifEmpty { mainUrl }
+        mainUrl = entryOrigin
+
+        debugLog(
+            "[${selected.channelName}] 선택 채널 단일 추출 시작 " +
+                "(streamId=${selected.streamId})"
         )
 
-        if (directLink != null) {
-            callback(directLink)
+        val entryUrl = "$entryOrigin/watch.php?id=${selected.streamId}"
+        val candidates = discoverPlayerCandidates(
+            entryOrigin = entryOrigin,
+            entryUrl = entryUrl,
+            streamId = selected.streamId
+        )
+
+        debugLog(
+            "[${selected.channelName}] 최종 player 후보 ${candidates.size}개 -> " +
+                candidates.joinToString(" | ") { "${it.player}:${it.url}" }
+        )
+
+        for (candidate in candidates) {
+            currentCoroutineContext().ensureActive()
+
+            val sourceName = "${selected.channelName} - ${candidate.player}"
+            debugLog(
+                "[${selected.channelName}] player '${candidate.player}' 시도 -> ${candidate.url}"
+            )
+
+            val link = extractVideo(
+                url = candidate.url,
+                sourceName = sourceName,
+                parentReferer = entryUrl
+            )
+
+            if (link != null) {
+                debugLog(
+                    "[${selected.channelName}] '${candidate.player}' 실제 HLS 검증 성공. " +
+                        "나머지 player 탐색 중지."
+                )
+                callback(link)
+                return
+            }
+        }
+
+        debugLog(
+            "[${selected.channelName}] 모든 player 후보에서 " +
+                "재생 가능한 검증 완료 HLS를 찾지 못했습니다."
+        )
+    }
+
+    /*
+     * v5 핵심:
+     * 먼저 /watch.php?id=<id> 를 source-of-truth entry page로 읽는다.
+     * entry HTML에 노출된 player URL / player key를 우선 수집하고,
+     * 누락된 player만 공식 6개 folder pattern으로 보완한다.
+     */
+    private suspend fun discoverPlayerCandidates(
+        entryOrigin: String,
+        entryUrl: String,
+        streamId: String
+    ): List<PlayerCandidate> {
+        val discovered = linkedMapOf<String, String>()
+
+        try {
+            val response = app.get(
+                entryUrl,
+                headers = pageHeaders(
+                    parentUrl = "$entryOrigin/",
+                    parentOrigin = entryOrigin
+                ),
+                timeout = 5
+            )
+
+            debugLog(
+                "[ENTRY] $entryUrl -> HTTP ${response.code}"
+            )
+
+            if (response.isSuccessful) {
+                val html = response.text
+
+                // 1) HTML 안의 실제 stream-<id>.php URL을 직접 수집.
+                val urlPatterns = listOf(
+                    Regex(
+                        """(?i)(https?://[^\s\"'<>]+/(?:stream|plus|watch|player|cast|casting)/stream-${Regex.escape(streamId)}\.php(?:\?[^\s\"'<>]*)?)"""
+                    ),
+                    Regex(
+                        """(?i)(//[^\s\"'<>]+/(?:stream|plus|watch|player|cast|casting)/stream-${Regex.escape(streamId)}\.php(?:\?[^\s\"'<>]*)?)"""
+                    ),
+                    Regex(
+                        """(?i)(/(?:stream|plus|watch|player|cast|casting)/stream-${Regex.escape(streamId)}\.php(?:\?[^\s\"'<>]*)?)"""
+                    )
+                )
+
+                for (pattern in urlPatterns) {
+                    pattern.findAll(html).forEach { match ->
+                        val raw = match.groupValues[1]
+                        val absolute = resolveUrl(entryUrl, raw) ?: return@forEach
+                        val key = playerKeyFromUrl(absolute) ?: return@forEach
+                        discovered.putIfAbsent(key, absolute)
+                    }
+                }
+
+                // 2) href/src/data-* 속성에 들어간 player URL도 별도 수집.
+                Regex(
+                    """(?i)(?:href|src|data-src|data-url|data-player-url)\s*=\s*[\"']([^\"']+)[\"']"""
+                ).findAll(html).forEach { match ->
+                    val raw = match.groupValues[1]
+                    val absolute = resolveUrl(entryUrl, raw) ?: return@forEach
+                    if (!absolute.contains("stream-$streamId.php", ignoreCase = true)) {
+                        return@forEach
+                    }
+                    val key = playerKeyFromUrl(absolute) ?: return@forEach
+                    discovered.putIfAbsent(key, absolute)
+                }
+
+                // 3) 버튼/JS가 folder 이름만 갖고 있는 경우를 잡는다.
+                val keyPatterns = listOf(
+                    Regex(
+                        """(?i)(?:data-player|data-folder|data-type|data-server)\s*=\s*[\"'](stream|plus|watch|player|cast|casting)[\"']"""
+                    ),
+                    Regex(
+                        """(?i)(?:switchPlayer|changePlayer|loadPlayer|setPlayer|selectPlayer)\s*\([^)]*[\"'](stream|plus|watch|player|cast|casting)[\"']"""
+                    ),
+                    Regex(
+                        """(?i)[\"'](stream|plus|watch|player|cast|casting)[\"']\s*[,)]"""
+                    )
+                )
+
+                for (pattern in keyPatterns) {
+                    pattern.findAll(html).forEach { match ->
+                        val key = match.groupValues[1].lowercase()
+                        if (key in players) {
+                            discovered.putIfAbsent(
+                                key,
+                                "$entryOrigin/$key/stream-$streamId.php"
+                            )
+                        }
+                    }
+                }
+
+                debugLog(
+                    "[ENTRY] 실제 HTML에서 발견한 player -> " +
+                        if (discovered.isEmpty()) {
+                            "없음"
+                        } else {
+                            discovered.entries.joinToString(" | ") { "${it.key}:${it.value}" }
+                        }
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            debugLog(
+                "[ENTRY] watch.php 분석 실패. 공식 folder fallback 사용 -> ${e.message}"
+            )
+        }
+
+        /*
+         * watch.php UI가 JS로 player URL을 동적 생성해 raw HTML에는
+         * default iframe만 보이는 경우가 있다. 이때 누락된 folder만 보완한다.
+         * 선택 채널 하나에 대해서만 최대 6개라 IP 폭주 구조로 돌아가지 않는다.
+         */
+        for (player in players) {
+            discovered.putIfAbsent(
+                player,
+                "$entryOrigin/$player/stream-$streamId.php"
+            )
+        }
+
+        return players.mapNotNull { player ->
+            discovered[player]?.let { PlayerCandidate(player, it) }
+        }
+    }
+
+    private fun playerKeyFromUrl(url: String): String? {
+        val path = try {
+            URL(url).path
+        } catch (_: Exception) {
+            return null
+        }
+
+        return players.firstOrNull { player ->
+            path.contains("/$player/", ignoreCase = true)
         }
     }
 
     private suspend fun extractVideo(
         url: String,
-        sourceName: String
+        sourceName: String,
+        parentReferer: String?
     ): ExtractorLink? {
         try {
             currentCoroutineContext().ensureActive()
 
             debugLog("================= [DDL EXTRACT START] =================")
-            debugLog("1. 소스 정보 -> Name: $sourceName, Target URL: $url")
+            debugLog("소스 -> $sourceName | $url")
 
-            val parsedUrl = URL(url)
-            val entryOrigin =
-                "${parsedUrl.protocol}://${parsedUrl.host}"
+            val targetOrigin = originOf(url) ?: mainUrl
+            val referer = parentReferer ?: "$targetOrigin/"
+            val refererOrigin = originOf(referer) ?: targetOrigin
 
-            mainUrl = entryOrigin
-
-            val requestHeaders = mapOf(
-                "user-agent" to userAgent,
-                "referer" to url,
-                "accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+            val response = app.get(
+                url,
+                headers = pageHeaders(
+                    parentUrl = referer,
+                    parentOrigin = refererOrigin
+                ),
+                timeout = 5
             )
 
-            /*
-             * HTTP/1.1 강제 없음.
-             * CloudStream 기본 app/NiceHttp 클라이언트를 그대로 사용한다.
-             */
-            val resp = withContext(Dispatchers.IO) {
-                app.get(
-                    url,
-                    headers = requestHeaders,
-                    timeout = 5
-                )
-            }
+            debugLog("플레이어 페이지 응답 코드: ${response.code}")
 
-            debugLog("2. 플레이어 페이지 응답 코드: ${resp.code}")
-
-            if (!resp.isSuccessful) {
-                debugLog(
-                    "플레이어 페이지 실패 HTTP ${resp.code}. " +
-                        "다음 fallback으로 이동."
-                )
+            if (!response.isSuccessful) {
+                debugLog("플레이어 페이지 HTTP ${response.code} -> 다음 player")
                 return null
             }
 
-            val iframeHeaders = requestHeaders.toMutableMap()
-            iframeHeaders["referer"] = url
-            iframeHeaders["origin"] = entryOrigin
-
-            /*
-             * 기존 구조:
-             *  - iframe 전부 async 병렬 다운로드
-             *  - 그 뒤 일괄 분석
-             *
-             * 변경 구조:
-             *  - 현재 플레이어 HTML 자체부터 분석
-             *  - parseAndExtract가 중첩 iframe을 순차적으로 내려간다.
-             *  - 첫 성공 즉시 return
-             *
-             * 선택되지 않은 다른 채널에는 어떤 요청도 보내지 않는다.
-             */
             val link = parseAndExtract(
-                iframeUrl = url,
-                iframeHtml = resp.text,
-                iframeHeaders = iframeHeaders,
-                entryOrigin = entryOrigin,
+                pageUrl = url,
+                pageHtml = response.text,
                 sourceName = sourceName,
-                depth = 0
+                depth = 0,
+                visited = linkedSetOf()
             )
 
             if (link != null) {
@@ -205,32 +311,93 @@ class DaddyLiveExtractor : ExtractorApi() {
                 return link
             }
 
-            debugLog(
-                "알림: 현재 fallback '$sourceName'에서 " +
-                    "유효한 진짜 스트림 주소를 획득하지 못했습니다."
-            )
+            debugLog("현재 player '$sourceName'에서 검증 완료 HLS를 찾지 못했습니다.")
             debugLog("================= [DDL EXTRACT END] =================")
-
             return null
         } catch (e: CancellationException) {
             debugLog("extractVideo 취소 감지 -> 전체 작업 즉시 중단")
             throw e
         } catch (e: SocketTimeoutException) {
-            debugLog(
-                "extractVideo 소켓 연결 타임아웃 예외 발생: ${e.message}"
-            )
+            debugLog("extractVideo 타임아웃: ${e.message}")
             return null
         } catch (e: IOException) {
-            debugLog(
-                "extractVideo 네트워크 입출력 에러 발생: ${e.message}"
-            )
+            debugLog("extractVideo 네트워크 오류: ${e.message}")
             return null
         } catch (e: Exception) {
-            debugLog(
-                "extractVideo 일반 예외 발생: ${e.message}"
-            )
+            debugLog("extractVideo 오류: ${e.message}")
             return null
         }
+    }
+
+    private fun originOf(url: String): String? {
+        return try {
+            val parsed = URL(url)
+            val port = if (
+                parsed.port != -1 &&
+                parsed.port != parsed.defaultPort
+            ) {
+                ":${parsed.port}"
+            } else {
+                ""
+            }
+            "${parsed.protocol}://${parsed.host}$port"
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun resolveUrl(
+        baseUrl: String,
+        rawUrl: String
+    ): String? {
+        val cleaned = rawUrl
+            .replace("&amp;", "&")
+            .replace("\\/", "/")
+            .trim()
+            .trim('"', '\'')
+
+        if (cleaned.isEmpty()) return null
+        if (cleaned.startsWith("javascript:", ignoreCase = true)) return null
+        if (cleaned.startsWith("data:", ignoreCase = true)) return null
+        if (cleaned.startsWith("about:", ignoreCase = true)) return null
+
+        return try {
+            when {
+                cleaned.startsWith("http://", ignoreCase = true) ||
+                    cleaned.startsWith("https://", ignoreCase = true) -> cleaned
+
+                cleaned.startsWith("//") ->
+                    "${URL(baseUrl).protocol}:$cleaned"
+
+                else -> URL(URL(baseUrl), cleaned).toString()
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun pageHeaders(
+        parentUrl: String,
+        parentOrigin: String
+    ): Map<String, String> {
+        return mapOf(
+            "user-agent" to userAgent,
+            "referer" to parentUrl,
+            "origin" to parentOrigin,
+            "accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+        )
+    }
+
+    private fun hlsHeaders(
+        origin: String,
+        referer: String = "$origin/"
+    ): Map<String, String> {
+        return mapOf(
+            "referer" to referer,
+            "origin" to origin,
+            "user-agent" to userAgent,
+            "accept" to "*/*"
+        )
     }
 
     private fun decodeEConfig(encoded: String): Map<String, Any?>? {
@@ -241,9 +408,14 @@ class DaddyLiveExtractor : ExtractorApi() {
 
             val parts = mutableListOf<String>()
             var offset = 0
+
             repeat(4) {
                 val end = minOf(offset + partLength, first.length)
-                parts += if (offset < first.length) first.substring(offset, end) else ""
+                parts += if (offset < first.length) {
+                    first.substring(offset, end)
+                } else {
+                    ""
+                }
                 offset += partLength
             }
 
@@ -252,12 +424,17 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val part = parts[i]
                 if (part.length <= 3) return null
 
-                val cleaned = part.substring(0, 3) + part.substring(4)
+                val cleaned =
+                    part.substring(0, 3) +
+                        part.substring(4)
+
                 decoded[order[i]] = base64Decode(cleaned)
             }
 
             val joined = decoded.joinToString("") { it.orEmpty() }
             val json = base64Decode(joined)
+
+            debugLog("[ECONFIG] 복호화 성공")
             mapper.readValue<Map<String, Any?>>(json)
         } catch (e: Exception) {
             debugLog("[ECONFIG] 복호화 실패: ${e.message}")
@@ -284,17 +461,14 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
 
             val body = response.text.trimStart()
-            val valid = body.startsWith("#EXTM3U") &&
-                (
-                    body.contains("#EXT-X-STREAM-INF") ||
-                        body.contains("#EXTINF") ||
-                        body.contains("#EXT-X-PART")
-                )
+            val valid = body.startsWith("#EXTM3U")
+
             if (valid) {
-                debugLog("[HLS-VALIDATE] 실제 HLS manifest 확인 -> $url")
+                debugLog("[HLS-VALIDATE] #EXTM3U 확인 -> $url")
             } else {
-                debugLog("[HLS-VALIDATE] HTTP ${response.code}이나 #EXTM3U 아님 -> $url")
+                debugLog("[HLS-VALIDATE] HTTP ${response.code}지만 HLS 아님 -> $url")
             }
+
             valid
         } catch (e: CancellationException) {
             throw e
@@ -304,323 +478,576 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
+    private suspend fun buildValidatedLink(
+        url: String,
+        sourceName: String,
+        displayName: String = sourceName,
+        referer: String,
+        origin: String,
+        headers: Map<String, String> = hlsHeaders(origin, referer)
+    ): ExtractorLink? {
+        if (!validateHls(url, headers)) return null
+
+        return newExtractorLink(
+            source = sourceName,
+            name = displayName,
+            url = url,
+            type = ExtractorLinkType.M3U8
+        ) {
+            this.referer = referer
+            this.quality = Qualities.Unknown.value
+            this.headers = headers
+        }
+    }
+
+    /*
+     * stream.js v0.0.26 방식.
+     * CloudStream은 P2P service worker를 사용하지 않으므로
+     * stream_url_nop2p를 최우선으로 사용한다.
+     */
     private suspend fun extractEConfigStream(
-        iframeUrl: String,
-        iframeHtml: String,
-        iframeOrigin: String,
+        pageUrl: String,
+        pageHtml: String,
+        pageOrigin: String,
         sourceName: String
     ): ExtractorLink? {
+        /*
+         * v4의 raw-string 정규식은 역슬래시를 이중 이스케이프해서
+         * window._econfig를 놓칠 수 있었다. v5에서 정확히 수정.
+         */
         val encoded = Regex(
-            """(?:window\\.)?_econfig\\s*=\\s*[\"']([^\"']+)[\"']""",
-            RegexOption.IGNORE_CASE
-        ).find(iframeHtml)?.groupValues?.getOrNull(1) ?: return null
+            """(?i)(?:window\.)?_econfig\s*=\s*["']([^"']+)["']"""
+        ).find(pageHtml)?.groupValues?.getOrNull(1)
+            ?: return null
 
-        debugLog("[ECONFIG] window._econfig 감지 -> $iframeUrl")
+        debugLog("[ECONFIG] window._econfig 감지 -> $pageUrl")
 
         val config = decodeEConfig(encoded) ?: return null
+
         val candidates = listOf(
             "stream_url_nop2p" to config["stream_url_nop2p"]?.toString(),
             "stream_url" to config["stream_url"]?.toString()
-        ).filter { (_, value) -> !value.isNullOrBlank() && value != "null" }
+        ).mapNotNull { (kind, raw) ->
+            val value = raw
+                ?.takeIf { it.isNotBlank() && it != "null" }
+                ?: return@mapNotNull null
 
-        val finalHeaders = mapOf(
-            "referer" to "$iframeOrigin/",
-            "origin" to iframeOrigin,
-            "user-agent" to userAgent,
-            "accept" to "*/*"
+            val resolved = resolveUrl(pageUrl, value)
+                ?: return@mapNotNull null
+
+            kind to resolved
+        }.distinctBy { it.second }
+
+        val finalHeaders = hlsHeaders(
+            origin = pageOrigin,
+            referer = "$pageOrigin/"
         )
 
-        for ((kind, rawUrl) in candidates) {
-            val raw = rawUrl ?: continue
-            val candidate = try {
-                when {
-                    raw.startsWith("http://") || raw.startsWith("https://") -> raw
-                    raw.startsWith("//") -> "${URL(iframeUrl).protocol}:$raw"
-                    else -> URL(URL(iframeUrl), raw).toString()
-                }
-            } catch (_: Exception) {
-                continue
-            }
+        for ((kind, candidate) in candidates) {
+            currentCoroutineContext().ensureActive()
 
             debugLog("[ECONFIG] $kind 후보 검증 -> $candidate")
-            if (!validateHls(candidate, finalHeaders)) continue
 
-            debugLog("[ECONFIG] 실제 재생 가능한 $kind 확정 -> $candidate")
-            return newExtractorLink(
-                source = sourceName,
-                name = "$sourceName [$kind]",
+            val link = buildValidatedLink(
                 url = candidate,
-                type = ExtractorLinkType.M3U8
-            ) {
-                this.referer = "$iframeOrigin/"
-                this.quality = Qualities.Unknown.value
-                this.headers = finalHeaders
+                sourceName = sourceName,
+                displayName = "$sourceName [$kind]",
+                referer = "$pageOrigin/",
+                origin = pageOrigin,
+                headers = finalHeaders
+            )
+
+            if (link != null) {
+                debugLog("[ECONFIG] 실제 재생 가능한 $kind 확정 -> $candidate")
+                return link
             }
         }
 
         return null
     }
 
-    // 중첩된 껍데기 페이지 및 다중 iframe 깊이를 파고들며 탐색하는 수집 엔진 (더미 출력 로그 전면 제거 완료)
     private suspend fun parseAndExtract(
-        iframeUrl: String, 
-        iframeHtml: String, 
-        iframeHeaders: Map<String, String>, 
-        entryOrigin: String, 
+        pageUrl: String,
+        pageHtml: String,
         sourceName: String,
-        depth: Int = 1
+        depth: Int,
+        visited: MutableSet<String>
     ): ExtractorLink? {
-        if (depth > 3) return null
-        
-        try {
-            val parsedIframe = URL(iframeUrl)
-            val iframeOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
+        if (depth > 4) return null
+        if (!visited.add(pageUrl)) return null
 
-            // 최신 tiestep/stream.js 경로: _econfig에서 non-P2P HLS를 우선 추출
-            val eConfigLink = extractEConfigStream(
-                iframeUrl = iframeUrl,
-                iframeHtml = iframeHtml,
-                iframeOrigin = iframeOrigin,
-                sourceName = sourceName
+        currentCoroutineContext().ensureActive()
+
+        val pageOrigin = originOf(pageUrl) ?: return null
+
+        debugLog("[CRAWL] depth=$depth -> $pageUrl")
+
+        // 1) 최신 tiestep/stream.js _econfig 방식 최우선.
+        val eConfigLink = extractEConfigStream(
+            pageUrl = pageUrl,
+            pageHtml = pageHtml,
+            pageOrigin = pageOrigin,
+            sourceName = sourceName
+        )
+        if (eConfigLink != null) return eConfigLink
+
+        // 2) HTML/JS에 signed m3u8 URL이 직접 노출된 경우.
+        val directM3u8Candidates = Regex(
+            """(?i)https?://[^\s"'<>\\]+\.m3u8(?:\?[^\s"'<>\\]*)?"""
+        ).findAll(pageHtml)
+            .map { it.value.replace("\\/", "/") }
+            .distinct()
+            .toList()
+
+        for (candidate in directM3u8Candidates) {
+            currentCoroutineContext().ensureActive()
+
+            val headers = hlsHeaders(
+                origin = pageOrigin,
+                referer = "$pageOrigin/"
             )
-            if (eConfigLink != null) return eConfigLink
 
-            // =======================================================
-            // atob 후보는 URL 문자열 발견만으로 성공 처리하지 않는다.
-            // 실제 manifest 요청이 2xx + #EXTM3U일 때만 반환한다.
-            // =======================================================
-            val atobMatches = Regex("""atob\(['\"](.*?)['\"]\)""").findAll(iframeHtml)
-            for (atobMatch in atobMatches) {
-                val b64Url = atobMatch.groupValues[1]
-                val decodedUrl = try {
-                    base64Decode(b64Url).replace("\"", "").trim()
-                } catch (_: Exception) {
-                    continue
-                }
+            debugLog("[DIRECT-M3U8] 후보 검증 -> $candidate")
+            val link = buildValidatedLink(
+                url = candidate,
+                sourceName = sourceName,
+                referer = "$pageOrigin/",
+                origin = pageOrigin,
+                headers = headers
+            )
+            if (link != null) return link
+        }
 
-                if (!decodedUrl.startsWith("http")) continue
+        // 3) embedsports 계열 JS 변수 복원.
+        val edm = Regex(
+            """(?i)\bedm\s*=\s*["']([^"']+)["']"""
+        ).find(pageHtml)?.groupValues?.getOrNull(1)
 
-                val finalHeaders = mapOf(
-                    "referer" to "$iframeOrigin/",
-                    "origin" to iframeOrigin,
-                    "user-agent" to userAgent,
-                    "accept" to "*/*"
-                )
+        val zmid = Regex(
+            """(?i)\bzmid\s*=\s*["']([^"']+)["']"""
+        ).find(pageHtml)?.groupValues?.getOrNull(1)
 
-                debugLog("[atob] 후보 발견. 실제 HLS 검증 -> $decodedUrl")
-                if (!validateHls(decodedUrl, finalHeaders)) {
-                    debugLog("[atob] dead/decoy 후보 폐기 -> $decodedUrl")
-                    continue
-                }
+        if (!edm.isNullOrBlank() && !zmid.isNullOrBlank()) {
+            val constructed = "https://$edm/court/$zmid.php"
+            val dynamicLink = crawlChild(
+                childUrl = constructed,
+                parentUrl = pageUrl,
+                sourceName = sourceName,
+                depth = depth,
+                visited = visited
+            )
+            if (dynamicLink != null) return dynamicLink
+        }
 
-                debugLog("[atob] 실제 HLS 검증 성공 -> $decodedUrl")
-                return newExtractorLink(
-                    source = sourceName,
-                    name = sourceName,
-                    url = decodedUrl,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = "$iframeOrigin/"
-                    this.quality = Qualities.Unknown.value
-                    this.headers = finalHeaders
-                }
+        // 4) 실제/동적 player URL 후보 수집 후 순차 탐색.
+        val nestedCandidates = collectNestedCandidates(
+            pageUrl = pageUrl,
+            pageHtml = pageHtml
+        )
+
+        if (nestedCandidates.isNotEmpty()) {
+            debugLog(
+                "[CRAWL] depth=$depth nested 후보 ${nestedCandidates.size}개 -> " +
+                    nestedCandidates.joinToString(" | ")
+            )
+        }
+
+        for (nestedUrl in nestedCandidates) {
+            currentCoroutineContext().ensureActive()
+
+            val nestedLink = crawlChild(
+                childUrl = nestedUrl,
+                parentUrl = pageUrl,
+                sourceName = sourceName,
+                depth = depth,
+                visited = visited
+            )
+            if (nestedLink != null) return nestedLink
+        }
+
+        // 5) wiki.js / Ignite legacy resolver.
+        val wikiLink = extractWikiStream(
+            pageUrl = pageUrl,
+            pageHtml = pageHtml,
+            pageOrigin = pageOrigin,
+            sourceName = sourceName
+        )
+        if (wikiLink != null) return wikiLink
+
+        // 6) atob 후보는 실제 HLS 검증 후에만 성공 처리.
+        val atobMatches = Regex(
+            """(?i)atob\(\s*["']([^"']+)["']\s*\)"""
+        ).findAll(pageHtml)
+
+        for (match in atobMatches) {
+            currentCoroutineContext().ensureActive()
+
+            val decoded = try {
+                base64Decode(match.groupValues[1])
+                    .replace("\\/", "/")
+                    .replace("\"", "")
+                    .trim()
+            } catch (_: Exception) {
+                continue
             }
 
-            // 1. 해당 HTML 본문 내에 wiki.js가 탑재되어 있는지 확인
-            val wikiJsMatch = Regex("""src=["'](https?://[^"']+|//[^"']+)wiki\.js""").find(iframeHtml)
-            if (wikiJsMatch != null) {
-                var rawWikiHost = wikiJsMatch.groupValues[1]
-                if (rawWikiHost.startsWith("//")) {
-                    rawWikiHost = "https:$rawWikiHost"
-                }
-                var igniteHost = rawWikiHost.trimEnd('/')
-                
-                // stellarthread.com 차단 도메인 감지 시, 현재 정상 동작하는 igniteandship.com으로 동적 자동 치환
-                if (igniteHost.contains("stellarthread.com")) {
-                    debugLog("[우회] 차단된 도메인(stellarthread) 감지! 활성 도메인(igniteandship.com)으로 자동 교체합니다.")
-                    igniteHost = "https://igniteandship.com"
-                }
-                
-                val pageName = parsedIframe.path.substringAfterLast("/").substringBefore(".php")
-                val fid = Regex("""fid\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
-                val zmidVar = Regex("""zmid\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
-                
-                val liveId = when {
-                    !fid.isNullOrEmpty() -> fid
-                    !zmidVar.isNullOrEmpty() -> zmidVar
-                    else -> pageName
-                }
-                debugLog("[IGNITE-우회] 진짜 중계 플레이어 감지! 호스트: $igniteHost, liveId: $liveId")
+            val candidate = resolveUrl(pageUrl, decoded) ?: continue
+            if (!candidate.contains(".m3u8", ignoreCase = true)) continue
 
-                // 진짜 영상 토큰이 탑재될 플레이어 페이지 호출
-                val playerUrl = "$igniteHost/wiki.php?player=desktop&live=$liveId"
-                val playerHeaders = mapOf(
-                    "user-agent" to userAgent,
-                    "referer" to iframeUrl,
-                    "origin" to iframeOrigin
-                )
-                
-                val playerResp = app.get(playerUrl, headers = playerHeaders, timeout = 5)
-                if (playerResp.isSuccessful) {
-                    val playerHtml = playerResp.text
-                    val arrayMatch = Regex("""\["h"\s*,\s*"t"\s*,\s*"t"\s*,\s*"p"\s*,\s*"s"\s*,[^\]]+\]""").find(playerHtml)
-                    if (arrayMatch != null) {
-                        var streamUrl = arrayMatch.groupValues[0]
-                            .replace("[", "")
-                            .replace("]", "")
-                            .replace("\"", "")
-                            .replace("\\/", "/")
-                            .replace(",", "")
-                            .trim()
-                        
-                        val idMatch = Regex("""document\.getElementById\(["']([^"']+)["']\)""").find(playerHtml)?.groupValues?.get(1)
-                        val spanMatch = if (idMatch != null) {
-                            Regex("""id=["']?$idMatch["']?[^>]*>([^<]*)""").find(playerHtml)?.groupValues?.get(1) ?: ""
-                        } else {
-                            ""
-                        }
-                        streamUrl += spanMatch
+            val headers = hlsHeaders(
+                origin = pageOrigin,
+                referer = "$pageOrigin/"
+            )
 
-                        if (streamUrl.startsWith("http")) {
-                            debugLog("[IGNITE-우회] 진짜 m3u8 주소 추출 성공 -> $streamUrl")
-                            val finalHeaders = mapOf(
-                                "referer" to "$igniteHost/",
-                                "origin" to igniteHost,
-                                "user-agent" to userAgent,
-                                "accept" to "*/*",
-                                "x-direct-connection" to "1",
-                                "sec-fetch-dest" to "empty",
-                                "sec-fetch-mode" to "cors",
-                                "sec-fetch-site" to "same-site"
-                            )
-                            return newExtractorLink(
-                                source = sourceName,
-                                name = sourceName,
-                                url = streamUrl,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = "$igniteHost/"
-                                this.quality = Qualities.Unknown.value
-                                this.headers = finalHeaders
-                            }
-                        }
-                    }
-                }
+            debugLog("[atob] 후보 검증 -> $candidate")
+
+            val link = buildValidatedLink(
+                url = candidate,
+                sourceName = sourceName,
+                referer = "$pageOrigin/",
+                origin = pageOrigin,
+                headers = headers
+            )
+
+            if (link != null) {
+                debugLog("[atob] 실제 HLS 검증 성공 -> $candidate")
+                return link
             }
 
-            // 2. 자바스크립트 변수로 위장한 동적 iframe 생성 감지 (embedsports.me 동적 생성 우회)
-            val edm = Regex("""edm\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
-            val zmid = Regex("""zmid\s*=\s*["']([^"']+)["']""").find(iframeHtml)?.groupValues?.get(1)
-            if (!edm.isNullOrEmpty() && !zmid.isNullOrEmpty()) {
-                val constructedIframeUrl = "https://$edm/court/$zmid.php"
-                debugLog("[$depth 단계] 동적 JS Iframe 가상 복원 성공 -> URL: $constructedIframeUrl")
-                
-                val nestedResp = app.get(constructedIframeUrl, headers = iframeHeaders, timeout = 5)
-                if (nestedResp.isSuccessful) {
-                    val link = parseAndExtract(constructedIframeUrl, nestedResp.text, iframeHeaders, entryOrigin, sourceName, depth + 1)
-                    if (link != null) return link
-                }
+            debugLog("[atob] dead/decoy 후보 폐기 -> $candidate")
+        }
+
+        // 7) Popcdn/Freeshot legacy resolver.
+        val popLink = extractPopcdnStream(
+            pageUrl = pageUrl,
+            pageOrigin = pageOrigin,
+            sourceName = sourceName
+        )
+        if (popLink != null) return popLink
+
+        return null
+    }
+
+    private fun collectNestedCandidates(
+        pageUrl: String,
+        pageHtml: String
+    ): List<String> {
+        val result = linkedSetOf<String>()
+
+        fun add(raw: String) {
+            val resolved = resolveUrl(pageUrl, raw) ?: return
+            if (resolved == pageUrl) return
+
+            val lower = resolved.lowercase()
+
+            if (
+                lower.endsWith(".js") ||
+                lower.endsWith(".css") ||
+                lower.endsWith(".png") ||
+                lower.endsWith(".jpg") ||
+                lower.endsWith(".jpeg") ||
+                lower.endsWith(".gif") ||
+                lower.endsWith(".svg") ||
+                lower.contains("doubleclick") ||
+                lower.contains("googlesyndication")
+            ) {
+                return
             }
 
-            // 3. 일반적인 중첩 static iframe 수집 및 순회 (재귀적)
-            val nestedIframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
-                .findAll(iframeHtml)
-                .map { match -> match.groupValues[1].ifEmpty { match.groupValues[2] } }
-                .distinct()
-                .filter { src ->
-                    val isStaticAsset = src.endsWith(".js") || src.endsWith(".css") || src.contains("tag.min")
-                    val isPlayerPath = src.contains("/e/") || src.contains("/court/") || src.contains("/player/") || src.contains("/stream/") || src.contains("/embed/") || src.contains("/wimbledon/") || src.contains("live=") || src.contains("id=")
-                    val isPopcdn = src.contains("freeshot") || src.contains("popcdn")
-                    !isStaticAsset && (isPlayerPath || isPopcdn)
-                }
-                .sortedByDescending { src ->
-                    when {
-                        src.contains("tiestep.top", ignoreCase = true) -> 100
-                        src.contains("/e/", ignoreCase = true) -> 90
-                        else -> 10
-                    }
-                }
-                .toList()
+            val likelyPlayer =
+                lower.contains("tiestep.") ||
+                    lower.contains("/e/") ||
+                    lower.contains("/embed/") ||
+                    lower.contains("/player/") ||
+                    lower.contains("/stream/") ||
+                    lower.contains("/court/") ||
+                    lower.contains("freeshot") ||
+                    lower.contains("popcdn") ||
+                    lower.contains("ksohls") ||
+                    lower.contains("live=") ||
+                    lower.contains("zmid=") ||
+                    lower.endsWith(".php")
 
-            for (nestedRawSrc in nestedIframeMatches) {
-                var nestedIframeUrl = nestedRawSrc
-                val parentOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
-                
-                if (nestedRawSrc.startsWith("//")) {
-                    nestedIframeUrl = "https:$nestedRawSrc"
-                } else if (nestedRawSrc.startsWith("/")) {
-                    nestedIframeUrl = "$parentOrigin$nestedRawSrc"
-                } else if (!nestedRawSrc.startsWith("http")) {
-                    nestedIframeUrl = "$parentOrigin/${nestedRawSrc.trimStart('/')}"
-                }
-                
-                val nestedHeaders = mapOf(
-                    "user-agent" to userAgent,
-                    "referer" to iframeUrl,
-                    "origin" to iframeOrigin,
-                    "accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-                )
-                val nestedResp = app.get(nestedIframeUrl, headers = nestedHeaders, timeout = 5)
-                if (nestedResp.isSuccessful) {
-                    val link = parseAndExtract(nestedIframeUrl, nestedResp.text, nestedHeaders, entryOrigin, sourceName, depth + 1)
-                    if (link != null) return link
-                }
-            }
-            
-            // 4. Popcdn / Freeshot 분기
-            if (iframeUrl.contains("freeshot.live") || iframeUrl.contains("popcdn.day")) {
-                debugLog("Freeshot / Popcdn 분기 감지")
-                var channelCode = ""
-                val embedMatch = Regex("""embed/([^/.]+)\.php""").find(iframeUrl)
-                if (embedMatch != null) {
-                    channelCode = embedMatch.groupValues[1]
-                } else {
-                    channelCode = iframeUrl.split("/").last().split("?").first()
-                }
-                
-                val targetUrl = "https://popcdn.day/player/$channelCode"
-                val popResp = app.get(targetUrl, headers = iframeHeaders, timeout = 5)
-                val popBody = popResp.text
-                
-                var finalM3u8 = ""
-                val streamUrlMatch = Regex("""streamUrl\s*:\s*"([^"]+)"""").find(popBody)
-                if (streamUrlMatch != null) {
-                    finalM3u8 = streamUrlMatch.groupValues[1].replace("\\", "")
-                } else {
-                    val tokenMatch = Regex("""token=([^&"']+)""").find(popBody)
-                    if (tokenMatch != null) {
-                        val token = tokenMatch.groupValues[1]
-                        finalM3u8 = "https://planetary.lovecdn.ru/$channelCode/tracks-v1a1/mono.m3u8?token=$token"
-                    }
-                }
-                
-                if (finalM3u8.isNotEmpty()) {
-                    debugLog("Freeshot 추출 성공 -> $finalM3u8")
-                    return newExtractorLink(
-                        source = sourceName,
-                        name = "Freeshot Server",
-                        url = finalM3u8,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = "https://popcdn.day/"
-                        this.quality = Qualities.Unknown.value
-                        this.headers = mapOf(
-                            "referer" to "https://popcdn.day/",
-                            "origin" to "https://popcdn.day",
-                            "user-agent" to userAgent
-                        )
-                    }
+            if (likelyPlayer) result += resolved
+        }
+
+        // 실제 iframe src.
+        Regex(
+            """(?is)<iframe\b[^>]*?\bsrc\s*=\s*(?:["']([^"']+)["']|([^\s>]+))"""
+        ).findAll(pageHtml).forEach { match ->
+            add(match.groupValues[1].ifEmpty { match.groupValues[2] })
+        }
+
+        // data-src / data-url / player URL 속성.
+        Regex(
+            """(?i)(?:data-src|data-url|data-player-url|data-embed|data-href)\s*=\s*["']([^"']+)["']"""
+        ).findAll(pageHtml).forEach { match ->
+            add(match.groupValues[1])
+        }
+
+        // JS iframe.src / src: / url: / embed: 형태.
+        Regex(
+            """(?i)(?:\.src|\bsrc|\burl|\bembed|\bplayer)\s*[:=]\s*["']([^"']+)["']"""
+        ).findAll(pageHtml).forEach { match ->
+            add(match.groupValues[1])
+        }
+
+        // HTML/JS 문자열에 직접 박힌 절대 URL.
+        Regex(
+            """(?i)(https?:)?//[^\s"'<>\\]+"""
+        ).findAll(pageHtml).forEach { match ->
+            add(match.value.replace("\\/", "/"))
+        }
+
+        return result
+            .sortedByDescending { candidate ->
+                val lower = candidate.lowercase()
+                when {
+                    lower.contains("tiestep.") -> 1000
+                    lower.contains("/e/") -> 900
+                    lower.contains("/embed/") -> 800
+                    lower.contains("freeshot") || lower.contains("popcdn") -> 700
+                    lower.contains("/player/") -> 600
+                    lower.contains("/stream/") -> 500
+                    lower.contains("/court/") -> 400
+                    else -> 100
                 }
             }
+            .take(12)
+    }
+
+    /*
+     * 중요: v4는 nested iframe 하나에서 DNS/timeout이 나면
+     * parseAndExtract 전체 catch로 빠져 나머지 iframe을 건너뛸 수 있었다.
+     * v5는 child 하나 단위로 실패를 격리한다.
+     */
+    private suspend fun crawlChild(
+        childUrl: String,
+        parentUrl: String,
+        sourceName: String,
+        depth: Int,
+        visited: MutableSet<String>
+    ): ExtractorLink? {
+        if (childUrl in visited) return null
+
+        val parentOrigin = originOf(parentUrl) ?: return null
+
+        return try {
+            currentCoroutineContext().ensureActive()
+
+            debugLog("[CRAWL] child 시도 -> $childUrl")
+
+            val response = app.get(
+                childUrl,
+                headers = pageHeaders(
+                    parentUrl = parentUrl,
+                    parentOrigin = parentOrigin
+                ),
+                timeout = 5
+            )
+
+            if (!response.isSuccessful) {
+                debugLog("[CRAWL] child HTTP ${response.code} -> $childUrl")
+                return null
+            }
+
+            parseAndExtract(
+                pageUrl = childUrl,
+                pageHtml = response.text,
+                sourceName = sourceName,
+                depth = depth + 1,
+                visited = visited
+            )
         } catch (e: CancellationException) {
             throw e
-        } catch (e: SocketTimeoutException) {
-            debugLog("crawlIframe 타임아웃 발생 (depth=$depth): ${e.message}")
-        } catch (e: IOException) {
-            debugLog("crawlIframe 네트워크 에러 (depth=$depth): ${e.message}")
         } catch (e: Exception) {
-            debugLog("crawlIframe 일반 예외 발생 (depth=$depth): ${e.message}")
+            debugLog("[CRAWL] child 실패, 다음 후보 계속 -> $childUrl | ${e.message}")
+            null
         }
-        return null
+    }
+
+    private suspend fun extractWikiStream(
+        pageUrl: String,
+        pageHtml: String,
+        pageOrigin: String,
+        sourceName: String
+    ): ExtractorLink? {
+        val wikiJsMatch = Regex(
+            """(?i)src=["'](https?://[^"']+|//[^"']+)wiki\.js"""
+        ).find(pageHtml) ?: return null
+
+        var rawWikiHost = wikiJsMatch.groupValues[1]
+        if (rawWikiHost.startsWith("//")) {
+            rawWikiHost = "https:$rawWikiHost"
+        }
+
+        var igniteHost = rawWikiHost.trimEnd('/')
+        if (igniteHost.contains("stellarthread.com", ignoreCase = true)) {
+            igniteHost = "https://igniteandship.com"
+        }
+
+        val pageName = try {
+            URL(pageUrl).path
+                .substringAfterLast("/")
+                .substringBefore(".php")
+        } catch (_: Exception) {
+            ""
+        }
+
+        val fid = Regex(
+            """(?i)\bfid\s*=\s*["']([^"']+)["']"""
+        ).find(pageHtml)?.groupValues?.getOrNull(1)
+
+        val zmid = Regex(
+            """(?i)\bzmid\s*=\s*["']([^"']+)["']"""
+        ).find(pageHtml)?.groupValues?.getOrNull(1)
+
+        val liveId = when {
+            !fid.isNullOrBlank() -> fid
+            !zmid.isNullOrBlank() -> zmid
+            pageName.isNotBlank() -> pageName
+            else -> return null
+        }
+
+        val playerUrl = "$igniteHost/wiki.php?player=desktop&live=$liveId"
+
+        return try {
+            val response = app.get(
+                playerUrl,
+                headers = pageHeaders(
+                    parentUrl = pageUrl,
+                    parentOrigin = pageOrigin
+                ),
+                timeout = 5
+            )
+
+            if (!response.isSuccessful) return null
+
+            val playerHtml = response.text
+            val arrayMatch = Regex(
+                """\["h"\s*,\s*"t"\s*,\s*"t"\s*,\s*"p"\s*,\s*"s"\s*,[^\]]+\]"""
+            ).find(playerHtml) ?: return null
+
+            var streamUrl = arrayMatch.value
+                .replace("[", "")
+                .replace("]", "")
+                .replace("\"", "")
+                .replace("\\/", "/")
+                .replace(",", "")
+                .trim()
+
+            val idMatch = Regex(
+                """document\.getElementById\(["']([^"']+)["']\)"""
+            ).find(playerHtml)?.groupValues?.getOrNull(1)
+
+            if (!idMatch.isNullOrBlank()) {
+                val safeId = Regex.escape(idMatch)
+                val span = Regex(
+                    """(?is)id=["']?$safeId["']?[^>]*>([^<]*)"""
+                ).find(playerHtml)?.groupValues?.getOrNull(1).orEmpty()
+                streamUrl += span
+            }
+
+            if (!streamUrl.startsWith("http")) return null
+
+            val headers = hlsHeaders(
+                origin = igniteHost,
+                referer = "$igniteHost/"
+            )
+
+            buildValidatedLink(
+                url = streamUrl,
+                sourceName = sourceName,
+                referer = "$igniteHost/",
+                origin = igniteHost,
+                headers = headers
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            debugLog("[IGNITE] 실패 -> ${e.message}")
+            null
+        }
+    }
+
+    private suspend fun extractPopcdnStream(
+        pageUrl: String,
+        pageOrigin: String,
+        sourceName: String
+    ): ExtractorLink? {
+        if (
+            !pageUrl.contains("freeshot", ignoreCase = true) &&
+            !pageUrl.contains("popcdn", ignoreCase = true)
+        ) {
+            return null
+        }
+
+        val channelCode = Regex(
+            """(?i)embed/([^/.?]+)(?:\.php)?"""
+        ).find(pageUrl)?.groupValues?.getOrNull(1)
+            ?: try {
+                URL(pageUrl).path
+                    .substringAfterLast("/")
+                    .substringBefore(".")
+            } catch (_: Exception) {
+                ""
+            }
+
+        if (channelCode.isBlank()) return null
+
+        val targetUrl = "https://popcdn.day/player/$channelCode"
+
+        return try {
+            val response = app.get(
+                targetUrl,
+                headers = pageHeaders(
+                    parentUrl = pageUrl,
+                    parentOrigin = pageOrigin
+                ),
+                timeout = 5
+            )
+
+            if (!response.isSuccessful) return null
+
+            val body = response.text
+            var finalM3u8 = Regex(
+                """(?i)streamUrl\s*:\s*["']([^"']+)["']"""
+            ).find(body)?.groupValues?.getOrNull(1)
+                ?.replace("\\/", "/")
+                .orEmpty()
+
+            if (finalM3u8.isBlank()) {
+                val token = Regex(
+                    """(?i)token=([^&"']+)"""
+                ).find(body)?.groupValues?.getOrNull(1)
+
+                if (!token.isNullOrBlank()) {
+                    finalM3u8 =
+                        "https://planetary.lovecdn.ru/$channelCode/tracks-v1a1/mono.m3u8?token=$token"
+                }
+            }
+
+            if (finalM3u8.isBlank()) return null
+
+            val origin = "https://popcdn.day"
+            val headers = hlsHeaders(
+                origin = origin,
+                referer = "$origin/"
+            )
+
+            buildValidatedLink(
+                url = finalM3u8,
+                sourceName = sourceName,
+                displayName = "Freeshot Server",
+                referer = "$origin/",
+                origin = origin,
+                headers = headers
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            debugLog("[POPCDN] 실패 -> ${e.message}")
+            null
+        }
     }
 }
