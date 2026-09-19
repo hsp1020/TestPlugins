@@ -23,7 +23,7 @@ import okhttp3.Protocol
 import java.net.URL
 
 class DaddyLiveExtractor : ExtractorApi() {
-    override var mainUrl = "https://dlhd.st" // 기본 주소 설정 (초기 바인딩용)
+    override var mainUrl = "https://dlhd.pk" // 기본 주소 설정 (초기 바인딩용)
     override val name = "DaddyLive"
     override val requiresReferer = false
     
