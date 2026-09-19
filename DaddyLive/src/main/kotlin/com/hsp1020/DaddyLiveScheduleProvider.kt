@@ -12,6 +12,7 @@ import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
+import com.lagradost.nicehttp.Requests
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newLiveSearchResponse
 import com.lagradost.cloudstream3.newLiveStreamLoadResponse
@@ -20,6 +21,7 @@ import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.Protocol
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
 import java.text.SimpleDateFormat
@@ -38,6 +40,37 @@ class DaddyLiveScheduleProvider : MainAPI() {
     // Extractor와 완벽히 통일된 표준 Chrome 브라우저 User-Agent 탑재
     private val userAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+
+    // dlhd.st가 OkHttp HTTP/2 연결을 PROTOCOL_ERROR로 리셋하는 환경을 우회하기 위한
+    // DaddyLive 전용 HTTP/1.1 클라이언트. CloudStream app의 기본 설정은 그대로 복제한다.
+    private val http11 by lazy {
+        Requests(
+            baseClient = app.baseClient.newBuilder()
+                .protocols(listOf(Protocol.HTTP_1_1))
+                .build(),
+            defaultHeaders = app.defaultHeaders,
+            defaultReferer = app.defaultReferer,
+            defaultData = app.defaultData,
+            defaultCookies = app.defaultCookies,
+            defaultCacheTime = app.defaultCacheTime,
+            defaultCacheTimeUnit = app.defaultCacheTimeUnit,
+            defaultTimeOut = app.defaultTimeOut,
+            responseParser = app.responseParser
+        )
+    }
+
+    private val requestHeaders = mapOf(
+        "user-agent" to userAgent,
+        "accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "accept-language" to "en-US,en;q=0.9"
+    )
+
+    private suspend fun getDaddyPage(url: String) =
+        http11.get(
+            url,
+            headers = requestHeaders,
+            referer = if (url == mainUrl) null else "$mainUrl/"
+        )
 
     private fun debugLog(message: String, throwable: Throwable? = null) {
         val errMessage = throwable?.message ?: "Unknown Error"
@@ -103,7 +136,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
         return try {
             // UI 스레드 정지 및 드랍 현상(렉)을 원천 차단하기 위해 IO 비동기 컨텍스트 격리 지정
             withContext(Dispatchers.IO) {
-                val response = app.get(mainUrl)
+                val response = getDaddyPage(mainUrl)
                 debugLog("getMainPage: Received response with status ${response.code}")
                 val doc = response.document
 
@@ -129,7 +162,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
         debugLog("search: Initiated with query '$query'")
         return try {
             withContext(Dispatchers.IO) {
-                val response = app.get(mainUrl)
+                val response = getDaddyPage(mainUrl)
                 debugLog("search: Page loaded with status ${response.code}")
                 val doc = response.document
 
@@ -155,7 +188,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
             withContext(Dispatchers.IO) {
                 if (url.contains("watch.php") || url.contains("stream-")) {
                     debugLog("load: Direct watch link detected. Commencing iframe extraction flow.")
-                    val response = app.get(url)
+                    val response = getDaddyPage(url)
                     debugLog("load: Watch page loaded with status ${response.code}")
                     val doc = response.document
                     val eventTitle = doc.select("h2").text().ifEmpty { doc.title().substringBefore(" | Watch") }
@@ -178,7 +211,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
                     }
                 } else {
                     debugLog("load: Standard schedule load detected. Fetching mainUrl schedule matrix.")
-                    val response = app.get(mainUrl)
+                    val response = getDaddyPage(mainUrl)
                     debugLog("load: Main schedule page loaded with status ${response.code}")
                     val doc = response.document
                     
