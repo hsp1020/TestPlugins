@@ -1,7 +1,6 @@
 package com.hsp1020
 
 import com.lagradost.api.Log
-import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -364,12 +363,11 @@ class DaddyLiveScheduleProvider : MainAPI() {
                     streamId = directStreamId
                 )
 
-                val episode = Episode(
-                    data = mapper.writeValueAsString(directSelection),
-                    name = directSelection.channelName,
-                    season = 1,
-                    episode = 1
-                )
+                val episode = newEpisode(directSelection) {
+                    this.name = directSelection.channelName
+                    this.season = 1
+                    this.episode = 1
+                }
 
                 return newTvSeriesLoadResponse(
                     directSelection.eventTitle,
@@ -420,12 +418,11 @@ class DaddyLiveScheduleProvider : MainAPI() {
                     streamId = channel.streamId
                 )
 
-                Episode(
-                    data = mapper.writeValueAsString(selection),
-                    name = channel.name,
-                    season = 1,
-                    episode = index + 1
-                )
+                newEpisode(selection) {
+                    this.name = channel.name
+                    this.season = 1
+                    this.episode = index + 1
+                }
             }
 
             val formattedTime = try {
