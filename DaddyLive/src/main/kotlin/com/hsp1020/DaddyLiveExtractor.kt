@@ -19,6 +19,7 @@ import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.URL
+import kotlin.math.ceil
 
 class DaddyLiveExtractor : ExtractorApi() {
     override var mainUrl = "https://dlive.sx"
@@ -232,6 +233,134 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
+    private fun decodeEConfig(encoded: String): Map<String, Any?>? {
+        return try {
+            val first = base64Decode(encoded)
+            val order = intArrayOf(2, 0, 3, 1)
+            val partLength = ceil(first.length / 4.0).toInt()
+
+            val parts = mutableListOf<String>()
+            var offset = 0
+            repeat(4) {
+                val end = minOf(offset + partLength, first.length)
+                parts += if (offset < first.length) first.substring(offset, end) else ""
+                offset += partLength
+            }
+
+            val decoded = arrayOfNulls<String>(4)
+            for (i in 0 until 4) {
+                val part = parts[i]
+                if (part.length <= 3) return null
+
+                val cleaned = part.substring(0, 3) + part.substring(4)
+                decoded[order[i]] = base64Decode(cleaned)
+            }
+
+            val joined = decoded.joinToString("") { it.orEmpty() }
+            val json = base64Decode(joined)
+            mapper.readValue<Map<String, Any?>>(json)
+        } catch (e: Exception) {
+            debugLog("[ECONFIG] 복호화 실패: ${e.message}")
+            null
+        }
+    }
+
+    private suspend fun validateHls(
+        url: String,
+        headers: Map<String, String>
+    ): Boolean {
+        currentCoroutineContext().ensureActive()
+
+        return try {
+            val response = app.get(
+                url,
+                headers = headers,
+                timeout = 5
+            )
+
+            if (!response.isSuccessful) {
+                debugLog("[HLS-VALIDATE] HTTP ${response.code} 실패 -> $url")
+                return false
+            }
+
+            val body = response.text.trimStart()
+            val valid = body.startsWith("#EXTM3U") &&
+                (
+                    body.contains("#EXT-X-STREAM-INF") ||
+                        body.contains("#EXTINF") ||
+                        body.contains("#EXT-X-PART")
+                )
+            if (valid) {
+                debugLog("[HLS-VALIDATE] 실제 HLS manifest 확인 -> $url")
+            } else {
+                debugLog("[HLS-VALIDATE] HTTP ${response.code}이나 #EXTM3U 아님 -> $url")
+            }
+            valid
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            debugLog("[HLS-VALIDATE] 요청 실패 -> $url | ${e.message}")
+            false
+        }
+    }
+
+    private suspend fun extractEConfigStream(
+        iframeUrl: String,
+        iframeHtml: String,
+        iframeOrigin: String,
+        sourceName: String
+    ): ExtractorLink? {
+        val encoded = Regex(
+            """(?:window\\.)?_econfig\\s*=\\s*[\"']([^\"']+)[\"']""",
+            RegexOption.IGNORE_CASE
+        ).find(iframeHtml)?.groupValues?.getOrNull(1) ?: return null
+
+        debugLog("[ECONFIG] window._econfig 감지 -> $iframeUrl")
+
+        val config = decodeEConfig(encoded) ?: return null
+        val candidates = listOf(
+            "stream_url_nop2p" to config["stream_url_nop2p"]?.toString(),
+            "stream_url" to config["stream_url"]?.toString()
+        ).filter { (_, value) -> !value.isNullOrBlank() && value != "null" }
+
+        val finalHeaders = mapOf(
+            "referer" to "$iframeOrigin/",
+            "origin" to iframeOrigin,
+            "user-agent" to userAgent,
+            "accept" to "*/*"
+        )
+
+        for ((kind, rawUrl) in candidates) {
+            val raw = rawUrl ?: continue
+            val candidate = try {
+                when {
+                    raw.startsWith("http://") || raw.startsWith("https://") -> raw
+                    raw.startsWith("//") -> "${URL(iframeUrl).protocol}:$raw"
+                    else -> URL(URL(iframeUrl), raw).toString()
+                }
+            } catch (_: Exception) {
+                continue
+            }
+
+            debugLog("[ECONFIG] $kind 후보 검증 -> $candidate")
+            if (!validateHls(candidate, finalHeaders)) continue
+
+            debugLog("[ECONFIG] 실제 재생 가능한 $kind 확정 -> $candidate")
+            return newExtractorLink(
+                source = sourceName,
+                name = "$sourceName [$kind]",
+                url = candidate,
+                type = ExtractorLinkType.M3U8
+            ) {
+                this.referer = "$iframeOrigin/"
+                this.quality = Qualities.Unknown.value
+                this.headers = finalHeaders
+            }
+        }
+
+        return null
+    }
+
     // 중첩된 껍데기 페이지 및 다중 iframe 깊이를 파고들며 탐색하는 수집 엔진 (더미 출력 로그 전면 제거 완료)
     private suspend fun parseAndExtract(
         iframeUrl: String, 
@@ -247,45 +376,56 @@ class DaddyLiveExtractor : ExtractorApi() {
             val parsedIframe = URL(iframeUrl)
             val iframeOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
 
+            // 최신 tiestep/stream.js 경로: _econfig에서 non-P2P HLS를 우선 추출
+            val eConfigLink = extractEConfigStream(
+                iframeUrl = iframeUrl,
+                iframeHtml = iframeHtml,
+                iframeOrigin = iframeOrigin,
+                sourceName = sourceName
+            )
+            if (eConfigLink != null) return eConfigLink
+
             // =======================================================
-            // [복구 및 보안 필터] 프리미엄 채널용 정석 atob 복구 (가짜 허니팟은 필터링)
+            // atob 후보는 URL 문자열 발견만으로 성공 처리하지 않는다.
+            // 실제 manifest 요청이 2xx + #EXTM3U일 때만 반환한다.
             // =======================================================
-            val atobMatch = Regex("""atob\(['"](.*?)['"]\)""").find(iframeHtml)
-            if (atobMatch != null) {
+            val atobMatches = Regex("""atob\(['\"](.*?)['\"]\)""").findAll(iframeHtml)
+            for (atobMatch in atobMatches) {
                 val b64Url = atobMatch.groupValues[1]
-                val decodedUrl = base64Decode(b64Url).replace("\"", "").trim()
-                
-                // 해독 결과가 가짜 허니팟(/hls/stream...)이 아닌 진짜 절대 경로 CDN 주소일 때만 정상 반환
-                if (decodedUrl.startsWith("http")) {
-                    debugLog("[PREMIUM] 프리미엄 정석 스트림 해독 성공 -> $decodedUrl")
-                    
-                    // [수정] 메인 도메인(entryOrigin) 대신 실제 플레이어가 삽입된 iframe 호스트(iframeOrigin)를 강제 사용합니다.
-                    val refOrigin = iframeOrigin
-                    
-                    return newExtractorLink(
-                        source = sourceName,
-                        name = sourceName,
-                        url = decodedUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = "$refOrigin/"
-                        this.quality = Qualities.Unknown.value
-                        this.headers = mapOf(
-                            "referer" to "$refOrigin/",
-                            "origin" to refOrigin,
-                            "user-agent" to userAgent,
-                            "accept" to "*/*",
-                            "x-direct-connection" to "1",
-                            "sec-fetch-dest" to "empty",
-                            "sec-fetch-mode" to "cors",
-                            "sec-fetch-site" to "cross-site"
-                        )
-                    }
-                } else {
-                    debugLog("[atob-필터링] 감지된 주소($decodedUrl)는 가짜 허니팟 주소이므로 우회를 지속합니다.")
+                val decodedUrl = try {
+                    base64Decode(b64Url).replace("\"", "").trim()
+                } catch (_: Exception) {
+                    continue
+                }
+
+                if (!decodedUrl.startsWith("http")) continue
+
+                val finalHeaders = mapOf(
+                    "referer" to "$iframeOrigin/",
+                    "origin" to iframeOrigin,
+                    "user-agent" to userAgent,
+                    "accept" to "*/*"
+                )
+
+                debugLog("[atob] 후보 발견. 실제 HLS 검증 -> $decodedUrl")
+                if (!validateHls(decodedUrl, finalHeaders)) {
+                    debugLog("[atob] dead/decoy 후보 폐기 -> $decodedUrl")
+                    continue
+                }
+
+                debugLog("[atob] 실제 HLS 검증 성공 -> $decodedUrl")
+                return newExtractorLink(
+                    source = sourceName,
+                    name = sourceName,
+                    url = decodedUrl,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = "$iframeOrigin/"
+                    this.quality = Qualities.Unknown.value
+                    this.headers = finalHeaders
                 }
             }
-            
+
             // 1. 해당 HTML 본문 내에 wiki.js가 탑재되어 있는지 확인
             val wikiJsMatch = Regex("""src=["'](https?://[^"']+|//[^"']+)wiki\.js""").find(iframeHtml)
             if (wikiJsMatch != null) {
@@ -389,9 +529,16 @@ class DaddyLiveExtractor : ExtractorApi() {
                 .distinct()
                 .filter { src ->
                     val isStaticAsset = src.endsWith(".js") || src.endsWith(".css") || src.contains("tag.min")
-                    val isPlayerPath = src.contains("/court/") || src.contains("/player/") || src.contains("/stream/") || src.contains("/embed/") || src.contains("/wimbledon/") || src.contains("live=") || src.contains("id=")
+                    val isPlayerPath = src.contains("/e/") || src.contains("/court/") || src.contains("/player/") || src.contains("/stream/") || src.contains("/embed/") || src.contains("/wimbledon/") || src.contains("live=") || src.contains("id=")
                     val isPopcdn = src.contains("freeshot") || src.contains("popcdn")
                     !isStaticAsset && (isPlayerPath || isPopcdn)
+                }
+                .sortedByDescending { src ->
+                    when {
+                        src.contains("tiestep.top", ignoreCase = true) -> 100
+                        src.contains("/e/", ignoreCase = true) -> 90
+                        else -> 10
+                    }
                 }
                 .toList()
 
@@ -407,9 +554,15 @@ class DaddyLiveExtractor : ExtractorApi() {
                     nestedIframeUrl = "$parentOrigin/${nestedRawSrc.trimStart('/')}"
                 }
                 
-                val nestedResp = app.get(nestedIframeUrl, headers = iframeHeaders, timeout = 5)
+                val nestedHeaders = mapOf(
+                    "user-agent" to userAgent,
+                    "referer" to iframeUrl,
+                    "origin" to iframeOrigin,
+                    "accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                )
+                val nestedResp = app.get(nestedIframeUrl, headers = nestedHeaders, timeout = 5)
                 if (nestedResp.isSuccessful) {
-                    val link = parseAndExtract(nestedIframeUrl, nestedResp.text, iframeHeaders, entryOrigin, sourceName, depth + 1)
+                    val link = parseAndExtract(nestedIframeUrl, nestedResp.text, nestedHeaders, entryOrigin, sourceName, depth + 1)
                     if (link != null) return link
                 }
             }
