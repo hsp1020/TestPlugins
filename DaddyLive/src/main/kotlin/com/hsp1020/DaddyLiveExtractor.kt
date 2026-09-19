@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.type.TypeReference
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
+import com.lagradost.nicehttp.NiceResponse
+import com.lagradost.nicehttp.Requests
 import com.lagradost.cloudstream3.base64Decode
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.mapper
@@ -17,6 +19,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.SocketTimeoutException
+import okhttp3.Protocol
 import java.net.URL
 
 class DaddyLiveExtractor : ExtractorApi() {
@@ -27,6 +30,39 @@ class DaddyLiveExtractor : ExtractorApi() {
     // 스케줄러와 완전 통일된 Chrome 표준 UA 사용
     private val userAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+
+    // DaddyLive 원본 호스트와의 요청만 HTTP/1.1로 우회한다.
+    // 외부 iframe/CDN 요청은 기존 CloudStream app 클라이언트를 그대로 사용한다.
+    private val http11 by lazy {
+        Requests(
+            baseClient = app.baseClient.newBuilder()
+                .protocols(listOf(Protocol.HTTP_1_1))
+                .build(),
+            defaultHeaders = app.defaultHeaders,
+            defaultReferer = app.defaultReferer,
+            defaultData = app.defaultData,
+            defaultCookies = app.defaultCookies,
+            defaultCacheTime = app.defaultCacheTime,
+            defaultCacheTimeUnit = app.defaultCacheTimeUnit,
+            defaultTimeOut = app.defaultTimeOut,
+            responseParser = app.responseParser
+        )
+    }
+
+    private suspend fun getPage(
+        url: String,
+        headers: Map<String, String>,
+        timeout: Long = 3L
+    ): NiceResponse {
+        val sameOrigin = try {
+            URL(url).host.equals(URL(mainUrl).host, ignoreCase = true)
+        } catch (_: Exception) {
+            false
+        }
+
+        val client = if (sameOrigin) http11 else app
+        return client.get(url, headers = headers, timeout = timeout)
+    }
 
     private fun debugLog(message: String) {
         Log.d("DDL-DEBUG", "[DDL-DEBUG] $message")
@@ -88,7 +124,7 @@ class DaddyLiveExtractor : ExtractorApi() {
 
             // UI 스레드 차단 방지를 위해 IO 비동기 스레드 컨텍스트 지정 및 타임아웃 단축
             val resp = withContext(Dispatchers.IO) {
-                app.get(url, headers = requestHeaders, timeout = 3000)
+                getPage(url, headers = requestHeaders, timeout = 3)
             }
             debugLog("2. 플레이어 페이지 응답 코드: ${resp.code}")
             if (!resp.isSuccessful) return null
@@ -126,7 +162,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                         }
                         
                         try {
-                            val iframeResp = app.get(iframeUrl, headers = iframeHeaders, timeout = 3000)
+                            val iframeResp = getPage(iframeUrl, headers = iframeHeaders, timeout = 3)
                             if (iframeResp.isSuccessful) {
                                 iframeUrl to iframeResp.text
                             } else null
@@ -241,7 +277,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     "origin" to iframeOrigin
                 )
                 
-                val playerResp = app.get(playerUrl, headers = playerHeaders, timeout = 3000)
+                val playerResp = getPage(playerUrl, headers = playerHeaders, timeout = 3)
                 if (playerResp.isSuccessful) {
                     val playerHtml = playerResp.text
                     val arrayMatch = Regex("""\["h"\s*,\s*"t"\s*,\s*"t"\s*,\s*"p"\s*,\s*"s"\s*,[^\]]+\]""").find(playerHtml)
@@ -291,7 +327,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val constructedIframeUrl = "https://$edm/court/$zmid.php"
                 debugLog("[$depth 단계] 동적 JS Iframe 가상 복원 성공 -> URL: $constructedIframeUrl")
                 
-                val nestedResp = app.get(constructedIframeUrl, headers = iframeHeaders, timeout = 3000)
+                val nestedResp = getPage(constructedIframeUrl, headers = iframeHeaders, timeout = 3)
                 if (nestedResp.isSuccessful) {
                     val link = parseAndExtract(constructedIframeUrl, nestedResp.text, iframeHeaders, entryOrigin, sourceName, depth + 1)
                     if (link != null) return link
@@ -323,7 +359,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     nestedIframeUrl = "$parentOrigin/${nestedRawSrc.trimStart('/')}"
                 }
                 
-                val nestedResp = app.get(nestedIframeUrl, headers = iframeHeaders, timeout = 3000)
+                val nestedResp = getPage(nestedIframeUrl, headers = iframeHeaders, timeout = 3)
                 if (nestedResp.isSuccessful) {
                     val link = parseAndExtract(nestedIframeUrl, nestedResp.text, iframeHeaders, entryOrigin, sourceName, depth + 1)
                     if (link != null) return link
@@ -342,7 +378,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
                 
                 val targetUrl = "https://popcdn.day/player/$channelCode"
-                val popResp = app.get(targetUrl, headers = iframeHeaders, timeout = 3000)
+                val popResp = getPage(targetUrl, headers = iframeHeaders, timeout = 3)
                 val popBody = popResp.text
                 
                 var finalM3u8 = ""
