@@ -1,27 +1,29 @@
 package com.hsp1020
 
-import com.fasterxml.jackson.core.type.TypeReference
 import com.lagradost.api.Log
+import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
-import com.lagradost.cloudstream3.LiveSearchResponse
 import com.lagradost.cloudstream3.LoadResponse
-import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.SeasonData
 import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.newHomePageResponse
-import com.lagradost.cloudstream3.newLiveSearchResponse
-import com.lagradost.cloudstream3.newLiveStreamLoadResponse
-import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.mapper
+import com.lagradost.cloudstream3.newHomePageResponse
+import com.lagradost.cloudstream3.newTvSeriesLoadResponse
+import com.lagradost.cloudstream3.newTvSeriesSearchResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.fasterxml.jackson.module.kotlin.readValue
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import org.jsoup.nodes.Element
 import java.net.URLDecoder
+import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -30,13 +32,28 @@ import java.util.TimeZone
 class DaddyLiveScheduleProvider : MainAPI() {
     override var mainUrl = "https://dlive.sx"
     override var name = "DaddyLive"
-    override val supportedTypes = setOf(TvType.Live)
+    override val supportedTypes = setOf(TvType.Live, TvType.TvSeries)
     override var lang = "en"
     override val hasMainPage = true
     override val hasDownloadSupport = false
 
     private val userAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+
+    /*
+     * HTTP/1.1 강제 클라이언트는 완전히 제거.
+     * CloudStream 기본 app/NiceHttp가 HTTP 프로토콜을 정상 협상한다.
+     */
+    private val requestHeaders = mapOf(
+        "user-agent" to userAgent,
+        "accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "accept-language" to "en-US,en;q=0.9"
+    )
+
+    private val scheduleMutex = Mutex()
+
+    @Volatile
+    private var scheduleCache: ScheduleSnapshot? = null
 
     private fun debugLog(message: String, throwable: Throwable? = null) {
         val errMessage = throwable?.message ?: "Unknown Error"
@@ -60,13 +77,14 @@ class DaddyLiveScheduleProvider : MainAPI() {
         private const val posterUrl =
             "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/live-streaming2.png"
 
+        private const val SCHEDULE_CACHE_TTL_MS = 60_000L
+
         fun convertGMTToLocalTime(gmtTime: String): String {
             val gmtFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
             gmtFormat.timeZone = TimeZone.getTimeZone("GMT")
 
             val date: Date =
-                gmtFormat.parse(gmtTime)
-                    ?: throw IllegalArgumentException("Invalid time format")
+                gmtFormat.parse(gmtTime) ?: throw IllegalArgumentException("Invalid time format")
 
             val localFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
             localFormat.timeZone = TimeZone.getDefault()
@@ -75,39 +93,166 @@ class DaddyLiveScheduleProvider : MainAPI() {
         }
     }
 
-    private fun searchResponseBuilder(doc: Element): List<LiveSearchResponse> {
-        return try {
-            val elements = doc.select(".schedule__event")
-            debugLog(
-                "searchResponseBuilder: Found ${elements.size} raw schedule elements."
-            )
+    private data class ScheduleChannel(
+        val name: String,
+        val streamId: String
+    )
 
-            elements.map { e ->
-                val dataTitle =
-                    e.select(".schedule__eventHeader").attr("data-title")
-                val eventTitle =
-                    e.select(".schedule__eventTitle").text()
-                val time =
-                    e.select(".schedule__time").text()
+    private data class ScheduleEvent(
+        val dataTitle: String,
+        val eventTitle: String,
+        val timeGmt: String,
+        val channels: List<ScheduleChannel>
+    )
 
-                val formattedTime = convertGMTToLocalTime(time)
+    private data class ScheduleSection(
+        val title: String,
+        val events: List<ScheduleEvent>
+    )
 
-                val encodedDataTitle =
-                    java.net.URLEncoder.encode(dataTitle, "UTF-8")
+    private data class ScheduleSnapshot(
+        val fetchedAt: Long,
+        val sections: List<ScheduleSection>
+    )
 
-                newLiveSearchResponse(
-                    "$formattedTime - $eventTitle",
-                    encodedDataTitle
-                ) {
-                    this.posterUrl = Companion.posterUrl
-                }
+    data class ChannelSelection(
+        val origin: String,
+        val eventTitle: String,
+        val channelName: String,
+        val streamId: String
+    )
+
+    private suspend fun getSchedule(forceRefresh: Boolean = false): ScheduleSnapshot {
+        val now = System.currentTimeMillis()
+        val cached = scheduleCache
+
+        if (
+            !forceRefresh &&
+            cached != null &&
+            now - cached.fetchedAt < SCHEDULE_CACHE_TTL_MS
+        ) {
+            debugLog("getSchedule: Using cached schedule snapshot.")
+            return cached
+        }
+
+        return scheduleMutex.withLock {
+            val lockedNow = System.currentTimeMillis()
+            val lockedCached = scheduleCache
+
+            if (
+                !forceRefresh &&
+                lockedCached != null &&
+                lockedNow - lockedCached.fetchedAt < SCHEDULE_CACHE_TTL_MS
+            ) {
+                debugLog("getSchedule: Another coroutine refreshed the cache. Reusing it.")
+                return@withLock lockedCached
             }
-        } catch (e: Exception) {
-            debugLog(
-                "searchResponseBuilder Failed to map elements",
-                e
-            )
-            emptyList()
+
+            debugLog("getSchedule: Fetching schedule from $mainUrl")
+
+            val response = withContext(Dispatchers.IO) {
+                app.get(
+                    mainUrl,
+                    headers = requestHeaders
+                )
+            }
+
+            debugLog("getSchedule: Received response with status ${response.code}")
+
+            if (!response.isSuccessful) {
+                throw IllegalStateException("DaddyLive schedule HTTP ${response.code}")
+            }
+
+            val doc = response.document
+
+            val sections = doc.select("#schedule .schedule__category").map { category ->
+                val sectionTitle = category.select(".card__meta").text()
+
+                val events = category.select(".schedule__event").mapNotNull { event ->
+                    val dataTitle =
+                        event.select(".schedule__eventHeader").attr("data-title").trim()
+
+                    val eventTitle =
+                        event.select(".schedule__eventTitle").text().trim()
+
+                    val time =
+                        event.select(".schedule__time").text().trim()
+
+                    if (dataTitle.isEmpty() || eventTitle.isEmpty()) {
+                        return@mapNotNull null
+                    }
+
+                    val seenIds = hashSetOf<String>()
+
+                    val channels = event.select(".schedule__channels > a").mapNotNull { channel ->
+                        val href = channel.attr("href")
+
+                        val streamId = href
+                            .substringAfter("id=", "")
+                            .substringBefore("&")
+                            .substringBefore("#")
+                            .trim()
+
+                        if (streamId.isEmpty() || !seenIds.add(streamId)) {
+                            return@mapNotNull null
+                        }
+
+                        val channelName =
+                            channel.text().trim().ifEmpty { "Channel $streamId" }
+
+                        ScheduleChannel(
+                            name = channelName,
+                            streamId = streamId
+                        )
+                    }
+
+                    ScheduleEvent(
+                        dataTitle = dataTitle,
+                        eventTitle = eventTitle,
+                        timeGmt = time,
+                        channels = channels
+                    )
+                }
+
+                debugLog(
+                    "getSchedule: Category '$sectionTitle' parsed with ${events.size} events."
+                )
+
+                ScheduleSection(
+                    title = sectionTitle,
+                    events = events
+                )
+            }
+
+            ScheduleSnapshot(
+                fetchedAt = System.currentTimeMillis(),
+                sections = sections
+            ).also {
+                scheduleCache = it
+                debugLog(
+                    "getSchedule: Cache refreshed. Sections=${it.sections.size}, " +
+                        "events=${it.sections.sumOf { section -> section.events.size }}"
+                )
+            }
+        }
+    }
+
+    private fun eventToSearchResponse(event: ScheduleEvent): SearchResponse {
+        val formattedTime = try {
+            convertGMTToLocalTime(event.timeGmt)
+        } catch (_: Exception) {
+            event.timeGmt
+        }
+
+        val encodedDataTitle = URLEncoder.encode(event.dataTitle, "UTF-8")
+
+        return newTvSeriesSearchResponse(
+            "$formattedTime - ${event.eventTitle}",
+            encodedDataTitle,
+            TvType.TvSeries
+        ) {
+            this.posterUrl = Companion.posterUrl
+            this.episodes = event.channels.size
         }
     }
 
@@ -115,319 +260,204 @@ class DaddyLiveScheduleProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        debugLog(
-            "getMainPage: Initiating call for main page: $mainUrl"
-        )
+        debugLog("getMainPage: Loading schedule.")
 
         return try {
-            withContext(Dispatchers.IO) {
-                val response = app.get(mainUrl)
+            val snapshot = getSchedule()
 
-                debugLog(
-                    "getMainPage: Received response with status ${response.code}"
-                )
-
-                val doc = response.document
-
-                val categories =
-                    doc.select("#schedule .schedule__category")
-
-                debugLog(
-                    "getMainPage: Parsing schedule categories. " +
-                        "Total categories: ${categories.size}"
-                )
-
-                val schedule = categories.map {
-                    val sectionTitle =
-                        it.select(".card__meta").text()
-
-                    val events =
-                        searchResponseBuilder(it)
-
-                    debugLog(
-                        "getMainPage: Category '$sectionTitle' " +
-                            "has ${events.size} events parsed."
-                    )
-
-                    HomePageList(
-                        sectionTitle,
-                        events,
-                        isHorizontalImages = true
-                    )
-                }
-
-                debugLog(
-                    "getMainPage successfully loaded with " +
-                        "${schedule.size} homepage sections."
-                )
-
-                newHomePageResponse(
-                    schedule,
-                    false
+            val home = snapshot.sections.map { section ->
+                HomePageList(
+                    section.title,
+                    section.events.map { eventToSearchResponse(it) },
+                    isHorizontalImages = true
                 )
             }
+
+            debugLog("getMainPage: Built ${home.size} homepage sections from cache.")
+            newHomePageResponse(home, false)
         } catch (e: Exception) {
-            debugLog(
-                "getMainPage FAILED",
-                e
-            )
+            debugLog("getMainPage FAILED", e)
             throw e
         }
     }
 
-    override suspend fun search(
-        query: String
-    ): List<SearchResponse> {
-        debugLog(
-            "search: Initiated with query '$query'"
-        )
+    override suspend fun search(query: String): List<SearchResponse> {
+        debugLog("search: Initiated with query '$query'")
 
         return try {
-            withContext(Dispatchers.IO) {
-                val response = app.get(mainUrl)
+            val normalizedQuery =
+                query.lowercase().replace(" ", "")
 
-                debugLog(
-                    "search: Page loaded with status ${response.code}"
-                )
-
-                val doc = response.document
-
-                val schedule =
-                    doc.select("#schedule .schedule__category")
-                        .map {
-                            searchResponseBuilder(it)
-                        }
-                        .flatten()
-
-                val matches = schedule.filter {
-                    query.lowercase().replace(" ", "") in
-                        it.name.lowercase().replace(" ", "")
+            getSchedule()
+                .sections
+                .flatMap { it.events }
+                .filter {
+                    it.eventTitle
+                        .lowercase()
+                        .replace(" ", "")
+                        .contains(normalizedQuery)
                 }
-
-                debugLog(
-                    "search: Filtered results. " +
-                        "Found ${matches.size} matches for '$query'"
-                )
-
-                matches
-            }
+                .map { eventToSearchResponse(it) }
+                .also {
+                    debugLog("search: Found ${it.size} matches for '$query'")
+                }
         } catch (e: Exception) {
-            debugLog(
-                "search FAILED for query '$query'",
-                e
-            )
+            debugLog("search FAILED for query '$query'", e)
             emptyList()
         }
     }
 
-    override suspend fun load(
-        url: String
-    ): LoadResponse {
-        debugLog(
-            "load: Loading detailed stream information for URL: $url"
-        )
+    private fun decodeEventTitle(url: String): String {
+        val raw = url
+            .removePrefix("$mainUrl/")
+            .substringBefore("?")
 
         return try {
-            withContext(Dispatchers.IO) {
-                if (
-                    url.contains("watch.php") ||
-                    url.contains("stream-")
+            URLDecoder.decode(raw, "UTF-8")
+        } catch (_: Exception) {
+            raw
+        }
+    }
+
+    private suspend fun findEvent(dataTitle: String): ScheduleEvent? {
+        val cachedMatch = getSchedule()
+            .sections
+            .asSequence()
+            .flatMap { it.events.asSequence() }
+            .firstOrNull { it.dataTitle == dataTitle }
+
+        if (cachedMatch != null) {
+            return cachedMatch
+        }
+
+        debugLog(
+            "findEvent: Event '$dataTitle' not found in cache. " +
+                "Refreshing schedule once."
+        )
+
+        return getSchedule(forceRefresh = true)
+            .sections
+            .asSequence()
+            .flatMap { it.events.asSequence() }
+            .firstOrNull { it.dataTitle == dataTitle }
+    }
+
+    override suspend fun load(url: String): LoadResponse {
+        debugLog("load: Building channel selector for URL: $url")
+
+        return try {
+            /*
+             * 직접 stream-*.php URL이 들어오는 오래된 경로도
+             * 단일 채널 Episode로 변환해 호환성을 유지한다.
+             */
+            val directStreamId =
+                Regex("""stream-(\d+)\.php""")
+                    .find(url)
+                    ?.groupValues
+                    ?.getOrNull(1)
+
+            if (directStreamId != null) {
+                val directSelection = ChannelSelection(
+                    origin = mainUrl,
+                    eventTitle = "DaddyLive Channel $directStreamId",
+                    channelName = "Channel $directStreamId",
+                    streamId = directStreamId
+                )
+
+                val episode = Episode(
+                    data = mapper.writeValueAsString(directSelection),
+                    name = directSelection.channelName,
+                    season = 1,
+                    episode = 1
+                )
+
+                return newTvSeriesLoadResponse(
+                    directSelection.eventTitle,
+                    url,
+                    TvType.TvSeries,
+                    listOf(episode)
                 ) {
-                    debugLog(
-                        "load: Direct watch link detected. " +
-                            "Commencing iframe extraction flow."
-                    )
-
-                    val response = app.get(url)
-
-                    debugLog(
-                        "load: Watch page loaded with status ${response.code}"
-                    )
-
-                    val doc = response.document
-
-                    val eventTitle =
-                        doc.select("h2")
-                            .text()
-                            .ifEmpty {
-                                doc.title()
-                                    .substringBefore(" | Watch")
-                            }
-
-                    val iframeSrc =
-                        doc.select("iframe#playerFrame")
-                            .attr("src")
-
-                    debugLog(
-                        "load: Found iframe#playerFrame src: '$iframeSrc'"
-                    )
-
-                    val id =
-                        if (iframeSrc.isNotEmpty()) {
-                            iframeSrc
-                                .substringAfter("stream-")
-                                .substringBefore(".php")
-                        } else {
-                            url.substringAfter("id=")
-                        }
-
-                    debugLog(
-                        "load: Extracted Channel Stream ID: $id"
-                    )
-
-                    val channels = listOf(
-                        Channel(
-                            eventTitle,
-                            "$mainUrl/%s/stream-$id.php"
+                    this.posterUrl = Companion.posterUrl
+                    this.plot = "\u200b"
+                    this.seasonNames = listOf(
+                        SeasonData(
+                            season = 1,
+                            name = "Channels",
+                            displaySeason = 1
                         )
                     )
-
-                    val channelsJson =
-                        mapper.writeValueAsString(channels)
-
-                    debugLog(
-                        "load SUCCESS: Built dynamic channel payload: " +
-                            channelsJson
-                    )
-
-                    newLiveStreamLoadResponse(
-                        eventTitle,
-                        url,
-                        dataUrl = channelsJson
-                    ) {
-                        this.posterUrl =
-                            Companion.posterUrl
-
-                        this.plot = "\u200b"
-                    }
-                } else {
-                    debugLog(
-                        "load: Standard schedule load detected. " +
-                            "Fetching mainUrl schedule matrix."
-                    )
-
-                    val response = app.get(mainUrl)
-
-                    debugLog(
-                        "load: Main schedule page loaded with status " +
-                            response.code
-                    )
-
-                    val doc = response.document
-
-                    val rawDataTitle =
-                        url.removePrefix("$mainUrl/")
-
-                    val dataTitle =
-                        try {
-                            val decoded =
-                                URLDecoder.decode(
-                                    rawDataTitle,
-                                    "UTF-8"
-                                )
-
-                            debugLog(
-                                "load: Decoded raw title " +
-                                    "'$rawDataTitle' -> '$decoded'"
-                            )
-
-                            decoded
-                        } catch (e: Exception) {
-                            debugLog(
-                                "load: URLDecoder failed. " +
-                                    "Reverting to raw string: " +
-                                    "'$rawDataTitle'",
-                                e
-                            )
-
-                            rawDataTitle
-                        }
-
-                    debugLog(
-                        "load: Searching DOM matrix for " +
-                            "data-title matched with: '$dataTitle'"
-                    )
-
-                    val event =
-                        doc.select("#schedule .schedule__event")
-                            .firstOrNull {
-                                val candidate =
-                                    it.select(
-                                        "div.schedule__eventHeader"
-                                    ).attr("data-title")
-
-                                candidate == dataTitle
-                            }
-
-                    if (event == null) {
-                        debugLog(
-                            "load ERROR: FAILED to match any event " +
-                                "in HTML with data-title: '$dataTitle'"
-                        )
-
-                        throw NoSuchElementException(
-                            "No scheduled event found for '$dataTitle'"
-                        )
-                    }
-
-                    val eventTitle =
-                        event.select(
-                            ".schedule__eventTitle"
-                        ).text()
-
-                    val channels =
-                        event.select(
-                            ".schedule__channels > a"
-                        ).map {
-                            val id =
-                                it.attr("href")
-                                    .substringAfter("id=")
-
-                            Channel(
-                                it.text(),
-                                "$mainUrl/%s/stream-$id.php"
-                            )
-                        }
-
-                    val channelsJson =
-                        mapper.writeValueAsString(channels)
-
-                    debugLog(
-                        "load SUCCESS: Matched title='$eventTitle', " +
-                            "generated channels=${channels.size}"
-                    )
-
-                    Log.d(
-                        "DDL Schedule - Channels",
-                        channelsJson
-                    )
-
-                    val time =
-                        event.select(
-                            ".schedule__time"
-                        ).text()
-
-                    val formattedTime =
-                        convertGMTToLocalTime(time)
-
-                    newLiveStreamLoadResponse(
-                        "$formattedTime - $eventTitle",
-                        url,
-                        dataUrl = channelsJson
-                    ) {
-                        this.posterUrl =
-                            Companion.posterUrl
-
-                        this.plot = "\u200b"
-                    }
                 }
             }
-        } catch (e: Exception) {
+
+            val dataTitle = decodeEventTitle(url)
+
+            debugLog("load: Looking up cached event by data-title: '$dataTitle'")
+
+            val event = findEvent(dataTitle)
+                ?: throw NoSuchElementException(
+                    "No scheduled event found for '$dataTitle'"
+                )
+
+            if (event.channels.isEmpty()) {
+                throw NoSuchElementException(
+                    "No channels found for '${event.eventTitle}'"
+                )
+            }
+
+            /*
+             * 핵심 리팩토링:
+             * 한 경기의 모든 채널을 loadLinks()로 몰아 넣지 않는다.
+             * 각 DaddyLive 채널을 CloudStream Episode 하나로 노출한다.
+             *
+             * 사용자가 Episode(채널)를 실제로 선택했을 때에만
+             * 그 Episode.data 하나가 loadLinks()로 전달된다.
+             */
+            val episodes = event.channels.mapIndexed { index, channel ->
+                val selection = ChannelSelection(
+                    origin = mainUrl,
+                    eventTitle = event.eventTitle,
+                    channelName = channel.name,
+                    streamId = channel.streamId
+                )
+
+                Episode(
+                    data = mapper.writeValueAsString(selection),
+                    name = channel.name,
+                    season = 1,
+                    episode = index + 1
+                )
+            }
+
+            val formattedTime = try {
+                convertGMTToLocalTime(event.timeGmt)
+            } catch (_: Exception) {
+                event.timeGmt
+            }
+
             debugLog(
-                "load FAILED for URL: $url",
-                e
+                "load SUCCESS: '${event.eventTitle}' exposed as " +
+                    "${episodes.size} selectable channel episodes. " +
+                    "No stream extraction has been performed yet."
             )
 
+            newTvSeriesLoadResponse(
+                "$formattedTime - ${event.eventTitle}",
+                url,
+                TvType.TvSeries,
+                episodes
+            ) {
+                this.posterUrl = Companion.posterUrl
+                this.plot = "\u200b"
+                this.seasonNames = listOf(
+                    SeasonData(
+                        season = 1,
+                        name = "Channels",
+                        displaySeason = 1
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            debugLog("load FAILED for URL: $url", e)
             throw e
         }
     }
@@ -436,79 +466,44 @@ class DaddyLiveScheduleProvider : MainAPI() {
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit,
+        callback: (ExtractorLink) -> Unit
     ): Boolean {
-        debugLog(
-            "loadLinks: Loading links using channel payload: $data"
-        )
-
         return try {
-            val channels =
-                try {
-                    mapper.readValue(
-                        data,
-                        object :
-                            TypeReference<List<Channel>>() {}
-                    )
-                } catch (e: Exception) {
-                    debugLog(
-                        "loadLinks: JSON Parsing Error",
-                        e
-                    )
-                    emptyList()
-                }
+            val selected =
+                mapper.readValue<ChannelSelection>(data)
 
             debugLog(
-                "loadLinks: Parsed channel count: ${channels.size}"
+                "loadLinks: Selected channel only -> " +
+                    "'${selected.channelName}' (streamId=${selected.streamId})"
             )
 
+            var found = false
 
-            val links =
-                channels.map { channel ->
-                    val url =
-                        channel.channelId.format("stream")
-
-                    debugLog(
-                        "loadLinks: Stream-only URL: " +
-                            "${channel.channelName} -> $url"
-                    )
-
-                    "${channel.channelName} - stream" to url
-                }
-
-            val linksJson =
-                mapper.writeValueAsString(links)
-
-            debugLog(
-                "loadLinks: Transporting STREAM-ONLY payload " +
-                    "to Extractor. URL count: ${links.size}"
-            )
-
+            /*
+             * data에는 사용자가 선택한 Episode 한 개만 들어온다.
+             * Extractor가 이 채널 하나에 대해서만 player fallback을 수행한다.
+             */
             DaddyLiveExtractor().getUrl(
-                linksJson,
+                data,
                 null,
-                subtitleCallback,
-                callback
-            )
+                subtitleCallback
+            ) { link ->
+                found = true
+                callback(link)
+            }
 
             debugLog(
-                "loadLinks SUCCESS: " +
-                    "Finished delegating stream-only links."
+                if (found) {
+                    "loadLinks SUCCESS: '${selected.channelName}' resolved."
+                } else {
+                    "loadLinks: '${selected.channelName}' produced no playable link."
+                }
             )
 
-            true
+            found
         } catch (e: Exception) {
-            debugLog(
-                "loadLinks FAILED",
-                e
-            )
-
+            debugLog("loadLinks FAILED", e)
             false
         }
     }
-
-    data class Channel(
-        val channelName: String,
-        val channelId: String
-    )
 }
