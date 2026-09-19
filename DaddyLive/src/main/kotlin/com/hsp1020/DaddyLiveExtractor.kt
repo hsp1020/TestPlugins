@@ -1,68 +1,51 @@
 package com.hsp1020
 
-import com.fasterxml.jackson.core.type.TypeReference
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import com.lagradost.nicehttp.NiceResponse
-import com.lagradost.nicehttp.Requests
 import com.lagradost.cloudstream3.base64Decode
-import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.mapper
+import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.SocketTimeoutException
-import okhttp3.Protocol
 import java.net.URL
 
 class DaddyLiveExtractor : ExtractorApi() {
-    override var mainUrl = "https://dlive.sx" // 기본 주소 설정 (초기 바인딩용)
+    override var mainUrl = "https://dlive.sx"
     override val name = "DaddyLive"
     override val requiresReferer = false
-    
-    // 스케줄러와 완전 통일된 Chrome 표준 UA 사용
+
     private val userAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
 
-    // DaddyLive 원본 호스트와의 요청만 HTTP/1.1로 우회한다.
-    // 외부 iframe/CDN 요청은 기존 CloudStream app 클라이언트를 그대로 사용한다.
-    private val http11 by lazy {
-        Requests(
-            baseClient = app.baseClient.newBuilder()
-                .protocols(listOf(Protocol.HTTP_1_1))
-                .build(),
-            defaultHeaders = app.defaultHeaders,
-            defaultReferer = app.defaultReferer,
-            defaultData = app.defaultData,
-            defaultCookies = app.defaultCookies,
-            defaultCacheTime = app.defaultCacheTime,
-            defaultCacheTimeUnit = app.defaultCacheTimeUnit,
-            defaultTimeOut = app.defaultTimeOut,
-            responseParser = app.responseParser
-        )
-    }
+    /*
+     * 사용자 지정 fallback 순서.
+     * 선택된 채널 하나에 대해서만 아래 순서로 탐색한다.
+     */
+    private val players = listOf(
+        "stream",
+        "plus",
+        "watch",
+        "player",
+        "cast",
+        "casting"
+    )
 
-    private suspend fun getPage(
-        url: String,
-        headers: Map<String, String>,
-        timeout: Long = 3L
-    ): NiceResponse {
-        val sameOrigin = try {
-            URL(url).host.equals(URL(mainUrl).host, ignoreCase = true)
-        } catch (_: Exception) {
-            false
-        }
-
-        val client = if (sameOrigin) http11 else app
-        return client.get(url, headers = headers, timeout = timeout)
-    }
+    private data class ExtractorChannelSelection(
+        val origin: String,
+        val eventTitle: String,
+        val channelName: String,
+        val streamId: String
+    )
 
     private fun debugLog(message: String) {
         Log.d("DDL-DEBUG", "[DDL-DEBUG] $message")
@@ -75,121 +58,175 @@ class DaddyLiveExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val links = try {
-            mapper.readValue(url, object : TypeReference<List<Pair<String, String>>>() {})
-        } catch (e: Exception) {
+        currentCoroutineContext().ensureActive()
+
+        val selected = try {
+            mapper.readValue<ExtractorChannelSelection>(url)
+        } catch (_: Exception) {
             null
         }
-        
-        if (links == null) {
-            val link = extractVideo(url, this.name)
-            if (link != null) callback(link)
+
+        /*
+         * 예전처럼 List<Pair<channel, url>> 전체를 받지 않는다.
+         * Provider의 Episode.data에서 사용자가 선택한 채널 하나만 받는다.
+         */
+        if (selected != null) {
+            val entryOrigin = selected.origin.trimEnd('/').ifEmpty { mainUrl }
+            mainUrl = entryOrigin
+
+            debugLog(
+                "[${selected.channelName}] 선택 채널 단일 추출 시작 " +
+                    "(streamId=${selected.streamId}, 후보=${players.size})"
+            )
+
+            for (player in players) {
+                currentCoroutineContext().ensureActive()
+
+                val candidateUrl =
+                    "$entryOrigin/$player/stream-${selected.streamId}.php"
+
+                val sourceName =
+                    "${selected.channelName} - $player"
+
+                debugLog(
+                    "[${selected.channelName}] fallback '$player' 시도 -> $candidateUrl"
+                )
+
+                val link = extractVideo(
+                    candidateUrl,
+                    sourceName
+                )
+
+                if (link != null) {
+                    debugLog(
+                        "[${selected.channelName}] '$player' 성공. " +
+                            "나머지 fallback 탐색 중지."
+                    )
+
+                    callback(link)
+                    return
+                }
+            }
+
+            debugLog(
+                "[${selected.channelName}] 모든 fallback 후보에서 " +
+                    "재생 가능한 링크를 찾지 못했습니다."
+            )
             return
         }
 
-        val groupedLinks = links.groupBy { it.first.substringBefore(" - ") }
+        /*
+         * 직접 URL 호출에 대한 최소 호환성.
+         * JSON Episode.data가 아닌 실제 URL이 들어오면 한 번만 추출한다.
+         */
+        val directLink = extractVideo(
+            url,
+            this.name
+        )
 
-        groupedLinks.forEach { (channelName, playerPairs) ->
-            debugLog("[$channelName] 채널의 스트림 추출 시작 (총 ${playerPairs.size}개 후보)")
-            
-            for (playerPair in playerPairs) {
-                val sourceName = playerPair.first 
-                val streamUrl = playerPair.second
-
-                val link = extractVideo(streamUrl, sourceName)
-                if (link != null) {
-                    callback(link)
-                    debugLog("[$channelName] 성공적으로 추출 완료. 해당 채널의 나머지 백업 플레이어 탐색 중지.")
-                    break 
-                }
-            }
+        if (directLink != null) {
+            callback(directLink)
         }
     }
 
-    private suspend fun extractVideo(url: String, sourceName: String): ExtractorLink? {
+    private suspend fun extractVideo(
+        url: String,
+        sourceName: String
+    ): ExtractorLink? {
         try {
+            currentCoroutineContext().ensureActive()
+
             debugLog("================= [DDL EXTRACT START] =================")
             debugLog("1. 소스 정보 -> Name: $sourceName, Target URL: $url")
-            
-            // [개선 - 동적 도메인 바인딩] 인입된 도메인에 맞춰 mainUrl 및 Origin 오리진 도메인을 즉시 바인딩하여 핫링크 우회 보장
+
             val parsedUrl = URL(url)
-            val entryOrigin = "${parsedUrl.protocol}://${parsedUrl.host}"
+            val entryOrigin =
+                "${parsedUrl.protocol}://${parsedUrl.host}"
+
             mainUrl = entryOrigin
-            
+
             val requestHeaders = mapOf(
                 "user-agent" to userAgent,
                 "referer" to url,
                 "accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
             )
 
-            // UI 스레드 차단 방지를 위해 IO 비동기 스레드 컨텍스트 지정 및 타임아웃 단축
+            /*
+             * HTTP/1.1 강제 없음.
+             * CloudStream 기본 app/NiceHttp 클라이언트를 그대로 사용한다.
+             */
             val resp = withContext(Dispatchers.IO) {
-                getPage(url, headers = requestHeaders, timeout = 3)
+                app.get(
+                    url,
+                    headers = requestHeaders,
+                    timeout = 5
+                )
             }
+
             debugLog("2. 플레이어 페이지 응답 코드: ${resp.code}")
-            if (!resp.isSuccessful) return null
-            val html = resp.text
-            
-            // [CORS 및 화이트리스트 최적화] 무단 광고 iframe 수집을 원천 차단하고 순수 중계용 iframe 주소만 안전하게 획득
-            val iframeMatches = Regex("""<iframe\s+[^>]*src=(?:["']([^"']+)["']|([^\s>]+))""", RegexOption.IGNORE_CASE)
-                .findAll(html)
-                .map { match -> match.groupValues[1].ifEmpty { match.groupValues[2] } }
-                .distinct()
-                .filter { src ->
-                    val isStaticAsset = src.endsWith(".js") || src.endsWith(".css") || src.contains("tag.min")
-                    val isPlayerPath = src.contains("/court/") || src.contains("/player/") || src.contains("/stream/") || src.contains("/embed/") || src.contains("/wimbledon/") || src.contains("live=") || src.contains("id=")
-                    val isPopcdn = src.contains("freeshot") || src.contains("popcdn")
-                    !isStaticAsset && (isPlayerPath || isPopcdn)
-                }
-                .toList()
-            
+
+            if (!resp.isSuccessful) {
+                debugLog(
+                    "플레이어 페이지 실패 HTTP ${resp.code}. " +
+                        "다음 fallback으로 이동."
+                )
+                return null
+            }
+
             val iframeHeaders = requestHeaders.toMutableMap()
             iframeHeaders["referer"] = url
             iframeHeaders["origin"] = entryOrigin
 
-            // [로딩 속도 대폭 단축 - 비동기 병렬 네트워크 통신]
-            // 수집된 중계 iframe 페이지들을 비동기 코루틴(async)으로 병렬 동시 호출하여 획득 대기 지연 시간을 비약적으로 축소
-            val loadedIframeBodies = coroutineScope {
-                iframeMatches.map { rawSrc ->
-                    async(Dispatchers.IO) {
-                        var iframeUrl = rawSrc
-                        if (rawSrc.startsWith("//")) {
-                            iframeUrl = "https:$rawSrc"
-                        } else if (rawSrc.startsWith("/")) {
-                            iframeUrl = "$entryOrigin$rawSrc"
-                        } else if (!rawSrc.startsWith("http")) {
-                            iframeUrl = "$entryOrigin/${rawSrc.trimStart('/')}"
-                        }
-                        
-                        try {
-                            val iframeResp = getPage(iframeUrl, headers = iframeHeaders, timeout = 3)
-                            if (iframeResp.isSuccessful) {
-                                iframeUrl to iframeResp.text
-                            } else null
-                        } catch (e: Exception) {
-                            null
-                        }
-                    }
-                }.mapNotNull { it.await() }
+            /*
+             * 기존 구조:
+             *  - iframe 전부 async 병렬 다운로드
+             *  - 그 뒤 일괄 분석
+             *
+             * 변경 구조:
+             *  - 현재 플레이어 HTML 자체부터 분석
+             *  - parseAndExtract가 중첩 iframe을 순차적으로 내려간다.
+             *  - 첫 성공 즉시 return
+             *
+             * 선택되지 않은 다른 채널에는 어떤 요청도 보내지 않는다.
+             */
+            val link = parseAndExtract(
+                iframeUrl = url,
+                iframeHtml = resp.text,
+                iframeHeaders = iframeHeaders,
+                entryOrigin = entryOrigin,
+                sourceName = sourceName,
+                depth = 0
+            )
+
+            if (link != null) {
+                debugLog("================= [DDL EXTRACT SUCCESS] =================")
+                return link
             }
 
-            // 병렬 로드가 완료된 HTML 소스들을 CPU로 정교하고 신속하게 Offline 해독 연산 진행
-            for ((iframeUrl, iframeHtml) in loadedIframeBodies) {
-                val link = parseAndExtract(iframeUrl, iframeHtml, iframeHeaders, entryOrigin, sourceName)
-                if (link != null) return link
-            }
-
-            debugLog("알림: 모든 후보 iframe 내부에서 유효한 진짜 스트림 주소를 획득하지 못했습니다.")
+            debugLog(
+                "알림: 현재 fallback '$sourceName'에서 " +
+                    "유효한 진짜 스트림 주소를 획득하지 못했습니다."
+            )
             debugLog("================= [DDL EXTRACT END] =================")
+
             return null
+        } catch (e: CancellationException) {
+            debugLog("extractVideo 취소 감지 -> 전체 작업 즉시 중단")
+            throw e
         } catch (e: SocketTimeoutException) {
-            debugLog("extractVideo 소켓 연결 타임아웃 예외 발생: ${e.message}")
+            debugLog(
+                "extractVideo 소켓 연결 타임아웃 예외 발생: ${e.message}"
+            )
             return null
         } catch (e: IOException) {
-            debugLog("extractVideo 네트워크 입출력 에러 발생: ${e.message}")
+            debugLog(
+                "extractVideo 네트워크 입출력 에러 발생: ${e.message}"
+            )
             return null
         } catch (e: Exception) {
-            debugLog("extractVideo 일반 예외 발생: ${e.message}")
+            debugLog(
+                "extractVideo 일반 예외 발생: ${e.message}"
+            )
             return null
         }
     }
@@ -277,7 +314,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     "origin" to iframeOrigin
                 )
                 
-                val playerResp = getPage(playerUrl, headers = playerHeaders, timeout = 3)
+                val playerResp = app.get(playerUrl, headers = playerHeaders, timeout = 5)
                 if (playerResp.isSuccessful) {
                     val playerHtml = playerResp.text
                     val arrayMatch = Regex("""\["h"\s*,\s*"t"\s*,\s*"t"\s*,\s*"p"\s*,\s*"s"\s*,[^\]]+\]""").find(playerHtml)
@@ -327,7 +364,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val constructedIframeUrl = "https://$edm/court/$zmid.php"
                 debugLog("[$depth 단계] 동적 JS Iframe 가상 복원 성공 -> URL: $constructedIframeUrl")
                 
-                val nestedResp = getPage(constructedIframeUrl, headers = iframeHeaders, timeout = 3)
+                val nestedResp = app.get(constructedIframeUrl, headers = iframeHeaders, timeout = 5)
                 if (nestedResp.isSuccessful) {
                     val link = parseAndExtract(constructedIframeUrl, nestedResp.text, iframeHeaders, entryOrigin, sourceName, depth + 1)
                     if (link != null) return link
@@ -359,7 +396,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                     nestedIframeUrl = "$parentOrigin/${nestedRawSrc.trimStart('/')}"
                 }
                 
-                val nestedResp = getPage(nestedIframeUrl, headers = iframeHeaders, timeout = 3)
+                val nestedResp = app.get(nestedIframeUrl, headers = iframeHeaders, timeout = 5)
                 if (nestedResp.isSuccessful) {
                     val link = parseAndExtract(nestedIframeUrl, nestedResp.text, iframeHeaders, entryOrigin, sourceName, depth + 1)
                     if (link != null) return link
@@ -378,7 +415,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
                 
                 val targetUrl = "https://popcdn.day/player/$channelCode"
-                val popResp = getPage(targetUrl, headers = iframeHeaders, timeout = 3)
+                val popResp = app.get(targetUrl, headers = iframeHeaders, timeout = 5)
                 val popBody = popResp.text
                 
                 var finalM3u8 = ""
@@ -404,6 +441,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                     )
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: SocketTimeoutException) {
             debugLog("crawlIframe 타임아웃 발생 (depth=$depth): ${e.message}")
         } catch (e: IOException) {
