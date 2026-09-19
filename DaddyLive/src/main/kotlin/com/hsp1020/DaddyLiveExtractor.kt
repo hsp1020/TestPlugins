@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -261,10 +262,15 @@ class DaddyLiveExtractor : ExtractorApi() {
                     // [수정] 메인 도메인(entryOrigin) 대신 실제 플레이어가 삽입된 iframe 호스트(iframeOrigin)를 강제 사용합니다.
                     val refOrigin = iframeOrigin
                     
-                    return ExtractorLink(
-                        source = sourceName, name = sourceName, url = decodedUrl,
-                        referer = "$refOrigin/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
-                        headers = mapOf(
+                    return newExtractorLink(
+                        source = sourceName,
+                        name = sourceName,
+                        url = decodedUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = "$refOrigin/"
+                        this.quality = Qualities.Unknown.value
+                        this.headers = mapOf(
                             "referer" to "$refOrigin/",
                             "origin" to refOrigin,
                             "user-agent" to userAgent,
@@ -274,7 +280,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                             "sec-fetch-mode" to "cors",
                             "sec-fetch-site" to "cross-site"
                         )
-                    )
+                    }
                 } else {
                     debugLog("[atob-필터링] 감지된 주소($decodedUrl)는 가짜 허니팟 주소이므로 우회를 지속합니다.")
                 }
@@ -347,11 +353,16 @@ class DaddyLiveExtractor : ExtractorApi() {
                                 "sec-fetch-mode" to "cors",
                                 "sec-fetch-site" to "same-site"
                             )
-                            return ExtractorLink(
-                                source = sourceName, name = sourceName, url = streamUrl,
-                                referer = "$igniteHost/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
-                                headers = finalHeaders
-                            )
+                            return newExtractorLink(
+                                source = sourceName,
+                                name = sourceName,
+                                url = streamUrl,
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.referer = "$igniteHost/"
+                                this.quality = Qualities.Unknown.value
+                                this.headers = finalHeaders
+                            }
                         }
                     }
                 }
@@ -432,13 +443,20 @@ class DaddyLiveExtractor : ExtractorApi() {
                 
                 if (finalM3u8.isNotEmpty()) {
                     debugLog("Freeshot 추출 성공 -> $finalM3u8")
-                    return ExtractorLink(
-                        source = sourceName, name = "Freeshot Server", url = finalM3u8,
-                        referer = "https://popcdn.day/", quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8,
-                        headers = mapOf(
-                            "referer" to "https://popcdn.day/", "origin" to "https://popcdn.day", "user-agent" to userAgent
+                    return newExtractorLink(
+                        source = sourceName,
+                        name = "Freeshot Server",
+                        url = finalM3u8,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = "https://popcdn.day/"
+                        this.quality = Qualities.Unknown.value
+                        this.headers = mapOf(
+                            "referer" to "https://popcdn.day/",
+                            "origin" to "https://popcdn.day",
+                            "user-agent" to userAgent
                         )
-                    )
+                    }
                 }
             }
         } catch (e: CancellationException) {
