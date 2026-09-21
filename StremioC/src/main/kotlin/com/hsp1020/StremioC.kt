@@ -118,7 +118,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     private var lastCacheTime: Long = 0
     
     private val pageMutex = Mutex()
-    private val activePageRequests = mutableMapOf<String, Deferred<HomePageResponse>>()
+    private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
 
     private fun getCineStreamProvider(forceSearch: Boolean = false): MainAPI? {
         if (cachedCineStreamProvider != null) return cachedCustomCineStreamProvider()
@@ -260,7 +260,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         val catalogSentIds = ConcurrentHashMap<String, MutableSet<String>>()
         val catalogSkipState = ConcurrentHashMap<String, Int>()
-        private val catalogGenerations = ConcurrentHashMap<String, Long>()
 
         suspend fun getOrFetchKitsu(url: String): String? {
             val now = System.currentTimeMillis()
@@ -581,10 +580,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             )
         }
 
-    private fun getCatalogStateKey(request: MainPageRequest): String {
-        return "$mainUrl|${request.data}"
-    }
-
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse = coroutineScope {
         println("[PAGINATION-DEBUG] ===== getMainPage START =====")
         println("[PAGINATION-DEBUG] Requested Page: $page, Tab Name: ${request.name}")
@@ -595,37 +590,28 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
         var isNewRequest = false
-        val stateKey = getCatalogStateKey(request)
+        val stateKey = "${this@StremioC.name}_${request.name}" 
 
-        val (requestKey, deferred) = pageMutex.withLock {
-            val generation = if (page <= 1) {
-                println("[PAGINATION-DEBUG] Page <= 1 detected. Resetting states for Tab: ${request.name}")
+        val deferred = pageMutex.withLock {
+            if (page <= 1) {
+                println("[PAGINATION-DEBUG] Page <= 1 detected. Clearing states for Tab Key: $stateKey")
                 catalogSentIds.remove(stateKey)
+                activePageRequests.clear()
                 catalogSkipState.remove(stateKey)
-
-                val nextGeneration = (catalogGenerations[stateKey] ?: 0L) + 1L
-                catalogGenerations[stateKey] = nextGeneration
-                nextGeneration
-            } else {
-                catalogGenerations[stateKey] ?: 0L
             }
-
-            val key = "$stateKey|generation=$generation|page=$page"
-            val requestDeferred = activePageRequests.getOrPut(key) {
+            
+            activePageRequests.getOrPut(page) {
                 isNewRequest = true
                 println("[PAGINATION-DEBUG] Creating new async request for Page: $page")
-                async {
+                async { 
                     try {
-                        fetchTabCatalogData(request, page, generation)
-                    } catch (e: CancellationException) {
-                        throw e
+                        fetchTabCatalogData(request, page) 
                     } catch (e: Exception) {
                         e.printStackTrace()
                         newHomePageResponse(emptyList(), hasNext = false)
                     }
                 }
             }
-            key to requestDeferred
         }
         
         return@coroutineScope try {
@@ -638,56 +624,38 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 println("[PAGINATION-DEBUG] Returning response for Page: $page with $listSize items.")
                 response
             }
-        } catch (e: CancellationException) {
-            throw e
         } catch (e: Exception) {
             e.printStackTrace()
             newHomePageResponse(emptyList(), hasNext = false)
         } finally {
             pageMutex.withLock {
-                activePageRequests.remove(requestKey)
+                activePageRequests.remove(page)
             }
             println("[PAGINATION-DEBUG] ===== getMainPage END (Page: $page) =====")
         }
     }
 
-    private suspend fun fetchTabCatalogData(
-        request: MainPageRequest,
-        page: Int,
-        generation: Long
-    ): HomePageResponse {
-        val stateKey = getCatalogStateKey(request)
-
-        if ((catalogGenerations[stateKey] ?: 0L) != generation) {
-            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Ignoring stale request for Page $page.")
-            return newHomePageResponse(emptyList(), hasNext = false)
-        }
+    private suspend fun fetchTabCatalogData(request: MainPageRequest, page: Int): HomePageResponse {
+        val stateKey = "${this@StremioC.name}_${request.name}"
 
         if (page > 1 && !catalogSkipState.containsKey(stateKey)) {
             println("[PAGINATION-DEBUG] [fetchTabCatalogData] Cold start detected on Page $page. Silently pre-fetching Page 1 to restore state.")
             try {
-                fetchTabCatalogData(request, 1, generation)
-            } catch (e: CancellationException) {
-                throw e
+                fetchTabCatalogData(request, 1) 
             } catch (e: Exception) {
                 e.printStackTrace()
             }
         }
 
-        if ((catalogGenerations[stateKey] ?: 0L) != generation) {
-            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Request became stale before Page $page fetch.")
-            return newHomePageResponse(emptyList(), hasNext = false)
-        }
-
         val currentSkip = catalogSkipState[stateKey] ?: 0
-        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Current Skip State: $currentSkip for Tab: ${request.name}")
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Current Skip State: $currentSkip for Tab Key: $stateKey")
         
         val targetPath = request.data.replace("###", currentSkip.toString())
         val targetUrl = buildUrl(targetPath)
-        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Catalog request prepared for Page: $page")
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Target URL: $targetUrl")
         
-        val cacheKey = "$stateKey|skip=$currentSkip"
-        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Cache slot prepared for Skip: $currentSkip")
+        val cacheKey = "${this@StremioC.name}_${request.name}_$currentSkip"
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Cache Key: $cacheKey")
 
         val resultPair = getOrFetchCachedPage(cacheKey) {
             println("[PAGINATION-DEBUG] [fetchTabCatalogData] Fetching from network or cache...")
@@ -702,19 +670,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             val metas = response?.metas ?: emptyList()
             println("[PAGINATION-DEBUG] [fetchTabCatalogData] Network/JSON parsed ${metas.size} items.")
-
-            if ((catalogGenerations[stateKey] ?: 0L) != generation) {
-                println("[PAGINATION-DEBUG] [fetchTabCatalogData] Discarding stale network result for Page $page.")
-                return@getOrFetchCachedPage null
-            }
             
             val mappedItems = metas.map { it.toSearchResponse(this@StremioC) }
             Pair(mappedItems, metas.size)
-        }
-
-        if ((catalogGenerations[stateKey] ?: 0L) != generation) {
-            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Discarding stale cached/result data for Page $page.")
-            return newHomePageResponse(emptyList(), hasNext = false)
         }
 
         if (resultPair != null) {
@@ -952,7 +910,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val encodedPrimaryId = primaryStremioId.urlEncode()
 
         val seenLinks = Collections.synchronizedSet(mutableSetOf<String>())
-        val seenSubtitles = Collections.synchronizedSet(mutableSetOf<String>())
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
             if (seenLinks.add(link.url)) {
                 callback(link)
@@ -998,7 +955,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             val name = file.name.removeSuffix(".xml")
                             val p = context.getSharedPreferences(name, Context.MODE_PRIVATE)
                             if (p.contains("stremio_addons")) {
-                                println("[STREMIOSUB] Setup Scan: Found 'stremio_addons' key in file: '$name'")
+                                println("[STREMIOSUB] Setup Scan: Found 'stremio_addons' key in file: '$name' -> value = ${p.getString("stremio_addons", "")}")
                             }
                         }
                     }
@@ -1017,7 +974,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     rawValue = rebuildPrefsBackup?.getString("stremio_addons", "") ?: ""
                 }
                 
-                println("[STREMIOSUB] Attempt 1 (rebuild_preference/key) -> raw value length: ${rawValue.length}")
+                println("[STREMIOSUB] Attempt 1 (rebuild_preference/key) -> raw value length: ${rawValue.length}, data: $rawValue")
                 if (rawValue.startsWith("\"") && rawValue.endsWith("\"") && rawValue.length >= 2) {
                     rawValue.substring(1, rawValue.length - 1)
                 } else {
@@ -1029,7 +986,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 try {
                     val prefs = CloudStreamApp.context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
                     val v = prefs?.getString("stremio_addons", "") ?: ""
-                    println("[STREMIOSUB] Attempt 2 (default SharedPreferences) -> length: ${v.length}")
+                    println("[STREMIOSUB] Attempt 2 (default SharedPreferences) -> length: ${v.length}, data: $v")
                     if (v.startsWith("\"") && v.endsWith("\"") && v.length >= 2) v.substring(1, v.length - 1) else v
                 } catch (e: Exception) {
                     println("[STREMIOSUB] Attempt 2 (default SharedPreferences) Failed: ${e.message}")
@@ -1043,7 +1000,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.onFailure { it.printStackTrace() }.getOrNull() }
                 .toSet() 
                 
-            println("[STREMIOSUB] Final parsed customHosts count: ${hosts.size}")
+            println("[STREMIOSUB] Final parsed customHosts list: $hosts")
             cachedCustomHosts = hosts
             cachedCustomHostsTime = now
             hosts
@@ -1051,33 +1008,31 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
 
         val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
-            val subtitleUrl = sub.url
-            if (subtitleUrl.isNotBlank() && seenSubtitles.add(subtitleUrl)) {
-                try {
-                    val start = subtitleUrl.indexOf("://")
-                    val host = if (start != -1) {
-                        val hostStart = start + 3
-                        val end = subtitleUrl.indexOf('/', hostStart)
-                        val hostPort = if (end == -1) subtitleUrl.substring(hostStart) else subtitleUrl.substring(hostStart, end)
-                        val portIdx = hostPort.indexOf(':')
-                        if (portIdx == -1) hostPort else hostPort.substring(0, portIdx)
-                    } else ""
+            try {
+                val url = sub.url
+                val start = url.indexOf("://")
+                val host = if (start != -1) {
+                    val hostStart = start + 3
+                    val end = url.indexOf('/', hostStart)
+                    val hostPort = if (end == -1) url.substring(hostStart) else url.substring(hostStart, end)
+                    val portIdx = hostPort.indexOf(':')
+                    if (portIdx == -1) hostPort else hostPort.substring(0, portIdx)
+                } else ""
 
-                    val isCustom = customHosts.contains(host)
-                    val isBuiltIn = builtInHosts.contains(host)
-                    val isContainsStrem = host.contains("strem", ignoreCase = true)
+                val isCustom = customHosts.contains(host)
+                val isBuiltIn = builtInHosts.contains(host)
+                val isContainsStrem = host.contains("strem", ignoreCase = true)
 
-                    val isStremio = isCustom || isBuiltIn || isContainsStrem
+                val isStremio = isCustom || isBuiltIn || isContainsStrem
 
-                    if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
-                        val newLang = "${sub.lang} (Stremio)"
-                        subtitleCallback.invoke(SubtitleFile(newLang, subtitleUrl))
-                    } else {
-                        subtitleCallback.invoke(sub)
-                    }
-                } catch (e: Exception) {
+                if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
+                    val newLang = "${sub.lang} (Stremio)"
+                    subtitleCallback.invoke(SubtitleFile(newLang, url))
+                } else {
                     subtitleCallback.invoke(sub)
                 }
+            } catch (e: Exception) {
+                subtitleCallback.invoke(sub)
             }
         }
 
@@ -1086,7 +1041,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 if (cleanBaseUrl.isNotBlank() && encodedPrimaryId.isNotBlank()) {
                     runSuspendCatching {
                         val streamRequestUrl = "$cleanBaseUrl/stream/$targetType/${encodedPrimaryId}.json$querySuffix"
-                        println("[STREMIOSUB] Requesting streams from current addon")
+                        println("[STREMIOSUB] Requesting streams from addon: $streamRequestUrl")
                         val text = customSession.get(streamRequestUrl, timeout = 25L).text
                         val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
                         res?.streams?.forEach { stream ->
@@ -1108,13 +1063,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             ?: ""
                         val subtitleRequestUrl = "$cleanBase/subtitles/$targetType/${encodedSubId}.json$suffix"
                         
-                        println("[STREMIOSUB] Requesting subtitles from sync addon")
+                        println("[STREMIOSUB] Requesting subtitles from sync url: $subtitleRequestUrl")
                         val text = customSession.get(subtitleRequestUrl, timeout = 15L).text
                         val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
                         
                         res?.subtitles?.forEach { sub ->
                             val lang = sub.lang ?: sub.lang_code ?: "Unknown"
-                            subtitleInterceptor.invoke(newSubtitleFile(lang, sub.url ?: return@forEach))
+                            subtitleCallback.invoke(newSubtitleFile(lang, sub.url ?: return@forEach))
                         }
                     }.onFailure { it.printStackTrace() }
                 }
@@ -2110,21 +2065,16 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     this.quality = getQuality(listOf(description, title, name))
                     this.headers = behaviorHints?.proxyHeaders?.request ?: behaviorHints?.headers ?: mapOf()
                 })
+                
+                subtitles.map { sub -> 
+                    val lang = sub.lang ?: sub.lang_code ?: "Unknown"
+                    val parsedLang = SubtitleHelper.fromTagToEnglishLanguageName(lang) ?: lang
+                    subtitleCallback.invoke(newSubtitleFile(parsedLang, sub.url ?: return@map)) 
+                }
             }
-
             if (ytId != null) loadExtractor("https://m.youtube.com/watch?v=$ytId", subtitleCallback, callback)
             if (externalUrl != null) loadExtractor(externalUrl, subtitleCallback, callback)
             if (infoHash != null) callback.invoke(newExtractorLink(name ?: "", title ?: name ?: "", "magnet:?xt=urn:btih:${infoHash}") { this.quality = Qualities.Unknown.value })
-
-            val hasPlayableTarget = url != null || ytId != null || externalUrl != null || infoHash != null
-            if (hasPlayableTarget) {
-                subtitles.forEach { sub ->
-                    val lang = sub.lang ?: sub.lang_code ?: "Unknown"
-                    val parsedLang = SubtitleHelper.fromTagToEnglishLanguageName(lang) ?: lang
-                    val subtitleUrl = sub.url ?: return@forEach
-                    subtitleCallback.invoke(newSubtitleFile(parsedLang, subtitleUrl))
-                }
-            }
         }
     }
 }
