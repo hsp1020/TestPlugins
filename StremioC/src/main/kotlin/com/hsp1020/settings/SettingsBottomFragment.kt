@@ -1339,10 +1339,13 @@ private fun showLanguageSelectDialog() {
         progressDialog.show()
 
         viewLifecycleOwner.lifecycleScope.launch {
+            val cleanUrl = item.link.substringBefore("?").trimEnd('/')
+            val currentUrl = if (cleanUrl.endsWith("manifest.json")) cleanUrl else "$cleanUrl/manifest.json"
+
             val manifestText = withContext(Dispatchers.IO) {
                 try { 
-                    // 1. 제한시간을 30초에서 15초로 변경
-                    com.lagradost.cloudstream3.app.get(item.link, timeout = 10L).text 
+                    // 실제 manifest URL로 요청
+                    com.lagradost.cloudstream3.app.get(currentUrl, timeout = 10L).text 
                 } catch (e: Exception) { 
                     e.printStackTrace(); 
                     null 
@@ -1351,13 +1354,11 @@ private fun showLanguageSelectDialog() {
             progressDialog.dismiss()
 
             if (manifestText.isNullOrBlank()) {
-                // 2. 토스트 대신 기존 테마 맞춤형 팝업(showSavedPopup) 표시
+                // 토스트 대신 기존 테마 맞춤형 팝업(showSavedPopup) 표시
                 showSavedPopup(context, "Error", "Failed to load manifest. Check link.")
                 return@launch
             }
 
-            val cleanUrl = item.link.substringBefore("?").trimEnd('/')
-            val currentUrl = if (cleanUrl.endsWith("manifest.json")) cleanUrl else "$cleanUrl/manifest.json"
             val manifestPrefs = context.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
             manifestPrefs.edit().putString(currentUrl.toUniqueKeyLocal(), manifestText).apply()
 
