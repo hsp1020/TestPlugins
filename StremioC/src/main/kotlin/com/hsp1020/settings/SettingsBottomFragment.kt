@@ -436,7 +436,7 @@ class SettingsBottomFragment(
                                         if (strVal != null) {
                                             cineStreamJson.put(cKey, strVal)
                                             found = true
-                                            println("[Setting_Write] Export Match: Key = '$cKey' | Value = '$strVal' | Type = String (via CloudStreamApp)")
+                                            println("[Setting_Write] Export Match: Key = '$cKey' | Type = String (via CloudStreamApp)")
                                         }
                                     } catch (t: Throwable) {
                                         println("[Setting_Write] Export Debug: Key = '$cKey' is not String -> ${t.message}")
@@ -448,7 +448,7 @@ class SettingsBottomFragment(
                                             if (boolVal != null) {
                                                 cineStreamJson.put(cKey, boolVal)
                                                 found = true
-                                                println("[Setting_Write] Export Match: Key = '$cKey' | Value = '$boolVal' | Type = Boolean (via CloudStreamApp)")
+                                                println("[Setting_Write] Export Match: Key = '$cKey' | Type = Boolean (via CloudStreamApp)")
                                             }
                                         } catch (t: Throwable) {
                                             println("[Setting_Write] Export Debug: Key = '$cKey' is not Boolean -> ${t.message}")
@@ -460,7 +460,7 @@ class SettingsBottomFragment(
                                             val intVal = CloudStreamApp.getKey<Int>(cKey)
                                             if (intVal != null) {
                                                 cineStreamJson.put(cKey, intVal)
-                                                println("[Setting_Write] Export Match: Key = '$cKey' | Value = '$intVal' | Type = Int (via CloudStreamApp)")
+                                                println("[Setting_Write] Export Match: Key = '$cKey' | Type = Int (via CloudStreamApp)")
                                             }
                                         } catch (t: Throwable) {
                                             println("[Setting_Write] Export Debug: Key = '$cKey' is not Int -> ${t.message}")
@@ -471,7 +471,7 @@ class SettingsBottomFragment(
                                 println("[Setting_Write] Export Error: ${e.message}")
                                 e.printStackTrace()
                             }
-                            println("[Setting_Write] Export Done: Generated JSON data = $cineStreamJson")
+                            println("[Setting_Write] Export Done: ${cineStreamJson.length()} settings exported")
                             json.put("cine_stream_data", cineStreamJson)
                         }                        
                                               
@@ -704,7 +704,7 @@ class SettingsBottomFragment(
                                     val isCineStreamEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, false) ?: false
                                     if (parsedJson.has("cine_stream_data") && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
                                         val cineStreamData = parsedJson.optJSONObject("cine_stream_data")
-                                        println("[Setting_Write] Import: parsedJson has 'cine_stream_data'. Data = $cineStreamData")
+                                        println("[Setting_Write] Import: parsedJson has 'cine_stream_data' (${cineStreamData?.length() ?: 0} settings)")
                                         if (cineStreamData != null) {
                                             val dynamicKeys = getCineStreamDynamicKeys()
                                             
@@ -719,7 +719,7 @@ class SettingsBottomFragment(
                                                             is String -> CloudStreamApp.setKey(cKey, cValue)
                                                             is Int -> CloudStreamApp.setKey(cKey, cValue)
                                                         }
-                                                        println("[Setting_Write] Import: CloudStreamApp setKey Success -> '$cKey' = '$cValue' | Type = ${cValue?.javaClass?.simpleName}")
+                                                        println("[Setting_Write] Import: CloudStreamApp setKey Success -> '$cKey' | Type = ${cValue?.javaClass?.simpleName}")
                                                     } catch (t: Throwable) {
                                                         println("[Setting_Write] Import: CloudStreamApp setKey Error for '$cKey' -> ${t.message}")
                                                     }
