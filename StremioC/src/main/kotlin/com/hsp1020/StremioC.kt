@@ -952,7 +952,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val encodedPrimaryId = primaryStremioId.urlEncode()
 
         val seenLinks = Collections.synchronizedSet(mutableSetOf<String>())
-        val seenSubtitles = Collections.synchronizedSet(mutableSetOf<String>())
+        // Only deduplicate subtitles supplied directly by Stremio addons.
+        // CloudStream extractors/integrations must keep using the original callback.
+        val seenStremioSubtitles = Collections.synchronizedSet(mutableSetOf<String>())
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
             if (seenLinks.add(link.url)) {
                 callback(link)
@@ -1050,9 +1052,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
         val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
 
-        val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
+        val stremioSubtitleCallback: (SubtitleFile) -> Unit = { sub ->
             val subtitleUrl = sub.url
-            if (subtitleUrl.isNotBlank() && seenSubtitles.add(subtitleUrl)) {
+            if (subtitleUrl.isNotBlank() && seenStremioSubtitles.add(subtitleUrl)) {
                 try {
                     val start = subtitleUrl.indexOf("://")
                     val host = if (start != -1) {
@@ -1090,7 +1092,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         val text = customSession.get(streamRequestUrl, timeout = 25L).text
                         val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
                         res?.streams?.forEach { stream ->
-                            stream.runCallback(this@StremioC, subtitleInterceptor, wrappedCallback)
+                            stream.runCallback(
+                                this@StremioC,
+                                stremioSubtitleCallback,
+                                subtitleCallback,
+                                wrappedCallback
+                            )
                         }
                     }.onFailure { it.printStackTrace() }
                 }
@@ -1114,22 +1121,22 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         
                         res?.subtitles?.forEach { sub ->
                             val lang = sub.lang ?: sub.lang_code ?: "Unknown"
-                            subtitleInterceptor.invoke(newSubtitleFile(lang, sub.url ?: return@forEach))
+                            stremioSubtitleCallback.invoke(newSubtitleFile(lang, sub.url ?: return@forEach))
                         }
                     }.onFailure { it.printStackTrace() }
                 }
             },
             { 
                 println("[STREMIOSUB] Initiating invokeCineStream")
-                invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) 
+                invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleCallback, wrappedCallback) 
             },
             { 
                 println("[STREMIOSUB] Initiating invokeStreamPlay")
-                invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) 
+                invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleCallback, wrappedCallback) 
             },
             {
                 if (isIntegrationEnabled("vixsrc_integration_enabled")) {
-                    VixSrcExtractor.invokeVixSrc(loadData, targetType, globalSeason, globalEpisode, subtitleInterceptor, wrappedCallback)
+                    VixSrcExtractor.invokeVixSrc(loadData, targetType, globalSeason, globalEpisode, subtitleCallback, wrappedCallback)
                 }
             }
         )
@@ -2091,7 +2098,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("sources") val sources: List<String> = emptyList(),
         @JsonProperty("subtitles") val subtitles: List<Subtitle> = emptyList()
     ) {
-        suspend fun runCallback(provider: StremioC, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
+        suspend fun runCallback(
+            provider: StremioC,
+            stremioSubtitleCallback: (SubtitleFile) -> Unit,
+            extractorSubtitleCallback: (SubtitleFile) -> Unit,
+            callback: (ExtractorLink) -> Unit
+        ) {
             if (url != null) {
                 val lowerUrl = url.lowercase()
                 val linkType = when {
@@ -2112,8 +2124,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 })
             }
 
-            if (ytId != null) loadExtractor("https://m.youtube.com/watch?v=$ytId", subtitleCallback, callback)
-            if (externalUrl != null) loadExtractor(externalUrl, subtitleCallback, callback)
+            if (ytId != null) loadExtractor("https://m.youtube.com/watch?v=$ytId", extractorSubtitleCallback, callback)
+            if (externalUrl != null) loadExtractor(externalUrl, extractorSubtitleCallback, callback)
             if (infoHash != null) callback.invoke(newExtractorLink(name ?: "", title ?: name ?: "", "magnet:?xt=urn:btih:${infoHash}") { this.quality = Qualities.Unknown.value })
 
             val hasPlayableTarget = url != null || ytId != null || externalUrl != null || infoHash != null
@@ -2122,7 +2134,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val lang = sub.lang ?: sub.lang_code ?: "Unknown"
                     val parsedLang = SubtitleHelper.fromTagToEnglishLanguageName(lang) ?: lang
                     val subtitleUrl = sub.url ?: return@forEach
-                    subtitleCallback.invoke(newSubtitleFile(parsedLang, subtitleUrl))
+                    stremioSubtitleCallback.invoke(newSubtitleFile(parsedLang, subtitleUrl))
                 }
             }
         }
