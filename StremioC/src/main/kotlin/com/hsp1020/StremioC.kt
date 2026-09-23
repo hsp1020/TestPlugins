@@ -512,7 +512,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val currentUrl = if (originalBase.endsWith("manifest.json")) originalBase else "$originalBase/manifest.json"
             val uniqueKey = currentUrl.toUniqueKey()
             
+            // Existing installations stored manifests under the old key. Use that
+            // cache only until getManifest() writes a URL-specific replacement.
             val diskCache = manifestPrefs.getString(uniqueKey, null)
+                ?: manifestPrefs.getString(currentUrl.toLegacyUniqueKey(), null)
             
             val rawCatalogs = if (cachedManifest != null) {
                 cachedManifest?.catalogs ?: emptyList()
