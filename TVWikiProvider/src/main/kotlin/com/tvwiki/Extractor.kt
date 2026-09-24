@@ -140,7 +140,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         it.trim().startsWith("#EXT-X-KEY") && it.contains("/v/key7")
                     }
                     val ivHex = keyLine?.let {
-                        Regex("""IV=(?:\"?)(0x[0-9a-fA-F]{32})(?:\"?)""").find(it)?.groupValues?.get(1)
+                        Regex("""IV=\"?(0x[0-9a-fA-F]{32})\"?""").find(it)?.groupValues?.get(1)
                     }
                     val parsedIv = if (ivHex != null) {
                         ivHex.removePrefix("0x").hexToByteArray()
@@ -166,6 +166,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             if (trimmed.startsWith("#EXT-X-KEY") && trimmed.contains("/v/key7")) {
                                 val match = Regex("""URI="([^"]+)"""").find(trimmed)
                                 if (match != null) {
+                                    newProxy.setKeyUrl(resolveUrl(baseUri, requestUrl, match.groupValues[1]))
                                     val newKeyLine = trimmed.replace(match.groupValues[1], "http://127.0.0.1:${newProxy.port}/key.bin")
                                     sb.append(newKeyLine).append("\n")
                                 } else sb.append(trimmed).append("\n")
@@ -251,6 +252,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
                 val discoveryTimeout = Runnable {
                     if (cont.isActive) {
+                        println("[TVWiki HOOK] Timed out; capturedKeyCount=${sessionKeys.size}, cUrlDetected=${detectedCUrl != null}")
                         try { webView?.destroy(); webView = null } catch (e: Exception) {}
                         cont.resume(null)
                     }
@@ -286,6 +288,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         val reqUrl = request?.url?.toString() ?: ""
                         if (reqUrl.contains("/c.html") && reqUrl.contains("token=")) {
                             detectedCUrl = reqUrl
+                            println("[TVWiki HOOK] Playlist URL detected; capturedKeyCount=${sessionKeys.size}")
                             view?.post { view.evaluateJavascript(hookScript, null) }
                             
                             if (sessionKeys.isNotEmpty() && cont.isActive) {
@@ -297,6 +300,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             } else {
                                 handler.postDelayed({
                                     if (cont.isActive) {
+                                        println("[TVWiki HOOK] Waited for key; capturedKeyCount=${sessionKeys.size}")
                                         handler.removeCallbacksAndMessages(null)
                                         try { webView?.destroy(); webView = null } catch (e: Exception) {}
                                         cont.resume(detectedCUrl)
@@ -336,6 +340,7 @@ class BunnyPoorCdn : ExtractorApi() {
         @Volatile private var verifiedKey: ByteArray? = null
         @Volatile private var currentIv: ByteArray? = null
         @Volatile private var testSegmentUrl: String? = null
+        @Volatile private var originalKeyUrl: String? = null
 
         fun start() {
             try {
@@ -364,6 +369,7 @@ class BunnyPoorCdn : ExtractorApi() {
         fun updateSession(h: Map<String, String>) { currentHeaders = h }
         fun setPlaylist(p: String) { currentPlaylist = p }
         fun setIv(iv: ByteArray) { currentIv = iv }
+        fun setKeyUrl(url: String) { originalKeyUrl = url }
         fun setTestSegment(url: String) { 
             if (testSegmentUrl == null) testSegmentUrl = url 
         }
@@ -413,22 +419,29 @@ class BunnyPoorCdn : ExtractorApi() {
             }
             try {
                 val responseData = app.get(url, headers = currentHeaders).body.bytes()
-                val candidates = synchronized(sessionKeys) { sessionKeys.toList() }
-                println("[TVWiki KEY] segmentBytes=${responseData.size}, candidateCount=${candidates.size}")
+                val captured = synchronized(sessionKeys) { sessionKeys.toList() }
+                println("[TVWiki KEY] segmentBytes=${responseData.size}, capturedKeyCount=${captured.size}")
                 if (responseData.isEmpty() || responseData.size % 16 != 0) {
                     println("[TVWiki KEY] Segment is not a complete AES-CBC ciphertext")
                     return null
                 }
-                for (hexKey in candidates) {
-                    if (!hexKey.matches(Regex("[0-9a-fA-F]{32}"))) continue
+                val candidates = captured.filter { it.matches(Regex("[0-9a-fA-F]{32}")) }
+                    .map { it.hexToByteArray() }.toMutableList()
+                originalKeyUrl?.let { keyUrl ->
                     try {
-                        val keyBytes = hexKey.hexToByteArray()
-                        val decrypted = decryptAES(responseData, keyBytes, targetIv)
-                        if (looksLikeMedia(decrypted)) {
-                            println("[TVWiki KEY] Verified media segment with an AES key")
-                            return keyBytes
-                        }
-                    } catch (e: Exception) { /* This candidate is not the media key. */ }
+                        val keyResponse = app.get(keyUrl, headers = currentHeaders).body.bytes()
+                        println("[TVWiki KEY] originalKeyBytes=${keyResponse.size}")
+                        if (keyResponse.size == 16) candidates.add(keyResponse)
+                    } catch (e: Exception) {
+                        println("[TVWiki KEY] Original key request failed: ${e.javaClass.simpleName}: ${e.message}")
+                    }
+                }
+                for (keyBytes in candidates) {
+                    val decrypted = decryptAES(responseData, keyBytes, targetIv)
+                    if (looksLikeMedia(decrypted)) {
+                        println("[TVWiki KEY] Verified media segment with an AES key")
+                        return keyBytes
+                    }
                 }
                 println("[TVWiki KEY] No candidate decrypted the first media segment")
                 return null
