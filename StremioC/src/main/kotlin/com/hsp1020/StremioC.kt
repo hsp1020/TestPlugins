@@ -118,7 +118,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     private var lastCacheTime: Long = 0
     
     private val pageMutex = Mutex()
-    private val activePageRequests = mutableMapOf<String, Deferred<HomePageResponse>>()
+    private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
 
     private fun getCineStreamProvider(forceSearch: Boolean = false): MainAPI? {
         if (cachedCineStreamProvider != null) return cachedCustomCineStreamProvider()
@@ -260,7 +260,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         val catalogSentIds = ConcurrentHashMap<String, MutableSet<String>>()
         val catalogSkipState = ConcurrentHashMap<String, Int>()
-        private val catalogGenerations = ConcurrentHashMap<String, Long>()
 
         suspend fun getOrFetchKitsu(url: String): String? {
             val now = System.currentTimeMillis()
@@ -468,26 +467,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             try {
                 val parsed = parseJson<Manifest>(resText)
                 if (parsed?.catalogs?.isNotEmpty() == true) {
-                    val catalogsChanged = cachedManifest != null &&
-                        lastManifestUrl == currentUrl && cachedManifest?.catalogs != parsed.catalogs
-
-                    if (catalogsChanged) {
-                        pageMutex.withLock {
-                            val prefix = "$mainUrl|"
-                            val stateKeys = catalogSentIds.keys.filter { it.startsWith(prefix) }.toSet() +
-                                catalogSkipState.keys.filter { it.startsWith(prefix) } +
-                                catalogGenerations.keys.filter { it.startsWith(prefix) }
-                            for (stateKey in stateKeys) {
-                                catalogGenerations[stateKey] = (catalogGenerations[stateKey] ?: 0L) + 1L
-                                catalogSentIds.remove(stateKey)
-                                catalogSkipState.remove(stateKey)
-                            }
-                        }
-                    }
-
                     cachedManifest = parsed
                     lastManifestUrl = currentUrl
                     lastCacheTime = now
+                    
+                    val prefix = "${this@StremioC.name}_"
+                    catalogSentIds.keys.filter { it.startsWith(prefix) }.forEach { catalogSentIds.remove(it) }
+                    catalogSkipState.keys.filter { it.startsWith(prefix) }.forEach { catalogSkipState.remove(it) }
                     
                     val context = CloudStreamApp.context
                     context?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
@@ -558,9 +544,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
 
             val orderKey = "catalog_order_$uniqueKey"
-            val legacyKey = currentUrl.toLegacyUniqueKey()
             val orderJson = prefs.getString(orderKey, null)
-                ?: prefs.getString("catalog_order_$legacyKey", null)
             val orderedKeys = mutableListOf<String>()
             if (orderJson != null) {
                 try {
@@ -581,17 +565,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     sortedTabs.forEach { tab ->
                         val isEnabled = if (tab.key.contains("_genre_")) {
                             val catalogKey = tab.key.substringBefore("_genre_")
-                            val masterKey = "genres_enabled_${uniqueKey}_$catalogKey"
-                            val tabKey = "tab_enabled_${uniqueKey}_${tab.key}"
-                            val isGenresMasterEnabled = if (prefs.contains(masterKey)) prefs.getBoolean(masterKey, true)
-                                else prefs.getBoolean("genres_enabled_${legacyKey}_$catalogKey", true)
-                            val isIndividualGenreEnabled = if (prefs.contains(tabKey)) prefs.getBoolean(tabKey, true)
-                                else prefs.getBoolean("tab_enabled_${legacyKey}_${tab.key}", true)
+                            val isGenresMasterEnabled = prefs.getBoolean("genres_enabled_${uniqueKey}_$catalogKey", true)
+                            val isIndividualGenreEnabled = prefs.getBoolean("tab_enabled_${uniqueKey}_${tab.key}", true)
                             isGenresMasterEnabled && isIndividualGenreEnabled
                         } else {
-                            val tabKey = "tab_enabled_${uniqueKey}_${tab.key}"
-                            if (prefs.contains(tabKey)) prefs.getBoolean(tabKey, true)
-                                else prefs.getBoolean("tab_enabled_${legacyKey}_${tab.key}", true)
+                            prefs.getBoolean("tab_enabled_${uniqueKey}_${tab.key}", true)
                         }
                         
                         if (isEnabled) {
@@ -601,10 +579,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }.toTypedArray()
             )
         }
-
-    private fun getCatalogStateKey(request: MainPageRequest): String {
-        return "$mainUrl|${request.data}"
-    }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse = coroutineScope {
         println("[PAGINATION-DEBUG] ===== getMainPage START =====")
@@ -616,37 +590,28 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
         var isNewRequest = false
-        val stateKey = getCatalogStateKey(request)
+        val stateKey = "${this@StremioC.name}_${request.name}" 
 
-        val (requestKey, deferred) = pageMutex.withLock {
-            val generation = if (page <= 1) {
-                println("[PAGINATION-DEBUG] Page <= 1 detected. Resetting states for Tab: ${request.name}")
+        val deferred = pageMutex.withLock {
+            if (page <= 1) {
+                println("[PAGINATION-DEBUG] Page <= 1 detected. Clearing states for Tab Key: $stateKey")
                 catalogSentIds.remove(stateKey)
+                activePageRequests.clear()
                 catalogSkipState.remove(stateKey)
-
-                val nextGeneration = (catalogGenerations[stateKey] ?: 0L) + 1L
-                catalogGenerations[stateKey] = nextGeneration
-                nextGeneration
-            } else {
-                catalogGenerations[stateKey] ?: 0L
             }
-
-            val key = "$stateKey|generation=$generation|page=$page"
-            val requestDeferred = activePageRequests.getOrPut(key) {
+            
+            activePageRequests.getOrPut(page) {
                 isNewRequest = true
                 println("[PAGINATION-DEBUG] Creating new async request for Page: $page")
-                async {
+                async { 
                     try {
-                        fetchTabCatalogData(request, page, generation)
-                    } catch (e: CancellationException) {
-                        throw e
+                        fetchTabCatalogData(request, page) 
                     } catch (e: Exception) {
                         e.printStackTrace()
                         newHomePageResponse(emptyList(), hasNext = false)
                     }
                 }
             }
-            key to requestDeferred
         }
         
         return@coroutineScope try {
@@ -659,56 +624,38 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 println("[PAGINATION-DEBUG] Returning response for Page: $page with $listSize items.")
                 response
             }
-        } catch (e: CancellationException) {
-            throw e
         } catch (e: Exception) {
             e.printStackTrace()
             newHomePageResponse(emptyList(), hasNext = false)
         } finally {
             pageMutex.withLock {
-                activePageRequests.remove(requestKey)
+                activePageRequests.remove(page)
             }
             println("[PAGINATION-DEBUG] ===== getMainPage END (Page: $page) =====")
         }
     }
 
-    private suspend fun fetchTabCatalogData(
-        request: MainPageRequest,
-        page: Int,
-        generation: Long
-    ): HomePageResponse {
-        val stateKey = getCatalogStateKey(request)
-
-        if ((catalogGenerations[stateKey] ?: 0L) != generation) {
-            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Ignoring stale request for Page $page.")
-            return newHomePageResponse(emptyList(), hasNext = false)
-        }
+    private suspend fun fetchTabCatalogData(request: MainPageRequest, page: Int): HomePageResponse {
+        val stateKey = "${this@StremioC.name}_${request.name}"
 
         if (page > 1 && !catalogSkipState.containsKey(stateKey)) {
             println("[PAGINATION-DEBUG] [fetchTabCatalogData] Cold start detected on Page $page. Silently pre-fetching Page 1 to restore state.")
             try {
-                fetchTabCatalogData(request, 1, generation)
-            } catch (e: CancellationException) {
-                throw e
+                fetchTabCatalogData(request, 1) 
             } catch (e: Exception) {
                 e.printStackTrace()
             }
         }
 
-        if ((catalogGenerations[stateKey] ?: 0L) != generation) {
-            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Request became stale before Page $page fetch.")
-            return newHomePageResponse(emptyList(), hasNext = false)
-        }
-
         val currentSkip = catalogSkipState[stateKey] ?: 0
-        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Current Skip State: $currentSkip for Tab: ${request.name}")
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Current Skip State: $currentSkip for Tab Key: $stateKey")
         
         val targetPath = request.data.replace("###", currentSkip.toString())
         val targetUrl = buildUrl(targetPath)
-        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Catalog request prepared for Page: $page")
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Target URL: $targetUrl")
         
-        val cacheKey = "$stateKey|skip=$currentSkip"
-        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Cache slot prepared for Skip: $currentSkip")
+        val cacheKey = "${this@StremioC.name}_${request.name}_$currentSkip"
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Cache Key: $cacheKey")
 
         val resultPair = getOrFetchCachedPage(cacheKey) {
             println("[PAGINATION-DEBUG] [fetchTabCatalogData] Fetching from network or cache...")
@@ -723,54 +670,42 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             val metas = response?.metas ?: emptyList()
             println("[PAGINATION-DEBUG] [fetchTabCatalogData] Network/JSON parsed ${metas.size} items.")
-
-            if ((catalogGenerations[stateKey] ?: 0L) != generation) {
-                println("[PAGINATION-DEBUG] [fetchTabCatalogData] Discarding stale network result for Page $page.")
-                return@getOrFetchCachedPage null
-            }
             
             val mappedItems = metas.map { it.toSearchResponse(this@StremioC) }
             Pair(mappedItems, metas.size)
         }
 
-        return pageMutex.withLock {
-            if ((catalogGenerations[stateKey] ?: 0L) != generation) {
-                println("[PAGINATION-DEBUG] [fetchTabCatalogData] Discarding stale cached/result data for Page $page.")
-                return@withLock newHomePageResponse(emptyList(), hasNext = false)
-            }
-
-            if (resultPair != null) {
-                println("[PAGINATION-DEBUG] [fetchTabCatalogData] ResultPair acquired. Size: ${resultPair.first.size}, Returned Meta Size: ${resultPair.second}")
-                catalogSkipState[stateKey] = currentSkip + resultPair.second
-                println("[PAGINATION-DEBUG] [fetchTabCatalogData] Next Skip State updated to: ${catalogSkipState[stateKey]}")
-
-                var seenForThisCatalog = catalogSentIds[stateKey]
-                if (seenForThisCatalog == null) {
-                    synchronized(catalogSentIds) {
-                        seenForThisCatalog = catalogSentIds.getOrPut(stateKey) {
-                            lruSet(500)
-                        }
+        if (resultPair != null) {
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] ResultPair acquired. Size: ${resultPair.first.size}, Returned Meta Size: ${resultPair.second}")
+            catalogSkipState[stateKey] = currentSkip + resultPair.second
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Next Skip State updated to: ${catalogSkipState[stateKey]}")
+            
+            var seenForThisCatalog = catalogSentIds[stateKey]
+            if (seenForThisCatalog == null) {
+                synchronized(catalogSentIds) {
+                    seenForThisCatalog = catalogSentIds.getOrPut(stateKey) { 
+                        lruSet(500) 
                     }
                 }
-
-                var duplicateCount = 0
-                val filteredItems = resultPair.first.filter { item ->
-                    val pureId = item.extractPureId()
-                    val isNew = seenForThisCatalog!!.add(pureId)
-                    if (!isNew) {
-                        duplicateCount++
-                    }
-                    isNew
-                }
-
-                println("[PAGINATION-DEBUG] [fetchTabCatalogData] Deduplication complete. Duplicates found: $duplicateCount. Final items to return: ${filteredItems.size}")
-
-                return@withLock newHomePageResponse(listOf(HomePageList(request.name, filteredItems)), hasNext = resultPair.second > 0)
             }
-
-            println("[PAGINATION-DEBUG] [fetchTabCatalogData] ResultPair is null. Returning empty.")
-            newHomePageResponse(emptyList(), hasNext = false)
+            
+            var duplicateCount = 0
+            val filteredItems = resultPair.first.filter { item -> 
+                val pureId = item.extractPureId()
+                val isNew = seenForThisCatalog!!.add(pureId)
+                if (!isNew) {
+                    duplicateCount++
+                }
+                isNew
+            }
+            
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Deduplication complete. Duplicates found: $duplicateCount. Final items to return: ${filteredItems.size}")
+            
+            return newHomePageResponse(listOf(HomePageList(request.name, filteredItems)), hasNext = resultPair.second > 0)
         }
+
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] ResultPair is null. Returning empty.")
+        return newHomePageResponse(emptyList(), hasNext = false)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -794,7 +729,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
     
     override suspend fun load(url: String): LoadResponse = coroutineScope {
-        var initialMetaFromResponse: CatalogEntry? = null
         val res: CatalogEntry = if (url.startsWith("{")) {
             parseJson<CatalogEntry>(url)
         } else {
@@ -802,12 +736,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             try {
                 val rootNode = parseJson<JsonNode>(responseText)
                 val metaNode = if (rootNode.has("meta")) rootNode.get("meta") else rootNode
-                val parsedEntry = parseJson<CatalogEntry>(metaNode.toString())
+                parseJson<CatalogEntry>(metaNode.toString()) 
                     ?: throw IllegalStateException("Failed to bind JSON to CatalogEntry")
-                if (rootNode.has("meta") && metaNode.isObject) {
-                    initialMetaFromResponse = parsedEntry
-                }
-                parsedEntry
             } catch (e: Exception) {
                 e.printStackTrace()
                 throw IllegalStateException("Metadata not found or parsing failed: $url", e)
@@ -816,19 +746,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         
         val normalizedId = try { normalizeId(res.id ?: "") } catch (e: Exception) { e.printStackTrace(); res.id ?: "" }
         val encodedId = normalizedId.urlEncode()
-
-        val addonDeferred = async(Dispatchers.IO) {
-            runSuspendCatching {
-                val syncMetaUrl = this@StremioC.getUnifiedMetaUrl(res.type ?: "movie", res.id ?: "")
-                if (syncMetaUrl == url && initialMetaFromResponse != null) {
-                    initialMetaFromResponse
-                } else {
-                    val text = customSession.get(syncMetaUrl).text
-                    val response = if (text.isNotBlank()) parseJson<CatalogResponse>(text) else null
-                    response?.meta ?: response?.metas?.firstOrNull { it.id == res.id } ?: response?.metas?.firstOrNull()
-                }
-            }.onFailure { it.printStackTrace() }.getOrNull()
-        }
 
         val isKitsuOrMal = res.id?.startsWith("kitsu:") == true || res.id?.startsWith("mal:") == true
         var fetchedAniListId: Int? = null
@@ -889,6 +806,15 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
         }
 
+        val addonDeferred = async(Dispatchers.IO) {
+            runSuspendCatching {
+                val syncMetaUrl = this@StremioC.getUnifiedMetaUrl(res.type ?: "movie", res.id ?: "")
+                val text = customSession.get(syncMetaUrl).text
+                val response = if (text.isNotBlank()) parseJson<CatalogResponse>(text) else null
+                response?.meta ?: response?.metas?.firstOrNull { it.id == res.id } ?: response?.metas?.firstOrNull()
+            }.onFailure { it.printStackTrace() }.getOrNull()
+        }
+             
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val targetTmdbId = resolvedTmdbId ?: if (res.id?.startsWith("tmdb:") == true) res.id.removePrefix("tmdb:") else tmdbIdFromRes
         
@@ -897,19 +823,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val mediaType = if (res.type == "movie") "movie" else "tv"
                 val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
                 val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend)
-                val cached = tmdbDetailsCache[detailUrl]
-                if (cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL) {
-                    cached.first
-                } else {
-                    runSuspendCatching {
-                        val text = customSession.get(detailUrl).text
-                        val fetched = if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
-                        if (fetched != null) {
-                            tmdbDetailsCache[detailUrl] = Pair(fetched, System.currentTimeMillis())
-                        }
-                        fetched
-                    }.onFailure { it.printStackTrace() }.getOrNull()
-                }
+                runSuspendCatching { 
+                    val text = customSession.get(detailUrl).text
+                    if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
+                }.onFailure { it.printStackTrace() }.getOrNull()
             }
         }
 
@@ -993,9 +910,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val encodedPrimaryId = primaryStremioId.urlEncode()
 
         val seenLinks = Collections.synchronizedSet(mutableSetOf<String>())
-        // Only deduplicate subtitles supplied directly by Stremio addons.
-        // CloudStream extractors/integrations must keep using the original callback.
-        val seenStremioSubtitles = Collections.synchronizedSet(mutableSetOf<String>())
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
             if (seenLinks.add(link.url)) {
                 callback(link)
@@ -1041,7 +955,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             val name = file.name.removeSuffix(".xml")
                             val p = context.getSharedPreferences(name, Context.MODE_PRIVATE)
                             if (p.contains("stremio_addons")) {
-                                println("[STREMIOSUB] Setup Scan: Found 'stremio_addons' key in file: '$name'")
+                                println("[STREMIOSUB] Setup Scan: Found 'stremio_addons' key in file: '$name' -> value = ${p.getString("stremio_addons", "")}")
                             }
                         }
                     }
@@ -1060,7 +974,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     rawValue = rebuildPrefsBackup?.getString("stremio_addons", "") ?: ""
                 }
                 
-                println("[STREMIOSUB] Attempt 1 (rebuild_preference/key) -> raw value length: ${rawValue.length}")
+                println("[STREMIOSUB] Attempt 1 (rebuild_preference/key) -> raw value length: ${rawValue.length}, data: $rawValue")
                 if (rawValue.startsWith("\"") && rawValue.endsWith("\"") && rawValue.length >= 2) {
                     rawValue.substring(1, rawValue.length - 1)
                 } else {
@@ -1072,7 +986,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 try {
                     val prefs = CloudStreamApp.context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
                     val v = prefs?.getString("stremio_addons", "") ?: ""
-                    println("[STREMIOSUB] Attempt 2 (default SharedPreferences) -> length: ${v.length}")
+                    println("[STREMIOSUB] Attempt 2 (default SharedPreferences) -> length: ${v.length}, data: $v")
                     if (v.startsWith("\"") && v.endsWith("\"") && v.length >= 2) v.substring(1, v.length - 1) else v
                 } catch (e: Exception) {
                     println("[STREMIOSUB] Attempt 2 (default SharedPreferences) Failed: ${e.message}")
@@ -1086,41 +1000,39 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.onFailure { it.printStackTrace() }.getOrNull() }
                 .toSet() 
                 
-            println("[STREMIOSUB] Final parsed customHosts count: ${hosts.size}")
+            println("[STREMIOSUB] Final parsed customHosts list: $hosts")
             cachedCustomHosts = hosts
             cachedCustomHostsTime = now
             hosts
         }
         val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
 
-        val stremioSubtitleCallback: (SubtitleFile) -> Unit = { sub ->
-            val subtitleUrl = sub.url
-            if (subtitleUrl.isNotBlank() && seenStremioSubtitles.add(subtitleUrl)) {
-                try {
-                    val start = subtitleUrl.indexOf("://")
-                    val host = if (start != -1) {
-                        val hostStart = start + 3
-                        val end = subtitleUrl.indexOf('/', hostStart)
-                        val hostPort = if (end == -1) subtitleUrl.substring(hostStart) else subtitleUrl.substring(hostStart, end)
-                        val portIdx = hostPort.indexOf(':')
-                        if (portIdx == -1) hostPort else hostPort.substring(0, portIdx)
-                    } else ""
+        val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
+            try {
+                val url = sub.url
+                val start = url.indexOf("://")
+                val host = if (start != -1) {
+                    val hostStart = start + 3
+                    val end = url.indexOf('/', hostStart)
+                    val hostPort = if (end == -1) url.substring(hostStart) else url.substring(hostStart, end)
+                    val portIdx = hostPort.indexOf(':')
+                    if (portIdx == -1) hostPort else hostPort.substring(0, portIdx)
+                } else ""
 
-                    val isCustom = customHosts.contains(host)
-                    val isBuiltIn = builtInHosts.contains(host)
-                    val isContainsStrem = host.contains("strem", ignoreCase = true)
+                val isCustom = customHosts.contains(host)
+                val isBuiltIn = builtInHosts.contains(host)
+                val isContainsStrem = host.contains("strem", ignoreCase = true)
 
-                    val isStremio = isCustom || isBuiltIn || isContainsStrem
+                val isStremio = isCustom || isBuiltIn || isContainsStrem
 
-                    if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
-                        val newLang = "${sub.lang} (Stremio)"
-                        subtitleCallback.invoke(SubtitleFile(newLang, subtitleUrl))
-                    } else {
-                        subtitleCallback.invoke(sub)
-                    }
-                } catch (e: Exception) {
+                if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
+                    val newLang = "${sub.lang} (Stremio)"
+                    subtitleCallback.invoke(SubtitleFile(newLang, url))
+                } else {
                     subtitleCallback.invoke(sub)
                 }
+            } catch (e: Exception) {
+                subtitleCallback.invoke(sub)
             }
         }
 
@@ -1129,16 +1041,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 if (cleanBaseUrl.isNotBlank() && encodedPrimaryId.isNotBlank()) {
                     runSuspendCatching {
                         val streamRequestUrl = "$cleanBaseUrl/stream/$targetType/${encodedPrimaryId}.json$querySuffix"
-                        println("[STREMIOSUB] Requesting streams from current addon")
+                        println("[STREMIOSUB] Requesting streams from addon: $streamRequestUrl")
                         val text = customSession.get(streamRequestUrl, timeout = 25L).text
                         val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
                         res?.streams?.forEach { stream ->
-                            stream.runCallback(
-                                this@StremioC,
-                                stremioSubtitleCallback,
-                                subtitleCallback,
-                                wrappedCallback
-                            )
+                            stream.runCallback(this@StremioC, subtitleInterceptor, wrappedCallback)
                         }
                     }.onFailure { it.printStackTrace() }
                 }
@@ -1156,28 +1063,28 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             ?: ""
                         val subtitleRequestUrl = "$cleanBase/subtitles/$targetType/${encodedSubId}.json$suffix"
                         
-                        println("[STREMIOSUB] Requesting subtitles from sync addon")
+                        println("[STREMIOSUB] Requesting subtitles from sync url: $subtitleRequestUrl")
                         val text = customSession.get(subtitleRequestUrl, timeout = 15L).text
                         val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
                         
                         res?.subtitles?.forEach { sub ->
                             val lang = sub.lang ?: sub.lang_code ?: "Unknown"
-                            stremioSubtitleCallback.invoke(newSubtitleFile(lang, sub.url ?: return@forEach))
+                            subtitleCallback.invoke(newSubtitleFile(lang, sub.url ?: return@forEach))
                         }
                     }.onFailure { it.printStackTrace() }
                 }
             },
             { 
                 println("[STREMIOSUB] Initiating invokeCineStream")
-                invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleCallback, wrappedCallback) 
+                invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) 
             },
             { 
                 println("[STREMIOSUB] Initiating invokeStreamPlay")
-                invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleCallback, wrappedCallback) 
+                invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) 
             },
             {
                 if (isIntegrationEnabled("vixsrc_integration_enabled")) {
-                    VixSrcExtractor.invokeVixSrc(loadData, targetType, globalSeason, globalEpisode, subtitleCallback, wrappedCallback)
+                    VixSrcExtractor.invokeVixSrc(loadData, targetType, globalSeason, globalEpisode, subtitleInterceptor, wrappedCallback)
                 }
             }
         )
@@ -1520,13 +1427,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         ): FetchedTmdbData {
             var fetchedRecommendations: List<SearchResponse>? = null
             
-            val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
-            val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend)
-            val cacheKey = detailUrl
+            val cacheKey = "${tmdbMediaType}_${tmdbIdStr}"
             val cached = tmdbDetailsCache[cacheKey]
             val detailRes = preFetchedDetail ?: if (cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL) {
                 cached.first
             } else {
+                val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
+                val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend)
                 val text = StremioC.customSession.get(detailUrl).text
                 val fetched = if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
                 if (fetched != null) {
@@ -1562,13 +1469,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             StremioC.networkSemaphore.withPermit {
                                 withTimeoutOrNull(10000L) {
                                     runSuspendCatching {
-                                        val seasonUrl = provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")
-                                        val seasonCacheKey = seasonUrl
+                                        val seasonCacheKey = "${tmdbIdStr}_$seasonNum"
                                         val cachedSeason = tmdbSeasonCache[seasonCacheKey]
                                         val seasonRes = if (cachedSeason != null && System.currentTimeMillis() - cachedSeason.second < METADATA_CACHE_TTL) {
                                             cachedSeason.first
                                         } else {
-                                            val fetchedSeasonText = StremioC.customSession.get(seasonUrl).text
+                                            val fetchedSeasonText = StremioC.customSession.get(provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")).text
                                             val fetchedSeason = if (fetchedSeasonText.isNotBlank()) parseJson<TmdbSeasonDetail>(fetchedSeasonText) else null
                                             if (fetchedSeason != null) {
                                                 tmdbSeasonCache[seasonCacheKey] = Pair(fetchedSeason, System.currentTimeMillis())
@@ -2140,12 +2046,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("sources") val sources: List<String> = emptyList(),
         @JsonProperty("subtitles") val subtitles: List<Subtitle> = emptyList()
     ) {
-        suspend fun runCallback(
-            provider: StremioC,
-            stremioSubtitleCallback: (SubtitleFile) -> Unit,
-            extractorSubtitleCallback: (SubtitleFile) -> Unit,
-            callback: (ExtractorLink) -> Unit
-        ) {
+        suspend fun runCallback(provider: StremioC, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
             if (url != null) {
                 val lowerUrl = url.lowercase()
                 val linkType = when {
@@ -2164,21 +2065,16 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     this.quality = getQuality(listOf(description, title, name))
                     this.headers = behaviorHints?.proxyHeaders?.request ?: behaviorHints?.headers ?: mapOf()
                 })
-            }
-
-            if (ytId != null) loadExtractor("https://m.youtube.com/watch?v=$ytId", extractorSubtitleCallback, callback)
-            if (externalUrl != null) loadExtractor(externalUrl, extractorSubtitleCallback, callback)
-            if (infoHash != null) callback.invoke(newExtractorLink(name ?: "", title ?: name ?: "", "magnet:?xt=urn:btih:${infoHash}") { this.quality = Qualities.Unknown.value })
-
-            val hasPlayableTarget = url != null || ytId != null || externalUrl != null || infoHash != null
-            if (hasPlayableTarget) {
-                subtitles.forEach { sub ->
+                
+                subtitles.map { sub -> 
                     val lang = sub.lang ?: sub.lang_code ?: "Unknown"
                     val parsedLang = SubtitleHelper.fromTagToEnglishLanguageName(lang) ?: lang
-                    val subtitleUrl = sub.url ?: return@forEach
-                    stremioSubtitleCallback.invoke(newSubtitleFile(parsedLang, subtitleUrl))
+                    subtitleCallback.invoke(newSubtitleFile(parsedLang, sub.url ?: return@map)) 
                 }
             }
+            if (ytId != null) loadExtractor("https://m.youtube.com/watch?v=$ytId", subtitleCallback, callback)
+            if (externalUrl != null) loadExtractor(externalUrl, subtitleCallback, callback)
+            if (infoHash != null) callback.invoke(newExtractorLink(name ?: "", title ?: name ?: "", "magnet:?xt=urn:btih:${infoHash}") { this.quality = Qualities.Unknown.value })
         }
     }
 }
@@ -2286,12 +2182,6 @@ data class ResultsTrailer(@JsonProperty("results") val results: ArrayList<Traile
 data class ExternalIds(@JsonProperty("imdb_id") val imdb_id: String? = null, @JsonProperty("tvdb_id") val tvdb_id: String? = null)
 
 private fun String.toUniqueKey(): String {
-    val bytes = java.security.MessageDigest.getInstance("SHA-256")
-        .digest(this.toByteArray(Charsets.UTF_8))
-    return "v2_" + bytes.joinToString("") { "%02x".format(it.toInt() and 0xff) }
-}
-
-private fun String.toLegacyUniqueKey(): String {
     return this.lowercase().filter { it.isLetter() }
 }
 
