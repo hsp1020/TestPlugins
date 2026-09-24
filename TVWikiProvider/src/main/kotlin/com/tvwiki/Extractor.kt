@@ -136,9 +136,23 @@ class BunnyPoorCdn : ExtractorApi() {
                     currentProxyServer = newProxy
 
                     val videoId = Regex("""/v/[ef]/([^/]+)""").find(capturedUrl!!)?.groupValues?.get(1) ?: "video"
-                    val ivMatch = Regex("""IV=("?)(0x[0-9a-fA-F]+)\1""").find(content)
-                    val ivHex = ivMatch?.groupValues?.get(2) ?: "0x00000000000000000000000000000000"
-                    val parsedIv = ivHex.removePrefix("0x").hexToByteArray()
+                    val keyLine = content.lineSequence().firstOrNull {
+                        it.trim().startsWith("#EXT-X-KEY") && it.contains("/v/key7")
+                    }
+                    val ivHex = keyLine?.let {
+                        Regex("""IV=(?:\"?)(0x[0-9a-fA-F]{32})(?:\"?)""").find(it)?.groupValues?.get(1)
+                    }
+                    val parsedIv = if (ivHex != null) {
+                        ivHex.removePrefix("0x").hexToByteArray()
+                    } else {
+                        // HLS AES-128: without an explicit IV, the first segment uses its sequence number.
+                        val sequence = content.lineSequence().firstOrNull {
+                            it.trim().startsWith("#EXT-X-MEDIA-SEQUENCE:")
+                        }?.substringAfter(":")?.trim()?.toLongOrNull() ?: 0L
+                        ByteArray(16).also { iv ->
+                            for (i in 0 until 8) iv[15 - i] = (sequence ushr (i * 8)).toByte()
+                        }
+                    }
                     
                     newProxy.setIv(parsedIv)
 
@@ -373,13 +387,14 @@ class BunnyPoorCdn : ExtractorApi() {
                         output.write(payload)
                     }
                     path.contains("/key.bin") -> {
-                        if (verifiedKey == null) {
-                            verifiedKey = verifyMultipleKeys()
+                        val keyPayload = verifiedKey ?: verifyMultipleKeys()?.also { verifiedKey = it }
+                        if (keyPayload == null) {
+                            println("[TVWiki KEY] No verified AES key; refusing to serve a placeholder key")
+                            output.write("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
+                        } else {
+                            output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\nContent-Length: ${keyPayload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
+                            output.write(keyPayload)
                         }
-                        
-                        val keyPayload = verifiedKey ?: ByteArray(16)
-                        output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\nContent-Length: ${keyPayload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
-                        output.write(keyPayload)
                     }
                 }
                 output.flush()
@@ -388,39 +403,56 @@ class BunnyPoorCdn : ExtractorApi() {
         }
 
         private suspend fun verifyMultipleKeys(): ByteArray? {
-            val url = testSegmentUrl ?: return null
-            val targetIv = currentIv ?: ByteArray(16)
-            
+            val url = testSegmentUrl ?: run {
+                println("[TVWiki KEY] No media segment found in playlist")
+                return null
+            }
+            val targetIv = currentIv ?: run {
+                println("[TVWiki KEY] No segment IV available")
+                return null
+            }
             try {
                 val responseData = app.get(url, headers = currentHeaders).body.bytes()
-                val checkSize = 1024 
-                val safeCheckSize = if (responseData.size < checkSize) responseData.size else checkSize
-                
-                synchronized(sessionKeys) {
-                    for ((index, hexKey) in sessionKeys.withIndex()) {
-                        try {
-                            val keyBytes = hexKey.hexToByteArray()
-                            for (offset in 0..512) {
-                                if (responseData.size < offset + safeCheckSize) break
-                                val testChunk = responseData.copyOfRange(offset, offset + safeCheckSize)
-                                val decrypted = decryptAES(testChunk, keyBytes, targetIv)
-                                
-                                if (decrypted.size >= 377 && decrypted[0] == 0x47.toByte() && decrypted[188] == 0x47.toByte() && decrypted[376] == 0x47.toByte()) {
-                                    return keyBytes
-                                }
-                            }
-                        } catch (e: Exception) {}
-                    }
+                val candidates = synchronized(sessionKeys) { sessionKeys.toList() }
+                println("[TVWiki KEY] segmentBytes=${responseData.size}, candidateCount=${candidates.size}")
+                if (responseData.isEmpty() || responseData.size % 16 != 0) {
+                    println("[TVWiki KEY] Segment is not a complete AES-CBC ciphertext")
                     return null
                 }
-            } catch (e: Exception) { 
+                for (hexKey in candidates) {
+                    if (!hexKey.matches(Regex("[0-9a-fA-F]{32}"))) continue
+                    try {
+                        val keyBytes = hexKey.hexToByteArray()
+                        val decrypted = decryptAES(responseData, keyBytes, targetIv)
+                        if (looksLikeMedia(decrypted)) {
+                            println("[TVWiki KEY] Verified media segment with an AES key")
+                            return keyBytes
+                        }
+                    } catch (e: Exception) { /* This candidate is not the media key. */ }
+                }
+                println("[TVWiki KEY] No candidate decrypted the first media segment")
+                return null
+            } catch (e: Exception) {
+                println("[TVWiki KEY] Segment fetch/verification failed: ${e.javaClass.simpleName}: ${e.message}")
                 return null 
             }
+        }
+
+        private fun looksLikeMedia(data: ByteArray): Boolean {
+            if (data.size >= 377 && data[0] == 0x47.toByte() &&
+                data[188] == 0x47.toByte() && data[376] == 0x47.toByte()) return true
+            if (data.size >= 3 && String(data, 0, 3, Charsets.US_ASCII) == "ID3") return true
+            if (data.size >= 8) {
+                val box = String(data, 4, 4, Charsets.US_ASCII)
+                if (box in setOf("moof", "styp", "ftyp", "sidx", "emsg")) return true
+            }
+            return false
         }
         
         private fun decryptAES(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
             return try {
-                val cipher = Cipher.getInstance("AES/CBC/NoPadding")
+                // HLS AES-128 encrypts the complete segment with PKCS#7 padding.
+                val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
                 cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                 cipher.doFinal(data)
             } catch (e: Exception) { ByteArray(0) }
