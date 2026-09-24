@@ -100,12 +100,26 @@ class BunnyPoorCdn : ExtractorApi() {
 
         var capturedUrl: String? = cleanUrl
         val currentSessionKeys = Collections.synchronizedSet(mutableSetOf<String>())
+        val playerScripts = Collections.synchronizedSet(mutableSetOf<String>())
 
         if (!cleanUrl.contains("/c.html")) {
-            val webViewResult = runWebViewHook(cleanUrl, cleanReferer, currentSessionKeys)
+            val webViewResult = runWebViewHook(cleanUrl, cleanReferer, currentSessionKeys, playerScripts)
             if (webViewResult != null) capturedUrl = webViewResult
         }
         tvwikiDiagnostic("WebView result", "capturedUrl=$capturedUrl capturedKeyCount=${currentSessionKeys.size}")
+        val playerJsUrl = synchronized(playerScripts) { playerScripts.firstOrNull() }
+        if (playerJsUrl != null) {
+            try {
+                val scriptBytes = app.get(playerJsUrl, headers = mapOf(
+                    "User-Agent" to DESKTOP_UA,
+                    "Referer" to "https://player.bunny-frame.online/"
+                )).body.bytes()
+                tvwikiDiagnostic("player.js metadata", "url=$playerJsUrl bytes=${scriptBytes.size}")
+                tvwikiDiagnostic("player.js source base64", Base64.encodeToString(scriptBytes, Base64.NO_WRAP))
+            } catch (e: Exception) {
+                tvwikiDiagnostic("player.js fetch failed", "${e.javaClass.simpleName}: ${e.message}")
+            }
+        } else tvwikiDiagnostic("player.js fetch failed", "No player.js request was observed")
 
         if (capturedUrl != null) {
             val cookie = CookieManager.getInstance().getCookie(capturedUrl)
@@ -215,7 +229,12 @@ class BunnyPoorCdn : ExtractorApi() {
         return false
     }
 
-    private suspend fun runWebViewHook(url: String, referer: String, sessionKeys: MutableSet<String>) = suspendCancellableCoroutine<String?> { cont ->
+    private suspend fun runWebViewHook(
+        url: String,
+        referer: String,
+        sessionKeys: MutableSet<String>,
+        playerScripts: MutableSet<String>
+    ) = suspendCancellableCoroutine<String?> { cont ->
         val handler = Handler(Looper.getMainLooper())
         var webView: WebView? = null
         var detectedCUrl: String? = null
@@ -312,6 +331,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
                     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                         val reqUrl = request?.url?.toString() ?: ""
+                        if (reqUrl.contains("/player/assets/player.js")) playerScripts.add(reqUrl)
                         if (reqUrl.contains("/c.html") || reqUrl.contains("/v/key7") ||
                             reqUrl.contains(".m3u8") ||
                             (reqUrl.contains("bunny-frame") && reqUrl.contains(".js"))) {
@@ -380,6 +400,7 @@ class BunnyPoorCdn : ExtractorApi() {
         @Volatile private var currentIv: ByteArray? = null
         @Volatile private var testSegmentUrl: String? = null
         @Volatile private var originalKeyUrl: String? = null
+        @Volatile private var sampleLogged = false
 
         fun start() {
             try {
@@ -458,6 +479,16 @@ class BunnyPoorCdn : ExtractorApi() {
             }
             try {
                 val responseData = app.get(url, headers = currentHeaders).body.bytes()
+                if (!sampleLogged) {
+                    synchronized(this) {
+                        if (!sampleLogged) {
+                            sampleLogged = true
+                            tvwikiDiagnostic("first encrypted segment URL", url)
+                            val sample = responseData.copyOfRange(0, minOf(responseData.size, 512))
+                            tvwikiDiagnostic("first encrypted segment prefix base64", Base64.encodeToString(sample, Base64.NO_WRAP))
+                        }
+                    }
+                }
                 val captured = synchronized(sessionKeys) { sessionKeys.toList() }
                 println("[TVWiki KEY] segmentBytes=${responseData.size}, capturedKeyCount=${captured.size}")
                 if (responseData.isEmpty() || responseData.size % 16 != 0) {
