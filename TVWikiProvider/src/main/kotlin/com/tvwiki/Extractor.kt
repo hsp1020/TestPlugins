@@ -4,6 +4,7 @@ package com.tvwiki
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -11,7 +12,6 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.CookieManager
-import android.util.Base64
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.CloudStreamApp
@@ -31,19 +31,11 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
 import java.util.Collections
+import org.json.JSONObject
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.coroutines.resume
-
-// Temporary diagnostic build. Logcat contains full URLs, headers and key-response bytes.
-private fun tvwikiDiagnostic(label: String, value: String) {
-    val chunks = value.chunked(2000)
-    if (chunks.isEmpty()) println("[TVWiki DIAG] $label (empty)")
-    chunks.forEachIndexed { index, chunk ->
-        println("[TVWiki DIAG] $label ${index + 1}/${chunks.size}: $chunk")
-    }
-}
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -100,26 +92,11 @@ class BunnyPoorCdn : ExtractorApi() {
 
         var capturedUrl: String? = cleanUrl
         val currentSessionKeys = Collections.synchronizedSet(mutableSetOf<String>())
-        val playerScripts = Collections.synchronizedSet(mutableSetOf<String>())
 
         if (!cleanUrl.contains("/c.html")) {
-            val webViewResult = runWebViewHook(cleanUrl, cleanReferer, currentSessionKeys, playerScripts)
+            val webViewResult = runWebViewHook(cleanUrl, cleanReferer, currentSessionKeys)
             if (webViewResult != null) capturedUrl = webViewResult
         }
-        tvwikiDiagnostic("WebView result", "capturedUrl=$capturedUrl capturedKeyCount=${currentSessionKeys.size}")
-        val playerJsUrl = synchronized(playerScripts) { playerScripts.firstOrNull() }
-        if (playerJsUrl != null) {
-            try {
-                val scriptBytes = app.get(playerJsUrl, headers = mapOf(
-                    "User-Agent" to DESKTOP_UA,
-                    "Referer" to "https://player.bunny-frame.online/"
-                )).body.bytes()
-                tvwikiDiagnostic("player.js metadata", "url=$playerJsUrl bytes=${scriptBytes.size}")
-                tvwikiDiagnostic("player.js source base64", Base64.encodeToString(scriptBytes, Base64.NO_WRAP))
-            } catch (e: Exception) {
-                tvwikiDiagnostic("player.js fetch failed", "${e.javaClass.simpleName}: ${e.message}")
-            }
-        } else tvwikiDiagnostic("player.js fetch failed", "No player.js request was observed")
 
         if (capturedUrl != null) {
             val cookie = CookieManager.getInstance().getCookie(capturedUrl)
@@ -152,10 +129,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 }
 
                 val isKey7 = content.lines().any { it.startsWith("#EXT-X-KEY") && it.contains("/v/key7") }
-                tvwikiDiagnostic("playlist key lines", content.lineSequence().filter {
-                    it.startsWith("#EXT-X-KEY") || it.startsWith("#EXT-X-MEDIA-SEQUENCE") ||
-                        it.startsWith("#EXT-X-MAP") || it.startsWith("#EXT-X-BYTERANGE")
-                }.joinToString("\n"))
 
                 if (isKey7) {
                     val newProxy = ProxyWebServer(currentSessionKeys).apply { 
@@ -184,7 +157,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     }
                     
                     newProxy.setIv(parsedIv)
-                    tvwikiDiagnostic("first-segment IV", parsedIv.joinToString("") { "%02x".format(it.toInt() and 0xff) })
 
                     val baseUri = try { URI(requestUrl) } catch (e: Exception) { null }
                     val sb = StringBuilder()
@@ -222,19 +194,12 @@ class BunnyPoorCdn : ExtractorApi() {
                     })
                     return true
                 }
-            } catch (e: Exception) {
-                tvwikiDiagnostic("extract failure", "${e.javaClass.simpleName}: ${e.message}")
-            }
+            } catch (e: Exception) { }
         }
         return false
     }
 
-    private suspend fun runWebViewHook(
-        url: String,
-        referer: String,
-        sessionKeys: MutableSet<String>,
-        playerScripts: MutableSet<String>
-    ) = suspendCancellableCoroutine<String?> { cont ->
+    private suspend fun runWebViewHook(url: String, referer: String, sessionKeys: MutableSet<String>) = suspendCancellableCoroutine<String?> { cont ->
         val handler = Handler(Looper.getMainLooper())
         var webView: WebView? = null
         var detectedCUrl: String? = null
@@ -247,8 +212,6 @@ class BunnyPoorCdn : ExtractorApi() {
 
         val hookScript = """
             (function() {
-                if (window.__tvwikiHookInstalled) return 'already-installed';
-                window.__tvwikiHookInstalled = true;
                 window.G = false;
                 if (window.crypto && window.crypto.subtle) {
                     const originalImportKey = window.crypto.subtle.importKey;
@@ -277,7 +240,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     }
                     return originalSet.apply(this, arguments);
                 };
-                return 'installed';
             })();
         """.trimIndent()
 
@@ -302,7 +264,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 webView?.webChromeClient = object : WebChromeClient() {
                     override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
                         val msg = consoleMessage?.message() ?: ""
-                        if (msg.isNotBlank()) tvwikiDiagnostic("WebView console", "${consoleMessage?.messageLevel()} ${consoleMessage?.sourceId()}:${consoleMessage?.lineNumber()} $msg")
                         if (msg.startsWith("CapturedKeyHex:")) {
                             val key = msg.substringAfter("CapturedKeyHex:").removePrefix("[SET]").removePrefix("[CRYPTO]")
                             if (sessionKeys.add(key)) { 
@@ -322,29 +283,15 @@ class BunnyPoorCdn : ExtractorApi() {
 
                 webView?.webViewClient = object : WebViewClient() {
                     override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                        super.onPageStarted(view, url, favicon)
-                        tvwikiDiagnostic("WebView page started", url ?: "null")
-                        view?.evaluateJavascript(hookScript) { result ->
-                            tvwikiDiagnostic("hook at page start", "url=$url result=$result")
-                        }
+                        super.onPageStarted(view, url, favicon); view?.evaluateJavascript(hookScript, null)
                     }
 
                     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                         val reqUrl = request?.url?.toString() ?: ""
-                        if (reqUrl.contains("/player/assets/player.js")) playerScripts.add(reqUrl)
-                        if (reqUrl.contains("/c.html") || reqUrl.contains("/v/key7") ||
-                            reqUrl.contains(".m3u8") ||
-                            (reqUrl.contains("bunny-frame") && reqUrl.contains(".js"))) {
-                            tvwikiDiagnostic("WebView request", "${request?.method} $reqUrl headers=${request?.requestHeaders}")
-                        }
                         if (reqUrl.contains("/c.html") && reqUrl.contains("token=")) {
                             detectedCUrl = reqUrl
                             println("[TVWiki HOOK] Playlist URL detected; capturedKeyCount=${sessionKeys.size}")
-                            view?.post {
-                                view.evaluateJavascript(hookScript) { result ->
-                                    tvwikiDiagnostic("hook after playlist detection", "result=$result")
-                                }
-                            }
+                            view?.post { view.evaluateJavascript(hookScript, null) }
                             
                             if (sessionKeys.isNotEmpty() && cont.isActive) {
                                 handler.removeCallbacksAndMessages(null)
@@ -367,11 +314,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        tvwikiDiagnostic("WebView page finished", url ?: "null")
-                        view?.evaluateJavascript(hookScript) { result ->
-                            tvwikiDiagnostic("hook at page finish", "url=$url result=$result")
-                        }
+                        super.onPageFinished(view, url); view?.evaluateJavascript(hookScript, null)
                     }
                 }
                 webView?.loadUrl(url, mapOf("Referer" to referer))
@@ -400,7 +343,6 @@ class BunnyPoorCdn : ExtractorApi() {
         @Volatile private var currentIv: ByteArray? = null
         @Volatile private var testSegmentUrl: String? = null
         @Volatile private var originalKeyUrl: String? = null
-        @Volatile private var sampleLogged = false
 
         fun start() {
             try {
@@ -479,16 +421,6 @@ class BunnyPoorCdn : ExtractorApi() {
             }
             try {
                 val responseData = app.get(url, headers = currentHeaders).body.bytes()
-                if (!sampleLogged) {
-                    synchronized(this) {
-                        if (!sampleLogged) {
-                            sampleLogged = true
-                            tvwikiDiagnostic("first encrypted segment URL", url)
-                            val sample = responseData.copyOfRange(0, minOf(responseData.size, 512))
-                            tvwikiDiagnostic("first encrypted segment prefix base64", Base64.encodeToString(sample, Base64.NO_WRAP))
-                        }
-                    }
-                }
                 val captured = synchronized(sessionKeys) { sessionKeys.toList() }
                 println("[TVWiki KEY] segmentBytes=${responseData.size}, capturedKeyCount=${captured.size}")
                 if (responseData.isEmpty() || responseData.size % 16 != 0) {
@@ -499,14 +431,13 @@ class BunnyPoorCdn : ExtractorApi() {
                     .map { it.hexToByteArray() }.toMutableList()
                 originalKeyUrl?.let { keyUrl ->
                     try {
-                        tvwikiDiagnostic("original key request", "url=$keyUrl headers=$currentHeaders")
-                        val keyHttpResponse = app.get(keyUrl, headers = currentHeaders)
-                        val contentType = keyHttpResponse.body.contentType()?.toString() ?: "unknown"
-                        val keyResponse = keyHttpResponse.body.bytes()
-                        println("[TVWiki KEY] originalKeyBytes=${keyResponse.size}, contentType=$contentType")
-                        tvwikiDiagnostic("original key response base64", Base64.encodeToString(keyResponse, Base64.NO_WRAP))
-                        tvwikiDiagnostic("original key response UTF-8", String(keyResponse, Charsets.UTF_8))
-                        if (keyResponse.size == 16) candidates.add(keyResponse)
+                        val keyResponse = app.get(keyUrl, headers = currentHeaders).body.bytes()
+                        println("[TVWiki KEY] originalKeyBytes=${keyResponse.size}")
+                        if (keyResponse.size == 16) {
+                            candidates.add(keyResponse)
+                        } else {
+                            decodeLevel7Key(keyResponse)?.let { candidates.add(it) }
+                        }
                     } catch (e: Exception) {
                         println("[TVWiki KEY] Original key request failed: ${e.javaClass.simpleName}: ${e.message}")
                     }
@@ -523,6 +454,84 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {
                 println("[TVWiki KEY] Segment fetch/verification failed: ${e.javaClass.simpleName}: ${e.message}")
                 return null 
+            }
+        }
+
+        // Same seven inverse steps used by the site's player.js decodeL7().
+        private fun decodeLevel7Key(payload: ByteArray): ByteArray? {
+            return try {
+                val json = JSONObject(String(payload, Charsets.UTF_8))
+                if (json.getInt("version") != 7 || json.getInt("key_length") != 16) return null
+                val layers = json.getJSONArray("layers")
+                val byName = (0 until layers.length()).associate { i ->
+                    val layer = layers.getJSONObject(i)
+                    layer.getString("name") to layer
+                }
+                fun layer(name: String): JSONObject = byName.getValue(name)
+                fun b64(value: String): ByteArray = Base64.decode(value, Base64.URL_SAFE or Base64.NO_WRAP)
+                fun ints(obj: JSONObject, field: String): List<Int> {
+                    val array = obj.getJSONArray(field)
+                    return (0 until array.length()).map { array.getInt(it) }
+                }
+
+                val encrypted = b64(json.getString("encrypted_key"))
+                val mask = b64(layer("final_encrypt").getString("xor_mask"))
+                val lengths = ints(layer("decoy_shuffle"), "segment_lengths")
+                require(mask.isNotEmpty() && lengths.all { it > 0 })
+                val total = lengths.sum()
+                require(total in 16..encrypted.size && total <= 65536)
+                val combined = ByteArray(total) { i ->
+                    ((encrypted[i].toInt() and 255) xor (mask[i % mask.size].toInt() and 255)).toByte()
+                }
+                var offset = 0
+                val segments = lengths.map { length ->
+                    combined.copyOfRange(offset, offset + length).also { offset += length }
+                }
+                val positions = ints(layer("decoy_shuffle"), "real_positions")
+                require(positions.size == 16 && positions.all { it in segments.indices })
+                val chained = positions.map { segments[it] }
+
+                var previous = b64(layer("xor_chain").getString("init_key"))
+                require(previous.isNotEmpty())
+                val noisy = chained.map { segment ->
+                    val decoded = ByteArray(segment.size) { i ->
+                        ((segment[i].toInt() and 255) xor (previous[i % previous.size].toInt() and 255)).toByte()
+                    }
+                    previous = segment.copyOfRange(0, minOf(4, segment.size))
+                    decoded
+                }
+                val segmentPerm = ints(layer("segment_noise"), "perm")
+                require(segmentPerm.size == 16 && segmentPerm.toSet().size == 16 && segmentPerm.all { it in 0..15 })
+                val level3 = ByteArray(16)
+                for (i in 0 until 16) level3[segmentPerm[i]] = noisy[i][0]
+
+                val rotations = ints(layer("bit_rotate"), "rotations")
+                require(rotations.isNotEmpty() && rotations.all { it >= 0 })
+                val level2 = ByteArray(16) { i ->
+                    val shift = rotations[i % rotations.size] % 8
+                    val value = level3[i].toInt() and 255
+                    ((value ushr shift) or (value shl (8 - shift))).toByte()
+                }
+                val inverse = b64(layer("sbox").getString("inverse_sbox"))
+                require(inverse.size == 256)
+                val level1 = ByteArray(16) { i -> inverse[level2[i].toInt() and 255] }
+
+                val bitPerm = ints(layer("bit_interleave"), "perm")
+                require(bitPerm.size == 128 && bitPerm.toSet().size == 128 && bitPerm.all { it in 0..127 })
+                val bits = IntArray(128)
+                for (i in 0 until 128) {
+                    bits[bitPerm[i]] = ((level1[i / 8].toInt() and 255) ushr (7 - i % 8)) and 1
+                }
+                val key = ByteArray(16) { i ->
+                    var value = 0
+                    for (bit in 0 until 8) value = (value shl 1) or bits[i * 8 + bit]
+                    value.toByte()
+                }
+                println("[TVWiki KEY] Decoded Level7 key response")
+                key
+            } catch (e: Exception) {
+                println("[TVWiki KEY] Level7 key decode failed: ${e.javaClass.simpleName}: ${e.message}")
+                null
             }
         }
 
