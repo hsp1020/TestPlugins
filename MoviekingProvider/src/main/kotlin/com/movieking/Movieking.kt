@@ -18,7 +18,7 @@ import kotlinx.coroutines.coroutineScope
 class MovieKing : MainAPI() {
     companion object {
         // 기본 도메인을 mvking7.org로 변경
-        var currentMainUrl = "https://mvking7.org"
+        var currentMainUrl = "https://mvking17.org"
         var isDomainChecked = false 
         private val domainMutex = Mutex()
         private const val PREFS_NAME = "MovieKing_Domain_Cache"
