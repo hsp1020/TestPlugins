@@ -11,6 +11,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.CookieManager
+import android.util.Base64
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.CloudStreamApp
@@ -34,6 +35,15 @@ import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.coroutines.resume
+
+// Temporary diagnostic build. Logcat contains full URLs, headers and key-response bytes.
+private fun tvwikiDiagnostic(label: String, value: String) {
+    val chunks = value.chunked(2000)
+    if (chunks.isEmpty()) println("[TVWiki DIAG] $label (empty)")
+    chunks.forEachIndexed { index, chunk ->
+        println("[TVWiki DIAG] $label ${index + 1}/${chunks.size}: $chunk")
+    }
+}
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -95,6 +105,7 @@ class BunnyPoorCdn : ExtractorApi() {
             val webViewResult = runWebViewHook(cleanUrl, cleanReferer, currentSessionKeys)
             if (webViewResult != null) capturedUrl = webViewResult
         }
+        tvwikiDiagnostic("WebView result", "capturedUrl=$capturedUrl capturedKeyCount=${currentSessionKeys.size}")
 
         if (capturedUrl != null) {
             val cookie = CookieManager.getInstance().getCookie(capturedUrl)
@@ -127,6 +138,10 @@ class BunnyPoorCdn : ExtractorApi() {
                 }
 
                 val isKey7 = content.lines().any { it.startsWith("#EXT-X-KEY") && it.contains("/v/key7") }
+                tvwikiDiagnostic("playlist key lines", content.lineSequence().filter {
+                    it.startsWith("#EXT-X-KEY") || it.startsWith("#EXT-X-MEDIA-SEQUENCE") ||
+                        it.startsWith("#EXT-X-MAP") || it.startsWith("#EXT-X-BYTERANGE")
+                }.joinToString("\n"))
 
                 if (isKey7) {
                     val newProxy = ProxyWebServer(currentSessionKeys).apply { 
@@ -155,6 +170,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     }
                     
                     newProxy.setIv(parsedIv)
+                    tvwikiDiagnostic("first-segment IV", parsedIv.joinToString("") { "%02x".format(it.toInt() and 0xff) })
 
                     val baseUri = try { URI(requestUrl) } catch (e: Exception) { null }
                     val sb = StringBuilder()
@@ -192,7 +208,9 @@ class BunnyPoorCdn : ExtractorApi() {
                     })
                     return true
                 }
-            } catch (e: Exception) { }
+            } catch (e: Exception) {
+                tvwikiDiagnostic("extract failure", "${e.javaClass.simpleName}: ${e.message}")
+            }
         }
         return false
     }
@@ -210,6 +228,8 @@ class BunnyPoorCdn : ExtractorApi() {
 
         val hookScript = """
             (function() {
+                if (window.__tvwikiHookInstalled) return 'already-installed';
+                window.__tvwikiHookInstalled = true;
                 window.G = false;
                 if (window.crypto && window.crypto.subtle) {
                     const originalImportKey = window.crypto.subtle.importKey;
@@ -238,6 +258,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     }
                     return originalSet.apply(this, arguments);
                 };
+                return 'installed';
             })();
         """.trimIndent()
 
@@ -262,6 +283,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 webView?.webChromeClient = object : WebChromeClient() {
                     override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
                         val msg = consoleMessage?.message() ?: ""
+                        if (msg.isNotBlank()) tvwikiDiagnostic("WebView console", "${consoleMessage?.messageLevel()} ${consoleMessage?.sourceId()}:${consoleMessage?.lineNumber()} $msg")
                         if (msg.startsWith("CapturedKeyHex:")) {
                             val key = msg.substringAfter("CapturedKeyHex:").removePrefix("[SET]").removePrefix("[CRYPTO]")
                             if (sessionKeys.add(key)) { 
@@ -281,15 +303,28 @@ class BunnyPoorCdn : ExtractorApi() {
 
                 webView?.webViewClient = object : WebViewClient() {
                     override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                        super.onPageStarted(view, url, favicon); view?.evaluateJavascript(hookScript, null)
+                        super.onPageStarted(view, url, favicon)
+                        tvwikiDiagnostic("WebView page started", url ?: "null")
+                        view?.evaluateJavascript(hookScript) { result ->
+                            tvwikiDiagnostic("hook at page start", "url=$url result=$result")
+                        }
                     }
 
                     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                         val reqUrl = request?.url?.toString() ?: ""
+                        if (reqUrl.contains("/c.html") || reqUrl.contains("/v/key7") ||
+                            reqUrl.contains(".m3u8") ||
+                            (reqUrl.contains("bunny-frame") && reqUrl.contains(".js"))) {
+                            tvwikiDiagnostic("WebView request", "${request?.method} $reqUrl headers=${request?.requestHeaders}")
+                        }
                         if (reqUrl.contains("/c.html") && reqUrl.contains("token=")) {
                             detectedCUrl = reqUrl
                             println("[TVWiki HOOK] Playlist URL detected; capturedKeyCount=${sessionKeys.size}")
-                            view?.post { view.evaluateJavascript(hookScript, null) }
+                            view?.post {
+                                view.evaluateJavascript(hookScript) { result ->
+                                    tvwikiDiagnostic("hook after playlist detection", "result=$result")
+                                }
+                            }
                             
                             if (sessionKeys.isNotEmpty() && cont.isActive) {
                                 handler.removeCallbacksAndMessages(null)
@@ -312,7 +347,11 @@ class BunnyPoorCdn : ExtractorApi() {
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url); view?.evaluateJavascript(hookScript, null)
+                        super.onPageFinished(view, url)
+                        tvwikiDiagnostic("WebView page finished", url ?: "null")
+                        view?.evaluateJavascript(hookScript) { result ->
+                            tvwikiDiagnostic("hook at page finish", "url=$url result=$result")
+                        }
                     }
                 }
                 webView?.loadUrl(url, mapOf("Referer" to referer))
@@ -429,8 +468,13 @@ class BunnyPoorCdn : ExtractorApi() {
                     .map { it.hexToByteArray() }.toMutableList()
                 originalKeyUrl?.let { keyUrl ->
                     try {
-                        val keyResponse = app.get(keyUrl, headers = currentHeaders).body.bytes()
-                        println("[TVWiki KEY] originalKeyBytes=${keyResponse.size}")
+                        tvwikiDiagnostic("original key request", "url=$keyUrl headers=$currentHeaders")
+                        val keyHttpResponse = app.get(keyUrl, headers = currentHeaders)
+                        val contentType = keyHttpResponse.body.contentType()?.toString() ?: "unknown"
+                        val keyResponse = keyHttpResponse.body.bytes()
+                        println("[TVWiki KEY] originalKeyBytes=${keyResponse.size}, contentType=$contentType")
+                        tvwikiDiagnostic("original key response base64", Base64.encodeToString(keyResponse, Base64.NO_WRAP))
+                        tvwikiDiagnostic("original key response UTF-8", String(keyResponse, Charsets.UTF_8))
                         if (keyResponse.size == 16) candidates.add(keyResponse)
                     } catch (e: Exception) {
                         println("[TVWiki KEY] Original key request failed: ${e.javaClass.simpleName}: ${e.message}")
