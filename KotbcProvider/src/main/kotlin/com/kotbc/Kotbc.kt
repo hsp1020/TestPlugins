@@ -13,7 +13,7 @@ import kotlinx.coroutines.coroutineScope
 
 class Kotbc : MainAPI() {
     companion object {
-        var currentMainUrl = "https://m142.kotbc2.com" 
+        var currentMainUrl = "https://m198.kotbc2.com" 
         var isDomainChecked = false 
         private val domainMutex = Mutex()
         private const val PREFS_NAME = "Kotbc_Domain_Cache"
