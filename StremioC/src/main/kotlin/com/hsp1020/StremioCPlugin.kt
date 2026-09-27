@@ -11,6 +11,7 @@ import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.plugins.PluginData
 import com.lagradost.cloudstream3.plugins.PluginManager
 import com.lagradost.cloudstream3.CloudStreamApp
+import com.lagradost.cloudstream3.utils.DataStoreHelper
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
@@ -19,6 +20,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -31,8 +33,16 @@ class StremioCPlugin : Plugin() {
     private val pluginIoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var manifestPrefetchJob: Job? = null
     private var catalogPrefetchJob: Job? = null
+    private var homeSelectionMonitorJob: Job? = null
     private val activeStremioProviders = mutableListOf<StremioC>()
+    private val rearmJobs = mutableMapOf<String, Job>()
+    private val rearmJobsLock = Any()
     private val catalogPrefetchStartupDelayMs = 1000L
+    private val homeSelectionPollMs = 500L
+    // 15s filters quick provider peeks without delaying large-provider refill by 30~60s.
+    // Baseline logs showed IMDB needed ~11s to prefetch only 13/46 rows at BG=2; with BG=4
+    // a 30s debounce would make full readiness too late for normal revisits.
+    private val homeSwitchRearmDebounceMs = 15_000L
 
     private fun prefsToJson(prefs: SharedPreferences): JSONObject {
         val json = JSONObject()
@@ -73,7 +83,8 @@ class StremioCPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
-        println("[StremioCPlugin v3.1-PREFETCH] load() 함수 호출됨")
+        println("[StremioCPlugin v3.3-TUNING-B] load() 함수 호출됨")
+        println("[StremioC-Home][TUNING] profile=B foreground=${StremioC.HOME_FOREGROUND_CONCURRENCY} background=${StremioC.HOME_PREFETCH_CONCURRENCY} rearmDebounceMs=$homeSwitchRearmDebounceMs manifestWarm=true")
         val appContext = context.applicationContext
 
         // --- 1. StremioC 자체 부팅 복원 엔진 (Flag Guard + Checksum 검증) ---
@@ -197,22 +208,27 @@ class StremioCPlugin : Plugin() {
             e.printStackTrace()
         }
 
-        println("[StremioCPlugin v3.1-PREFETCH] reload(context) 실행 시도")
+        println("[StremioCPlugin v3.3-TUNING-B] reload(context) 실행 시도")
         reload(appContext)
         
         val activity = context as? AppCompatActivity
         openSettings = {
-            println("[StremioCPlugin v3.1-PREFETCH] openSettings 클릭됨, SettingsBottomFragment 표시 시도")
+            println("[StremioCPlugin v3.3-TUNING-B] openSettings 클릭됨, SettingsBottomFragment 표시 시도")
             val frag = SettingsBottomFragment(this, appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE))
             activity?.supportFragmentManager?.let { fm -> frag.show(fm, "Frag") }
         }
     }
 
     fun reload(context: Context) {
-        println("[StremioCPlugin v3.1-PREFETCH] reload() 함수 호출됨")
+        println("[StremioCPlugin v3.3-TUNING-B] reload() 함수 호출됨")
         val appContext = context.applicationContext
 
         catalogPrefetchJob?.cancel()
+        homeSelectionMonitorJob?.cancel()
+        synchronized(rearmJobsLock) {
+            rearmJobs.values.forEach { it.cancel() }
+            rearmJobs.clear()
+        }
         val oldProviders = synchronized(activeStremioProviders) {
             activeStremioProviders.toList().also { activeStremioProviders.clear() }
         }
@@ -228,7 +244,7 @@ class StremioCPlugin : Plugin() {
             try {
                 val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
                 val json = prefs.getString(PREF_KEY_LINKS, null) ?: "[]"
-                println("[StremioCPlugin v3.1-PREFETCH] 저장된 링크 JSON 로드 완료 (bytes=${json.length})")
+                println("[StremioCPlugin v3.3-TUNING-B] 저장된 링크 JSON 로드 완료 (bytes=${json.length})")
                 
                 val arr = JSONArray(json)
                 val links = mutableListOf<LinkEntry>()
@@ -243,11 +259,11 @@ class StremioCPlugin : Plugin() {
                         )
                     )
                 }
-                println("[StremioCPlugin v3.1-PREFETCH] 파싱된 커스텀 링크 개수: ${links.size}")
+                println("[StremioCPlugin v3.3-TUNING-B] 파싱된 커스텀 링크 개수: ${links.size}")
                 val registeredProviders = mutableListOf<StremioC>()
                 
                 for (item in links) {
-                    println("[StremioCPlugin v3.1-PREFETCH] 링크 처리 중: ${item.name} (${item.type})")
+                    println("[StremioCPlugin v3.3-TUNING-B] 링크 처리 중: ${item.name} (${item.type})")
                     val pluginsOnline: Array<PluginData> = PluginManager.getPluginsOnline()
                     var found: PluginData? = null
                     for (p in pluginsOnline) {
@@ -258,18 +274,18 @@ class StremioCPlugin : Plugin() {
                     }
                     if (found != null) {
                         try {
-                            println("[StremioCPlugin v3.1-PREFETCH] 기존 플러그인 발견, 언로드 시도: ${found.internalName}")
+                            println("[StremioCPlugin v3.3-TUNING-B] 기존 플러그인 발견, 언로드 시도: ${found.internalName}")
                             PluginManager.unloadPlugin(found.filePath)
                             delay(250) 
                         } catch (e: Throwable) {
                             Log.e("StremioCPlugin", "unload failed ${e.message}")
-                            println("[StremioCPlugin v3.1-PREFETCH] 플러그인 언로드 실패: ${e.message}")
+                            println("[StremioCPlugin v3.3-TUNING-B] 플러그인 언로드 실패: ${e.message}")
                             e.printStackTrace()
                         }
                     } 
                     
                     try {
-                        println("[StremioCPlugin v3.1-PREFETCH] 새로운 확장 등록 시도: ${item.name} 타입: ${item.type}")
+                        println("[StremioCPlugin v3.3-TUNING-B] 새로운 확장 등록 시도: ${item.name} 타입: ${item.type}")
                         when (item.type) {
                             "StremioC" -> {
                                 try {
@@ -291,19 +307,19 @@ class StremioCPlugin : Plugin() {
                                 }
                             }
                         }
-                        println("[StremioCPlugin v3.1-PREFETCH] 확장 등록 완료 (StremioC 강제): ${item.name}")
+                        println("[StremioCPlugin v3.3-TUNING-B] 확장 등록 완료 (StremioC 강제): ${item.name}")
                     } catch (e: Throwable) {
                         Log.e("StremioCPlugin", "register failed ${e.message}")
-                        println("[StremioCPlugin v3.1-PREFETCH] 확장 등록 실패: ${e.message}")
+                        println("[StremioCPlugin v3.3-TUNING-B] 확장 등록 실패: ${e.message}")
                         e.printStackTrace()
                     }
                 }
                 try {
-                    println("[StremioCPlugin v3.1-PREFETCH] afterPluginsLoadedEvent 호출 시도")
+                    println("[StremioCPlugin v3.3-TUNING-B] afterPluginsLoadedEvent 호출 시도")
                     MainActivity.afterPluginsLoadedEvent.invoke(true)
                 } catch (e: Throwable) {
                     Log.w("StremioCPlugin", "afterPluginsLoaded invoke failed ${e.message}")
-                    println("[StremioCPlugin v3.1-PREFETCH] afterPluginsLoadedEvent 호출 실패: ${e.message}")
+                    println("[StremioCPlugin v3.3-TUNING-B] afterPluginsLoadedEvent 호출 실패: ${e.message}")
                     e.printStackTrace()
                 }
 
@@ -312,12 +328,92 @@ class StremioCPlugin : Plugin() {
                     activeStremioProviders.addAll(registeredProviders)
                 }
 
+                // Observe CloudStream's selected homepage provider. A provider that was just left is
+                // re-armed only after a 15s grace period. Returning before that cancels the scheduled
+                // refill, preventing rapid A↔B switching from repeatedly downloading page 1.
+                homeSelectionMonitorJob?.cancel()
+                homeSelectionMonitorJob = pluginIoScope.launch {
+                    var lastHome = DataStoreHelper.currentHomePage
+                    println("[StremioC-Home][PREFETCH_REFRESH] stage=MONITOR_START current=${lastHome ?: "none"} debounceMs=$homeSwitchRearmDebounceMs")
+                    while (isActive) {
+                        delay(homeSelectionPollMs)
+                        val currentHome = DataStoreHelper.currentHomePage
+                        if (currentHome != lastHome) {
+                            val previousHome = lastHome
+                            lastHome = currentHome
+                            println("[StremioC-Home][PREFETCH_REFRESH] stage=HOME_SWITCH from=${previousHome ?: "none"} to=${currentHome ?: "none"}")
+
+                            // If the user returns to a provider before its delayed refill fires (or
+                            // while it is running), cancel that refill immediately. Foreground can
+                            // consume any READY/IN_FLIGHT entries that already exist.
+                            currentHome?.let { selectedName ->
+                                val key = selectedName.lowercase()
+                                val job = synchronized(rearmJobsLock) { rearmJobs.remove(key) }
+                                if (job != null) {
+                                    job.cancel()
+                                    println("[StremioC-Home][PREFETCH_REFRESH] provider=$selectedName stage=REARM_CANCEL_RETURNED")
+                                }
+                            }
+
+                            val previousProvider = synchronized(activeStremioProviders) {
+                                activeStremioProviders.firstOrNull {
+                                    previousHome != null && it.name.equals(previousHome, ignoreCase = true)
+                                }
+                            }
+                            if (previousProvider != null) {
+                                val key = previousProvider.name.lowercase()
+                                val job = launch {
+                                    try {
+                                        println("[StremioC-Home][PREFETCH_REFRESH] provider=${previousProvider.name} stage=REARM_SCHEDULED debounceMs=$homeSwitchRearmDebounceMs")
+                                        delay(homeSwitchRearmDebounceMs)
+                                        if (DataStoreHelper.currentHomePage?.equals(previousProvider.name, ignoreCase = true) == true) {
+                                            println("[StremioC-Home][PREFETCH_REFRESH] provider=${previousProvider.name} stage=REARM_SKIP reason=RETURNED")
+                                            return@launch
+                                        }
+                                        println("[StremioC-Home][PREFETCH_REFRESH] provider=${previousProvider.name} stage=REARM_FIRE")
+                                        previousProvider.rearmOneShotCatalogPrefetch("HOME_SWITCH_${homeSwitchRearmDebounceMs}MS")
+                                    } catch (e: kotlinx.coroutines.CancellationException) {
+                                        println("[StremioC-Home][PREFETCH_REFRESH] provider=${previousProvider.name} stage=REARM_CANCELLED")
+                                        throw e
+                                    } catch (t: Throwable) {
+                                        println("[StremioC-Home][PREFETCH_REFRESH] provider=${previousProvider.name} stage=REARM_FAILED errorClass=${t.javaClass.simpleName}")
+                                    }
+                                }
+                                val replaced = synchronized(rearmJobsLock) {
+                                    rearmJobs.put(key, job)
+                                }
+                                replaced?.cancel()
+                                job.invokeOnCompletion {
+                                    synchronized(rearmJobsLock) {
+                                        if (rearmJobs[key] === job) rearmJobs.remove(key)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 catalogPrefetchJob = pluginIoScope.launch {
-                    // Catalog definitions must be ready first. If a manifest fetch fails, that
-                    // provider simply reports PROVIDER_EMPTY and normal foreground loading remains intact.
+                    // Catalog definitions must be ready first. Then parse the authoritative stored
+                    // manifests into typed Manifest objects before the first homepage build.
                     manifestPrefetchJob?.join()
+                    val warmStarted = System.nanoTime()
+                    try {
+                        coroutineScope {
+                            registeredProviders.map { provider ->
+                                launch { provider.warmMainPageManifest("BOOT") }
+                            }.joinAll()
+                        }
+                        println("[StremioC-Home][MANIFEST_WARM] stage=BOOT_DONE providers=${registeredProviders.size} totalMs=${(System.nanoTime() - warmStarted) / 1_000_000}")
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        println("[StremioC-Home][MANIFEST_WARM] stage=BOOT_CANCELLED")
+                        throw e
+                    } catch (t: Throwable) {
+                        println("[StremioC-Home][MANIFEST_WARM] stage=BOOT_FAILED errorClass=${t.javaClass.simpleName}")
+                    }
+
                     delay(catalogPrefetchStartupDelayMs)
-                    println("[StremioC-Home][PREFETCH_BOOT] stage=START providers=${registeredProviders.size} startupDelayMs=$catalogPrefetchStartupDelayMs")
+                    println("[StremioC-Home][PREFETCH_BOOT] stage=START providers=${registeredProviders.size} startupDelayMs=$catalogPrefetchStartupDelayMs bgConcurrency=${StremioC.HOME_PREFETCH_CONCURRENCY} fgConcurrency=${StremioC.HOME_FOREGROUND_CONCURRENCY}")
                     try {
                         coroutineScope {
                             registeredProviders.map { provider ->
@@ -334,7 +430,7 @@ class StremioCPlugin : Plugin() {
                 }
             } catch (e: Throwable) {
                 Log.e("StremioCPlugin", "reload error ${e.message}")
-                println("[StremioCPlugin v3.1-PREFETCH] reload 함수 에러: ${e.message}")
+                println("[StremioCPlugin v3.3-TUNING-B] reload 함수 에러: ${e.message}")
                 e.printStackTrace()
             }
         }
