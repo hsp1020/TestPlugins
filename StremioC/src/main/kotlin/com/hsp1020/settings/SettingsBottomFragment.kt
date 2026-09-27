@@ -1355,7 +1355,6 @@ private fun showLanguageSelectDialog() {
 
                 if (catalogs != null) {
                     for (cat in catalogs) {
-                        if (!cat.supportsHome()) continue
                         val id = cat.id ?: ""
                         val type = cat.type ?: "movie"
                         val name = cat.name ?: id
