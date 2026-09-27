@@ -62,10 +62,6 @@ class StremioCPlugin : Plugin() {
         }
     }
 
-    private fun String.toUniqueKeyLocal(): String {
-        return this.lowercase().filter { it.isLetter() }
-    }
-
     override fun load(context: Context) {
         println("[StremioCPlugin v3.0-TRACKING] load() 함수 호출됨")
         val appContext = context.applicationContext
@@ -146,26 +142,38 @@ class StremioCPlugin : Plugin() {
                 val manifestPrefs = appContext.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
                 
                 links.forEach { link ->
-                    val cleanUrl = link.substringBefore("?").trimEnd('/')
-                    val currentUrl = if (cleanUrl.endsWith("manifest.json")) cleanUrl else "$cleanUrl/manifest.json"
-                    val uniqueKey = currentUrl.toUniqueKeyLocal()
+                    // Use the exact same query-aware URL/key functions as StremioC.kt and SettingsBottomFragment.kt.
+                    val currentUrl = stremioManifestUrl(link)
+                    val uniqueKey = stremioCatalogKey(link)
+                    val keyLabel = uniqueKey.take(14)
 
                     if (!manifestPrefs.contains(uniqueKey)) {
-                        println("[StremioCPlugin] Manifest cache missing for link: $link. Prefetching asynchronously...")
+                        val totalStarted = System.nanoTime()
+                        println("[StremioC-Home][BOOT_MANIFEST] key=$keyLabel stage=START")
                         try {
+                            val httpStarted = System.nanoTime()
                             val responseText = com.lagradost.cloudstream3.app.get(currentUrl, timeout = 15L).text
+                            val httpMs = (System.nanoTime() - httpStarted) / 1_000_000
                             if (responseText.isNotBlank()) {
+                                val parseStarted = System.nanoTime()
                                 val parsed = JSONObject(responseText)
+                                val parseMs = (System.nanoTime() - parseStarted) / 1_000_000
                                 if (parsed.has("catalogs")) {
-                                    val manifestEditor = manifestPrefs.edit()
-                                    manifestEditor.putString(uniqueKey, responseText)
-                                    manifestEditor.commit()
-                                    println("[StremioCPlugin] Prefetched and cached manifest for uniqueKey: $uniqueKey")
+                                    val writeStarted = System.nanoTime()
+                                    manifestPrefs.edit().putString(uniqueKey, responseText).commit()
+                                    val writeMs = (System.nanoTime() - writeStarted) / 1_000_000
+                                    println("[StremioC-Home][BOOT_MANIFEST] key=$keyLabel stage=DONE httpMs=$httpMs parseMs=$parseMs prefsCommitMs=$writeMs bytes=${responseText.length} totalMs=${(System.nanoTime() - totalStarted) / 1_000_000}")
+                                } else {
+                                    println("[StremioC-Home][BOOT_MANIFEST] key=$keyLabel stage=NO_CATALOGS httpMs=$httpMs parseMs=$parseMs totalMs=${(System.nanoTime() - totalStarted) / 1_000_000}")
                                 }
+                            } else {
+                                println("[StremioC-Home][BOOT_MANIFEST] key=$keyLabel stage=EMPTY httpMs=$httpMs totalMs=${(System.nanoTime() - totalStarted) / 1_000_000}")
                             }
                         } catch (e: Throwable) {
-                            println("[StremioCPlugin] Failed to prefetch manifest for $link: ${e.message}")
+                            println("[StremioC-Home][BOOT_MANIFEST] key=$keyLabel stage=FAILED errorClass=${e.javaClass.simpleName} totalMs=${(System.nanoTime() - totalStarted) / 1_000_000}")
                         }
+                    } else {
+                        println("[StremioC-Home][BOOT_MANIFEST] key=$keyLabel stage=HIT")
                     }
                 }
             } catch (e: Throwable) {
