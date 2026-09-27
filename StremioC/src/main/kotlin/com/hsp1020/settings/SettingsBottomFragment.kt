@@ -852,7 +852,7 @@ class SettingsBottomFragment(
             setPadding(0, 18, 0, 18)
         }
         val metadataProtocolText = TextView(ctx).apply {
-            text = "Metadata HTTP/2 (A/B Test)\nON = H2 + H1 fallback  /  OFF = H1 only"
+            text = "Metadata HTTP/2 (No-Cache A/B)\nON = H2 + H1 fallback  /  OFF = H1 only"
             setTextColor(Color.WHITE)
             textSize = 14f
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -871,9 +871,10 @@ class SettingsBottomFragment(
 
         switchMetadataHttp2.setOnCheckedChangeListener { _, enabled ->
             sharedPref.edit().putBoolean(SettingsRepository.PREF_KEY_METADATA_HTTP2_ENABLED, enabled).apply()
+            StremioC.resetMetadataAbBenchmarkState()
             Toast.makeText(
                 ctx,
-                if (enabled) "Metadata protocol: H2 (HTTP/2)" else "Metadata protocol: H1 (HTTP/1.1)",
+                if (enabled) "Metadata protocol: H2 · cache OFF · state reset" else "Metadata protocol: H1 · cache OFF · state reset",
                 Toast.LENGTH_SHORT
             ).show()
         }
