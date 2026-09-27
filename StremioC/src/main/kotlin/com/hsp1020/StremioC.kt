@@ -151,6 +151,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val scope: CoroutineScope,
         val deferred: Deferred<HomePageResponse>,
         val createdAtMs: Long,
+        val host: String,
         @Volatile var claimed: Boolean = false
     )
     private val prefetchMutex = Mutex()
@@ -294,6 +295,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         // Foreground and background home traffic use separate budgets so prefetch can never
         // consume the slots reserved for the provider the user is actively viewing.
         const val HOME_FOREGROUND_CONCURRENCY = 16
+        const val HOME_FOREGROUND_PER_HOST_CONCURRENCY = 8
         const val HOME_PREFETCH_CONCURRENCY = 4
         private val homeForegroundSemaphore = Semaphore(HOME_FOREGROUND_CONCURRENCY)
         private val homePrefetchSemaphore = Semaphore(HOME_PREFETCH_CONCURRENCY)
@@ -370,7 +372,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 .callTimeout(10, TimeUnit.SECONDS)
                 .dispatcher(Dispatcher().apply {
                     maxRequests = HOME_FOREGROUND_CONCURRENCY
-                    maxRequestsPerHost = HOME_FOREGROUND_CONCURRENCY
+                    maxRequestsPerHost = HOME_FOREGROUND_PER_HOST_CONCURRENCY
                 })
                 .connectionPool(ConnectionPool(HOME_FOREGROUND_CONCURRENCY, 60, TimeUnit.SECONDS))
                 .build()
@@ -1050,6 +1052,29 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     private fun isThisProviderSelectedOnHome(): Boolean =
         DataStoreHelper.currentHomePage?.equals(name, ignoreCase = true) == true
 
+    private suspend fun preemptUnclaimedPrefetchForHost(host: String) {
+        val cancelled = prefetchMutex.withLock {
+            val victims = page1Prefetch.entries
+                .filter { (_, entry) ->
+                    entry.host == host && !entry.claimed && !entry.deferred.isCompleted
+                }
+                .map { it.key to it.value }
+
+            victims.forEach { (stateKey, entry) ->
+                if (page1Prefetch[stateKey] === entry) page1Prefetch.remove(stateKey)
+            }
+            victims.map { it.second }
+        }
+        if (cancelled.isEmpty()) return
+
+        cancelled.forEach { it.scope.cancel() }
+        withTimeoutOrNull(250L) { cancelled.map { it.deferred }.joinAll() }
+        com.lagradost.api.Log.d(
+            "StremioC",
+            "home preempt host=$host state=CANCEL_BG_FOR_FG count=${cancelled.size}"
+        )
+    }
+
     private suspend fun consumeOneShotPrefetch(request: MainPageRequest): HomePageResponse? {
         val stateKey = getCatalogStateKey(request)
         val now = System.currentTimeMillis()
@@ -1068,12 +1093,22 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         if (expired != null) {
             expired!!.scope.cancel()
+            com.lagradost.api.Log.d("StremioC", "home state provider=$name tab=${request.name} state=MISS reason=EXPIRED")
             return null
         }
-        if (entry == null) return null
+        if (entry == null) {
+            com.lagradost.api.Log.d("StremioC", "home state provider=$name tab=${request.name} state=MISS")
+            return null
+        }
+
+        val wasReady = entry.deferred.isCompleted
+        com.lagradost.api.Log.d(
+            "StremioC",
+            "home state provider=$name tab=${request.name} state=${if (wasReady) "READY" else "IN_FLIGHT"}"
+        )
 
         val result = try {
-            if (entry.deferred.isCompleted) {
+            if (wasReady) {
                 entry.deferred.await()
             } else {
                 withTimeoutOrNull(HOME_PREFETCH_JOIN_GRACE_MS) { entry.deferred.await() }
@@ -1101,6 +1136,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         // the old 20s PREFETCH flight in the cancellation race.
         entry.scope.cancel()
         if (result == null && !entry.deferred.isCompleted) {
+            com.lagradost.api.Log.d(
+                "StremioC",
+                "home state provider=$name tab=${request.name} state=CANCEL_BG_FOR_FG"
+            )
             withTimeoutOrNull(250L) { entry.deferred.join() }
         }
         return result
@@ -1129,6 +1168,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private suspend fun prefetchOnePage(request: MainPageRequest) {
         val stateKey = getCatalogStateKey(request)
+        val targetPath = request.data.replace("###", "0")
+        val host = buildUrl(targetPath).toHttpUrlOrNull()?.host ?: return
         val entry = prefetchMutex.withLock {
             if (foregroundCompletedPage1.contains(stateKey) || page1Prefetch.containsKey(stateKey)) {
                 return@withLock null
@@ -1141,7 +1182,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             OneShotPrefetch(
                 scope = scope,
                 deferred = deferred,
-                createdAtMs = System.currentTimeMillis()
+                createdAtMs = System.currentTimeMillis(),
+                host = host
             ).also { page1Prefetch[stateKey] = it }
         } ?: return
 
@@ -1216,6 +1258,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         entries.forEach { it.scope.cancel() }
     }
 
+    private fun getCatalogLogIdentity(request: MainPageRequest): Pair<String, String> {
+        val parts = request.data.substringBefore('?').split('/').filter { it.isNotBlank() }
+        val catalogIndex = parts.indexOf("catalog")
+        val type = parts.getOrNull(catalogIndex + 1) ?: "unknown"
+        val id = parts.getOrNull(catalogIndex + 2) ?: "unknown"
+        return type to id
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val stateKey = getCatalogStateKey(request)
         return try {
@@ -1234,7 +1284,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             throw e
         } catch (t: Throwable) {
             val status = (t as? CatalogHttpException)?.statusCode?.toString() ?: "none"
-            com.lagradost.api.Log.w("StremioC", "home row isolated provider=$name tab=${request.name} page=$page status=$status errorClass=${t.javaClass.simpleName}")
+            val (catalogType, catalogId) = getCatalogLogIdentity(request)
+            com.lagradost.api.Log.w(
+                "StremioC",
+                "home row isolated provider=$name tab=${request.name} page=$page status=$status errorClass=${t.javaClass.simpleName} catalogType=$catalogType catalogId=$catalogId"
+            )
             newHomePageResponse(listOf(HomePageList(request.name, emptyList<SearchResponse>())), hasNext = false)
         }
     }
@@ -1317,13 +1371,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 fetchHomeJson(targetUrl, origin)
             }
         } else {
-            homeForegroundSemaphore.withPermit {
-                beginForegroundHost(host)
-                try {
+            beginForegroundHost(host)
+            try {
+                // Stop only unclaimed, still-running prefetches for this host. Completed READY
+                // entries and rows already claimed by foreground are preserved. Marking the host
+                // active before preemption also prevents new same-host background work from starting.
+                preemptUnclaimedPrefetchForHost(host)
+                homeForegroundSemaphore.withPermit {
                     fetchHomeJson(targetUrl, origin)
-                } finally {
-                    endForegroundHost(host)
                 }
+            } finally {
+                endForegroundHost(host)
             }
         }
 
