@@ -1265,7 +1265,27 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     override suspend fun search(query: String): List<SearchResponse> {
         mainUrl = mainUrl.fixSourceUrl()
         val manifest = getManifest()
-        val supportedCatalogs = manifest?.catalogs?.filter { it.supportsSearch() } ?: emptyList()
+
+        val context = CloudStreamApp.context
+        val prefs = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+        val currentUrl = stremioManifestUrl(mainUrl)
+        val uniqueKey = stremioCatalogKey(mainUrl)
+        val legacyKey = currentUrl.toLegacyUniqueKey()
+        if (prefs != null) migrateStremioCatalogSettings(prefs, mainUrl)
+
+        val supportedCatalogs = manifest?.catalogs?.filter { catalog ->
+            if (!catalog.supportsSearch()) return@filter false
+            if (prefs == null) return@filter true
+
+            val catalogId = catalog.id ?: return@filter false
+            val catalogType = catalog.type ?: "movie"
+            val tabKey = "tab_enabled_${uniqueKey}_${catalogId}_${catalogType}_default"
+            if (prefs.contains(tabKey)) {
+                prefs.getBoolean(tabKey, true)
+            } else {
+                prefs.getBoolean("tab_enabled_${legacyKey}_${catalogId}_${catalogType}_default", true)
+            }
+        } ?: emptyList()
         
         val searchResults = coroutineScope {
             supportedCatalogs.map { catalog ->
