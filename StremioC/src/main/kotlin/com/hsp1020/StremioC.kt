@@ -278,8 +278,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val networkSemaphore = Semaphore(35)
         // CloudStream launches all homepage rows concurrently and waits for all of them.
         // Bound foreground traffic directly; catalog prefetch has intentionally been removed.
-        const val HOME_FOREGROUND_CONCURRENCY = 16
-        const val HOME_FOREGROUND_PER_HOST_CONCURRENCY = 8
+        const val HOME_FOREGROUND_CONCURRENCY = 12
+        const val HOME_FOREGROUND_PER_HOST_CONCURRENCY = 12
         private val homeForegroundSemaphore = Semaphore(HOME_FOREGROUND_CONCURRENCY)
         private const val HOME_SLOW_REQUEST_LOG_MS = 1_500L
 
@@ -338,10 +338,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         private val homeForegroundClient by lazy {
             app.baseClient.newBuilder()
-                .protocols(listOf(Protocol.HTTP_1_1))
-                .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(10, TimeUnit.SECONDS)
-                .callTimeout(10, TimeUnit.SECONDS)
+                .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)
+                .callTimeout(35, TimeUnit.SECONDS)
+                .cache(null)
                 .dispatcher(Dispatcher().apply {
                     maxRequests = HOME_FOREGROUND_CONCURRENCY
                     maxRequestsPerHost = HOME_FOREGROUND_PER_HOST_CONCURRENCY
