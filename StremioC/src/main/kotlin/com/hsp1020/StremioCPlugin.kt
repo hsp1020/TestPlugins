@@ -14,6 +14,11 @@ import com.lagradost.cloudstream3.CloudStreamApp
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -23,6 +28,11 @@ import kotlinx.coroutines.withContext
 class StremioCPlugin : Plugin() {
     private val PREF_FILE = "StremioC"
     private val PREF_KEY_LINKS = "stremio_saved_links"
+    private val pluginIoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var manifestPrefetchJob: Job? = null
+    private var catalogPrefetchJob: Job? = null
+    private val activeStremioProviders = mutableListOf<StremioC>()
+    private val catalogPrefetchStartupDelayMs = 1000L
 
     private fun prefsToJson(prefs: SharedPreferences): JSONObject {
         val json = JSONObject()
@@ -63,7 +73,7 @@ class StremioCPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
-        println("[StremioCPlugin v3.0-TRACKING] load() 함수 호출됨")
+        println("[StremioCPlugin v3.1-PREFETCH] load() 함수 호출됨")
         val appContext = context.applicationContext
 
         // --- 1. StremioC 자체 부팅 복원 엔진 (Flag Guard + Checksum 검증) ---
@@ -125,7 +135,7 @@ class StremioCPlugin : Plugin() {
         }
 
         // --- 3. Restored Links Manifest Auto-Prefetch Engine (부팅 비동기 프리페처) ---
-        CoroutineScope(Dispatchers.IO).launch {
+        manifestPrefetchJob = pluginIoScope.launch {
             try {
                 val prefs = appContext.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
                 val json = prefs.getString("stremio_saved_links", null) ?: "[]"
@@ -187,26 +197,38 @@ class StremioCPlugin : Plugin() {
             e.printStackTrace()
         }
 
-        println("[StremioCPlugin v3.0-TRACKING] reload(context) 실행 시도")
+        println("[StremioCPlugin v3.1-PREFETCH] reload(context) 실행 시도")
         reload(appContext)
         
         val activity = context as? AppCompatActivity
         openSettings = {
-            println("[StremioCPlugin v3.0-TRACKING] openSettings 클릭됨, SettingsBottomFragment 표시 시도")
+            println("[StremioCPlugin v3.1-PREFETCH] openSettings 클릭됨, SettingsBottomFragment 표시 시도")
             val frag = SettingsBottomFragment(this, appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE))
             activity?.supportFragmentManager?.let { fm -> frag.show(fm, "Frag") }
         }
     }
 
     fun reload(context: Context) {
-        println("[StremioCPlugin v3.0-TRACKING] reload() 함수 호출됨")
+        println("[StremioCPlugin v3.1-PREFETCH] reload() 함수 호출됨")
         val appContext = context.applicationContext
+
+        catalogPrefetchJob?.cancel()
+        val oldProviders = synchronized(activeStremioProviders) {
+            activeStremioProviders.toList().also { activeStremioProviders.clear() }
+        }
+        if (oldProviders.isNotEmpty()) {
+            pluginIoScope.launch {
+                oldProviders.forEach { provider ->
+                    runCatching { provider.cancelOneShotCatalogPrefetch("PLUGIN_RELOAD") }
+                }
+            }
+        }
         
         CoroutineScope(Dispatchers.Main).launch {
             try {
                 val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
                 val json = prefs.getString(PREF_KEY_LINKS, null) ?: "[]"
-                println("[StremioCPlugin v3.0-TRACKING] 저장된 링크 JSON 로드 완료: $json")
+                println("[StremioCPlugin v3.1-PREFETCH] 저장된 링크 JSON 로드 완료 (bytes=${json.length})")
                 
                 val arr = JSONArray(json)
                 val links = mutableListOf<LinkEntry>()
@@ -221,10 +243,11 @@ class StremioCPlugin : Plugin() {
                         )
                     )
                 }
-                println("[StremioCPlugin v3.0-TRACKING] 파싱된 커스텀 링크 개수: ${links.size}")
+                println("[StremioCPlugin v3.1-PREFETCH] 파싱된 커스텀 링크 개수: ${links.size}")
+                val registeredProviders = mutableListOf<StremioC>()
                 
                 for (item in links) {
-                    println("[StremioCPlugin v3.0-TRACKING] 링크 처리 중: ${item.name} (${item.type})")
+                    println("[StremioCPlugin v3.1-PREFETCH] 링크 처리 중: ${item.name} (${item.type})")
                     val pluginsOnline: Array<PluginData> = PluginManager.getPluginsOnline()
                     var found: PluginData? = null
                     for (p in pluginsOnline) {
@@ -235,49 +258,83 @@ class StremioCPlugin : Plugin() {
                     }
                     if (found != null) {
                         try {
-                            println("[StremioCPlugin v3.0-TRACKING] 기존 플러그인 발견, 언로드 시도: ${found.internalName}")
+                            println("[StremioCPlugin v3.1-PREFETCH] 기존 플러그인 발견, 언로드 시도: ${found.internalName}")
                             PluginManager.unloadPlugin(found.filePath)
                             delay(250) 
                         } catch (e: Throwable) {
                             Log.e("StremioCPlugin", "unload failed ${e.message}")
-                            println("[StremioCPlugin v3.0-TRACKING] 플러그인 언로드 실패: ${e.message}")
+                            println("[StremioCPlugin v3.1-PREFETCH] 플러그인 언로드 실패: ${e.message}")
                             e.printStackTrace()
                         }
                     } 
                     
                     try {
-                        println("[StremioCPlugin v3.0-TRACKING] 새로운 확장 등록 시도: ${item.name} 타입: ${item.type}")
+                        println("[StremioCPlugin v3.1-PREFETCH] 새로운 확장 등록 시도: ${item.name} 타입: ${item.type}")
                         when (item.type) {
                             "StremioC" -> {
                                 try {
-                                    registerMainAPI(StremioC(item.link, item.name))
+                                    val provider = StremioC(item.link, item.name)
+                                    registerMainAPI(provider)
+                                    if (item.link.isNotBlank()) registeredProviders.add(provider)
                                 } catch (e: Throwable) {
                                     e.printStackTrace()
                                     try { registerMainAPI(StremioC("", item.name)) } catch (e2: Throwable) { e2.printStackTrace() }
                                 }
                             }
                             else -> {
-                                try { registerMainAPI(StremioC(item.link, item.name)) } catch (e: Throwable) { e.printStackTrace() }
+                                try {
+                                    val provider = StremioC(item.link, item.name)
+                                    registerMainAPI(provider)
+                                    if (item.link.isNotBlank()) registeredProviders.add(provider)
+                                } catch (e: Throwable) {
+                                    e.printStackTrace()
+                                }
                             }
                         }
-                        println("[StremioCPlugin v3.0-TRACKING] 확장 등록 완료 (StremioC 강제): ${item.name}")
+                        println("[StremioCPlugin v3.1-PREFETCH] 확장 등록 완료 (StremioC 강제): ${item.name}")
                     } catch (e: Throwable) {
                         Log.e("StremioCPlugin", "register failed ${e.message}")
-                        println("[StremioCPlugin v3.0-TRACKING] 확장 등록 실패: ${e.message}")
+                        println("[StremioCPlugin v3.1-PREFETCH] 확장 등록 실패: ${e.message}")
                         e.printStackTrace()
                     }
                 }
                 try {
-                    println("[StremioCPlugin v3.0-TRACKING] afterPluginsLoadedEvent 호출 시도")
+                    println("[StremioCPlugin v3.1-PREFETCH] afterPluginsLoadedEvent 호출 시도")
                     MainActivity.afterPluginsLoadedEvent.invoke(true)
                 } catch (e: Throwable) {
                     Log.w("StremioCPlugin", "afterPluginsLoaded invoke failed ${e.message}")
-                    println("[StremioCPlugin v3.0-TRACKING] afterPluginsLoadedEvent 호출 실패: ${e.message}")
+                    println("[StremioCPlugin v3.1-PREFETCH] afterPluginsLoadedEvent 호출 실패: ${e.message}")
                     e.printStackTrace()
+                }
+
+                synchronized(activeStremioProviders) {
+                    activeStremioProviders.clear()
+                    activeStremioProviders.addAll(registeredProviders)
+                }
+
+                catalogPrefetchJob = pluginIoScope.launch {
+                    // Catalog definitions must be ready first. If a manifest fetch fails, that
+                    // provider simply reports PROVIDER_EMPTY and normal foreground loading remains intact.
+                    manifestPrefetchJob?.join()
+                    delay(catalogPrefetchStartupDelayMs)
+                    println("[StremioC-Home][PREFETCH_BOOT] stage=START providers=${registeredProviders.size} startupDelayMs=$catalogPrefetchStartupDelayMs")
+                    try {
+                        coroutineScope {
+                            registeredProviders.map { provider ->
+                                launch { provider.prefetchEnabledMainPageCatalogs() }
+                            }.joinAll()
+                        }
+                        println("[StremioC-Home][PREFETCH_BOOT] stage=DONE providers=${registeredProviders.size}")
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        println("[StremioC-Home][PREFETCH_BOOT] stage=CANCELLED")
+                        throw e
+                    } catch (t: Throwable) {
+                        println("[StremioC-Home][PREFETCH_BOOT] stage=FAILED errorClass=${t.javaClass.simpleName}")
+                    }
                 }
             } catch (e: Throwable) {
                 Log.e("StremioCPlugin", "reload error ${e.message}")
-                println("[StremioCPlugin v3.0-TRACKING] reload 함수 에러: ${e.message}")
+                println("[StremioCPlugin v3.1-PREFETCH] reload 함수 에러: ${e.message}")
                 e.printStackTrace()
             }
         }
