@@ -373,16 +373,29 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         fun metadataProtocolMode(): String = if (isMetadataHttp2Enabled()) "H2" else "H1"
 
-        private fun buildMetadataSession(protocols: List<Protocol>, mode: String): Requests {
-            val newClient = app.baseClient.newBuilder()
+        private fun buildMetadataHttpClient(protocols: List<Protocol>, mode: String): okhttp3.OkHttpClient {
+            return app.baseClient.newBuilder()
                 .protocols(protocols)
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(20, TimeUnit.SECONDS)
                 .writeTimeout(20, TimeUnit.SECONDS)
+                // A/B benchmark isolation: metadata requests must never reuse OkHttp HTTP cache
+                // or conditional validators produced by the other protocol run.
+                .cache(null)
+                .addInterceptor { chain ->
+                    val cleanRequest = chain.request().newBuilder()
+                        .removeHeader("If-None-Match")
+                        .removeHeader("If-Modified-Since")
+                        .header("Cache-Control", "no-store, max-age=0")
+                        .header("Pragma", "no-cache")
+                        .build()
+                    chain.proceed(cleanRequest)
+                }
                 .dispatcher(Dispatcher().apply {
                     maxRequests = 70
                     maxRequestsPerHost = 40
                 })
+                // H1/H2 each receive an independent pool so connections can never cross modes.
                 .connectionPool(ConnectionPool(45, 15, TimeUnit.SECONDS))
                 .addNetworkInterceptor { chain ->
                     val startedNs = System.nanoTime()
@@ -390,34 +403,48 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     try {
                         val response = chain.proceed(request)
                         println(
-                            "[StremioC-MetadataHTTP] mode=$mode host=${request.url.host} protocol=${response.protocol} code=${response.code} ms=${loadPerfMs(startedNs)}"
+                            "[StremioC-MetadataHTTP] mode=$mode cache=OFF host=${request.url.host} protocol=${response.protocol} code=${response.code} ms=${loadPerfMs(startedNs)}"
                         )
                         response
                     } catch (t: Throwable) {
                         println(
-                            "[StremioC-MetadataHTTP] mode=$mode host=${request.url.host} protocol=NO_RESPONSE error=${t.javaClass.simpleName} ms=${loadPerfMs(startedNs)}"
+                            "[StremioC-MetadataHTTP] mode=$mode cache=OFF host=${request.url.host} protocol=NO_RESPONSE error=${t.javaClass.simpleName} ms=${loadPerfMs(startedNs)}"
                         )
                         throw t
                     }
                 }
                 .build()
-
-            return Requests(newClient).apply {
-                this.responseParser = app.responseParser
-                this.defaultHeaders = app.defaultHeaders
-            }
         }
 
-        private val metadataSessionH2 by lazy {
-            buildMetadataSession(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1), "H2")
+        private fun wrapMetadataClient(client: okhttp3.OkHttpClient): Requests = Requests(client).apply {
+            this.responseParser = app.responseParser
+            this.defaultHeaders = app.defaultHeaders
         }
 
-        private val metadataSessionH1 by lazy {
-            buildMetadataSession(listOf(Protocol.HTTP_1_1), "H1")
+        private val metadataHttpClientH2 by lazy {
+            buildMetadataHttpClient(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1), "H2")
         }
+
+        private val metadataHttpClientH1 by lazy {
+            buildMetadataHttpClient(listOf(Protocol.HTTP_1_1), "H1")
+        }
+
+        private val metadataSessionH2 by lazy { wrapMetadataClient(metadataHttpClientH2) }
+        private val metadataSessionH1 by lazy { wrapMetadataClient(metadataHttpClientH1) }
 
         val metadataSession: Requests
             get() = if (isMetadataHttp2Enabled()) metadataSessionH2 else metadataSessionH1
+
+        fun resetMetadataAbBenchmarkState() {
+            tmdbDetailsCache.clear()
+            tmdbSeasonCache.clear()
+            kitsuMetaCache.clear()
+            tmdbFindCache.clear()
+            aniZipCache.clear()
+            metadataHttpClientH1.connectionPool.evictAll()
+            metadataHttpClientH2.connectionPool.evictAll()
+            println("[StremioC-MetadataHTTP] benchmark_reset cache=OFF memoryCaches=cleared connections=evicted")
+        }
 
         private val homeClient by lazy {
             app.baseClient.newBuilder()
@@ -1415,7 +1442,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val loadTrace = newLoadPerfTrace()
         val loadTotalStartNs = System.nanoTime()
         loadPerfLog(loadTrace, "START", "provider=$name input=${if (url.startsWith("{")) "INLINE" else "URL"}")
-        loadPerfLog(loadTrace, "METADATA_PROTOCOL", "mode=${metadataProtocolMode()}")
+        loadPerfLog(loadTrace, "METADATA_PROTOCOL", "mode=${metadataProtocolMode()} cache=OFF")
 
         val parsedUrlHint = parseDetailUrlHint(url)
         val rememberedHint = detailLoadHints[url]?.takeIf { cached ->
@@ -1851,7 +1878,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             loadPerfLog(loadTrace, "MDBLIST_APPLY", "ms=${loadPerfMs(mdbApplyStartNs)} enabled=$mdbEnabled id=$actualMdbId ratings=0")
         }
 
-        loadPerfLog(loadTrace, "TOTAL", "ms=${loadPerfMs(loadTotalStartNs)} mode=${metadataProtocolMode()} id=${res.id} finalImdb=${resolvedIdHolder[0]} finalTmdb=${resolvedIdHolder[1]}")
+        loadPerfLog(loadTrace, "TOTAL", "ms=${loadPerfMs(loadTotalStartNs)} mode=${metadataProtocolMode()} cache=OFF id=${res.id} finalImdb=${resolvedIdHolder[0]} finalTmdb=${resolvedIdHolder[1]}")
         return@coroutineScope loadRes
     }
 
