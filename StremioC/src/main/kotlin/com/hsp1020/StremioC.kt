@@ -131,18 +131,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     // caller waits for that owner and reuses the prepared object instead of parsing twice.
     private val mainPageManifestParseLock = Any()
 
-    private data class MainPageManifestParseResult(
-        val manifest: Manifest?,
-        val mode: String,
-        val lockWaitMs: Long,
-        val parseMs: Long,
-    )
-    
     private val pageMutex = Mutex()
     private class PageFlight(
         val scope: CoroutineScope,
         val deferred: Deferred<HomePageResponse>,
-        val traceId: String,
         var waiters: Int = 0
     )
     private val activePageRequests = mutableMapOf<String, PageFlight>()
@@ -150,7 +142,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     private class OneShotPrefetch(
         val scope: CoroutineScope,
         val deferred: Deferred<HomePageResponse>,
-        val traceId: String,
         val createdAtMs: Long,
         @Volatile var claimed: Boolean = false
     )
@@ -359,72 +350,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
         }
 
-        private data class HomeRequestTrace(
-            val traceId: String,
-            val provider: String,
-            val tab: String,
-            val page: Int,
-            val origin: String,
-            val attempt: Int = 1
-        )
-
-        private class HomePerfEventListener : okhttp3.EventListener() {
-            private val callStartedNs = System.nanoTime()
-            private var dnsStartedNs = 0L
-            private var connectStartedNs = 0L
-            private var tlsStartedNs = 0L
-            private var requestHeadersStartedNs = 0L
-            private var requestHeadersEndedNs = 0L
-            private var responseBodyStartedNs = 0L
-
-            private fun elapsedMs(startNs: Long): Long =
-                if (startNs == 0L) -1L else (System.nanoTime() - startNs) / 1_000_000L
-
-            private fun ctx(call: okhttp3.Call): String {
-                val trace = call.request().tag(HomeRequestTrace::class.java)
-                return if (trace == null) {
-                    "trace=unknown"
-                } else {
-                    "trace=${trace.traceId} provider=${trace.provider} tab=${trace.tab} page=${trace.page} origin=${trace.origin} attempt=${trace.attempt}"
-                }
-            }
-
-            override fun dnsStart(call: okhttp3.Call, domainName: String) { dnsStartedNs = System.nanoTime() }
-            override fun dnsEnd(call: okhttp3.Call, domainName: String, inetAddressList: List<java.net.InetAddress>) {
-                println("[StremioC-Home][NET] ${ctx(call)} stage=DNS ms=${elapsedMs(dnsStartedNs)} addresses=${inetAddressList.size}")
-            }
-            override fun connectStart(call: okhttp3.Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy) { connectStartedNs = System.nanoTime() }
-            override fun secureConnectStart(call: okhttp3.Call) { tlsStartedNs = System.nanoTime() }
-            override fun secureConnectEnd(call: okhttp3.Call, handshake: okhttp3.Handshake?) {
-                println("[StremioC-Home][NET] ${ctx(call)} stage=TLS ms=${elapsedMs(tlsStartedNs)}")
-            }
-            override fun connectEnd(call: okhttp3.Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy, protocol: okhttp3.Protocol?) {
-                println("[StremioC-Home][NET] ${ctx(call)} stage=CONNECT_TOTAL ms=${elapsedMs(connectStartedNs)} protocol=$protocol")
-            }
-            override fun requestHeadersStart(call: okhttp3.Call) { requestHeadersStartedNs = System.nanoTime() }
-            override fun requestHeadersEnd(call: okhttp3.Call, request: okhttp3.Request) {
-                requestHeadersEndedNs = System.nanoTime()
-                println("[StremioC-Home][NET] ${ctx(call)} stage=REQUEST_HEADERS ms=${elapsedMs(requestHeadersStartedNs)}")
-            }
-            override fun responseHeadersStart(call: okhttp3.Call) {
-                val base = if (requestHeadersEndedNs != 0L) requestHeadersEndedNs else callStartedNs
-                println("[StremioC-Home][NET] ${ctx(call)} stage=TTFB ms=${elapsedMs(base)}")
-            }
-            override fun responseBodyStart(call: okhttp3.Call) { responseBodyStartedNs = System.nanoTime() }
-            override fun responseBodyEnd(call: okhttp3.Call, byteCount: Long) {
-                println("[StremioC-Home][NET] ${ctx(call)} stage=BODY ms=${elapsedMs(responseBodyStartedNs)} bytes=$byteCount")
-            }
-            override fun callEnd(call: okhttp3.Call) {
-                println("[StremioC-Home][NET] ${ctx(call)} stage=CALL_TOTAL ms=${elapsedMs(callStartedNs)}")
-            }
-            override fun callFailed(call: okhttp3.Call, ioe: java.io.IOException) {
-                println("[StremioC-Home][NET] ${ctx(call)} stage=FAILED totalMs=${elapsedMs(callStartedNs)} errorClass=${ioe.javaClass.simpleName}")
-            }
-        }
-
         private val homeClient by lazy {
             app.baseClient.newBuilder()
-                .eventListenerFactory { HomePerfEventListener() }
                 .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(20, TimeUnit.SECONDS)
@@ -443,18 +370,16 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         private fun isRetryableCatalogStatus(code: Int): Boolean =
             code == 404 || code == 408 || code == 425 || code == 500 || code == 502 || code == 503 || code == 504
 
-        private suspend fun fetchHomeJson(url: String, trace: HomeRequestTrace): String {
+        private suspend fun fetchHomeJson(url: String, origin: String): String {
             var attempt = 1
             while (true) {
                 currentCoroutineContext().ensureActive()
-                val attemptTrace = trace.copy(attempt = attempt)
                 try {
-                    return fetchHomeJsonOnce(url, attemptTrace)
+                    return fetchHomeJsonOnce(url, origin)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: CatalogHttpException) {
                     if (attempt < HOME_ROW_MAX_ATTEMPTS && isRetryableCatalogStatus(e.statusCode)) {
-                        println("[StremioC-Home][ROW_RETRY] trace=${trace.traceId} provider=${trace.provider} tab=${trace.tab} page=${trace.page} origin=${trace.origin} attempt=$attempt nextAttempt=${attempt + 1} reason=HTTP_${e.statusCode} delayMs=$HOME_ROW_RETRY_DELAY_MS")
                         delay(HOME_ROW_RETRY_DELAY_MS)
                         attempt++
                         continue
@@ -462,7 +387,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     throw e
                 } catch (e: java.io.IOException) {
                     if (attempt < HOME_ROW_MAX_ATTEMPTS) {
-                        println("[StremioC-Home][ROW_RETRY] trace=${trace.traceId} provider=${trace.provider} tab=${trace.tab} page=${trace.page} origin=${trace.origin} attempt=$attempt nextAttempt=${attempt + 1} reason=${e.javaClass.simpleName} delayMs=$HOME_ROW_RETRY_DELAY_MS")
                         delay(HOME_ROW_RETRY_DELAY_MS)
                         attempt++
                         continue
@@ -472,19 +396,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
         }
 
-        private suspend fun fetchHomeJsonOnce(url: String, trace: HomeRequestTrace): String {
+        private suspend fun fetchHomeJsonOnce(url: String, origin: String): String {
             val host = url.toHttpUrlOrNull()?.host ?: throw IllegalArgumentException("Invalid catalog URL")
             val now = System.currentTimeMillis()
             val foregroundUntil = homeHostBackoff[host] ?: 0L
             val prefetchUntil = homePrefetchHostBackoff[host] ?: 0L
-            val until = if (trace.origin == "PREFETCH") maxOf(foregroundUntil, prefetchUntil) else foregroundUntil
+            val until = if (origin == "PREFETCH") maxOf(foregroundUntil, prefetchUntil) else foregroundUntil
             if (until > now) throw IllegalStateException("Catalog server rate limited; retry later")
             val request = okhttp3.Request.Builder()
                 .url(url)
-                .tag(HomeRequestTrace::class.java, trace)
                 .apply { app.defaultHeaders.forEach { (name, value) -> header(name, value) } }
                 .build()
-            val started = System.nanoTime()
             return suspendCancellableCoroutine { continuation ->
                 val call = homeClient.newCall(request)
                 continuation.invokeOnCancellation { call.cancel() }
@@ -495,7 +417,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                         val outcome = runCatching {
                             response.use { res ->
-                                println("[StremioC-Home][HTTP_RESPONSE] trace=${trace.traceId} provider=${trace.provider} tab=${trace.tab} page=${trace.page} origin=${trace.origin} attempt=${trace.attempt} status=${res.code} protocol=${res.protocol} networkMs=${(System.nanoTime() - started) / 1_000_000}")
                                 if (res.code == 429) {
                                     val raw = res.header("Retry-After")
                                     val delayMs = raw?.toLongOrNull()?.coerceIn(0L, 86400L)?.times(1000L)
@@ -503,7 +424,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                                             java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", java.util.Locale.US)
                                                 .parse(raw ?: "")?.time?.minus(System.currentTimeMillis())
                                         }.getOrNull()?.coerceIn(0L, 86400000L) ?: 10000L
-                                    if (trace.origin == "PREFETCH") {
+                                    if (origin == "PREFETCH") {
                                         synchronized(homePrefetchHostBackoff) {
                                             homePrefetchHostBackoff[host] = maxOf(
                                                 homePrefetchHostBackoff[host] ?: 0L,
@@ -709,56 +630,39 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 
     private suspend fun fetchManifestLocked(): Manifest? {
-        val totalStarted = System.nanoTime()
         val currentUrl = stremioManifestUrl(mainUrl)
-
         val now = System.currentTimeMillis()
         val isExpired = (now - lastCacheTime) > CACHE_TTL_MS
 
         if (cachedManifest != null && lastManifestUrl == currentUrl && !isExpired && !cachedManifest?.catalogs.isNullOrEmpty()) {
-            println("[StremioC-Home][MANIFEST] provider=$name source=MEMORY catalogs=${cachedManifest?.catalogs?.size ?: 0} totalMs=${(System.nanoTime() - totalStarted) / 1_000_000}")
             return cachedManifest
         }
 
-        val netStarted = System.nanoTime()
         val resText = runSuspendCatching {
             customSession.get(currentUrl, timeout = 15L).text
         }.onFailure {
-            println("[StremioC-Home][MANIFEST] provider=$name stage=HTTP_FAILED ms=${(System.nanoTime() - netStarted) / 1_000_000} errorClass=${it.javaClass.simpleName}")
             it.printStackTrace()
         }.getOrNull()
-        val netMs = (System.nanoTime() - netStarted) / 1_000_000
 
         if (!resText.isNullOrBlank()) {
-            val parseStarted = System.nanoTime()
             try {
                 val parsed = parseJson<Manifest>(resText)
-                val parseMs = (System.nanoTime() - parseStarted) / 1_000_000
                 if (parsed?.catalogs?.isNotEmpty() == true) {
                     cachedManifest = parsed
                     preparedMainPageManifest = PreparedMainPageManifest(currentUrl, resText.toUniqueKey(), parsed)
                     lastManifestUrl = currentUrl
                     lastCacheTime = now
 
-                    val writeStarted = System.nanoTime()
                     val context = CloudStreamApp.context
                     context?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
                         ?.edit()?.putString(currentUrl.toUniqueKey(), resText)?.apply()
-                    val writeMs = (System.nanoTime() - writeStarted) / 1_000_000
-
-                    println("[StremioC-Home][MANIFEST] provider=$name source=NETWORK httpMs=$netMs parseMs=$parseMs prefsApplyMs=$writeMs bytes=${resText.length} catalogs=${parsed.catalogs.size} totalMs=${(System.nanoTime() - totalStarted) / 1_000_000}")
                     return parsed
                 }
-                println("[StremioC-Home][MANIFEST] provider=$name stage=PARSE_EMPTY httpMs=$netMs parseMs=$parseMs bytes=${resText.length}")
             } catch (e: Exception) {
-                println("[StremioC-Home][MANIFEST] provider=$name stage=PARSE_FAILED httpMs=$netMs parseMs=${(System.nanoTime() - parseStarted) / 1_000_000} errorClass=${e.javaClass.simpleName}")
                 e.printStackTrace()
             }
-        } else {
-            println("[StremioC-Home][MANIFEST] provider=$name stage=EMPTY_RESPONSE httpMs=$netMs")
         }
 
-        println("[StremioC-Home][MANIFEST] provider=$name source=FALLBACK totalMs=${(System.nanoTime() - totalStarted) / 1_000_000}")
         return cachedManifest
     }
 
@@ -767,34 +671,24 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         raw: String,
         currentUrl: String,
         signature: String,
-        reason: String,
-    ): MainPageManifestParseResult {
+    ): Manifest? {
         preparedMainPageManifest?.let { existing ->
             if (existing.manifestUrl == currentUrl && existing.rawSignature == signature) {
-                return MainPageManifestParseResult(existing.manifest, "HIT", 0L, 0L)
+                return existing.manifest
             }
         }
 
-        val waitStarted = System.nanoTime()
         return synchronized(mainPageManifestParseLock) {
-            val lockWaitMs = (System.nanoTime() - waitStarted) / 1_000_000
-
-            // Another caller may have finished while this caller was waiting for the owner.
             val joined = preparedMainPageManifest
             if (joined != null && joined.manifestUrl == currentUrl && joined.rawSignature == signature) {
-                println("[StremioC-Home][MANIFEST_SINGLE_FLIGHT] provider=$name reason=$reason mode=JOIN lockWaitMs=$lockWaitMs parseMs=0 catalogs=${joined.manifest.catalogs.size}")
-                MainPageManifestParseResult(joined.manifest, "JOIN", lockWaitMs, 0L)
+                joined.manifest
             } else {
-                val parseStarted = System.nanoTime()
                 val parsed: Manifest? = runCatching { parseJson<Manifest>(raw) }.getOrNull()
-                val parseMs = (System.nanoTime() - parseStarted) / 1_000_000
                 if (parsed != null && parsed.catalogs.isNotEmpty()) {
                     preparedMainPageManifest = PreparedMainPageManifest(currentUrl, signature, parsed)
-                    println("[StremioC-Home][MANIFEST_SINGLE_FLIGHT] provider=$name reason=$reason mode=OWNER lockWaitMs=$lockWaitMs parseMs=$parseMs catalogs=${parsed.catalogs.size}")
-                    MainPageManifestParseResult(parsed, "OWNER", lockWaitMs, parseMs)
+                    parsed
                 } else {
-                    println("[StremioC-Home][MANIFEST_SINGLE_FLIGHT] provider=$name reason=$reason mode=OWNER_FAILED lockWaitMs=$lockWaitMs parseMs=$parseMs")
-                    MainPageManifestParseResult(null, "OWNER_FAILED", lockWaitMs, parseMs)
+                    null
                 }
             }
         }
@@ -805,91 +699,45 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
      * This is not a catalog-result cache: only the manifest definition is retained in RAM.
      * A settings/manifest change is detected by the SHA-256 signature and reparsed automatically.
      */
-    suspend fun warmMainPageManifest(reason: String = "BOOT"): Boolean {
+    suspend fun warmMainPageManifest(): Boolean {
         if (mainUrl.isBlank()) return false
         val context = CloudStreamApp.context ?: return false
         val manifestPrefs = context.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
         val currentUrl = stremioManifestUrl(mainUrl)
-        val readStarted = System.nanoTime()
         val raw = stremioReadManifest(manifestPrefs, mainUrl)
-        val readMs = (System.nanoTime() - readStarted) / 1_000_000
-        if (raw.isNullOrBlank()) {
-            println("[StremioC-Home][MANIFEST_WARM] provider=$name reason=$reason stage=MISS readMs=$readMs")
-            return false
-        }
+        if (raw.isNullOrBlank()) return false
 
-        val signatureStarted = System.nanoTime()
         val signature = raw.toUniqueKey()
-        val signatureMs = (System.nanoTime() - signatureStarted) / 1_000_000
-        val result = withContext(Dispatchers.Default) {
-            parseMainPageManifestSingleFlight(raw, currentUrl, signature, "WARM_$reason")
+        val parsed = withContext(Dispatchers.Default) {
+            parseMainPageManifestSingleFlight(raw, currentUrl, signature)
         }
-        val parsed = result.manifest
-        if (parsed == null || parsed.catalogs.isEmpty()) {
-            println("[StremioC-Home][MANIFEST_WARM] provider=$name reason=$reason stage=FAILED mode=${result.mode} readMs=$readMs signatureMs=$signatureMs lockWaitMs=${result.lockWaitMs} parseMs=${result.parseMs}")
-            return false
-        }
-
-        val stage = when (result.mode) {
-            "HIT" -> "HIT"
-            "JOIN" -> "JOIN"
-            else -> "READY"
-        }
-        println("[StremioC-Home][MANIFEST_WARM] provider=$name reason=$reason stage=$stage mode=${result.mode} catalogs=${parsed.catalogs.size} readMs=$readMs signatureMs=$signatureMs lockWaitMs=${result.lockWaitMs} parseMs=${result.parseMs}")
-        return true
+        return parsed?.catalogs?.isNotEmpty() == true
     }
 
 
     override val mainPage: List<MainPageData>
         get() {
-            val perfStarted = System.nanoTime()
             val context = CloudStreamApp.context ?: return emptyList()
             val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
             val manifestPrefs = context.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
 
             val currentUrl = stremioManifestUrl(mainUrl)
             val uniqueKey = stremioCatalogKey(mainUrl)
-            val migrateStarted = System.nanoTime()
             migrateStremioCatalogSettings(prefs, mainUrl)
-            val migrateMs = (System.nanoTime() - migrateStarted) / 1_000_000
-            val manifestReadStarted = System.nanoTime()
             val diskCache = stremioReadManifest(manifestPrefs, mainUrl)
-            val manifestReadMs = (System.nanoTime() - manifestReadStarted) / 1_000_000
-            // Settings refresh writes the authoritative definition. Reuse the typed manifest only
-            // while its SHA-256 signature still matches the persisted raw JSON.
-            val manifestParseStarted = System.nanoTime()
-            var manifestSource = "MEMORY_MANIFEST"
             val rawCatalogs = if (!diskCache.isNullOrBlank()) {
-                val signature = diskCache.toUniqueKey()
-                val result = parseMainPageManifestSingleFlight(
+                val parsed = parseMainPageManifestSingleFlight(
                     diskCache,
                     currentUrl,
-                    signature,
-                    "MAINPAGE"
+                    diskCache.toUniqueKey()
                 )
-                val parsed = result.manifest
-                if (parsed != null) {
-                    manifestSource = when (result.mode) {
-                        "HIT" -> "PREPARSED_DISK"
-                        "JOIN" -> "PREPARSED_JOIN"
-                        else -> "DISK_PARSED_OWNER"
-                    }
-                    parsed.catalogs
-                } else {
-                    manifestSource = "MEMORY_FALLBACK"
-                    cachedManifest?.catalogs.orEmpty()
-                }
+                parsed?.catalogs ?: cachedManifest?.catalogs.orEmpty()
             } else {
                 cachedManifest?.catalogs.orEmpty()
             }
-            val manifestParseMs = (System.nanoTime() - manifestParseStarted) / 1_000_000
 
-            if (rawCatalogs.isEmpty()) {
-                println("[StremioC-Home][MAINPAGE_BUILD] provider=$name stage=NO_CATALOG migrateMs=$migrateMs manifestReadMs=$manifestReadMs manifestParseMs=$manifestParseMs totalMs=${(System.nanoTime() - perfStarted) / 1_000_000}")
-                return emptyList()
-            }
-            
-            val tabBuildStarted = System.nanoTime()
+            if (rawCatalogs.isEmpty()) return emptyList()
+
             val flatTabs = mutableListOf<FlatTab>()
             rawCatalogs.forEach { catalog ->
                 if (!catalog.supportsHome()) return@forEach
@@ -897,9 +745,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val catalogType = catalog.type ?: "movie"
                 val catalogName = catalog.name ?: catalogId
                 val displayType = catalogType.replaceFirstChar { it.uppercase() }
-                
-                val requiresGenre = catalog.requiresExtra("genre")
 
+                val requiresGenre = catalog.requiresExtra("genre")
                 if (!requiresGenre) {
                     flatTabs.add(FlatTab(
                         key = "${catalogId}_${catalogType}_default",
@@ -921,9 +768,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     ))
                 }
             }
-            val tabBuildMs = (System.nanoTime() - tabBuildStarted) / 1_000_000
 
-            val orderStarted = System.nanoTime()
             val orderKey = "catalog_order_$uniqueKey"
             val legacyKey = currentUrl.toLegacyUniqueKey()
             val orderJson = prefs.getString(orderKey, null)
@@ -932,41 +777,32 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             if (orderJson != null) {
                 try {
                     val arr = org.json.JSONArray(orderJson)
-                    for (i in 0 until arr.length()) {
-                        orderedKeys.add(arr.getString(i))
-                    }
+                    for (i in 0 until arr.length()) orderedKeys.add(arr.getString(i))
                 } catch (e: Exception) { e.printStackTrace() }
             }
 
             val rank = orderedKeys.withIndex().associate { it.value to it.index }
             val sortedTabs = flatTabs.sortedBy { rank[it.key] ?: Int.MAX_VALUE }
-            val orderMs = (System.nanoTime() - orderStarted) / 1_000_000
-
-            val filterStarted = System.nanoTime()
             val enabledTabs = buildList<Pair<String, String>> {
-                    sortedTabs.forEach { tab ->
-                        val isEnabled = if (tab.key.contains("_genre_")) {
-                            val catalogKey = tab.key.substringBefore("_genre_")
-                            val masterKey = "genres_enabled_${uniqueKey}_$catalogKey"
-                            val tabKey = "tab_enabled_${uniqueKey}_${tab.key}"
-                            val isGenresMasterEnabled = if (prefs.contains(masterKey)) prefs.getBoolean(masterKey, true)
-                                else prefs.getBoolean("genres_enabled_${legacyKey}_$catalogKey", true)
-                            val isIndividualGenreEnabled = if (prefs.contains(tabKey)) prefs.getBoolean(tabKey, true)
-                                else prefs.getBoolean("tab_enabled_${legacyKey}_${tab.key}", true)
-                            isGenresMasterEnabled && isIndividualGenreEnabled
-                        } else {
-                            val tabKey = "tab_enabled_${uniqueKey}_${tab.key}"
-                            if (prefs.contains(tabKey)) prefs.getBoolean(tabKey, true)
-                                else prefs.getBoolean("tab_enabled_${legacyKey}_${tab.key}", true)
-                        }
-                        
-                        if (isEnabled) {
-                            add(tab.urlPath to tab.displayName)
-                        }
+                sortedTabs.forEach { tab ->
+                    val isEnabled = if (tab.key.contains("_genre_")) {
+                        val catalogKey = tab.key.substringBefore("_genre_")
+                        val masterKey = "genres_enabled_${uniqueKey}_$catalogKey"
+                        val tabKey = "tab_enabled_${uniqueKey}_${tab.key}"
+                        val isGenresMasterEnabled = if (prefs.contains(masterKey)) prefs.getBoolean(masterKey, true)
+                            else prefs.getBoolean("genres_enabled_${legacyKey}_$catalogKey", true)
+                        val isIndividualGenreEnabled = if (prefs.contains(tabKey)) prefs.getBoolean(tabKey, true)
+                            else prefs.getBoolean("tab_enabled_${legacyKey}_${tab.key}", true)
+                        isGenresMasterEnabled && isIndividualGenreEnabled
+                    } else {
+                        val tabKey = "tab_enabled_${uniqueKey}_${tab.key}"
+                        if (prefs.contains(tabKey)) prefs.getBoolean(tabKey, true)
+                            else prefs.getBoolean("tab_enabled_${legacyKey}_${tab.key}", true)
                     }
+
+                    if (isEnabled) add(tab.urlPath to tab.displayName)
                 }
-            val filterMs = (System.nanoTime() - filterStarted) / 1_000_000
-            println("[StremioC-Home][MAINPAGE_BUILD] provider=$name source=$manifestSource catalogs=${rawCatalogs.size} flatTabs=${flatTabs.size} enabledTabs=${enabledTabs.size} migrateMs=$migrateMs manifestReadMs=$manifestReadMs manifestParseMs=$manifestParseMs tabBuildMs=$tabBuildMs orderMs=$orderMs filterMs=$filterMs totalMs=${(System.nanoTime() - perfStarted) / 1_000_000}")
+            }
             return mainPageOf(*enabledTabs.toTypedArray())
         }
 
@@ -974,18 +810,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return "$mainUrl|${request.data}"
     }
 
-    fun homeTuningSummary(): String =
-        "foreground=${HOME_FOREGROUND_CONCURRENCY} background=${HOME_PREFETCH_CONCURRENCY} manifestWarm=singleFlight prefetchInFlight=handoff"
 
     private fun isThisProviderSelectedOnHome(): Boolean =
         DataStoreHelper.currentHomePage?.equals(name, ignoreCase = true) == true
 
-    private suspend fun waitForBackgroundPrefetchWindow(): Long {
-        val started = System.nanoTime()
+    private suspend fun waitForBackgroundPrefetchWindow() {
         while (foregroundHomeRequests.get() > 0 || isThisProviderSelectedOnHome()) {
             delay(HOME_PREFETCH_IDLE_POLL_MS)
         }
-        return (System.nanoTime() - started) / 1_000_000
     }
 
     private suspend fun consumeOneShotPrefetch(request: MainPageRequest): HomePageResponse? {
@@ -993,9 +825,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val now = System.currentTimeMillis()
         var expired: OneShotPrefetch? = null
         val entry = prefetchMutex.withLock {
-            // Mark this row as foreground-seen for the current visit. It is cleared only after
-            // CloudStream switches away from this provider, so background refresh cannot rewind
-            // page-2 pagination while this provider is selected.
             foregroundSeenPage1.add(stateKey)
             val candidate = page1Prefetch[stateKey] ?: return@withLock null
             if (now - candidate.createdAtMs > HOME_PREFETCH_TTL_MS) {
@@ -1010,28 +839,16 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         if (expired != null) {
             expired!!.scope.cancel()
-            println("[StremioC-Home][PREFETCH] provider=$name tab=${request.name} stage=MISS reason=EXPIRED")
             return null
         }
-        if (entry == null) {
-            println("[StremioC-Home][PREFETCH] provider=$name tab=${request.name} stage=MISS reason=NONE")
-            return null
-        }
+        if (entry == null) return null
 
-        val state = if (entry.deferred.isCompleted) "READY" else "IN_FLIGHT"
-        val ageMs = now - entry.createdAtMs
-        println("[StremioC-Home][PREFETCH] trace=${entry.traceId} provider=$name tab=${request.name} stage=CONSUME state=$state ageMs=$ageMs")
         return try {
-            val awaitStarted = System.nanoTime()
-            val result = entry.deferred.await()
-            println("[StremioC-Home][PREFETCH] trace=${entry.traceId} provider=$name tab=${request.name} stage=CONSUMED awaitMs=${(System.nanoTime() - awaitStarted) / 1_000_000}")
-            result
+            entry.deferred.await()
         } catch (e: CancellationException) {
             if (!currentCoroutineContext().isActive) throw e
-            println("[StremioC-Home][PREFETCH] trace=${entry.traceId} provider=$name tab=${request.name} stage=FALLBACK reason=CANCELLED")
             null
-        } catch (t: Throwable) {
-            println("[StremioC-Home][PREFETCH] trace=${entry.traceId} provider=$name tab=${request.name} stage=FALLBACK reason=FAILED errorClass=${t.javaClass.simpleName}")
+        } catch (_: Throwable) {
             null
         } finally {
             prefetchMutex.withLock {
@@ -1041,186 +858,103 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
     }
 
+    private suspend fun schedulePrefetchExpiry(stateKey: String, entry: OneShotPrefetch) {
+        entry.scope.launch {
+            delay(HOME_PREFETCH_TTL_MS)
+            var removed = false
+            prefetchMutex.withLock {
+                if (page1Prefetch[stateKey] === entry && !entry.claimed) {
+                    page1Prefetch.remove(stateKey)
+                    removed = true
+                }
+            }
+            if (removed) entry.scope.cancel()
+        }
+    }
+
     private suspend fun prefetchOnePage(request: MainPageRequest) {
         val stateKey = getCatalogStateKey(request)
-        val traceId = "p" + (System.nanoTime() and 0xFFFFFFL).toString(16)
-        var skipReason: String? = null
-
         val entry = prefetchMutex.withLock {
-            if (foregroundSeenPage1.contains(stateKey)) {
-                skipReason = "FOREGROUND_SEEN"
-                return@withLock null
-            }
-            page1Prefetch[stateKey]?.let {
-                skipReason = "EXISTS"
+            if (foregroundSeenPage1.contains(stateKey) || page1Prefetch.containsKey(stateKey)) {
                 return@withLock null
             }
 
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             val deferred = scope.async(start = CoroutineStart.LAZY) {
-                executeMainPage(1, request, "PREFETCH", traceId)
+                executeMainPage(1, request, "PREFETCH")
             }
             OneShotPrefetch(
                 scope = scope,
                 deferred = deferred,
-                traceId = traceId,
                 createdAtMs = System.currentTimeMillis()
             ).also { page1Prefetch[stateKey] = it }
-        }
+        } ?: return
 
-        if (entry == null) {
-            println("[StremioC-Home][PREFETCH] provider=$name tab=${request.name} stage=SKIP reason=${skipReason ?: "UNKNOWN"}")
-            return
-        }
-
-        println("[StremioC-Home][PREFETCH] trace=$traceId provider=$name tab=${request.name} stage=START")
         entry.deferred.start()
         try {
-            val started = System.nanoTime()
             entry.deferred.await()
-            println("[StremioC-Home][PREFETCH] trace=$traceId provider=$name tab=${request.name} stage=READY ms=${(System.nanoTime() - started) / 1_000_000}")
-
-            // Keep only the completed one-shot result. It is never persisted and is removed on
-            // first foreground use or after the short TTL.
-            entry.scope.launch {
-                delay(HOME_PREFETCH_TTL_MS)
-                var removed = false
-                prefetchMutex.withLock {
-                    if (page1Prefetch[stateKey] === entry && !entry.claimed) {
-                        page1Prefetch.remove(stateKey)
-                        removed = true
-                    }
-                }
-                if (removed) {
-                    println("[StremioC-Home][PREFETCH] trace=$traceId provider=$name tab=${request.name} stage=EXPIRE ttlMs=$HOME_PREFETCH_TTL_MS")
-                    entry.scope.cancel()
-                }
-            }
+            schedulePrefetchExpiry(stateKey, entry)
         } catch (e: CancellationException) {
             if (!currentCoroutineContext().isActive) {
-                // HOME_SWITCH return cancels the refill coordinator, not the independent row scope.
-                // Hold this background permit until the exact request completes, so BG=4 remains a
-                // real upper bound. Foreground may await the same Deferred concurrently.
-                println("[StremioC-Home][PREFETCH] trace=$traceId provider=$name tab=${request.name} stage=HANDOFF_IN_FLIGHT reason=COORDINATOR_CANCELLED")
                 val completed = withContext(NonCancellable) {
                     runCatching { entry.deferred.await() }.isSuccess
                 }
                 if (completed) {
-                    println("[StremioC-Home][PREFETCH] trace=$traceId provider=$name tab=${request.name} stage=READY_HANDOFF")
-                    entry.scope.launch {
-                        delay(HOME_PREFETCH_TTL_MS)
-                        var removed = false
-                        prefetchMutex.withLock {
-                            if (page1Prefetch[stateKey] === entry && !entry.claimed) {
-                                page1Prefetch.remove(stateKey)
-                                removed = true
-                            }
-                        }
-                        if (removed) {
-                            println("[StremioC-Home][PREFETCH] trace=$traceId provider=$name tab=${request.name} stage=EXPIRE ttlMs=$HOME_PREFETCH_TTL_MS")
-                            entry.scope.cancel()
-                        }
-                    }
+                    schedulePrefetchExpiry(stateKey, entry)
                 } else {
                     prefetchMutex.withLock {
                         if (page1Prefetch[stateKey] === entry) page1Prefetch.remove(stateKey)
                     }
                     if (!entry.claimed) entry.scope.cancel()
-                    println("[StremioC-Home][PREFETCH] trace=$traceId provider=$name tab=${request.name} stage=HANDOFF_FAILED")
                 }
                 throw e
             }
 
-            // The row Deferred itself was cancelled (for example explicit INVALIDATE), so remove it.
             prefetchMutex.withLock {
                 if (page1Prefetch[stateKey] === entry) page1Prefetch.remove(stateKey)
             }
-            println("[StremioC-Home][PREFETCH] trace=$traceId provider=$name tab=${request.name} stage=CANCELLED")
             entry.scope.cancel()
-        } catch (t: Throwable) {
+        } catch (_: Throwable) {
             prefetchMutex.withLock {
                 if (page1Prefetch[stateKey] === entry) page1Prefetch.remove(stateKey)
             }
-            println("[StremioC-Home][PREFETCH] trace=$traceId provider=$name tab=${request.name} stage=FAILED errorClass=${t.javaClass.simpleName}")
             entry.scope.cancel()
         }
     }
 
-    /**
-     * Volatile page-1 prefetch for this registered Stremio provider.
-     *
-     * - boot-time fill + re-fill after the provider is left
-     * - never writes catalog results to disk/SharedPreferences
-     * - never prefetches page 2+
-     * - never starts new prefetch work while this provider is the selected homepage
-     * - A/B profile B allows at most four background catalog fetches globally
-     * - successful results are consumed once and then removed, or expire after 5 minutes
-     */
-    suspend fun prefetchEnabledMainPageCatalogs(reason: String = "BOOT") {
+    suspend fun prefetchEnabledMainPageCatalogs() {
         if (mainUrl.isBlank()) return
         prefetchSweepMutex.withLock {
             val tabs = try {
                 mainPage
-            } catch (t: Throwable) {
-                println("[StremioC-Home][PREFETCH] provider=$name stage=PROVIDER_FAILED point=MAINPAGE reason=$reason errorClass=${t.javaClass.simpleName}")
+            } catch (_: Throwable) {
                 return@withLock
             }
-            if (tabs.isEmpty()) {
-                println("[StremioC-Home][PREFETCH] provider=$name stage=PROVIDER_EMPTY reason=$reason")
-                return@withLock
-            }
+            if (tabs.isEmpty()) return@withLock
 
-            println("[StremioC-Home][PREFETCH] provider=$name stage=PROVIDER_START reason=$reason tabs=${tabs.size}")
-            var startedCount = 0
             for (tab in tabs) {
                 currentCoroutineContext().ensureActive()
                 val request = MainPageRequest(tab.name, tab.data, tab.horizontalImages)
-                if (prefetchMutex.withLock { foregroundSeenPage1.contains(getCatalogStateKey(request)) }) {
-                    println("[StremioC-Home][PREFETCH] provider=$name tab=${tab.name} stage=SKIP reason=FOREGROUND_SEEN cycle=$reason")
-                    continue
-                }
+                if (prefetchMutex.withLock { foregroundSeenPage1.contains(getCatalogStateKey(request)) }) continue
 
-                val foregroundWaitMs = waitForBackgroundPrefetchWindow()
-                if (foregroundWaitMs > 0) {
-                    println("[StremioC-Home][PREFETCH] provider=$name tab=${tab.name} stage=WAIT_WINDOW cycle=$reason waitMs=$foregroundWaitMs selected=${DataStoreHelper.currentHomePage ?: "none"}")
-                }
+                waitForBackgroundPrefetchWindow()
                 homePrefetchSemaphore.withPermit {
-                    // Re-check after acquiring a background slot. A provider switch or foreground
-                    // pagination can happen while this worker is queued.
-                    val afterSlotWaitMs = waitForBackgroundPrefetchWindow()
-                    if (afterSlotWaitMs > 0) {
-                        println("[StremioC-Home][PREFETCH] provider=$name tab=${tab.name} stage=WAIT_WINDOW_AFTER_SLOT cycle=$reason waitMs=$afterSlotWaitMs selected=${DataStoreHelper.currentHomePage ?: "none"}")
-                    }
-                    if (prefetchMutex.withLock { foregroundSeenPage1.contains(getCatalogStateKey(request)) }) {
-                        println("[StremioC-Home][PREFETCH] provider=$name tab=${tab.name} stage=SKIP reason=FOREGROUND_SEEN_AFTER_WAIT cycle=$reason")
-                    } else {
+                    waitForBackgroundPrefetchWindow()
+                    if (!prefetchMutex.withLock { foregroundSeenPage1.contains(getCatalogStateKey(request)) }) {
                         prefetchOnePage(request)
-                        startedCount++
                     }
                 }
             }
-            println("[StremioC-Home][PREFETCH] provider=$name stage=PROVIDER_DONE reason=$reason attempted=$startedCount tabs=${tabs.size}")
         }
     }
 
-    /**
-     * Called after CloudStream switches away from this provider. The consumed one-shot rows are
-     * replenished in RAM while another provider is selected. Existing unconsumed READY entries
-     * are preserved; only missing rows are fetched again. No catalog result is persisted to disk.
-     */
-    suspend fun rearmOneShotCatalogPrefetch(reason: String = "HOME_SWITCH") {
+    suspend fun rearmOneShotCatalogPrefetch() {
         if (mainUrl.isBlank()) return
-        val clearedSeen = prefetchMutex.withLock {
-            val count = foregroundSeenPage1.size
-            foregroundSeenPage1.clear()
-            count
-        }
-        println("[StremioC-Home][PREFETCH_REFRESH] provider=$name stage=REARM reason=$reason clearedForegroundSeen=$clearedSeen existing=${prefetchMutex.withLock { page1Prefetch.size }}")
-        prefetchEnabledMainPageCatalogs("REARM_$reason")
+        prefetchMutex.withLock { foregroundSeenPage1.clear() }
+        prefetchEnabledMainPageCatalogs()
     }
 
-
-    suspend fun cancelOneShotCatalogPrefetch(reason: String = "INVALIDATE") {
+    suspend fun cancelOneShotCatalogPrefetch() {
         val entries = prefetchMutex.withLock {
             val copy = page1Prefetch.values.toList()
             page1Prefetch.clear()
@@ -1228,9 +962,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             copy
         }
         entries.forEach { it.scope.cancel() }
-        if (entries.isNotEmpty()) {
-            println("[StremioC-Home][PREFETCH] provider=$name stage=INVALIDATE reason=$reason entries=${entries.size}")
-        }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -1249,7 +980,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 throw e
             } catch (t: Throwable) {
                 val status = (t as? CatalogHttpException)?.statusCode?.toString() ?: "none"
-                println("[StremioC-Home][ROW_FAIL_ISOLATED] provider=$name tab=${request.name} page=$page status=$status errorClass=${t.javaClass.simpleName}")
+                com.lagradost.api.Log.w("StremioC", "home row isolated provider=$name tab=${request.name} page=$page status=$status errorClass=${t.javaClass.simpleName}")
                 newHomePageResponse(listOf(HomePageList(request.name, emptyList<SearchResponse>())), hasNext = false)
             }
         } finally {
@@ -1260,24 +991,16 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     private suspend fun executeMainPage(
         page: Int,
         request: MainPageRequest,
-        origin: String,
-        forcedTraceId: String? = null
+        origin: String
     ): HomePageResponse {
-        val totalStarted = System.nanoTime()
-        val requestedTraceId = forcedTraceId ?: (System.nanoTime() and 0xFFFFFFL).toString(16)
-        var traceId = requestedTraceId
         val stateKey = getCatalogStateKey(request)
         val key = "$stateKey|page=$page"
         var owner = false
 
-        val dispatchLockStarted = System.nanoTime()
         val flight = pageMutex.withLock {
-            val dispatchLockMs = (System.nanoTime() - dispatchLockStarted) / 1_000_000
             val existing = activePageRequests[key]
             if (existing != null) {
                 existing.waiters++
-                traceId = existing.traceId
-                println("[StremioC-Home][PERF][$traceId][DISPATCH] provider=$name tab=${request.name} page=$page origin=$origin mode=JOIN waiters=${existing.waiters} lockWaitMs=$dispatchLockMs")
                 existing
             } else {
                 owner = true
@@ -1288,20 +1011,16 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 } else catalogGenerations[stateKey] ?: 0L
                 val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
                 val deferred = scope.async(start = CoroutineStart.LAZY) {
-                    fetchTabCatalogData(request, page, generation, requestedTraceId, origin)
+                    fetchTabCatalogData(request, page, generation, origin)
                 }
-                println("[StremioC-Home][PERF][$requestedTraceId][DISPATCH] provider=$name tab=${request.name} page=$page origin=$origin mode=OWNER generation=$generation lockWaitMs=$dispatchLockMs")
-                PageFlight(scope, deferred, requestedTraceId, 1).also { activePageRequests[key] = it }
+                PageFlight(scope, deferred, 1).also { activePageRequests[key] = it }
             }
         }
 
         try {
-            val awaitStarted = System.nanoTime()
             val response = flight.deferred.await()
-            println("[StremioC-Home][PERF][$traceId][AWAIT] provider=$name tab=${request.name} page=$page origin=$origin owner=$owner awaitMs=${(System.nanoTime() - awaitStarted) / 1_000_000}")
             return if (!owner && page > 1) newHomePageResponse(emptyList(), hasNext = true) else response
         } finally {
-            val cleanupStarted = System.nanoTime()
             withContext(NonCancellable) {
                 pageMutex.withLock {
                     flight.waiters--
@@ -1311,7 +1030,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     }
                 }
             }
-            println("[StremioC-Home][PERF][$traceId][TOTAL] provider=$name tab=${request.name} page=$page origin=$origin cleanupMs=${(System.nanoTime() - cleanupStarted) / 1_000_000} totalMs=${(System.nanoTime() - totalStarted) / 1_000_000}")
         }
     }
 
@@ -1319,68 +1037,43 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         request: MainPageRequest,
         page: Int,
         generation: Long,
-        traceId: String,
         origin: String
     ): HomePageResponse {
-        val totalStarted = System.nanoTime()
         val stateKey = getCatalogStateKey(request)
 
         if ((catalogGenerations[stateKey] ?: 0L) != generation) {
-            println("[StremioC-Home][PERF][$traceId][STALE] provider=$name tab=${request.name} page=$page origin=$origin point=ENTRY")
             return newHomePageResponse(emptyList(), hasNext = false)
         }
 
         if (page > 1 && !catalogSkipState.containsKey(stateKey)) {
-            val coldStarted = System.nanoTime()
-            println("[StremioC-Home][PERF][$traceId][COLD_START] provider=$name tab=${request.name} page=$page origin=$origin action=PREFETCH_PAGE1")
-            fetchTabCatalogData(request, 1, generation, traceId, origin)
-            println("[StremioC-Home][PERF][$traceId][COLD_START] provider=$name tab=${request.name} page=$page origin=$origin prefetchMs=${(System.nanoTime() - coldStarted) / 1_000_000}")
+            fetchTabCatalogData(request, 1, generation, origin)
         }
 
         if ((catalogGenerations[stateKey] ?: 0L) != generation) {
-            println("[StremioC-Home][PERF][$traceId][STALE] provider=$name tab=${request.name} page=$page origin=$origin point=BEFORE_FETCH")
             return newHomePageResponse(emptyList(), hasNext = false)
         }
 
         val currentSkip = catalogSkipState[stateKey] ?: 0
         val targetPath = request.data.replace("###", currentSkip.toString())
         val targetUrl = buildUrl(targetPath)
-        println("[StremioC-Home][PERF][$traceId][START] provider=$name tab=${request.name} page=$page origin=$origin skip=$currentSkip")
 
-        val queueStarted = System.nanoTime()
         val jsonText = StremioC.homeNetworkSemaphore.withPermit {
-            val queueWaitMs = (System.nanoTime() - queueStarted) / 1_000_000
-            println("[StremioC-Home][PERF][$traceId][QUEUE] provider=$name tab=${request.name} page=$page origin=$origin waitMs=$queueWaitMs")
-            val httpStarted = System.nanoTime()
-            try {
-                val text = fetchHomeJson(targetUrl, HomeRequestTrace(traceId, name, request.name, page, origin))
-                println("[StremioC-Home][PERF][$traceId][HTTP] provider=$name tab=${request.name} page=$page origin=$origin ms=${(System.nanoTime() - httpStarted) / 1_000_000} bytes=${text.length}")
-                text
-            } catch (t: Throwable) {
-                println("[StremioC-Home][PERF][$traceId][HTTP_FAILED] provider=$name tab=${request.name} page=$page origin=$origin ms=${(System.nanoTime() - httpStarted) / 1_000_000} errorClass=${t.javaClass.simpleName}")
-                throw t
-            }
+            fetchHomeJson(targetUrl, origin)
         }
 
-        val parseStarted = System.nanoTime()
         val metas = try {
             parseJson<HomeCatalogResponse>(jsonText).metas
                 ?: throw IllegalStateException("Catalog response is missing metas")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            println("[StremioC-Home][PERF][$traceId][PARSE_FAILED] provider=$name tab=${request.name} page=$page origin=$origin ms=${(System.nanoTime() - parseStarted) / 1_000_000} errorClass=${e.javaClass.simpleName}")
             throw IllegalStateException("Invalid catalog response", e)
         }
-        val parseMs = (System.nanoTime() - parseStarted) / 1_000_000
-        println("[StremioC-Home][PERF][$traceId][PARSE] provider=$name tab=${request.name} page=$page origin=$origin ms=$parseMs metas=${metas.size}")
 
         if ((catalogGenerations[stateKey] ?: 0L) != generation) {
-            println("[StremioC-Home][PERF][$traceId][STALE] provider=$name tab=${request.name} page=$page origin=$origin point=AFTER_PARSE")
             return newHomePageResponse(emptyList(), hasNext = false)
         }
 
-        val mapStarted = System.nanoTime()
         val mappedItems = metas.map { meta ->
             val type = meta.type ?: "movie"
             val title = meta.name?.takeIf { it.isNotBlank() }
@@ -1389,41 +1082,25 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 posterUrl = meta.poster
             }
         }
-        val mapMs = (System.nanoTime() - mapStarted) / 1_000_000
-        println("[StremioC-Home][PERF][$traceId][MAP] provider=$name tab=${request.name} page=$page origin=$origin ms=$mapMs items=${mappedItems.size}")
         val resultPair = Pair(mappedItems, metas.size)
 
-        val finalizeLockStarted = System.nanoTime()
         return pageMutex.withLock {
-            val finalizeLockMs = (System.nanoTime() - finalizeLockStarted) / 1_000_000
             if ((catalogGenerations[stateKey] ?: 0L) != generation) {
-                println("[StremioC-Home][PERF][$traceId][STALE] provider=$name tab=${request.name} page=$page origin=$origin point=FINALIZE lockWaitMs=$finalizeLockMs")
                 return@withLock newHomePageResponse(emptyList(), hasNext = false)
             }
 
-            val stateStarted = System.nanoTime()
             catalogSkipState[stateKey] = currentSkip + resultPair.second
 
             var seenForThisCatalog = catalogSentIds[stateKey]
             if (seenForThisCatalog == null) {
                 synchronized(catalogSentIds) {
-                    seenForThisCatalog = catalogSentIds.getOrPut(stateKey) {
-                        lruSet(500)
-                    }
+                    seenForThisCatalog = catalogSentIds.getOrPut(stateKey) { lruSet(500) }
                 }
             }
 
-            var duplicateCount = 0
-            val dedupStarted = System.nanoTime()
             val filteredItems = resultPair.first.filter { item ->
-                val pureId = item.extractPureId()
-                val isNew = seenForThisCatalog!!.add(pureId)
-                if (!isNew) duplicateCount++
-                isNew
+                seenForThisCatalog!!.add(item.extractPureId())
             }
-            val dedupMs = (System.nanoTime() - dedupStarted) / 1_000_000
-            val stateMs = (System.nanoTime() - stateStarted) / 1_000_000
-            println("[StremioC-Home][PERF][$traceId][FINALIZE] provider=$name tab=${request.name} page=$page origin=$origin lockWaitMs=$finalizeLockMs stateMs=$stateMs dedupMs=$dedupMs duplicates=$duplicateCount returned=${filteredItems.size} nextSkip=${catalogSkipState[stateKey]} totalFetchMs=${(System.nanoTime() - totalStarted) / 1_000_000}")
 
             newHomePageResponse(
                 listOf(HomePageList(request.name, filteredItems)),
