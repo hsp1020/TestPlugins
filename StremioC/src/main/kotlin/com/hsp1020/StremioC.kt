@@ -126,6 +126,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val manifest: Manifest,
     )
     @Volatile private var preparedMainPageManifest: PreparedMainPageManifest? = null
+    // mainPage is a synchronous property, so the manifest warm-up and foreground build share
+    // this JVM lock. A matching persisted manifest is parsed by exactly one owner; a concurrent
+    // caller waits for that owner and reuses the prepared object instead of parsing twice.
+    private val mainPageManifestParseLock = Any()
+
+    private data class MainPageManifestParseResult(
+        val manifest: Manifest?,
+        val mode: String,
+        val lockWaitMs: Long,
+        val parseMs: Long,
+    )
     
     private val pageMutex = Mutex()
     private class PageFlight(
@@ -752,6 +763,43 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 
 
+    private fun parseMainPageManifestSingleFlight(
+        raw: String,
+        currentUrl: String,
+        signature: String,
+        reason: String,
+    ): MainPageManifestParseResult {
+        preparedMainPageManifest?.let { existing ->
+            if (existing.manifestUrl == currentUrl && existing.rawSignature == signature) {
+                return MainPageManifestParseResult(existing.manifest, "HIT", 0L, 0L)
+            }
+        }
+
+        val waitStarted = System.nanoTime()
+        return synchronized(mainPageManifestParseLock) {
+            val lockWaitMs = (System.nanoTime() - waitStarted) / 1_000_000
+
+            // Another caller may have finished while this caller was waiting for the owner.
+            val joined = preparedMainPageManifest
+            if (joined != null && joined.manifestUrl == currentUrl && joined.rawSignature == signature) {
+                println("[StremioC-Home][MANIFEST_SINGLE_FLIGHT] provider=$name reason=$reason mode=JOIN lockWaitMs=$lockWaitMs parseMs=0 catalogs=${joined.manifest.catalogs.size}")
+                MainPageManifestParseResult(joined.manifest, "JOIN", lockWaitMs, 0L)
+            } else {
+                val parseStarted = System.nanoTime()
+                val parsed: Manifest? = runCatching { parseJson<Manifest>(raw) }.getOrNull()
+                val parseMs = (System.nanoTime() - parseStarted) / 1_000_000
+                if (parsed != null && parsed.catalogs.isNotEmpty()) {
+                    preparedMainPageManifest = PreparedMainPageManifest(currentUrl, signature, parsed)
+                    println("[StremioC-Home][MANIFEST_SINGLE_FLIGHT] provider=$name reason=$reason mode=OWNER lockWaitMs=$lockWaitMs parseMs=$parseMs catalogs=${parsed.catalogs.size}")
+                    MainPageManifestParseResult(parsed, "OWNER", lockWaitMs, parseMs)
+                } else {
+                    println("[StremioC-Home][MANIFEST_SINGLE_FLIGHT] provider=$name reason=$reason mode=OWNER_FAILED lockWaitMs=$lockWaitMs parseMs=$parseMs")
+                    MainPageManifestParseResult(null, "OWNER_FAILED", lockWaitMs, parseMs)
+                }
+            }
+        }
+    }
+
     /**
      * Parse the authoritative persisted manifest ahead of the first homepage build.
      * This is not a catalog-result cache: only the manifest definition is retained in RAM.
@@ -773,27 +821,21 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val signatureStarted = System.nanoTime()
         val signature = raw.toUniqueKey()
         val signatureMs = (System.nanoTime() - signatureStarted) / 1_000_000
-        val existing = preparedMainPageManifest
-        if (existing != null && existing.manifestUrl == currentUrl && existing.rawSignature == signature) {
-            println("[StremioC-Home][MANIFEST_WARM] provider=$name reason=$reason stage=HIT catalogs=${existing.manifest.catalogs.size} readMs=$readMs signatureMs=$signatureMs")
-            return true
+        val result = withContext(Dispatchers.Default) {
+            parseMainPageManifestSingleFlight(raw, currentUrl, signature, "WARM_$reason")
         }
-
-        val parseStarted = System.nanoTime()
-        val parsed = try {
-            withContext(Dispatchers.Default) { parseJson<Manifest>(raw) }
-        } catch (t: Throwable) {
-            println("[StremioC-Home][MANIFEST_WARM] provider=$name reason=$reason stage=FAILED errorClass=${t.javaClass.simpleName} readMs=$readMs signatureMs=$signatureMs parseMs=${(System.nanoTime() - parseStarted) / 1_000_000}")
-            return false
-        }
-        val parseMs = (System.nanoTime() - parseStarted) / 1_000_000
-        if (parsed.catalogs.isEmpty()) {
-            println("[StremioC-Home][MANIFEST_WARM] provider=$name reason=$reason stage=EMPTY readMs=$readMs signatureMs=$signatureMs parseMs=$parseMs")
+        val parsed = result.manifest
+        if (parsed == null || parsed.catalogs.isEmpty()) {
+            println("[StremioC-Home][MANIFEST_WARM] provider=$name reason=$reason stage=FAILED mode=${result.mode} readMs=$readMs signatureMs=$signatureMs lockWaitMs=${result.lockWaitMs} parseMs=${result.parseMs}")
             return false
         }
 
-        preparedMainPageManifest = PreparedMainPageManifest(currentUrl, signature, parsed)
-        println("[StremioC-Home][MANIFEST_WARM] provider=$name reason=$reason stage=READY catalogs=${parsed.catalogs.size} readMs=$readMs signatureMs=$signatureMs parseMs=$parseMs")
+        val stage = when (result.mode) {
+            "HIT" -> "HIT"
+            "JOIN" -> "JOIN"
+            else -> "READY"
+        }
+        println("[StremioC-Home][MANIFEST_WARM] provider=$name reason=$reason stage=$stage mode=${result.mode} catalogs=${parsed.catalogs.size} readMs=$readMs signatureMs=$signatureMs lockWaitMs=${result.lockWaitMs} parseMs=${result.parseMs}")
         return true
     }
 
@@ -819,20 +861,23 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             var manifestSource = "MEMORY_MANIFEST"
             val rawCatalogs = if (!diskCache.isNullOrBlank()) {
                 val signature = diskCache.toUniqueKey()
-                val prepared = preparedMainPageManifest
-                if (prepared != null && prepared.manifestUrl == currentUrl && prepared.rawSignature == signature) {
-                    manifestSource = "PREPARSED_DISK"
-                    prepared.manifest.catalogs
-                } else {
-                    val parsed = runCatching { parseJson<Manifest>(diskCache) }.getOrNull()
-                    if (parsed != null) {
-                        preparedMainPageManifest = PreparedMainPageManifest(currentUrl, signature, parsed)
-                        manifestSource = "DISK_PARSED_NOW"
-                        parsed.catalogs
-                    } else {
-                        manifestSource = "MEMORY_FALLBACK"
-                        cachedManifest?.catalogs.orEmpty()
+                val result = parseMainPageManifestSingleFlight(
+                    diskCache,
+                    currentUrl,
+                    signature,
+                    "MAINPAGE"
+                )
+                val parsed = result.manifest
+                if (parsed != null) {
+                    manifestSource = when (result.mode) {
+                        "HIT" -> "PREPARSED_DISK"
+                        "JOIN" -> "PREPARSED_JOIN"
+                        else -> "DISK_PARSED_OWNER"
                     }
+                    parsed.catalogs
+                } else {
+                    manifestSource = "MEMORY_FALLBACK"
+                    cachedManifest?.catalogs.orEmpty()
                 }
             } else {
                 cachedManifest?.catalogs.orEmpty()
@@ -930,7 +975,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 
     fun homeTuningSummary(): String =
-        "foreground=${HOME_FOREGROUND_CONCURRENCY} background=${HOME_PREFETCH_CONCURRENCY} manifestWarm=true"
+        "foreground=${HOME_FOREGROUND_CONCURRENCY} background=${HOME_PREFETCH_CONCURRENCY} manifestWarm=singleFlight prefetchInFlight=handoff"
 
     private fun isThisProviderSelectedOnHome(): Boolean =
         DataStoreHelper.currentHomePage?.equals(name, ignoreCase = true) == true
@@ -1052,12 +1097,46 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
             }
         } catch (e: CancellationException) {
+            if (!currentCoroutineContext().isActive) {
+                // HOME_SWITCH return cancels the refill coordinator, not the independent row scope.
+                // Hold this background permit until the exact request completes, so BG=4 remains a
+                // real upper bound. Foreground may await the same Deferred concurrently.
+                println("[StremioC-Home][PREFETCH] trace=$traceId provider=$name tab=${request.name} stage=HANDOFF_IN_FLIGHT reason=COORDINATOR_CANCELLED")
+                val completed = withContext(NonCancellable) {
+                    runCatching { entry.deferred.await() }.isSuccess
+                }
+                if (completed) {
+                    println("[StremioC-Home][PREFETCH] trace=$traceId provider=$name tab=${request.name} stage=READY_HANDOFF")
+                    entry.scope.launch {
+                        delay(HOME_PREFETCH_TTL_MS)
+                        var removed = false
+                        prefetchMutex.withLock {
+                            if (page1Prefetch[stateKey] === entry && !entry.claimed) {
+                                page1Prefetch.remove(stateKey)
+                                removed = true
+                            }
+                        }
+                        if (removed) {
+                            println("[StremioC-Home][PREFETCH] trace=$traceId provider=$name tab=${request.name} stage=EXPIRE ttlMs=$HOME_PREFETCH_TTL_MS")
+                            entry.scope.cancel()
+                        }
+                    }
+                } else {
+                    prefetchMutex.withLock {
+                        if (page1Prefetch[stateKey] === entry) page1Prefetch.remove(stateKey)
+                    }
+                    if (!entry.claimed) entry.scope.cancel()
+                    println("[StremioC-Home][PREFETCH] trace=$traceId provider=$name tab=${request.name} stage=HANDOFF_FAILED")
+                }
+                throw e
+            }
+
+            // The row Deferred itself was cancelled (for example explicit INVALIDATE), so remove it.
             prefetchMutex.withLock {
                 if (page1Prefetch[stateKey] === entry) page1Prefetch.remove(stateKey)
             }
             println("[StremioC-Home][PREFETCH] trace=$traceId provider=$name tab=${request.name} stage=CANCELLED")
             entry.scope.cancel()
-            if (!currentCoroutineContext().isActive) throw e
         } catch (t: Throwable) {
             prefetchMutex.withLock {
                 if (page1Prefetch[stateKey] === entry) page1Prefetch.remove(stateKey)
