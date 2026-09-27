@@ -119,7 +119,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     private var lastCacheTime: Long = 0
     
     private val pageMutex = Mutex()
-    private val activePageRequests = mutableMapOf<String, Deferred<HomePageResponse>>()
+    private class PageFlight(
+        val scope: CoroutineScope,
+        val deferred: Deferred<HomePageResponse>,
+        var waiters: Int = 0
+    )
+    private val activePageRequests = mutableMapOf<String, PageFlight>()
+    private val manifestMutex = Mutex()
 
     private fun getCineStreamProvider(): MainAPI? {
         if (getKey<Boolean>("ProviderCineStream") == false) return null
@@ -304,6 +310,67 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
         }
 
+        private val homeClient by lazy {
+            app.baseClient.newBuilder()
+                .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)
+                .callTimeout(35, TimeUnit.SECONDS)
+                .cache(null)
+                .dispatcher(Dispatcher().apply {
+                    maxRequests = 10
+                    maxRequestsPerHost = 10
+                })
+                .connectionPool(ConnectionPool(10, 60, TimeUnit.SECONDS))
+                .build()
+        }
+        private val homeHostBackoff = ConcurrentHashMap<String, Long>()
+
+        private suspend fun fetchHomeJson(url: String): String {
+            val host = url.toHttpUrlOrNull()?.host ?: throw IllegalArgumentException("Invalid catalog URL")
+            val now = System.currentTimeMillis()
+            val until = homeHostBackoff[host] ?: 0L
+            if (until > now) throw IllegalStateException("Catalog server rate limited; retry later")
+            val request = okhttp3.Request.Builder().url(url).apply {
+                app.defaultHeaders.forEach { (name, value) -> header(name, value) }
+            }.build()
+            val started = System.nanoTime()
+            return suspendCancellableCoroutine { continuation ->
+                val call = homeClient.newCall(request)
+                continuation.invokeOnCancellation { call.cancel() }
+                call.enqueue(object : okhttp3.Callback {
+                    override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                        if (continuation.isActive) continuation.resumeWith(Result.failure(e))
+                    }
+                    override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                        val outcome = runCatching {
+                            response.use { res ->
+                                println("[StremioC-Home] status=${res.code} protocol=${res.protocol} httpMs=${(System.nanoTime() - started) / 1_000_000}")
+                                if (res.code == 429) {
+                                    val raw = res.header("Retry-After")
+                                    val delayMs = raw?.toLongOrNull()?.coerceIn(0L, 86400L)?.times(1000L)
+                                        ?: runCatching {
+                                            java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", java.util.Locale.US)
+                                                .parse(raw ?: "")?.time?.minus(System.currentTimeMillis())
+                                        }.getOrNull()?.coerceIn(0L, 86400000L) ?: 10000L
+                                    synchronized(homeHostBackoff) {
+                                        homeHostBackoff[host] = maxOf(
+                                            homeHostBackoff[host] ?: 0L,
+                                            System.currentTimeMillis() + delayMs
+                                        )
+                                    }
+                                    throw IllegalStateException("Catalog HTTP 429; retry later")
+                                }
+                                if (!res.isSuccessful) throw IllegalStateException("Catalog HTTP ${res.code}")
+                                res.body?.string() ?: throw IllegalStateException("Empty catalog response body")
+                            }
+                        }
+                        if (continuation.isActive) continuation.resumeWith(outcome)
+                    }
+                })
+            }
+        }
+
         fun loadProviderDynamically(
             pluginKeyword: String,
             className: String,
@@ -477,9 +544,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return if (link.startsWith("/")) "https://image.tmdb.org/t/p/w300$link" else link
     }
 
-    private suspend fun getManifest(): Manifest? {
-        val originalBase = mainUrl.substringBefore("?").trimEnd('/')
-        val currentUrl = if (originalBase.endsWith("manifest.json")) originalBase else "$originalBase/manifest.json"
+    private suspend fun getManifest(): Manifest? = manifestMutex.withLock {
+        fetchManifestLocked()
+    }
+
+    private suspend fun fetchManifestLocked(): Manifest? {
+        val currentUrl = stremioManifestUrl(mainUrl)
         
         val now = System.currentTimeMillis()
         val isExpired = (now - lastCacheTime) > CACHE_TTL_MS
@@ -496,23 +566,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             try {
                 val parsed = parseJson<Manifest>(resText)
                 if (parsed?.catalogs?.isNotEmpty() == true) {
-                    val catalogsChanged = cachedManifest != null &&
-                        lastManifestUrl == currentUrl && cachedManifest?.catalogs != parsed.catalogs
-
-                    if (catalogsChanged) {
-                        pageMutex.withLock {
-                            val prefix = "$mainUrl|"
-                            val stateKeys = catalogSentIds.keys.filter { it.startsWith(prefix) }.toSet() +
-                                catalogSkipState.keys.filter { it.startsWith(prefix) } +
-                                catalogGenerations.keys.filter { it.startsWith(prefix) }
-                            for (stateKey in stateKeys) {
-                                catalogGenerations[stateKey] = (catalogGenerations[stateKey] ?: 0L) + 1L
-                                catalogSentIds.remove(stateKey)
-                                catalogSkipState.remove(stateKey)
-                            }
-                        }
-                    }
-
                     cachedManifest = parsed
                     lastManifestUrl = currentUrl
                     lastCacheTime = now
@@ -536,38 +589,27 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
             val manifestPrefs = context.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
 
-            val originalBase = mainUrl.substringBefore("?").trimEnd('/')
-            val currentUrl = if (originalBase.endsWith("manifest.json")) originalBase else "$originalBase/manifest.json"
-            val uniqueKey = currentUrl.toUniqueKey()
-            
-            // Existing installations stored manifests under the old key. Use that
-            // cache only until getManifest() writes a URL-specific replacement.
-            val diskCache = manifestPrefs.getString(uniqueKey, null)
-                ?: manifestPrefs.getString(currentUrl.toLegacyUniqueKey(), null)
-            
-            val rawCatalogs = if (cachedManifest != null) {
-                cachedManifest?.catalogs ?: emptyList()
-            } else if (!diskCache.isNullOrBlank()) {
-                try {
-                    parseJson<Manifest>(diskCache).catalogs ?: emptyList()
-                } catch (e: Exception) { 
-                    e.printStackTrace()
-                    emptyList() 
-                }
-            } else {
-                emptyList()
-            }
+            val currentUrl = stremioManifestUrl(mainUrl)
+            val uniqueKey = stremioCatalogKey(mainUrl)
+            migrateStremioCatalogSettings(prefs, mainUrl)
+            val diskCache = stremioReadManifest(manifestPrefs, mainUrl)
+            // Settings refresh writes the authoritative definition; do not prefer stale memory.
+            val rawCatalogs = if (!diskCache.isNullOrBlank()) {
+                runCatching { parseJson<Manifest>(diskCache).catalogs }.getOrNull()
+                    ?: cachedManifest?.catalogs.orEmpty()
+            } else cachedManifest?.catalogs.orEmpty()
 
             if (rawCatalogs.isEmpty()) return emptyList()
             
             val flatTabs = mutableListOf<FlatTab>()
             rawCatalogs.forEach { catalog ->
+                if (!catalog.supportsHome()) return@forEach
                 val catalogId = catalog.id ?: ""
                 val catalogType = catalog.type ?: "movie"
                 val catalogName = catalog.name ?: catalogId
                 val displayType = catalogType.replaceFirstChar { it.uppercase() }
                 
-                val requiresGenre = catalog.extra?.any { it.name == "genre" && it.isRequired == true } == true
+                val requiresGenre = catalog.requiresExtra("genre")
 
                 if (!requiresGenre) {
                     flatTabs.add(FlatTab(
@@ -577,7 +619,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     ))
                 }
 
-                val genres = catalog.getGenresList()
+                val genresEnabled = prefs.getBoolean(
+                    "genres_enabled_${uniqueKey}_${catalogId}_${catalogType}", true
+                )
+                val genres = if (genresEnabled) catalog.getGenresList() else emptyList()
                 genres.forEach { genre ->
                     val capitalizedGenre = genre.replaceFirstChar { it.uppercase() }
                     flatTabs.add(FlatTab(
@@ -602,10 +647,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 } catch (e: Exception) { e.printStackTrace() }
             }
 
-            val sortedTabs = flatTabs.sortedBy { tab ->
-                val idx = orderedKeys.indexOf(tab.key)
-                if (idx != -1) idx else Int.MAX_VALUE
-            }
+            val rank = orderedKeys.withIndex().associate { it.value to it.index }
+            val sortedTabs = flatTabs.sortedBy { rank[it.key] ?: Int.MAX_VALUE }
 
             return mainPageOf(
                 *buildList<Pair<String, String>> {
@@ -637,69 +680,50 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return "$mainUrl|${request.data}"
     }
 
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse = coroutineScope {
-        println("[PAGINATION-DEBUG] ===== getMainPage START =====")
-        println("[PAGINATION-DEBUG] Requested Page: $page, Tab Name: ${request.name}")
-        println("[PAGINATION-DEBUG] Request Data: ${request.data}")
-
-        launch(Dispatchers.IO) {
-            runSuspendCatching { getManifest() }.onFailure { it.printStackTrace() }
-        }
-
-        var isNewRequest = false
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val stateKey = getCatalogStateKey(request)
-
-        val (requestKey, deferred) = pageMutex.withLock {
-            val generation = if (page <= 1) {
-                println("[PAGINATION-DEBUG] Page <= 1 detected. Resetting states for Tab: ${request.name}")
-                catalogSentIds.remove(stateKey)
-                catalogSkipState.remove(stateKey)
-
-                val nextGeneration = (catalogGenerations[stateKey] ?: 0L) + 1L
-                catalogGenerations[stateKey] = nextGeneration
-                nextGeneration
+        val key = "$stateKey|page=$page"
+        var owner = false
+        val flight = pageMutex.withLock {
+            val existing = activePageRequests[key]
+            if (existing != null) {
+                existing.waiters++
+                existing
             } else {
-                catalogGenerations[stateKey] ?: 0L
+                owner = true
+                val generation = if (page <= 1) {
+                    catalogSentIds.remove(stateKey)
+                    catalogSkipState.remove(stateKey)
+                    ((catalogGenerations[stateKey] ?: 0L) + 1L).also {
+                        catalogGenerations[stateKey] = it
+                    }
+                } else catalogGenerations[stateKey] ?: 0L
+                // Request-scoped ownership: the last waiting caller cancels all work.
+                val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+                val deferred = scope.async(start = CoroutineStart.LAZY) {
+                    fetchTabCatalogData(request, page, generation)
+                }
+                PageFlight(scope, deferred, 1).also { activePageRequests[key] = it }
             }
-
-            val key = "$stateKey|generation=$generation|page=$page"
-            val requestDeferred = activePageRequests.getOrPut(key) {
-                isNewRequest = true
-                println("[PAGINATION-DEBUG] Creating new async request for Page: $page")
-                async {
-                    try {
-                        fetchTabCatalogData(request, page, generation)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                        newHomePageResponse(emptyList(), hasNext = false)
+        }
+        val started = System.nanoTime()
+        try {
+            val response = flight.deferred.await()
+            // Preserve the existing pagination contract: append a shared later page once.
+            return if (!owner && page > 1) {
+                newHomePageResponse(emptyList(), hasNext = true)
+            } else response
+        } finally {
+            withContext(NonCancellable) {
+                pageMutex.withLock {
+                    flight.waiters--
+                    if (flight.waiters == 0) {
+                        if (activePageRequests[key] === flight) activePageRequests.remove(key)
+                        flight.scope.cancel()
                     }
                 }
             }
-            key to requestDeferred
-        }
-        
-        return@coroutineScope try {
-            val response = deferred.await()
-            if (!isNewRequest && page > 1) {
-                println("[PAGINATION-DEBUG] Returning empty list because it's not a new request for Page: $page")
-                newHomePageResponse(emptyList(), hasNext = true)
-            } else {
-                val listSize = response.items.firstOrNull()?.list?.size ?: 0
-                println("[PAGINATION-DEBUG] Returning response for Page: $page with $listSize items.")
-                response
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            e.printStackTrace()
-            newHomePageResponse(emptyList(), hasNext = false)
-        } finally {
-            pageMutex.withLock {
-                activePageRequests.remove(requestKey)
-            }
-            println("[PAGINATION-DEBUG] ===== getMainPage END (Page: $page) =====")
+            println("[StremioC-Home] page=$page elapsedMs=${(System.nanoTime() - started) / 1_000_000}")
         }
     }
 
@@ -717,13 +741,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         if (page > 1 && !catalogSkipState.containsKey(stateKey)) {
             println("[PAGINATION-DEBUG] [fetchTabCatalogData] Cold start detected on Page $page. Silently pre-fetching Page 1 to restore state.")
-            try {
-                fetchTabCatalogData(request, 1, generation)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            fetchTabCatalogData(request, 1, generation)
         }
 
         if ((catalogGenerations[stateKey] ?: 0L) != generation) {
@@ -738,31 +756,36 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val targetUrl = buildUrl(targetPath)
         println("[PAGINATION-DEBUG] [fetchTabCatalogData] Catalog request prepared for Page: $page")
         
-        val cacheKey = "$stateKey|skip=$currentSkip"
-        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Cache slot prepared for Skip: $currentSkip")
-
-        val resultPair = getOrFetchCachedPage(cacheKey) {
-            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Fetching from network or cache...")
-            
-            val jsonText = StremioC.homeNetworkSemaphore.withPermit {
-                customSession.get(targetUrl).text
-            }
-            
-            val response = try {
-                parseJson<CatalogResponse>(jsonText)
-            } catch (e: Exception) { e.printStackTrace(); null }
-
-            val metas = response?.metas ?: emptyList()
-            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Network/JSON parsed ${metas.size} items.")
-
-            if ((catalogGenerations[stateKey] ?: 0L) != generation) {
-                println("[PAGINATION-DEBUG] [fetchTabCatalogData] Discarding stale network result for Page $page.")
-                return@getOrFetchCachedPage null
-            }
-            
-            val mappedItems = metas.map { it.toSearchResponse(this@StremioC) }
-            Pair(mappedItems, metas.size)
+        // Every independent home load goes to the network; no page-cache dependency.
+        val queueStarted = System.nanoTime()
+        val jsonText = StremioC.homeNetworkSemaphore.withPermit {
+            val queueMs = (System.nanoTime() - queueStarted) / 1_000_000
+            println("[StremioC-Home] queueMs=$queueMs")
+            fetchHomeJson(targetUrl)
         }
+        val parseStarted = System.nanoTime()
+        val metas = try {
+            parseJson<HomeCatalogResponse>(jsonText).metas
+                ?: throw IllegalStateException("Catalog response is missing metas")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw IllegalStateException("Invalid catalog response", e)
+        }
+        if ((catalogGenerations[stateKey] ?: 0L) != generation) {
+            return newHomePageResponse(emptyList(), hasNext = false)
+        }
+        val mappedItems = metas.map { meta ->
+            // Match the original home card's name/type/URL behavior.
+            val type = meta.type ?: "movie"
+            val title = meta.name?.takeIf { it.isNotBlank() }
+                ?: "[${type.replaceFirstChar { it.uppercase() }}] ${meta.id}"
+            newMovieSearchResponse(title, getUnifiedMetaUrl(type, meta.id ?: ""), TvType.Others) {
+                posterUrl = meta.poster
+            }
+        }
+        val resultPair = Pair(mappedItems, metas.size)
+        println("[StremioC-Home] items=${metas.size} parseMapMs=${(System.nanoTime() - parseStarted) / 1_000_000}")
 
         return pageMutex.withLock {
             if ((catalogGenerations[stateKey] ?: 0L) != generation) {
@@ -770,7 +793,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 return@withLock newHomePageResponse(emptyList(), hasNext = false)
             }
 
-            if (resultPair != null) {
+            run {
                 println("[PAGINATION-DEBUG] [fetchTabCatalogData] ResultPair acquired. Size: ${resultPair.first.size}, Returned Meta Size: ${resultPair.second}")
                 catalogSkipState[stateKey] = currentSkip + resultPair.second
                 println("[PAGINATION-DEBUG] [fetchTabCatalogData] Next Skip State updated to: ${catalogSkipState[stateKey]}")
@@ -799,8 +822,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 return@withLock newHomePageResponse(listOf(HomePageList(request.name, filteredItems)), hasNext = resultPair.second > 0)
             }
 
-            println("[PAGINATION-DEBUG] [fetchTabCatalogData] ResultPair is null. Returning empty.")
-            newHomePageResponse(emptyList(), hasNext = false)
         }
     }
 
@@ -955,6 +976,20 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         val resolvedIdHolder = arrayOf<String?>(null, null)
 
+        val earlyMdbId = resolvedTmdbId ?: resolvedImdbId ?: when {
+            res.id?.startsWith("tt") == true -> res.id
+            res.id?.startsWith("tmdb:") == true -> res.id.removePrefix("tmdb:")
+            res.moviedb_id != null -> res.moviedb_id.toString()
+            res.tmdbIdExt != null -> res.tmdbIdExt
+            else -> null
+        }
+        val mdbEnabled = isIntegrationEnabled("mdblist_enabled")
+        val earlyMdbIsTmdb = (earlyMdbId == resolvedTmdbId) || (earlyMdbId?.startsWith("tt") == false)
+        val mdbDeferred = if (mdbEnabled && earlyMdbId != null) async(Dispatchers.IO) {
+            runSuspendCatching { fetchMdbListRatings(earlyMdbId, earlyMdbIsTmdb) }
+                .getOrDefault(emptyList())
+        } else null
+
         val loadRes = res.toLoadResponse(
             provider = this@StremioC, 
             imdbId = finalProcessedId, 
@@ -986,9 +1021,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             actualIsTmdb = (actualMdbId == resolvedTmdb)
         }
 
-        if (actualMdbId != null && isIntegrationEnabled("mdblist_enabled")) {
-            val mdbRatings = runSuspendCatching { 
-                fetchMdbListRatings(actualMdbId, actualIsTmdb) 
+        if (actualMdbId != null && mdbEnabled) {
+            val mdbRatings = if (mdbDeferred != null && actualMdbId == earlyMdbId && actualIsTmdb == earlyMdbIsTmdb) {
+                mdbDeferred.await()
+            } else runSuspendCatching {
+                fetchMdbListRatings(actualMdbId, actualIsTmdb)
             }.onFailure { it.printStackTrace() }.getOrDefault(emptyList())
 
             if (mdbRatings.isNotEmpty()) {
@@ -1595,8 +1632,20 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("types") val parsedTypes: List<String>? = null, 
         @JsonProperty("extra") val extra: List<Extra>? = null, 
         @JsonProperty("extraSupported") val extraSupported: List<String>? = null,
-        @JsonProperty("genres") val genres: List<String>? = null
+        @JsonProperty("genres") val genres: List<String>? = null,
+        @JsonProperty("extraRequired") val extraRequired: List<String>? = null
     ) {
+        fun requiresExtra(name: String): Boolean =
+            extra?.any { it.name == name && it.isRequired == true } == true ||
+                extraRequired?.contains(name) == true
+
+        fun supportsHome(): Boolean {
+            val required = extra.orEmpty().filter { it.isRequired == true }.mapNotNull { it.name } +
+                extraRequired.orEmpty()
+            return !id.isNullOrBlank() && required.all { it == "genre" || it == "skip" } &&
+                (!requiresExtra("genre") || getGenresList().isNotEmpty())
+        }
+
         val activeTypes: List<String> get() = if (!parsedTypes.isNullOrEmpty()) parsedTypes else listOfNotNull(type)
 
         fun getGenresList(): List<String> {
@@ -1646,6 +1695,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             return Pair(HomePageList("${name ?: id} - $displayType", distinctEntries), allMetas.size)
         }
     }
+
+    private data class HomeCatalogResponse(
+        @JsonProperty("metas") val metas: List<HomeCatalogEntry>? = null
+    )
+
+    private data class HomeCatalogEntry(
+        @JsonProperty("id") val id: String? = null,
+        @JsonProperty("type") val type: String? = null,
+        @JsonProperty("name") val name: String? = null,
+        @JsonProperty("poster") val poster: String? = null
+    )
 
     private data class CatalogResponse(
         @JsonProperty("metas") val metas: List<CatalogEntry>?, 
@@ -2540,3 +2600,58 @@ fun getSafeAllProviders(): List<MainAPI> {
 }
 
 private data class FlatTab(val key: String, val displayName: String, val urlPath: String)
+
+
+// Shared by the provider and SettingsBottomFragment. Keep these functions together.
+internal fun stremioManifestUrl(source: String): String {
+    val base = source.substringBefore("?").trimEnd('/').removeSuffix("/manifest.json")
+    val query = source.substringAfter("?", "").takeIf { it.isNotEmpty() }?.let { "?$it" } ?: ""
+    return "$base/manifest.json$query"
+}
+
+internal fun stremioCatalogKey(source: String): String = stremioManifestUrl(source).toUniqueKey()
+
+private fun stremioOldCatalogKeys(source: String): List<String> = listOf(
+    source.toLegacyUniqueKey(),
+    stremioManifestUrl(source).substringBefore("?").toLegacyUniqueKey(),
+    stremioManifestUrl(source).toLegacyUniqueKey(),
+    stremioManifestUrl(source).substringBefore("?").toUniqueKey()
+).distinct()
+
+internal fun migrateStremioCatalogSettings(prefs: SharedPreferences, source: String) {
+    val key = stremioCatalogKey(source)
+    val marker = "catalog_keys_migrated_$key"
+    synchronized(StremioC::class.java) {
+        if (prefs.getBoolean(marker, false)) return
+        val all = prefs.all
+        val editor = prefs.edit()
+        val written = mutableSetOf<String>()
+        for (old in stremioOldCatalogKeys(source)) {
+            if (old == key) continue
+            for ((name, value) in all) {
+                val target = when {
+                    name == "catalog_order_$old" -> "catalog_order_$key"
+                    name.startsWith("tab_enabled_${old}_") -> "tab_enabled_${key}_" + name.removePrefix("tab_enabled_${old}_")
+                    name.startsWith("genres_enabled_${old}_") -> "genres_enabled_${key}_" + name.removePrefix("genres_enabled_${old}_")
+                    else -> continue
+                }
+                // The supplied settings UI wrote legacy keys exclusively. On first
+                // migration these are authoritative; subsequent saves use v2 only.
+                if (!written.add(target)) continue
+                when (value) {
+                    is Boolean -> editor.putBoolean(target, value)
+                    is String -> editor.putString(target, value)
+                }
+            }
+        }
+        editor.putBoolean(marker, true).apply()
+    }
+}
+
+internal fun stremioReadManifest(prefs: SharedPreferences, source: String): String? {
+    prefs.getString(stremioCatalogKey(source), null)?.let { return it }
+    for (old in stremioOldCatalogKeys(source)) {
+        prefs.getString(old, null)?.let { return it }
+    }
+    return null
+}
