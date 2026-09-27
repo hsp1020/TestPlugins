@@ -1358,10 +1358,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
         val mdbEnabled = isIntegrationEnabled("mdblist_enabled")
         val earlyMdbIsTmdb = (earlyMdbId == resolvedTmdbId) || (earlyMdbId?.startsWith("tt") == false)
-        val mdbDeferred = if (mdbEnabled && earlyMdbId != null) async(Dispatchers.IO) {
-            runSuspendCatching { fetchMdbListRatings(earlyMdbId, earlyMdbIsTmdb) }
-                .getOrDefault(emptyList())
-        } else null
+        val mdbDeferred: Deferred<List<String>>? = if (mdbEnabled && earlyMdbId != null) {
+            async(Dispatchers.IO) {
+                runSuspendCatching { fetchMdbListRatings(earlyMdbId, earlyMdbIsTmdb) }
+                    .getOrDefault(emptyList<String>())
+            }
+        } else {
+            null
+        }
 
         val loadRes = res.toLoadResponse(
             provider = this@StremioC, 
@@ -2446,7 +2450,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             var tmdbIdStr: String? = resolvedTmdbId ?: if (this@CatalogEntry.id?.startsWith("tmdb:") == true) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
 
-            val findApiDeferred = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
+            val findApiDeferred: Deferred<Pair<String, String>?>? = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
                 async(Dispatchers.IO) {
                     val cacheKey = finalImdbId
                     val cachedFind = tmdbFindCache[cacheKey]
@@ -2538,7 +2542,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             var finalAniId = fetchedAniListId
 
             // 중복 비동기 리소스 방지 조건식 정밀 교정: 두 ID중 어느 하나라도 유실된 상태에서만 연동 호출 트리거
-            val aniZipDeferred = if (isAnimeMedia && finalImdbId != null && (finalMalId == null || finalAniId == null)) {
+            val aniZipDeferred: Deferred<Pair<Int?, Int?>?>? = if (isAnimeMedia && finalImdbId != null && (finalMalId == null || finalAniId == null)) {
                 async(Dispatchers.IO) {
                     val cacheKey = finalImdbId
                     val cachedZip = aniZipCache[cacheKey]
