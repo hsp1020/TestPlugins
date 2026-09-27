@@ -83,8 +83,8 @@ class StremioCPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
-        println("[StremioCPlugin v3.3-TUNING-B] load() 함수 호출됨")
-        println("[StremioC-Home][TUNING] profile=B foreground=${StremioC.HOME_FOREGROUND_CONCURRENCY} background=${StremioC.HOME_PREFETCH_CONCURRENCY} rearmDebounceMs=$homeSwitchRearmDebounceMs manifestWarm=true")
+        println("[StremioCPlugin v3.4-SINGLEFLIGHT-HANDOFF] load() 함수 호출됨")
+        println("[StremioC-Home][TUNING] profile=B2 foreground=${StremioC.HOME_FOREGROUND_CONCURRENCY} background=${StremioC.HOME_PREFETCH_CONCURRENCY} rearmDebounceMs=$homeSwitchRearmDebounceMs manifestWarm=singleFlight prefetchInFlight=handoff")
         val appContext = context.applicationContext
 
         // --- 1. StremioC 자체 부팅 복원 엔진 (Flag Guard + Checksum 검증) ---
@@ -208,19 +208,19 @@ class StremioCPlugin : Plugin() {
             e.printStackTrace()
         }
 
-        println("[StremioCPlugin v3.3-TUNING-B] reload(context) 실행 시도")
+        println("[StremioCPlugin v3.4-SINGLEFLIGHT-HANDOFF] reload(context) 실행 시도")
         reload(appContext)
         
         val activity = context as? AppCompatActivity
         openSettings = {
-            println("[StremioCPlugin v3.3-TUNING-B] openSettings 클릭됨, SettingsBottomFragment 표시 시도")
+            println("[StremioCPlugin v3.4-SINGLEFLIGHT-HANDOFF] openSettings 클릭됨, SettingsBottomFragment 표시 시도")
             val frag = SettingsBottomFragment(this, appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE))
             activity?.supportFragmentManager?.let { fm -> frag.show(fm, "Frag") }
         }
     }
 
     fun reload(context: Context) {
-        println("[StremioCPlugin v3.3-TUNING-B] reload() 함수 호출됨")
+        println("[StremioCPlugin v3.4-SINGLEFLIGHT-HANDOFF] reload() 함수 호출됨")
         val appContext = context.applicationContext
 
         catalogPrefetchJob?.cancel()
@@ -244,7 +244,7 @@ class StremioCPlugin : Plugin() {
             try {
                 val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
                 val json = prefs.getString(PREF_KEY_LINKS, null) ?: "[]"
-                println("[StremioCPlugin v3.3-TUNING-B] 저장된 링크 JSON 로드 완료 (bytes=${json.length})")
+                println("[StremioCPlugin v3.4-SINGLEFLIGHT-HANDOFF] 저장된 링크 JSON 로드 완료 (bytes=${json.length})")
                 
                 val arr = JSONArray(json)
                 val links = mutableListOf<LinkEntry>()
@@ -259,11 +259,11 @@ class StremioCPlugin : Plugin() {
                         )
                     )
                 }
-                println("[StremioCPlugin v3.3-TUNING-B] 파싱된 커스텀 링크 개수: ${links.size}")
+                println("[StremioCPlugin v3.4-SINGLEFLIGHT-HANDOFF] 파싱된 커스텀 링크 개수: ${links.size}")
                 val registeredProviders = mutableListOf<StremioC>()
                 
                 for (item in links) {
-                    println("[StremioCPlugin v3.3-TUNING-B] 링크 처리 중: ${item.name} (${item.type})")
+                    println("[StremioCPlugin v3.4-SINGLEFLIGHT-HANDOFF] 링크 처리 중: ${item.name} (${item.type})")
                     val pluginsOnline: Array<PluginData> = PluginManager.getPluginsOnline()
                     var found: PluginData? = null
                     for (p in pluginsOnline) {
@@ -274,18 +274,18 @@ class StremioCPlugin : Plugin() {
                     }
                     if (found != null) {
                         try {
-                            println("[StremioCPlugin v3.3-TUNING-B] 기존 플러그인 발견, 언로드 시도: ${found.internalName}")
+                            println("[StremioCPlugin v3.4-SINGLEFLIGHT-HANDOFF] 기존 플러그인 발견, 언로드 시도: ${found.internalName}")
                             PluginManager.unloadPlugin(found.filePath)
                             delay(250) 
                         } catch (e: Throwable) {
                             Log.e("StremioCPlugin", "unload failed ${e.message}")
-                            println("[StremioCPlugin v3.3-TUNING-B] 플러그인 언로드 실패: ${e.message}")
+                            println("[StremioCPlugin v3.4-SINGLEFLIGHT-HANDOFF] 플러그인 언로드 실패: ${e.message}")
                             e.printStackTrace()
                         }
                     } 
                     
                     try {
-                        println("[StremioCPlugin v3.3-TUNING-B] 새로운 확장 등록 시도: ${item.name} 타입: ${item.type}")
+                        println("[StremioCPlugin v3.4-SINGLEFLIGHT-HANDOFF] 새로운 확장 등록 시도: ${item.name} 타입: ${item.type}")
                         when (item.type) {
                             "StremioC" -> {
                                 try {
@@ -307,19 +307,19 @@ class StremioCPlugin : Plugin() {
                                 }
                             }
                         }
-                        println("[StremioCPlugin v3.3-TUNING-B] 확장 등록 완료 (StremioC 강제): ${item.name}")
+                        println("[StremioCPlugin v3.4-SINGLEFLIGHT-HANDOFF] 확장 등록 완료 (StremioC 강제): ${item.name}")
                     } catch (e: Throwable) {
                         Log.e("StremioCPlugin", "register failed ${e.message}")
-                        println("[StremioCPlugin v3.3-TUNING-B] 확장 등록 실패: ${e.message}")
+                        println("[StremioCPlugin v3.4-SINGLEFLIGHT-HANDOFF] 확장 등록 실패: ${e.message}")
                         e.printStackTrace()
                     }
                 }
                 try {
-                    println("[StremioCPlugin v3.3-TUNING-B] afterPluginsLoadedEvent 호출 시도")
+                    println("[StremioCPlugin v3.4-SINGLEFLIGHT-HANDOFF] afterPluginsLoadedEvent 호출 시도")
                     MainActivity.afterPluginsLoadedEvent.invoke(true)
                 } catch (e: Throwable) {
                     Log.w("StremioCPlugin", "afterPluginsLoaded invoke failed ${e.message}")
-                    println("[StremioCPlugin v3.3-TUNING-B] afterPluginsLoadedEvent 호출 실패: ${e.message}")
+                    println("[StremioCPlugin v3.4-SINGLEFLIGHT-HANDOFF] afterPluginsLoadedEvent 호출 실패: ${e.message}")
                     e.printStackTrace()
                 }
 
@@ -343,9 +343,9 @@ class StremioCPlugin : Plugin() {
                             lastHome = currentHome
                             println("[StremioC-Home][PREFETCH_REFRESH] stage=HOME_SWITCH from=${previousHome ?: "none"} to=${currentHome ?: "none"}")
 
-                            // If the user returns to a provider before its delayed refill fires (or
-                            // while it is running), cancel that refill immediately. Foreground can
-                            // consume any READY/IN_FLIGHT entries that already exist.
+                            // If the user returns, cancel the debounce/refill coordinator. Rows that have
+                            // already started are owned by StremioC's independent one-shot scope, so cancellation
+                            // stops only future row starts; foreground can consume READY/IN_FLIGHT entries.
                             currentHome?.let { selectedName ->
                                 val key = selectedName.lowercase()
                                 val job = synchronized(rearmJobsLock) { rearmJobs.remove(key) }
@@ -371,6 +371,10 @@ class StremioCPlugin : Plugin() {
                                             return@launch
                                         }
                                         println("[StremioC-Home][PREFETCH_REFRESH] provider=${previousProvider.name} stage=REARM_FIRE")
+                                        // The coordinator itself remains cancellable so returning to this provider
+                                        // stops the refill loop immediately. StremioC.prefetchOnePage() owns each
+                                        // started row in an independent scope and keeps that exact IN_FLIGHT row
+                                        // alive until foreground can consume it.
                                         previousProvider.rearmOneShotCatalogPrefetch("HOME_SWITCH_${homeSwitchRearmDebounceMs}MS")
                                     } catch (e: kotlinx.coroutines.CancellationException) {
                                         println("[StremioC-Home][PREFETCH_REFRESH] provider=${previousProvider.name} stage=REARM_CANCELLED")
@@ -430,7 +434,7 @@ class StremioCPlugin : Plugin() {
                 }
             } catch (e: Throwable) {
                 Log.e("StremioCPlugin", "reload error ${e.message}")
-                println("[StremioCPlugin v3.3-TUNING-B] reload 함수 에러: ${e.message}")
+                println("[StremioCPlugin v3.4-SINGLEFLIGHT-HANDOFF] reload 함수 에러: ${e.message}")
                 e.printStackTrace()
             }
         }
