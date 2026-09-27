@@ -11,20 +11,15 @@ import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.plugins.PluginData
 import com.lagradost.cloudstream3.plugins.PluginManager
 import com.lagradost.cloudstream3.CloudStreamApp
-import com.lagradost.cloudstream3.utils.DataStoreHelper
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.joinAll
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
@@ -33,17 +28,6 @@ class StremioCPlugin : Plugin() {
     private val PREF_FILE = "StremioC"
     private val PREF_KEY_LINKS = "stremio_saved_links"
     private val pluginIoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var manifestPrefetchJob: Job? = null
-    private var catalogPrefetchJob: Job? = null
-    private var homeSelectionMonitorJob: Job? = null
-    private val activeStremioProviders = mutableListOf<StremioC>()
-    private val rearmJobs = mutableMapOf<String, Job>()
-    private val rearmJobsLock = Any()
-    private val homeSelectionPollMs = 500L
-    // 15s filters quick provider peeks without delaying large-provider refill by 30~60s.
-    // Baseline logs showed IMDB needed ~11s to prefetch only 13/46 rows at BG=2; with BG=4
-    // a 30s debounce would make full readiness too late for normal revisits.
-    private val homeSwitchRearmDebounceMs = 15_000L
 
     private fun prefsToJson(prefs: SharedPreferences): JSONObject {
         val json = JSONObject()
@@ -140,8 +124,8 @@ class StremioCPlugin : Plugin() {
             e.printStackTrace()
         }
 
-        // --- 3. Restored Links Manifest Auto-Prefetch Engine (부팅 비동기 프리페처) ---
-        manifestPrefetchJob = pluginIoScope.launch {
+        // --- 3. Restore only missing manifests in the background. No catalog rows are prefetched. ---
+        pluginIoScope.launch {
             try {
                 val prefs = appContext.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
                 val json = prefs.getString("stremio_saved_links", null) ?: "[]"
@@ -177,7 +161,7 @@ class StremioCPlugin : Plugin() {
                                         }
                                     }
                                 } catch (e: Throwable) {
-                                    Log.w("StremioCPlugin", "boot manifest prefetch failed: ${e.message}")
+                                    Log.w("StremioCPlugin", "boot manifest fetch failed: ${e.message}")
                                 }
                             }
                         }
@@ -205,23 +189,6 @@ class StremioCPlugin : Plugin() {
     fun reload(context: Context) {
         val appContext = context.applicationContext
 
-        catalogPrefetchJob?.cancel()
-        homeSelectionMonitorJob?.cancel()
-        synchronized(rearmJobsLock) {
-            rearmJobs.values.forEach { it.cancel() }
-            rearmJobs.clear()
-        }
-        val oldProviders = synchronized(activeStremioProviders) {
-            activeStremioProviders.toList().also { activeStremioProviders.clear() }
-        }
-        if (oldProviders.isNotEmpty()) {
-            pluginIoScope.launch {
-                oldProviders.forEach { provider ->
-                    runCatching { provider.cancelOneShotCatalogPrefetch() }
-                }
-            }
-        }
-        
         CoroutineScope(Dispatchers.Main).launch {
             try {
                 val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
@@ -240,7 +207,6 @@ class StremioCPlugin : Plugin() {
                         )
                     )
                 }
-                val registeredProviders = mutableListOf<StremioC>()
                 val pluginsOnline: Array<PluginData> = PluginManager.getPluginsOnline()
                 val unloadedPluginPaths = mutableSetOf<String>()
                 
@@ -268,7 +234,6 @@ class StremioCPlugin : Plugin() {
                                 try {
                                     val provider = StremioC(item.link, item.name)
                                     registerMainAPI(provider)
-                                    if (item.link.isNotBlank()) registeredProviders.add(provider)
                                 } catch (e: Throwable) {
                                     e.printStackTrace()
                                     try { registerMainAPI(StremioC("", item.name)) } catch (e2: Throwable) { e2.printStackTrace() }
@@ -278,7 +243,6 @@ class StremioCPlugin : Plugin() {
                                 try {
                                     val provider = StremioC(item.link, item.name)
                                     registerMainAPI(provider)
-                                    if (item.link.isNotBlank()) registeredProviders.add(provider)
                                 } catch (e: Throwable) {
                                     e.printStackTrace()
                                 }
@@ -289,135 +253,11 @@ class StremioCPlugin : Plugin() {
                         e.printStackTrace()
                     }
                 }
-                // Prepare persisted manifest + mainPage definitions off the UI thread before
-                // CloudStream is told the providers are ready. This performs no catalog network I/O.
-                try {
-                    withContext(Dispatchers.IO) {
-                        coroutineScope {
-                            registeredProviders.map { provider ->
-                                launch { provider.warmMainPageDefinition() }
-                            }.joinAll()
-                        }
-                    }
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (t: Throwable) {
-                    Log.w("StremioCPlugin", "mainPage warm-up failed: ${t.message}")
-                }
-
                 try {
                     MainActivity.afterPluginsLoadedEvent.invoke(true)
                 } catch (e: Throwable) {
                     Log.w("StremioCPlugin", "afterPluginsLoaded invoke failed ${e.message}")
                     e.printStackTrace()
-                }
-
-                synchronized(activeStremioProviders) {
-                    activeStremioProviders.clear()
-                    activeStremioProviders.addAll(registeredProviders)
-                }
-
-                // Observe CloudStream's selected homepage provider. A provider that was just left is
-                // re-armed only after a 15s grace period. Returning before that cancels the scheduled
-                // refill, preventing rapid A↔B switching from repeatedly downloading page 1.
-                homeSelectionMonitorJob?.cancel()
-                homeSelectionMonitorJob = pluginIoScope.launch {
-                    var lastHome = DataStoreHelper.currentHomePage
-                    while (isActive) {
-                        delay(homeSelectionPollMs)
-                        val currentHome = DataStoreHelper.currentHomePage
-                        if (currentHome != lastHome) {
-                            val previousHome = lastHome
-                            lastHome = currentHome
-
-                            // If the user returns, cancel the debounce/refill coordinator. Rows that have
-                            // already started are owned by StremioC's independent one-shot scope, so cancellation
-                            // stops only future row starts; foreground consumes READY immediately and gives
-                            // IN_FLIGHT entries a short grace period before switching to its fail-fast path.
-                            currentHome?.let { selectedName ->
-                                val key = selectedName.lowercase()
-                                val job = synchronized(rearmJobsLock) { rearmJobs.remove(key) }
-                                if (job != null) {
-                                    job.cancel()
-                                }
-                            }
-
-                            val previousProvider = synchronized(activeStremioProviders) {
-                                activeStremioProviders.firstOrNull {
-                                    previousHome != null && it.name.equals(previousHome, ignoreCase = true)
-                                }
-                            }
-                            if (previousProvider != null) {
-                                val key = previousProvider.name.lowercase()
-                                val job = launch {
-                                    try {
-                                        delay(homeSwitchRearmDebounceMs)
-                                        if (DataStoreHelper.currentHomePage?.equals(previousProvider.name, ignoreCase = true) == true) {
-                                            return@launch
-                                        }
-                                        // The coordinator itself remains cancellable so returning to this provider
-                                        // stops the refill loop immediately. StremioC.prefetchOnePage() owns each
-                                        // started row in an independent scope and keeps that exact IN_FLIGHT row
-                                        // alive; foreground may consume it if it finishes inside the short grace period.
-                                        previousProvider.rearmOneShotCatalogPrefetch()
-                                    } catch (e: kotlinx.coroutines.CancellationException) {
-                                        throw e
-                                    } catch (t: Throwable) {
-                                        Log.w("StremioCPlugin", "catalog rearm failed for ${previousProvider.name}: ${t.message}")
-                                    }
-                                }
-                                val replaced = synchronized(rearmJobsLock) {
-                                    rearmJobs.put(key, job)
-                                }
-                                replaced?.cancel()
-                                job.invokeOnCompletion {
-                                    synchronized(rearmJobsLock) {
-                                        if (rearmJobs[key] === job) rearmJobs.remove(key)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                catalogPrefetchJob = pluginIoScope.launch {
-                    coroutineScope {
-                        // Existing persisted manifests start prefetching immediately.
-                        launch {
-                            try {
-                                coroutineScope {
-                                    registeredProviders.map { provider ->
-                                        launch { provider.prefetchEnabledMainPageCatalogs() }
-                                    }.joinAll()
-                                }
-                            } catch (e: kotlinx.coroutines.CancellationException) {
-                                throw e
-                            } catch (t: Throwable) {
-                                Log.w("StremioCPlugin", "catalog prefetch failed: ${t.message}")
-                            }
-                        }
-
-                        // Missing-manifest work runs independently. As soon as those downloads finish,
-                        // newly available providers can warm/prefetch without waiting for a large existing
-                        // provider sweep. Per-provider sweep locks and one-shot state deduplicate overlap.
-                        launch {
-                            manifestPrefetchJob?.join()
-                            try {
-                                coroutineScope {
-                                    registeredProviders.map { provider ->
-                                        launch {
-                                            provider.warmMainPageDefinition()
-                                            provider.prefetchEnabledMainPageCatalogs()
-                                        }
-                                    }.joinAll()
-                                }
-                            } catch (e: kotlinx.coroutines.CancellationException) {
-                                throw e
-                            } catch (t: Throwable) {
-                                Log.w("StremioCPlugin", "post-manifest catalog prefetch failed: ${t.message}")
-                            }
-                        }
-                    }
                 }
             } catch (e: Throwable) {
                 Log.e("StremioCPlugin", "reload error ${e.message}")
