@@ -360,12 +360,22 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
         }
 
-        // Detail-metadata A/B client. Keep stream/subtitle/customSession pinned to HTTP/1.1.
-        // All transport knobs match customSession; only ALPN protocols differ so the profile
-        // isolates HTTP/2 negotiation/multiplexing from unrelated dispatcher/pool changes.
-        val metadataSession by lazy {
+        // Detail-metadata A/B clients. Keep stream/subtitle/customSession pinned to HTTP/1.1.
+        // H1 and H2 use identical timeout/dispatcher/pool values; only the protocol list differs.
+        // The active client is selected from SharedPreferences for every metadata call, so the
+        // same APK can switch modes without recompiling. Restart between benchmark runs to
+        // equalize cold/warm connection state.
+        private const val PREF_METADATA_HTTP2_ENABLED = "metadata_http2_enabled"
+
+        private fun isMetadataHttp2Enabled(): Boolean =
+            CloudStreamApp.context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+                ?.getBoolean(PREF_METADATA_HTTP2_ENABLED, true) ?: true
+
+        fun metadataProtocolMode(): String = if (isMetadataHttp2Enabled()) "H2" else "H1"
+
+        private fun buildMetadataSession(protocols: List<Protocol>, mode: String): Requests {
             val newClient = app.baseClient.newBuilder()
-                .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
+                .protocols(protocols)
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(20, TimeUnit.SECONDS)
                 .writeTimeout(20, TimeUnit.SECONDS)
@@ -380,23 +390,34 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     try {
                         val response = chain.proceed(request)
                         println(
-                            "[StremioC-MetadataHTTP] host=${request.url.host} protocol=${response.protocol} code=${response.code} ms=${loadPerfMs(startedNs)}"
+                            "[StremioC-MetadataHTTP] mode=$mode host=${request.url.host} protocol=${response.protocol} code=${response.code} ms=${loadPerfMs(startedNs)}"
                         )
                         response
                     } catch (t: Throwable) {
                         println(
-                            "[StremioC-MetadataHTTP] host=${request.url.host} protocol=NO_RESPONSE error=${t.javaClass.simpleName} ms=${loadPerfMs(startedNs)}"
+                            "[StremioC-MetadataHTTP] mode=$mode host=${request.url.host} protocol=NO_RESPONSE error=${t.javaClass.simpleName} ms=${loadPerfMs(startedNs)}"
                         )
                         throw t
                     }
                 }
                 .build()
 
-            Requests(newClient).apply {
+            return Requests(newClient).apply {
                 this.responseParser = app.responseParser
                 this.defaultHeaders = app.defaultHeaders
             }
         }
+
+        private val metadataSessionH2 by lazy {
+            buildMetadataSession(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1), "H2")
+        }
+
+        private val metadataSessionH1 by lazy {
+            buildMetadataSession(listOf(Protocol.HTTP_1_1), "H1")
+        }
+
+        val metadataSession: Requests
+            get() = if (isMetadataHttp2Enabled()) metadataSessionH2 else metadataSessionH1
 
         private val homeClient by lazy {
             app.baseClient.newBuilder()
@@ -1394,6 +1415,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val loadTrace = newLoadPerfTrace()
         val loadTotalStartNs = System.nanoTime()
         loadPerfLog(loadTrace, "START", "provider=$name input=${if (url.startsWith("{")) "INLINE" else "URL"}")
+        loadPerfLog(loadTrace, "METADATA_PROTOCOL", "mode=${metadataProtocolMode()}")
 
         val parsedUrlHint = parseDetailUrlHint(url)
         val rememberedHint = detailLoadHints[url]?.takeIf { cached ->
@@ -1829,7 +1851,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             loadPerfLog(loadTrace, "MDBLIST_APPLY", "ms=${loadPerfMs(mdbApplyStartNs)} enabled=$mdbEnabled id=$actualMdbId ratings=0")
         }
 
-        loadPerfLog(loadTrace, "TOTAL", "ms=${loadPerfMs(loadTotalStartNs)} id=${res.id} finalImdb=${resolvedIdHolder[0]} finalTmdb=${resolvedIdHolder[1]}")
+        loadPerfLog(loadTrace, "TOTAL", "ms=${loadPerfMs(loadTotalStartNs)} mode=${metadataProtocolMode()} id=${res.id} finalImdb=${resolvedIdHolder[0]} finalTmdb=${resolvedIdHolder[1]}")
         return@coroutineScope loadRes
     }
 
