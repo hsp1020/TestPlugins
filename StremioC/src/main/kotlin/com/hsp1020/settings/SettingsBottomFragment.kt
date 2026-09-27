@@ -1321,7 +1321,8 @@ private fun showLanguageSelectDialog() {
 
     private fun showCatalogConfigDialog(item: LinkItem) {
         val context = requireContext()
-        val uniqueId = item.link.toUniqueKeyLocal() 
+        migrateStremioCatalogSettings(sharedPref, item.link)
+        val uniqueId = stremioCatalogKey(item.link) 
         
         val progressContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -1339,8 +1340,7 @@ private fun showLanguageSelectDialog() {
         progressDialog.show()
 
         viewLifecycleOwner.lifecycleScope.launch {
-            val cleanUrl = item.link.substringBefore("?").trimEnd('/')
-            val currentUrl = if (cleanUrl.endsWith("manifest.json")) cleanUrl else "$cleanUrl/manifest.json"
+            val currentUrl = stremioManifestUrl(item.link)
 
             val manifestText = withContext(Dispatchers.IO) {
                 try { 
@@ -1360,21 +1360,22 @@ private fun showLanguageSelectDialog() {
             }
 
             val manifestPrefs = context.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
-            manifestPrefs.edit().putString(currentUrl.toUniqueKeyLocal(), manifestText).apply()
 
             val flatTabs = mutableListOf<ConfigFlatTab>()
             try {
                 val manifest = parseJson<StremioC.Manifest>(manifestText)
                 val catalogs = manifest.catalogs
-                
+                manifestPrefs.edit().putString(stremioCatalogKey(item.link), manifestText).apply()
+
                 if (catalogs != null) {
                     for (cat in catalogs) {
+                        if (!cat.supportsHome()) continue
                         val id = cat.id ?: ""
                         val type = cat.type ?: "movie"
                         val name = cat.name ?: id
                         val displayType = type.replaceFirstChar { it.uppercase() }
                         
-                        val requiresGenre = cat.extra?.any { it.name == "genre" && it.isRequired == true } ?: false
+                        val requiresGenre = cat.requiresExtra("genre")
 
                         flatTabs.add(ConfigFlatTab(
                             key = "${id}_${type}_default", 
@@ -1413,7 +1414,8 @@ private fun showLanguageSelectDialog() {
     private fun displayCatalogListDialog(addonName: String, flatTabs: List<ConfigFlatTab>, linkUrl: String) {
         val context = requireContext()
         val prefs = sharedPref
-        val uniqueId = linkUrl.toUniqueKeyLocal()
+        migrateStremioCatalogSettings(prefs, linkUrl)
+        val uniqueId = stremioCatalogKey(linkUrl)
         val orderKey = "catalog_order_$uniqueId"
         
         val orderJson = prefs.getString(orderKey, null)
@@ -1729,7 +1731,6 @@ private fun showLanguageSelectDialog() {
     }
 
     private fun String.capitalizeFirstLocal(): String = if (this.isNotEmpty()) this.substring(0, 1).uppercase() + this.substring(1) else this
-    private fun String.toUniqueKeyLocal(): String = this.lowercase().filter { it.isLetter() }
 
     private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
         try {
