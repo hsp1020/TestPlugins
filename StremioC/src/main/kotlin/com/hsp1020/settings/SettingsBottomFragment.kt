@@ -76,6 +76,7 @@ object SettingsRepository {
     const val PREF_KEY_TMDB_API_KEY = "tmdb_api_key"
     const val PREF_KEY_MDBLIST_ENABLED = "mdblist_enabled"
     const val PREF_KEY_MDBLIST_API_KEY = "mdblist_api_key"
+    const val PREF_KEY_METADATA_HTTP2_ENABLED = "metadata_http2_enabled"
 
     fun loadLinks(sharedPref: SharedPreferences): MutableList<LinkItem> {
         val json = sharedPref.getString(PREF_KEY_LINKS, null) ?: return mutableListOf()
@@ -841,6 +842,40 @@ class SettingsBottomFragment(
 
         switchMdbList.setOnCheckedChangeListener { _, isChecked ->
             layoutMdbList.visibility = if (isChecked) View.VISIBLE else View.GONE
+        }
+
+        // Runtime H1/H2 A/B switch. No extra XML resource is required: insert the row next to
+        // the existing TMDB/MDBList settings so the same APK can benchmark both transports.
+        val metadataProtocolRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(0, 18, 0, 18)
+        }
+        val metadataProtocolText = TextView(ctx).apply {
+            text = "Metadata HTTP/2 (A/B Test)\nON = H2 + H1 fallback  /  OFF = H1 only"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val switchMetadataHttp2 = Switch(ctx).apply {
+            isChecked = sharedPref.getBoolean(SettingsRepository.PREF_KEY_METADATA_HTTP2_ENABLED, true)
+            makeTvCompatible()
+        }
+        metadataProtocolRow.addView(metadataProtocolText)
+        metadataProtocolRow.addView(switchMetadataHttp2)
+
+        (layoutMdbList.parent as? ViewGroup)?.let { parent ->
+            val index = parent.indexOfChild(layoutMdbList)
+            if (index >= 0) parent.addView(metadataProtocolRow, index + 1) else parent.addView(metadataProtocolRow)
+        }
+
+        switchMetadataHttp2.setOnCheckedChangeListener { _, enabled ->
+            sharedPref.edit().putBoolean(SettingsRepository.PREF_KEY_METADATA_HTTP2_ENABLED, enabled).apply()
+            Toast.makeText(
+                ctx,
+                if (enabled) "Metadata protocol: H2 (HTTP/2)" else "Metadata protocol: H1 (HTTP/1.1)",
+                Toast.LENGTH_SHORT
+            ).show()
         }
 
         addlinks.setOnClickListener {
