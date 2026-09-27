@@ -76,7 +76,6 @@ object SettingsRepository {
     const val PREF_KEY_TMDB_API_KEY = "tmdb_api_key"
     const val PREF_KEY_MDBLIST_ENABLED = "mdblist_enabled"
     const val PREF_KEY_MDBLIST_API_KEY = "mdblist_api_key"
-    const val PREF_KEY_METADATA_HTTP2_ENABLED = "metadata_http2_enabled"
 
     fun loadLinks(sharedPref: SharedPreferences): MutableList<LinkItem> {
         val json = sharedPref.getString(PREF_KEY_LINKS, null) ?: return mutableListOf()
@@ -426,9 +425,7 @@ class SettingsBottomFragment(
                         if (isCineStreamExportActive) {
                             val cineStreamJson = JSONObject()
                             try {
-                                println("[Setting_Write] Export: Attempting to read directly from CloudStreamApp DB")
                                 val dynamicKeys = getCineStreamDynamicKeys()
-                                println("[Setting_Write] Export: Total dynamic keys to scan: ${dynamicKeys.size}")
                                 
                                 dynamicKeys.forEach { cKey ->
                                     var found = false
@@ -437,10 +434,8 @@ class SettingsBottomFragment(
                                         if (strVal != null) {
                                             cineStreamJson.put(cKey, strVal)
                                             found = true
-                                            println("[Setting_Write] Export Match: Key = '$cKey' | Type = String (via CloudStreamApp)")
                                         }
                                     } catch (t: Throwable) {
-                                        println("[Setting_Write] Export Debug: Key = '$cKey' is not String -> ${t.message}")
                                     }
                                     
                                     if (!found) {
@@ -449,10 +444,8 @@ class SettingsBottomFragment(
                                             if (boolVal != null) {
                                                 cineStreamJson.put(cKey, boolVal)
                                                 found = true
-                                                println("[Setting_Write] Export Match: Key = '$cKey' | Type = Boolean (via CloudStreamApp)")
                                             }
                                         } catch (t: Throwable) {
-                                            println("[Setting_Write] Export Debug: Key = '$cKey' is not Boolean -> ${t.message}")
                                         }
                                     }
                                     
@@ -461,18 +454,14 @@ class SettingsBottomFragment(
                                             val intVal = CloudStreamApp.getKey<Int>(cKey)
                                             if (intVal != null) {
                                                 cineStreamJson.put(cKey, intVal)
-                                                println("[Setting_Write] Export Match: Key = '$cKey' | Type = Int (via CloudStreamApp)")
                                             }
                                         } catch (t: Throwable) {
-                                            println("[Setting_Write] Export Debug: Key = '$cKey' is not Int -> ${t.message}")
                                         }
                                     }
                                 }
                             } catch (e: Exception) {
-                                println("[Setting_Write] Export Error: ${e.message}")
                                 e.printStackTrace()
                             }
-                            println("[Setting_Write] Export Done: ${cineStreamJson.length()} settings exported")
                             json.put("cine_stream_data", cineStreamJson)
                         }                        
                                               
@@ -705,12 +694,10 @@ class SettingsBottomFragment(
                                     val isCineStreamEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, false) ?: false
                                     if (parsedJson.has("cine_stream_data") && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
                                         val cineStreamData = parsedJson.optJSONObject("cine_stream_data")
-                                        println("[Setting_Write] Import: parsedJson has 'cine_stream_data' (${cineStreamData?.length() ?: 0} settings)")
                                         if (cineStreamData != null) {
                                             val dynamicKeys = getCineStreamDynamicKeys()
                                             
                                             // 1. CloudStreamApp 전역 데이터베이스 복원
-                                            println("[Setting_Write] Import: Restoring to CloudStreamApp database...")
                                             dynamicKeys.forEach { cKey ->
                                                 if (cineStreamData.has(cKey)) {
                                                     val cValue = cineStreamData.get(cKey)
@@ -720,9 +707,7 @@ class SettingsBottomFragment(
                                                             is String -> CloudStreamApp.setKey(cKey, cValue)
                                                             is Int -> CloudStreamApp.setKey(cKey, cValue)
                                                         }
-                                                        println("[Setting_Write] Import: CloudStreamApp setKey Success -> '$cKey' | Type = ${cValue?.javaClass?.simpleName}")
                                                     } catch (t: Throwable) {
-                                                        println("[Setting_Write] Import: CloudStreamApp setKey Error for '$cKey' -> ${t.message}")
                                                     }
                                                 } else {
                                                     try { CloudStreamApp.setKey(cKey, null as String?) } catch (_: Throwable) {}
@@ -842,41 +827,6 @@ class SettingsBottomFragment(
 
         switchMdbList.setOnCheckedChangeListener { _, isChecked ->
             layoutMdbList.visibility = if (isChecked) View.VISIBLE else View.GONE
-        }
-
-        // Runtime H1/H2 A/B switch. No extra XML resource is required: insert the row next to
-        // the existing TMDB/MDBList settings so the same APK can benchmark both transports.
-        val metadataProtocolRow = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
-            setPadding(0, 18, 0, 18)
-        }
-        val metadataProtocolText = TextView(ctx).apply {
-            text = "Metadata HTTP/2 (No-Cache A/B)\nON = H2 + H1 fallback  /  OFF = H1 only"
-            setTextColor(Color.WHITE)
-            textSize = 14f
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        val switchMetadataHttp2 = Switch(ctx).apply {
-            isChecked = sharedPref.getBoolean(SettingsRepository.PREF_KEY_METADATA_HTTP2_ENABLED, true)
-            makeTvCompatible()
-        }
-        metadataProtocolRow.addView(metadataProtocolText)
-        metadataProtocolRow.addView(switchMetadataHttp2)
-
-        (layoutMdbList.parent as? ViewGroup)?.let { parent ->
-            val index = parent.indexOfChild(layoutMdbList)
-            if (index >= 0) parent.addView(metadataProtocolRow, index + 1) else parent.addView(metadataProtocolRow)
-        }
-
-        switchMetadataHttp2.setOnCheckedChangeListener { _, enabled ->
-            sharedPref.edit().putBoolean(SettingsRepository.PREF_KEY_METADATA_HTTP2_ENABLED, enabled).apply()
-            StremioC.resetMetadataAbBenchmarkState()
-            Toast.makeText(
-                ctx,
-                if (enabled) "Metadata protocol: H2 · cache OFF · state reset" else "Metadata protocol: H1 · cache OFF · state reset",
-                Toast.LENGTH_SHORT
-            ).show()
         }
 
         addlinks.setOnClickListener {
