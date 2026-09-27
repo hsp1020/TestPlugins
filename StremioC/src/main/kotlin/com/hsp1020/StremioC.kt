@@ -1575,7 +1575,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 urlHint?.tmdbId == directTmdbFromRes &&
                 hintMediaType == authoritativeMediaType
 
-            val hintedImdbForFind = urlHint?.id?.takeIf { it.startsWith("tt") }
+            // For Kitsu/MAL, the speculative resolver may already have produced an IMDb ID
+            // even though the original URL itself is kitsu:/mal:. Reuse that IMDb ID when
+            // validating an already-completed speculative IMDb -> TMDB find.
+            val hintedImdbForFind = resolvedImdbId ?: urlHint?.id?.takeIf { it.startsWith("tt") }
             val cachedFindMatchesAuthoritative = if (
                 directTmdbFromRes != null &&
                 hintedImdbForFind != null &&
@@ -1668,8 +1671,22 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             else -> null
         }
         val postMetaEarlyMdbIsTmdb = (postMetaEarlyMdbId == resolvedTmdbId) || (postMetaEarlyMdbId?.startsWith("tt") == false)
+
+        // A speculative MDB Deferred can exist for Kitsu/MAL yet resolve to null when the
+        // resolver found no IMDb/TMDB ID. In that case do not let the mere Deferred object
+        // suppress the post-meta MDB request: start it immediately from the authoritative
+        // Stremio meta ID so MDBList can overlap the remaining TMDB/core work.
+        val speculativeMdbHasUsableTarget = when {
+            speculativeMdbDeferred == null || !hintMatchesAuthoritative -> false
+            urlHint?.id?.startsWith("tt") == true -> true
+            urlHint?.id?.startsWith("tmdb:") == true -> true
+            urlHint?.id?.startsWith("kitsu:") == true || urlHint?.id?.startsWith("mal:") == true ->
+                !resolvedTmdbId.isNullOrBlank() || !resolvedImdbId.isNullOrBlank()
+            else -> false
+        }
+
         val postMetaMdbDeferred: Deferred<SpeculativeMdbResult?>? = if (
-            mdbEnabled && postMetaEarlyMdbId != null && (speculativeMdbDeferred == null || !hintMatchesAuthoritative)
+            mdbEnabled && postMetaEarlyMdbId != null && !speculativeMdbHasUsableTarget
         ) {
             async(Dispatchers.IO) {
                 val mdbStartNs = System.nanoTime()
