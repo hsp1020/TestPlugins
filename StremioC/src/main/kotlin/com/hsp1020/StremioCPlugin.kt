@@ -105,11 +105,9 @@ class StremioCPlugin : Plugin() {
                     editor.putBoolean("stremio_c_restore_complete", true)
                     editor.putString("stremio_c_last_applied_backup_hash", incomingHash)
                     editor.commit()
-                    println("[StremioCPlugin] StremioC preferences restored successfully on load.")
                 }
             }
         } catch (e: Throwable) {
-            println("[StremioCPlugin] Error during StremioC restore on boot: ${e.message}")
             e.printStackTrace()
         }
 
@@ -134,11 +132,9 @@ class StremioCPlugin : Plugin() {
                     editor.putBoolean("streamplay_restore_complete", true)
                     editor.putString("streamplay_last_applied_backup_hash", incomingHash)
                     editor.commit()
-                    println("[StremioCPlugin] StreamPlay preferences restored successfully via proxy on load.")
                 }
             }
         } catch (e: Throwable) {
-            println("[StremioCPlugin] Error during StreamPlay proxy restore on boot: ${e.message}")
             e.printStackTrace()
         }
 
