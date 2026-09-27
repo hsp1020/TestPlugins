@@ -985,9 +985,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
         val mdbEnabled = isIntegrationEnabled("mdblist_enabled")
         val earlyMdbIsTmdb = (earlyMdbId == resolvedTmdbId) || (earlyMdbId?.startsWith("tt") == false)
-        val mdbDeferred = if (mdbEnabled && earlyMdbId != null) async(Dispatchers.IO) {
-            runSuspendCatching { fetchMdbListRatings(earlyMdbId, earlyMdbIsTmdb) }
-                .getOrDefault(emptyList())
+        val mdbDeferred: Deferred<List<String>>? = if (mdbEnabled && earlyMdbId != null) {
+            async<List<String>>(Dispatchers.IO) {
+                runSuspendCatching { fetchMdbListRatings(earlyMdbId, earlyMdbIsTmdb) }
+                    .getOrDefault(emptyList<String>())
+            }
         } else null
 
         val loadRes = res.toLoadResponse(
