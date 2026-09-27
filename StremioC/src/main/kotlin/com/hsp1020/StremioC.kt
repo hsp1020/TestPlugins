@@ -45,7 +45,6 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
-import com.lagradost.cloudstream3.utils.DataStoreHelper
 import com.lagradost.nicehttp.Requests
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
@@ -62,7 +61,6 @@ import java.net.URLEncoder
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
 import java.lang.ref.WeakReference
 
 inline fun <T> runSuspendCatching(block: () -> T): Result<T> {
@@ -134,9 +132,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     )
     @Volatile private var preparedMainPageManifest: PreparedMainPageManifest? = null
     @Volatile private var preparedMainPageData: PreparedMainPageData? = null
-    // mainPage is a synchronous property, so the manifest warm-up and foreground build share
-    // this JVM lock. A matching persisted manifest is parsed by exactly one owner; a concurrent
-    // caller waits for that owner and reuses the prepared object instead of parsing twice.
+    // mainPage is a synchronous property. A matching persisted manifest is parsed by exactly
+    // one caller; concurrent/repeated callers reuse the prepared object instead of parsing twice.
     private val mainPageManifestParseLock = Any()
 
     private val pageMutex = Mutex()
@@ -147,19 +144,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     )
     private val activePageRequests = mutableMapOf<String, PageFlight>()
 
-    private class OneShotPrefetch(
-        val scope: CoroutineScope,
-        val deferred: Deferred<HomePageResponse>,
-        val createdAtMs: Long,
-        val host: String,
-        @Volatile var claimed: Boolean = false
-    )
-    private val prefetchMutex = Mutex()
-    private val prefetchSweepMutex = Mutex()
-    private val page1Prefetch = mutableMapOf<String, OneShotPrefetch>()
-    // Page-1 rows are marked completed only after a successful foreground response.
-    // Failed/cancelled foreground attempts remain eligible for later background refill.
-    private val foregroundCompletedPage1 = mutableSetOf<String>()
     private val manifestMutex = Mutex()
 
     private fun getCineStreamProvider(): MainAPI? {
@@ -292,23 +276,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
         val networkSemaphore = Semaphore(35)
-        // Foreground and background home traffic use separate budgets so prefetch can never
-        // consume the slots reserved for the provider the user is actively viewing.
+        // CloudStream launches all homepage rows concurrently and waits for all of them.
+        // Bound foreground traffic directly; catalog prefetch has intentionally been removed.
         const val HOME_FOREGROUND_CONCURRENCY = 16
         const val HOME_FOREGROUND_PER_HOST_CONCURRENCY = 8
-        const val HOME_PREFETCH_CONCURRENCY = 4
         private val homeForegroundSemaphore = Semaphore(HOME_FOREGROUND_CONCURRENCY)
-        private val homePrefetchSemaphore = Semaphore(HOME_PREFETCH_CONCURRENCY)
-
-        // Track only the hosts currently serving foreground catalog traffic. Background work for
-        // other hosts continues; same-host prefetch yields to foreground to reduce rate-limit risk.
-        private val activeForegroundHosts = ConcurrentHashMap<String, AtomicInteger>()
-        private const val HOME_PREFETCH_TTL_MS = 5 * 60 * 1000L
-        private const val HOME_PREFETCH_IDLE_POLL_MS = 50L
-        private const val HOME_ROW_RETRY_DELAY_MS = 300L
-        private const val HOME_FOREGROUND_MAX_ATTEMPTS = 1
-        private const val HOME_PREFETCH_MAX_ATTEMPTS = 2
-        private const val HOME_PREFETCH_JOIN_GRACE_MS = 1_500L
         private const val HOME_SLOW_REQUEST_LOG_MS = 1_500L
 
         private class CatalogHttpException(val statusCode: Int) :
@@ -377,89 +349,28 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 .connectionPool(ConnectionPool(HOME_FOREGROUND_CONCURRENCY, 60, TimeUnit.SECONDS))
                 .build()
         }
-        private val homePrefetchClient by lazy {
-            app.baseClient.newBuilder()
-                .protocols(listOf(Protocol.HTTP_1_1))
-                .connectTimeout(10, TimeUnit.SECONDS)
-                .readTimeout(20, TimeUnit.SECONDS)
-                .callTimeout(20, TimeUnit.SECONDS)
-                .dispatcher(Dispatcher().apply {
-                    maxRequests = HOME_PREFETCH_CONCURRENCY
-                    maxRequestsPerHost = HOME_PREFETCH_CONCURRENCY
-                })
-                .connectionPool(ConnectionPool(HOME_PREFETCH_CONCURRENCY, 60, TimeUnit.SECONDS))
-                .build()
-        }
         private val homeHostBackoff = ConcurrentHashMap<String, Long>()
-        private val homePrefetchHostBackoff = ConcurrentHashMap<String, Long>()
 
-        private fun isRetryableCatalogStatus(code: Int): Boolean =
-            code == 408 || code == 425 || code == 500 || code == 502 || code == 503 || code == 504
-
-        private fun beginForegroundHost(host: String) {
-            activeForegroundHosts.computeIfAbsent(host) { AtomicInteger(0) }.incrementAndGet()
-        }
-
-        private fun endForegroundHost(host: String) {
-            val counter = activeForegroundHosts[host] ?: return
-            if (counter.decrementAndGet() <= 0) {
-                activeForegroundHosts.remove(host, counter)
-            }
-        }
-
-        private suspend fun waitForForegroundHostIdle(host: String) {
-            while ((activeForegroundHosts[host]?.get() ?: 0) > 0) {
-                delay(HOME_PREFETCH_IDLE_POLL_MS)
-            }
-        }
-
-        private suspend fun fetchHomeJson(url: String, origin: String): String {
-            val maxAttempts = if (origin == "PREFETCH") HOME_PREFETCH_MAX_ATTEMPTS else HOME_FOREGROUND_MAX_ATTEMPTS
-            var attempt = 1
-            while (true) {
-                currentCoroutineContext().ensureActive()
-                try {
-                    return fetchHomeJsonOnce(url, origin)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: CatalogHttpException) {
-                    if (attempt < maxAttempts && isRetryableCatalogStatus(e.statusCode)) {
-                        delay(HOME_ROW_RETRY_DELAY_MS)
-                        attempt++
-                        continue
-                    }
-                    throw e
-                } catch (e: java.io.IOException) {
-                    if (attempt < maxAttempts) {
-                        delay(HOME_ROW_RETRY_DELAY_MS)
-                        attempt++
-                        continue
-                    }
-                    throw e
-                }
-            }
-        }
-
-        private suspend fun fetchHomeJsonOnce(url: String, origin: String): String {
+        private suspend fun fetchHomeJson(url: String): String {
+            currentCoroutineContext().ensureActive()
             val host = url.toHttpUrlOrNull()?.host ?: throw IllegalArgumentException("Invalid catalog URL")
             val now = System.currentTimeMillis()
-            val foregroundUntil = homeHostBackoff[host] ?: 0L
-            val prefetchUntil = homePrefetchHostBackoff[host] ?: 0L
-            val until = if (origin == "PREFETCH") maxOf(foregroundUntil, prefetchUntil) else foregroundUntil
+            val until = homeHostBackoff[host] ?: 0L
             if (until > now) throw IllegalStateException("Catalog server rate limited; retry later")
+
             val request = okhttp3.Request.Builder()
                 .url(url)
                 .apply { app.defaultHeaders.forEach { (name, value) -> header(name, value) } }
                 .build()
-            val client = if (origin == "PREFETCH") homePrefetchClient else homeForegroundClient
             val startedAt = System.currentTimeMillis()
             return suspendCancellableCoroutine { continuation ->
-                val call = client.newCall(request)
+                val call = homeForegroundClient.newCall(request)
                 continuation.invokeOnCancellation { call.cancel() }
                 call.enqueue(object : okhttp3.Callback {
                     override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
                         if (continuation.isActive) continuation.resumeWith(Result.failure(e))
                     }
+
                     override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                         val outcome = runCatching {
                             response.use { res ->
@@ -470,20 +381,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                                             java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", java.util.Locale.US)
                                                 .parse(raw ?: "")?.time?.minus(System.currentTimeMillis())
                                         }.getOrNull()?.coerceIn(0L, 86400000L) ?: 10000L
-                                    if (origin == "PREFETCH") {
-                                        synchronized(homePrefetchHostBackoff) {
-                                            homePrefetchHostBackoff[host] = maxOf(
-                                                homePrefetchHostBackoff[host] ?: 0L,
-                                                System.currentTimeMillis() + delayMs
-                                            )
-                                        }
-                                    } else {
-                                        synchronized(homeHostBackoff) {
-                                            homeHostBackoff[host] = maxOf(
-                                                homeHostBackoff[host] ?: 0L,
-                                                System.currentTimeMillis() + delayMs
-                                            )
-                                        }
+                                    synchronized(homeHostBackoff) {
+                                        homeHostBackoff[host] = maxOf(
+                                            homeHostBackoff[host] ?: 0L,
+                                            System.currentTimeMillis() + delayMs
+                                        )
                                     }
                                     throw CatalogHttpException(429)
                                 }
@@ -493,7 +395,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         }
                         val elapsed = System.currentTimeMillis() - startedAt
                         if (elapsed >= HOME_SLOW_REQUEST_LOG_MS) {
-                            com.lagradost.api.Log.d("StremioC", "home slow origin=$origin host=$host ms=$elapsed")
+                            com.lagradost.api.Log.d("StremioC", "home slow host=$host ms=$elapsed")
                         }
                         if (continuation.isActive) continuation.resumeWith(outcome)
                     }
@@ -617,20 +519,90 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val mediaType: String,
         val viaFind: Boolean,
         val detail: TmdbDetailResponse?
+    ) {
+        fun matchesDirect(id: String, type: String): Boolean = tmdbId == id && mediaType == type
+        fun matchesFind(imdbId: String?): Boolean = viaFind && !imdbId.isNullOrBlank() && sourceImdbId == imdbId
+        fun asFindResult(): Pair<String, String>? = if (viaFind) tmdbId to mediaType else null
+    }
+
+    private data class MdbTarget(
+        val id: String,
+        val isTmdb: Boolean
     )
 
     private data class SpeculativeMdbResult(
-        val id: String,
-        val isTmdb: Boolean,
+        val target: MdbTarget,
         val ratings: List<String>,
         val requestSucceeded: Boolean
-    )
+    ) {
+        fun matches(other: MdbTarget): Boolean = target == other && requestSucceeded
+    }
 
     private fun canonicalDetailType(type: String?): String? = when (type?.lowercase()) {
         "movie" -> "movie"
         "series", "tv" -> "series"
         null -> null
         else -> type.lowercase()
+    }
+
+    private fun detailMediaType(type: String?): String =
+        if (canonicalDetailType(type) == "movie") "movie" else "tv"
+
+    private fun isKitsuOrMalId(id: String?): Boolean =
+        id?.startsWith("kitsu:") == true || id?.startsWith("mal:") == true
+
+    private fun directMdbTarget(id: String?): MdbTarget? = when {
+        id?.startsWith("tt") == true -> MdbTarget(id, false)
+        id?.startsWith("tmdb:") == true -> MdbTarget(id.removePrefix("tmdb:"), true)
+        else -> null
+    }
+
+    private fun resolvedMdbTarget(
+        entry: CatalogEntry,
+        resolvedTmdbId: String?,
+        resolvedImdbId: String?
+    ): MdbTarget? {
+        val id = resolvedTmdbId ?: resolvedImdbId ?: when {
+            entry.id?.startsWith("tt") == true -> entry.id
+            entry.id?.startsWith("tmdb:") == true -> entry.id.removePrefix("tmdb:")
+            entry.moviedb_id != null -> entry.moviedb_id.toString()
+            !entry.tmdbIdExt.isNullOrBlank() -> entry.tmdbIdExt
+            else -> null
+        } ?: return null
+        return MdbTarget(id, id == resolvedTmdbId || !id.startsWith("tt"))
+    }
+
+    private suspend fun fetchMdbAttempt(target: MdbTarget): SpeculativeMdbResult {
+        val attempt = runSuspendCatching { fetchMdbListRatings(target.id, target.isTmdb) }
+        return SpeculativeMdbResult(
+            target = target,
+            ratings = attempt.getOrDefault(emptyList<String>()),
+            requestSucceeded = attempt.isSuccess
+        )
+    }
+
+    private fun CoroutineScope.launchMdbAttempt(target: MdbTarget?): Deferred<SpeculativeMdbResult?>? =
+        target?.let { async(Dispatchers.IO) { fetchMdbAttempt(it) } }
+
+    private fun cachedFindMatches(
+        imdbId: String?,
+        tmdbId: String?,
+        mediaType: String
+    ): Boolean {
+        if (imdbId.isNullOrBlank() || tmdbId.isNullOrBlank()) return false
+        val cached = tmdbFindCache[imdbId] ?: return false
+        return System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL &&
+            cached.first?.first == tmdbId && cached.first?.second == mediaType
+    }
+
+    private fun hasUsableSpeculativeMdbTarget(
+        hint: DetailUrlHint?,
+        resolvedTmdbId: String?,
+        resolvedImdbId: String?
+    ): Boolean = when {
+        directMdbTarget(hint?.id) != null -> true
+        isKitsuOrMalId(hint?.id) -> !resolvedTmdbId.isNullOrBlank() || !resolvedImdbId.isNullOrBlank()
+        else -> false
     }
 
     private fun parseDetailUrlHint(url: String): DetailUrlHint? {
@@ -899,39 +871,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
     }
 
-    /**
-     * Parse the authoritative persisted manifest ahead of the first homepage build.
-     * This is not a catalog-result cache: only manifest/configuration definitions are retained in RAM.
-     */
-    suspend fun warmMainPageManifest(): Boolean {
-        if (mainUrl.isBlank()) return false
-        val context = CloudStreamApp.context ?: return false
-        val manifestPrefs = context.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
-        val currentUrl = stremioManifestUrl(mainUrl)
-        val raw = stremioReadManifest(manifestPrefs, mainUrl)
-        if (raw.isNullOrBlank()) return false
-
-        val signature = raw.toUniqueKey()
-        val parsed = withContext(Dispatchers.Default) {
-            parseMainPageManifestSingleFlight(raw, currentUrl, signature)
-        }
-        return parsed?.catalogs?.isNotEmpty() == true
-    }
-
-    /** Build the synchronous CloudStream mainPage definition off the UI thread when possible. */
-    suspend fun warmMainPageDefinition(): Boolean {
-        if (!warmMainPageManifest()) return false
-        val context = CloudStreamApp.context ?: return false
-        val manifestPrefs = context.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
-        val currentUrl = stremioManifestUrl(mainUrl)
-        val raw = stremioReadManifest(manifestPrefs, mainUrl) ?: return false
-        val signature = raw.toUniqueKey()
-        val data = withContext(Dispatchers.Default) { buildMainPageData() }
-        if (data.isEmpty()) return false
-        preparedMainPageData = PreparedMainPageData(currentUrl, signature, data)
-        return true
-    }
-
     private fun buildMainPageData(): List<MainPageData> {
         val context = CloudStreamApp.context ?: return emptyList()
         val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
@@ -1048,216 +987,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return "$mainUrl|${request.data}"
     }
 
-
-    private fun isThisProviderSelectedOnHome(): Boolean =
-        DataStoreHelper.currentHomePage?.equals(name, ignoreCase = true) == true
-
-    private suspend fun preemptUnclaimedPrefetchForHost(host: String) {
-        val cancelled = prefetchMutex.withLock {
-            val victims = page1Prefetch.entries
-                .filter { (_, entry) ->
-                    entry.host == host && !entry.claimed && !entry.deferred.isCompleted
-                }
-                .map { it.key to it.value }
-
-            victims.forEach { (stateKey, entry) ->
-                if (page1Prefetch[stateKey] === entry) page1Prefetch.remove(stateKey)
-            }
-            victims.map { it.second }
-        }
-        if (cancelled.isEmpty()) return
-
-        cancelled.forEach { it.scope.cancel() }
-        withTimeoutOrNull(250L) { cancelled.map { it.deferred }.joinAll() }
-        com.lagradost.api.Log.d(
-            "StremioC",
-            "home preempt host=$host state=CANCEL_BG_FOR_FG count=${cancelled.size}"
-        )
-    }
-
-    private suspend fun consumeOneShotPrefetch(request: MainPageRequest): HomePageResponse? {
-        val stateKey = getCatalogStateKey(request)
-        val now = System.currentTimeMillis()
-        var expired: OneShotPrefetch? = null
-        val entry = prefetchMutex.withLock {
-            val candidate = page1Prefetch[stateKey] ?: return@withLock null
-            if (now - candidate.createdAtMs > HOME_PREFETCH_TTL_MS) {
-                if (page1Prefetch[stateKey] === candidate) page1Prefetch.remove(stateKey)
-                expired = candidate
-                null
-            } else {
-                candidate.claimed = true
-                candidate
-            }
-        }
-
-        if (expired != null) {
-            expired!!.scope.cancel()
-            com.lagradost.api.Log.d("StremioC", "home state provider=$name tab=${request.name} state=MISS reason=EXPIRED")
-            return null
-        }
-        if (entry == null) {
-            com.lagradost.api.Log.d("StremioC", "home state provider=$name tab=${request.name} state=MISS")
-            return null
-        }
-
-        val wasReady = entry.deferred.isCompleted
-        com.lagradost.api.Log.d(
-            "StremioC",
-            "home state provider=$name tab=${request.name} state=${if (wasReady) "READY" else "IN_FLIGHT"}"
-        )
-
-        val result = try {
-            if (wasReady) {
-                entry.deferred.await()
-            } else {
-                withTimeoutOrNull(HOME_PREFETCH_JOIN_GRACE_MS) { entry.deferred.await() }
-            }
-        } catch (e: CancellationException) {
-            if (!currentCoroutineContext().isActive) {
-                prefetchMutex.withLock {
-                    if (page1Prefetch[stateKey] === entry) page1Prefetch.remove(stateKey)
-                }
-                entry.scope.cancel()
-                throw e
-            }
-            null
-        } catch (_: Throwable) {
-            null
-        }
-
-        prefetchMutex.withLock {
-            if (page1Prefetch[stateKey] === entry) page1Prefetch.remove(stateKey)
-            if (result != null) foregroundCompletedPage1.add(stateKey)
-        }
-        // If an IN_FLIGHT prefetch did not finish inside the short foreground grace period,
-        // cancel it and let the dedicated 10s foreground path take over. Give the cancelled
-        // wrapper a tiny window to remove its PageFlight so foreground cannot accidentally join
-        // the old 20s PREFETCH flight in the cancellation race.
-        entry.scope.cancel()
-        if (result == null && !entry.deferred.isCompleted) {
-            com.lagradost.api.Log.d(
-                "StremioC",
-                "home state provider=$name tab=${request.name} state=CANCEL_BG_FOR_FG"
-            )
-            withTimeoutOrNull(250L) { entry.deferred.join() }
-        }
-        return result
-    }
-
-    private suspend fun schedulePrefetchExpiry(stateKey: String, entry: OneShotPrefetch) {
-        entry.scope.launch {
-            delay(HOME_PREFETCH_TTL_MS)
-            var removed = false
-            prefetchMutex.withLock {
-                if (page1Prefetch[stateKey] === entry && !entry.claimed) {
-                    page1Prefetch.remove(stateKey)
-                    removed = true
-                }
-            }
-            if (removed) entry.scope.cancel()
-        }
-    }
-
-    private suspend fun cleanupFailedPrefetch(stateKey: String, entry: OneShotPrefetch) {
-        prefetchMutex.withLock {
-            if (page1Prefetch[stateKey] === entry) page1Prefetch.remove(stateKey)
-        }
-        if (!entry.claimed) entry.scope.cancel()
-    }
-
-    private suspend fun prefetchOnePage(request: MainPageRequest) {
-        val stateKey = getCatalogStateKey(request)
-        val targetPath = request.data.replace("###", "0")
-        val host = buildUrl(targetPath).toHttpUrlOrNull()?.host ?: return
-        val entry = prefetchMutex.withLock {
-            if (foregroundCompletedPage1.contains(stateKey) || page1Prefetch.containsKey(stateKey)) {
-                return@withLock null
-            }
-
-            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-            val deferred = scope.async(start = CoroutineStart.LAZY) {
-                executeMainPage(1, request, "PREFETCH")
-            }
-            OneShotPrefetch(
-                scope = scope,
-                deferred = deferred,
-                createdAtMs = System.currentTimeMillis(),
-                host = host
-            ).also { page1Prefetch[stateKey] = it }
-        } ?: return
-
-        entry.deferred.start()
-        try {
-            entry.deferred.await()
-            schedulePrefetchExpiry(stateKey, entry)
-        } catch (e: CancellationException) {
-            if (!currentCoroutineContext().isActive) {
-                // The sweep/rearm coordinator may be cancelled when the user switches back.
-                // The row itself owns an independent scope, so leave it alive and detach cleanup
-                // instead of blocking cancellation until the network call finishes.
-                entry.scope.launch {
-                    val completed = runCatching { entry.deferred.await() }.isSuccess
-                    if (completed) schedulePrefetchExpiry(stateKey, entry)
-                    else cleanupFailedPrefetch(stateKey, entry)
-                }
-                throw e
-            }
-            cleanupFailedPrefetch(stateKey, entry)
-        } catch (_: Throwable) {
-            cleanupFailedPrefetch(stateKey, entry)
-        }
-    }
-
-    suspend fun prefetchEnabledMainPageCatalogs() {
-        if (mainUrl.isBlank() || isThisProviderSelectedOnHome()) return
-        prefetchSweepMutex.withLock {
-            val tabs = try {
-                mainPage
-            } catch (_: Throwable) {
-                return@withLock
-            }
-            if (tabs.isEmpty()) return@withLock
-
-            val requests = tabs.map { tab -> MainPageRequest(tab.name, tab.data, tab.horizontalImages) }
-            val nextIndex = AtomicInteger(0)
-            val workerCount = minOf(HOME_PREFETCH_CONCURRENCY, requests.size)
-            coroutineScope {
-                repeat(workerCount) {
-                    launch {
-                        while (isActive) {
-                            // Once this provider becomes the visible homepage, stop starting new BG rows.
-                            // Already-started rows remain consumable through the one-shot state.
-                            if (isThisProviderSelectedOnHome()) return@launch
-                            val index = nextIndex.getAndIncrement()
-                            if (index >= requests.size) return@launch
-                            val request = requests[index]
-                            val stateKey = getCatalogStateKey(request)
-                            if (prefetchMutex.withLock { foregroundCompletedPage1.contains(stateKey) }) continue
-                            prefetchOnePage(request)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    suspend fun rearmOneShotCatalogPrefetch() {
-        if (mainUrl.isBlank()) return
-        prefetchMutex.withLock { foregroundCompletedPage1.clear() }
-        prefetchEnabledMainPageCatalogs()
-    }
-
-    suspend fun cancelOneShotCatalogPrefetch() {
-        val entries = prefetchMutex.withLock {
-            val copy = page1Prefetch.values.toList()
-            page1Prefetch.clear()
-            foregroundCompletedPage1.clear()
-            copy
-        }
-        entries.forEach { it.scope.cancel() }
-    }
-
     private fun getCatalogLogIdentity(request: MainPageRequest): Pair<String, String> {
         val parts = request.data.substringBefore('?').split('/').filter { it.isNotBlank() }
         val catalogIndex = parts.indexOf("catalog")
@@ -1267,18 +996,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val stateKey = getCatalogStateKey(request)
         return try {
-            val response = if (page <= 1) {
-                val prefetched = consumeOneShotPrefetch(request)
-                prefetched ?: executeMainPage(page, request, "FOREGROUND")
-            } else {
-                executeMainPage(page, request, "FOREGROUND")
-            }
-            if (page <= 1) {
-                prefetchMutex.withLock { foregroundCompletedPage1.add(stateKey) }
-            }
-            response
+            executeMainPage(page, request)
         } catch (e: CancellationException) {
             // Navigation/provider switches must still cancel promptly.
             throw e
@@ -1295,8 +1014,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private suspend fun executeMainPage(
         page: Int,
-        request: MainPageRequest,
-        origin: String
+        request: MainPageRequest
     ): HomePageResponse {
         val stateKey = getCatalogStateKey(request)
         val key = "$stateKey|page=$page"
@@ -1316,7 +1034,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 } else catalogGenerations[stateKey] ?: 0L
                 val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
                 val deferred = scope.async(start = CoroutineStart.LAZY) {
-                    fetchTabCatalogData(request, page, generation, origin)
+                    fetchTabCatalogData(request, page, generation)
                 }
                 PageFlight(scope, deferred, 1).also { activePageRequests[key] = it }
             }
@@ -1341,8 +1059,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     private suspend fun fetchTabCatalogData(
         request: MainPageRequest,
         page: Int,
-        generation: Long,
-        origin: String
+        generation: Long
     ): HomePageResponse {
         val stateKey = getCatalogStateKey(request)
 
@@ -1351,7 +1068,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
         if (page > 1 && !catalogSkipState.containsKey(stateKey)) {
-            fetchTabCatalogData(request, 1, generation, origin)
+            fetchTabCatalogData(request, 1, generation)
         }
 
         if ((catalogGenerations[stateKey] ?: 0L) != generation) {
@@ -1362,27 +1079,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val targetPath = request.data.replace("###", currentSkip.toString())
         val targetUrl = buildUrl(targetPath)
 
-        val host = targetUrl.toHttpUrlOrNull()?.host ?: throw IllegalArgumentException("Invalid catalog URL")
-        val jsonText = if (origin == "PREFETCH") {
-            // Do not occupy a BG slot while the same host is actively serving foreground traffic.
-            waitForForegroundHostIdle(host)
-            homePrefetchSemaphore.withPermit {
-                waitForForegroundHostIdle(host)
-                fetchHomeJson(targetUrl, origin)
-            }
-        } else {
-            beginForegroundHost(host)
-            try {
-                // Stop only unclaimed, still-running prefetches for this host. Completed READY
-                // entries and rows already claimed by foreground are preserved. Marking the host
-                // active before preemption also prevents new same-host background work from starting.
-                preemptUnclaimedPrefetchForHost(host)
-                homeForegroundSemaphore.withPermit {
-                    fetchHomeJson(targetUrl, origin)
-                }
-            } finally {
-                endForegroundHost(host)
-            }
+        val jsonText = homeForegroundSemaphore.withPermit {
+            fetchHomeJson(targetUrl)
         }
 
         val metas = try {
@@ -1400,11 +1098,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         val mappedItems = metas.map { meta ->
             val type = meta.type ?: "movie"
+            val id = meta.id ?: ""
             val title = meta.name?.takeIf { it.isNotBlank() }
-                ?: "[${type.replaceFirstChar { it.uppercase() }}] ${meta.id}"
-            newMovieSearchResponse(title, getUnifiedMetaUrl(type, meta.id ?: ""), TvType.Others) {
-                posterUrl = meta.poster
-            }
+                ?: "[${type.replaceFirstChar { it.uppercase() }}] $id"
+            val metaUrl = getUnifiedMetaUrl(type, id)
+            rememberDetailLoadHint(metaUrl, type, id, meta.moviedb_id?.toString() ?: meta.tmdbIdExt)
+            newMovieSearchResponse(title, metaUrl, TvType.Others) { posterUrl = meta.poster }
         }
         val resultPair = Pair(mappedItems, metas.size)
 
@@ -1481,47 +1180,26 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 canonicalDetailType(cached.type) == canonicalDetailType(parsedUrlHint.type)
         }
         val urlHint = rememberedHint ?: parsedUrlHint
-        val hintCanonicalType = canonicalDetailType(urlHint?.type)
-        val hintMediaType = if (hintCanonicalType == "movie") "movie" else "tv"
+        val hintMediaType = detailMediaType(urlHint?.type)
         val mdbEnabled = isIntegrationEnabled("mdblist_enabled")
+        val directMdbHint = directMdbTarget(urlHint?.id)
 
-        val speculativeKitsuDeferred: Deferred<KitsuResolvedMeta?>? = if (
-            urlHint?.id?.startsWith("kitsu:") == true || urlHint?.id?.startsWith("mal:") == true
-        ) {
-            async(Dispatchers.IO) {
-                resolveKitsuForLoad(urlHint.id, urlHint.type)
-            }
-        } else {
-            null
+        val hintedKitsuId = urlHint?.id?.takeIf { isKitsuOrMalId(it) }
+        val speculativeKitsuDeferred: Deferred<KitsuResolvedMeta?>? = hintedKitsuId?.let { id ->
+            async(Dispatchers.IO) { resolveKitsuForLoad(id, urlHint.type) }
         }
 
-        val speculativeMdbDeferred: Deferred<SpeculativeMdbResult?>? = if (!mdbEnabled || urlHint == null) {
-            null
-        } else {
-            when {
-                urlHint.id.startsWith("tt") -> async(Dispatchers.IO) {
-                    val attempt = runSuspendCatching { fetchMdbListRatings(urlHint.id, false) }
-                    val ratings = attempt.getOrDefault(emptyList<String>())
-                    SpeculativeMdbResult(urlHint.id, false, ratings, attempt.isSuccess)
-                }
-                urlHint.id.startsWith("tmdb:") -> {
-                    val tmdbId = urlHint.id.removePrefix("tmdb:")
-                    async(Dispatchers.IO) {
-                        val attempt = runSuspendCatching { fetchMdbListRatings(tmdbId, true) }
-                        val ratings = attempt.getOrDefault(emptyList<String>())
-                        SpeculativeMdbResult(tmdbId, true, ratings, attempt.isSuccess)
-                    }
-                }
-                speculativeKitsuDeferred != null -> async(Dispatchers.IO) {
-                    val resolved = speculativeKitsuDeferred.await() ?: return@async null
-                    val mdbId = resolved.tmdbId ?: resolved.imdbId ?: return@async null
-                    val isTmdb = resolved.tmdbId != null && mdbId == resolved.tmdbId
-                    val attempt = runSuspendCatching { fetchMdbListRatings(mdbId, isTmdb) }
-                    val ratings = attempt.getOrDefault(emptyList<String>())
-                    SpeculativeMdbResult(mdbId, isTmdb, ratings, attempt.isSuccess)
-                }
-                else -> null
+        val speculativeMdbDeferred: Deferred<SpeculativeMdbResult?>? = when {
+            !mdbEnabled || urlHint == null -> null
+            directMdbHint != null -> launchMdbAttempt(directMdbHint)
+            speculativeKitsuDeferred != null -> async(Dispatchers.IO) {
+                val resolved = speculativeKitsuDeferred.await() ?: return@async null
+                val target = resolved.tmdbId?.let { MdbTarget(it, true) }
+                    ?: resolved.imdbId?.let { MdbTarget(it, false) }
+                    ?: return@async null
+                fetchMdbAttempt(target)
             }
+            else -> null
         }
 
         val speculativeTmdbDeferred: Deferred<SpeculativeTmdbChain?>? = when {
@@ -1608,7 +1286,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             result
         }
 
-        val isKitsuOrMal = res.id?.startsWith("kitsu:") == true || res.id?.startsWith("mal:") == true
+        val isKitsuOrMal = isKitsuOrMalId(res.id)
         var fetchedAniListId: Int? = null
         var fetchedMalId: Int? = null
         var resolvedImdbId: String? = null
@@ -1639,65 +1317,23 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             !tmdbIdFromRes.isNullOrBlank() -> tmdbIdFromRes
             else -> null
         }
-        val authoritativeMediaType = if (canonicalDetailType(res.type) == "movie") "movie" else "tv"
+        val authoritativeMediaType = detailMediaType(res.type)
 
-        var validatedFindResult: Pair<String, String>? = null
-        var validatedFindImdbId: String? = null
-        var speculativeTmdbDetail: TmdbDetailResponse? = null
-        var speculativeTmdbId: String? = null
-        var speculativeTmdbMediaType: String? = null
+        var acceptedTmdbSpec: SpeculativeTmdbChain? = null
 
         if (hintMatchesAuthoritative && speculativeTmdbDeferred != null) {
-            val catalogTargetIsAuthoritative = !urlHint?.tmdbId.isNullOrBlank() &&
-                directTmdbFromRes != null &&
-                urlHint?.tmdbId == directTmdbFromRes &&
+            val hintedImdb = resolvedImdbId ?: urlHint?.id?.takeIf { it.startsWith("tt") }
+            val authoritativeHint = !urlHint?.tmdbId.isNullOrBlank() &&
+                directTmdbFromRes != null && urlHint?.tmdbId == directTmdbFromRes &&
                 hintMediaType == authoritativeMediaType
+            val reuseFind = urlHint?.tmdbId.isNullOrBlank() &&
+                cachedFindMatches(hintedImdb, directTmdbFromRes, authoritativeMediaType)
 
-            // For Kitsu/MAL, the speculative resolver may already have produced an IMDb ID
-            // even though the original URL itself is kitsu:/mal:. Reuse that IMDb ID when
-            // validating an already-completed speculative IMDb -> TMDB find.
-            val hintedImdbForFind = resolvedImdbId ?: urlHint?.id?.takeIf { it.startsWith("tt") }
-            val cachedFindMatchesAuthoritative = if (
-                directTmdbFromRes != null &&
-                hintedImdbForFind != null &&
-                urlHint?.tmdbId.isNullOrBlank()
-            ) {
-                val cached = tmdbFindCache[hintedImdbForFind]
-                cached != null &&
-                    System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL &&
-                    cached.first?.first == directTmdbFromRes &&
-                    cached.first?.second == authoritativeMediaType
-            } else {
-                false
-            }
-
-            val shouldAwaitSpeculative = when {
-                directTmdbFromRes == null -> true
-                catalogTargetIsAuthoritative -> true
-                cachedFindMatchesAuthoritative -> true
-                speculativeTmdbDeferred.isCompleted -> true
-                else -> false
-            }
-
-            if (shouldAwaitSpeculative) {
-                val spec = speculativeTmdbDeferred.await()
-                if (spec != null) {
-                    val effectiveImdb = resolvedImdbId ?: res.id?.takeIf { it.startsWith("tt") }
-                    val valid = if (directTmdbFromRes != null) {
-                        spec.tmdbId == directTmdbFromRes && spec.mediaType == authoritativeMediaType
-                    } else {
-                        spec.viaFind && !effectiveImdb.isNullOrBlank() && spec.sourceImdbId == effectiveImdb
-                    }
-
-                    if (valid) {
-                        speculativeTmdbId = spec.tmdbId
-                        speculativeTmdbMediaType = spec.mediaType
-                        speculativeTmdbDetail = spec.detail
-                        if (spec.viaFind) {
-                            validatedFindResult = Pair(spec.tmdbId, spec.mediaType)
-                            validatedFindImdbId = spec.sourceImdbId
-                        }
-                    }
+            if (directTmdbFromRes == null || authoritativeHint || reuseFind || speculativeTmdbDeferred.isCompleted) {
+                speculativeTmdbDeferred.await()?.let { spec ->
+                    val valid = directTmdbFromRes?.let { spec.matchesDirect(it, authoritativeMediaType) }
+                        ?: spec.matchesFind(hintedImdb)
+                    if (valid) acceptedTmdbSpec = spec
                 }
             } else {
                 speculativeTmdbDeferred.cancel()
@@ -1705,49 +1341,23 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
 
+        val validatedFindResult = acceptedTmdbSpec?.asFindResult()
+        val validatedFindImdbId = acceptedTmdbSpec?.takeIf { it.viaFind }?.sourceImdbId
         val targetTmdbId = directTmdbFromRes ?: validatedFindResult?.first
         val targetTmdbMediaType = validatedFindResult?.second ?: authoritativeMediaType
+        val speculativeTmdbDetail = acceptedTmdbSpec?.takeIf {
+            targetTmdbId != null && it.matchesDirect(targetTmdbId, targetTmdbMediaType)
+        }?.detail
 
-        // Start authoritative POST_META MDBList before waiting for TMDB detail. This is
-        // intentionally positioned on the same side of the await boundary as the TMDB
-        // Deferred so resolver-miss Kitsu/MAL cases overlap both network requests.
-        val postMetaEarlyMdbId = resolvedTmdbId ?: resolvedImdbId ?: when {
-            res.id?.startsWith("tt") == true -> res.id
-            res.id?.startsWith("tmdb:") == true -> res.id.removePrefix("tmdb:")
-            res.moviedb_id != null -> res.moviedb_id.toString()
-            res.tmdbIdExt != null -> res.tmdbIdExt
-            else -> null
-        }
-        val postMetaEarlyMdbIsTmdb = (postMetaEarlyMdbId == resolvedTmdbId) || (postMetaEarlyMdbId?.startsWith("tt") == false)
-
-        // A speculative MDB Deferred can exist for Kitsu/MAL yet resolve to null when the
-        // resolver found no IMDb/TMDB ID. In that case do not let the mere Deferred object
-        // suppress the post-meta MDB request: start it immediately from the authoritative
-        // Stremio meta ID so MDBList can overlap the remaining TMDB/core work.
-        val speculativeMdbHasUsableTarget = when {
-            speculativeMdbDeferred == null || !hintMatchesAuthoritative -> false
-            urlHint?.id?.startsWith("tt") == true -> true
-            urlHint?.id?.startsWith("tmdb:") == true -> true
-            urlHint?.id?.startsWith("kitsu:") == true || urlHint?.id?.startsWith("mal:") == true ->
-                !resolvedTmdbId.isNullOrBlank() || !resolvedImdbId.isNullOrBlank()
-            else -> false
-        }
-
-        val postMetaMdbDeferred: Deferred<SpeculativeMdbResult?>? = if (
-            mdbEnabled && postMetaEarlyMdbId != null && !speculativeMdbHasUsableTarget
-        ) {
-            async(Dispatchers.IO) {
-                val attempt = runSuspendCatching { fetchMdbListRatings(postMetaEarlyMdbId, postMetaEarlyMdbIsTmdb) }
-                val ratings = attempt.getOrDefault(emptyList<String>())
-                SpeculativeMdbResult(postMetaEarlyMdbId, postMetaEarlyMdbIsTmdb, ratings, attempt.isSuccess)
-            }
-        } else {
-            null
-        }
+        val postMetaMdbTarget = resolvedMdbTarget(res, resolvedTmdbId, resolvedImdbId)
+        val speculativeMdbHasUsableTarget = speculativeMdbDeferred != null && hintMatchesAuthoritative &&
+            hasUsableSpeculativeMdbTarget(urlHint, resolvedTmdbId, resolvedImdbId)
+        val postMetaMdbDeferred = if (mdbEnabled && !speculativeMdbHasUsableTarget) {
+            launchMdbAttempt(postMetaMdbTarget)
+        } else null
 
         val normalTmdbDeferred: Deferred<TmdbDetailResponse?>? = if (
-            targetTmdbId != null &&
-            !(speculativeTmdbId == targetTmdbId && speculativeTmdbMediaType == targetTmdbMediaType && speculativeTmdbDetail != null)
+            targetTmdbId != null && speculativeTmdbDetail == null
         ) {
             async(Dispatchers.IO) {
                 fetchTmdbDetailForLoad(targetTmdbId, targetTmdbMediaType)
@@ -1782,51 +1392,28 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             resolvedIdHolder = resolvedIdHolder
         )
 
-        val primaryMdbId = resolvedTmdbId ?: resolvedImdbId ?: when {
-            res.id?.startsWith("tt") == true -> res.id
-            res.id?.startsWith("tmdb:") == true -> res.id.removePrefix("tmdb:")
-            res.moviedb_id != null -> res.moviedb_id.toString()
-            res.tmdbIdExt != null -> res.tmdbIdExt
-            else -> null
-        }
-        val primaryMdbIsTmdb = (primaryMdbId == resolvedTmdbId) || (primaryMdbId?.startsWith("tt") == false)
-
-        var actualMdbId = primaryMdbId
-        var actualIsTmdb = primaryMdbIsTmdb
-        if (actualMdbId == null) {
+        var actualMdbTarget = resolvedMdbTarget(res, resolvedTmdbId, resolvedImdbId)
+        if (actualMdbTarget == null) {
             val resolvedImdb = resolvedIdHolder[0]?.takeIf { it.startsWith("tt") }
             val resolvedTmdb = resolvedIdHolder[1]?.takeIf { it.isNotBlank() }
-            actualMdbId = resolvedImdb ?: resolvedTmdb
-            actualIsTmdb = (actualMdbId == resolvedTmdb)
+            actualMdbTarget = resolvedImdb?.let { MdbTarget(it, false) }
+                ?: resolvedTmdb?.let { MdbTarget(it, true) }
         }
 
-        if (actualMdbId != null && mdbEnabled) {
-            var mdbRatings: List<String>? = null
-
-            if (hintMatchesAuthoritative && speculativeMdbDeferred != null) {
-                val spec = speculativeMdbDeferred.await()
-                if (spec != null && spec.id == actualMdbId && spec.isTmdb == actualIsTmdb && spec.requestSucceeded) {
-                    mdbRatings = spec.ratings
-                }
-            }
-
-            if (mdbRatings == null && postMetaMdbDeferred != null) {
-                val post = postMetaMdbDeferred.await()
-                if (post != null && post.id == actualMdbId && post.isTmdb == actualIsTmdb && post.requestSucceeded) {
-                    mdbRatings = post.ratings
-                }
-            }
-
+        val finalMdbTarget = actualMdbTarget
+        if (finalMdbTarget != null && mdbEnabled) {
+            var mdbRatings: List<String>? = if (hintMatchesAuthoritative) {
+                speculativeMdbDeferred?.await()?.takeIf { it.matches(finalMdbTarget) }?.ratings
+            } else null
             if (mdbRatings == null) {
-                val ratings = runSuspendCatching {
-                    fetchMdbListRatings(actualMdbId, actualIsTmdb)
-                }.onFailure { it.printStackTrace() }.getOrDefault(emptyList())
-                mdbRatings = ratings
+                mdbRatings = postMetaMdbDeferred?.await()?.takeIf { it.matches(finalMdbTarget) }?.ratings
+            }
+            if (mdbRatings == null) {
+                mdbRatings = fetchMdbAttempt(finalMdbTarget).ratings
             }
 
-            val finalMdbRatings = mdbRatings ?: emptyList()
-            if (finalMdbRatings.isNotEmpty()) {
-                val ratingStr = finalMdbRatings.joinToString("  ")
+            if (mdbRatings.isNotEmpty()) {
+                val ratingStr = mdbRatings.joinToString("  ")
                 val currentPlot = loadRes.plot
                 loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr<br>$currentPlot" else ratingStr
                 loadRes.score = null
@@ -2489,7 +2076,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("id") val id: String? = null,
         @JsonProperty("type") val type: String? = null,
         @JsonProperty("name") val name: String? = null,
-        @JsonProperty("poster") val poster: String? = null
+        @JsonProperty("poster") val poster: String? = null,
+        @JsonProperty("moviedb_id") val moviedb_id: Int? = null,
+        @JsonProperty("_tmdbId") val tmdbIdExt: String? = null
     )
 
     private data class CatalogResponse(
