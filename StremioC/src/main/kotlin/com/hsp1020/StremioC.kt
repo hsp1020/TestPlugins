@@ -77,13 +77,6 @@ inline fun <T> runSuspendCatching(block: () -> T): Result<T> {
 
 private fun String.urlEncode(): String = try { URLEncoder.encode(this, "UTF-8").replace("+", "%20") } catch (e: Exception) { this }
 
-// Detail-screen load() diagnostics only. Remove this block after profiling.
-private val LOAD_PERF_SEQ = AtomicInteger(0)
-private fun newLoadPerfTrace(): String = LOAD_PERF_SEQ.incrementAndGet().toString(16)
-private fun loadPerfMs(startNs: Long): Long = (System.nanoTime() - startNs) / 1_000_000L
-private fun loadPerfLog(trace: String, stage: String, detail: String) {
-    println("[StremioC-LoadPerf][$trace][$stage] $detail")
-}
 
 private fun String.cleanBaseUrl(): String {
     return this.substringBefore("?").replace("/manifest.json", "").trimEnd('/')
@@ -238,9 +231,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         private val IMDB_ID_REGEX = "tt[0-9]+".toRegex()
         private val JSON_ID_EXTRACT_REGEX = "\"id\":\"([^\"]+)\"".toRegex()
         
-        val globalPageCache = lruCacheMap<String, Triple<List<SearchResponse>, Int, Long>>(100)
-        val cacheMutexes = ConcurrentHashMap<String, Mutex>()
-        const val CACHE_TTL_MS = 3600000L 
+        private const val MANIFEST_CACHE_TTL_MS = 3_600_000L
         
         private val settingsCache = ConcurrentHashMap<String, Pair<Boolean, Long>>()
         
@@ -292,8 +283,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
         val networkSemaphore = Semaphore(35)
-        // A/B profile B: previous baseline was foreground=10 / background=2.
-        // Keep these explicit so logcat comparisons are reproducible.
+        // Foreground home loading keeps higher concurrency than background prefetch.
         const val HOME_FOREGROUND_CONCURRENCY = 16
         const val HOME_PREFETCH_CONCURRENCY = 4
         val homeNetworkSemaphore = Semaphore(HOME_FOREGROUND_CONCURRENCY)
@@ -335,7 +325,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 if (now - time < METADATA_CACHE_TTL) return res
             }
             return runSuspendCatching {
-                val res = metadataSession.get(url, timeout = 10L).text
+                val res = customSession.get(url, timeout = 10L).text
                 if (res.isNotBlank()) kitsuMetaCache[url] = Pair(res, now)
                 res
             }.onFailure { it.printStackTrace() }.getOrNull()
@@ -360,99 +350,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
         }
 
-        // Detail-metadata A/B clients. Keep stream/subtitle/customSession pinned to HTTP/1.1.
-        // H1 and H2 use identical timeout/dispatcher/pool values; only the protocol list differs.
-        // The active client is selected from SharedPreferences for every metadata call, so the
-        // same APK can switch modes without recompiling. Restart between benchmark runs to
-        // equalize cold/warm connection state.
-        private const val PREF_METADATA_HTTP2_ENABLED = "metadata_http2_enabled"
-
-        private fun isMetadataHttp2Enabled(): Boolean =
-            CloudStreamApp.context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-                ?.getBoolean(PREF_METADATA_HTTP2_ENABLED, true) ?: true
-
-        fun metadataProtocolMode(): String = if (isMetadataHttp2Enabled()) "H2" else "H1"
-
-        private fun buildMetadataHttpClient(protocols: List<Protocol>, mode: String): okhttp3.OkHttpClient {
-            return app.baseClient.newBuilder()
-                .protocols(protocols)
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(20, TimeUnit.SECONDS)
-                .writeTimeout(20, TimeUnit.SECONDS)
-                // A/B benchmark isolation: metadata requests must never reuse OkHttp HTTP cache
-                // or conditional validators produced by the other protocol run.
-                .cache(null)
-                .addInterceptor { chain ->
-                    val cleanRequest = chain.request().newBuilder()
-                        .removeHeader("If-None-Match")
-                        .removeHeader("If-Modified-Since")
-                        .header("Cache-Control", "no-store, max-age=0")
-                        .header("Pragma", "no-cache")
-                        .build()
-                    chain.proceed(cleanRequest)
-                }
-                .dispatcher(Dispatcher().apply {
-                    maxRequests = 70
-                    maxRequestsPerHost = 40
-                })
-                // H1/H2 each receive an independent pool so connections can never cross modes.
-                .connectionPool(ConnectionPool(45, 15, TimeUnit.SECONDS))
-                .addNetworkInterceptor { chain ->
-                    val startedNs = System.nanoTime()
-                    val request = chain.request()
-                    try {
-                        val response = chain.proceed(request)
-                        println(
-                            "[StremioC-MetadataHTTP] mode=$mode cache=OFF host=${request.url.host} protocol=${response.protocol} code=${response.code} ms=${loadPerfMs(startedNs)}"
-                        )
-                        response
-                    } catch (t: Throwable) {
-                        println(
-                            "[StremioC-MetadataHTTP] mode=$mode cache=OFF host=${request.url.host} protocol=NO_RESPONSE error=${t.javaClass.simpleName} ms=${loadPerfMs(startedNs)}"
-                        )
-                        throw t
-                    }
-                }
-                .build()
-        }
-
-        private fun wrapMetadataClient(client: okhttp3.OkHttpClient): Requests = Requests(client).apply {
-            this.responseParser = app.responseParser
-            this.defaultHeaders = app.defaultHeaders
-        }
-
-        private val metadataHttpClientH2 by lazy {
-            buildMetadataHttpClient(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1), "H2")
-        }
-
-        private val metadataHttpClientH1 by lazy {
-            buildMetadataHttpClient(listOf(Protocol.HTTP_1_1), "H1")
-        }
-
-        private val metadataSessionH2 by lazy { wrapMetadataClient(metadataHttpClientH2) }
-        private val metadataSessionH1 by lazy { wrapMetadataClient(metadataHttpClientH1) }
-
-        val metadataSession: Requests
-            get() = if (isMetadataHttp2Enabled()) metadataSessionH2 else metadataSessionH1
-
-        fun resetMetadataAbBenchmarkState() {
-            tmdbDetailsCache.clear()
-            tmdbSeasonCache.clear()
-            kitsuMetaCache.clear()
-            tmdbFindCache.clear()
-            aniZipCache.clear()
-            metadataHttpClientH1.connectionPool.evictAll()
-            metadataHttpClientH2.connectionPool.evictAll()
-            println("[StremioC-MetadataHTTP] benchmark_reset cache=OFF memoryCaches=cleared connections=evicted")
-        }
-
         private val homeClient by lazy {
             app.baseClient.newBuilder()
-                .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
+                .protocols(listOf(Protocol.HTTP_1_1))
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(20, TimeUnit.SECONDS)
                 .callTimeout(35, TimeUnit.SECONDS)
-                .cache(null)
                 .dispatcher(Dispatcher().apply {
                     maxRequests = HOME_FOREGROUND_CONCURRENCY
                     maxRequestsPerHost = HOME_FOREGROUND_CONCURRENCY
@@ -632,32 +535,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             return isEnabled
         }
 
-        suspend fun getOrFetchCachedPage(
-            key: String, 
-            fetchBlock: suspend () -> Pair<List<SearchResponse>, Int>?
-        ): Pair<List<SearchResponse>, Int>? {
-            val now = System.currentTimeMillis()
-            
-            globalPageCache[key]?.let { entry ->
-                if (now - entry.third <= CACHE_TTL_MS) return Pair(entry.first, entry.second)
-            }
-
-            val mutex = cacheMutexes.getOrPut(key) { Mutex() }
-
-            return mutex.withLock {
-                globalPageCache[key]?.let { entry ->
-                    if (now - entry.third <= CACHE_TTL_MS) {
-                        return@withLock Pair(entry.first, entry.second)
-                    }
-                }
-
-                val result = fetchBlock()
-                if (result != null && result.first.isNotEmpty()) {
-                    globalPageCache[key] = Triple(result.first, result.second, System.currentTimeMillis())
-                }
-                result
-            }
-        }
     }
 
     private fun SearchResponse.extractPureId(): String {
@@ -723,18 +600,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private suspend fun resolveKitsuForLoad(
         id: String,
-        type: String?,
-        loadTrace: String?,
-        mode: String
+        type: String?
     ): KitsuResolvedMeta? {
-        val startedNs = System.nanoTime()
         val targetType = if (canonicalDetailType(type) == "movie") "movie" else "series"
         val kitsuUrl = "https://anime-kitsu.strem.fun/meta/$targetType/$id.json"
         val kitsuRes = getOrFetchKitsu(kitsuUrl)
         if (kitsuRes.isNullOrBlank()) {
-            loadTrace?.let {
-                loadPerfLog(it, "KITSU_RESOLVE_TASK", "ms=${loadPerfMs(startedNs)} mode=$mode id=$id type=$targetType found=false")
-            }
             return null
         }
 
@@ -795,30 +666,18 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             malId = fetchedMalId,
             videos = kitsuVideos
         )
-        loadTrace?.let {
-            loadPerfLog(
-                it,
-                "KITSU_RESOLVE_TASK",
-                "ms=${loadPerfMs(startedNs)} mode=$mode id=$id type=$targetType found=true imdb=${result.imdbId} tmdb=${result.tmdbId} anilist=${result.aniListId} mal=${result.malId} videos=${result.videos?.size ?: 0}"
-            )
-        }
         return result
     }
 
     private suspend fun fetchTmdbFindForLoad(
-        imdbId: String,
-        loadTrace: String?,
-        mode: String
+        imdbId: String
     ): Pair<String, String>? {
-        val startedNs = System.nanoTime()
         val cachedFind = tmdbFindCache[imdbId]
-        var source = "CACHE"
         val result: Pair<String, String>? = if (cachedFind != null && System.currentTimeMillis() - cachedFind.second < METADATA_CACHE_TTL) {
             cachedFind.first
         } else {
-            source = "NETWORK"
             val fetchedFind = runSuspendCatching {
-                val text = metadataSession.get(buildTmdbUrl("/find/$imdbId", "external_source" to "imdb_id")).text
+                val text = customSession.get(buildTmdbUrl("/find/$imdbId", "external_source" to "imdb_id")).text
                 val findRes = if (text.isNotBlank()) parseJson<TmdbFindResponse>(text) else null
                 val movieMatch = findRes?.movie_results?.firstOrNull()
                 if (movieMatch?.id != null) {
@@ -832,19 +691,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
             fetchedFind
         }
-        loadTrace?.let {
-            loadPerfLog(it, "TMDB_FIND_TASK", "ms=${loadPerfMs(startedNs)} mode=$mode source=$source imdb=$imdbId result=${result?.first} media=${result?.second}")
-        }
         return result
     }
 
     private suspend fun fetchTmdbDetailForLoad(
         tmdbId: String,
-        mediaType: String,
-        loadTrace: String?,
-        mode: String
+        mediaType: String
     ): TmdbDetailResponse? {
-        val startedNs = System.nanoTime()
         val detailAppend = if (mediaType == "movie") {
             "release_dates,credits,images,videos,external_ids,recommendations,translations"
         } else {
@@ -852,26 +705,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
         val detailUrl = buildTmdbUrl("/$mediaType/$tmdbId", "append_to_response" to detailAppend)
         val cached = tmdbDetailsCache[detailUrl]
-        var source = "CACHE"
         val result: TmdbDetailResponse? = if (cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL) {
             cached.first
         } else {
-            source = "NETWORK"
             runSuspendCatching {
-                val text = metadataSession.get(detailUrl).text
+                val text = customSession.get(detailUrl).text
                 val fetched = if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
                 if (fetched != null) {
                     tmdbDetailsCache[detailUrl] = Pair(fetched, System.currentTimeMillis())
                 }
                 fetched
             }.onFailure { it.printStackTrace() }.getOrNull()
-        }
-        loadTrace?.let {
-            loadPerfLog(
-                it,
-                "TMDB_DETAIL_TASK",
-                "ms=${loadPerfMs(startedNs)} mode=$mode source=$source tmdb=$tmdbId media=$mediaType found=${result != null} recommendationsAppended=true"
-            )
         }
         return result
     }
@@ -941,7 +785,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     private suspend fun fetchManifestLocked(): Manifest? {
         val currentUrl = stremioManifestUrl(mainUrl)
         val now = System.currentTimeMillis()
-        val isExpired = (now - lastCacheTime) > CACHE_TTL_MS
+        val isExpired = (now - lastCacheTime) > MANIFEST_CACHE_TTL_MS
 
         if (cachedManifest != null && lastManifestUrl == currentUrl && !isExpired && !cachedManifest?.catalogs.isNullOrEmpty()) {
             return cachedManifest
@@ -1439,11 +1283,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
     
     override suspend fun load(url: String): LoadResponse = coroutineScope {
-        val loadTrace = newLoadPerfTrace()
-        val loadTotalStartNs = System.nanoTime()
-        loadPerfLog(loadTrace, "START", "provider=$name input=${if (url.startsWith("{")) "INLINE" else "URL"}")
-        loadPerfLog(loadTrace, "METADATA_PROTOCOL", "mode=${metadataProtocolMode()} cache=OFF")
-
         val parsedUrlHint = parseDetailUrlHint(url)
         val rememberedHint = detailLoadHints[url]?.takeIf { cached ->
             parsedUrlHint != null &&
@@ -1454,17 +1293,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val hintCanonicalType = canonicalDetailType(urlHint?.type)
         val hintMediaType = if (hintCanonicalType == "movie") "movie" else "tv"
         val mdbEnabled = isIntegrationEnabled("mdblist_enabled")
-        loadPerfLog(
-            loadTrace,
-            "SPEC_HINT",
-            "source=${if (rememberedHint != null) "CATALOG" else if (parsedUrlHint != null) "URL" else "NONE"} type=${urlHint?.type} id=${urlHint?.id} tmdb=${urlHint?.tmdbId} canonicalType=$hintCanonicalType mdbEnabled=$mdbEnabled"
-        )
 
         val speculativeKitsuDeferred: Deferred<KitsuResolvedMeta?>? = if (
             urlHint?.id?.startsWith("kitsu:") == true || urlHint?.id?.startsWith("mal:") == true
         ) {
             async(Dispatchers.IO) {
-                resolveKitsuForLoad(urlHint.id, urlHint.type, loadTrace, "SPECULATIVE")
+                resolveKitsuForLoad(urlHint.id, urlHint.type)
             }
         } else {
             null
@@ -1475,19 +1309,15 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         } else {
             when {
                 urlHint.id.startsWith("tt") -> async(Dispatchers.IO) {
-                    val mdbStartNs = System.nanoTime()
                     val attempt = runSuspendCatching { fetchMdbListRatings(urlHint.id, false) }
                     val ratings = attempt.getOrDefault(emptyList<String>())
-                    loadPerfLog(loadTrace, "MDBLIST_TASK", "ms=${loadPerfMs(mdbStartNs)} mode=SPECULATIVE id=${urlHint.id} isTmdb=false ratings=${ratings.size} success=${attempt.isSuccess}")
                     SpeculativeMdbResult(urlHint.id, false, ratings, attempt.isSuccess)
                 }
                 urlHint.id.startsWith("tmdb:") -> {
                     val tmdbId = urlHint.id.removePrefix("tmdb:")
                     async(Dispatchers.IO) {
-                        val mdbStartNs = System.nanoTime()
                         val attempt = runSuspendCatching { fetchMdbListRatings(tmdbId, true) }
                         val ratings = attempt.getOrDefault(emptyList<String>())
-                        loadPerfLog(loadTrace, "MDBLIST_TASK", "ms=${loadPerfMs(mdbStartNs)} mode=SPECULATIVE id=$tmdbId isTmdb=true ratings=${ratings.size} success=${attempt.isSuccess}")
                         SpeculativeMdbResult(tmdbId, true, ratings, attempt.isSuccess)
                     }
                 }
@@ -1495,10 +1325,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val resolved = speculativeKitsuDeferred.await() ?: return@async null
                     val mdbId = resolved.tmdbId ?: resolved.imdbId ?: return@async null
                     val isTmdb = resolved.tmdbId != null && mdbId == resolved.tmdbId
-                    val mdbStartNs = System.nanoTime()
                     val attempt = runSuspendCatching { fetchMdbListRatings(mdbId, isTmdb) }
                     val ratings = attempt.getOrDefault(emptyList<String>())
-                    loadPerfLog(loadTrace, "MDBLIST_TASK", "ms=${loadPerfMs(mdbStartNs)} mode=SPECULATIVE_AFTER_KITSU id=$mdbId isTmdb=$isTmdb ratings=${ratings.size} success=${attempt.isSuccess}")
                     SpeculativeMdbResult(mdbId, isTmdb, ratings, attempt.isSuccess)
                 }
                 else -> null
@@ -1509,31 +1337,31 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             !urlHint?.tmdbId.isNullOrBlank() -> {
                 val hintedTmdbId = urlHint?.tmdbId ?: ""
                 async(Dispatchers.IO) {
-                    val detail = fetchTmdbDetailForLoad(hintedTmdbId, hintMediaType, loadTrace, "SPECULATIVE_CATALOG_HINT")
+                    val detail = fetchTmdbDetailForLoad(hintedTmdbId, hintMediaType)
                     SpeculativeTmdbChain(urlHint?.id?.takeIf { it.startsWith("tt") }, hintedTmdbId, hintMediaType, false, detail)
                 }
             }
             urlHint?.id?.startsWith("tt") == true -> async(Dispatchers.IO) {
                 val hintId = urlHint?.id ?: return@async null
-                val find = fetchTmdbFindForLoad(hintId, loadTrace, "SPECULATIVE") ?: return@async null
-                val detail = fetchTmdbDetailForLoad(find.first, find.second, loadTrace, "SPECULATIVE_CHAIN")
+                val find = fetchTmdbFindForLoad(hintId) ?: return@async null
+                val detail = fetchTmdbDetailForLoad(find.first, find.second)
                 SpeculativeTmdbChain(hintId, find.first, find.second, true, detail)
             }
             urlHint?.id?.startsWith("tmdb:") == true -> {
                 val tmdbId = urlHint.id.removePrefix("tmdb:")
                 async(Dispatchers.IO) {
-                    val detail = fetchTmdbDetailForLoad(tmdbId, hintMediaType, loadTrace, "SPECULATIVE_DIRECT")
+                    val detail = fetchTmdbDetailForLoad(tmdbId, hintMediaType)
                     SpeculativeTmdbChain(null, tmdbId, hintMediaType, false, detail)
                 }
             }
             speculativeKitsuDeferred != null -> async(Dispatchers.IO) {
                 val resolved = speculativeKitsuDeferred.await() ?: return@async null
                 if (!resolved.tmdbId.isNullOrBlank()) {
-                    val detail = fetchTmdbDetailForLoad(resolved.tmdbId, hintMediaType, loadTrace, "SPECULATIVE_AFTER_KITSU")
+                    val detail = fetchTmdbDetailForLoad(resolved.tmdbId, hintMediaType)
                     SpeculativeTmdbChain(resolved.imdbId, resolved.tmdbId, hintMediaType, false, detail)
                 } else if (!resolved.imdbId.isNullOrBlank()) {
-                    val find = fetchTmdbFindForLoad(resolved.imdbId, loadTrace, "SPECULATIVE_AFTER_KITSU") ?: return@async null
-                    val detail = fetchTmdbDetailForLoad(find.first, find.second, loadTrace, "SPECULATIVE_AFTER_KITSU_CHAIN")
+                    val find = fetchTmdbFindForLoad(resolved.imdbId) ?: return@async null
+                    val detail = fetchTmdbDetailForLoad(find.first, find.second)
                     SpeculativeTmdbChain(resolved.imdbId, find.first, find.second, true, detail)
                 } else {
                     null
@@ -1543,14 +1371,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
         var initialMetaFromResponse: CatalogEntry? = null
-        val stremioMetaStartNs = System.nanoTime()
-        var stremioMetaNetworkMs = 0L
         val res: CatalogEntry = if (url.startsWith("{")) {
             parseJson<CatalogEntry>(url)
         } else {
-            val metaNetworkStartNs = System.nanoTime()
-            val responseText = metadataSession.get(url).text
-            stremioMetaNetworkMs = loadPerfMs(metaNetworkStartNs)
+            val responseText = customSession.get(url).text
             try {
                 val rootNode = parseJson<JsonNode>(responseText)
                 val metaNode = if (rootNode.has("meta")) rootNode.get("meta") else rootNode
@@ -1565,11 +1389,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 throw IllegalStateException("Metadata not found or parsing failed: $url", e)
             }
         }
-        loadPerfLog(
-            loadTrace,
-            "STREMIO_META",
-            "totalMs=${loadPerfMs(stremioMetaStartNs)} networkMs=$stremioMetaNetworkMs id=${res.id} type=${res.type} initialMeta=${initialMetaFromResponse != null}"
-        )
 
         val hintMatchesAuthoritative = urlHint != null &&
             urlHint.id == res.id &&
@@ -1579,33 +1398,22 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             speculativeMdbDeferred?.cancel()
             speculativeTmdbDeferred?.cancel()
             speculativeKitsuDeferred?.cancel()
-            loadPerfLog(loadTrace, "SPEC_VALIDATE", "status=MISMATCH hintId=${urlHint.id} hintType=${urlHint.type} metaId=${res.id} metaType=${res.type} action=CANCEL_AND_FALLBACK")
-        } else if (urlHint != null) {
-            loadPerfLog(loadTrace, "SPEC_VALIDATE", "status=MATCH id=${res.id} type=${res.type}")
-        } else {
-            loadPerfLog(loadTrace, "SPEC_VALIDATE", "status=NO_HINT action=EXISTING_PATH")
         }
 
-        val normalizeStartNs = System.nanoTime()
         val normalizedId = try { normalizeId(res.id ?: "") } catch (e: Exception) { e.printStackTrace(); res.id ?: "" }
         val encodedId = normalizedId.urlEncode()
-        loadPerfLog(loadTrace, "NORMALIZE_ID", "ms=${loadPerfMs(normalizeStartNs)} raw=${res.id} normalized=$normalizedId")
 
         val addonDeferred = async(Dispatchers.IO) {
-            val addonMetaStartNs = System.nanoTime()
-            var source = "NETWORK"
             val result = runSuspendCatching {
                 val syncMetaUrl = this@StremioC.getUnifiedMetaUrl(res.type ?: "movie", res.id ?: "")
                 if (syncMetaUrl == url && initialMetaFromResponse != null) {
-                    source = "INITIAL_RESPONSE"
                     initialMetaFromResponse
                 } else {
-                    val text = metadataSession.get(syncMetaUrl).text
+                    val text = customSession.get(syncMetaUrl).text
                     val response = if (text.isNotBlank()) parseJson<CatalogResponse>(text) else null
                     response?.meta ?: response?.metas?.firstOrNull { it.id == res.id } ?: response?.metas?.firstOrNull()
                 }
             }.onFailure { it.printStackTrace() }.getOrNull()
-            loadPerfLog(loadTrace, "ADDON_META_TASK", "ms=${loadPerfMs(addonMetaStartNs)} source=$source found=${result != null}")
             result
         }
 
@@ -1615,16 +1423,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         var resolvedImdbId: String? = null
         var resolvedTmdbId: String? = null
         var kitsuVideos: List<Video>? = null
-        val kitsuApplyStartNs = System.nanoTime()
 
         if (isKitsuOrMal) {
             val resolved = if (hintMatchesAuthoritative && speculativeKitsuDeferred != null) {
-                val awaitStartNs = System.nanoTime()
                 val value = speculativeKitsuDeferred.await()
-                loadPerfLog(loadTrace, "KITSU_RESOLVE_AWAIT", "ms=${loadPerfMs(awaitStartNs)} mode=SPECULATIVE_REUSE found=${value != null}")
                 value
             } else {
-                resolveKitsuForLoad(res.id ?: "", res.type, loadTrace, "FALLBACK")
+                resolveKitsuForLoad(res.id ?: "", res.type)
             }
 
             if (resolved != null) {
@@ -1635,11 +1440,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 kitsuVideos = resolved.videos
             }
         }
-        loadPerfLog(
-            loadTrace,
-            "KITSU_RESOLVE",
-            "ms=${loadPerfMs(kitsuApplyStartNs)} active=$isKitsuOrMal imdb=$resolvedImdbId tmdb=$resolvedTmdbId anilist=$fetchedAniListId mal=$fetchedMalId videos=${kitsuVideos?.size ?: 0}"
-        )
 
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val directTmdbFromRes = when {
@@ -1689,9 +1489,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
 
             if (shouldAwaitSpeculative) {
-                val awaitStartNs = System.nanoTime()
                 val spec = speculativeTmdbDeferred.await()
-                loadPerfLog(loadTrace, "SPEC_TMDB_AWAIT", "ms=${loadPerfMs(awaitStartNs)} found=${spec != null} reason=${when { catalogTargetIsAuthoritative -> "CATALOG_TARGET_MATCH"; cachedFindMatchesAuthoritative -> "FIND_CACHE_MATCH"; directTmdbFromRes == null -> "NEED_FIND"; else -> "ALREADY_COMPLETED" }}")
                 if (spec != null) {
                     val effectiveImdb = resolvedImdbId ?: res.id?.takeIf { it.startsWith("tt") }
                     val valid = if (directTmdbFromRes != null) {
@@ -1708,14 +1506,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             validatedFindResult = Pair(spec.tmdbId, spec.mediaType)
                             validatedFindImdbId = spec.sourceImdbId
                         }
-                        loadPerfLog(loadTrace, "SPEC_TMDB_REUSE", "status=VALID tmdb=${spec.tmdbId} media=${spec.mediaType} viaFind=${spec.viaFind} detail=${spec.detail != null}")
-                    } else {
-                        loadPerfLog(loadTrace, "SPEC_TMDB_REUSE", "status=DISCARD expectedTmdb=$directTmdbFromRes expectedMedia=$authoritativeMediaType gotTmdb=${spec.tmdbId} gotMedia=${spec.mediaType} viaFind=${spec.viaFind}")
                     }
                 }
             } else {
                 speculativeTmdbDeferred.cancel()
-                loadPerfLog(loadTrace, "SPEC_TMDB_REUSE", "status=CANCELLED_FOR_AUTHORITATIVE tmdb=$directTmdbFromRes media=$authoritativeMediaType action=POST_META_DIRECT")
             }
         }
 
@@ -1752,10 +1546,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             mdbEnabled && postMetaEarlyMdbId != null && !speculativeMdbHasUsableTarget
         ) {
             async(Dispatchers.IO) {
-                val mdbStartNs = System.nanoTime()
                 val attempt = runSuspendCatching { fetchMdbListRatings(postMetaEarlyMdbId, postMetaEarlyMdbIsTmdb) }
                 val ratings = attempt.getOrDefault(emptyList<String>())
-                loadPerfLog(loadTrace, "MDBLIST_TASK", "ms=${loadPerfMs(mdbStartNs)} mode=POST_META id=$postMetaEarlyMdbId isTmdb=$postMetaEarlyMdbIsTmdb ratings=${ratings.size} success=${attempt.isSuccess}")
                 SpeculativeMdbResult(postMetaEarlyMdbId, postMetaEarlyMdbIsTmdb, ratings, attempt.isSuccess)
             }
         } else {
@@ -1767,30 +1559,22 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             !(speculativeTmdbId == targetTmdbId && speculativeTmdbMediaType == targetTmdbMediaType && speculativeTmdbDetail != null)
         ) {
             async(Dispatchers.IO) {
-                fetchTmdbDetailForLoad(targetTmdbId, targetTmdbMediaType, loadTrace, "POST_META")
+                fetchTmdbDetailForLoad(targetTmdbId, targetTmdbMediaType)
             }
         } else {
             null
         }
 
-        val tmdbAwaitStartNs = System.nanoTime()
         val preFetchedTmdbDetail = speculativeTmdbDetail ?: normalTmdbDeferred?.await()
-        loadPerfLog(
-            loadTrace,
-            "TMDB_DETAIL_AWAIT",
-            "ms=${loadPerfMs(tmdbAwaitStartNs)} active=${speculativeTmdbDeferred != null || normalTmdbDeferred != null} tmdb=$targetTmdbId media=$targetTmdbMediaType found=${preFetchedTmdbDetail != null} source=${if (speculativeTmdbDetail != null) "SPECULATIVE" else if (normalTmdbDeferred != null) "POST_META" else "NONE"}"
-        )
 
         var finalProcessedId = res.id
         val imdbId = resolvedImdbId ?: preFetchedTmdbDetail?.external_ids?.imdb_id
         if (!imdbId.isNullOrBlank() && (imdbId.startsWith("tt") || imdbId.startsWith("kitsu:"))) {
             finalProcessedId = imdbId
         }
-        loadPerfLog(loadTrace, "PRIMARY_ID_RESOLVE", "input=${res.id} final=$finalProcessedId imdb=$imdbId tmdb=$targetTmdbId")
 
         val resolvedIdHolder = arrayOf<String?>(null, null)
 
-        val coreResponseStartNs = System.nanoTime()
         val loadRes = res.toLoadResponse(
             provider = this@StremioC,
             imdbId = finalProcessedId,
@@ -1804,10 +1588,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             fetchedMalId = fetchedMalId,
             resolvedTmdbId = resolvedTmdbId,
             kitsuVideos = kitsuVideos,
-            resolvedIdHolder = resolvedIdHolder,
-            loadTrace = loadTrace
+            resolvedIdHolder = resolvedIdHolder
         )
-        loadPerfLog(loadTrace, "CORE_RESPONSE", "ms=${loadPerfMs(coreResponseStartNs)} type=${loadRes.javaClass.simpleName} resolvedImdb=${resolvedIdHolder[0]} resolvedTmdb=${resolvedIdHolder[1]}")
 
         val primaryMdbId = resolvedTmdbId ?: resolvedImdbId ?: when {
             res.id?.startsWith("tt") == true -> res.id
@@ -1827,43 +1609,28 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             actualIsTmdb = (actualMdbId == resolvedTmdb)
         }
 
-        val mdbApplyStartNs = System.nanoTime()
         if (actualMdbId != null && mdbEnabled) {
-            var reusedMode: String? = null
             var mdbRatings: List<String>? = null
 
             if (hintMatchesAuthoritative && speculativeMdbDeferred != null) {
-                val awaitStartNs = System.nanoTime()
                 val spec = speculativeMdbDeferred.await()
-                loadPerfLog(loadTrace, "MDBLIST_AWAIT", "ms=${loadPerfMs(awaitStartNs)} mode=SPECULATIVE id=${spec?.id} ratings=${spec?.ratings?.size ?: 0} success=${spec?.requestSucceeded}")
                 if (spec != null && spec.id == actualMdbId && spec.isTmdb == actualIsTmdb && spec.requestSucceeded) {
                     mdbRatings = spec.ratings
-                    reusedMode = "SPECULATIVE"
-                } else if (spec != null && (spec.id != actualMdbId || spec.isTmdb != actualIsTmdb)) {
-                    loadPerfLog(loadTrace, "MDBLIST_REUSE", "status=MISMATCH specId=${spec.id} specIsTmdb=${spec.isTmdb} actualId=$actualMdbId actualIsTmdb=$actualIsTmdb action=LATE_FALLBACK")
-                } else if (spec != null && !spec.requestSucceeded) {
-                    loadPerfLog(loadTrace, "MDBLIST_REUSE", "status=FAILED_EARLY id=${spec.id} action=LATE_FALLBACK")
                 }
             }
 
             if (mdbRatings == null && postMetaMdbDeferred != null) {
-                val awaitStartNs = System.nanoTime()
                 val post = postMetaMdbDeferred.await()
-                loadPerfLog(loadTrace, "MDBLIST_AWAIT", "ms=${loadPerfMs(awaitStartNs)} mode=POST_META id=${post?.id} ratings=${post?.ratings?.size ?: 0} success=${post?.requestSucceeded}")
                 if (post != null && post.id == actualMdbId && post.isTmdb == actualIsTmdb && post.requestSucceeded) {
                     mdbRatings = post.ratings
-                    reusedMode = "POST_META"
                 }
             }
 
             if (mdbRatings == null) {
-                val lateStartNs = System.nanoTime()
                 val ratings = runSuspendCatching {
                     fetchMdbListRatings(actualMdbId, actualIsTmdb)
                 }.onFailure { it.printStackTrace() }.getOrDefault(emptyList())
-                loadPerfLog(loadTrace, "MDBLIST_TASK", "ms=${loadPerfMs(lateStartNs)} mode=LATE id=$actualMdbId isTmdb=$actualIsTmdb ratings=${ratings.size}")
                 mdbRatings = ratings
-                reusedMode = "LATE"
             }
 
             val finalMdbRatings = mdbRatings ?: emptyList()
@@ -1873,12 +1640,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr<br>$currentPlot" else ratingStr
                 loadRes.score = null
             }
-            loadPerfLog(loadTrace, "MDBLIST_APPLY", "ms=${loadPerfMs(mdbApplyStartNs)} enabled=true id=$actualMdbId ratings=${finalMdbRatings.size} source=$reusedMode")
-        } else {
-            loadPerfLog(loadTrace, "MDBLIST_APPLY", "ms=${loadPerfMs(mdbApplyStartNs)} enabled=$mdbEnabled id=$actualMdbId ratings=0")
         }
 
-        loadPerfLog(loadTrace, "TOTAL", "ms=${loadPerfMs(loadTotalStartNs)} mode=${metadataProtocolMode()} cache=OFF id=${res.id} finalImdb=${resolvedIdHolder[0]} finalTmdb=${resolvedIdHolder[1]}")
         return@coroutineScope loadRes
     }
 
@@ -1951,13 +1714,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             val name = file.name.removeSuffix(".xml")
                             val p = context.getSharedPreferences(name, Context.MODE_PRIVATE)
                             if (p.contains("stremio_addons")) {
-                                println("[STREMIOSUB] Setup Scan: Found 'stremio_addons' key in file: '$name'")
                             }
                         }
                     }
                 }
             } catch (e: Exception) {
-                println("[STREMIOSUB] Setup Scan Warning: ${e.message}")
                 e.printStackTrace()
             }
 
@@ -1970,22 +1731,18 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     rawValue = rebuildPrefsBackup?.getString("stremio_addons", "") ?: ""
                 }
                 
-                println("[STREMIOSUB] Attempt 1 (rebuild_preference/key) -> raw value length: ${rawValue.length}")
                 if (rawValue.startsWith("\"") && rawValue.endsWith("\"") && rawValue.length >= 2) {
                     rawValue.substring(1, rawValue.length - 1)
                 } else {
                     rawValue
                 }
             } catch (t: Throwable) {
-                println("[STREMIOSUB] Attempt 1 (rebuild_preference) Crash: ${t.message}. Trying Fallback.")
                 t.printStackTrace()
                 try {
                     val prefs = CloudStreamApp.context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
                     val v = prefs?.getString("stremio_addons", "") ?: ""
-                    println("[STREMIOSUB] Attempt 2 (default SharedPreferences) -> length: ${v.length}")
                     if (v.startsWith("\"") && v.endsWith("\"") && v.length >= 2) v.substring(1, v.length - 1) else v
                 } catch (e: Exception) {
-                    println("[STREMIOSUB] Attempt 2 (default SharedPreferences) Failed: ${e.message}")
                     e.printStackTrace()
                     ""
                 }
@@ -1996,7 +1753,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.onFailure { it.printStackTrace() }.getOrNull() }
                 .toSet() 
                 
-            println("[STREMIOSUB] Final parsed customHosts count: ${hosts.size}")
             cachedCustomHosts = hosts
             cachedCustomHostsTime = now
             hosts
@@ -2046,7 +1802,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 if (cleanBaseUrl.isNotBlank() && encodedPrimaryId.isNotBlank()) {
                     runSuspendCatching {
                         val streamRequestUrl = "$cleanBaseUrl/stream/$targetType/${encodedPrimaryId}.json$querySuffix"
-                        println("[STREMIOSUB] Requesting streams from current addon")
                         val text = customSession.get(streamRequestUrl, timeout = 25L).text
                         val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
                         res?.streams?.forEach { stream ->
@@ -2073,7 +1828,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             ?: ""
                         val subtitleRequestUrl = "$cleanBase/subtitles/$targetType/${encodedSubId}.json$suffix"
                         
-                        println("[STREMIOSUB] Requesting subtitles from sync addon")
                         val text = customSession.get(subtitleRequestUrl, timeout = 15L).text
                         val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
                         
@@ -2085,11 +1839,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
             },
             { 
-                println("[STREMIOSUB] Initiating invokeCineStream")
                 invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, integrationSubtitleCallback, wrappedCallback) 
             },
             { 
-                println("[STREMIOSUB] Initiating invokeStreamPlay")
                 invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, integrationSubtitleCallback, wrappedCallback) 
             },
             {
@@ -2647,29 +2399,24 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         private suspend fun fetchTmdbDetails(
             provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
-            stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null,
-            loadTrace: String? = null
+            stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null
         ): FetchedTmdbData {
             var fetchedRecommendations: List<SearchResponse>? = null
             
-            val detailResolveStartNs = System.nanoTime()
             val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
             val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend)
             val cacheKey = detailUrl
             val cached = tmdbDetailsCache[cacheKey]
-            var detailSource = if (preFetchedDetail != null) "PREFETCHED" else "CACHE"
             val detailRes = preFetchedDetail ?: if (cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL) {
                 cached.first
             } else {
-                detailSource = "NETWORK"
-                val text = StremioC.metadataSession.get(detailUrl).text
+                val text = StremioC.customSession.get(detailUrl).text
                 val fetched = if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
                 if (fetched != null) {
                     tmdbDetailsCache[cacheKey] = Pair(fetched, System.currentTimeMillis())
                 }
                 fetched
             }
-            loadTrace?.let { loadPerfLog(it, "TMDB_DETAIL_RESOLVE", "ms=${loadPerfMs(detailResolveStartNs)} source=$detailSource tmdb=$tmdbIdStr media=$tmdbMediaType found=${detailRes != null}") }
             
             if (detailRes == null) {
                 return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null, null)
@@ -2685,7 +2432,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             
             coroutineScope {
                 val shouldFocusEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType != "movie" && stremioType != "series" && !isMovie)
-                val episodeBatchStartNs = System.nanoTime()
                 
                 val episodeDeferred = if (shouldFocusEpisodes) {
                     var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
@@ -2705,7 +2451,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                                         val seasonRes = if (cachedSeason != null && System.currentTimeMillis() - cachedSeason.second < METADATA_CACHE_TTL) {
                                             cachedSeason.first
                                         } else {
-                                            val fetchedSeasonText = StremioC.metadataSession.get(seasonUrl).text
+                                            val fetchedSeasonText = StremioC.customSession.get(seasonUrl).text
                                             val fetchedSeason = if (fetchedSeasonText.isNotBlank()) parseJson<TmdbSeasonDetail>(fetchedSeasonText) else null
                                             if (fetchedSeason != null) {
                                                 tmdbSeasonCache[seasonCacheKey] = Pair(fetchedSeason, System.currentTimeMillis())
@@ -2721,25 +2467,21 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 } else null
 
                 val collectionDeferred = async(Dispatchers.IO) {
-                    val collectionStartNs = System.nanoTime()
                     val collectionId = detailRes.belongs_to_collection?.id
                     val active = isMovie && collectionId != null
                     val parts: List<TmdbMedia> = if (active) {
                         runSuspendCatching {
                             val colUrl = provider.buildTmdbUrl("/collection/$collectionId")
-                            val colText = StremioC.metadataSession.get(colUrl).text
+                            val colText = StremioC.customSession.get(colUrl).text
                             if (colText.isNotBlank()) parseJson<TmdbCollectionDetail>(colText).parts ?: emptyList() else emptyList()
                         }.getOrDefault(emptyList())
                     } else emptyList()
-                    loadTrace?.let { loadPerfLog(it, "TMDB_COLLECTION", "ms=${loadPerfMs(collectionStartNs)} active=$active parts=${parts.size}") }
                     parts
                 }
 
                 val collectionParts = collectionDeferred.await()
                 episodeDeferred?.awaitAll()
-                loadTrace?.let { loadPerfLog(it, "TMDB_EPISODES", "ms=${if (episodeDeferred != null) loadPerfMs(episodeBatchStartNs) else 0} active=${episodeDeferred != null} seasons=${episodeDeferred?.size ?: 0} episodes=${episodeTmdbMeta.size}") }
 
-                val recommendationsStartNs = System.nanoTime()
                 val tmdbRecs: List<TmdbMedia> = detailRes.recommendations?.results ?: emptyList()
                 val finalCombinedMedia = (collectionParts + tmdbRecs)
                     .distinctBy { it.id }
@@ -2770,7 +2512,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         this.posterUrl = recPoster
                     }
                 }.take(50)
-                loadTrace?.let { loadPerfLog(it, "RECOMMENDATIONS_BUILD", "ms=${loadPerfMs(recommendationsStartNs)} source=TMDB_APPEND_PLUS_COLLECTION tmdb=${tmdbRecs.size} collection=${collectionParts.size} returned=${fetchedRecommendations?.size ?: 0}") }
             }
             
             val countryCode = langCode.substringAfter("-", "KR").uppercase()
@@ -2923,12 +2664,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             fetchedMalId: Int? = null, 
             resolvedTmdbId: String? = null,
             kitsuVideos: List<Video>? = null,
-            resolvedIdHolder: Array<String?>? = null,
-            loadTrace: String? = null
+            resolvedIdHolder: Array<String?>? = null
         ): LoadResponse = coroutineScope {
-            val addonAwaitStartNs = System.nanoTime()
             val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
-            loadTrace?.let { loadPerfLog(it, "ADDON_META_AWAIT", "ms=${loadPerfMs(addonAwaitStartNs)} active=${addonDeferred != null} id=${this@CatalogEntry.id}") }
 
             var finalImdbId = if (this@CatalogEntry.id?.startsWith("tt") == true) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
@@ -2941,18 +2679,16 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
 
             var tmdbIdStr: String? = resolvedTmdbId ?: if (this@CatalogEntry.id?.startsWith("tmdb:") == true) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
-            loadTrace?.let { loadPerfLog(it, "ID_INPUT", "imdb=$finalImdbId tmdb=$tmdbIdStr sourceId=${this@CatalogEntry.id}") }
 
             var foundMediaType: String? = null
             if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true && preFetchedFind != null && preFetchedFindImdbId == finalImdbId) {
                 tmdbIdStr = preFetchedFind.first
                 foundMediaType = preFetchedFind.second
-                loadTrace?.let { loadPerfLog(it, "TMDB_FIND_REUSE", "status=REUSED imdb=$finalImdbId tmdb=${preFetchedFind.first} media=${preFetchedFind.second}") }
             }
 
             val findApiDeferred: Deferred<Pair<String, String>?>? = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
                 async(Dispatchers.IO) {
-                    provider.fetchTmdbFindForLoad(finalImdbId, loadTrace, "FALLBACK")
+                    provider.fetchTmdbFindForLoad(finalImdbId)
                 }
             } else null
 
@@ -2967,32 +2703,21 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val finalType = detailedEntry.type ?: this@CatalogEntry.type
 
             if (findApiDeferred != null) {
-                val findAwaitStartNs = System.nanoTime()
                 val findResult = findApiDeferred.await()
-                loadTrace?.let { loadPerfLog(it, "TMDB_FIND_AWAIT", "ms=${loadPerfMs(findAwaitStartNs)} result=${findResult?.first} media=${findResult?.second}") }
                 if (findResult != null) { tmdbIdStr = findResult.first; foundMediaType = findResult.second }
             }
-            loadTrace?.let { loadPerfLog(it, "ID_RESOLVED", "imdb=$finalImdbId tmdb=$tmdbIdStr mediaHint=$foundMediaType") }
 
             var tmdbData: FetchedTmdbData? = null
             if (tmdbIdStr != null) {
-                val tmdbEnrichStartNs = System.nanoTime()
                 try {
                     val refinedMediaType = foundMediaType ?: if (finalType == "series" || finalType == "tv") "tv" else if (isSingleMovie(finalType, finalVideos) || finalType == "movie" || finalVideos.isNullOrEmpty()) "movie" else "tv"
                     val safePrefetchedDetail = preFetchedDetail?.takeIf {
                         preFetchedDetailTmdbId == tmdbIdStr && preFetchedDetailMediaType == refinedMediaType
                     }
-                    if (preFetchedDetail != null && safePrefetchedDetail == null) {
-                        loadTrace?.let { loadPerfLog(it, "TMDB_DETAIL_REUSE", "status=DISCARD expectedTmdb=$tmdbIdStr expectedMedia=$refinedMediaType prefetchedTmdb=$preFetchedDetailTmdbId prefetchedMedia=$preFetchedDetailMediaType") }
-                    }
-                    tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!, refinedMediaType == "movie", finalImdbId, finalType, finalVideos, safePrefetchedDetail, loadTrace)
-                    loadTrace?.let { loadPerfLog(it, "TMDB_ENRICH", "ms=${loadPerfMs(tmdbEnrichStartNs)} tmdb=$tmdbIdStr media=$refinedMediaType success=${tmdbData != null}") }
+                    tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!, refinedMediaType == "movie", finalImdbId, finalType, finalVideos, safePrefetchedDetail)
                 } catch (e: Exception) {
-                    loadTrace?.let { loadPerfLog(it, "TMDB_ENRICH", "ms=${loadPerfMs(tmdbEnrichStartNs)} tmdb=$tmdbIdStr failed=${e.javaClass.simpleName}") }
                     e.printStackTrace()
                 }
-            } else {
-                loadTrace?.let { loadPerfLog(it, "TMDB_ENRICH", "ms=0 skipped=no_tmdb_id") }
             }
 
             var finalName = originalName ?: this@CatalogEntry.name ?: "Unknown Content"
@@ -3044,16 +2769,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             // 중복 비동기 리소스 방지 조건식 정밀 교정: 두 ID중 어느 하나라도 유실된 상태에서만 연동 호출 트리거
             val aniZipDeferred: Deferred<Pair<Int?, Int?>?>? = if (isAnimeMedia && finalImdbId?.startsWith("tt") == true && (finalMalId == null || finalAniId == null)) {
                 async(Dispatchers.IO) {
-                    val aniZipStartNs = System.nanoTime()
                     val cacheKey = finalImdbId
                     val cachedZip = aniZipCache[cacheKey]
-                    var source = "CACHE"
                     val result: Pair<Int?, Int?>? = if (cachedZip != null && System.currentTimeMillis() - cachedZip.second < METADATA_CACHE_TTL) {
                         cachedZip.first
                     } else {
-                        source = "NETWORK"
                         val fetchedZip = runSuspendCatching {
-                            val mappingRes = StremioC.metadataSession.get("https://api.ani.zip/mappings?imdb_id=$finalImdbId", timeout = 5L).text
+                            val mappingRes = StremioC.customSession.get("https://api.ani.zip/mappings?imdb_id=$finalImdbId", timeout = 5L).text
                             val node = parseJson<JsonNode>(mappingRes)
                             val mappings = node.get("mappings")
                             if (mappings != null && !mappings.isNull) {
@@ -3067,27 +2789,16 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         }
                         fetchedZip
                     }
-                    loadTrace?.let { loadPerfLog(it, "ANIZIP_TASK", "ms=${loadPerfMs(aniZipStartNs)} source=$source imdb=$finalImdbId mal=${result?.first} anilist=${result?.second}") }
                     result
                 }
             } else null
 
             if (isAnimeMedia && finalImdbId?.startsWith("tt") == true && (finalMalId == null || finalAniId == null)) {
-                val aniZipAwaitStartNs = System.nanoTime()
                 val aniZipResult = aniZipDeferred?.await()
-                loadTrace?.let { loadPerfLog(it, "ANIZIP_AWAIT", "ms=${loadPerfMs(aniZipAwaitStartNs)} active=${aniZipDeferred != null} imdb=$finalImdbId result=${aniZipResult != null}") }
                 if (aniZipResult != null) {
                     finalMalId = finalMalId ?: aniZipResult.first
                     finalAniId = finalAniId ?: aniZipResult.second
                 }
-            } else {
-                val aniZipSkipReason = when {
-                    !isAnimeMedia -> "NOT_ANIME"
-                    finalImdbId?.startsWith("tt") != true -> "NON_IMDB_ID"
-                    finalMalId != null && finalAniId != null -> "IDS_COMPLETE"
-                    else -> "NOT_NEEDED"
-                }
-                loadTrace?.let { loadPerfLog(it, "ANIZIP_AWAIT", "ms=0 active=false reason=$aniZipSkipReason anime=$isAnimeMedia imdb=$finalImdbId mal=$finalMalId anilist=$finalAniId") }
             }
 
             val cleanImdbId = finalImdbId?.let { idStr ->
@@ -3120,7 +2831,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     movieId
                 }
 
-                val responseBuildStartNs = System.nanoTime()
                 val response = provider.newMovieLoadResponse(
                     finalName, metaUrl, finalMovieType, 
                     LoadData(
@@ -3161,11 +2871,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
                     this.apiName = provider.getTargetApiName()
                 }
-                loadTrace?.let { loadPerfLog(it, "BUILD_RESPONSE", "ms=${loadPerfMs(responseBuildStartNs)} kind=movie recommendations=${tmdbData?.fetchedRecommendations?.size ?: 0}") }
                 return@coroutineScope response
 
             } else {
-                val episodeProcessStartNs = System.nanoTime()
                 val finalEpisodes = processEpisodes(
                     provider, 
                     cleanImdbId, 
@@ -3185,9 +2893,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     this@CatalogEntry.kitsuIdExt,
                     tmdbData?.fetchedYear // ★ 수집된 출시 연도(year) 인자 전달 추가
                 )
-                loadTrace?.let { loadPerfLog(it, "PROCESS_EPISODES", "ms=${loadPerfMs(episodeProcessStartNs)} input=${finalVideos?.size ?: 0} output=${finalEpisodes.size}") }
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
-                val responseBuildStartNs = System.nanoTime()
                 val response = provider.newTvSeriesLoadResponse(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
                 ) {
@@ -3211,7 +2917,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
                     this.apiName = provider.getTargetApiName()
                 }
-                loadTrace?.let { loadPerfLog(it, "BUILD_RESPONSE", "ms=${loadPerfMs(responseBuildStartNs)} kind=series episodes=${finalEpisodes.size} recommendations=${tmdbData?.fetchedRecommendations?.size ?: 0}") }
                 return@coroutineScope response
             }           
         }
