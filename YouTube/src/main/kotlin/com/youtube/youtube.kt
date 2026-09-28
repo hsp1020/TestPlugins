@@ -306,13 +306,13 @@ class YoutubeProvider(
     companion object {
         private val providerScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-        // Keep request dispatch parallel, but cap the memory-heavy phase that starts at textLarge.
-        // app.post() can still overlap across all CHIP catalogs; only response-body materialization,
-        // Jackson Map creation and recursive extraction are limited. This avoids turning startup
-        // into four full network waves while preventing 13 multi-megabyte Strings/JSON trees from
-        // living at the same time.
-        private const val CHIP_MEMORY_PARALLELISM = 4
-        private val chipMemorySemaphore = Semaphore(CHIP_MEMORY_PARALLELISM)
+        // Gate CHIP browse BEFORE app.post(). NiceHttp may buffer/materialize a large response body
+        // before the caller reaches textLarge, so a post-response semaphore is too late to control
+        // peak heap/LOS pressure. Six concurrent browse requests is the initial balance for this
+        // device: it still preserves substantial HTTP parallelism while preventing 13+ multi-MB
+        // responses/JSON trees from being alive at once.
+        private const val CHIP_BROWSE_CONCURRENCY = 6
+        private val chipBrowseSemaphore = Semaphore(CHIP_BROWSE_CONCURRENCY)
 
         // CloudStream may create/cancel an initial set of MainPage requests while plugins are still
         // being registered. Give only direct non-CHIP page-1 HTTP calls a one-time short settle
@@ -882,32 +882,32 @@ class YoutubeProvider(
             "X-Youtube-Client-Version" to bootstrap.clientVersion
         )
 
-        // Dispatch every CHIP request immediately so DNS/TLS/HTTP2/server latency still overlaps.
-        // The permit is acquired only after app.post() has returned a response wrapper and BEFORE
-        // textLarge materializes a multi-megabyte String. This is deliberately different from a
-        // full-request semaphore: catalog loading remains network-parallel while peak heap is capped.
-        val requestStartNs = System.nanoTime()
-        val rawResponse = app.post(
-            apiUrl,
-            json = payload,
-            headers = headers,
-            interceptor = ytInterceptor
-        )
-        currentCoroutineContext().ensureActive()
-        val responseReadyNs = System.nanoTime()
-        val responseWaitMs = (responseReadyNs - requestStartNs) / 1_000_000L
-
+        // Acquire the permit BEFORE app.post(). NiceHttp can retain/buffer response data before
+        // textLarge is accessed, which means gating only the parse phase does not prevent a startup
+        // burst of large response objects. The permit therefore covers app.post + textLarge + JSON
+        // parse + renderer extraction. Six permits retain useful parallelism without allowing every
+        // enabled CHIP catalog to hold a multi-megabyte response at the same time.
         val queueStartNs = System.nanoTime()
-        return chipMemorySemaphore.withPermit {
+        return chipBrowseSemaphore.withPermit {
             currentCoroutineContext().ensureActive()
             val acquiredNs = System.nanoTime()
             val queueMs = (acquiredNs - queueStartNs) / 1_000_000L
 
+            val requestStartNs = System.nanoTime()
+            val rawResponse = app.post(
+                apiUrl,
+                json = payload,
+                headers = headers,
+                interceptor = ytInterceptor
+            )
+            currentCoroutineContext().ensureActive()
+
             // NiceHttp .text has a 5 MB safety cap; chip responses such as Music can exceed it.
-            // textLarge, Jackson tree creation and recursive renderer traversal now share ONE permit,
-            // so large Strings and large parsed Maps cannot multiply across every startup catalog.
+            // Keep textLarge under the same permit as the request and JSON object graph.
             val body = rawResponse.textLarge
             currentCoroutineContext().ensureActive()
+            val responseReadyNs = System.nanoTime()
+            val responseWaitMs = (responseReadyNs - requestStartNs) / 1_000_000L
             if (body.isBlank()) return@withPermit null
 
             val response = try {
