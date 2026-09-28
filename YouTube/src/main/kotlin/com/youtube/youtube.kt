@@ -973,16 +973,118 @@ class YoutubeProvider(
         }
     }
 
+    private data class ContinuationCandidate(
+        val token: String,
+        val path: String,
+        val score: Int
+    )
+
+    /**
+     * Last-resort continuation scan used after the structured page cursor and the legacy
+     * recursive scan. This is intentionally run on one streamed continuation item at a time,
+     * not on the complete multi-megabyte response tree, so the low-memory streaming path stays
+     * intact. Header/filter-chip branches are excluded to avoid selecting a category-switch token.
+     */
+    private fun findGenericContinuationCandidate(root: Any?): ContinuationCandidate? {
+        var best: ContinuationCandidate? = null
+
+        fun isExcludedKey(key: String): Boolean = when (key) {
+            "header",
+            "feedFilterChipBarRenderer",
+            "chipCloudRenderer",
+            "relatedChipCloudRenderer",
+            "chipCloudChipRenderer",
+            "chipViewModel",
+            "chipCloud" -> true
+            else -> false
+        }
+
+        fun scorePath(path: String): Int {
+            var score = 0
+            if (path.contains("appendContinuationItemsAction")) score += 120
+            if (path.contains("reloadContinuationItemsCommand")) score += 120
+            if (path.contains("continuationItems")) score += 110
+            if (path.contains("richGrid")) score += 100
+            if (path.contains("continuationItemRenderer")) score += 90
+            if (path.contains("buttonRenderer")) score += 60
+            if (path.contains("loadMore", ignoreCase = true)) score += 50
+            if (path.contains("contents")) score += 20
+            if (path.contains("shelf", ignoreCase = true)) score -= 25
+            if (path.contains("reel", ignoreCase = true)) score -= 25
+            if (path.contains("engagementPanel", ignoreCase = true)) score -= 50
+            return score
+        }
+
+        fun consider(token: String?, path: String) {
+            if (token.isNullOrBlank()) return
+            val candidate = ContinuationCandidate(token, path, scorePath(path))
+            val current = best
+            if (current == null ||
+                candidate.score > current.score ||
+                (candidate.score == current.score && candidate.path.length > current.path.length)
+            ) {
+                best = candidate
+            }
+        }
+
+        fun walk(node: Any?, path: String, depth: Int) {
+            if (node == null || depth > 48) return
+            when (node) {
+                is Map<*, *> -> {
+                    val continuationCommand = node["continuationCommand"] as? Map<*, *>
+                    consider(continuationCommand?.get("token") as? String, "$path.continuationCommand")
+
+                    val browseContinuation = node["browseContinuationEndpoint"] as? Map<*, *>
+                    consider(browseContinuation?.get("token") as? String, "$path.browseContinuationEndpoint")
+
+                    val searchContinuation = node["searchContinuationEndpoint"] as? Map<*, *>
+                    consider(searchContinuation?.get("token") as? String, "$path.searchContinuationEndpoint")
+
+                    val command = node["command"] as? Map<*, *>
+                    consider(command?.get("token") as? String, "$path.command")
+
+                    for ((keyAny, value) in node) {
+                        val key = keyAny as? String ?: continue
+                        if (isExcludedKey(key)) continue
+                        walk(value, "$path.$key", depth + 1)
+                    }
+                }
+                is List<*> -> node.forEachIndexed { index, item ->
+                    walk(item, "$path[$index]", depth + 1)
+                }
+            }
+        }
+
+        walk(root, "$", 0)
+        return best
+    }
+
+    private fun preferGenericCandidate(
+        current: ContinuationCandidate?,
+        candidate: ContinuationCandidate?
+    ): ContinuationCandidate? {
+        if (candidate == null) return current
+        if (current == null) return candidate
+        return when {
+            candidate.score > current.score -> candidate
+            candidate.score < current.score -> current
+            candidate.path.length > current.path.length -> candidate
+            else -> current
+        }
+    }
+
     private data class StreamingChipState(
         val results: MutableList<SearchResponse> = mutableListOf(),
         val seenIds: MutableSet<String> = mutableSetOf(),
-        // Page-level continuationItemRenderer is authoritative. While streaming forward, overwrite
-        // this candidate so the last root continuationItemRenderer matches the legacy asReversed()
-        // preference. Internal renderer tokens are kept only as a compatibility fallback.
+        // Strict continuation priority: direct page cursor > recursive compatibility token >
+        // path-aware generic command token. The generic candidate is collected per streamed item,
+        // so restoring this fallback does not rebuild the complete response object graph.
         var pageLevelNextToken: String? = null,
         var pageLevelSource: String = "none",
         var fallbackNextToken: String? = null,
         var fallbackSource: String = "none",
+        var genericNextCandidate: ContinuationCandidate? = null,
+        var genericSource: String = "none",
         var processedAny: Boolean = false,
         var sawReloadCommand: Boolean = false
     )
@@ -1011,13 +1113,32 @@ class YoutubeProvider(
                     // implementation scanned that array in reverse and preferred its last page cursor.
                     pageTokenInThisItems = pageToken
                 }
-            } else if (state.fallbackNextToken.isNullOrBlank()) {
-                // Rich sections and other nested renderers can expose their own continuations.
-                // Never let those outrank the page cursor; retain only the first as a fallback.
-                val fallbackToken = findTokenRecursive(item)
-                if (!fallbackToken.isNullOrBlank()) {
-                    state.fallbackNextToken = fallbackToken
+            }
+
+            // Priority tier 2: legacy recursive fallback. Once a page-level cursor is known,
+            // lower-priority scans are unnecessary. Before then, keep only the first recursive
+            // token exactly as the compatibility path did.
+            var recursiveTokenForItem: String? = null
+            val pageCursorKnown = !state.pageLevelNextToken.isNullOrBlank() || !pageTokenInThisItems.isNullOrBlank()
+            if (!pageCursorKnown && state.fallbackNextToken.isNullOrBlank()) {
+                recursiveTokenForItem = findTokenRecursive(item)
+                if (!recursiveTokenForItem.isNullOrBlank()) {
+                    state.fallbackNextToken = recursiveTokenForItem
                     state.fallbackSource = source
+                }
+            }
+
+            // Priority tier 3: scan generic command wrappers only while neither higher-priority
+            // tier has produced a token. This keeps the fallback cheap on normal responses.
+            if (!pageCursorKnown &&
+                state.fallbackNextToken.isNullOrBlank() &&
+                recursiveTokenForItem.isNullOrBlank()
+            ) {
+                val genericCandidate = findGenericContinuationCandidate(item)
+                val preferredGeneric = preferGenericCandidate(state.genericNextCandidate, genericCandidate)
+                if (preferredGeneric !== state.genericNextCandidate) {
+                    state.genericNextCandidate = preferredGeneric
+                    state.genericSource = source
                 }
             }
         }
@@ -1114,12 +1235,21 @@ class YoutubeProvider(
                                 if (state.pageLevelNextToken.isNullOrBlank() && !pageToken.isNullOrBlank()) {
                                     state.pageLevelNextToken = pageToken
                                     state.pageLevelSource = field
-                                } else if (state.fallbackNextToken.isNullOrBlank()) {
+                                }
+
+                                if (state.fallbackNextToken.isNullOrBlank()) {
                                     val fallbackToken = findTokenRecursive(value)
                                     if (!fallbackToken.isNullOrBlank()) {
                                         state.fallbackNextToken = fallbackToken
                                         state.fallbackSource = field
                                     }
+                                }
+
+                                val genericCandidate = findGenericContinuationCandidate(value)
+                                val preferredGeneric = preferGenericCandidate(state.genericNextCandidate, genericCandidate)
+                                if (preferredGeneric !== state.genericNextCandidate) {
+                                    state.genericNextCandidate = preferredGeneric
+                                    state.genericSource = field
                                 }
                             }
                         }
@@ -1130,11 +1260,25 @@ class YoutubeProvider(
 
             if (!state.processedAny) return null
 
-            val nextToken = state.pageLevelNextToken ?: state.fallbackNextToken
+            val nextToken = state.pageLevelNextToken
+                ?: state.fallbackNextToken
+                ?: state.genericNextCandidate?.token
             var source = when {
                 !state.pageLevelNextToken.isNullOrBlank() -> state.pageLevelSource
                 !state.fallbackNextToken.isNullOrBlank() -> state.fallbackSource
+                state.genericNextCandidate != null -> state.genericSource
                 else -> "none"
+            }
+
+            if (state.pageLevelNextToken.isNullOrBlank() &&
+                state.fallbackNextToken.isNullOrBlank() &&
+                state.genericNextCandidate != null
+            ) {
+                Log.d(
+                    "YoutubeUtils",
+                    "[CHIP_CONT] generic path=${state.genericNextCandidate?.path} " +
+                        "score=${state.genericNextCandidate?.score} source=$source"
+                )
             }
 
             if (nextToken.isNullOrBlank() && state.sawReloadCommand) {
@@ -1240,6 +1384,7 @@ class YoutubeProvider(
                     if (nextToken.isNullOrBlank()) {
                         nextToken = findContinuationFromItemsSafe(appendItems)
                             ?: findTokenRecursive(appendItems)
+                            ?: findGenericContinuationCandidate(appendItems)?.token
                         if (!nextToken.isNullOrBlank()) source = "top_level_append"
                     }
                 }
@@ -1253,6 +1398,7 @@ class YoutubeProvider(
                     if (nextToken.isNullOrBlank()) {
                         nextToken = findContinuationFromItemsSafe(reloadItems)
                             ?: findTokenRecursive(reloadItems)
+                            ?: findGenericContinuationCandidate(reloadItems)?.token
                         if (!nextToken.isNullOrBlank()) source = "top_level_reload"
                     }
                 }
@@ -1264,7 +1410,10 @@ class YoutubeProvider(
             processRecursive(continuationContents, results, seenIds, playlistMode = false, isSearch = false)
             processedAny = true
             if (nextToken.isNullOrBlank()) {
-                nextToken = findTokenRecursive(continuationContents)
+                val continuationItems = findContinuationItemsRecursive(continuationContents)
+                nextToken = findContinuationFromItemsSafe(continuationItems)
+                    ?: findTokenRecursive(continuationContents)
+                    ?: findGenericContinuationCandidate(continuationContents)?.token
                 if (!nextToken.isNullOrBlank()) source = "continuationContents"
             }
         }
@@ -1274,7 +1423,10 @@ class YoutubeProvider(
             processRecursive(contents, results, seenIds, playlistMode = false, isSearch = false)
             processedAny = true
             if (nextToken.isNullOrBlank()) {
-                nextToken = findTokenRecursive(contents)
+                val continuationItems = findContinuationItemsRecursive(contents)
+                nextToken = findContinuationFromItemsSafe(continuationItems)
+                    ?: findTokenRecursive(contents)
+                    ?: findGenericContinuationCandidate(contents)?.token
                 if (!nextToken.isNullOrBlank()) source = "contents"
             }
         }
@@ -1288,6 +1440,18 @@ class YoutubeProvider(
         if (nextToken.isNullOrBlank()) {
             nextToken = findTokenRecursive(response)
             if (!nextToken.isNullOrBlank()) source = "recursive_fallback"
+        }
+
+        if (nextToken.isNullOrBlank()) {
+            val generic = findGenericContinuationCandidate(response)
+            if (generic != null) {
+                nextToken = generic.token
+                source = "generic_fallback"
+                Log.d(
+                    "YoutubeUtils",
+                    "[CHIP_CONT] generic path=${generic.path} score=${generic.score} source=$source"
+                )
+            }
         }
 
         if (nextToken.isNullOrBlank() && sawReloadCommand) {
