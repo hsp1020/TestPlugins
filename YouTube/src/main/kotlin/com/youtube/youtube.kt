@@ -1,6 +1,5 @@
 package com.hsp1020.youtube
 
-
 import org.json.JSONObject
 import android.content.SharedPreferences
 import android.util.Log
@@ -284,6 +283,23 @@ class YoutubeProvider(
         val chips: LinkedHashMap<String, String>,
         val homeItems: List<SearchResponse>,
         val homeNextToken: String?
+    )
+
+    // Fetch/HTML parsing is deliberately isolated from renderer processing so the multi-megabyte
+    // HTML String becomes unreachable before processRecursive() builds the final card list.
+    private data class ParsedHomeBootstrapSource(
+        val apiKey: String?,
+        val clientVersion: String,
+        val visitorData: String?,
+        val initialData: Map<String, Any>
+    )
+
+    private data class ParsedDirectPageSource(
+        val apiKey: String?,
+        val clientVersion: String?,
+        val visitorData: String?,
+        val initialData: Map<String, Any>,
+        val parseMode: String
     )
 
     private data class ParsedChipPayload(
@@ -661,33 +677,47 @@ class YoutubeProvider(
         }
     }
 
+    private suspend fun fetchParsedHomeBootstrapSource(): ParsedHomeBootstrapSource? {
+        currentCoroutineContext().ensureActive()
+        val freshUrl = "$mainUrl/?t=${System.currentTimeMillis()}"
+        val html = app.get(
+            freshUrl,
+            interceptor = ytInterceptor,
+            headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")
+        ).textLarge
+        currentCoroutineContext().ensureActive()
+        updateChipPage1ObservedPeakHeap()
+
+        val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
+            ?: savedApiKey
+            ?: appPrefs?.getString("yt_api_key", null)
+        val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
+            ?: savedVisitorData
+            ?: appPrefs?.getString("yt_visitor_data", null)
+        val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION")
+            ?: savedClientVersion
+            ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
+            ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
+
+        // Home needs only top-level contents. This helper returns before any renderer/card processing,
+        // so its HTML String is not retained alongside SearchResponse construction.
+        val initialData = extractHomeInitialData(html) ?: return null
+        updateChipPage1ObservedPeakHeap()
+        return ParsedHomeBootstrapSource(
+            apiKey = apiKey,
+            clientVersion = clientVersion,
+            visitorData = visitorData,
+            initialData = initialData
+        )
+    }
+
     private suspend fun fetchAndPrepareHomeBootstrap(requestLang: String): HomeBootstrapPayload? {
         return youtubePayloadSemaphore.withPermit {
+            // Keep fetch/HTML lifetime in a child frame. At this point only the pruned contents tree
+            // survives; the original HTML is no longer needed by processRecursive/findTokenRecursive.
+            val parsed = fetchParsedHomeBootstrapSource() ?: return@withPermit null
             currentCoroutineContext().ensureActive()
-            val freshUrl = "$mainUrl/?t=${System.currentTimeMillis()}"
-            val html = app.get(
-                freshUrl,
-                interceptor = ytInterceptor,
-                headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")
-            ).textLarge
-            currentCoroutineContext().ensureActive()
-            updateChipPage1ObservedPeakHeap()
-
-            val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
-                ?: savedApiKey
-                ?: appPrefs?.getString("yt_api_key", null)
-            val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
-                ?: savedVisitorData
-                ?: appPrefs?.getString("yt_visitor_data", null)
-            val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION")
-                ?: savedClientVersion
-                ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
-                ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
-
-            // Home bootstrap needs only the top-level contents tree. Avoid materializing responseContext,
-            // topbar/framework/update metadata and avoid creating a second giant JSON substring.
-            val initialData = extractHomeInitialData(html) ?: return@withPermit null
-            updateChipPage1ObservedPeakHeap()
+            val initialData = parsed.initialData
 
             val freshChips = extractChipTokens(initialData)
             val homeResults = mutableListOf<SearchResponse>()
@@ -703,9 +733,9 @@ class YoutubeProvider(
             updateChipPage1ObservedPeakHeap()
 
             HomeBootstrapPayload(
-                apiKey = apiKey ?: return@withPermit null,
-                clientVersion = clientVersion,
-                visitorData = visitorData,
+                apiKey = parsed.apiKey ?: return@withPermit null,
+                clientVersion = parsed.clientVersion,
+                visitorData = parsed.visitorData,
                 chips = freshChips,
                 homeItems = homeResults.toList(),
                 homeNextToken = homeNextToken
@@ -2957,22 +2987,97 @@ class YoutubeProvider(
         }
     }
 
+    private fun isKnownContentsOnlyDirectPage(targetUrl: String): Boolean {
+        return try {
+            val uri = java.net.URI(targetUrl)
+            val host = uri.host?.lowercase() ?: return false
+            if (host != "www.youtube.com" && host != "youtube.com" && host != "m.youtube.com") {
+                return false
+            }
+
+            val path = (uri.path ?: "").trimEnd('/').ifEmpty { "/" }
+            val query = uri.rawQuery.orEmpty()
+            when {
+                path == "/feed/history" -> true
+                path == "/playlist" && query.split('&').any { it.startsWith("list=") } -> true
+                Regex("^/@[^/]+/videos$").matches(path) -> true
+                Regex("^/(?:channel|c|user)/[^/]+/videos$").matches(path) -> true
+                else -> false
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun extractDirectPageInitialData(
+        html: String,
+        requestData: String,
+        targetUrl: String
+    ): Pair<Map<String, Any>?, String> {
+        if (requestData == "Home") {
+            return extractHomeInitialData(html) to "home_contents"
+        }
+
+        if (isKnownContentsOnlyDirectPage(targetUrl)) {
+            // These page families have their feed/cards and page cursor under top-level contents.
+            // If YouTube changes that shape and pruning fails outright, retain the legacy full parser.
+            val pruned = extractYtInitialDataInternal(html, setOf("contents"))
+            if (pruned?.get("contents") != null) {
+                return pruned to "known_contents"
+            }
+            return extractYtInitialData(html) to "full_fallback"
+        }
+
+        // Arbitrary/custom YouTube URLs keep the old compatibility behavior unchanged.
+        return extractYtInitialData(html) to "full_compat"
+    }
+
+    private suspend fun fetchParsedDirectPageSource(
+        requestData: String,
+        targetUrl: String
+    ): ParsedDirectPageSource? {
+        currentCoroutineContext().ensureActive()
+        val html = app.get(
+            targetUrl,
+            interceptor = ytInterceptor,
+            headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")
+        ).textLarge
+        currentCoroutineContext().ensureActive()
+        updateChipPage1ObservedPeakHeap()
+
+        val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
+        val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
+        val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION")
+            ?: savedClientVersion
+            ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
+
+        val (initialData, parseMode) = extractDirectPageInitialData(html, requestData, targetUrl)
+        val parsedInitialData = initialData ?: return null
+        updateChipPage1ObservedPeakHeap()
+
+        return ParsedDirectPageSource(
+            apiKey = apiKey,
+            clientVersion = clientVersion,
+            visitorData = visitorData,
+            initialData = parsedInitialData,
+            parseMode = parseMode
+        )
+    }
+
     private suspend fun loadDirectPage1(requestData: String): DirectPageResult? {
         awaitStartupDirectRequestSettle()
         return youtubePayloadSemaphore.withPermit {
             currentCoroutineContext().ensureActive()
             val targetUrl = if (requestData == "Home") mainUrl else requestData
-            val html = app.get(
-                targetUrl,
-                interceptor = ytInterceptor,
-                headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")
-            ).textLarge
-            currentCoroutineContext().ensureActive()
-            updateChipPage1ObservedPeakHeap()
 
-            savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
-            savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
-            savedClientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION")
+            // Fetch/config extraction/ytInitialData extraction live in a separate frame so the raw
+            // HTML String is released before renderer traversal and final card construction begin.
+            val parsed = fetchParsedDirectPageSource(requestData, targetUrl) ?: return@withPermit null
+            currentCoroutineContext().ensureActive()
+
+            savedApiKey = parsed.apiKey
+            savedVisitorData = parsed.visitorData
+            savedClientVersion = parsed.clientVersion
                 ?: savedClientVersion
                 ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
 
@@ -2984,12 +3089,11 @@ class YoutubeProvider(
                     ?.apply()
             }
 
-            val initialData = if (requestData == "Home") {
-                extractHomeInitialData(html)
-            } else {
-                extractYtInitialData(html)
-            } ?: return@withPermit null
-            updateChipPage1ObservedPeakHeap()
+            val initialData = parsed.initialData
+            Log.d(
+                "YoutubeUtils",
+                "[DIRECT_PARSE] mode=${parsed.parseMode} key=$requestData"
+            )
 
             if (requestData == "Home") {
                 val chips = extractChipTokens(initialData)
