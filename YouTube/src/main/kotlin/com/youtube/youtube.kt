@@ -19,8 +19,6 @@ import java.nio.charset.StandardCharsets
 import java.util.Collections
 import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 import com.lagradost.cloudstream3.CloudStreamApp
 import androidx.preference.PreferenceManager
 import kotlinx.coroutines.async
@@ -285,33 +283,9 @@ class YoutubeProvider(
         val homeNextToken: String?
     )
 
-    // Fetch/HTML parsing is deliberately isolated from renderer processing so the multi-megabyte
-    // HTML String becomes unreachable before processRecursive() builds the final card list.
-    private data class ParsedHomeBootstrapSource(
-        val apiKey: String?,
-        val clientVersion: String,
-        val visitorData: String?,
-        val initialData: Map<String, Any>
-    )
-
-    private data class ParsedDirectPageSource(
-        val apiKey: String?,
-        val clientVersion: String?,
-        val visitorData: String?,
-        val initialData: Map<String, Any>,
-        val parseMode: String
-    )
-
-    private data class ParsedChipPayload(
-        val processed: ProcessedChipPayload,
-        val bodyChars: Int,
-        val responseWaitMs: Long
-    )
-
     private data class ProcessedChipPayload(
         val items: List<SearchResponse>,
-        val nextToken: String?,
-        val continuationSource: String
+        val nextToken: String?
     )
 
     private data class DirectPageResult(
@@ -322,16 +296,6 @@ class YoutubeProvider(
     private data class ChipCatalogSession(
         val bootstrap: ChipBootstrapSnapshot,
         val pageTokens: ConcurrentHashMap<Int, String> = ConcurrentHashMap()
-    )
-
-    private data class ChipBrowseResult(
-        val items: List<SearchResponse>,
-        val nextToken: String?,
-        val continuationSource: String,
-        val bodyChars: Int,
-        val responseWaitMs: Long,
-        val memoryQueueMs: Long,
-        val memoryWorkMs: Long
     )
 
     private val chipCatalogSessions = ConcurrentHashMap<String, ChipCatalogSession>()
@@ -359,35 +323,16 @@ class YoutubeProvider(
     companion object {
         private val providerScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-        // One shared memory budget for every large YouTube payload handled by this provider.
-        // This is deliberately broader than CHIP: Home bootstrap, direct page-1 HTML/ytInitialData,
-        // and CHIP browse responses can otherwise overlap and defeat a CHIP-only semaphore.
         private const val YOUTUBE_PAYLOAD_CONCURRENCY = 3
         private val youtubePayloadSemaphore = Semaphore(YOUTUBE_PAYLOAD_CONCURRENCY)
 
-        // Prepared Home is only a startup deduplication hand-off, not a normal Home cache.
-        // Keep this window separate from the 15s CHIP bootstrap TTL so a later manual Home refresh
-        // still performs a real no-cache request instead of replaying stale prepared results.
         private const val PREPARED_HOME_REUSE_MS = 2_500L
 
-        // Startup metrics span Home bootstrap + CHIP page-1 work, not CHIP alone. This catches the
-        // actual peak that used to happen while a duplicate Home parse overlapped CHIP requests.
-        private val chipPage1Active = AtomicInteger(0)
-        private val chipPage1BatchStartedAtMs = AtomicLong(0L)
-        private val chipPage1ObservedPeakHeapBytes = AtomicLong(0L)
-        private val youtubeMemoryEpochStartedAtMs = AtomicLong(0L)
-
-        // CloudStream may create/cancel an initial set of MainPage requests while plugins are still
-        // being registered. Give only direct non-CHIP page-1 HTTP calls a one-time short settle
-        // window so doomed startup calls can be cancelled before OkHttp is opened.
         private const val STARTUP_DIRECT_REQUEST_SETTLE_MS = 200L
         private val startupGateLock = Any()
         @Volatile
         private var startupFirstDirectRequestAtMs: Long = 0L
 
-        // Shared across duplicate YoutubeProvider instances created during CloudStream startup.
-        // This prevents duplicate bootstrap downloads/mainPage rebuilds without blocking a later
-        // plugin reload with a permanent "registered once" flag.
         private data class ChipBootstrapInFlight(
             val language: String,
             val deferred: kotlinx.coroutines.Deferred<ChipBootstrapSnapshot?>
@@ -612,10 +557,6 @@ class YoutubeProvider(
     private fun getSavedContinuationToken(key: String, page: Int): String? {
         val pageKey = if (page > 0) "${key}_page_$page" else key
         
-        if (key.startsWith("chip_") || key.contains("chip", ignoreCase = true)) {
-            Log.d("YoutubeUtils", "[CHIP] getSavedContinuationToken - Page: $page, Key: $pageKey")
-        }
-
         return continuationTokenCache[pageKey]
     }
 
@@ -626,10 +567,6 @@ class YoutubeProvider(
     private fun saveContinuationToken(key: String, page: Int, token: String?) {
         val pageKey = if (page > 0) "${key}_page_$page" else key
         
-        if (key.startsWith("chip_") || key.contains("chip", ignoreCase = true)) {
-            Log.d("YoutubeUtils", "[CHIP] saveContinuationToken - Page: $page, Key: $pageKey, TokenToSave: $token")
-        }
-
         if (token.isNullOrBlank()) {
             continuationTokenCache.remove(pageKey)
         } else {
@@ -677,47 +614,29 @@ class YoutubeProvider(
         }
     }
 
-    private suspend fun fetchParsedHomeBootstrapSource(): ParsedHomeBootstrapSource? {
-        currentCoroutineContext().ensureActive()
-        val freshUrl = "$mainUrl/?t=${System.currentTimeMillis()}"
-        val html = app.get(
-            freshUrl,
-            interceptor = ytInterceptor,
-            headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")
-        ).textLarge
-        currentCoroutineContext().ensureActive()
-        updateChipPage1ObservedPeakHeap()
-
-        val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
-            ?: savedApiKey
-            ?: appPrefs?.getString("yt_api_key", null)
-        val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
-            ?: savedVisitorData
-            ?: appPrefs?.getString("yt_visitor_data", null)
-        val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION")
-            ?: savedClientVersion
-            ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
-            ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
-
-        // Home needs only top-level contents. This helper returns before any renderer/card processing,
-        // so its HTML String is not retained alongside SearchResponse construction.
-        val initialData = extractHomeInitialData(html) ?: return null
-        updateChipPage1ObservedPeakHeap()
-        return ParsedHomeBootstrapSource(
-            apiKey = apiKey,
-            clientVersion = clientVersion,
-            visitorData = visitorData,
-            initialData = initialData
-        )
-    }
-
     private suspend fun fetchAndPrepareHomeBootstrap(requestLang: String): HomeBootstrapPayload? {
         return youtubePayloadSemaphore.withPermit {
-            // Keep fetch/HTML lifetime in a child frame. At this point only the pruned contents tree
-            // survives; the original HTML is no longer needed by processRecursive/findTokenRecursive.
-            val parsed = fetchParsedHomeBootstrapSource() ?: return@withPermit null
             currentCoroutineContext().ensureActive()
-            val initialData = parsed.initialData
+            val freshUrl = "$mainUrl/?t=${System.currentTimeMillis()}"
+            val html = app.get(
+                freshUrl,
+                interceptor = ytInterceptor,
+                headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")
+            ).textLarge
+            currentCoroutineContext().ensureActive()
+
+            val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
+                ?: savedApiKey
+                ?: appPrefs?.getString("yt_api_key", null)
+            val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
+                ?: savedVisitorData
+                ?: appPrefs?.getString("yt_visitor_data", null)
+            val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION")
+                ?: savedClientVersion
+                ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
+                ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
+
+            val initialData = extractHomeInitialData(html) ?: return@withPermit null
 
             val freshChips = extractChipTokens(initialData)
             val homeResults = mutableListOf<SearchResponse>()
@@ -730,12 +649,11 @@ class YoutubeProvider(
                 isSearch = false
             )
             val homeNextToken = findTokenRecursive(initialData)
-            updateChipPage1ObservedPeakHeap()
 
             HomeBootstrapPayload(
-                apiKey = parsed.apiKey ?: return@withPermit null,
-                clientVersion = parsed.clientVersion,
-                visitorData = parsed.visitorData,
+                apiKey = apiKey ?: return@withPermit null,
+                clientVersion = clientVersion,
+                visitorData = visitorData,
                 chips = freshChips,
                 homeItems = homeResults.toList(),
                 homeNextToken = homeNextToken
@@ -750,12 +668,7 @@ class YoutubeProvider(
             it.language == requestLang && now - it.createdAtMs <= chipBootstrapStaleFallbackMs
         }
 
-        // Start one memory epoch before Home bootstrap so LAST_COMPLETE includes the true startup peak.
-        youtubeMemoryEpochStartedAtMs.set(now)
-        chipPage1ObservedPeakHeapBytes.set(currentRuntimeHeapBytes())
-
         try {
-            Log.d("YoutubeUtils", "[CHIP_BOOTSTRAP] REFRESH_START")
             val payload = fetchAndPrepareHomeBootstrap(requestLang)
             if (payload == null || payload.apiKey.isBlank() || payload.chips.isEmpty()) {
                 Log.w(
@@ -802,15 +715,8 @@ class YoutubeProvider(
                 createdAtMs = createdAt
             )
             sharedChipBootstrapSnapshot = snapshot
-            updateChipPage1ObservedPeakHeap()
-            Log.d(
-                "YoutubeUtils",
-                "[CHIP_BOOTSTRAP] REFRESH_OK fresh=${payload.chips.size} merged=${mergedFreshChips.size} " +
-                    "preparedHomeItems=${payload.homeItems.size}"
-            )
             return snapshot
         } catch (e: CancellationException) {
-            Log.d("YoutubeUtils", "[CHIP_BOOTSTRAP] REFRESH_CANCELLED")
             throw e
         } catch (e: Exception) {
             Log.e("YoutubeUtils", "[CHIP_BOOTSTRAP] REFRESH_FAILED fallback=${fallback != null}", e)
@@ -826,10 +732,6 @@ class YoutubeProvider(
             cached.language == requestLang &&
             now - cached.createdAtMs <= chipBootstrapTtlMs
         ) {
-            Log.d(
-                "YoutubeUtils",
-                "[CHIP_BOOTSTRAP] HIT age=${now - cached.createdAtMs}ms chips=${cached.chips.size}"
-            )
             return cached
         }
 
@@ -840,10 +742,6 @@ class YoutubeProvider(
                 lockedCached.language == requestLang &&
                 lockedNow - lockedCached.createdAtMs <= chipBootstrapTtlMs
             ) {
-                Log.d(
-                    "YoutubeUtils",
-                    "[CHIP_BOOTSTRAP] HIT_AFTER_LOCK age=${lockedNow - lockedCached.createdAtMs}ms chips=${lockedCached.chips.size}"
-                )
                 return@synchronized null
             }
 
@@ -852,7 +750,6 @@ class YoutubeProvider(
                 existing.language == requestLang &&
                 existing.deferred.isActive
             ) {
-                Log.d("YoutubeUtils", "[CHIP_BOOTSTRAP] JOIN_IN_FLIGHT")
                 existing.deferred
             } else {
                 val created = providerScope.async {
@@ -870,7 +767,6 @@ class YoutubeProvider(
             }
         }
 
-        // A cache hit discovered inside the lock returns null above.
         if (deferred == null) {
             return sharedChipBootstrapSnapshot?.takeIf {
                 it.language == requestLang &&
@@ -878,8 +774,6 @@ class YoutubeProvider(
             }
         }
 
-        // Cancelling one CloudStream section cancels only this waiter. The single shared
-        // bootstrap continues in providerScope and can be reused by sibling sections.
         return deferred.await()
     }
 
@@ -909,89 +803,19 @@ class YoutubeProvider(
             chips = merged,
             createdAtMs = System.currentTimeMillis()
         )
-        Log.d(
-            "YoutubeUtils",
-            "[CHIP_BOOTSTRAP] PUBLISHED_FROM_HOME fresh=${chips.size} merged=${merged.size}"
-        )
-    }
-
-    private fun currentRuntimeHeapBytes(): Long {
-        val runtime = Runtime.getRuntime()
-        return runtime.totalMemory() - runtime.freeMemory()
-    }
-
-    private fun updateChipPage1ObservedPeakHeap() {
-        val used = currentRuntimeHeapBytes()
-        while (true) {
-            val previous = chipPage1ObservedPeakHeapBytes.get()
-            if (used <= previous || chipPage1ObservedPeakHeapBytes.compareAndSet(previous, used)) return
-        }
-    }
-
-    private fun beginChipPage1Metrics(page: Int) {
-        if (page != 1) return
-        if (chipPage1Active.getAndIncrement() == 0) {
-            val now = System.currentTimeMillis()
-            chipPage1BatchStartedAtMs.set(now)
-            val memoryEpoch = youtubeMemoryEpochStartedAtMs.get()
-            if (memoryEpoch == 0L || now - memoryEpoch > 15_000L) {
-                youtubeMemoryEpochStartedAtMs.set(now)
-                chipPage1ObservedPeakHeapBytes.set(currentRuntimeHeapBytes())
-            } else {
-                updateChipPage1ObservedPeakHeap()
-            }
-            Log.d(
-                "YoutubeUtils",
-                "[CHIP_METRICS] BATCH_START payloadConcurrency=$YOUTUBE_PAYLOAD_CONCURRENCY " +
-                    "memoryEpochAge=${(now - youtubeMemoryEpochStartedAtMs.get()).coerceAtLeast(0L)}ms"
-            )
-        } else {
-            updateChipPage1ObservedPeakHeap()
-        }
-    }
-
-    private fun endChipPage1Metrics(page: Int) {
-        if (page != 1) return
-        updateChipPage1ObservedPeakHeap()
-        val remaining = chipPage1Active.decrementAndGet()
-        if (remaining == 0) {
-            val now = System.currentTimeMillis()
-            val elapsedMs = (now - chipPage1BatchStartedAtMs.get()).coerceAtLeast(0L)
-            val fullEpochMs = (now - youtubeMemoryEpochStartedAtMs.get()).coerceAtLeast(0L)
-            val peakMb = chipPage1ObservedPeakHeapBytes.get() / (1024.0 * 1024.0)
-            val runtimeMaxMb = Runtime.getRuntime().maxMemory() / (1024.0 * 1024.0)
-            Log.d(
-                "YoutubeUtils",
-                "[CHIP_METRICS] LAST_COMPLETE elapsed=${elapsedMs}ms fullStartup=${fullEpochMs}ms " +
-                    "observedPeakHeap=${String.format(java.util.Locale.US, "%.1f", peakMb)}MB " +
-                    "runtimeMaxHeap=${String.format(java.util.Locale.US, "%.1f", runtimeMaxMb)}MB " +
-                    "losFreed=read_adjacent_ART_GC"
-            )
-            youtubeMemoryEpochStartedAtMs.set(0L)
-        }
     }
 
     private data class ContinuationCandidate(
         val token: String,
         val score: Int,
-        val depth: Int,
-        val kind: String
-    )
-
-    private data class ContinuationFallbackScan(
-        val recursiveToken: String? = null,
-        val genericCandidate: ContinuationCandidate? = null
+        val depth: Int
     )
 
     private data class ContinuationFallbackResult(
         val recursiveToken: String? = null,
-        val recursiveSource: String = "none",
-        val genericCandidate: ContinuationCandidate? = null,
-        val genericSource: String = "none"
+        val genericCandidate: ContinuationCandidate? = null
     )
 
-    // Compact path flags used by the generic last-resort scanner. Keeping only structural
-    // flags/depth avoids allocating "$path.$key" strings for every JSON node.
     private fun continuationPathFlag(key: String): Int = when {
         key == "appendContinuationItemsAction" -> 1 shl 0
         key == "reloadContinuationItemsCommand" -> 1 shl 1
@@ -1061,125 +885,15 @@ class YoutubeProvider(
             if (!token.isNullOrBlank()) return token
         }
 
-        // Defensive support for alternate renderer shapes.
         return (renderer["continuationCommand"] as? Map<*, *>)?.get("token") as? String
             ?: (renderer["browseContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
             ?: (renderer["searchContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
             ?: renderer["token"] as? String
     }
 
-    /**
-     * One DFS pass collects the legacy recursive fallback and, only while no recursive token has
-     * been found, the generic command candidate. This preserves recursive > generic priority while
-     * eliminating v9's second tree walk and per-node path String allocations.
-     */
-    private fun scanContinuationFallbacks(root: Any?): ContinuationFallbackScan {
-        var recursiveToken: String? = null
-        var bestGeneric: ContinuationCandidate? = null
-
-        fun considerGeneric(token: String?, mask: Int, depth: Int, kind: String) {
-            if (token.isNullOrBlank() || !recursiveToken.isNullOrBlank()) return
-            val candidate = ContinuationCandidate(
-                token = token,
-                score = continuationCandidateScore(mask),
-                depth = depth,
-                kind = kind
-            )
-            bestGeneric = preferGenericCandidate(bestGeneric, candidate)
-        }
-
-        fun walk(node: Any?, mask: Int, depth: Int): Boolean {
-            if (node == null || depth > 48) return false
-            when (node) {
-                is Map<*, *> -> {
-                    // Exact legacy recursive priority at each node.
-                    val renderer = node["continuationItemRenderer"] as? Map<*, *>
-                    val rendererToken = extractContinuationRendererToken(renderer)
-                    if (!rendererToken.isNullOrBlank()) {
-                        recursiveToken = rendererToken
-                        return true
-                    }
-
-                    val nextData = node["nextContinuationData"] as? Map<*, *>
-                        ?: node["reloadContinuationData"] as? Map<*, *>
-                        ?: node["timedContinuationData"] as? Map<*, *>
-                        ?: node["invalidationContinuationData"] as? Map<*, *>
-                    if (nextData != null) {
-                        val token = nextData["continuation"] as? String
-                            ?: nextData["token"] as? String
-                        if (!token.isNullOrBlank()) {
-                            recursiveToken = token
-                            return true
-                        }
-                    }
-
-                    // Generic tier is collected in the same traversal, but it can never outrank a
-                    // recursive token found later because recursiveToken immediately wins globally.
-                    val continuationCommand = node["continuationCommand"] as? Map<*, *>
-                    considerGeneric(
-                        continuationCommand?.get("token") as? String,
-                        mask,
-                        depth + 1,
-                        "continuationCommand"
-                    )
-
-                    val browseContinuation = node["browseContinuationEndpoint"] as? Map<*, *>
-                    considerGeneric(
-                        browseContinuation?.get("token") as? String,
-                        mask,
-                        depth + 1,
-                        "browseContinuationEndpoint"
-                    )
-
-                    val searchContinuation = node["searchContinuationEndpoint"] as? Map<*, *>
-                    considerGeneric(
-                        searchContinuation?.get("token") as? String,
-                        mask,
-                        depth + 1,
-                        "searchContinuationEndpoint"
-                    )
-
-                    val command = node["command"] as? Map<*, *>
-                    considerGeneric(
-                        command?.get("token") as? String,
-                        mask,
-                        depth + 1,
-                        "command"
-                    )
-
-                    for ((keyAny, value) in node) {
-                        val key = keyAny as? String ?: continue
-                        if (isExcludedContinuationKey(key)) continue
-                        if (walk(value, mask or continuationPathFlag(key), depth + 1)) {
-                            return true
-                        }
-                    }
-                }
-
-                is List<*> -> {
-                    for (item in node) {
-                        if (walk(item, mask, depth + 1)) {
-                            return true
-                        }
-                    }
-                }
-            }
-            return false
-        }
-
-        walk(root, 0, 0)
-        return if (!recursiveToken.isNullOrBlank()) {
-            ContinuationFallbackScan(recursiveToken = recursiveToken)
-        } else {
-            ContinuationFallbackScan(genericCandidate = bestGeneric)
-        }
-    }
-
     private data class FallbackAccumulator(
         var recursiveToken: String? = null,
-        var recursiveSource: String = "none",
-        var genericCandidate: ContinuationCandidate? = null,
-        var genericSource: String = "none"
+        var genericCandidate: ContinuationCandidate? = null
     )
 
     private val recursiveContinuationDataKeys = setOf(
@@ -1206,7 +920,6 @@ class YoutubeProvider(
     private fun streamScanFallbackNode(
         parser: com.fasterxml.jackson.core.JsonParser,
         accumulator: FallbackAccumulator,
-        source: String,
         pathMask: Int = 0,
         depth: Int = 0,
         containerKey: String? = null,
@@ -1227,7 +940,6 @@ class YoutubeProvider(
                     streamScanFallbackNode(
                         parser,
                         accumulator,
-                        source,
                         pathMask,
                         depth + 1,
                         containerKey,
@@ -1249,17 +961,19 @@ class YoutubeProvider(
 
                     val field = parser.currentName
                     parser.nextToken()
-
                     if (isExcludedContinuationKey(field)) {
                         parser.skipChildren()
                         continue
                     }
 
                     val nextMask = pathMask or continuationPathFlag(field)
-                    val nextInContinuationRenderer = inContinuationRenderer || field == "continuationItemRenderer"
+                    val nextInContinuationRenderer =
+                        inContinuationRenderer || field == "continuationItemRenderer"
 
-                    // Recursive tier: continuationItemRenderer endpoint token.
-                    if (field == "token" && parser.currentToken == JsonToken.VALUE_STRING && nextInContinuationRenderer) {
+                    if (field == "token" &&
+                        parser.currentToken == JsonToken.VALUE_STRING &&
+                        nextInContinuationRenderer
+                    ) {
                         val parentIsAllowed = containerKey == "continuationItemRenderer" ||
                             containerKey == "continuationEndpoint" ||
                             (containerKey != null && containerKey in genericContinuationContainerKeys)
@@ -1267,15 +981,12 @@ class YoutubeProvider(
                             val token = parser.valueAsString
                             if (!token.isNullOrBlank()) {
                                 accumulator.recursiveToken = token
-                                accumulator.recursiveSource = source
                                 accumulator.genericCandidate = null
-                                accumulator.genericSource = "none"
                                 continue
                             }
                         }
                     }
 
-                    // Recursive tier: next/reload/timed/invalidationContinuationData.
                     if ((field == "continuation" || field == "token") &&
                         parser.currentToken == JsonToken.VALUE_STRING &&
                         containerKey != null && containerKey in recursiveContinuationDataKeys
@@ -1283,14 +994,11 @@ class YoutubeProvider(
                         val token = parser.valueAsString
                         if (!token.isNullOrBlank()) {
                             accumulator.recursiveToken = token
-                            accumulator.recursiveSource = source
                             accumulator.genericCandidate = null
-                            accumulator.genericSource = "none"
                             continue
                         }
                     }
 
-                    // Generic tier: direct token inside continuationCommand/browse/search/command.
                     if (field == "token" &&
                         parser.currentToken == JsonToken.VALUE_STRING &&
                         containerKey != null && containerKey in genericContinuationContainerKeys &&
@@ -1301,27 +1009,19 @@ class YoutubeProvider(
                             val candidate = ContinuationCandidate(
                                 token = token,
                                 score = continuationCandidateScore(pathMask),
-                                depth = depth,
-                                kind = containerKey ?: "command"
+                                depth = depth
                             )
-                            val preferred = preferGenericCandidate(accumulator.genericCandidate, candidate)
-                            if (preferred !== accumulator.genericCandidate) {
-                                accumulator.genericCandidate = preferred
-                                accumulator.genericSource = source
-                            }
+                            accumulator.genericCandidate =
+                                preferGenericCandidate(accumulator.genericCandidate, candidate)
                         }
                     }
 
-                    if (parser.currentToken == JsonToken.START_OBJECT || parser.currentToken == JsonToken.START_ARRAY) {
-                        val childSource = when (field) {
-                            "appendContinuationItemsAction" -> "top_level_append"
-                            "reloadContinuationItemsCommand" -> "top_level_reload"
-                            else -> source
-                        }
+                    if (parser.currentToken == JsonToken.START_OBJECT ||
+                        parser.currentToken == JsonToken.START_ARRAY
+                    ) {
                         streamScanFallbackNode(
                             parser,
                             accumulator,
-                            childSource,
                             nextMask,
                             depth + 1,
                             field,
@@ -1341,11 +1041,9 @@ class YoutubeProvider(
      */
     private fun streamFindFallbackContinuation(body: String): ContinuationFallbackResult {
         val accumulator = FallbackAccumulator()
-
         try {
             mapper.factory.createParser(body).use { parser ->
                 if (parser.nextToken() != JsonToken.START_OBJECT) return@use
-
                 while (parser.nextToken() != JsonToken.END_OBJECT) {
                     if (!accumulator.recursiveToken.isNullOrBlank()) break
                     if (parser.currentToken != JsonToken.FIELD_NAME) {
@@ -1360,16 +1058,12 @@ class YoutubeProvider(
                         continue
                     }
 
-                    if (parser.currentToken == JsonToken.START_OBJECT || parser.currentToken == JsonToken.START_ARRAY) {
+                    if (parser.currentToken == JsonToken.START_OBJECT ||
+                        parser.currentToken == JsonToken.START_ARRAY
+                    ) {
                         streamScanFallbackNode(
                             parser = parser,
                             accumulator = accumulator,
-                            source = when (field) {
-                                "onResponseReceivedActions",
-                                "onResponseReceivedEndpoints",
-                                "onResponseReceivedCommands" -> "response_actions"
-                                else -> field
-                            },
                             pathMask = continuationPathFlag(field),
                             depth = 1,
                             containerKey = field,
@@ -1384,25 +1078,21 @@ class YoutubeProvider(
 
         return ContinuationFallbackResult(
             recursiveToken = accumulator.recursiveToken,
-            recursiveSource = accumulator.recursiveSource,
-            genericCandidate = if (accumulator.recursiveToken.isNullOrBlank()) accumulator.genericCandidate else null,
-            genericSource = if (accumulator.recursiveToken.isNullOrBlank()) accumulator.genericSource else "none"
+            genericCandidate = if (accumulator.recursiveToken.isNullOrBlank()) {
+                accumulator.genericCandidate
+            } else {
+                null
+            }
         )
     }
 
     private data class StreamingChipState(
         val results: MutableList<SearchResponse> = mutableListOf(),
         val seenIds: MutableSet<String> = mutableSetOf(),
-        // First pass is intentionally page-cursor-only. Recursive/generic fallbacks are deferred
-        // until the complete response has proven that no authoritative page cursor exists.
         var pageLevelNextToken: String? = null,
-        var pageLevelSource: String = "none",
-        var processedAny: Boolean = false,
-        var sawReloadCommand: Boolean = false
+        var processedAny: Boolean = false
     )
 
-    // Only renderer subtrees that collectFromRenderer/processRecursive already know how to
-    // interpret are materialized. Container objects/arrays remain streaming-only.
     private val chipResultRendererKeys = setOf(
         "videoRenderer",
         "compactVideoRenderer",
@@ -1421,8 +1111,6 @@ class YoutubeProvider(
         parser: com.fasterxml.jackson.core.JsonParser,
         state: StreamingChipState
     ) {
-        // This is intentionally the only Map/List materialization in the normal CHIP result path:
-        // one renderer subtree at a time, immediately converted to SearchResponse and released.
         val rendererValue = mapper.readValue(parser, Any::class.java) ?: return
         state.processedAny = true
         val wrapper = mapOf<String, Any>(field to rendererValue)
@@ -1493,7 +1181,6 @@ class YoutubeProvider(
     private fun streamResultTree(
         parser: com.fasterxml.jackson.core.JsonParser,
         state: StreamingChipState,
-        source: String,
         depth: Int = 0
     ) {
         if (depth > 48) {
@@ -1504,7 +1191,7 @@ class YoutubeProvider(
         when (parser.currentToken) {
             JsonToken.START_ARRAY -> {
                 while (parser.nextToken() != JsonToken.END_ARRAY) {
-                    streamResultTree(parser, state, source, depth + 1)
+                    streamResultTree(parser, state, depth + 1)
                 }
             }
 
@@ -1518,14 +1205,16 @@ class YoutubeProvider(
                     val field = parser.currentName
                     parser.nextToken()
                     when {
-                        field == "continuationItems" && parser.currentToken == JsonToken.START_ARRAY ->
-                            streamContinuationItems(parser, state, source)
+                        field == "continuationItems" &&
+                            parser.currentToken == JsonToken.START_ARRAY ->
+                            streamContinuationItems(parser, state)
 
                         field in chipResultRendererKeys ->
                             processStreamedRenderer(field, parser, state)
 
-                        parser.currentToken == JsonToken.START_OBJECT || parser.currentToken == JsonToken.START_ARRAY ->
-                            streamResultTree(parser, state, source, depth + 1)
+                        parser.currentToken == JsonToken.START_OBJECT ||
+                            parser.currentToken == JsonToken.START_ARRAY ->
+                            streamResultTree(parser, state, depth + 1)
 
                         else -> Unit
                     }
@@ -1538,8 +1227,7 @@ class YoutubeProvider(
 
     private fun streamContinuationItems(
         parser: com.fasterxml.jackson.core.JsonParser,
-        state: StreamingChipState,
-        source: String
+        state: StreamingChipState
     ) {
         if (parser.currentToken != JsonToken.START_ARRAY) {
             parser.skipChildren()
@@ -1549,7 +1237,7 @@ class YoutubeProvider(
         var pageTokenInThisItems: String? = null
         while (parser.nextToken() != JsonToken.END_ARRAY) {
             if (parser.currentToken != JsonToken.START_OBJECT) {
-                streamResultTree(parser, state, source, 1)
+                streamResultTree(parser, state, 1)
                 continue
             }
 
@@ -1563,11 +1251,9 @@ class YoutubeProvider(
                 val field = parser.currentName
                 parser.nextToken()
                 when {
-                    // Tier 1: only a root item continuationItemRenderer counts as the page cursor.
                     field == "continuationItemRenderer" -> {
                         val pageToken = streamContinuationRendererToken(parser)
                         if (!pageToken.isNullOrBlank()) {
-                            // Preserve legacy asReversed() behavior: last root cursor wins.
                             pageTokenInThisItems = pageToken
                         }
                     }
@@ -1575,8 +1261,9 @@ class YoutubeProvider(
                     field in chipResultRendererKeys ->
                         processStreamedRenderer(field, parser, state)
 
-                    parser.currentToken == JsonToken.START_OBJECT || parser.currentToken == JsonToken.START_ARRAY ->
-                        streamResultTree(parser, state, source, 1)
+                    parser.currentToken == JsonToken.START_OBJECT ||
+                        parser.currentToken == JsonToken.START_ARRAY ->
+                        streamResultTree(parser, state, 1)
 
                     else -> Unit
                 }
@@ -1585,31 +1272,32 @@ class YoutubeProvider(
 
         if (state.pageLevelNextToken.isNullOrBlank() && !pageTokenInThisItems.isNullOrBlank()) {
             state.pageLevelNextToken = pageTokenInThisItems
-            state.pageLevelSource = source
         }
     }
 
     private fun streamContinuationCommand(
         parser: com.fasterxml.jackson.core.JsonParser,
-        state: StreamingChipState,
-        source: String
+        state: StreamingChipState
     ) {
         if (parser.currentToken != JsonToken.START_OBJECT) {
             parser.skipChildren()
             return
         }
+
         while (parser.nextToken() != JsonToken.END_OBJECT) {
             if (parser.currentToken != JsonToken.FIELD_NAME) {
                 parser.skipChildren()
                 continue
             }
+
             val field = parser.currentName
             parser.nextToken()
             if (field == "continuationItems") {
-                streamContinuationItems(parser, state, source)
-            } else if (parser.currentToken == JsonToken.START_OBJECT || parser.currentToken == JsonToken.START_ARRAY) {
-                // Preserve uncommon renderer-bearing command shapes without materializing command maps.
-                streamResultTree(parser, state, source, 1)
+                streamContinuationItems(parser, state)
+            } else if (parser.currentToken == JsonToken.START_OBJECT ||
+                parser.currentToken == JsonToken.START_ARRAY
+            ) {
+                streamResultTree(parser, state, 1)
             }
         }
     }
@@ -1622,30 +1310,31 @@ class YoutubeProvider(
             parser.skipChildren()
             return
         }
+
         while (parser.nextToken() != JsonToken.END_ARRAY) {
             if (parser.currentToken != JsonToken.START_OBJECT) {
                 parser.skipChildren()
                 continue
             }
+
             while (parser.nextToken() != JsonToken.END_OBJECT) {
                 if (parser.currentToken != JsonToken.FIELD_NAME) {
                     parser.skipChildren()
                     continue
                 }
+
                 val field = parser.currentName
                 parser.nextToken()
                 when (field) {
-                    "appendContinuationItemsAction" ->
-                        streamContinuationCommand(parser, state, "top_level_append")
-
-                    "reloadContinuationItemsCommand" -> {
-                        state.sawReloadCommand = true
-                        streamContinuationCommand(parser, state, "top_level_reload")
-                    }
+                    "appendContinuationItemsAction",
+                    "reloadContinuationItemsCommand" ->
+                        streamContinuationCommand(parser, state)
 
                     else -> {
-                        if (parser.currentToken == JsonToken.START_OBJECT || parser.currentToken == JsonToken.START_ARRAY) {
-                            streamResultTree(parser, state, field, 1)
+                        if (parser.currentToken == JsonToken.START_OBJECT ||
+                            parser.currentToken == JsonToken.START_ARRAY
+                        ) {
+                            streamResultTree(parser, state, 1)
                         } else {
                             parser.skipChildren()
                         }
@@ -1658,10 +1347,9 @@ class YoutubeProvider(
     private fun streamProcessChipResponse(body: String): ProcessedChipPayload? {
         return try {
             val state = StreamingChipState()
-
-            // Pass 1: cards + authoritative page-level continuationItemRenderer only.
             mapper.factory.createParser(body).use { parser ->
                 if (parser.nextToken() != JsonToken.START_OBJECT) return@use null
+
                 while (parser.nextToken() != JsonToken.END_OBJECT) {
                     if (parser.currentToken != JsonToken.FIELD_NAME) {
                         parser.skipChildren()
@@ -1673,16 +1361,17 @@ class YoutubeProvider(
                     when (field) {
                         "onResponseReceivedActions",
                         "onResponseReceivedEndpoints",
-                        "onResponseReceivedCommands" -> streamActionArray(parser, state)
+                        "onResponseReceivedCommands" ->
+                            streamActionArray(parser, state)
 
                         "continuationContents", "contents" ->
-                            streamResultTree(parser, state, field)
+                            streamResultTree(parser, state)
 
                         else -> {
-                            // Compatibility path remains streaming. Unknown top-level containers are
-                            // traversed but never promoted to a whole-response Map/List tree.
-                            if (parser.currentToken == JsonToken.START_OBJECT || parser.currentToken == JsonToken.START_ARRAY) {
-                                streamResultTree(parser, state, field)
+                            if (parser.currentToken == JsonToken.START_OBJECT ||
+                                parser.currentToken == JsonToken.START_ARRAY
+                            ) {
+                                streamResultTree(parser, state)
                             } else {
                                 parser.skipChildren()
                             }
@@ -1694,43 +1383,21 @@ class YoutubeProvider(
             if (!state.processedAny) return null
 
             var nextToken = state.pageLevelNextToken
-            var source = if (!nextToken.isNullOrBlank()) state.pageLevelSource else "none"
-
-            if (!nextToken.isNullOrBlank()) {
-                Log.d("YoutubeUtils", "[CHIP_CONT] PAGE_CURSOR source=$source")
-            }
-
-            // Only if tier 1 is absent, scan again for recursive fallback then generic fallback.
-            // This pass is token-only streaming and creates no renderer/object graph.
             if (nextToken.isNullOrBlank()) {
-                Log.d("YoutubeUtils", "[CHIP_CONT] FALLBACK_PASS pageCursor=none")
                 val fallback = streamFindFallbackContinuation(body)
                 if (!fallback.recursiveToken.isNullOrBlank()) {
                     nextToken = fallback.recursiveToken
-                    source = fallback.recursiveSource
                 } else if (fallback.genericCandidate != null) {
                     nextToken = fallback.genericCandidate.token
-                    source = fallback.genericSource
-                    Log.d(
-                        "YoutubeUtils",
-                        "[CHIP_CONT] generic kind=${fallback.genericCandidate.kind} " +
-                            "score=${fallback.genericCandidate.score} depth=${fallback.genericCandidate.depth} " +
-                            "source=$source"
-                    )
                 }
             }
 
-            if (nextToken.isNullOrBlank() && state.sawReloadCommand) {
-                source = "reload_terminal"
-                Log.d("YoutubeUtils", "[CHIP_CONT] reload command contained no follow-up token")
-            } else if (nextToken.isNullOrBlank()) {
-                source = "none"
-                Log.d("YoutubeUtils", "[CHIP_CONT] no continuation candidate found")
-            }
-
-            ProcessedChipPayload(state.results, nextToken, source)
+            ProcessedChipPayload(state.results, nextToken)
         } catch (e: Exception) {
-            Log.e("YoutubeUtils", "[CHIP] STREAM_PARSE_FAILED ${e.javaClass.simpleName}: ${e.message}")
+            Log.e(
+                "YoutubeUtils",
+                "[CHIP] STREAM_PARSE_FAILED ${e.javaClass.simpleName}: ${e.message}"
+            )
             null
         }
     }
@@ -1740,7 +1407,7 @@ class YoutubeProvider(
         token: String,
         requestKey: String,
         page: Int
-    ): ParsedChipPayload? {
+    ): ProcessedChipPayload? {
         val apiUrl = "$mainUrl/youtubei/v1/browse?key=${bootstrap.apiKey}"
         val clientContext = linkedMapOf<String, Any>(
             "clientName" to "WEB",
@@ -1764,10 +1431,7 @@ class YoutubeProvider(
             "X-Youtube-Client-Version" to bootstrap.clientVersion
         )
 
-        val requestStartNs = System.nanoTime()
         var body = run {
-            // Keep the NiceHttp response reference inside this narrow scope so its buffers become
-            // unreachable before renderer conversion finishes.
             val rawResponse = app.post(
                 apiUrl,
                 json = payload,
@@ -1778,24 +1442,16 @@ class YoutubeProvider(
             rawResponse.textLarge
         }
         currentCoroutineContext().ensureActive()
-        val responseReadyNs = System.nanoTime()
-        val responseWaitMs = (responseReadyNs - requestStartNs) / 1_000_000L
-        val bodyChars = body.length
         if (body.isBlank()) return null
 
-        // CHIP parsing is streaming-only. The multi-megabyte response is never expanded into a
-        // whole-response Map/List graph; only one recognized renderer subtree exists at a time.
         val processed = streamProcessChipResponse(body)
-        body = "" // drop the multi-megabyte String before logging/return object construction
+        body = ""
         if (processed == null) {
             currentCoroutineContext().ensureActive()
-            Log.e(
-                "YoutubeUtils",
-                "[CHIP] JSON_PARSE_FAILED chars=$bodyChars key=$requestKey page=$page"
-            )
+            Log.e("YoutubeUtils", "[CHIP] JSON_PARSE_FAILED key=$requestKey page=$page")
             return null
         }
-        return ParsedChipPayload(processed, bodyChars, responseWaitMs)
+        return processed
     }
 
     private suspend fun executeChipBrowseAndProcess(
@@ -1803,39 +1459,11 @@ class YoutubeProvider(
         token: String,
         requestKey: String,
         page: Int
-    ): ChipBrowseResult? {
+    ): ProcessedChipPayload? {
         currentCoroutineContext().ensureActive()
-        beginChipPage1Metrics(page)
-        try {
-            val queueStartNs = System.nanoTime()
-            return youtubePayloadSemaphore.withPermit {
-                currentCoroutineContext().ensureActive()
-                val acquiredNs = System.nanoTime()
-                val queueMs = (acquiredNs - queueStartNs) / 1_000_000L
-
-                // Keep raw NiceHttp response + multi-megabyte String inside this helper. CHIP JSON
-                // is traversed streaming-only; one recognized renderer subtree at a time is converted
-                // immediately to SearchResponse and released.
-                val parsed = fetchAndParseChipPayload(bootstrap, token, requestKey, page)
-                    ?: return@withPermit null
-                if (page == 1) updateChipPage1ObservedPeakHeap()
-
-                val processed = parsed.processed
-                if (page == 1) updateChipPage1ObservedPeakHeap()
-
-                val workMs = (System.nanoTime() - acquiredNs) / 1_000_000L
-                ChipBrowseResult(
-                    items = processed.items,
-                    nextToken = processed.nextToken,
-                    continuationSource = processed.continuationSource,
-                    bodyChars = parsed.bodyChars,
-                    responseWaitMs = parsed.responseWaitMs,
-                    memoryQueueMs = queueMs,
-                    memoryWorkMs = workMs
-                )
-            }
-        } finally {
-            endChipPage1Metrics(page)
+        return youtubePayloadSemaphore.withPermit {
+            currentCoroutineContext().ensureActive()
+            fetchAndParseChipPayload(bootstrap, token, requestKey, page)
         }
     }
 
@@ -1849,21 +1477,9 @@ class YoutubeProvider(
         }
         val remaining = STARTUP_DIRECT_REQUEST_SETTLE_MS - (now - firstAt)
         if (remaining > 0L) {
-            Log.d("YoutubeUtils", "[STARTUP_GATE] direct-page1 wait=${remaining}ms")
             delay(remaining)
             currentCoroutineContext().ensureActive()
         }
-    }
-
-    private fun findContinuationFromItemsSafe(items: List<*>?): String? {
-        if (items == null) return null
-        for (item in items.asReversed()) {
-            val map = item as? Map<*, *> ?: continue
-            val continuationRenderer = map["continuationItemRenderer"] as? Map<*, *> ?: continue
-            val token = extractContinuationRendererToken(continuationRenderer)
-            if (!token.isNullOrBlank()) return token
-        }
-        return null
     }
 
     private fun mergeAndSaveChips(newChips: List<CachedChip>) {
@@ -1889,7 +1505,6 @@ class YoutubeProvider(
         try {
             val outJson = mapper.writeValueAsString(mergedList)
             prefs.edit().putString("yt_cached_chips", outJson).apply()
-            Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Cached chips synchronized successfully. Size: ${mergedList.size}")
         } catch (e: Exception) {
             logError(e)
         }
@@ -1906,14 +1521,8 @@ class YoutubeProvider(
             newChips.forEach { chip ->
                 val stableUrl = "chip_name_${chip.name}"
                 if (currentList.none { section -> section.url == stableUrl }) {
-                    // Newly discovered dynamic YouTube chips must be visible in Settings so the
-                    // user can opt in later, but they must never auto-expand the active home page.
                     currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = false))
                     modified = true
-                    Log.d(
-                        "YoutubeUtils",
-                        "[CHIP_DEBUG] mergeAndSaveChips - Mirrored new chip to settings disabled: ${chip.name}"
-                    )
                 }
             }
 
@@ -2783,13 +2392,10 @@ class YoutubeProvider(
     }
 
     private fun extractYtInitialData(html: String): Map<String, Any>? {
-        // Parse directly from a bounded Reader over the original HTML String. This avoids allocating
-        // another multi-megabyte substring before Jackson builds the object graph.
         return extractYtInitialDataInternal(html, null)
     }
 
     private fun extractHomeInitialData(html: String): Map<String, Any>? {
-        // Home bootstrap/feed extraction only needs contents. Config values are read directly from HTML.
         return extractYtInitialDataInternal(html, setOf("contents"))
     }
 
@@ -2855,14 +2461,9 @@ class YoutubeProvider(
                     currentLang == sharedLastLang &&
                     currentCustomSectionsJson == sharedLastCustomSectionsJson
                 ) {
-                    Log.d("YoutubeUtils", "[CHIP_DEBUG] mainPage - Cache hit after lock.")
                     return@synchronized lockedCached
                 }
 
-                Log.d(
-                    "YoutubeUtils",
-                    "[CHIP_DEBUG] mainPage - Cache miss or config changed. Rebuilding MainPageData list."
-                )
                 val customSections = getCustomHomepages()
                 val list = mutableListOf<MainPageData>()
 
@@ -2873,10 +2474,6 @@ class YoutubeProvider(
                     emptyMap()
                 }
 
-                Log.d(
-                    "YoutubeUtils",
-                    "[CHIP_DEBUG] mainPage - Cached chips map keys: ${cachedChipsMap.keys}"
-                )
 
                 customSections.filter { section -> section.isEnabled }.forEach { section ->
                     val url = section.url
@@ -2919,7 +2516,6 @@ class YoutubeProvider(
 
     private fun getCustomHomepages(): List<CustomSection> {
         val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
-        Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Raw custom_homepages_v3 JSON: $json")
         
         val currentList = try {
             mapper.readValue<List<CustomSection>>(json).toMutableList()
@@ -2943,10 +2539,6 @@ class YoutubeProvider(
                 if (currentList.none { section -> section.url == stableUrl }) {
                     currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = false))
                     modified = true
-                    Log.d(
-                        "YoutubeUtils",
-                        "[CHIP_DEBUG] getCustomHomepages - Added missing chip to settings disabled: ${chip.name}"
-                    )
                 }
             }
         } catch (e: Exception) {
@@ -2987,97 +2579,21 @@ class YoutubeProvider(
         }
     }
 
-    private fun isKnownContentsOnlyDirectPage(targetUrl: String): Boolean {
-        return try {
-            val uri = java.net.URI(targetUrl)
-            val host = uri.host?.lowercase() ?: return false
-            if (host != "www.youtube.com" && host != "youtube.com" && host != "m.youtube.com") {
-                return false
-            }
-
-            val path = (uri.path ?: "").trimEnd('/').ifEmpty { "/" }
-            val query = uri.rawQuery.orEmpty()
-            when {
-                path == "/feed/history" -> true
-                path == "/playlist" && query.split('&').any { it.startsWith("list=") } -> true
-                Regex("^/@[^/]+/videos$").matches(path) -> true
-                Regex("^/(?:channel|c|user)/[^/]+/videos$").matches(path) -> true
-                else -> false
-            }
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    private fun extractDirectPageInitialData(
-        html: String,
-        requestData: String,
-        targetUrl: String
-    ): Pair<Map<String, Any>?, String> {
-        if (requestData == "Home") {
-            return extractHomeInitialData(html) to "home_contents"
-        }
-
-        if (isKnownContentsOnlyDirectPage(targetUrl)) {
-            // These page families have their feed/cards and page cursor under top-level contents.
-            // If YouTube changes that shape and pruning fails outright, retain the legacy full parser.
-            val pruned = extractYtInitialDataInternal(html, setOf("contents"))
-            if (pruned?.get("contents") != null) {
-                return pruned to "known_contents"
-            }
-            return extractYtInitialData(html) to "full_fallback"
-        }
-
-        // Arbitrary/custom YouTube URLs keep the old compatibility behavior unchanged.
-        return extractYtInitialData(html) to "full_compat"
-    }
-
-    private suspend fun fetchParsedDirectPageSource(
-        requestData: String,
-        targetUrl: String
-    ): ParsedDirectPageSource? {
-        currentCoroutineContext().ensureActive()
-        val html = app.get(
-            targetUrl,
-            interceptor = ytInterceptor,
-            headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")
-        ).textLarge
-        currentCoroutineContext().ensureActive()
-        updateChipPage1ObservedPeakHeap()
-
-        val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
-        val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
-        val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION")
-            ?: savedClientVersion
-            ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
-
-        val (initialData, parseMode) = extractDirectPageInitialData(html, requestData, targetUrl)
-        val parsedInitialData = initialData ?: return null
-        updateChipPage1ObservedPeakHeap()
-
-        return ParsedDirectPageSource(
-            apiKey = apiKey,
-            clientVersion = clientVersion,
-            visitorData = visitorData,
-            initialData = parsedInitialData,
-            parseMode = parseMode
-        )
-    }
-
     private suspend fun loadDirectPage1(requestData: String): DirectPageResult? {
         awaitStartupDirectRequestSettle()
         return youtubePayloadSemaphore.withPermit {
             currentCoroutineContext().ensureActive()
             val targetUrl = if (requestData == "Home") mainUrl else requestData
-
-            // Fetch/config extraction/ytInitialData extraction live in a separate frame so the raw
-            // HTML String is released before renderer traversal and final card construction begin.
-            val parsed = fetchParsedDirectPageSource(requestData, targetUrl) ?: return@withPermit null
+            val html = app.get(
+                targetUrl,
+                interceptor = ytInterceptor,
+                headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")
+            ).textLarge
             currentCoroutineContext().ensureActive()
 
-            savedApiKey = parsed.apiKey
-            savedVisitorData = parsed.visitorData
-            savedClientVersion = parsed.clientVersion
+            savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
+            savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
+            savedClientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION")
                 ?: savedClientVersion
                 ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
 
@@ -3089,16 +2605,15 @@ class YoutubeProvider(
                     ?.apply()
             }
 
-            val initialData = parsed.initialData
-            Log.d(
-                "YoutubeUtils",
-                "[DIRECT_PARSE] mode=${parsed.parseMode} key=$requestData"
-            )
+            val initialData = if (requestData == "Home") {
+                extractHomeInitialData(html)
+            } else {
+                extractYtInitialData(html)
+            } ?: return@withPermit null
 
             if (requestData == "Home") {
                 val chips = extractChipTokens(initialData)
                 if (chips.isNotEmpty()) {
-                    Log.d("YoutubeUtils", "[CHIP_DEBUG] merge and save chips on direct Home fallback")
                     mergeAndSaveChips(chips.map { CachedChip(it.key, it.value) })
                     publishChipBootstrapFromHome(
                         savedApiKey,
@@ -3124,7 +2639,6 @@ class YoutubeProvider(
                 playlistId = playlistId
             )
             val next = findTokenRecursive(initialData)
-            updateChipPage1ObservedPeakHeap()
 
             val result = DirectPageResult(directResults.toList(), next)
             if (requestData == "Home") {
@@ -3163,23 +2677,16 @@ class YoutubeProvider(
                         val chipName: String?
                         val tokenToUse: String?
 
-                        val tokenSource: String
                         if (requestData.startsWith("chip_name_")) {
                             chipName = requestData.removePrefix("chip_name_")
                             val freshToken = bootstrap.chips[chipName]
                             val persistedToken = persistedChips.firstOrNull { it.name == chipName }?.token
                             tokenToUse = freshToken ?: persistedToken
-                            tokenSource = when {
-                                !freshToken.isNullOrBlank() -> "fresh"
-                                !persistedToken.isNullOrBlank() -> "persisted_fallback"
-                                else -> "missing"
-                            }
                         } else {
                             val legacyToken = requestData.removePrefix("chip_")
                             chipName = persistedChips.firstOrNull { it.token == legacyToken }?.name
                             val freshToken = chipName?.let { bootstrap.chips[it] }
                             tokenToUse = freshToken ?: legacyToken
-                            tokenSource = if (!freshToken.isNullOrBlank()) "fresh" else "legacy_fallback"
                         }
 
                         if (tokenToUse.isNullOrBlank()) {
@@ -3188,25 +2695,15 @@ class YoutubeProvider(
                                 "[CHIP] page=1 token missing key=$requestData name=${chipName ?: "unknown"} freshChips=${bootstrap.chips.size} persisted=${persistedChips.size}"
                             )
                         } else {
-                            Log.d(
-                                "YoutubeUtils",
-                                "[CHIP] BROWSE_START page=1 key=$requestData name=${chipName ?: "legacy"} tokenSource=$tokenSource"
-                            )
                             val browse = executeChipBrowseAndProcess(bootstrap, tokenToUse, requestData, 1)
                             if (browse != null) {
                                 results.addAll(browse.items)
                                 val nextToken = browse.nextToken
-                                val source = browse.continuationSource
                                 nextContinuation = nextToken
                                 if (results.isEmpty()) {
-                                    Log.w(
-                                        "YoutubeUtils",
-                                        "[CHIP] NO_ITEMS page=1 key=$requestData continuationSource=$source"
-                                    )
+                                    Log.w("YoutubeUtils", "[CHIP] NO_ITEMS page=1 key=$requestData")
                                 }
 
-                                // Commit a brand-new catalog session only after a successful response.
-                                // A cancelled/failed refresh therefore cannot erase a previously valid cursor chain.
                                 if (results.isNotEmpty() || !nextToken.isNullOrBlank()) {
                                     val newSession = ChipCatalogSession(bootstrap)
                                     if (!nextToken.isNullOrBlank()) {
@@ -3217,13 +2714,6 @@ class YoutubeProvider(
                                     Log.w("YoutubeUtils", "[CHIP] SESSION_NOT_COMMITTED page=1 key=$requestData")
                                 }
 
-                                Log.d(
-                                    "YoutubeUtils",
-                                    "[CHIP] BROWSE_OK page=1 key=$requestData items=${results.size} " +
-                                        "next=${!nextToken.isNullOrBlank()} source=$source tokenSource=$tokenSource " +
-                                        "chars=${browse.bodyChars} response=${browse.responseWaitMs}ms " +
-                                        "memWait=${browse.memoryQueueMs}ms memWork=${browse.memoryWorkMs}ms"
-                                )
                             } else {
                                 Log.w("YoutubeUtils", "[CHIP] BROWSE_EMPTY_RESPONSE page=1 key=$requestData")
                             }
@@ -3237,18 +2727,13 @@ class YoutubeProvider(
                     } else if (tokenToUse.isNullOrBlank()) {
                         Log.w("YoutubeUtils", "[CHIP] PAGE_TOKEN_MISSING page=$page key=$requestData")
                     } else {
-                        Log.d("YoutubeUtils", "[CHIP] BROWSE_START page=$page key=$requestData")
                         val browse = executeChipBrowseAndProcess(session.bootstrap, tokenToUse, requestData, page)
                         if (browse != null) {
                             results.addAll(browse.items)
                             val nextToken = browse.nextToken
-                            val source = browse.continuationSource
                             nextContinuation = nextToken
                             if (results.isEmpty()) {
-                                Log.w(
-                                    "YoutubeUtils",
-                                    "[CHIP] NO_ITEMS page=$page key=$requestData continuationSource=$source"
-                                )
+                                Log.w("YoutubeUtils", "[CHIP] NO_ITEMS page=$page key=$requestData")
                             }
                             if (!nextToken.isNullOrBlank()) {
                                 session.pageTokens[page + 1] = nextToken
@@ -3256,22 +2741,12 @@ class YoutubeProvider(
                                 session.pageTokens.remove(page + 1)
                             }
 
-                            Log.d(
-                                "YoutubeUtils",
-                                "[CHIP] BROWSE_OK page=$page key=$requestData items=${results.size} " +
-                                    "next=${!nextToken.isNullOrBlank()} source=$source " +
-                                    "chars=${browse.bodyChars} response=${browse.responseWaitMs}ms " +
-                                    "memWait=${browse.memoryQueueMs}ms memWork=${browse.memoryWorkMs}ms"
-                            )
                         } else {
                             Log.w("YoutubeUtils", "[CHIP] BROWSE_EMPTY_RESPONSE page=$page key=$requestData")
                         }
                     }
                 }
             } else if (page == 1) {
-                // Home no longer performs a second fetch/parse beside bootstrap. The shared
-                // bootstrap prepares compact Home results from the same ytInitialData tree, then
-                // CHIP callers and Home reuse that compact result after the large tree is released.
                 if (requestData == "Home") {
                     ensureChipBootstrap()
                     currentCoroutineContext().ensureActive()
@@ -3279,16 +2754,11 @@ class YoutubeProvider(
                     if (prepared != null) {
                         results.addAll(prepared.items)
                         nextContinuation = prepared.nextToken
-                        Log.d(
-                            "YoutubeUtils",
-                            "[HOME_REUSE] prepared items=${prepared.items.size} next=${!prepared.nextToken.isNullOrBlank()}"
-                        )
                     } else {
                         val direct = loadDirectPage1(requestData)
                         if (direct != null) {
                             results.addAll(direct.items)
                             nextContinuation = direct.nextToken
-                            Log.d("YoutubeUtils", "[HOME_REUSE] fallback_direct items=${direct.items.size}")
                         }
                     }
                 } else {
@@ -3299,7 +2769,6 @@ class YoutubeProvider(
                     }
                 }
             } else {
-                // Non-CHIP pagination intentionally remains on the legacy cursor behavior.
                 var tokenToUse = getSavedContinuationToken(requestData)
 
                 if (!tokenToUse.isNullOrBlank() && results.isEmpty()) {
@@ -3356,16 +2825,13 @@ class YoutubeProvider(
                 }
             }
         } catch (e: CancellationException) {
-            Log.d("YoutubeUtils", "[MAIN_PAGE] cancelled page=$page key=$requestData")
             throw e
         } catch (e: Exception) {
-            // OkHttp/NiceHttp can expose cancellation as IOException("Canceled").
             currentCoroutineContext().ensureActive()
             logError(e)
         }
 
         if (!isChip) {
-            // Only successful/non-cancelled non-CHIP calls update the legacy cursor.
             saveContinuationToken(requestData, nextContinuation)
         }
 
