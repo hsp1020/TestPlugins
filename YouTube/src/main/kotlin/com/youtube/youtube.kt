@@ -18,6 +18,8 @@ import java.nio.charset.StandardCharsets
 import java.util.Collections
 import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import com.lagradost.cloudstream3.CloudStreamApp
 import androidx.preference.PreferenceManager
 import kotlinx.coroutines.async
@@ -307,12 +309,19 @@ class YoutubeProvider(
         private val providerScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
         // Gate CHIP browse BEFORE app.post(). NiceHttp may buffer/materialize a large response body
-        // before the caller reaches textLarge, so a post-response semaphore is too late to control
-        // peak heap/LOS pressure. Six concurrent browse requests is the initial balance for this
-        // device: it still preserves substantial HTTP parallelism while preventing 13+ multi-MB
-        // responses/JSON trees from being alive at once.
-        private const val CHIP_BROWSE_CONCURRENCY = 6
+        // before the caller reaches textLarge, so the permit covers network response buffering,
+        // textLarge, JSON parsing, and renderer extraction. Four concurrent page loads are used for
+        // this comparison build to reduce peak heap/LOS pressure further than the previous value 6.
+        private const val CHIP_BROWSE_CONCURRENCY = 4
         private val chipBrowseSemaphore = Semaphore(CHIP_BROWSE_CONCURRENCY)
+
+        // Startup page-1 CHIP batch metrics. Runtime heap is sampled at meaningful allocation points
+        // and is therefore an observed peak, not ART's exact allocator high-water mark. LOS reclaimed
+        // bytes are not exposed by the public Android runtime API; use the ART GC lines adjacent to
+        // [CHIP_METRICS] LAST_COMPLETE when comparing builds.
+        private val chipPage1Active = AtomicInteger(0)
+        private val chipPage1BatchStartedAtMs = AtomicLong(0L)
+        private val chipPage1ObservedPeakHeapBytes = AtomicLong(0L)
 
         // CloudStream may create/cancel an initial set of MainPage requests while plugins are still
         // being registered. Give only direct non-CHIP page-1 HTTP calls a one-time short settle
@@ -794,62 +803,49 @@ class YoutubeProvider(
         )
     }
 
-    private fun topLevelActionTypes(response: Map<String, Any>): String {
-        val actionKeys = listOf(
-            "onResponseReceivedActions",
-            "onResponseReceivedEndpoints",
-            "onResponseReceivedCommands"
-        )
-        val parts = mutableListOf<String>()
-        for (key in actionKeys) {
-            val actions = response[key] as? List<*> ?: continue
-            val types = actions.mapNotNull { action ->
-                (action as? Map<*, *>)?.keys?.filterIsInstance<String>()?.joinToString("+")
-            }.take(12)
-            parts += "$key(${actions.size})=[${types.joinToString(",")}]"
-        }
-        return if (parts.isEmpty()) "none" else parts.joinToString(" ; ")
+    private fun currentRuntimeHeapBytes(): Long {
+        val runtime = Runtime.getRuntime()
+        return runtime.totalMemory() - runtime.freeMemory()
     }
 
-    private fun logGameContinuationDiagnostics(
-        page: Int,
-        requestKey: String,
-        bodyChars: Int,
-        response: Map<String, Any>
-    ) {
-        val summaries = mutableListOf<String>()
-        val actionKeys = listOf(
-            "onResponseReceivedActions",
-            "onResponseReceivedEndpoints",
-            "onResponseReceivedCommands"
-        )
-        for (key in actionKeys) {
-            val actions = response[key] as? List<*> ?: continue
-            actions.forEachIndexed { index, action ->
-                val actionMap = action as? Map<*, *> ?: return@forEachIndexed
-                val reload = actionMap["reloadContinuationItemsCommand"] as? Map<*, *> ?: return@forEachIndexed
-                val items = reload["continuationItems"] as? List<*>
-                val itemTypes = linkedMapOf<String, Int>()
-                items?.forEach { item ->
-                    val map = item as? Map<*, *> ?: return@forEach
-                    val keyName = map.keys.filterIsInstance<String>().firstOrNull() ?: "unknown"
-                    itemTypes[keyName] = (itemTypes[keyName] ?: 0) + 1
-                }
-                val targetId = reload["targetId"]?.toString() ?: "none"
-                val slot = reload["slot"]?.toString() ?: "none"
-                val typesText = itemTypes.entries.joinToString(",") { "${it.key}:${it.value}" }
-                summaries += "$key[$index] targetId=$targetId slot=$slot items=${items?.size ?: 0} types=[$typesText]"
-            }
+    private fun updateChipPage1ObservedPeakHeap() {
+        val used = currentRuntimeHeapBytes()
+        while (true) {
+            val previous = chipPage1ObservedPeakHeapBytes.get()
+            if (used <= previous || chipPage1ObservedPeakHeapBytes.compareAndSet(previous, used)) return
         }
+    }
 
-        Log.w(
-            "YoutubeUtils",
-            "[GAME_CONT_DIAG] page=$page key=$requestKey chars=$bodyChars topKeys=${response.keys.joinToString("|")}"
-        )
-        Log.w(
-            "YoutubeUtils",
-            "[GAME_CONT_DIAG] actionTypes=${topLevelActionTypes(response)} reload=${if (summaries.isEmpty()) "none" else summaries.joinToString(" ; ")}"
-        )
+    private fun beginChipPage1Metrics(page: Int) {
+        if (page != 1) return
+        if (chipPage1Active.getAndIncrement() == 0) {
+            chipPage1BatchStartedAtMs.set(System.currentTimeMillis())
+            chipPage1ObservedPeakHeapBytes.set(currentRuntimeHeapBytes())
+            Log.d(
+                "YoutubeUtils",
+                "[CHIP_METRICS] BATCH_START concurrency=$CHIP_BROWSE_CONCURRENCY"
+            )
+        } else {
+            updateChipPage1ObservedPeakHeap()
+        }
+    }
+
+    private fun endChipPage1Metrics(page: Int) {
+        if (page != 1) return
+        updateChipPage1ObservedPeakHeap()
+        val remaining = chipPage1Active.decrementAndGet()
+        if (remaining == 0) {
+            val elapsedMs = (System.currentTimeMillis() - chipPage1BatchStartedAtMs.get()).coerceAtLeast(0L)
+            val peakMb = chipPage1ObservedPeakHeapBytes.get() / (1024.0 * 1024.0)
+            val runtimeMaxMb = Runtime.getRuntime().maxMemory() / (1024.0 * 1024.0)
+            Log.d(
+                "YoutubeUtils",
+                "[CHIP_METRICS] LAST_COMPLETE elapsed=${elapsedMs}ms " +
+                    "observedPeakHeap=${String.format(java.util.Locale.US, "%.1f", peakMb)}MB " +
+                    "runtimeMaxHeap=${String.format(java.util.Locale.US, "%.1f", runtimeMaxMb)}MB " +
+                    "losFreed=read_adjacent_ART_GC"
+            )
+        }
     }
 
     private suspend fun executeChipBrowseAndProcess(
@@ -859,7 +855,9 @@ class YoutubeProvider(
         page: Int
     ): ChipBrowseResult? {
         currentCoroutineContext().ensureActive()
-        val apiUrl = "$mainUrl/youtubei/v1/browse?key=${bootstrap.apiKey}"
+        beginChipPage1Metrics(page)
+        try {
+            val apiUrl = "$mainUrl/youtubei/v1/browse?key=${bootstrap.apiKey}"
         val clientContext = linkedMapOf<String, Any>(
             "clientName" to "WEB",
             "clientVersion" to bootstrap.clientVersion,
@@ -885,8 +883,8 @@ class YoutubeProvider(
         // Acquire the permit BEFORE app.post(). NiceHttp can retain/buffer response data before
         // textLarge is accessed, which means gating only the parse phase does not prevent a startup
         // burst of large response objects. The permit therefore covers app.post + textLarge + JSON
-        // parse + renderer extraction. Six permits retain useful parallelism without allowing every
-        // enabled CHIP catalog to hold a multi-megabyte response at the same time.
+        // parse + renderer extraction. Four permits are used in this comparison build to reduce
+        // simultaneous multi-megabyte response/JSON object graphs further than the previous 6.
         val queueStartNs = System.nanoTime()
         return chipBrowseSemaphore.withPermit {
             currentCoroutineContext().ensureActive()
@@ -906,6 +904,7 @@ class YoutubeProvider(
             // Keep textLarge under the same permit as the request and JSON object graph.
             val body = rawResponse.textLarge
             currentCoroutineContext().ensureActive()
+            if (page == 1) updateChipPage1ObservedPeakHeap()
             val responseReadyNs = System.nanoTime()
             val responseWaitMs = (responseReadyNs - requestStartNs) / 1_000_000L
             if (body.isBlank()) return@withPermit null
@@ -928,13 +927,7 @@ class YoutubeProvider(
             val localSeenIds = mutableSetOf<String>()
             processChipResponse(response, localResults, localSeenIds)
             val (nextToken, source) = findChipContinuation(response)
-
-            // Game currently arrives as reloadContinuationItemsCommand. If YouTube later includes a
-            // true follow-up endpoint in that command/items, findChipContinuation() will use it.
-            // If it does not, treat this response as terminal instead of fabricating/reusing a token.
-            if (requestKey == "chip_name_게임" && nextToken.isNullOrBlank()) {
-                logGameContinuationDiagnostics(page, requestKey, body.length, response)
-            }
+            if (page == 1) updateChipPage1ObservedPeakHeap()
 
             val workMs = (System.nanoTime() - acquiredNs) / 1_000_000L
             ChipBrowseResult(
@@ -946,6 +939,9 @@ class YoutubeProvider(
                 memoryQueueMs = queueMs,
                 memoryWorkMs = workMs
             )
+        }
+        } finally {
+            endChipPage1Metrics(page)
         }
     }
 
@@ -1205,9 +1201,8 @@ class YoutubeProvider(
         }
 
         if (sawReloadCommand) {
-            // Game currently lands here: YouTube returned a reload command with content but no
-            // follow-up token anywhere in the response. Reusing the chip token would replay page 1,
-            // so mark it as an explicit server-terminal response instead of a parser failure.
+            // A reload command can legitimately contain content without any follow-up token.
+            // Reusing the current chip token would replay page 1, so treat it as terminal.
             Log.d("YoutubeUtils", "[CHIP_CONT] reload command contained no follow-up token")
             return null to "reload_terminal"
         }
