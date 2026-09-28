@@ -436,15 +436,61 @@ class MovieKing : MainAPI() {
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         checkAndUpdateDomain()
         println("[MovieKing DBG] 🔗 영상 링크 추출 시작: $data")
+
         var targetData = data
         if (!targetData.startsWith(mainUrl) && (targetData.contains("mvking") || targetData.contains("movieking"))) {
             targetData = mainUrl + targetData.replace(Regex("https?://[^/]+"), "")
+            println("[MovieKing DBG] 🔄 상세 URL 도메인 보정: $targetData")
         }
 
-        try {
-            val src = safeGet(targetData).document.selectFirst("iframe#view_iframe")?.attr("src")
-            if (src != null) { loadExtractor(fixUrl(src), targetData, subtitleCallback, callback); return true }
-        } catch (e: Exception) { if (e is CancellationException) throw e }
-        return false
+        return try {
+            val detailRes = safeGet(targetData)
+            println("[MovieKing DBG] 📄 상세페이지 HTTP=${detailRes.code} final=${detailRes.url} len=${detailRes.text.length}")
+
+            val iframe = detailRes.document.selectFirst("iframe#view_iframe")
+            val rawSrc = iframe?.attr("src")?.trim().orEmpty()
+            println("[MovieKing DBG] 🧩 iframe 존재=${iframe != null}, rawSrc=${rawSrc.ifBlank { "<empty>" }}")
+
+            if (rawSrc.isBlank()) {
+                println("[MovieKing DBG] ❌ iframe#view_iframe 또는 src를 찾지 못함")
+                return false
+            }
+
+            val playerUrl = when {
+                rawSrc.startsWith("http://") || rawSrc.startsWith("https://") -> rawSrc
+                rawSrc.startsWith("//") -> "https:$rawSrc"
+                else -> fixUrl(rawSrc)
+            }
+            println("[MovieKing DBG] ▶ player URL=$playerUrl")
+
+            var emittedLinks = 0
+            val extractorMatched = loadExtractor(
+                playerUrl,
+                targetData,
+                subtitleCallback
+            ) { link ->
+                emittedLinks++
+                println(
+                    "[MovieKing DBG] ✅ ExtractorLink#$emittedLinks " +
+                        "source=${link.source} name=${link.name} type=${link.type} " +
+                        "url=${link.url.take(300)}"
+                )
+                callback(link)
+            }
+
+            println("[MovieKing DBG] 🧪 loadExtractor matched=$extractorMatched emittedLinks=$emittedLinks")
+            if (!extractorMatched) {
+                println("[MovieKing DBG] ❌ player URL에 매칭되는 ExtractorApi가 없음: $playerUrl")
+            } else if (emittedLinks == 0) {
+                println("[MovieKing DBG] ❌ Extractor는 매칭됐지만 실제 재생 링크 callback이 0개")
+            }
+
+            emittedLinks > 0
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            println("[MovieKing DBG] ❌ loadLinks 예외: ${e.javaClass.simpleName}: ${e.message}")
+            e.printStackTrace()
+            false
+        }
     }
 }
