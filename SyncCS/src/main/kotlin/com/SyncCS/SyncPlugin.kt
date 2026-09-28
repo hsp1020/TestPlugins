@@ -23,6 +23,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 @CloudstreamPlugin
 class SyncPlugin : Plugin() {
@@ -32,58 +34,106 @@ class SyncPlugin : Plugin() {
     private var backgroundDelayJob: Job? = null
     private var debounceJob: Job? = null
     private val backupMutex = Mutex()
-    
-    private var isAppInForeground = true
-    private var isRestoring = false
-    private var lastRestoreTime = 0L
+    private val restoreInFlight = AtomicBoolean(false)
+    private val instanceToken = UUID.randomUUID().toString()
+
+    @Volatile private var isAppInForeground = true
+    @Volatile private var isRestoring = false
+    @Volatile private var lastRestoreTime = 0L
 
     private var lifecycleCallbacks: Application.ActivityLifecycleCallbacks? = null
+    private var listenersRegistered = false
 
-    private val bookmarksListener = { _: Boolean -> triggerBackup(2000L) }
-    private val afterPluginsListener = { _: Boolean -> triggerBackup(5000L) }
-    private val mainPluginsListener = { _: Boolean -> triggerBackup(5000L) }
-    private val reloadHomeListener = { _: Boolean -> 
-        if (!isRestoring) triggerBackup(3000L) 
+    private val bookmarksListener = { _: Boolean ->
+        if (isCurrentInstance()) triggerBackup(2000L)
     }
-    private val reloadAccountListener = { _: Boolean -> 
-        if (!isRestoring) triggerBackup(3000L) 
+    private val afterPluginsListener = { _: Boolean ->
+        if (isCurrentInstance()) triggerBackup(5000L)
+    }
+    private val mainPluginsListener = { _: Boolean ->
+        if (isCurrentInstance()) triggerBackup(5000L)
+    }
+    private val reloadHomeListener = { _: Boolean ->
+        if (isCurrentInstance() && !isRestoring) triggerBackup(3000L)
+    }
+    private val reloadAccountListener = { _: Boolean ->
+        if (isCurrentInstance() && !isRestoring) triggerBackup(3000L)
     }
 
     companion object {
-        private var isLifecycleRegistered = false 
+        private const val ACTIVE_INSTANCE_KEY = "synccs_active_instance_token"
+    }
+
+    /**
+     * CloudStream can recreate/reload a plugin without the previous plugin instance having
+     * completed unload yet. Event listeners and lifecycle callbacks from those old instances
+     * may therefore still fire. Keep one process-wide logical owner in CloudStream's shared
+     * preferences so stale instances become harmless no-ops even across plugin classloaders.
+     */
+    private fun claimActiveInstance(context: Context) {
+        synchronized(CloudStreamApp::class.java) {
+            val prefs = with(DataStore) { context.getSharedPrefs() }
+            prefs.edit().putString(ACTIVE_INSTANCE_KEY, instanceToken).commit()
+        }
+        Log.d("SYNC", "[SyncPlugin] Active instance claimed: ${instanceToken.take(8)}")
+    }
+
+    private fun isCurrentInstance(context: Context? = CloudStreamApp.context): Boolean {
+        val ctx = context ?: return false
+        val prefs = with(DataStore) { ctx.getSharedPrefs() }
+        return prefs.getString(ACTIVE_INSTANCE_KEY, null) == instanceToken
+    }
+
+    private fun releaseActiveInstance() {
+        val context = CloudStreamApp.context ?: return
+        synchronized(CloudStreamApp::class.java) {
+            val prefs = with(DataStore) { context.getSharedPrefs() }
+            if (prefs.getString(ACTIVE_INSTANCE_KEY, null) == instanceToken) {
+                prefs.edit().remove(ACTIVE_INSTANCE_KEY).commit()
+            }
+        }
     }
 
     private fun startSyncLoop(context: Context) {
         Log.d("SYNC", "[SyncPlugin] startSyncLoop() initiated.")
-        
+
         val app = context.applicationContext as? Application
-        if (app != null && !isLifecycleRegistered) {
-            isLifecycleRegistered = true
+        if (app != null && lifecycleCallbacks == null) {
             lifecycleCallbacks = object : Application.ActivityLifecycleCallbacks {
                 private var activeActivities = 0
+
                 override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+
                 override fun onActivityStarted(activity: Activity) {
-                    backgroundDelayJob?.cancel() 
+                    if (!isCurrentInstance()) return
+                    backgroundDelayJob?.cancel()
                     activeActivities++
                     isAppInForeground = true
-                    restoreDevice() 
+                    restoreDevice()
                 }
+
                 override fun onActivityResumed(activity: Activity) {}
+
                 override fun onActivityPaused(activity: Activity) {
+                    if (!isCurrentInstance()) return
                     // 일시정지/화면이탈 시 시청 중이던 위치를 1회 백업
                     triggerBackup(500L)
                 }
+
                 override fun onActivityStopped(activity: Activity) {
+                    if (!isCurrentInstance()) return
                     activeActivities = maxOf(0, activeActivities - 1)
                     if (activeActivities <= 0) {
                         backgroundDelayJob?.cancel()
                         backgroundDelayJob = pluginScope.launch {
                             delay(2000L)
+                            if (!isCurrentInstance()) return@launch
                             isAppInForeground = false
                             executeBackup()
                         }
                     }
                 }
+
                 override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
                 override fun onActivityDestroyed(activity: Activity) {}
             }
@@ -95,6 +145,10 @@ class SyncPlugin : Plugin() {
             lastRestoreTime = System.currentTimeMillis()
             while (isActive) {
                 try {
+                    if (!isCurrentInstance()) {
+                        Log.d("SYNC", "[SyncPlugin] Stale instance sync loop stopped: ${instanceToken.take(8)}")
+                        break
+                    }
                     if (isAppInForeground) {
                         val now = System.currentTimeMillis()
                         if (now - lastRestoreTime >= 300000L) { // 5분 주기 복원
@@ -111,28 +165,31 @@ class SyncPlugin : Plugin() {
     }
 
     private fun triggerBackup(delayMs: Long = 3000L) {
-        if (isRestoring) return
+        if (!isCurrentInstance() || isRestoring) return
         debounceJob?.cancel()
         debounceJob = pluginScope.launch {
             delay(delayMs)
+            if (!isCurrentInstance() || isRestoring) return@launch
             executeBackup()
         }
     }
 
     private suspend fun executeBackup() {
-        if (isRestoring) return
+        if (!isCurrentInstance() || isRestoring) return
         backupMutex.withLock {
+            if (!isCurrentInstance() || isRestoring) return@withLock
             try {
                 Log.d("SYNC", "[SyncPlugin] Executing backupDevice() logic...")
                 val context = CloudStreamApp.context ?: return@withLock
                 val prefs = with(DataStore) { context.getSharedPrefs() }
-                
+
                 val isBackupEnabled = prefs.getString("backup_device", null)?.let {
                     try { mapper.readValue<String>(it) } catch(e: Exception) { "false" }
                 } == "true"
-                
+
                 if (isBackupEnabled) {
                     val backupFile = BackupUtils.getBackup(context)
+                    if (!isCurrentInstance(context)) return@withLock
                     val backupJson = mapper.writeValueAsString(backupFile)
                     Log.d("SYNC", "[SyncPlugin] Backup JSON created. Calling ApiUtils.syncThisDevice().")
                     ApiUtils.syncThisDevice(backupJson, context)
@@ -146,6 +203,7 @@ class SyncPlugin : Plugin() {
     }
 
     private fun restoreDevice() {
+        if (!isCurrentInstance()) return
         Log.d("SYNC", "[SyncPlugin] restoreDevice() called.")
         val context = CloudStreamApp.context ?: return
         val prefs = with(DataStore) { context.getSharedPrefs() }
@@ -158,9 +216,18 @@ class SyncPlugin : Plugin() {
             return
         }
 
+        if (!restoreInFlight.compareAndSet(false, true)) {
+            Log.d("SYNC", "[SyncPlugin] Restore already in progress, skipping duplicate request.")
+            return
+        }
+
         pluginScope.launch {
             try {
+                if (!isCurrentInstance(context)) return@launch
+
                 val devices = ApiUtils.fetchDevices()
+                if (!isCurrentInstance(context)) return@launch
+
                 val currentDeviceId = try {
                     prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) }
                 } catch (e: Exception) {
@@ -168,6 +235,8 @@ class SyncPlugin : Plugin() {
                 } ?: UtilKt.getDeviceId(context.packageName, context)
 
                 for (device in devices) {
+                    if (!isCurrentInstance(context)) return@launch
+
                     if (device.deviceId == currentDeviceId) {
                         Log.d("SYNC", "[SyncPlugin] Skipping own device: ${device.name}")
                         continue
@@ -200,6 +269,8 @@ class SyncPlugin : Plugin() {
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
+            } finally {
+                restoreInFlight.set(false)
             }
         }
     }
@@ -216,26 +287,37 @@ class SyncPlugin : Plugin() {
         lifecycleCallbacks?.let { callbacks ->
             app?.unregisterActivityLifecycleCallbacks(callbacks)
             lifecycleCallbacks = null
-            isLifecycleRegistered = false
         }
 
-        MainActivity.bookmarksUpdatedEvent -= bookmarksListener
-        MainActivity.afterPluginsLoadedEvent -= afterPluginsListener
-        MainActivity.mainPluginsLoadedEvent -= mainPluginsListener
-        MainActivity.reloadHomeEvent -= reloadHomeListener
-        MainActivity.reloadAccountEvent -= reloadAccountListener
+        if (listenersRegistered) {
+            MainActivity.bookmarksUpdatedEvent -= bookmarksListener
+            MainActivity.afterPluginsLoadedEvent -= afterPluginsListener
+            MainActivity.mainPluginsLoadedEvent -= mainPluginsListener
+            MainActivity.reloadHomeEvent -= reloadHomeListener
+            MainActivity.reloadAccountEvent -= reloadAccountListener
+            listenersRegistered = false
+        }
+
+        releaseActiveInstance()
     }
 
     override fun load(context: Context) {
+        // Claim ownership before starting any lifecycle/event work. Any previous plugin
+        // instance that survived a reload will immediately become a no-op.
+        claimActiveInstance(context)
+
         CloudStreamApp.setKey("device_id", UtilKt.getDeviceId(context.packageName, context))
         restoreDevice()
         startSyncLoop(context)
 
-        MainActivity.bookmarksUpdatedEvent += bookmarksListener
-        MainActivity.afterPluginsLoadedEvent += afterPluginsListener
-        MainActivity.mainPluginsLoadedEvent += mainPluginsListener
-        MainActivity.reloadHomeEvent += reloadHomeListener
-        MainActivity.reloadAccountEvent += reloadAccountListener
+        if (!listenersRegistered) {
+            MainActivity.bookmarksUpdatedEvent += bookmarksListener
+            MainActivity.afterPluginsLoadedEvent += afterPluginsListener
+            MainActivity.mainPluginsLoadedEvent += mainPluginsListener
+            MainActivity.reloadHomeEvent += reloadHomeListener
+            MainActivity.reloadAccountEvent += reloadAccountListener
+            listenersRegistered = true
+        }
 
         openSettings = { activityContext ->
             val appCompatActivity = activityContext as? AppCompatActivity
