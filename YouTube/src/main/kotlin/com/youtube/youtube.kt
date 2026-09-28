@@ -31,8 +31,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.stream.StreamInfo
 import org.schabi.newpipe.extractor.localization.Localization
@@ -271,19 +269,9 @@ class YoutubeProvider(
         val pageTokens: ConcurrentHashMap<Int, String> = ConcurrentHashMap()
     )
 
-    private val chipBootstrapMutex = Mutex()
-    @Volatile
-    private var chipBootstrapSnapshot: ChipBootstrapSnapshot? = null
     private val chipCatalogSessions = ConcurrentHashMap<String, ChipCatalogSession>()
     private val chipBootstrapTtlMs = 15_000L
     private val chipBootstrapStaleFallbackMs = 60_000L
-
-    @Volatile
-    private var cachedMainPageList: List<MainPageData>? = null
-    @Volatile
-    private var lastLang: String? = null
-    @Volatile
-    private var lastCustomSectionsJson: String? = null
 
     override var mainUrl = "https://www.youtube.com"
     override var name = "YouTube"
@@ -305,6 +293,28 @@ class YoutubeProvider(
 
     companion object {
         private val providerScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+        // Shared across duplicate YoutubeProvider instances created during CloudStream startup.
+        // This prevents duplicate bootstrap downloads/mainPage rebuilds without blocking a later
+        // plugin reload with a permanent "registered once" flag.
+        private data class ChipBootstrapInFlight(
+            val language: String,
+            val deferred: kotlinx.coroutines.Deferred<ChipBootstrapSnapshot?>
+        )
+
+        private val chipBootstrapCoordinatorLock = Any()
+        @Volatile
+        private var sharedChipBootstrapSnapshot: ChipBootstrapSnapshot? = null
+        @Volatile
+        private var sharedChipBootstrapInFlight: ChipBootstrapInFlight? = null
+
+        private val mainPageCacheLock = Any()
+        @Volatile
+        private var sharedCachedMainPageList: List<MainPageData>? = null
+        @Volatile
+        private var sharedLastLang: String? = null
+        @Volatile
+        private var sharedLastCustomSectionsJson: String? = null
 
         private val homeShorts = Collections.synchronizedList(mutableListOf<Episode>())
         private val searchShorts = Collections.synchronizedList(mutableListOf<Episode>())
@@ -574,92 +584,154 @@ class YoutubeProvider(
         }
     }
 
+    private suspend fun refreshChipBootstrap(requestLang: String): ChipBootstrapSnapshot? {
+        val now = System.currentTimeMillis()
+        val current = sharedChipBootstrapSnapshot
+        val fallback = current?.takeIf {
+            it.language == requestLang && now - it.createdAtMs <= chipBootstrapStaleFallbackMs
+        }
+
+        try {
+            Log.d("YoutubeUtils", "[CHIP_BOOTSTRAP] REFRESH_START")
+            val freshUrl = "$mainUrl/?t=${System.currentTimeMillis()}"
+            val html = app.get(
+                freshUrl,
+                interceptor = ytInterceptor,
+                headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")
+            ).textLarge
+
+            val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
+                ?: savedApiKey
+                ?: appPrefs?.getString("yt_api_key", null)
+            val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
+                ?: savedVisitorData
+                ?: appPrefs?.getString("yt_visitor_data", null)
+            val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION")
+                ?: savedClientVersion
+                ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
+                ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
+            val initialData = extractYtInitialData(html)
+            val freshChips = extractChipTokens(initialData)
+
+            if (apiKey.isNullOrBlank() || freshChips.isEmpty()) {
+                Log.w(
+                    "YoutubeUtils",
+                    "[CHIP_BOOTSTRAP] REFRESH_INVALID apiKey=${!apiKey.isNullOrBlank()} chips=${freshChips.size}; fallback=${fallback != null}"
+                )
+                return fallback
+            }
+
+            savedApiKey = apiKey
+            savedVisitorData = visitorData
+            savedClientVersion = clientVersion
+            appPrefs?.edit()
+                ?.putString("yt_api_key", apiKey)
+                ?.putString("yt_visitor_data", visitorData)
+                ?.putString("yt_client_version", clientVersion)
+                ?.apply()
+
+            mergeAndSaveChips(freshChips.map { CachedChip(it.key, it.value) })
+
+            // YouTube's chip bar is dynamic. If another fresh Home response in the same
+            // short window exposed extra chips, keep the union of those fresh observations.
+            val mergedFreshChips = LinkedHashMap<String, String>()
+            val previous = sharedChipBootstrapSnapshot
+            if (previous != null &&
+                previous.language == requestLang &&
+                System.currentTimeMillis() - previous.createdAtMs <= chipBootstrapStaleFallbackMs
+            ) {
+                mergedFreshChips.putAll(previous.chips)
+            }
+            mergedFreshChips.putAll(freshChips)
+
+            val snapshot = ChipBootstrapSnapshot(
+                language = requestLang,
+                apiKey = apiKey,
+                clientVersion = clientVersion,
+                visitorData = visitorData,
+                chips = mergedFreshChips,
+                createdAtMs = System.currentTimeMillis()
+            )
+            sharedChipBootstrapSnapshot = snapshot
+            Log.d(
+                "YoutubeUtils",
+                "[CHIP_BOOTSTRAP] REFRESH_OK fresh=${freshChips.size} merged=${mergedFreshChips.size}"
+            )
+            return snapshot
+        } catch (e: CancellationException) {
+            // This coroutine runs in providerScope, not in an individual CloudStream
+            // main-page request, so only true provider-scope cancellation reaches here.
+            Log.d("YoutubeUtils", "[CHIP_BOOTSTRAP] REFRESH_CANCELLED")
+            throw e
+        } catch (e: Exception) {
+            Log.e("YoutubeUtils", "[CHIP_BOOTSTRAP] REFRESH_FAILED fallback=${fallback != null}", e)
+            return fallback
+        }
+    }
+
     private suspend fun ensureChipBootstrap(): ChipBootstrapSnapshot? {
         val requestLang = lang
         val now = System.currentTimeMillis()
-        val cached = chipBootstrapSnapshot
-        if (cached != null && cached.language == requestLang && now - cached.createdAtMs <= chipBootstrapTtlMs) {
-            Log.d("YoutubeUtils", "[CHIP_BOOTSTRAP] HIT age=${now - cached.createdAtMs}ms chips=${cached.chips.size}")
+        val cached = sharedChipBootstrapSnapshot
+        if (cached != null &&
+            cached.language == requestLang &&
+            now - cached.createdAtMs <= chipBootstrapTtlMs
+        ) {
+            Log.d(
+                "YoutubeUtils",
+                "[CHIP_BOOTSTRAP] HIT age=${now - cached.createdAtMs}ms chips=${cached.chips.size}"
+            )
             return cached
         }
 
-        return chipBootstrapMutex.withLock {
+        val deferred = synchronized(chipBootstrapCoordinatorLock) {
             val lockedNow = System.currentTimeMillis()
-            val current = chipBootstrapSnapshot
-            if (current != null && current.language == requestLang && lockedNow - current.createdAtMs <= chipBootstrapTtlMs) {
-                Log.d("YoutubeUtils", "[CHIP_BOOTSTRAP] HIT_AFTER_LOCK age=${lockedNow - current.createdAtMs}ms chips=${current.chips.size}")
-                return@withLock current
-            }
-
-            val fallback = current?.takeIf {
-                it.language == requestLang && lockedNow - it.createdAtMs <= chipBootstrapStaleFallbackMs
-            }
-
-            try {
-                currentCoroutineContext().ensureActive()
-                Log.d("YoutubeUtils", "[CHIP_BOOTSTRAP] REFRESH_START")
-                val freshUrl = "$mainUrl/?t=${System.currentTimeMillis()}"
-                val html = app.get(
-                    freshUrl,
-                    interceptor = ytInterceptor,
-                    headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")
-                ).textLarge
-                currentCoroutineContext().ensureActive()
-
-                val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
-                    ?: savedApiKey
-                    ?: appPrefs?.getString("yt_api_key", null)
-                val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
-                    ?: savedVisitorData
-                    ?: appPrefs?.getString("yt_visitor_data", null)
-                val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION")
-                    ?: savedClientVersion
-                    ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
-                    ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
-                val initialData = extractYtInitialData(html)
-                val chips = extractChipTokens(initialData)
-
-                if (apiKey.isNullOrBlank() || chips.isEmpty()) {
-                    Log.w(
-                        "YoutubeUtils",
-                        "[CHIP_BOOTSTRAP] REFRESH_INVALID apiKey=${!apiKey.isNullOrBlank()} chips=${chips.size}; fallback=${fallback != null}"
-                    )
-                    return@withLock fallback
-                }
-
-                savedApiKey = apiKey
-                savedVisitorData = visitorData
-                savedClientVersion = clientVersion
-                appPrefs?.edit()
-                    ?.putString("yt_api_key", apiKey)
-                    ?.putString("yt_visitor_data", visitorData)
-                    ?.putString("yt_client_version", clientVersion)
-                    ?.apply()
-
-                mergeAndSaveChips(chips.map { CachedChip(it.key, it.value) })
-
-                val snapshot = ChipBootstrapSnapshot(
-                    language = requestLang,
-                    apiKey = apiKey,
-                    clientVersion = clientVersion,
-                    visitorData = visitorData,
-                    chips = LinkedHashMap(chips),
-                    createdAtMs = System.currentTimeMillis()
+            val lockedCached = sharedChipBootstrapSnapshot
+            if (lockedCached != null &&
+                lockedCached.language == requestLang &&
+                lockedNow - lockedCached.createdAtMs <= chipBootstrapTtlMs
+            ) {
+                Log.d(
+                    "YoutubeUtils",
+                    "[CHIP_BOOTSTRAP] HIT_AFTER_LOCK age=${lockedNow - lockedCached.createdAtMs}ms chips=${lockedCached.chips.size}"
                 )
-                chipBootstrapSnapshot = snapshot
-                Log.d("YoutubeUtils", "[CHIP_BOOTSTRAP] REFRESH_OK chips=${chips.size}")
-                snapshot
-            } catch (e: CancellationException) {
-                Log.d("YoutubeUtils", "[CHIP_BOOTSTRAP] REFRESH_CANCELLED")
-                throw e
-            } catch (e: Exception) {
-                // NiceHttp can surface a cancelled call as IOException("Canceled").
-                // If the CloudStream request itself was cancelled, preserve coroutine semantics.
-                currentCoroutineContext().ensureActive()
-                Log.e("YoutubeUtils", "[CHIP_BOOTSTRAP] REFRESH_FAILED fallback=${fallback != null}", e)
-                fallback
+                return@synchronized null
+            }
+
+            val existing = sharedChipBootstrapInFlight
+            if (existing != null &&
+                existing.language == requestLang &&
+                existing.deferred.isActive
+            ) {
+                Log.d("YoutubeUtils", "[CHIP_BOOTSTRAP] JOIN_IN_FLIGHT")
+                existing.deferred
+            } else {
+                val created = providerScope.async {
+                    refreshChipBootstrap(requestLang)
+                }
+                sharedChipBootstrapInFlight = ChipBootstrapInFlight(requestLang, created)
+                created.invokeOnCompletion {
+                    synchronized(chipBootstrapCoordinatorLock) {
+                        if (sharedChipBootstrapInFlight?.deferred === created) {
+                            sharedChipBootstrapInFlight = null
+                        }
+                    }
+                }
+                created
             }
         }
+
+        // A cache hit discovered inside the lock returns null above.
+        if (deferred == null) {
+            return sharedChipBootstrapSnapshot?.takeIf {
+                it.language == requestLang &&
+                    System.currentTimeMillis() - it.createdAtMs <= chipBootstrapTtlMs
+            }
+        }
+
+        // Cancelling one CloudStream section cancels only this waiter. The single shared
+        // bootstrap continues in providerScope and can be reused by sibling sections.
+        return deferred.await()
     }
 
     private fun publishChipBootstrapFromHome(
@@ -669,15 +741,29 @@ class YoutubeProvider(
         chips: Map<String, String>
     ) {
         if (apiKey.isNullOrBlank() || clientVersion.isNullOrBlank() || chips.isEmpty()) return
-        chipBootstrapSnapshot = ChipBootstrapSnapshot(
+
+        val merged = LinkedHashMap<String, String>()
+        val previous = sharedChipBootstrapSnapshot
+        if (previous != null &&
+            previous.language == lang &&
+            System.currentTimeMillis() - previous.createdAtMs <= chipBootstrapStaleFallbackMs
+        ) {
+            merged.putAll(previous.chips)
+        }
+        merged.putAll(chips)
+
+        sharedChipBootstrapSnapshot = ChipBootstrapSnapshot(
             language = lang,
             apiKey = apiKey,
             clientVersion = clientVersion,
             visitorData = visitorData,
-            chips = LinkedHashMap(chips),
+            chips = merged,
             createdAtMs = System.currentTimeMillis()
         )
-        Log.d("YoutubeUtils", "[CHIP_BOOTSTRAP] PUBLISHED_FROM_HOME chips=${chips.size}")
+        Log.d(
+            "YoutubeUtils",
+            "[CHIP_BOOTSTRAP] PUBLISHED_FROM_HOME fresh=${chips.size} merged=${merged.size}"
+        )
     }
 
     private suspend fun executeChipBrowse(
@@ -707,14 +793,34 @@ class YoutubeProvider(
             "X-Youtube-Client-Name" to "WEB",
             "X-Youtube-Client-Version" to bootstrap.clientVersion
         )
-        val response = app.post(
+
+        val rawResponse = app.post(
             apiUrl,
             json = payload,
             headers = headers,
             interceptor = ytInterceptor
-        ).parsedSafe<Map<String, Any>>()
+        )
         currentCoroutineContext().ensureActive()
-        return response
+
+        // parsedSafe() goes through NiceResponse.text and hard-fails at 5 MB.
+        // Music responses can exceed that limit, so use the explicit large-body path.
+        val body = rawResponse.textLarge
+        currentCoroutineContext().ensureActive()
+        if (body.isBlank()) return null
+
+        return try {
+            mapper.readValue<Map<String, Any>>(body)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
+            Log.e(
+                "YoutubeUtils",
+                "[CHIP] JSON_PARSE_FAILED bytes=${body.length}",
+                e
+            )
+            null
+        }
     }
 
     private fun findContinuationFromItemsSafe(items: List<*>?): String? {
@@ -778,6 +884,97 @@ class YoutubeProvider(
         }
     }
 
+    private data class ContinuationCandidate(
+        val token: String,
+        val path: String,
+        val score: Int
+    )
+
+    private fun findGenericContinuationCandidate(root: Any?): ContinuationCandidate? {
+        val candidates = mutableListOf<ContinuationCandidate>()
+        val excludedKeys = setOf(
+            "header",
+            "feedFilterChipBarRenderer",
+            "chipCloudRenderer",
+            "relatedChipCloudRenderer",
+            "chipCloudChipRenderer",
+            "chipViewModel",
+            "chipCloud"
+        )
+
+        fun scorePath(path: String): Int {
+            var score = 0
+            if (path.contains("appendContinuationItemsAction")) score += 120
+            if (path.contains("continuationItems")) score += 110
+            if (path.contains("richGrid")) score += 100
+            if (path.contains("continuationItemRenderer")) score += 90
+            if (path.contains("buttonRenderer")) score += 60
+            if (path.contains("loadMore", ignoreCase = true)) score += 50
+            if (path.contains("contents")) score += 20
+            if (path.contains("shelf", ignoreCase = true)) score -= 25
+            if (path.contains("reel", ignoreCase = true)) score -= 25
+            if (path.contains("engagementPanel", ignoreCase = true)) score -= 50
+            return score
+        }
+
+        fun walk(node: Any?, path: String, depth: Int) {
+            if (node == null || depth > 48) return
+            when (node) {
+                is Map<*, *> -> {
+                    val continuationCommand = node["continuationCommand"] as? Map<*, *>
+                    val continuationToken = continuationCommand?.get("token") as? String
+                    if (!continuationToken.isNullOrBlank()) {
+                        val candidatePath = "$path.continuationCommand"
+                        candidates += ContinuationCandidate(
+                            continuationToken,
+                            candidatePath,
+                            scorePath(candidatePath)
+                        )
+                    }
+
+                    val browseContinuation = node["browseContinuationEndpoint"] as? Map<*, *>
+                    val browseToken = browseContinuation?.get("token") as? String
+                    if (!browseToken.isNullOrBlank()) {
+                        val candidatePath = "$path.browseContinuationEndpoint"
+                        candidates += ContinuationCandidate(
+                            browseToken,
+                            candidatePath,
+                            scorePath(candidatePath)
+                        )
+                    }
+
+                    val searchContinuation = node["searchContinuationEndpoint"] as? Map<*, *>
+                    val searchToken = searchContinuation?.get("token") as? String
+                    if (!searchToken.isNullOrBlank()) {
+                        val candidatePath = "$path.searchContinuationEndpoint"
+                        candidates += ContinuationCandidate(
+                            searchToken,
+                            candidatePath,
+                            scorePath(candidatePath)
+                        )
+                    }
+
+                    for ((keyAny, value) in node) {
+                        val key = keyAny as? String ?: continue
+                        if (key in excludedKeys) continue
+                        walk(value, "$path.$key", depth + 1)
+                    }
+                }
+                is List<*> -> {
+                    node.forEachIndexed { index, item ->
+                        walk(item, "$path[$index]", depth + 1)
+                    }
+                }
+            }
+        }
+
+        walk(root, "$", 0)
+        return candidates.maxWithOrNull(
+            compareBy<ContinuationCandidate> { it.score }
+                .thenBy { it.path.length }
+        )
+    }
+
     private fun findChipContinuation(response: Map<String, Any>): Pair<String?, String> {
         // Prefer the top-level append action for the main feed. This avoids selecting
         // continuations from inner shelves/carousels before the catalog cursor.
@@ -815,7 +1012,23 @@ class YoutubeProvider(
 
         // Compatibility fallback for response variants not covered above.
         val fallback = findTokenRecursive(response)
-        return fallback to if (fallback.isNullOrBlank()) "none" else "recursive_fallback"
+        if (!fallback.isNullOrBlank()) {
+            return fallback to "recursive_fallback"
+        }
+
+        // Last-resort path-aware scan for variants such as buttonRenderer/command wrappers.
+        // Filter-chip/header trees are excluded so we do not accidentally use a category-switch token.
+        val generic = findGenericContinuationCandidate(response)
+        if (generic != null) {
+            Log.d(
+                "YoutubeUtils",
+                "[CHIP_CONT] generic path=${generic.path} score=${generic.score}"
+            )
+            return generic.token to "generic_fallback"
+        }
+
+        Log.d("YoutubeUtils", "[CHIP_CONT] no continuation candidate found")
+        return null to "none"
     }
 
     private fun mergeAndSaveChips(newChips: List<CachedChip>) {
@@ -1731,54 +1944,83 @@ class YoutubeProvider(
         get() {
             val currentLang = lang
             val currentCustomSectionsJson = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
-            val cached = cachedMainPageList
-            
-            if (cached != null && currentLang == lastLang && currentCustomSectionsJson == lastCustomSectionsJson) {
-                return cached
+
+            val fastCached = sharedCachedMainPageList
+            if (fastCached != null &&
+                currentLang == sharedLastLang &&
+                currentCustomSectionsJson == sharedLastCustomSectionsJson
+            ) {
+                return fastCached
             }
 
-            Log.d("YoutubeUtils", "[CHIP_DEBUG] mainPage - Cache miss or config changed. Rebuilding MainPageData list.")
-            val customSections = getCustomHomepages()
-            val list = mutableListOf<MainPageData>()
+            return synchronized(mainPageCacheLock) {
+                val lockedCached = sharedCachedMainPageList
+                if (lockedCached != null &&
+                    currentLang == sharedLastLang &&
+                    currentCustomSectionsJson == sharedLastCustomSectionsJson
+                ) {
+                    Log.d("YoutubeUtils", "[CHIP_DEBUG] mainPage - Cache hit after lock.")
+                    return@synchronized lockedCached
+                }
 
-            val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
-            val cachedChipsMap = try {
-                mapper.readValue<List<CachedChip>>(cachedChipsJson).associateBy { it.name }
-            } catch (e: Exception) {
-                emptyMap()
-            }
+                Log.d(
+                    "YoutubeUtils",
+                    "[CHIP_DEBUG] mainPage - Cache miss or config changed. Rebuilding MainPageData list."
+                )
+                val customSections = getCustomHomepages()
+                val list = mutableListOf<MainPageData>()
 
-            Log.d("YoutubeUtils", "[CHIP_DEBUG] mainPage - Cached chips map keys: ${cachedChipsMap.keys}")
+                val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
+                val cachedChipsMap = try {
+                    mapper.readValue<List<CachedChip>>(cachedChipsJson).associateBy { it.name }
+                } catch (e: Exception) {
+                    emptyMap()
+                }
 
-            customSections.filter { section -> section.isEnabled }.forEach { section ->
-                val url = section.url
-                when {
-                    url == "Home" -> {
-                        list.add(MainPageData("Home", "Home", horizontalImages = true))
-                    }
-                    url.startsWith("chip_name_") -> {
-                        val chipName = url.removePrefix("chip_name_")
-                        val activeChip = cachedChipsMap[chipName]
-                        if (activeChip != null) {
-                            list.add(MainPageData(activeChip.name, "chip_name_${activeChip.name}", horizontalImages = true))
-                        } else {
-                            Log.w("YoutubeUtils", "[CHIP_DEBUG] mainPage - Skipped enabled chip '$chipName' because it's missing from cachedChipsMap!")
+                Log.d(
+                    "YoutubeUtils",
+                    "[CHIP_DEBUG] mainPage - Cached chips map keys: ${cachedChipsMap.keys}"
+                )
+
+                customSections.filter { section -> section.isEnabled }.forEach { section ->
+                    val url = section.url
+                    when {
+                        url == "Home" -> {
+                            list.add(MainPageData("Home", "Home", horizontalImages = true))
+                        }
+                        url.startsWith("chip_name_") -> {
+                            val chipName = url.removePrefix("chip_name_")
+                            val activeChip = cachedChipsMap[chipName]
+                            if (activeChip != null) {
+                                list.add(
+                                    MainPageData(
+                                        activeChip.name,
+                                        "chip_name_${activeChip.name}",
+                                        horizontalImages = true
+                                    )
+                                )
+                            } else {
+                                Log.w(
+                                    "YoutubeUtils",
+                                    "[CHIP_DEBUG] mainPage - Skipped enabled chip '$chipName' because it's missing from cachedChipsMap!"
+                                )
+                            }
+                        }
+                        else -> {
+                            var title = section.name
+                            if (title.isBlank()) title = extractNameFromUrl(url)
+                            list.add(MainPageData(title, url, horizontalImages = true))
                         }
                     }
-                    else -> {
-                        var title = section.name
-                        if (title.isBlank()) title = extractNameFromUrl(url)
-                        list.add(MainPageData(title, url, horizontalImages = true))
-                    }
                 }
-            }
 
-            lastLang = currentLang
-            lastCustomSectionsJson = currentCustomSectionsJson
-            cachedMainPageList = list
-            return list
+                sharedLastLang = currentLang
+                sharedLastCustomSectionsJson = currentCustomSectionsJson
+                sharedCachedMainPageList = list
+                list
+            }
         }
-        
+
     private fun getCustomHomepages(): List<CustomSection> {
         val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
         Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Raw custom_homepages_v3 JSON: $json")
@@ -1862,22 +2104,35 @@ class YoutubeProvider(
                         val chipName: String?
                         val tokenToUse: String?
 
+                        val tokenSource: String
                         if (requestData.startsWith("chip_name_")) {
                             chipName = requestData.removePrefix("chip_name_")
-                            tokenToUse = bootstrap.chips[chipName]
+                            val freshToken = bootstrap.chips[chipName]
+                            val persistedToken = persistedChips.firstOrNull { it.name == chipName }?.token
+                            tokenToUse = freshToken ?: persistedToken
+                            tokenSource = when {
+                                !freshToken.isNullOrBlank() -> "fresh"
+                                !persistedToken.isNullOrBlank() -> "persisted_fallback"
+                                else -> "missing"
+                            }
                         } else {
                             val legacyToken = requestData.removePrefix("chip_")
                             chipName = persistedChips.firstOrNull { it.token == legacyToken }?.name
-                            tokenToUse = chipName?.let { bootstrap.chips[it] } ?: legacyToken
+                            val freshToken = chipName?.let { bootstrap.chips[it] }
+                            tokenToUse = freshToken ?: legacyToken
+                            tokenSource = if (!freshToken.isNullOrBlank()) "fresh" else "legacy_fallback"
                         }
 
                         if (tokenToUse.isNullOrBlank()) {
                             Log.w(
                                 "YoutubeUtils",
-                                "[CHIP] page=1 token missing key=$requestData name=${chipName ?: "unknown"} freshChips=${bootstrap.chips.size}"
+                                "[CHIP] page=1 token missing key=$requestData name=${chipName ?: "unknown"} freshChips=${bootstrap.chips.size} persisted=${persistedChips.size}"
                             )
                         } else {
-                            Log.d("YoutubeUtils", "[CHIP] BROWSE_START page=1 key=$requestData name=${chipName ?: "legacy"}")
+                            Log.d(
+                                "YoutubeUtils",
+                                "[CHIP] BROWSE_START page=1 key=$requestData name=${chipName ?: "legacy"} tokenSource=$tokenSource"
+                            )
                             val response = executeChipBrowse(bootstrap, tokenToUse)
                             if (response != null) {
                                 processChipResponse(response, results, seenIds)
@@ -1905,7 +2160,7 @@ class YoutubeProvider(
 
                                 Log.d(
                                     "YoutubeUtils",
-                                    "[CHIP] BROWSE_OK page=1 key=$requestData items=${results.size} next=${!nextToken.isNullOrBlank()} source=$source"
+                                    "[CHIP] BROWSE_OK page=1 key=$requestData items=${results.size} next=${!nextToken.isNullOrBlank()} source=$source tokenSource=$tokenSource"
                                 )
                             } else {
                                 Log.w("YoutubeUtils", "[CHIP] BROWSE_EMPTY_RESPONSE page=1 key=$requestData")
@@ -1949,10 +2204,8 @@ class YoutubeProvider(
                     }
                 }
             } else if (page == 1) {
-                if (requestData == "Home") {
-                    cachedMainPageList = null
-                }
-
+                // mainPage cache is keyed by language + custom_homepages JSON, so a normal
+                // Home fetch does not need to invalidate/rebuild it pre-emptively.
                 // Preserve the existing continuation behavior for non-CHIP sections only.
                 saveContinuationToken(requestData, null)
 
