@@ -940,39 +940,6 @@ class YoutubeProvider(
         }
     }
 
-    private fun parseChipResponsePruned(body: String): Map<String, Any>? {
-        val keep = setOf(
-            "onResponseReceivedActions",
-            "onResponseReceivedEndpoints",
-            "onResponseReceivedCommands",
-            "continuationContents",
-            "contents"
-        )
-        return try {
-            mapper.factory.createParser(body).use { parser ->
-                if (parser.nextToken() != JsonToken.START_OBJECT) return@use null
-                val out = LinkedHashMap<String, Any>()
-                while (parser.nextToken() != JsonToken.END_OBJECT) {
-                    if (parser.currentToken != JsonToken.FIELD_NAME) {
-                        parser.skipChildren()
-                        continue
-                    }
-                    val fieldName = parser.currentName
-                    parser.nextToken()
-                    if (fieldName in keep) {
-                        val value = mapper.readValue(parser, Any::class.java)
-                        if (value != null) out[fieldName] = value
-                    } else {
-                        parser.skipChildren()
-                    }
-                }
-                out
-            }
-        } catch (e: Exception) {
-            null
-        }
-    }
-
     private data class ContinuationCandidate(
         val token: String,
         val score: Int,
@@ -1184,115 +1151,169 @@ class YoutubeProvider(
         var genericSource: String = "none"
     )
 
-    private fun streamFallbackContinuationItems(
+    private val recursiveContinuationDataKeys = setOf(
+        "nextContinuationData",
+        "reloadContinuationData",
+        "timedContinuationData",
+        "invalidationContinuationData"
+    )
+
+    private val genericContinuationContainerKeys = setOf(
+        "continuationCommand",
+        "browseContinuationEndpoint",
+        "searchContinuationEndpoint",
+        "command"
+    )
+
+    /**
+     * Streaming tier-2/3 scanner. No JSON subtree is materialized here.
+     *
+     * Priority is identical to the legacy walk:
+     *   recursive continuationItemRenderer / *ContinuationData
+     *   -> best-scoring generic continuation command.
+     */
+    private fun streamScanFallbackNode(
         parser: com.fasterxml.jackson.core.JsonParser,
         accumulator: FallbackAccumulator,
-        source: String
+        source: String,
+        pathMask: Int = 0,
+        depth: Int = 0,
+        containerKey: String? = null,
+        inContinuationRenderer: Boolean = false
     ) {
-        if (parser.currentToken != JsonToken.START_ARRAY) {
+        if (depth > 48 || !accumulator.recursiveToken.isNullOrBlank()) {
             parser.skipChildren()
             return
         }
 
-        while (parser.nextToken() != JsonToken.END_ARRAY) {
-            // Once recursive tier has won, the rest of the fallback pass is irrelevant.
-            if (!accumulator.recursiveToken.isNullOrBlank()) {
-                parser.skipChildren()
-                continue
-            }
-
-            val item = mapper.readValue(parser, Any::class.java) ?: continue
-            val scan = scanContinuationFallbacks(item)
-
-            if (!scan.recursiveToken.isNullOrBlank()) {
-                accumulator.recursiveToken = scan.recursiveToken
-                accumulator.recursiveSource = source
-                accumulator.genericCandidate = null
-                accumulator.genericSource = "none"
-                continue
-            }
-
-            val preferred = preferGenericCandidate(accumulator.genericCandidate, scan.genericCandidate)
-            if (preferred !== accumulator.genericCandidate) {
-                accumulator.genericCandidate = preferred
-                accumulator.genericSource = source
-            }
-        }
-    }
-
-    private fun streamFallbackContinuationCommand(
-        parser: com.fasterxml.jackson.core.JsonParser,
-        accumulator: FallbackAccumulator,
-        source: String
-    ) {
-        if (parser.currentToken != JsonToken.START_OBJECT) {
-            parser.skipChildren()
-            return
-        }
-        while (parser.nextToken() != JsonToken.END_OBJECT) {
-            if (parser.currentToken != JsonToken.FIELD_NAME) {
-                parser.skipChildren()
-                continue
-            }
-            val field = parser.currentName
-            parser.nextToken()
-            if (field == "continuationItems") {
-                streamFallbackContinuationItems(parser, accumulator, source)
-            } else {
-                parser.skipChildren()
-            }
-            if (!accumulator.recursiveToken.isNullOrBlank()) return
-        }
-    }
-
-    private fun streamFallbackActionArray(
-        parser: com.fasterxml.jackson.core.JsonParser,
-        accumulator: FallbackAccumulator
-    ) {
-        if (parser.currentToken != JsonToken.START_ARRAY) {
-            parser.skipChildren()
-            return
-        }
-
-        while (parser.nextToken() != JsonToken.END_ARRAY) {
-            if (!accumulator.recursiveToken.isNullOrBlank()) return
-            if (parser.currentToken != JsonToken.START_OBJECT) {
-                parser.skipChildren()
-                continue
-            }
-            while (parser.nextToken() != JsonToken.END_OBJECT) {
-                if (parser.currentToken != JsonToken.FIELD_NAME) {
-                    parser.skipChildren()
-                    continue
+        when (parser.currentToken) {
+            JsonToken.START_ARRAY -> {
+                while (parser.nextToken() != JsonToken.END_ARRAY) {
+                    if (!accumulator.recursiveToken.isNullOrBlank()) {
+                        parser.skipChildren()
+                        continue
+                    }
+                    streamScanFallbackNode(
+                        parser,
+                        accumulator,
+                        source,
+                        pathMask,
+                        depth + 1,
+                        containerKey,
+                        inContinuationRenderer
+                    )
                 }
-                val field = parser.currentName
-                parser.nextToken()
-                when (field) {
-                    "appendContinuationItemsAction" ->
-                        streamFallbackContinuationCommand(parser, accumulator, "top_level_append")
-                    "reloadContinuationItemsCommand" ->
-                        streamFallbackContinuationCommand(parser, accumulator, "top_level_reload")
-                    else -> parser.skipChildren()
-                }
-                if (!accumulator.recursiveToken.isNullOrBlank()) return
             }
+
+            JsonToken.START_OBJECT -> {
+                while (parser.nextToken() != JsonToken.END_OBJECT) {
+                    if (!accumulator.recursiveToken.isNullOrBlank()) {
+                        parser.skipChildren()
+                        continue
+                    }
+                    if (parser.currentToken != JsonToken.FIELD_NAME) {
+                        parser.skipChildren()
+                        continue
+                    }
+
+                    val field = parser.currentName
+                    parser.nextToken()
+
+                    if (isExcludedContinuationKey(field)) {
+                        parser.skipChildren()
+                        continue
+                    }
+
+                    val nextMask = pathMask or continuationPathFlag(field)
+                    val nextInContinuationRenderer = inContinuationRenderer || field == "continuationItemRenderer"
+
+                    // Recursive tier: continuationItemRenderer endpoint token.
+                    if (field == "token" && parser.currentToken == JsonToken.VALUE_STRING && nextInContinuationRenderer) {
+                        val parentIsAllowed = containerKey == "continuationItemRenderer" ||
+                            containerKey == "continuationEndpoint" ||
+                            (containerKey != null && containerKey in genericContinuationContainerKeys)
+                        if (parentIsAllowed) {
+                            val token = parser.valueAsString
+                            if (!token.isNullOrBlank()) {
+                                accumulator.recursiveToken = token
+                                accumulator.recursiveSource = source
+                                accumulator.genericCandidate = null
+                                accumulator.genericSource = "none"
+                                continue
+                            }
+                        }
+                    }
+
+                    // Recursive tier: next/reload/timed/invalidationContinuationData.
+                    if ((field == "continuation" || field == "token") &&
+                        parser.currentToken == JsonToken.VALUE_STRING &&
+                        containerKey != null && containerKey in recursiveContinuationDataKeys
+                    ) {
+                        val token = parser.valueAsString
+                        if (!token.isNullOrBlank()) {
+                            accumulator.recursiveToken = token
+                            accumulator.recursiveSource = source
+                            accumulator.genericCandidate = null
+                            accumulator.genericSource = "none"
+                            continue
+                        }
+                    }
+
+                    // Generic tier: direct token inside continuationCommand/browse/search/command.
+                    if (field == "token" &&
+                        parser.currentToken == JsonToken.VALUE_STRING &&
+                        containerKey != null && containerKey in genericContinuationContainerKeys &&
+                        accumulator.recursiveToken.isNullOrBlank()
+                    ) {
+                        val token = parser.valueAsString
+                        if (!token.isNullOrBlank()) {
+                            val candidate = ContinuationCandidate(
+                                token = token,
+                                score = continuationCandidateScore(pathMask),
+                                depth = depth,
+                                kind = containerKey ?: "command"
+                            )
+                            val preferred = preferGenericCandidate(accumulator.genericCandidate, candidate)
+                            if (preferred !== accumulator.genericCandidate) {
+                                accumulator.genericCandidate = preferred
+                                accumulator.genericSource = source
+                            }
+                        }
+                    }
+
+                    if (parser.currentToken == JsonToken.START_OBJECT || parser.currentToken == JsonToken.START_ARRAY) {
+                        val childSource = when (field) {
+                            "appendContinuationItemsAction" -> "top_level_append"
+                            "reloadContinuationItemsCommand" -> "top_level_reload"
+                            else -> source
+                        }
+                        streamScanFallbackNode(
+                            parser,
+                            accumulator,
+                            childSource,
+                            nextMask,
+                            depth + 1,
+                            field,
+                            nextInContinuationRenderer
+                        )
+                    }
+                }
+            }
+
+            else -> Unit
         }
     }
 
     /**
-     * Tier 2/3 pass. It is invoked only after the first streaming pass proves that no direct
-     * page-level continuationItemRenderer exists anywhere in the response.
-     *
-     * Normal paginated CHIP responses therefore do zero recursive/generic fallback work.
+     * Tier 2/3 pass. Invoked only if pass 1 found no authoritative page-level cursor.
+     * This pass creates no renderer Map/List objects and never materializes contents branches.
      */
     private fun streamFindFallbackContinuation(body: String): ContinuationFallbackResult {
         val accumulator = FallbackAccumulator()
 
         try {
             mapper.factory.createParser(body).use { parser ->
-                if (parser.nextToken() != JsonToken.START_OBJECT) {
-                    return@use
-                }
+                if (parser.nextToken() != JsonToken.START_OBJECT) return@use
 
                 while (parser.nextToken() != JsonToken.END_OBJECT) {
                     if (!accumulator.recursiveToken.isNullOrBlank()) break
@@ -1303,35 +1324,26 @@ class YoutubeProvider(
 
                     val field = parser.currentName
                     parser.nextToken()
-                    when (field) {
-                        "onResponseReceivedActions",
-                        "onResponseReceivedEndpoints",
-                        "onResponseReceivedCommands" ->
-                            streamFallbackActionArray(parser, accumulator)
+                    if (isExcludedContinuationKey(field)) {
+                        parser.skipChildren()
+                        continue
+                    }
 
-                        "continuationContents", "contents" -> {
-                            val value = mapper.readValue(parser, Any::class.java)
-                            if (value != null) {
-                                val scan = scanContinuationFallbacks(value)
-                                if (!scan.recursiveToken.isNullOrBlank()) {
-                                    accumulator.recursiveToken = scan.recursiveToken
-                                    accumulator.recursiveSource = field
-                                    accumulator.genericCandidate = null
-                                    accumulator.genericSource = "none"
-                                } else {
-                                    val preferred = preferGenericCandidate(
-                                        accumulator.genericCandidate,
-                                        scan.genericCandidate
-                                    )
-                                    if (preferred !== accumulator.genericCandidate) {
-                                        accumulator.genericCandidate = preferred
-                                        accumulator.genericSource = field
-                                    }
-                                }
-                            }
-                        }
-
-                        else -> parser.skipChildren()
+                    if (parser.currentToken == JsonToken.START_OBJECT || parser.currentToken == JsonToken.START_ARRAY) {
+                        streamScanFallbackNode(
+                            parser = parser,
+                            accumulator = accumulator,
+                            source = when (field) {
+                                "onResponseReceivedActions",
+                                "onResponseReceivedEndpoints",
+                                "onResponseReceivedCommands" -> "response_actions"
+                                else -> field
+                            },
+                            pathMask = continuationPathFlag(field),
+                            depth = 1,
+                            containerKey = field,
+                            inContinuationRenderer = field == "continuationItemRenderer"
+                        )
                     }
                 }
             }
@@ -1358,6 +1370,141 @@ class YoutubeProvider(
         var sawReloadCommand: Boolean = false
     )
 
+    // Only renderer subtrees that collectFromRenderer/processRecursive already know how to
+    // interpret are materialized. Container objects/arrays remain streaming-only.
+    private val chipResultRendererKeys = setOf(
+        "videoRenderer",
+        "compactVideoRenderer",
+        "gridVideoRenderer",
+        "playlistVideoRenderer",
+        "playlistPanelVideoRenderer",
+        "richItemRenderer",
+        "reelItemRenderer",
+        "shortsLockupViewModel",
+        "lockupViewModel",
+        "channelRenderer"
+    )
+
+    private fun processStreamedRenderer(
+        field: String,
+        parser: com.fasterxml.jackson.core.JsonParser,
+        state: StreamingChipState
+    ) {
+        // This is intentionally the only Map/List materialization in the normal CHIP result path:
+        // one renderer subtree at a time, immediately converted to SearchResponse and released.
+        val rendererValue = mapper.readValue(parser, Any::class.java) ?: return
+        state.processedAny = true
+        val wrapper = mapOf<String, Any>(field to rendererValue)
+        processRecursive(
+            wrapper,
+            state.results,
+            state.seenIds,
+            playlistMode = false,
+            isSearch = false
+        )
+    }
+
+    private fun streamContinuationRendererToken(
+        parser: com.fasterxml.jackson.core.JsonParser
+    ): String? {
+        if (parser.currentToken != JsonToken.START_OBJECT) {
+            parser.skipChildren()
+            return null
+        }
+
+        var bestToken: String? = null
+        var bestPriority = Int.MAX_VALUE
+
+        fun priorityFor(containerKey: String?): Int = when (containerKey) {
+            "continuationCommand" -> 1
+            "browseContinuationEndpoint" -> 2
+            "searchContinuationEndpoint" -> 3
+            "command" -> 4
+            "continuationEndpoint" -> 5
+            null -> 6 // defensive renderer-level token
+            else -> Int.MAX_VALUE
+        }
+
+        fun walkObject(containerKey: String?, depth: Int) {
+            if (depth > 10 || parser.currentToken != JsonToken.START_OBJECT) {
+                parser.skipChildren()
+                return
+            }
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                if (parser.currentToken != JsonToken.FIELD_NAME) {
+                    parser.skipChildren()
+                    continue
+                }
+                val field = parser.currentName
+                parser.nextToken()
+
+                if (field == "token" && parser.currentToken == JsonToken.VALUE_STRING) {
+                    val token = parser.valueAsString
+                    val priority = priorityFor(containerKey)
+                    if (!token.isNullOrBlank() && priority < bestPriority) {
+                        bestToken = token
+                        bestPriority = priority
+                    }
+                } else if (parser.currentToken == JsonToken.START_OBJECT) {
+                    val shouldDescend = field == "continuationEndpoint" ||
+                        field in genericContinuationContainerKeys
+                    if (shouldDescend) walkObject(field, depth + 1) else parser.skipChildren()
+                } else {
+                    parser.skipChildren()
+                }
+            }
+        }
+
+        walkObject(null, 0)
+        return bestToken
+    }
+
+    private fun streamResultTree(
+        parser: com.fasterxml.jackson.core.JsonParser,
+        state: StreamingChipState,
+        source: String,
+        depth: Int = 0
+    ) {
+        if (depth > 48) {
+            parser.skipChildren()
+            return
+        }
+
+        when (parser.currentToken) {
+            JsonToken.START_ARRAY -> {
+                while (parser.nextToken() != JsonToken.END_ARRAY) {
+                    streamResultTree(parser, state, source, depth + 1)
+                }
+            }
+
+            JsonToken.START_OBJECT -> {
+                while (parser.nextToken() != JsonToken.END_OBJECT) {
+                    if (parser.currentToken != JsonToken.FIELD_NAME) {
+                        parser.skipChildren()
+                        continue
+                    }
+
+                    val field = parser.currentName
+                    parser.nextToken()
+                    when {
+                        field == "continuationItems" && parser.currentToken == JsonToken.START_ARRAY ->
+                            streamContinuationItems(parser, state, source)
+
+                        field in chipResultRendererKeys ->
+                            processStreamedRenderer(field, parser, state)
+
+                        parser.currentToken == JsonToken.START_OBJECT || parser.currentToken == JsonToken.START_ARRAY ->
+                            streamResultTree(parser, state, source, depth + 1)
+
+                        else -> Unit
+                    }
+                }
+            }
+
+            else -> Unit
+        }
+    }
+
     private fun streamContinuationItems(
         parser: com.fasterxml.jackson.core.JsonParser,
         state: StreamingChipState,
@@ -1370,19 +1517,37 @@ class YoutubeProvider(
 
         var pageTokenInThisItems: String? = null
         while (parser.nextToken() != JsonToken.END_ARRAY) {
-            val item = mapper.readValue(parser, Any::class.java) ?: continue
-            state.processedAny = true
-            processRecursive(item, state.results, state.seenIds, playlistMode = false, isSearch = false)
+            if (parser.currentToken != JsonToken.START_OBJECT) {
+                streamResultTree(parser, state, source, 1)
+                continue
+            }
 
-            // Tier 1 only: root/page-level continuationItemRenderer. No recursive or generic walk
-            // is performed during the normal result pass. This is the critical v10 allocation cut.
-            val itemMap = item as? Map<*, *>
-            val continuationRenderer = itemMap?.get("continuationItemRenderer") as? Map<*, *>
-            if (continuationRenderer != null) {
-                val pageToken = extractContinuationRendererToken(continuationRenderer)
-                if (!pageToken.isNullOrBlank()) {
-                    // Match legacy asReversed() semantics: the last root page cursor wins.
-                    pageTokenInThisItems = pageToken
+            state.processedAny = true
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                if (parser.currentToken != JsonToken.FIELD_NAME) {
+                    parser.skipChildren()
+                    continue
+                }
+
+                val field = parser.currentName
+                parser.nextToken()
+                when {
+                    // Tier 1: only a root item continuationItemRenderer counts as the page cursor.
+                    field == "continuationItemRenderer" -> {
+                        val pageToken = streamContinuationRendererToken(parser)
+                        if (!pageToken.isNullOrBlank()) {
+                            // Preserve legacy asReversed() behavior: last root cursor wins.
+                            pageTokenInThisItems = pageToken
+                        }
+                    }
+
+                    field in chipResultRendererKeys ->
+                        processStreamedRenderer(field, parser, state)
+
+                    parser.currentToken == JsonToken.START_OBJECT || parser.currentToken == JsonToken.START_ARRAY ->
+                        streamResultTree(parser, state, source, 1)
+
+                    else -> Unit
                 }
             }
         }
@@ -1411,8 +1576,9 @@ class YoutubeProvider(
             parser.nextToken()
             if (field == "continuationItems") {
                 streamContinuationItems(parser, state, source)
-            } else {
-                parser.skipChildren()
+            } else if (parser.currentToken == JsonToken.START_OBJECT || parser.currentToken == JsonToken.START_ARRAY) {
+                // Preserve uncommon renderer-bearing command shapes without materializing command maps.
+                streamResultTree(parser, state, source, 1)
             }
         }
     }
@@ -1440,11 +1606,19 @@ class YoutubeProvider(
                 when (field) {
                     "appendContinuationItemsAction" ->
                         streamContinuationCommand(parser, state, "top_level_append")
+
                     "reloadContinuationItemsCommand" -> {
                         state.sawReloadCommand = true
                         streamContinuationCommand(parser, state, "top_level_reload")
                     }
-                    else -> parser.skipChildren()
+
+                    else -> {
+                        if (parser.currentToken == JsonToken.START_OBJECT || parser.currentToken == JsonToken.START_ARRAY) {
+                            streamResultTree(parser, state, field, 1)
+                        } else {
+                            parser.skipChildren()
+                        }
+                    }
                 }
             }
         }
@@ -1454,7 +1628,7 @@ class YoutubeProvider(
         return try {
             val state = StreamingChipState()
 
-            // Pass 1: process results and look ONLY for authoritative page-level cursors.
+            // Pass 1: cards + authoritative page-level continuationItemRenderer only.
             mapper.factory.createParser(body).use { parser ->
                 if (parser.nextToken() != JsonToken.START_OBJECT) return@use null
                 while (parser.nextToken() != JsonToken.END_OBJECT) {
@@ -1470,30 +1644,18 @@ class YoutubeProvider(
                         "onResponseReceivedEndpoints",
                         "onResponseReceivedCommands" -> streamActionArray(parser, state)
 
-                        "continuationContents", "contents" -> {
-                            // Rare alternate layout: materialize only this branch, not the full response.
-                            // Still keep pass 1 page-cursor-only; fallback scanning is deferred.
-                            val value = mapper.readValue(parser, Any::class.java)
-                            if (value != null) {
-                                state.processedAny = true
-                                processRecursive(
-                                    value,
-                                    state.results,
-                                    state.seenIds,
-                                    playlistMode = false,
-                                    isSearch = false
-                                )
+                        "continuationContents", "contents" ->
+                            streamResultTree(parser, state, field)
 
-                                val continuationItems = findContinuationItemsRecursive(value)
-                                val pageToken = findContinuationFromItemsSafe(continuationItems)
-                                if (state.pageLevelNextToken.isNullOrBlank() && !pageToken.isNullOrBlank()) {
-                                    state.pageLevelNextToken = pageToken
-                                    state.pageLevelSource = field
-                                }
+                        else -> {
+                            // Compatibility path remains streaming. Unknown top-level containers are
+                            // traversed but never promoted to a whole-response Map/List tree.
+                            if (parser.currentToken == JsonToken.START_OBJECT || parser.currentToken == JsonToken.START_ARRAY) {
+                                streamResultTree(parser, state, field)
+                            } else {
+                                parser.skipChildren()
                             }
                         }
-
-                        else -> parser.skipChildren()
                     }
                 }
             }
@@ -1507,9 +1669,8 @@ class YoutubeProvider(
                 Log.d("YoutubeUtils", "[CHIP_CONT] PAGE_CURSOR source=$source")
             }
 
-            // Pass 2 exists only when pass 1 proved that no page-level continuationItemRenderer
-            // exists anywhere. Recursive and generic tiers are scanned together in one low-allocation
-            // traversal, preserving recursive > generic priority without v9's duplicate tree walks.
+            // Only if tier 1 is absent, scan again for recursive fallback then generic fallback.
+            // This pass is token-only streaming and creates no renderer/object graph.
             if (nextToken.isNullOrBlank()) {
                 Log.d("YoutubeUtils", "[CHIP_CONT] FALLBACK_PASS pageCursor=none")
                 val fallback = streamFindFallbackContinuation(body)
@@ -1537,7 +1698,8 @@ class YoutubeProvider(
             }
 
             ProcessedChipPayload(state.results, nextToken, source)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e("YoutubeUtils", "[CHIP] STREAM_PARSE_FAILED ${e.javaClass.simpleName}: ${e.message}")
             null
         }
     }
@@ -1572,28 +1734,28 @@ class YoutubeProvider(
         )
 
         val requestStartNs = System.nanoTime()
-        val rawResponse = app.post(
-            apiUrl,
-            json = payload,
-            headers = headers,
-            interceptor = ytInterceptor
-        )
-        currentCoroutineContext().ensureActive()
-
-        val body = rawResponse.textLarge
+        var body = run {
+            // Keep the NiceHttp response reference inside this narrow scope so its buffers become
+            // unreachable before renderer conversion finishes.
+            val rawResponse = app.post(
+                apiUrl,
+                json = payload,
+                headers = headers,
+                interceptor = ytInterceptor
+            )
+            currentCoroutineContext().ensureActive()
+            rawResponse.textLarge
+        }
         currentCoroutineContext().ensureActive()
         val responseReadyNs = System.nanoTime()
         val responseWaitMs = (responseReadyNs - requestStartNs) / 1_000_000L
         val bodyChars = body.length
         if (body.isBlank()) return null
 
-        // Common observed response shapes are processed directly from Jackson's streaming parser,
-        // one continuation item at a time. This avoids a full multi-megabyte Map/List object graph.
-        // Keep a pruned-tree fallback only for an unknown future response shape.
-        val processed = streamProcessChipResponse(body) ?: run {
-            val response = parseChipResponsePruned(body)
-            response?.let { processChipResponseAndContinuation(it) }
-        }
+        // CHIP parsing is streaming-only. The multi-megabyte response is never expanded into a
+        // whole-response Map/List graph; only one recognized renderer subtree exists at a time.
+        val processed = streamProcessChipResponse(body)
+        body = "" // drop the multi-megabyte String before logging/return object construction
         if (processed == null) {
             currentCoroutineContext().ensureActive()
             Log.e(
@@ -1603,143 +1765,6 @@ class YoutubeProvider(
             return null
         }
         return ParsedChipPayload(processed, bodyChars, responseWaitMs)
-    }
-
-    private fun processChipResponseAndContinuation(response: Map<String, Any>): ProcessedChipPayload {
-        val results = mutableListOf<SearchResponse>()
-        val seenIds = mutableSetOf<String>()
-        val actionKeys = listOf(
-            "onResponseReceivedActions",
-            "onResponseReceivedEndpoints",
-            "onResponseReceivedCommands"
-        )
-
-        var processedAny = false
-        var pageLevelToken: String? = null
-        var pageLevelSource = "none"
-        var sawReloadCommand = false
-
-        // Keep only references to already-materialized pruned branches. Fallback traversal is
-        // deferred until every branch has been checked for a page-level continuation cursor.
-        val fallbackRoots = mutableListOf<Pair<Any?, String>>()
-
-        for (key in actionKeys) {
-            val actions = response[key] as? List<*> ?: continue
-            for (action in actions) {
-                val actionMap = action as? Map<*, *> ?: continue
-
-                val append = actionMap["appendContinuationItemsAction"] as? Map<*, *>
-                val appendItems = append?.get("continuationItems") as? List<*>
-                if (appendItems != null) {
-                    processRecursive(appendItems, results, seenIds, playlistMode = false, isSearch = false)
-                    processedAny = true
-                    fallbackRoots.add(appendItems to "top_level_append")
-                    if (pageLevelToken.isNullOrBlank()) {
-                        val token = findContinuationFromItemsSafe(appendItems)
-                        if (!token.isNullOrBlank()) {
-                            pageLevelToken = token
-                            pageLevelSource = "top_level_append"
-                        }
-                    }
-                }
-
-                val reload = actionMap["reloadContinuationItemsCommand"] as? Map<*, *>
-                val reloadItems = reload?.get("continuationItems") as? List<*>
-                if (reload != null) sawReloadCommand = true
-                if (reloadItems != null) {
-                    processRecursive(reloadItems, results, seenIds, playlistMode = false, isSearch = false)
-                    processedAny = true
-                    fallbackRoots.add(reloadItems to "top_level_reload")
-                    if (pageLevelToken.isNullOrBlank()) {
-                        val token = findContinuationFromItemsSafe(reloadItems)
-                        if (!token.isNullOrBlank()) {
-                            pageLevelToken = token
-                            pageLevelSource = "top_level_reload"
-                        }
-                    }
-                }
-            }
-        }
-
-        val continuationContents = response["continuationContents"]
-        if (continuationContents != null) {
-            processRecursive(continuationContents, results, seenIds, playlistMode = false, isSearch = false)
-            processedAny = true
-            fallbackRoots.add(continuationContents to "continuationContents")
-            if (pageLevelToken.isNullOrBlank()) {
-                val continuationItems = findContinuationItemsRecursive(continuationContents)
-                val token = findContinuationFromItemsSafe(continuationItems)
-                if (!token.isNullOrBlank()) {
-                    pageLevelToken = token
-                    pageLevelSource = "continuationContents"
-                }
-            }
-        }
-
-        val contents = response["contents"]
-        if (contents != null) {
-            processRecursive(contents, results, seenIds, playlistMode = false, isSearch = false)
-            processedAny = true
-            fallbackRoots.add(contents to "contents")
-            if (pageLevelToken.isNullOrBlank()) {
-                val continuationItems = findContinuationItemsRecursive(contents)
-                val token = findContinuationFromItemsSafe(continuationItems)
-                if (!token.isNullOrBlank()) {
-                    pageLevelToken = token
-                    pageLevelSource = "contents"
-                }
-            }
-        }
-
-        if (!processedAny) {
-            processRecursive(response, results, seenIds, playlistMode = false, isSearch = false)
-            fallbackRoots.add(response to "recursive_fallback")
-        }
-
-        var nextToken = pageLevelToken
-        var source = if (!pageLevelToken.isNullOrBlank()) pageLevelSource else "none"
-
-        if (nextToken.isNullOrBlank()) {
-            var bestGeneric: ContinuationCandidate? = null
-            var bestGenericSource = "none"
-
-            for ((root, rootSource) in fallbackRoots) {
-                val scan = scanContinuationFallbacks(root)
-                if (!scan.recursiveToken.isNullOrBlank()) {
-                    nextToken = scan.recursiveToken
-                    source = rootSource
-                    bestGeneric = null
-                    bestGenericSource = "none"
-                    break
-                }
-
-                val preferred = preferGenericCandidate(bestGeneric, scan.genericCandidate)
-                if (preferred !== bestGeneric) {
-                    bestGeneric = preferred
-                    bestGenericSource = rootSource
-                }
-            }
-
-            if (nextToken.isNullOrBlank() && bestGeneric != null) {
-                nextToken = bestGeneric.token
-                source = bestGenericSource
-                Log.d(
-                    "YoutubeUtils",
-                    "[CHIP_CONT] generic kind=${bestGeneric.kind} score=${bestGeneric.score} " +
-                        "depth=${bestGeneric.depth} source=$source"
-                )
-            }
-        }
-
-        if (nextToken.isNullOrBlank() && sawReloadCommand) {
-            source = "reload_terminal"
-            Log.d("YoutubeUtils", "[CHIP_CONT] reload command contained no follow-up token")
-        } else if (nextToken.isNullOrBlank()) {
-            source = "none"
-            Log.d("YoutubeUtils", "[CHIP_CONT] no continuation candidate found")
-        }
-
-        return ProcessedChipPayload(results, nextToken, source)
     }
 
     private suspend fun executeChipBrowseAndProcess(
@@ -1757,9 +1782,9 @@ class YoutubeProvider(
                 val acquiredNs = System.nanoTime()
                 val queueMs = (acquiredNs - queueStartNs) / 1_000_000L
 
-                // Keep raw NiceHttp response + multi-megabyte String inside this helper. Common
-                // continuation layouts are converted directly to compact SearchResponse objects via
-                // streaming; only unknown layouts use the pruned-tree compatibility fallback.
+                // Keep raw NiceHttp response + multi-megabyte String inside this helper. CHIP JSON
+                // is traversed streaming-only; one recognized renderer subtree at a time is converted
+                // immediately to SearchResponse and released.
                 val parsed = fetchAndParseChipPayload(bootstrap, token, requestKey, page)
                     ?: return@withPermit null
                 if (page == 1) updateChipPage1ObservedPeakHeap()
