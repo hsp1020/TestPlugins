@@ -323,7 +323,7 @@ class YoutubeProvider(
     companion object {
         private val providerScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-        private const val YOUTUBE_PAYLOAD_CONCURRENCY = 3
+        private const val YOUTUBE_PAYLOAD_CONCURRENCY = 5
         private val youtubePayloadSemaphore = Semaphore(YOUTUBE_PAYLOAD_CONCURRENCY)
 
         private const val PREPARED_HOME_REUSE_MS = 2_500L
