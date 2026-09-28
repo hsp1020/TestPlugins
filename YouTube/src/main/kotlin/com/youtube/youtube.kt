@@ -276,9 +276,9 @@ class YoutubeProvider(
         val nextToken: String?,
         val continuationSource: String,
         val bodyChars: Int,
-        val bodyReadMs: Long,
-        val parseQueueMs: Long,
-        val parseWorkMs: Long
+        val responseWaitMs: Long,
+        val memoryQueueMs: Long,
+        val memoryWorkMs: Long
     )
 
     private val chipCatalogSessions = ConcurrentHashMap<String, ChipCatalogSession>()
@@ -306,11 +306,13 @@ class YoutubeProvider(
     companion object {
         private val providerScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-        // Do not serialize the whole browse request. Network/body download stays parallel, while
-        // the memory-heavy Jackson Map + recursive extraction stage is capped. This targets the
-        // startup LOS/GC spike without turning 13 catalogs into 4 full network waves.
-        private const val CHIP_PARSE_PARALLELISM = 4
-        private val chipParseSemaphore = Semaphore(CHIP_PARSE_PARALLELISM)
+        // Keep request dispatch parallel, but cap the memory-heavy phase that starts at textLarge.
+        // app.post() can still overlap across all CHIP catalogs; only response-body materialization,
+        // Jackson Map creation and recursive extraction are limited. This avoids turning startup
+        // into four full network waves while preventing 13 multi-megabyte Strings/JSON trees from
+        // living at the same time.
+        private const val CHIP_MEMORY_PARALLELISM = 4
+        private val chipMemorySemaphore = Semaphore(CHIP_MEMORY_PARALLELISM)
 
         // CloudStream may create/cancel an initial set of MainPage requests while plugins are still
         // being registered. Give only direct non-CHIP page-1 HTTP calls a one-time short settle
@@ -792,69 +794,6 @@ class YoutubeProvider(
         )
     }
 
-    private fun countLiteralOccurrences(text: String, needle: String): Int {
-        if (needle.isEmpty()) return 0
-        var count = 0
-        var from = 0
-        while (true) {
-            val index = text.indexOf(needle, from)
-            if (index < 0) break
-            count++
-            from = index + needle.length
-        }
-        return count
-    }
-
-    private fun collectContinuationStructure(root: Any?, maxEntries: Int = 60): List<String> {
-        val out = mutableListOf<String>()
-        val excludedKeys = setOf(
-            "header",
-            "feedFilterChipBarRenderer",
-            "chipCloudRenderer",
-            "relatedChipCloudRenderer",
-            "chipCloudChipRenderer",
-            "chipViewModel",
-            "chipCloud"
-        )
-
-        fun describe(value: Any?): String = when (value) {
-            is Map<*, *> -> "map(keys=${value.keys.filterIsInstance<String>().take(8).joinToString("|")})"
-            is List<*> -> "list(size=${value.size})"
-            is String -> "string(len=${value.length})"
-            null -> "null"
-            else -> value::class.java.simpleName
-        }
-
-        fun walk(node: Any?, path: String, depth: Int) {
-            if (node == null || depth > 36 || out.size >= maxEntries) return
-            when (node) {
-                is Map<*, *> -> {
-                    for ((keyAny, value) in node) {
-                        if (out.size >= maxEntries) return
-                        val key = keyAny as? String ?: continue
-                        if (key in excludedKeys) continue
-                        val childPath = "$path.$key"
-                        if (key.contains("continuation", ignoreCase = true)) {
-                            out += "$childPath -> ${describe(value)}"
-                        } else if (key == "token" && path.contains("continuation", ignoreCase = true)) {
-                            out += "$childPath -> ${describe(value)}"
-                        }
-                        walk(value, childPath, depth + 1)
-                    }
-                }
-                is List<*> -> {
-                    node.forEachIndexed { index, value ->
-                        if (out.size >= maxEntries) return
-                        walk(value, "$path[$index]", depth + 1)
-                    }
-                }
-            }
-        }
-
-        walk(root, "$", 0)
-        return out
-    }
-
     private fun topLevelActionTypes(response: Map<String, Any>): String {
         val actionKeys = listOf(
             "onResponseReceivedActions",
@@ -875,42 +814,42 @@ class YoutubeProvider(
     private fun logGameContinuationDiagnostics(
         page: Int,
         requestKey: String,
-        body: String,
+        bodyChars: Int,
         response: Map<String, Any>
     ) {
-        val rawContinuation = countLiteralOccurrences(body, "\"continuation")
-        val rawContinuationItem = countLiteralOccurrences(body, "\"continuationItemRenderer\"")
-        val rawContinuationCommand = countLiteralOccurrences(body, "\"continuationCommand\"")
-        val rawAppend = countLiteralOccurrences(body, "\"appendContinuationItemsAction\"")
-        val rawToken = countLiteralOccurrences(body, "\"token\"")
-        val continuationContents = response["continuationContents"] as? Map<*, *>
-        val structure = collectContinuationStructure(response)
+        val summaries = mutableListOf<String>()
+        val actionKeys = listOf(
+            "onResponseReceivedActions",
+            "onResponseReceivedEndpoints",
+            "onResponseReceivedCommands"
+        )
+        for (key in actionKeys) {
+            val actions = response[key] as? List<*> ?: continue
+            actions.forEachIndexed { index, action ->
+                val actionMap = action as? Map<*, *> ?: return@forEachIndexed
+                val reload = actionMap["reloadContinuationItemsCommand"] as? Map<*, *> ?: return@forEachIndexed
+                val items = reload["continuationItems"] as? List<*>
+                val itemTypes = linkedMapOf<String, Int>()
+                items?.forEach { item ->
+                    val map = item as? Map<*, *> ?: return@forEach
+                    val keyName = map.keys.filterIsInstance<String>().firstOrNull() ?: "unknown"
+                    itemTypes[keyName] = (itemTypes[keyName] ?: 0) + 1
+                }
+                val targetId = reload["targetId"]?.toString() ?: "none"
+                val slot = reload["slot"]?.toString() ?: "none"
+                val typesText = itemTypes.entries.joinToString(",") { "${it.key}:${it.value}" }
+                summaries += "$key[$index] targetId=$targetId slot=$slot items=${items?.size ?: 0} types=[$typesText]"
+            }
+        }
 
         Log.w(
             "YoutubeUtils",
-            "[GAME_CONT_DIAG] page=$page key=$requestKey chars=${body.length} " +
-                "rawContinuation=$rawContinuation continuationItem=$rawContinuationItem " +
-                "continuationCommand=$rawContinuationCommand appendAction=$rawAppend tokenKeys=$rawToken"
+            "[GAME_CONT_DIAG] page=$page key=$requestKey chars=$bodyChars topKeys=${response.keys.joinToString("|")}"
         )
         Log.w(
             "YoutubeUtils",
-            "[GAME_CONT_DIAG] topKeys=${response.keys.joinToString("|")} " +
-                "continuationContentsKeys=${continuationContents?.keys?.filterIsInstance<String>()?.joinToString("|") ?: "none"}"
+            "[GAME_CONT_DIAG] actionTypes=${topLevelActionTypes(response)} reload=${if (summaries.isEmpty()) "none" else summaries.joinToString(" ; ")}"
         )
-        Log.w(
-            "YoutubeUtils",
-            "[GAME_CONT_DIAG] actionTypes=${topLevelActionTypes(response)}"
-        )
-        if (structure.isEmpty()) {
-            Log.w("YoutubeUtils", "[GAME_CONT_DIAG] structure=NONE")
-        } else {
-            structure.chunked(8).forEachIndexed { index, chunk ->
-                Log.w(
-                    "YoutubeUtils",
-                    "[GAME_CONT_DIAG] structure[$index]=${chunk.joinToString(" || ")}"
-                )
-            }
-        }
     }
 
     private suspend fun executeChipBrowseAndProcess(
@@ -943,9 +882,11 @@ class YoutubeProvider(
             "X-Youtube-Client-Version" to bootstrap.clientVersion
         )
 
-        // Keep the network/body transfer parallel. The semaphore below starts only after the
-        // response text has been read, so catalog network latency still overlaps across sections.
-        val bodyReadStartNs = System.nanoTime()
+        // Dispatch every CHIP request immediately so DNS/TLS/HTTP2/server latency still overlaps.
+        // The permit is acquired only after app.post() has returned a response wrapper and BEFORE
+        // textLarge materializes a multi-megabyte String. This is deliberately different from a
+        // full-request semaphore: catalog loading remains network-parallel while peak heap is capped.
+        val requestStartNs = System.nanoTime()
         val rawResponse = app.post(
             apiUrl,
             json = payload,
@@ -953,20 +894,21 @@ class YoutubeProvider(
             interceptor = ytInterceptor
         )
         currentCoroutineContext().ensureActive()
+        val responseReadyNs = System.nanoTime()
+        val responseWaitMs = (responseReadyNs - requestStartNs) / 1_000_000L
 
-        // NiceHttp .text has a 5 MB safety cap; chip responses such as Music can exceed it.
-        val body = rawResponse.textLarge
-        currentCoroutineContext().ensureActive()
-        val bodyReadMs = (System.nanoTime() - bodyReadStartNs) / 1_000_000L
-        if (body.isBlank()) return null
-
-        // Body strings may coexist briefly, but the much more expensive Jackson object graph and
-        // recursive renderer traversal are capped to four at a time. This is the main GC fix.
         val queueStartNs = System.nanoTime()
-        return chipParseSemaphore.withPermit {
+        return chipMemorySemaphore.withPermit {
             currentCoroutineContext().ensureActive()
             val acquiredNs = System.nanoTime()
             val queueMs = (acquiredNs - queueStartNs) / 1_000_000L
+
+            // NiceHttp .text has a 5 MB safety cap; chip responses such as Music can exceed it.
+            // textLarge, Jackson tree creation and recursive renderer traversal now share ONE permit,
+            // so large Strings and large parsed Maps cannot multiply across every startup catalog.
+            val body = rawResponse.textLarge
+            currentCoroutineContext().ensureActive()
+            if (body.isBlank()) return@withPermit null
 
             val response = try {
                 mapper.readValue<Map<String, Any>>(body)
@@ -987,11 +929,11 @@ class YoutubeProvider(
             processChipResponse(response, localResults, localSeenIds)
             val (nextToken, source) = findChipContinuation(response)
 
-            // Do not dump megabytes of JSON. Only the failing Game catalog gets a bounded structural
-            // diagnosis, which tells us whether YouTube omitted continuation entirely or our parser
-            // still missed a concrete continuation representation.
+            // Game currently arrives as reloadContinuationItemsCommand. If YouTube later includes a
+            // true follow-up endpoint in that command/items, findChipContinuation() will use it.
+            // If it does not, treat this response as terminal instead of fabricating/reusing a token.
             if (requestKey == "chip_name_게임" && nextToken.isNullOrBlank()) {
-                logGameContinuationDiagnostics(page, requestKey, body, response)
+                logGameContinuationDiagnostics(page, requestKey, body.length, response)
             }
 
             val workMs = (System.nanoTime() - acquiredNs) / 1_000_000L
@@ -1000,9 +942,9 @@ class YoutubeProvider(
                 nextToken = nextToken,
                 continuationSource = source,
                 bodyChars = body.length,
-                bodyReadMs = bodyReadMs,
-                parseQueueMs = queueMs,
-                parseWorkMs = workMs
+                responseWaitMs = responseWaitMs,
+                memoryQueueMs = queueMs,
+                memoryWorkMs = workMs
             )
         }
     }
@@ -1067,18 +1009,37 @@ class YoutubeProvider(
         seenIds: MutableSet<String>
     ) {
         var processedAny = false
-        val topLevelKeys = listOf(
+
+        // Continuation responses can arrive as either appendContinuationItemsAction or
+        // reloadContinuationItemsCommand. Process their item arrays directly first instead of
+        // recursively walking the entire action envelope. This covers Game's current response
+        // shape and reduces unnecessary traversal/allocation.
+        val actionKeys = listOf(
             "onResponseReceivedActions",
             "onResponseReceivedEndpoints",
-            "onResponseReceivedCommands",
-            "continuationContents",
-            "contents"
+            "onResponseReceivedCommands"
         )
-        for (key in topLevelKeys) {
+        for (key in actionKeys) {
+            val actions = response[key] as? List<*> ?: continue
+            for (action in actions) {
+                val actionMap = action as? Map<*, *> ?: continue
+                val command = (actionMap["appendContinuationItemsAction"] as? Map<*, *>)
+                    ?: (actionMap["reloadContinuationItemsCommand"] as? Map<*, *>)
+                    ?: continue
+                val items = command["continuationItems"] as? List<*> ?: continue
+                processRecursive(items, results, seenIds, playlistMode = false, isSearch = false)
+                processedAny = true
+            }
+        }
+
+        // Initial/alternate response layouts still use these containers. seenIds keeps this safe
+        // even if YouTube duplicates the same renderer in more than one branch.
+        for (key in listOf("continuationContents", "contents")) {
             val value = response[key] ?: continue
             processRecursive(value, results, seenIds, playlistMode = false, isSearch = false)
             processedAny = true
         }
+
         if (!processedAny) {
             processRecursive(response, results, seenIds, playlistMode = false, isSearch = false)
         }
@@ -1176,21 +1137,37 @@ class YoutubeProvider(
     }
 
     private fun findChipContinuation(response: Map<String, Any>): Pair<String?, String> {
-        // Prefer the top-level append action for the main feed. This avoids selecting
-        // continuations from inner shelves/carousels before the catalog cursor.
+        // Prefer top-level feed commands. YouTube uses both appendContinuationItemsAction and
+        // reloadContinuationItemsCommand depending on experiment/category. A reload command is
+        // not itself a next-page token; only a continuation endpoint inside its items is valid.
         val actionKeys = listOf(
             "onResponseReceivedActions",
             "onResponseReceivedEndpoints",
             "onResponseReceivedCommands"
         )
+        var sawReloadCommand = false
         for (key in actionKeys) {
             val actions = response[key] as? List<*> ?: continue
             for (action in actions) {
                 val actionMap = action as? Map<*, *> ?: continue
-                val append = actionMap["appendContinuationItemsAction"] as? Map<*, *> ?: continue
-                val items = append["continuationItems"] as? List<*> ?: continue
-                val token = findContinuationFromItemsSafe(items)
-                if (!token.isNullOrBlank()) return token to "top_level_append"
+
+                val append = actionMap["appendContinuationItemsAction"] as? Map<*, *>
+                val appendItems = append?.get("continuationItems") as? List<*>
+                if (appendItems != null) {
+                    val token = findContinuationFromItemsSafe(appendItems)
+                        ?: findGenericContinuationCandidate(appendItems)?.token
+                    if (!token.isNullOrBlank()) return token to "top_level_append"
+                }
+
+                val reload = actionMap["reloadContinuationItemsCommand"] as? Map<*, *>
+                val reloadItems = reload?.get("continuationItems") as? List<*>
+                if (reload != null) sawReloadCommand = true
+                if (reloadItems != null) {
+                    val token = findContinuationFromItemsSafe(reloadItems)
+                        ?: findTokenRecursive(reloadItems)
+                        ?: findGenericContinuationCandidate(reloadItems)?.token
+                    if (!token.isNullOrBlank()) return token to "top_level_reload"
+                }
             }
         }
 
@@ -1225,6 +1202,14 @@ class YoutubeProvider(
                 "[CHIP_CONT] generic path=${generic.path} score=${generic.score}"
             )
             return generic.token to "generic_fallback"
+        }
+
+        if (sawReloadCommand) {
+            // Game currently lands here: YouTube returned a reload command with content but no
+            // follow-up token anywhere in the response. Reusing the chip token would replay page 1,
+            // so mark it as an explicit server-terminal response instead of a parser failure.
+            Log.d("YoutubeUtils", "[CHIP_CONT] reload command contained no follow-up token")
+            return null to "reload_terminal"
         }
 
         Log.d("YoutubeUtils", "[CHIP_CONT] no continuation candidate found")
@@ -1271,9 +1256,14 @@ class YoutubeProvider(
             newChips.forEach { chip ->
                 val stableUrl = "chip_name_${chip.name}"
                 if (currentList.none { section -> section.url == stableUrl }) {
-                    currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = true))
+                    // Newly discovered dynamic YouTube chips must be visible in Settings so the
+                    // user can opt in later, but they must never auto-expand the active home page.
+                    currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = false))
                     modified = true
-                    Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Instantly mirrored missing chip to custom_homepages_v3: ${chip.name}")
+                    Log.d(
+                        "YoutubeUtils",
+                        "[CHIP_DEBUG] mergeAndSaveChips - Mirrored new chip to settings disabled: ${chip.name}"
+                    )
                 }
             }
 
@@ -2245,9 +2235,12 @@ class YoutubeProvider(
             cachedChips.forEach { chip ->
                 val stableUrl = "chip_name_${chip.name}"
                 if (currentList.none { section -> section.url == stableUrl }) {
-                    currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = true))
+                    currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = false))
                     modified = true
-                    Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Added missing chip category to custom list: ${chip.name}")
+                    Log.d(
+                        "YoutubeUtils",
+                        "[CHIP_DEBUG] getCustomHomepages - Added missing chip to settings disabled: ${chip.name}"
+                    )
                 }
             }
         } catch (e: Exception) {
@@ -2362,8 +2355,8 @@ class YoutubeProvider(
                                     "YoutubeUtils",
                                     "[CHIP] BROWSE_OK page=1 key=$requestData items=${results.size} " +
                                         "next=${!nextToken.isNullOrBlank()} source=$source tokenSource=$tokenSource " +
-                                        "chars=${browse.bodyChars} net=${browse.bodyReadMs}ms " +
-                                        "parseWait=${browse.parseQueueMs}ms parseWork=${browse.parseWorkMs}ms"
+                                        "chars=${browse.bodyChars} response=${browse.responseWaitMs}ms " +
+                                        "memWait=${browse.memoryQueueMs}ms memWork=${browse.memoryWorkMs}ms"
                                 )
                             } else {
                                 Log.w("YoutubeUtils", "[CHIP] BROWSE_EMPTY_RESPONSE page=1 key=$requestData")
@@ -2401,8 +2394,8 @@ class YoutubeProvider(
                                 "YoutubeUtils",
                                 "[CHIP] BROWSE_OK page=$page key=$requestData items=${results.size} " +
                                     "next=${!nextToken.isNullOrBlank()} source=$source " +
-                                    "chars=${browse.bodyChars} net=${browse.bodyReadMs}ms " +
-                                    "parseWait=${browse.parseQueueMs}ms parseWork=${browse.parseWorkMs}ms"
+                                    "chars=${browse.bodyChars} response=${browse.responseWaitMs}ms " +
+                                    "memWait=${browse.memoryQueueMs}ms memWork=${browse.memoryWorkMs}ms"
                             )
                         } else {
                             Log.w("YoutubeUtils", "[CHIP] BROWSE_EMPTY_RESPONSE page=$page key=$requestData")
