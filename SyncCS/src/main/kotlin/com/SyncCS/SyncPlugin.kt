@@ -223,48 +223,52 @@ class SyncPlugin : Plugin() {
 
         pluginScope.launch {
             try {
-                if (!isCurrentInstance(context)) return@launch
+                // Serialize the entire remote restore transaction with backups.
+                // This prevents a stale local backup PATCH from racing a foreground restore GET/merge.
+                backupMutex.withLock {
+                    if (!isCurrentInstance(context)) return@withLock
 
-                val devices = ApiUtils.fetchDevices()
-                if (!isCurrentInstance(context)) return@launch
+                    val devices = ApiUtils.fetchDevices()
+                    if (!isCurrentInstance(context)) return@withLock
 
-                val currentDeviceId = try {
-                    prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) }
-                } catch (e: Exception) {
-                    null
-                } ?: UtilKt.getDeviceId(context.packageName, context)
+                    val currentDeviceId = try {
+                        prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) }
+                    } catch (e: Exception) {
+                        null
+                    } ?: UtilKt.getDeviceId(context.packageName, context)
 
-                for (device in devices) {
-                    if (!isCurrentInstance(context)) return@launch
+                    for (device in devices) {
+                        if (!isCurrentInstance(context)) return@withLock
 
-                    if (device.deviceId == currentDeviceId) {
-                        Log.d("SYNC", "[SyncPlugin] Skipping own device: ${device.name}")
-                        continue
-                    }
+                        if (device.deviceId == currentDeviceId) {
+                            Log.d("SYNC", "[SyncPlugin] Skipping own device: ${device.name}")
+                            continue
+                        }
 
-                    val lastHashKey = "sync_last_hash_${device.deviceId}"
-                    val lastHash = prefs.getString(lastHashKey, "")
-                    val currentHash = UtilKt.md5(device.syncedData ?: "")
+                        val lastHashKey = "sync_last_hash_${device.deviceId}"
+                        val lastHash = prefs.getString(lastHashKey, "")
+                        val currentHash = UtilKt.md5(device.syncedData ?: "")
 
-                    if (lastHash != currentHash) {
-                        Log.d("SYNC", "[SyncPlugin] New data found for device: ${device.name}. Merging...")
-                        device.syncedData?.let { encoded ->
-                            val decoded = UtilKt.decompressJsonFromString(encoded)
-                            if (decoded.isNotBlank()) {
-                                isRestoring = true
-                                try {
-                                    val backupFile = mapper.readValue<BackupFile>(decoded)
-                                    BackupUtils.restore(context, backupFile, restoreSettings = true, restoreDataStore = true)
-                                    prefs.edit().putString(lastHashKey, currentHash).apply()
-                                    Log.d("SYNC", "[SyncPlugin] Restore merge successful for ${device.name}")
-                                } finally {
-                                    delay(1000L)
-                                    isRestoring = false
+                        if (lastHash != currentHash) {
+                            Log.d("SYNC", "[SyncPlugin] New data found for device: ${device.name}. Merging...")
+                            device.syncedData?.let { encoded ->
+                                val decoded = UtilKt.decompressJsonFromString(encoded)
+                                if (decoded.isNotBlank()) {
+                                    isRestoring = true
+                                    try {
+                                        val backupFile = mapper.readValue<BackupFile>(decoded)
+                                        BackupUtils.restore(context, backupFile, restoreSettings = true, restoreDataStore = true)
+                                        prefs.edit().putString(lastHashKey, currentHash).apply()
+                                        Log.d("SYNC", "[SyncPlugin] Restore merge successful for ${device.name}")
+                                    } finally {
+                                        delay(1000L)
+                                        isRestoring = false
+                                    }
                                 }
                             }
+                        } else {
+                            Log.d("SYNC", "[SyncPlugin] Device ${device.name} is already up-to-date.")
                         }
-                    } else {
-                        Log.d("SYNC", "[SyncPlugin] Device ${device.name} is already up-to-date.")
                     }
                 }
             } catch (e: Exception) {
