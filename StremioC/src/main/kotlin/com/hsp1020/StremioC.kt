@@ -1576,6 +1576,51 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
         }
 
+        // Avoid issuing the exact same subtitle resource request twice when the
+        // active addon and history-sync addon resolve to an identical URL.
+        val requestedSubtitleUrls = Collections.synchronizedSet(mutableSetOf<String>())
+
+        suspend fun fetchStremioSubtitles(
+            addonUrl: String,
+            id: String?,
+            season: Int?,
+            episode: Int?
+        ) {
+            if (addonUrl.isBlank() || id.isNullOrBlank()) return
+
+            val subId = buildStremioId(
+                targetType,
+                id,
+                season,
+                episode,
+                isSubtitle = true
+            ) ?: id
+            if (subId.isBlank()) return
+
+            val cleanSubtitleBase = addonUrl.fixSourceUrl().cleanBaseUrl()
+            if (cleanSubtitleBase.isBlank()) return
+
+            val subtitleSuffix = addonUrl.substringAfter("?", "")
+                .takeIf { it.isNotEmpty() }
+                ?.let { "?$it" }
+                ?: ""
+            val subtitleRequestUrl =
+                "$cleanSubtitleBase/subtitles/$targetType/${subId.urlEncode()}.json$subtitleSuffix"
+
+            if (!requestedSubtitleUrls.add(subtitleRequestUrl)) return
+
+            runSuspendCatching {
+                val text = customSession.get(subtitleRequestUrl, timeout = 15L).text
+                val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
+
+                res?.subtitles?.forEach { sub ->
+                    val subtitleUrl = sub.url ?: return@forEach
+                    val lang = sub.lang ?: sub.lang_code ?: "Unknown"
+                    stremioSubtitleCallback.invoke(newSubtitleFile(lang, subtitleUrl))
+                }
+            }.onFailure { it.printStackTrace() }
+        }
+
         runAllAsync(
             {
                 if (cleanBaseUrl.isNotBlank() && encodedPrimaryId.isNotBlank()) {
@@ -1595,26 +1640,23 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
             },
             {
+                // Fetch subtitle resources exposed by the currently selected
+                // Stremio addon itself (e.g. AIOStreams aggregated subtitles).
+                fetchStremioSubtitles(
+                    currentMainUrl,
+                    primaryId,
+                    loadData.season,
+                    loadData.episode
+                )
+            },
+            {
                 if (isSyncEnabled && syncUrl.isNotBlank()) {
-                    runSuspendCatching {
-                        val subId = buildStremioId(targetType, globalId ?: primaryId, globalSeason, globalEpisode, isSubtitle = true) ?: globalId ?: primaryId
-                        val encodedSubId = subId.urlEncode()
-                        
-                        val cleanBase = syncUrl.cleanBaseUrl()
-                        val suffix = syncUrl.substringAfter("?", "")
-                            .takeIf { it.isNotEmpty() }
-                            ?.let { "?$it" }
-                            ?: ""
-                        val subtitleRequestUrl = "$cleanBase/subtitles/$targetType/${encodedSubId}.json$suffix"
-                        
-                        val text = customSession.get(subtitleRequestUrl, timeout = 15L).text
-                        val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
-                        
-                        res?.subtitles?.forEach { sub ->
-                            val lang = sub.lang ?: sub.lang_code ?: "Unknown"
-                            stremioSubtitleCallback.invoke(newSubtitleFile(lang, sub.url ?: return@forEach))
-                        }
-                    }.onFailure { it.printStackTrace() }
+                    fetchStremioSubtitles(
+                        syncUrl,
+                        globalId ?: primaryId,
+                        globalSeason,
+                        globalEpisode
+                    )
                 }
             },
             { 
