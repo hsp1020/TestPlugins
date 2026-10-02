@@ -82,6 +82,174 @@ object VixSrcExtractor {
         return url
     }
 
+    private fun logVixSrcMasterQualities(masterText: String) {
+        try {
+            val normalized = masterText.replace("\\r", "")
+            val lines = normalized.lines().map { it.trim() }
+
+            println("[STREMIOSUB-VIXSRC] 📺 ===== HLS QUALITY INSPECTION =====")
+
+            val streamIndexes = lines.indices.filter {
+                lines[it].startsWith("#EXT-X-STREAM-INF", ignoreCase = true)
+            }
+
+            if (streamIndexes.isEmpty()) {
+                val resolutionTags = Regex(
+                    """RESOLUTION\\s*=\\s*(\\d+)\\s*x\\s*(\\d+)""",
+                    RegexOption.IGNORE_CASE
+                ).findAll(normalized).mapNotNull { match ->
+                    val width = match.groupValues.getOrNull(1)?.toIntOrNull()
+                    val height = match.groupValues.getOrNull(2)?.toIntOrNull()
+                    if (width != null && height != null) width to height else null
+                }.toList()
+
+                val renditionHints = Regex(
+                    """(?:rendition=|[/_-])(\\d{3,4})p(?:[&/?_.-]|$)""",
+                    RegexOption.IGNORE_CASE
+                ).findAll(normalized)
+                    .mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }
+                    .toList()
+
+                val allHeights = buildList {
+                    addAll(resolutionTags.map { it.second })
+                    addAll(renditionHints)
+                }
+
+                val maxHeight = allHeights.maxOrNull()
+                val found1080 = allHeights.any { it >= 1080 }
+                val segmentCount = lines.count {
+                    it.isNotBlank() && !it.startsWith("#")
+                }
+
+                println(
+                    "[STREMIOSUB-VIXSRC] 📺 No #EXT-X-STREAM-INF found -> " +
+                        "response is a MEDIA playlist (single rendition) or has no variant table"
+                )
+                println("[STREMIOSUB-VIXSRC] 📺 Media playlist URI lines=$segmentCount")
+
+                if (resolutionTags.isNotEmpty()) {
+                    println(
+                        "[STREMIOSUB-VIXSRC] 📺 Resolution tags=" +
+                            resolutionTags.distinct().joinToString(", ") { "${it.first}x${it.second}" }
+                    )
+                }
+
+                if (renditionHints.isNotEmpty()) {
+                    println(
+                        "[STREMIOSUB-VIXSRC] 📺 Rendition hints=" +
+                            renditionHints.distinct().sorted().joinToString(", ") { "${it}p" }
+                    )
+                }
+
+                println(
+                    "[STREMIOSUB-VIXSRC] 📺 SUMMARY: variants=0 " +
+                        "maxHeight=${maxHeight?.let { "${it}p" } ?: "UNKNOWN"} " +
+                        "has1080=$found1080"
+                )
+
+                when {
+                    found1080 ->
+                        println("[STREMIOSUB-VIXSRC] ✅ PLAYLIST CONTAINS 1080p OR HIGHER HINT")
+                    maxHeight != null ->
+                        println("[STREMIOSUB-VIXSRC] ❌ PLAYLIST HAS NO 1080p; MAX=${maxHeight}p")
+                    else ->
+                        println(
+                            "[STREMIOSUB-VIXSRC] ⚠️ Single media playlist does not advertise resolution; " +
+                                "actual decoder size must be checked in player log"
+                        )
+                }
+
+                println("[STREMIOSUB-VIXSRC] 📺 ===== END QUALITY INSPECTION =====")
+                return
+            }
+
+            var maxHeight = 0
+            var found1080 = false
+            var variantCount = 0
+
+            for (index in streamIndexes) {
+                val info = lines[index]
+
+                val resolution = Regex(
+                    """RESOLUTION\\s*=\\s*(\\d+)\\s*x\\s*(\\d+)""",
+                    RegexOption.IGNORE_CASE
+                ).find(info)
+
+                val width = resolution?.groupValues?.getOrNull(1)?.toIntOrNull()
+                val height = resolution?.groupValues?.getOrNull(2)?.toIntOrNull()
+
+                val bandwidth = Regex(
+                    """(?:^|,)BANDWIDTH\\s*=\\s*(\\d+)""",
+                    RegexOption.IGNORE_CASE
+                ).find(info)?.groupValues?.getOrNull(1)?.toLongOrNull()
+
+                val averageBandwidth = Regex(
+                    """AVERAGE-BANDWIDTH\\s*=\\s*(\\d+)""",
+                    RegexOption.IGNORE_CASE
+                ).find(info)?.groupValues?.getOrNull(1)?.toLongOrNull()
+
+                val codecs = Regex(
+                    """CODECS\\s*=\\s*"([^"]+)"""",
+                    RegexOption.IGNORE_CASE
+                ).find(info)?.groupValues?.getOrNull(1)
+
+                val variantUrl = (index + 1 until lines.size)
+                    .asSequence()
+                    .map { lines[it] }
+                    .firstOrNull { it.isNotBlank() && !it.startsWith("#") }
+
+                if (height != null) {
+                    maxHeight = maxOf(maxHeight, height)
+                    if (height >= 1080) found1080 = true
+                }
+
+                val urlRendition = variantUrl?.let {
+                    Regex(
+                        """rendition=(\\d{3,4})p""",
+                        RegexOption.IGNORE_CASE
+                    ).find(it)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                }
+
+                if (urlRendition != null) {
+                    maxHeight = maxOf(maxHeight, urlRendition)
+                    if (urlRendition >= 1080) found1080 = true
+                }
+
+                variantCount++
+
+                println(
+                    "[STREMIOSUB-VIXSRC] 📺 VARIANT #$variantCount " +
+                        "resolution=${if (width != null && height != null) "${width}x${height}" else "UNKNOWN"} " +
+                        "bandwidth=${bandwidth ?: "UNKNOWN"} " +
+                        "avgBandwidth=${averageBandwidth ?: "UNKNOWN"} " +
+                        "codecs=${codecs ?: "UNKNOWN"}"
+                )
+                println(
+                    "[STREMIOSUB-VIXSRC] 📺 VARIANT #$variantCount URL=${variantUrl ?: "NONE"}"
+                )
+            }
+
+            println(
+                "[STREMIOSUB-VIXSRC] 📺 SUMMARY: variants=$variantCount " +
+                    "maxHeight=${if (maxHeight > 0) "${maxHeight}p" else "UNKNOWN"} " +
+                    "has1080=$found1080"
+            )
+
+            when {
+                found1080 ->
+                    println("[STREMIOSUB-VIXSRC] ✅ SERVER MASTER CONTAINS 1080p")
+                maxHeight > 0 ->
+                    println("[STREMIOSUB-VIXSRC] ❌ SERVER MASTER HAS NO 1080p; MAX=${maxHeight}p")
+                else ->
+                    println("[STREMIOSUB-VIXSRC] ⚠️ Unable to determine maximum resolution")
+            }
+
+            println("[STREMIOSUB-VIXSRC] 📺 ===== END QUALITY INSPECTION =====")
+        } catch (e: Exception) {
+            println("[STREMIOSUB-VIXSRC] ⚠️ HLS quality inspection failed: ${e.message}")
+        }
+    }
+
     suspend fun invokeVixSrc(
         loadData: StremioC.LoadData,
         targetType: String,
@@ -291,6 +459,7 @@ object VixSrcExtractor {
 
                 var verifiedHeaders: MutableMap<String, String>? = null
                 var verifiedMode: String? = null
+                var verifiedPlaylistText: String? = null
 
                 for ((mode, headers) in candidates) {
                     try {
@@ -301,6 +470,7 @@ object VixSrcExtractor {
                         if (verificationText.startsWith("#EXTM3U")) {
                             verifiedHeaders = headers
                             verifiedMode = mode
+                            verifiedPlaylistText = verificationResponse.text
                             println("[STREMIOSUB-VIXSRC] ✅ Movie playlist verified with Referer mode=$mode")
                             break
                         } else {
@@ -326,6 +496,7 @@ object VixSrcExtractor {
                 }
 
                 playerHeaders = verifiedHeaders ?: return
+                verifiedPlaylistText?.let { logVixSrcMasterQualities(it) }
                 println("[STREMIOSUB-VIXSRC] 🧭 Player request mode=MOVIE($verifiedMode referer)")
             } else {
                 playerHeaders = makePlayerHeaders(embedUrl, includeOrigin = false)
