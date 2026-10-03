@@ -19,6 +19,9 @@ import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newAnimeSearchResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Element
 import java.net.URI
 import java.net.URLDecoder
@@ -149,7 +152,7 @@ class OHLI24 : MainAPI() {
         val ageRating = info["등급"]?.takeIf { it.isNotBlank() }
         val plot = doc.selectFirst(".view-story .view-stocon")?.text()?.trim().orEmpty()
 
-        val episodes = routeAnchors(doc, "e").map { anchor ->
+        val episodes = loadAllEpisodeAnchors(url, doc).map { anchor ->
             val href = absoluteUrl(anchor.attr("href"))
             val routeLabel = routeText(href, "e")
             val visibleLabel = anchor.text().trim()
@@ -168,6 +171,30 @@ class OHLI24 : MainAPI() {
             posterUrl = poster
             this.plot = plot
         }
+    }
+
+    private suspend fun loadAllEpisodeAnchors(url: String, firstDoc: Element): List<Element> {
+        val pageData = firstDoc.selectFirst("script[data-page=app]")?.data().orEmpty()
+        val lastPage = Regex("\"last_page\":(\\d+)")
+            .find(pageData)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
+
+        val all = routeAnchors(firstDoc, "e").toMutableList()
+        if (lastPage <= 1) return all
+
+        coroutineScope {
+            for (batch in (2..lastPage).chunked(4)) {
+                batch.map { page ->
+                    async {
+                        val pageUrl = "${url.substringBefore('?')}?page=$page"
+                        app.get(pageUrl, headers = headers, timeout = 100).document
+                    }
+                }.awaitAll().forEach { pageDoc ->
+                    all += routeAnchors(pageDoc, "e")
+                }
+            }
+        }
+
+        return all.distinctBy { absoluteUrl(it.attr("href")) }
     }
 
     private fun episodeNumber(text: String): Int? =
