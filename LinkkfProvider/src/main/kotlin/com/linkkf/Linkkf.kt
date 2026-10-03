@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
+import java.net.URLEncoder
 import org.jsoup.nodes.Element
 
 class Linkkf : MainAPI() {
@@ -50,15 +51,43 @@ class Linkkf : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        return try {
-            app.get("$mainUrl/view/wd/$query/", headers = commonHeaders)
-                .document
-                .select(".vod-item")
+        val keyword = query.trim()
+        if (keyword.isEmpty()) return emptyList()
+
+        val encoded = URLEncoder.encode(keyword, "UTF-8")
+        val results = mutableListOf<SearchResponse>()
+        var page = 1
+
+        while (true) {
+            val pageUrl = if (page == 1) {
+                "$mainUrl/view/?wd=$encoded"
+            } else {
+                "$mainUrl/view/page/$page/?wd=$encoded"
+            }
+
+            val doc = try {
+                app.get(pageUrl, headers = commonHeaders).document
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                break
+            }
+
+            val pageResults = doc.select(".search-list .vod-item")
                 .mapNotNull { it.toSearchResponse() }
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            emptyList()
+
+            if (pageResults.isEmpty()) break
+            results.addAll(pageResults)
+
+            val nextPage = page + 1
+            val hasNext = doc.select(
+                ".ewave-page a[href*='/view/page/$nextPage/'][href*='wd=']"
+            ).isNotEmpty()
+
+            if (!hasNext) break
+            page = nextPage
         }
+
+        return results
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -86,7 +115,8 @@ class Linkkf : MainAPI() {
             ?.trim()
             ?.takeIf { it.isNotBlank() }
 
-        val detailPlot = buildList {            
+        val detailPlot = buildList {
+            airingInfo?.let { add("방영 정보：${it}년") }
             originalTitle?.let { add("원제：$it") }
             add(description)
         }.joinToString("<br>")
