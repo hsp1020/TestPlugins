@@ -68,10 +68,42 @@ class Linkkf : MainAPI() {
         val poster = doc.selectFirst(".detail-img img")?.let {
             absoluteUrl(it.attr("data-original").ifBlank { it.attr("src") })
         }
-        val description = doc.selectFirst(".detail-desc-content")?.text()?.trim().orEmpty()
-            .ifBlank { "다시보기" }
-        val tags = doc.select(".detail-info-desc a[href*='/class/']").map { it.text().trim() }
-        val year = doc.selectFirst("a[href*='/year/']")?.text()?.trim()?.toIntOrNull()
+        val description = doc.selectFirst(".detail-desc-content")?.text()?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: doc.selectFirst("meta[name=description]")?.attr("content")?.trim()
+                ?.takeIf { it.isNotBlank() }
+            ?: "다시보기"
+
+        val infoText = doc.selectFirst(".box.layout-box.gap.tv")?.text().orEmpty()
+        val airingInfo = Regex("""방영\\s*정보\\s*[：:]\\s*(\\d{4})\\s*년""")
+            .find(infoText)
+            ?.groupValues
+            ?.getOrNull(1)
+        val originalTitle = Regex("""원제\\s*[：:]\\s*(.+)$""")
+            .find(infoText)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+
+        val plot = buildList {
+            airingInfo?.let { add("방영 정보：${it}년") }
+            originalTitle?.let { add("원제：$it") }
+            add(description)
+        }.joinToString("\\n")
+
+        val genreRow = doc.select(".detail-info-desc li").firstOrNull { li ->
+            li.selectFirst("span")?.text()?.contains("장르") == true
+        }
+        val genreText = genreRow?.text().orEmpty()
+            .substringAfter("：", genreRow?.text().orEmpty().substringAfter(":", ""))
+        val tags = genreText
+            .split("/")
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        val year = airingInfo?.toIntOrNull()
 
         fun parseEpisodes(selector: String): List<Episode> = doc.select(selector).mapNotNull { a ->
             val episodeUrl = absoluteUrl(a.attr("href")) ?: return@mapNotNull null
@@ -108,7 +140,7 @@ class Linkkf : MainAPI() {
 
         return newAnimeLoadResponse(title, fullUrl, TvType.Anime) {
             posterUrl = poster
-            plot = description
+            plot = plot
             this.tags = tags
             this.year = year
             if (subEpisodes.isNotEmpty()) addEpisodes(DubStatus.Subbed, subEpisodes)
