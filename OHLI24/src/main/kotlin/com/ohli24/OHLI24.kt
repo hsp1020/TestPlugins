@@ -16,8 +16,7 @@ import com.lagradost.cloudstream3.mainPageOf
 import com.lagradost.cloudstream3.newAnimeLoadResponse
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
-import com.lagradost.cloudstream3.newMovieLoadResponse
-import com.lagradost.cloudstream3.newMovieSearchResponse
+import com.lagradost.cloudstream3.newAnimeSearchResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Element
@@ -32,7 +31,7 @@ class OHLI24 : MainAPI() {
     override var lang = "ko"
     override val hasChromecastSupport = true
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
+    override val supportedTypes = setOf(TvType.Anime)
 
     override val mainPage = mainPageOf(
         "bbs/board.php?bo_table=ing" to "방영중",
@@ -73,7 +72,7 @@ class OHLI24 : MainAPI() {
         val card = cardRoot(this)
         val poster = imageUrl(card.selectFirst("img"))
         val rating = card.selectFirst(".rating, [class*=rating]")?.text()?.trim().orEmpty()
-        return newMovieSearchResponse(title, href, TvType.Anime) {
+        return newAnimeSearchResponse(title, href) {
             posterUrl = poster
             if (rating.toDoubleOrNull() != null) score = Score.from10(rating)
         }
@@ -111,54 +110,23 @@ class OHLI24 : MainAPI() {
         val plot = Regex("줄거리\\s+(.+?)(?:\\s+에피소드|$)").find(body)
             ?.groupValues?.getOrNull(1)?.trim().orEmpty()
 
-        val episodeAnchors = routeAnchors(doc, "e")
-        val isSeries = when (declaredType(doc.selectFirst("script[data-page=app]")?.data().orEmpty())) {
-            TvType.Anime -> true
-            TvType.AnimeMovie -> false
-            else -> episodeAnchors.size > 1 || episodeAnchors.any {
-                episodeNumber(routeText(it.attr("href"), "e")) != null || episodeNumber(it.text()) != null
+        val episodes = routeAnchors(doc, "e").map { anchor ->
+            val href = absoluteUrl(anchor.attr("href"))
+            val routeLabel = routeText(href, "e")
+            val visibleLabel = anchor.text().trim()
+            val number = episodeNumber(routeLabel) ?: episodeNumber(visibleLabel)
+            newEpisode(href) {
+                name = routeLabel.ifBlank { visibleLabel.ifBlank { number?.let { "Episode $it" } ?: title } }
+                episode = number
             }
-        }
+        }.sortedBy { it.episode ?: Int.MAX_VALUE }
 
-        if (isSeries) {
-            val episodes = episodeAnchors.map { anchor ->
-                val href = absoluteUrl(anchor.attr("href"))
-                val routeLabel = routeText(href, "e")
-                val visibleLabel = anchor.text().trim()
-                val number = episodeNumber(routeLabel) ?: episodeNumber(visibleLabel)
-                newEpisode(href) {
-                    name = routeLabel.ifBlank { visibleLabel.ifBlank { number?.let { "Episode $it" } ?: title } }
-                    episode = number
-                }
-            }.sortedBy { it.episode ?: Int.MAX_VALUE }
-
-            return newAnimeLoadResponse(title, url, TvType.Anime) {
-                addEpisodes(DubStatus.Subbed, episodes)
-                this.year = year
-                tags = genres
-                posterUrl = poster
-                this.plot = plot
-            }
-        }
-
-        val data = episodeAnchors.firstOrNull()?.attr("href")?.let(::absoluteUrl).orEmpty()
-        return newMovieLoadResponse(title, url, TvType.AnimeMovie, data) {
+        return newAnimeLoadResponse(title, url, TvType.Anime) {
+            addEpisodes(DubStatus.Subbed, episodes)
             this.year = year
             tags = genres
             posterUrl = poster
             this.plot = plot
-        }
-    }
-
-    private fun declaredType(data: String): TvType? {
-        val kind = Regex("\\\"card_meta\\\"\\s*:\\s*\\{[^}]*\\\"kind\\\"\\s*:\\s*\\\"(series|movie)\\\"", RegexOption.IGNORE_CASE)
-            .find(data)?.groupValues?.getOrNull(1)
-        val role = Regex("\\\"role\\\"\\s*:\\s*\\\"(series|movie)\\\"", RegexOption.IGNORE_CASE)
-            .find(data)?.groupValues?.getOrNull(1)
-        return when ((kind ?: role)?.lowercase()) {
-            "series" -> TvType.Anime
-            "movie" -> TvType.AnimeMovie
-            else -> null
         }
     }
 
