@@ -86,8 +86,7 @@ class Linkkf : MainAPI() {
             ?.trim()
             ?.takeIf { it.isNotBlank() }
 
-        val detailPlot = buildList {
-            airingInfo?.let { add("방영 정보：${it}년") }
+        val detailPlot = buildList {            
             originalTitle?.let { add("원제：$it") }
             add(description)
         }.joinToString("<br>")
