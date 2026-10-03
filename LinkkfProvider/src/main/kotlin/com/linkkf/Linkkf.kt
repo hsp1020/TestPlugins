@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URLEncoder
 import org.jsoup.nodes.Element
 
@@ -116,7 +117,6 @@ class Linkkf : MainAPI() {
             ?.takeIf { it.isNotBlank() }
 
         val detailPlot = buildList {
-            airingInfo?.let { add("방영 정보：${it}년") }
             originalTitle?.let { add("원제：$it") }
             add(description)
         }.joinToString("<br>")
@@ -193,10 +193,6 @@ class Linkkf : MainAPI() {
                 else -> result.url to result.referer
             } ?: return false
 
-            captureUrl(watchUrl, "$mainUrl/", VTT_REGEX)?.let { subtitleUrl ->
-                subtitleCallback(newSubtitleFile(lang = "Korean", url = subtitleUrl))
-            }
-
             callback(
                 newExtractorLink(
                     source = name,
@@ -208,6 +204,12 @@ class Linkkf : MainAPI() {
                     quality = getQualityFromName("HD")
                 }
             )
+
+            withTimeoutOrNull(8_000L) {
+                captureUrl(watchUrl, "$mainUrl/", VTT_REGEX)
+            }?.let { subtitleUrl ->
+                subtitleCallback(newSubtitleFile(lang = "Korean", url = subtitleUrl))
+            }
 
             true
         } catch (e: Exception) {
