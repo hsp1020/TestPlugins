@@ -257,11 +257,11 @@ class Kotbc : MainAPI() {
 
                     add(
                         if (type == TvType.Movie) {
-                            newMovieSearchResponse("${index + 1}. $title", url, TvType.Movie) {
+                            newMovieSearchResponse(title, url, TvType.Movie) {
                                 posterUrl = poster
                             }
                         } else {
-                            newTvSeriesSearchResponse("${index + 1}. $title", url, TvType.TvSeries) {
+                            newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
                                 posterUrl = poster
                             }
                         }
