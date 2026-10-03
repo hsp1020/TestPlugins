@@ -101,14 +101,17 @@ class OHLI24 : MainAPI() {
         val poster = imageUrl(doc.selectFirst(
             ".view-info .image img, img[itemprop=image], .serial-movie-wrap img, .image img"
         ))
-        val body = doc.body()?.text()?.replace(Regex("\\s+"), " ").orEmpty()
-        val genres = Regex("장르\\s+(.+?)\\s+(?:방영일|상영일|등급|총화수|런타임|별점)")
-            .find(body)?.groupValues?.getOrNull(1)?.split(',')
+        val info = doc.select(".view-info .list > p").mapNotNull { row ->
+            val values = row.select("span.block").map { it.text().trim() }
+            if (values.size >= 2) values[0] to values[1] else null
+        }.toMap()
+        val genres = info["장르"]?.split(',')
             ?.map { it.trim() }?.filter { it.isNotBlank() } ?: emptyList()
-        val year = Regex("(?:방영일|상영일)\\s+(\\d{4})").find(body)
-            ?.groupValues?.getOrNull(1)?.toIntOrNull()
-        val plot = Regex("줄거리\\s+(.+?)(?:\\s+에피소드|$)").find(body)
-            ?.groupValues?.getOrNull(1)?.trim().orEmpty()
+        val year = info["방영일"]?.let {
+            Regex("\\b(\\d{4})\\.").find(it)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        }
+        val ageRating = info["등급"]?.takeIf { it.isNotBlank() }
+        val plot = doc.selectFirst(".view-story .view-stocon")?.text()?.trim().orEmpty()
 
         val episodes = routeAnchors(doc, "e").map { anchor ->
             val href = absoluteUrl(anchor.attr("href"))
@@ -125,6 +128,7 @@ class OHLI24 : MainAPI() {
             addEpisodes(DubStatus.Subbed, episodes)
             this.year = year
             tags = genres
+            contentRating = ageRating
             posterUrl = poster
             this.plot = plot
         }
