@@ -17,6 +17,7 @@ import com.lagradost.cloudstream3.newAnimeLoadResponse
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newAnimeSearchResponse
+import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import kotlinx.coroutines.async
@@ -152,14 +153,10 @@ class OHLI24 : MainAPI() {
         val ageRating = info["등급"]?.takeIf { it.isNotBlank() }
         val plot = doc.selectFirst(".view-story .view-stocon")?.text()?.trim().orEmpty()
 
-        val episodes = loadAllEpisodeAnchors(url, doc).map { anchor ->
-            val href = absoluteUrl(anchor.attr("href"))
-            val routeLabel = routeText(href, "e")
-            val visibleLabel = anchor.text().trim()
-            val number = episodeNumber(routeLabel) ?: episodeNumber(visibleLabel)
-            newEpisode(href) {
-                name = routeLabel.ifBlank { visibleLabel.ifBlank { number?.let { "Episode $it" } ?: title } }
-                episode = number
+        val episodes = loadAllEpisodes(url, doc).map { item ->
+            newEpisode(item.url) {
+                name = item.name
+                episode = item.number
             }
         }.sortedBy { it.episode ?: Int.MAX_VALUE }
 
@@ -173,29 +170,111 @@ class OHLI24 : MainAPI() {
         }
     }
 
-    private suspend fun loadAllEpisodeAnchors(url: String, firstDoc: Element): List<Element> {
-        val pageData = firstDoc.selectFirst("script[data-page=app]")?.data().orEmpty()
-        val lastPage = Regex("\"last_page\":(\\d+)")
-            .find(pageData)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1
+    private data class InertiaPage(
+        val component: String? = null,
+        val props: InertiaProps? = null,
+        val version: String? = null
+    )
 
-        val all = routeAnchors(firstDoc, "e").toMutableList()
-        if (lastPage <= 1) return all
+    private data class InertiaProps(
+        val episodes: EpisodePage? = null
+    )
 
+    private data class EpisodePage(
+        val current_page: Int? = null,
+        val last_page: Int? = null,
+        val total: Int? = null,
+        val data: List<EpisodeItem> = emptyList()
+    )
+
+    private data class EpisodeItem(
+        val title: String? = null,
+        val slug: String? = null
+    )
+
+    private data class ParsedEpisode(
+        val url: String,
+        val name: String,
+        val number: Int?
+    )
+
+    private suspend fun loadAllEpisodes(url: String, firstDoc: Element): List<ParsedEpisode> {
+        val firstInertia = parseInertiaPage(firstDoc)
+        val firstPage = firstInertia?.props?.episodes
+        val firstItems = firstPage?.let(::toParsedEpisodes).orEmpty()
+            .ifEmpty { routeEpisodes(firstDoc) }
+        val lastPage = firstPage?.last_page ?: 1
+        if (lastPage <= 1) return firstItems
+
+        val all = firstItems.toMutableList()
         coroutineScope {
             for (batch in (2..lastPage).chunked(4)) {
                 batch.map { page ->
-                    async {
-                        val pageUrl = "${url.substringBefore('?')}?page=$page"
-                        app.get(pageUrl, headers = headers, timeout = 100).document
-                    }
-                }.awaitAll().forEach { pageDoc ->
-                    all += routeAnchors(pageDoc, "e")
+                    async { fetchEpisodePage(url, page, firstInertia?.version) }
+                }.awaitAll().forEach { pageData ->
+                    if (pageData != null) all += toParsedEpisodes(pageData)
                 }
             }
         }
 
-        return all.distinctBy { absoluteUrl(it.attr("href")) }
+        return all.distinctBy { it.url }
     }
+
+    private suspend fun fetchEpisodePage(url: String, page: Int, version: String?): EpisodePage? {
+        val pageUrl = "${url.substringBefore('?')}?page=$page"
+        val inertiaHeaders = headers.toMutableMap().apply {
+            this["X-Inertia"] = "true"
+            this["X-Inertia-Partial-Component"] = "contents/List"
+            this["X-Inertia-Partial-Data"] = "episodes"
+            this["X-Requested-With"] = "XMLHttpRequest"
+            this["Referer"] = url.substringBefore('?')
+            if (!version.isNullOrBlank()) this["X-Inertia-Version"] = version
+        }
+
+        repeat(2) {
+            val response = runCatching {
+                app.get(pageUrl, headers = inertiaHeaders, timeout = 100)
+            }.getOrNull() ?: return@repeat
+            val episodePage = tryParseJson<InertiaPage>(response.text)?.props?.episodes
+            if (episodePage != null && episodePage.current_page == page) return episodePage
+        }
+
+        val fullResponse = runCatching {
+            app.get(pageUrl, headers = headers, timeout = 100)
+        }.getOrNull() ?: return null
+        val fullPage = parseInertiaPage(fullResponse.document)?.props?.episodes
+        return fullPage?.takeIf { it.current_page == page }
+    }
+
+    private fun parseInertiaPage(doc: Element): InertiaPage? {
+        val json = doc.selectFirst("script[data-page=app]")?.data()?.trim().orEmpty()
+        if (json.isBlank()) return null
+        return tryParseJson<InertiaPage>(json)
+    }
+
+    private fun toParsedEpisodes(page: EpisodePage): List<ParsedEpisode> =
+        page.data.mapNotNull { item ->
+            val label = item.slug?.trim().takeUnless { it.isNullOrBlank() }
+                ?: item.title?.trim().takeUnless { it.isNullOrBlank() }
+                ?: return@mapNotNull null
+            ParsedEpisode(
+                url = "$mainUrl/e/${encodeRoute(label)}",
+                name = label,
+                number = episodeNumber(label)
+            )
+        }
+
+    private fun routeEpisodes(doc: Element): List<ParsedEpisode> =
+        routeAnchors(doc, "e").map { anchor ->
+            val href = absoluteUrl(anchor.attr("href"))
+            val routeLabel = routeText(href, "e")
+            val visibleLabel = anchor.text().trim()
+            val label = routeLabel.ifBlank { visibleLabel }
+            ParsedEpisode(href, label, episodeNumber(label))
+        }
+
+    private fun encodeRoute(value: String): String =
+        URLEncoder.encode(value, "UTF-8").replace("+", "%20")
 
     private fun episodeNumber(text: String): Int? =
         Regex("(\\d+)(?:\\.\\d+)?화(?:\\(完\\))?").find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
