@@ -56,7 +56,7 @@ class Linkkf : MainAPI() {
                 list = HomePageList(
                     name = request.name,
                     list = list,
-                    isHorizontalImages = true
+                    isHorizontalImages = false
                 ),
                 hasNext = hasNextPage
             )
