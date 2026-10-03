@@ -95,7 +95,7 @@ object VixSrcExtractor {
 
             if (streamIndexes.isEmpty()) {
                 val resolutionTags = Regex(
-                    """RESOLUTION\\s*=\\s*(\\d+)\\s*x\\s*(\\d+)""",
+                    """RESOLUTION\s*=\s*(\d+)\s*x\s*(\d+)""",
                     RegexOption.IGNORE_CASE
                 ).findAll(normalized).mapNotNull { match ->
                     val width = match.groupValues.getOrNull(1)?.toIntOrNull()
@@ -104,7 +104,7 @@ object VixSrcExtractor {
                 }.toList()
 
                 val renditionHints = Regex(
-                    """(?:rendition=|[/_-])(\\d{3,4})p(?:[&/?_.-]|$)""",
+                    """(?:rendition=|[/_-])(\d{3,4})p(?:[&/?_.-]|$)""",
                     RegexOption.IGNORE_CASE
                 ).findAll(normalized)
                     .mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }
@@ -171,7 +171,7 @@ object VixSrcExtractor {
                 val info = lines[index]
 
                 val resolution = Regex(
-                    """RESOLUTION\\s*=\\s*(\\d+)\\s*x\\s*(\\d+)""",
+                    """RESOLUTION\s*=\s*(\d+)\s*x\s*(\d+)""",
                     RegexOption.IGNORE_CASE
                 ).find(info)
 
@@ -179,17 +179,17 @@ object VixSrcExtractor {
                 val height = resolution?.groupValues?.getOrNull(2)?.toIntOrNull()
 
                 val bandwidth = Regex(
-                    """(?:^|,)BANDWIDTH\\s*=\\s*(\\d+)""",
+                    """(?:^|,)BANDWIDTH\s*=\s*(\d+)""",
                     RegexOption.IGNORE_CASE
                 ).find(info)?.groupValues?.getOrNull(1)?.toLongOrNull()
 
                 val averageBandwidth = Regex(
-                    """AVERAGE-BANDWIDTH\\s*=\\s*(\\d+)""",
+                    """AVERAGE-BANDWIDTH\s*=\s*(\d+)""",
                     RegexOption.IGNORE_CASE
                 ).find(info)?.groupValues?.getOrNull(1)?.toLongOrNull()
 
                 val codecs = Regex(
-                    """CODECS\\s*=\\s*"([^"]+)"""",
+                    """CODECS\s*=\s*"([^"]+)""",
                     RegexOption.IGNORE_CASE
                 ).find(info)?.groupValues?.getOrNull(1)
 
@@ -205,7 +205,7 @@ object VixSrcExtractor {
 
                 val urlRendition = variantUrl?.let {
                     Regex(
-                        """rendition=(\\d{3,4})p""",
+                        """rendition=(\d{3,4})p""",
                         RegexOption.IGNORE_CASE
                     ).find(it)?.groupValues?.getOrNull(1)?.toIntOrNull()
                 }
@@ -247,6 +247,147 @@ object VixSrcExtractor {
             println("[STREMIOSUB-VIXSRC] 📺 ===== END QUALITY INSPECTION =====")
         } catch (e: Exception) {
             println("[STREMIOSUB-VIXSRC] ⚠️ HLS quality inspection failed: ${e.message}")
+        }
+    }
+
+
+    private suspend fun probeForced1080(
+        masterText: String,
+        playerHeaders: Map<String, String>
+    ) {
+        println("[STREMIOSUB-VIXSRC] 🧪 ===== FORCE 1080P PROBE =====")
+
+        try {
+            val variantUrls = masterText
+                .replace("\\u0026", "&")
+                .replace("\\/", "/")
+                .replace("&amp;", "&")
+                .lines()
+                .map { it.trim() }
+                .filter { it.isNotBlank() && !it.startsWith("#") }
+                .filter { Regex("""(?:[?&])rendition=\d{3,4}p(?:[&]|$)""", RegexOption.IGNORE_CASE).containsMatchIn(it) }
+
+            if (variantUrls.isEmpty()) {
+                println("[STREMIOSUB-VIXSRC] 🧪 PROBE SKIP: no rendition=*p variant URL found")
+                return
+            }
+
+            fun renditionOf(url: String): Int? =
+                Regex("""(?:[?&])rendition=(\d{3,4})p(?:[&]|$)""", RegexOption.IGNORE_CASE)
+                    .find(url)
+                    ?.groupValues
+                    ?.getOrNull(1)
+                    ?.toIntOrNull()
+
+            val sourceUrl = variantUrls
+                .firstOrNull { renditionOf(it) == 720 }
+                ?: variantUrls.maxByOrNull { renditionOf(it) ?: -1 }
+
+            if (sourceUrl == null) {
+                println("[STREMIOSUB-VIXSRC] 🧪 PROBE SKIP: no usable source variant")
+                return
+            }
+
+            val sourceRendition = renditionOf(sourceUrl)
+            val renditionMatch = Regex(
+                """([?&]rendition=)\d{3,4}p""",
+                RegexOption.IGNORE_CASE
+            ).find(sourceUrl)
+
+            if (renditionMatch == null) {
+                println("[STREMIOSUB-VIXSRC] 🧪 PROBE SKIP: rendition query parameter could not be replaced")
+                return
+            }
+
+            val forced1080Url = sourceUrl.replaceRange(
+                renditionMatch.range,
+                "${renditionMatch.groupValues[1]}1080p"
+            )
+
+            println("[STREMIOSUB-VIXSRC] 🧪 Source rendition=${sourceRendition?.let { "${it}p" } ?: "UNKNOWN"}")
+            println("[STREMIOSUB-VIXSRC] 🧪 Source URL=$sourceUrl")
+            println("[STREMIOSUB-VIXSRC] 🧪 Forced URL=$forced1080Url")
+            println("[STREMIOSUB-VIXSRC] 🧪 NOTE: token/expires/b are intentionally kept unchanged; only rendition is forced")
+
+            var sourceBody: String? = null
+            var sourceCode: Int? = null
+
+            try {
+                val sourceResponse = StremioC.customSession.get(sourceUrl, headers = playerHeaders)
+                sourceCode = sourceResponse.code
+                sourceBody = sourceResponse.text
+                println(
+                    "[STREMIOSUB-VIXSRC] 🧪 SOURCE GET: code=${sourceResponse.code} " +
+                        "isM3U8=${sourceResponse.text.trimStart().startsWith("#EXTM3U")} " +
+                        "bodyLength=${sourceResponse.text.length}"
+                )
+            } catch (e: Exception) {
+                println("[STREMIOSUB-VIXSRC] 🧪 SOURCE GET EXCEPTION: ${e.message}")
+            }
+
+            try {
+                val forcedResponse = StremioC.customSession.get(forced1080Url, headers = playerHeaders)
+                val forcedBody = forcedResponse.text
+                val forcedTrimmed = forcedBody.trimStart()
+                val isM3u8 = forcedTrimmed.startsWith("#EXTM3U")
+                val sameAsSource = sourceBody != null && sourceBody == forcedBody
+                val preview = forcedTrimmed
+                    .replace("\r", " ")
+                    .replace("\n", " ")
+                    .take(220)
+
+                println(
+                    "[STREMIOSUB-VIXSRC] 🧪 FORCED 1080 GET: code=${forcedResponse.code} " +
+                        "isM3U8=$isM3u8 bodyLength=${forcedBody.length} sameAsSource=$sameAsSource"
+                )
+                println("[STREMIOSUB-VIXSRC] 🧪 FORCED 1080 BODY PREFIX=$preview")
+
+                when {
+                    forcedResponse.code == 403 ->
+                        println("[STREMIOSUB-VIXSRC] 🧪 VERDICT: 403 -> rendition is tied to token/signature; URL text replacement alone cannot unlock 1080p")
+
+                    forcedResponse.code == 404 ->
+                        println("[STREMIOSUB-VIXSRC] 🧪 VERDICT: 404 -> forced 1080p rendition endpoint is not present for this asset")
+
+                    forcedResponse.code !in 200..299 ->
+                        println("[STREMIOSUB-VIXSRC] 🧪 VERDICT: HTTP ${forcedResponse.code} -> forced 1080p endpoint rejected")
+
+                    !isM3u8 ->
+                        println("[STREMIOSUB-VIXSRC] 🧪 VERDICT: HTTP 2xx but response is not an HLS playlist")
+
+                    sameAsSource ->
+                        println("[STREMIOSUB-VIXSRC] 🧪 VERDICT: forced 1080 returns byte-identical playlist to source -> server fallback/alias, not a distinct 1080 rendition")
+
+                    else -> {
+                        val forcedHints = Regex(
+                            """(?:RESOLUTION\s*=\s*\d+x(\d+)|rendition=(\d{3,4})p)""",
+                            RegexOption.IGNORE_CASE
+                        ).findAll(forcedBody).mapNotNull { m ->
+                            m.groupValues.getOrNull(1)?.takeIf { it.isNotBlank() }?.toIntOrNull()
+                                ?: m.groupValues.getOrNull(2)?.takeIf { it.isNotBlank() }?.toIntOrNull()
+                        }.toList()
+
+                        val maxHint = forcedHints.maxOrNull()
+                        if (maxHint != null) {
+                            println("[STREMIOSUB-VIXSRC] 🧪 FORCED 1080 playlist max hint=${maxHint}p")
+                        }
+
+                        println(
+                            "[STREMIOSUB-VIXSRC] 🧪 VERDICT: forced URL returned a distinct valid HLS playlist; " +
+                                "this is a POSSIBLE hidden 1080 endpoint and must be confirmed by decoder width/height or segment characteristics"
+                        )
+                    }
+                }
+
+                if (sourceCode != null) {
+                    println("[STREMIOSUB-VIXSRC] 🧪 Comparison: sourceCode=$sourceCode forcedCode=${forcedResponse.code}")
+                }
+            } catch (e: Exception) {
+                println("[STREMIOSUB-VIXSRC] 🧪 FORCED 1080 EXCEPTION: ${e.message}")
+                println("[STREMIOSUB-VIXSRC] 🧪 VERDICT: forced URL request failed before a valid HLS response was obtained")
+            }
+        } finally {
+            println("[STREMIOSUB-VIXSRC] 🧪 ===== END FORCE 1080P PROBE =====")
         }
     }
 
@@ -496,7 +637,10 @@ object VixSrcExtractor {
                 }
 
                 playerHeaders = verifiedHeaders ?: return
-                verifiedPlaylistText?.let { logVixSrcMasterQualities(it) }
+                verifiedPlaylistText?.let {
+                    logVixSrcMasterQualities(it)
+                    probeForced1080(it, playerHeaders)
+                }
                 println("[STREMIOSUB-VIXSRC] 🧭 Player request mode=MOVIE($verifiedMode referer)")
             } else {
                 playerHeaders = makePlayerHeaders(embedUrl, includeOrigin = false)
