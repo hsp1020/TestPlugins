@@ -128,7 +128,7 @@ class KotbcExtractor : ExtractorApi() {
             ?.value
     }
 
-    private fun emitLink(
+    private suspend fun emitLink(
         result: InterceptResult,
         callback: (ExtractorLink) -> Unit
     ) {
