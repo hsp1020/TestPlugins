@@ -537,14 +537,34 @@ class Kotbc : MainAPI() {
     }
 
     private fun unpackPlayerData(data: String): Pair<String, String>? {
-        if (!data.startsWith(PLAYER_DATA_PREFIX)) return null
+        /*
+         * CloudStream은 Episode.data / Movie.data가 http(s) URL이 아니면
+         * provider mainUrl 기준 상대 URL로 보정할 수 있다.
+         *
+         * 예:
+         *   KOTBC_PLAYER:{...}
+         * ->
+         *   https://k01.kotbc2.com/KOTBC_PLAYER:{...}
+         *
+         * 따라서 startsWith()가 아니라 marker 위치를 찾아 JSON payload만 분리한다.
+         */
+        val markerIndex = data.indexOf(PLAYER_DATA_PREFIX)
+        if (markerIndex < 0) return null
 
         return try {
-            val payload = JSONObject(data.removePrefix(PLAYER_DATA_PREFIX))
+            val payloadText = data.substring(
+                markerIndex + PLAYER_DATA_PREFIX.length
+            )
+
+            val payload = JSONObject(payloadText)
             val playerUrl = payload.optString("url").trim()
             val refererUrl = payload.optString("referer").trim()
 
-            if (playerUrl.isEmpty()) {
+            if (
+                !playerUrl.startsWith("http://") &&
+                !playerUrl.startsWith("https://")
+            ) {
+                println("[Kotbc DBG] ⚠️ player payload URL 비정상: $playerUrl")
                 null
             } else {
                 playerUrl to refererUrl.ifEmpty { mainUrl }
