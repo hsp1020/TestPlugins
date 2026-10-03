@@ -791,7 +791,8 @@ class Kotbc : MainAPI() {
         return if (isMovie) {
             /*
              * 영화도 KOTBC 내부적으로 episodes.data 1개를 사용한다.
-             * body.url이 있으면 작품 상세 URL이 아니라 실제 nnmo.../video/...를 data로 넘긴다.
+             * data payload에는 예상 nnmo URL과 실제 KOTBC 작품 페이지 URL을 함께 보관한다.
+             * loadLinks()에서 작품 페이지의 실제 popup을 실행해 glamov wrapper를 확정한다.
              */
             val playData = episodes.firstOrNull()?.data
 
@@ -855,11 +856,11 @@ class Kotbc : MainAPI() {
             println("[Kotbc DBG] 🔗 player payload -> $playerUrl")
             println("[Kotbc DBG] 🔗 player referer -> $refererUrl")
 
-            KotbcExtractor().getUrl(
-                playerUrl,
-                refererUrl,
-                subtitleCallback,
-                callback
+            KotbcExtractor().getUrlFromKotbcPage(
+                pageUrl = refererUrl,
+                expectedPlayerUrl = playerUrl,
+                subtitleCallback = subtitleCallback,
+                callback = callback
             )
 
             return true
@@ -901,11 +902,11 @@ class Kotbc : MainAPI() {
             if (!currentVideoUrl.isNullOrBlank()) {
                 println("[Kotbc DBG] ✅ 현재 회차 Inertia player -> $currentVideoUrl")
 
-                KotbcExtractor().getUrl(
-                    currentVideoUrl,
-                    targetUrl,
-                    subtitleCallback,
-                    callback
+                KotbcExtractor().getUrlFromKotbcPage(
+                    pageUrl = targetUrl,
+                    expectedPlayerUrl = currentVideoUrl,
+                    subtitleCallback = subtitleCallback,
+                    callback = callback
                 )
 
                 return true
@@ -959,7 +960,7 @@ class Kotbc : MainAPI() {
 
                     KotbcExtractor().getUrl(
                         playerUrl,
-                        mainUrl,
+                        targetUrl,
                         subtitleCallback,
                         callback
                     )
