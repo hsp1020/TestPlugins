@@ -34,6 +34,7 @@ class OHLI24 : MainAPI() {
     override val supportedTypes = setOf(TvType.Anime)
 
     override val mainPage = mainPageOf(
+        "__popular__" to "인기 작품 TOP 10",
         "bbs/board.php?bo_table=ing" to "방영중",
         "bbs/board.php?bo_table=fin" to "종영",
         "bbs/board.php?bo_table=theater" to "극장판"
@@ -46,12 +47,47 @@ class OHLI24 : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        if (request.data == "__popular__") {
+            val items = if (page == 1) getPopular() else emptyList()
+            return newHomePageResponse(
+                HomePageList(request.name, items, isHorizontalImages = false),
+                hasNext = false
+            )
+        }
+
         val doc = app.get("$mainUrl/${request.data}&page=$page", headers = headers, timeout = 100).document
         val items = routeAnchors(doc, "c").mapNotNull { it.toSearchResult() }
         return newHomePageResponse(
             HomePageList(request.name, items, isHorizontalImages = false),
             hasNext = items.isNotEmpty()
         )
+    }
+
+    private suspend fun getPopular(): List<SearchResponse> {
+        val home = app.get(mainUrl, headers = headers, timeout = 100).document
+        val detailUrl = routeAnchors(home, "c").firstOrNull()?.attr("href")
+            ?.let(::absoluteUrl) ?: return emptyList()
+        val detail = app.get(detailUrl, headers = headers, timeout = 100).document
+
+        return detail.select("#sidebar-tabpanel-popular li > a[href]")
+            .take(10)
+            .mapNotNull { it.toPopularResult() }
+    }
+
+    private fun Element.toPopularResult(): SearchResponse? {
+        val href = absoluteUrl(attr("href"))
+        val title = selectFirst("img[alt]")?.attr("alt")?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: routeText(href, "c").ifBlank { return null }
+        val poster = imageUrl(selectFirst("img"))
+        val rating = select("span.font-semibold.tabular-nums.text-foreground")
+            .map { it.text().trim() }
+            .firstOrNull { it.toDoubleOrNull() != null }
+
+        return newAnimeSearchResponse(title, href) {
+            posterUrl = poster
+            rating?.toDoubleOrNull()?.let { score = Score.from10(it.toString()) }
+        }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
