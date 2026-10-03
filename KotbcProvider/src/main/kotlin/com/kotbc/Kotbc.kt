@@ -22,6 +22,7 @@ class Kotbc : MainAPI() {
         // 구버전 SharedPreferences(m200 등)를 다시 읽지 않도록 캐시 네임스페이스를 분리한다.
         private const val PREFS_NAME = "Kotbc_Domain_Cache_v2"
         private const val PREF_KEY = "current_domain"
+        private const val PLAYER_DATA_PREFIX = "KOTBC_PLAYER:"
 
         var currentMainUrl = DEFAULT_DOMAIN
         var isDomainChecked = false
@@ -526,21 +527,55 @@ class Kotbc : MainAPI() {
             .distinctBy { it.slug ?: it.name }
     }
 
+    private fun packPlayerData(playerUrl: String, refererUrl: String): String {
+        val payload = JSONObject()
+            .put("url", playerUrl)
+            .put("referer", refererUrl)
+            .toString()
+
+        return PLAYER_DATA_PREFIX + payload
+    }
+
+    private fun unpackPlayerData(data: String): Pair<String, String>? {
+        if (!data.startsWith(PLAYER_DATA_PREFIX)) return null
+
+        return try {
+            val payload = JSONObject(data.removePrefix(PLAYER_DATA_PREFIX))
+            val playerUrl = payload.optString("url").trim()
+            val refererUrl = payload.optString("referer").trim()
+
+            if (playerUrl.isEmpty()) {
+                null
+            } else {
+                playerUrl to refererUrl.ifEmpty { mainUrl }
+            }
+        } catch (e: Exception) {
+            println("[Kotbc DBG] ⚠️ player data decode 실패: ${e.message}")
+            null
+        }
+    }
+
     private fun buildEpisodeData(
         targetUrl: String,
         parsed: ParsedEpisode
     ): String? {
-        parsed.videoUrl?.let { return it }
+        val slug = parsed.slug
 
-        val slug = parsed.slug ?: return null
-
-        // DOM fallback은 이미 "/작품/회차" 경로다.
-        if (slug.startsWith("/")) {
-            return resolveUrl(slug)
+        val episodePageUrl = when {
+            slug.isNullOrBlank() -> targetUrl
+            slug.startsWith("/") -> resolveUrl(slug)
+            else -> targetUrl.trimEnd('/') + "/" + encodePathSegment(slug)
         }
 
-        // Inertia slug만 있고 body.url이 없는 예외 케이스.
-        return targetUrl.trimEnd('/') + "/" + encodePathSegment(slug)
+        /*
+         * video URL만 넘기면 nnmo player가 원래 KOTBC 문서 Referer를 잃는다.
+         * player URL + 정확한 회차/영화 페이지 URL을 함께 전달한다.
+         */
+        parsed.videoUrl?.let { playerUrl ->
+            return packPlayerData(playerUrl, episodePageUrl)
+        }
+
+        return episodePageUrl
     }
 
     private fun encodePathSegment(value: String): String {
@@ -783,15 +818,31 @@ class Kotbc : MainAPI() {
         }
 
         /*
-         * load()에서 props.episodes.data[].body.url을 data에 직접 넣으므로
-         * nnmo0oi1.com 같은 외부 player URL은 KOTBC 페이지로 재요청하지 말고
-         * 곧바로 기존 KotbcExtractor로 보낸다.
+         * 정상 경로: load()가 player URL과 실제 KOTBC 회차/영화 페이지 Referer를
+         * 하나의 payload로 묶어 전달한다.
+         */
+        unpackPlayerData(rawData)?.let { (playerUrl, refererUrl) ->
+            println("[Kotbc DBG] 🔗 player payload -> $playerUrl")
+            println("[Kotbc DBG] 🔗 player referer -> $refererUrl")
+
+            KotbcExtractor().getUrl(
+                playerUrl,
+                refererUrl,
+                subtitleCallback,
+                callback
+            )
+
+            return true
+        }
+
+        /*
+         * 구버전/캐시된 Episode.data 호환.
          */
         if (
             (rawData.startsWith("http://") || rawData.startsWith("https://")) &&
             !rawData.contains("kotbc2.com", ignoreCase = true)
         ) {
-            println("[Kotbc DBG] 🔗 직접 player URL -> $rawData")
+            println("[Kotbc DBG] 🔗 구버전 직접 player URL -> $rawData")
 
             KotbcExtractor().getUrl(
                 rawData,
@@ -822,7 +873,7 @@ class Kotbc : MainAPI() {
 
                 KotbcExtractor().getUrl(
                     currentVideoUrl,
-                    mainUrl,
+                    targetUrl,
                     subtitleCallback,
                     callback
                 )
