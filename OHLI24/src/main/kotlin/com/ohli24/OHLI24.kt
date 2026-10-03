@@ -32,7 +32,7 @@ class OHLI24 : MainAPI() {
     override var lang = "ko"
     override val hasChromecastSupport = true
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.Anime,TvType.AnimeMovie)
+    override val supportedTypes = setOf(TvType.Anime, TvType.AnimeMovie)
 
     override val mainPage = mainPageOf(
         "bbs/board.php?bo_table=ing" to "방영중",
@@ -40,260 +40,143 @@ class OHLI24 : MainAPI() {
         "bbs/board.php?bo_table=theater" to "극장판"
     )
 
+    private val headers = mapOf(
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer" to "$mainUrl/"
+    )
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = "$mainUrl/${request.data}&page=$page"
-        println("[OHLI24][MAIN] GET start name=${request.name} page=$page url=$url")
-
-        val response = app.get(
-            url,
-            timeout = 100,
-            headers = browserHeaders()
-        )
-
-        val html = response.text
-        val document = response.document
-        val pageTitle = document.title().trim()
-        val lower = html.lowercase()
-
-        val blockedMarkers = listOf(
-            "just a moment",
-            "attention required",
-            "cf-browser-verification",
-            "cf-chl-",
-            "challenge-platform",
-            "checking your browser",
-            "access denied",
-            "403 forbidden",
-            "error 403",
-            "captcha"
-        ).filter { lower.contains(it) }
-
-        // 2026-10 current site: content pages are /c/<title>.
-        // Do not depend on the removed list-row/post-title template.
-        val contentAnchors = findContentAnchors(document)
-        val home = contentAnchors.mapNotNull { it.toRouteSearchResult() }
-
-        println(
-            "[OHLI24][MAIN] response html=${html.length} title='$pageTitle' " +
-                "contentAnchors=${contentAnchors.size} parsed=${home.size}"
-        )
-
-        if (blockedMarkers.isNotEmpty()) {
-            println("[OHLI24][BLOCK] suspected anti-bot page markers=${blockedMarkers.joinToString()}")
-        }
-
-        if (home.isEmpty()) {
-            val bodySample = document.body()?.text()
-                ?.replace(Regex("\\s+"), " ")
-                ?.take(700)
-                .orEmpty()
-            val hrefSamples = document.select("a[href]")
-                .map { it.attr("href") }
-                .filter { it.isNotBlank() }
-                .distinct()
-                .take(20)
-
-            println("[OHLI24][DIAG] EMPTY main page")
-            println("[OHLI24][DIAG] title='$pageTitle'")
-            println("[OHLI24][DIAG] bodySample=$bodySample")
-            println("[OHLI24][DIAG] hrefSamples=${hrefSamples.joinToString(" | ")}")
-        } else {
-            home.take(3).forEachIndexed { index, item ->
-                println("[OHLI24][MAIN] sample[$index] name='${item.name}' url='${item.url}'")
-            }
-        }
+        val doc = app.get(
+            "$mainUrl/${request.data}&page=$page",
+            headers = headers,
+            timeout = 100
+        ).document
+        val items = routeAnchors(doc, "c").mapNotNull { it.toSearchResult() }
 
         return newHomePageResponse(
             list = HomePageList(
                 name = request.name,
-                list = home,
+                list = items,
                 isHorizontalImages = false
             ),
-            hasNext = home.isNotEmpty()
+            hasNext = items.isNotEmpty()
         )
     }
 
-    private fun browserHeaders(): Map<String, String> = mapOf(
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Cache-Control" to "no-cache",
-        "Pragma" to "no-cache",
-        "Referer" to "$mainUrl/"
-    )
+    private fun routeAnchors(root: Element, route: String): List<Element> =
+        root.select("a[href]")
+            .filter { normalizeUrl(it.attr("href")).startsWith("$mainUrl/$route/") }
+            .distinctBy { normalizeUrl(it.attr("href")) }
 
-    private fun findContentAnchors(root: Element): List<Element> {
-        return root.select("a[href]")
-            .filter { anchor ->
-                val href = normalizeSiteUrl(anchor.attr("href"))
-                href.startsWith("$mainUrl/c/")
-            }
-            .distinctBy { normalizeSiteUrl(it.attr("href")) }
-    }
+    private fun Element.toSearchResult(): SearchResponse? {
+        val href = normalizeUrl(attr("href"))
+        val title = decodeRoute(href, "c").ifBlank { text().trim() }
+        if (title.isBlank()) return null
 
-    private fun Element.toRouteSearchResult(): SearchResponse? {
-        val rawHref = attr("href").trim()
-        if (rawHref.isBlank()) return null
-
-        val href = normalizeSiteUrl(rawHref)
-        if (!href.startsWith("$mainUrl/c/")) return null
-
-        val title = titleFromContentUrl(href).ifBlank {
-            text()
-                .replace(Regex("Update!", RegexOption.IGNORE_CASE), "")
-                .replace(Regex("\\d{4}-\\d{2}-\\d{2}.*$"), "")
-                .trim()
-        }
-        if (title.isBlank()) {
-            println("[OHLI24][PARSE] skip route: title missing href=$href")
-            return null
-        }
-
-        val posterUrl = findPosterAround(this)
-        val scoreText = findNearbyScore(this)
+        val card = cardRoot(this)
+        val poster = imageUrl(card.selectFirst("img"))
+        val score = card.selectFirst(".rating, [class*=rating]")?.text()?.trim().orEmpty()
 
         return newMovieSearchResponse(title, href, TvType.Movie) {
-            this.posterUrl = posterUrl
-            if (scoreText.isNotBlank()) {
-                this.score = Score.from10(scoreText)
-            }
+            posterUrl = poster
+            if (score.toDoubleOrNull() != null) this.score = Score.from10(score)
         }
     }
 
-    private fun titleFromContentUrl(url: String): String {
-        val encoded = url.substringAfter("/c/", "")
-            .substringBefore('?')
-            .substringBefore('#')
-        if (encoded.isBlank()) return ""
-        return try {
-            URLDecoder.decode(encoded, "UTF-8").trim()
-        } catch (_: Exception) {
-            encoded.trim()
-        }
-    }
-
-    private fun findPosterAround(anchor: Element): String? {
-        var node: Element? = anchor
+    private fun cardRoot(anchor: Element): Element {
+        var current = anchor
         repeat(5) {
-            val current = node ?: return null
-            val contentUrls = current.select("a[href]")
-                .map { normalizeSiteUrl(it.attr("href")) }
-                .filter { it.startsWith("$mainUrl/c/") }
-                .distinct()
-
-            // Once an ancestor contains multiple cards, stop before borrowing a sibling poster.
-            if (contentUrls.size > 1) return null
-
-            val image = current.selectFirst("img")
-            if (image != null) {
-                val raw = listOf(
-                    "src",
-                    "data-src",
-                    "data-original",
-                    "data-lazy-src",
-                    "data-ezsrc"
-                ).asSequence()
-                    .map { image.attr(it).trim() }
-                    .firstOrNull { value ->
-                        value.isNotBlank() &&
-                            !value.startsWith("data:", ignoreCase = true) &&
-                            value != "#"
-                    }
-                if (!raw.isNullOrBlank()) return normalizeSiteUrl(raw)
+            val parent = current.parent() ?: return current
+            val contentLinks = parent.select("a[href]").count {
+                normalizeUrl(it.attr("href")).startsWith("$mainUrl/c/")
             }
-            node = current.parent()
+            if (contentLinks > 1) return current
+            current = parent
         }
-        return null
+        return current
     }
 
-    private fun findNearbyScore(anchor: Element): String {
-        var node: Element? = anchor
-        repeat(4) {
-            val score = node?.selectFirst(".rating, [class*=rating]")?.text()?.trim().orEmpty()
-            if (score.toDoubleOrNull() != null) return score
-            node = node?.parent()
-        }
-        return ""
+    private fun imageUrl(element: Element?): String? {
+        if (element == null) return null
+        val raw = listOf("src", "data-src", "data-original", "data-lazy-src", "data-ezsrc", "content")
+            .asSequence()
+            .map { element.attr(it).trim() }
+            .firstOrNull { it.isNotBlank() && it != "#" && !it.startsWith("data:", true) }
+        return raw?.let(::normalizeUrl)
     }
 
-    private fun normalizeSiteUrl(rawUrl: String): String {
-        val url = rawUrl.trim()
+    private fun normalizeUrl(raw: String): String {
+        val url = raw.trim()
         return when {
-            url.startsWith("http://", ignoreCase = true) ||
-                url.startsWith("https://", ignoreCase = true) -> url
+            url.startsWith("http://", true) || url.startsWith("https://", true) -> url
             url.startsWith("//") -> "https:$url"
-            url.startsWith("../") -> "$mainUrl/${url.removePrefix("../")}"
-            url.startsWith("./") -> "$mainUrl/bbs/${url.removePrefix("./")}"
-            url.startsWith("board.php") || url.startsWith("search.php") -> "$mainUrl/bbs/$url"
+            url.startsWith("../") -> "$mainUrl/${url.removePrefix("../")}" 
             url.startsWith("/") -> "$mainUrl$url"
             else -> fixUrl(url)
         }
     }
 
+    private fun decodeRoute(raw: String, route: String): String {
+        val encoded = normalizeUrl(raw).substringAfter("/$route/", "")
+            .substringBefore('?').substringBefore('#')
+        if (encoded.isBlank()) return ""
+        return runCatching { URLDecoder.decode(encoded, "UTF-8").trim() }
+            .getOrDefault(encoded.trim())
+    }
+
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = URLEncoder.encode(query, "UTF-8")
-        val url = "$mainUrl/bbs/search.php?srows=24&gr_id=&sfl=wr_subject&stx=$encoded"
-        println("[OHLI24][SEARCH] GET query='$query' url=$url")
-        val document = app.get(url, timeout = 100, headers = browserHeaders()).document
-        val results = findContentAnchors(document).mapNotNull { it.toRouteSearchResult() }
-        println("[OHLI24][SEARCH] parsed=${results.size}")
-        return results
+        val doc = app.get(
+            "$mainUrl/bbs/search.php?srows=24&gr_id=&sfl=wr_subject&stx=$encoded",
+            headers = headers,
+            timeout = 100
+        ).document
+        return routeAnchors(doc, "c").mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url, timeout = 100, headers = browserHeaders()).document
+        val doc = app.get(url, headers = headers, timeout = 100).document
         doc.setBaseUri(url)
 
         val title = doc.selectFirst("h1")?.text()?.trim()
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
                 ?.substringBeforeLast(" - 애니24")?.trim()
-            ?: titleFromContentUrl(url)
-            .ifBlank { "UnKnown" }
+            ?: decodeRoute(url, "c").ifBlank { "UnKnown" }
 
+        // OHLI24의 og:image는 공통 배너일 수 있으므로 실제 작품 이미지에서만 선택한다.
         val poster = sequenceOf(
-            doc.selectFirst("meta[property=og:image]")?.attr("content"),
-            doc.selectFirst("img[itemprop=image]")?.attr("src"),
-            doc.select("img").firstOrNull { it.attr("alt").trim() == title }?.attr("src")
-        ).filterNotNull().map { it.trim() }.firstOrNull { it.isNotBlank() }
-            ?.let(::normalizeSiteUrl)
+            doc.selectFirst("img[itemprop=image]"),
+            doc.selectFirst("meta[itemprop=image]"),
+            doc.selectFirst(".view-wrap img"),
+            doc.selectFirst(".serial-movie-wrap img"),
+            doc.selectFirst(".image img"),
+            doc.select("img").firstOrNull { it.attr("alt").trim().equals(title, true) }
+        ).mapNotNull(::imageUrl).firstOrNull()
 
-        val bodyText = doc.body()?.text()?.replace(Regex("\\s+"), " ").orEmpty()
+        val body = doc.body()?.text()?.replace(Regex("\\s+"), " ").orEmpty()
         val genres = Regex("장르\\s+(.+?)\\s+(?:방영일|상영일|등급|총화수|런타임|별점)")
-            .find(bodyText)?.groupValues?.getOrNull(1)
-            ?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() }
+            .find(body)?.groupValues?.getOrNull(1)
+            ?.split(',')?.map { it.trim() }?.filter { it.isNotBlank() }
             ?: emptyList()
-
         val year = Regex("(?:방영일|상영일)\\s+(\\d{4})")
-            .find(bodyText)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            .find(body)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val plot = Regex("줄거리\\s+(.+?)\\s+에피소드")
+            .find(body)?.groupValues?.getOrNull(1)?.trim().orEmpty()
 
-        val descript = Regex("줄거리\\s+(.+?)\\s+에피소드")
-            .find(bodyText)?.groupValues?.getOrNull(1)?.trim().orEmpty()
-
-        // 2026-10 current detail pages expose episodes through /e/<episode title>.
-        val episodeAnchors = doc.select("a[href]")
-            .filter { normalizeSiteUrl(it.attr("href")).startsWith("$mainUrl/e/") }
-            .distinctBy { normalizeSiteUrl(it.attr("href")) }
-
-        val hasNumberedEpisodes = episodeAnchors.any { anchor ->
-            Regex("\\d+(?:\\.\\d+)?화(?:\\(完\\))?").containsMatchIn(anchor.text()) ||
-                Regex("\\d+(?:\\.\\d+)?화").containsMatchIn(decodeEpisodeUrl(anchor.attr("href")))
+        val episodeAnchors = routeAnchors(doc, "e")
+        val isSeries = episodeAnchors.size > 1 || episodeAnchors.any {
+            episodeNumber(it.text().ifBlank { decodeRoute(it.attr("href"), "e") }) != null
         }
-        val type = if (episodeAnchors.size > 1 || hasNumberedEpisodes) TvType.TvSeries else TvType.Movie
 
-        println(
-            "[OHLI24][LOAD] title='$title' type=$type episodes=${episodeAnchors.size} " +
-                "poster=${!poster.isNullOrBlank()} genres=${genres.size}"
-        )
-
-        if (type == TvType.TvSeries) {
+        if (isSeries) {
             val episodes = episodeAnchors.map { anchor ->
-                val href = normalizeSiteUrl(anchor.attr("href"))
-                val label = anchor.text().trim().ifBlank { decodeEpisodeUrl(href) }
-                val epno = Regex("(\\d+)(?:\\.\\d+)?화(?:\\(完\\))?")
-                    .find(label)?.groupValues?.getOrNull(1)?.toIntOrNull()
-
+                val href = normalizeUrl(anchor.attr("href"))
+                val label = anchor.text().trim().ifBlank { decodeRoute(href, "e") }
+                val number = episodeNumber(label)
                 newEpisode(href) {
-                    this.name = label.ifBlank { if (epno != null) "Episode $epno" else title }
-                    this.episode = epno
+                    name = label.ifBlank { number?.let { "Episode $it" } ?: title }
+                    episode = number
                 }
             }.sortedBy { it.episode ?: Int.MAX_VALUE }
 
@@ -302,34 +185,22 @@ class OHLI24 : MainAPI() {
                 this.year = year
                 this.tags = genres
                 this.posterUrl = poster
-                this.plot = descript
+                this.plot = plot
             }
-        } else {
-            val href = episodeAnchors.firstOrNull()?.attr("href")
-                ?.let(::normalizeSiteUrl)
-                .orEmpty()
+        }
 
-            return newMovieLoadResponse(title, url, TvType.AnimeMovie, href) {
-                this.year = year
-                this.tags = genres
-                this.posterUrl = poster
-                this.plot = descript
-            }
+        val data = episodeAnchors.firstOrNull()?.attr("href")?.let(::normalizeUrl).orEmpty()
+        return newMovieLoadResponse(title, url, TvType.AnimeMovie, data) {
+            this.year = year
+            this.tags = genres
+            this.posterUrl = poster
+            this.plot = plot
         }
     }
 
-    private fun decodeEpisodeUrl(rawUrl: String): String {
-        val url = normalizeSiteUrl(rawUrl)
-        val encoded = url.substringAfter("/e/", "")
-            .substringBefore('?')
-            .substringBefore('#')
-        if (encoded.isBlank()) return ""
-        return try {
-            URLDecoder.decode(encoded, "UTF-8").trim()
-        } catch (_: Exception) {
-            encoded.trim()
-        }
-    }
+    private fun episodeNumber(text: String): Int? =
+        Regex("(\\d+)(?:\\.\\d+)?화(?:\\(完\\))?")
+            .find(text)?.groupValues?.getOrNull(1)?.toIntOrNull()
 
     override suspend fun loadLinks(
         data: String,
@@ -337,33 +208,24 @@ class OHLI24 : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = app.get(data, timeout = 20, headers = browserHeaders()).document
-        val iframeSrc = doc.selectFirst("iframe[src]")?.attr("src")?.trim()
-        val vurl = doc.selectFirst("form.tt input[name=vurl]")?.attr("value")?.trim()
-        val playerLink = doc.select("a[href]")
-            .firstOrNull { anchor ->
-                val href = anchor.attr("href")
-                href.contains("cdndania.com/video/", ignoreCase = true) ||
-                    href.contains("michealcdn.com", ignoreCase = true)
-            }?.attr("href")?.trim()
+        val doc = app.get(data, headers = headers, timeout = 20).document
+        val player = sequenceOf(
+            doc.selectFirst("iframe[src]")?.attr("src"),
+            doc.selectFirst("form.tt input[name=vurl]")?.attr("value"),
+            doc.select("a[href]").firstOrNull {
+                val href = it.attr("href")
+                href.contains("cdndania.com/video/", true) || href.contains("michealcdn.com", true)
+            }?.attr("href")
+        ).filterNotNull().map { it.trim() }.firstOrNull { it.isNotBlank() }
+            ?.let(::normalizeUrl).orEmpty()
 
-        val iframe = listOfNotNull(iframeSrc, vurl, playerLink)
-            .firstOrNull { it.isNotBlank() }
-            ?.let(::normalizeSiteUrl)
-            .orEmpty()
+        if (player.isBlank()) return false
 
-        println("[OHLI24][LINK] data=$data player='$iframe'")
-        if (iframe.isBlank()) {
-            println("[OHLI24][LINK] no iframe/form/player anchor found")
-            return false
-        }
-
-        if (iframe.contains("cdndania.com/video/", ignoreCase = true) || iframe.contains("/video/")) {
-            Cdndania().getUrl(iframe, mainUrl, subtitleCallback, callback)
+        if (player.contains("cdndania.com/video/", true)) {
+            Cdndania().getUrl(player, mainUrl, subtitleCallback, callback)
         } else {
-            loadExtractor(iframe, mainUrl, subtitleCallback, callback)
+            loadExtractor(player, mainUrl, subtitleCallback, callback)
         }
         return true
     }
-
 }
