@@ -58,22 +58,51 @@ class LinkkfExtractor {
                 "[PAGE] finalUrl=$finalPageUrl htmlLength=${html.length} scripts=${scripts.size}"
             )
 
-            // 기존 코드의 `var player_ + actual_url` 고정 조건을 없애고 모든 script를 탐색한다.
-            val actualUrlRaw = scripts.firstNotNullOfOrNull { extractJsField(it, "actual_url") }
+            // 플레이어와 직접 관련된 script만 먼저 고른다.
+            // 일반 페이지의 canonical/schema `url`을 자막 키로 오인하면
+            // /s/https://linkani.tv/ani/.../.vtt 같은 잘못된 주소가 만들어진다.
+            val playerSource = scripts.firstOrNull {
+                it.contains("actual_url", ignoreCase = true)
+            } ?: scripts.firstOrNull {
+                it.contains(".m3u8", ignoreCase = true)
+            } ?: scripts.firstOrNull {
+                it.contains("var player_", ignoreCase = true)
+            }
+
+            val actualUrlRaw = playerSource?.let { extractJsField(it, "actual_url") }
+                ?: scripts.firstNotNullOfOrNull { extractJsField(it, "actual_url") }
                 ?: extractJsField(html, "actual_url")
 
-            val subtitleKey = scripts.firstNotNullOfOrNull { extractJsField(it, "url") }
-                ?: extractJsField(html, "url")
+            // 자막은 우선 플레이어 script 안의 직접 .vtt 주소를 찾고,
+            // 없을 때만 같은 playerSource 안의 정확한 `url` 필드를 proxy key로 사용한다.
+            val directSubtitleRaw = playerSource?.let { findVtt(it) }
+                ?: scripts.firstNotNullOfOrNull { findVtt(it) }
 
-            val subtitleUrl = subtitleKey
-                ?.takeIf { it.isNotBlank() }
-                ?.let { "$SUBTITLE_BASE_URL/$it.vtt" }
+            val rawSubtitleKey = playerSource?.let { extractJsField(it, "url") }
+            val subtitleKey = rawSubtitleKey
+                ?.takeIf { isUsableSubtitleProxyKey(it) }
+
+            val directSubtitleUrl = directSubtitleRaw
+                ?.let { resolveUrl(finalPageUrl.ifBlank { url }, it) }
                 .orEmpty()
 
-            val fallbackSubtitleUrl = subtitleKey
-                ?.takeIf { it.isNotBlank() }
-                ?.let { "$SUBTITLE_FALLBACK_BASE_URL/$it.vtt" }
-                .orEmpty()
+            val subtitleUrl = when {
+                directSubtitleUrl.isNotEmpty() -> directSubtitleUrl
+                subtitleKey != null -> buildSubtitleProxyUrl(SUBTITLE_BASE_URL, subtitleKey)
+                else -> ""
+            }
+
+            val fallbackSubtitleUrl = when {
+                directSubtitleUrl.isNotEmpty() -> ""
+                subtitleKey != null -> buildSubtitleProxyUrl(SUBTITLE_FALLBACK_BASE_URL, subtitleKey)
+                else -> ""
+            }
+
+            Log.d(
+                TAG,
+                "[SUBTITLE] playerSource=${playerSource != null} direct=${directSubtitleUrl.isNotEmpty()} " +
+                    "rawKey=${rawSubtitleKey ?: "<none>"} accepted=${subtitleKey != null}"
+            )
 
             if (!actualUrlRaw.isNullOrBlank()) {
                 val actualUrl = resolveUrl(finalPageUrl.ifBlank { url }, actualUrlRaw)
@@ -94,7 +123,8 @@ class LinkkfExtractor {
             }
 
             // actual_url 구조가 바뀌어도 HTML/JS에 m3u8가 노출되어 있으면 직접 회수한다.
-            val directM3u8Raw = scripts.firstNotNullOfOrNull { findM3u8(it) }
+            val directM3u8Raw = playerSource?.let { findM3u8(it) }
+                ?: scripts.firstNotNullOfOrNull { findM3u8(it) }
                 ?: findM3u8(html)
 
             if (!directM3u8Raw.isNullOrBlank()) {
@@ -143,6 +173,53 @@ class LinkkfExtractor {
             if (!value.isNullOrBlank()) return decodeJsUrl(value)
         }
         return null
+    }
+
+    /**
+     * subtitle proxy key는 player object 내부의 상대 키/경로여야 한다.
+     * 작품 상세 URL 같은 절대 URL을 허용하면
+     * https://sub.../s/https://linkani.../.vtt 형태의 잘못된 주소가 생성된다.
+     */
+    private fun isUsableSubtitleProxyKey(raw: String): Boolean {
+        val value = decodeJsUrl(raw).trim()
+        if (value.isBlank()) return false
+        if (value.startsWith("http://", ignoreCase = true)) return false
+        if (value.startsWith("https://", ignoreCase = true)) return false
+        if (value.startsWith("//")) return false
+        if (value.contains(".m3u8", ignoreCase = true)) return false
+        return true
+    }
+
+    private fun buildSubtitleProxyUrl(base: String, rawKey: String): String {
+        val key = decodeJsUrl(rawKey).trim().trimStart('/')
+        return if (key.endsWith(".vtt", ignoreCase = true)) {
+            "$base/$key"
+        } else {
+            "$base/$key.vtt"
+        }
+    }
+
+    private fun findVtt(source: String): String? {
+        if (source.isBlank()) return null
+
+        val normalized = decodeJsUrl(source)
+
+        val absolute = Regex(
+            """https?://[^\s\"'<>\\]+?\.vtt(?:\?[^\s\"'<>\\]*)?""",
+            RegexOption.IGNORE_CASE
+        ).find(normalized)?.value
+        if (!absolute.isNullOrBlank()) return absolute
+
+        val protocolRelative = Regex(
+            """//[^\s\"'<>\\]+?\.vtt(?:\?[^\s\"'<>\\]*)?""",
+            RegexOption.IGNORE_CASE
+        ).find(normalized)?.value
+        if (!protocolRelative.isNullOrBlank()) return protocolRelative
+
+        return Regex(
+            """(?:^|[\"'=:(\s])(/[^\s\"'<>\\]+?\.vtt(?:\?[^\s\"'<>\\]*)?)""",
+            RegexOption.IGNORE_CASE
+        ).find(normalized)?.groupValues?.getOrNull(1)
     }
 
     private fun findM3u8(source: String): String? {
