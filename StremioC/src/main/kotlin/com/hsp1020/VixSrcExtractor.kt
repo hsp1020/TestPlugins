@@ -1,9 +1,8 @@
 // 파일명: hsp1020/VixSrcExtractor.kt
 package com.hsp1020
 
-import com.lagradost.cloudstream3.AudioFile
 import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.newAudioFile
+import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
@@ -14,6 +13,11 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import java.net.URI
 
 object VixSrcExtractor {
@@ -23,6 +27,10 @@ object VixSrcExtractor {
     private const val USER_AGENT =
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
     private const val ACCEPT_LANGUAGE = "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+    private const val PROVIDER_SOURCE = "StremioC"
+    private const val SYNTHETIC_HOST = "vixsrc.to"
+    private const val SYNTHETIC_PATH_PREFIX = "/__cs3_vixsrc__/"
+    private const val SYNTHETIC_PREFIX = "VIXSRC_SYNTHETIC_MASTER_V1\n"
 
     private val EMBED_REGEX = """(/embed/(\d+)[^"'\s]*)""".toRegex()
     private val PLAYLIST_URL_REGEX =
@@ -52,15 +60,22 @@ object VixSrcExtractor {
 
     private data class HlsVariant(
         val url: String,
+        val width: Int,
         val height: Int,
         val bandwidth: Long,
+        val averageBandwidth: Long,
+        val codecs: String?,
         val audioGroup: String?
     )
 
     private data class HlsAudioTrack(
-        val groupId: String?,
+        val groupId: String,
+        val name: String,
+        val language: String?,
+        val channels: String?,
         val url: String,
-        val isDefault: Boolean
+        val isDefault: Boolean,
+        val autoSelect: Boolean
     )
 
     private data class HlsSubtitleTrack(
@@ -181,9 +196,12 @@ object VixSrcExtractor {
 
             val attributes = parseAttributes(line.substringAfter(':'))
             val childUrl = resolveHlsUrl(masterUrl, lines[uriIndex])
-            val resolutionHeight = attributes["RESOLUTION"]
-                ?.substringAfterLast('x')
-                ?.toIntOrNull()
+
+            val resolution = attributes["RESOLUTION"]
+                ?.split('x', limit = 2)
+                ?.takeIf { it.size == 2 }
+            val width = resolution?.getOrNull(0)?.toIntOrNull() ?: 0
+            val resolutionHeight = resolution?.getOrNull(1)?.toIntOrNull()
                 ?: RESOLUTION_REGEX.find(line)?.groupValues?.getOrNull(2)?.toIntOrNull()
             val renditionHeight = RENDITION_HEIGHT_REGEX.find(childUrl)
                 ?.groupValues
@@ -192,8 +210,11 @@ object VixSrcExtractor {
 
             variants += HlsVariant(
                 url = childUrl,
+                width = width,
                 height = resolutionHeight ?: renditionHeight ?: 0,
                 bandwidth = attributes["BANDWIDTH"]?.toLongOrNull() ?: 0L,
+                averageBandwidth = attributes["AVERAGE-BANDWIDTH"]?.toLongOrNull() ?: 0L,
+                codecs = attributes["CODECS"]?.takeIf { it.isNotBlank() },
                 audioGroup = attributes["AUDIO"]?.takeIf { it.isNotBlank() }
             )
             index = uriIndex + 1
@@ -216,26 +237,120 @@ object VixSrcExtractor {
                 val attributes = parseAttributes(line.substringAfter(':'))
                 if (!attributes["TYPE"].equals("AUDIO", ignoreCase = true)) return@mapNotNull null
 
-                val rawUri = attributes["URI"]?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val groupId = attributes["GROUP-ID"]?.takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
+                val rawUri = attributes["URI"]?.takeIf { it.isNotBlank() }
+                    ?: return@mapNotNull null
+
                 HlsAudioTrack(
-                    groupId = attributes["GROUP-ID"]?.takeIf { it.isNotBlank() },
+                    groupId = groupId,
+                    name = attributes["NAME"]?.takeIf { it.isNotBlank() } ?: "Audio",
+                    language = attributes["LANGUAGE"]?.takeIf { it.isNotBlank() },
+                    channels = attributes["CHANNELS"]?.takeIf { it.isNotBlank() },
                     url = resolveHlsUrl(masterUrl, rawUri),
-                    isDefault = attributes["DEFAULT"].equals("YES", ignoreCase = true)
+                    isDefault = attributes["DEFAULT"].equals("YES", ignoreCase = true),
+                    autoSelect = attributes["AUTOSELECT"].equals("YES", ignoreCase = true)
                 )
             }
-            .distinctBy { it.url }
+            .distinctBy { it.groupId to it.url }
             .toList()
 
-    private fun selectAudioTrack(
+    private fun matchingAudioTracks(
         variant: HlsVariant,
         audioTracks: List<HlsAudioTrack>
-    ): HlsAudioTrack? {
-        val matching = variant.audioGroup
-            ?.let { group -> audioTracks.filter { it.groupId == group } }
-            ?.takeIf { it.isNotEmpty() }
-            ?: audioTracks
+    ): List<HlsAudioTrack> {
+        val group = variant.audioGroup ?: return emptyList()
+        return audioTracks.filter { it.groupId == group }
+    }
 
-        return matching.firstOrNull { it.isDefault } ?: matching.firstOrNull()
+    private fun hlsQuote(value: String): String =
+        "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+    private fun buildSyntheticMaster(
+        variant: HlsVariant,
+        audioTracks: List<HlsAudioTrack>
+    ): String? {
+        val matchedAudio = matchingAudioTracks(variant, audioTracks)
+
+        // A variant referencing an AUDIO group is video-only. Without its matching
+        // audio rendition, exposing the child directly would produce silent playback.
+        if (variant.audioGroup != null && matchedAudio.isEmpty()) return null
+
+        val hasDefaultAudio = matchedAudio.any { it.isDefault }
+
+        return buildString {
+            appendLine("#EXTM3U")
+            appendLine("#EXT-X-VERSION:3")
+            appendLine("#EXT-X-INDEPENDENT-SEGMENTS")
+
+            matchedAudio.forEachIndexed { index, audio ->
+                val attrs = mutableListOf(
+                    "TYPE=AUDIO",
+                    "GROUP-ID=${hlsQuote(audio.groupId)}",
+                    "NAME=${hlsQuote(audio.name)}",
+                    "DEFAULT=${if (audio.isDefault || (!hasDefaultAudio && index == 0)) "YES" else "NO"}",
+                    "AUTOSELECT=${if (audio.autoSelect || index == 0) "YES" else "NO"}"
+                )
+                audio.language?.let { attrs += "LANGUAGE=${hlsQuote(it)}" }
+                audio.channels?.let { attrs += "CHANNELS=${hlsQuote(it)}" }
+                attrs += "URI=${hlsQuote(audio.url)}"
+                appendLine("#EXT-X-MEDIA:${attrs.joinToString(",")}")
+            }
+
+            val streamAttrs = mutableListOf(
+                "BANDWIDTH=${variant.bandwidth.coerceAtLeast(1L)}"
+            )
+            if (variant.averageBandwidth > 0L) {
+                streamAttrs += "AVERAGE-BANDWIDTH=${variant.averageBandwidth}"
+            }
+            if (variant.width > 0 && variant.height > 0) {
+                streamAttrs += "RESOLUTION=${variant.width}x${variant.height}"
+            }
+            variant.codecs?.let { streamAttrs += "CODECS=${hlsQuote(it)}" }
+            variant.audioGroup?.let { streamAttrs += "AUDIO=${hlsQuote(it)}" }
+
+            appendLine("#EXT-X-STREAM-INF:${streamAttrs.joinToString(",")}")
+            appendLine(variant.url)
+        }
+    }
+
+    private fun syntheticMasterUrl(actualVid: String, height: Int): String =
+        "https://$SYNTHETIC_HOST${SYNTHETIC_PATH_PREFIX}$actualVid/${height}p.m3u8"
+
+    /**
+     * Intercepts only the synthetic per-resolution master URL. Real VixSrc child
+     * playlists/segments continue through the normal OkHttp request path.
+     *
+     * StremioC.getVideoInterceptor() must delegate to this method.
+     */
+    fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
+        val payload = extractorLink.extractorData
+            ?.takeIf { it.startsWith(SYNTHETIC_PREFIX) }
+            ?.removePrefix(SYNTHETIC_PREFIX)
+            ?: return null
+
+        return Interceptor { chain ->
+            val request = chain.request()
+            if (request.url.host.equals(SYNTHETIC_HOST, ignoreCase = true) &&
+                request.url.encodedPath.startsWith(SYNTHETIC_PATH_PREFIX)
+            ) {
+                Response.Builder()
+                    .request(request)
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .header("Content-Type", "application/vnd.apple.mpegurl")
+                    .header("Cache-Control", "no-store")
+                    .body(
+                        payload.toResponseBody(
+                            "application/vnd.apple.mpegurl".toMediaType()
+                        )
+                    )
+                    .build()
+            } else {
+                chain.proceed(request)
+            }
+        }
     }
 
     private fun parseSubtitleTracks(masterUrl: String, masterText: String): List<HlsSubtitleTrack> =
@@ -296,7 +411,11 @@ object VixSrcExtractor {
                     semaphore.withPermit {
                         try {
                             resolveSubtitleVttUrl(track, headers)
-                                ?.let { SubtitleFile(track.label, it) }
+                                ?.let { vttUrl ->
+                                    newSubtitleFile(track.label, vttUrl) {
+                                        this.headers = headers
+                                    }
+                                }
                         } catch (c: CancellationException) {
                             throw c
                         } catch (_: Exception) {
@@ -308,19 +427,6 @@ object VixSrcExtractor {
             .awaitAll()
             .filterNotNull()
             .forEach(subtitleCallback)
-    }
-
-    private suspend fun buildAudioFiles(
-        variant: HlsVariant,
-        availableAudioTracks: List<HlsAudioTrack>,
-        headers: Map<String, String>
-    ): List<AudioFile> {
-        val selectedAudio = selectAudioTrack(variant, availableAudioTracks) ?: return emptyList()
-        return listOf(
-            newAudioFile(selectedAudio.url) {
-                this.headers = headers
-            }
-        )
     }
 
     suspend fun invokeVixSrc(
@@ -485,22 +591,19 @@ object VixSrcExtractor {
 
             var emittedVariantCount = 0
             for (variant in variants) {
-                val separateAudio = buildAudioFiles(variant, availableAudioTracks, finalHeaders)
-
-                // A variant that explicitly references an AUDIO group is video-only.
-                // Never expose it without the matching separate audio source.
-                if (variant.audioGroup != null && separateAudio.isEmpty()) continue
+                val syntheticMaster = buildSyntheticMaster(variant, availableAudioTracks)
+                    ?: continue
 
                 callback(
                     newExtractorLink(
-                        "VixSrc",
+                        PROVIDER_SOURCE,
                         "VixSrc ${variant.height}p",
-                        variant.url,
+                        syntheticMasterUrl(actualVid, variant.height),
                         ExtractorLinkType.M3U8
                     ) {
                         quality = variant.height
                         headers = finalHeaders
-                        this.audioTracks = separateAudio
+                        extractorData = SYNTHETIC_PREFIX + syntheticMaster
                     }
                 )
                 emittedVariantCount++
