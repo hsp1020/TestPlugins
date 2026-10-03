@@ -7,7 +7,7 @@ import org.jsoup.nodes.Element
 import kotlinx.coroutines.CancellationException
 
 class Linkkf : MainAPI() {
-    override var mainUrl = "https://linkkf.tv"
+    override var mainUrl = "https://linkani.tv"
     override var name = "Linkkf"
     override val hasMainPage = true
     override var lang = "ko"
