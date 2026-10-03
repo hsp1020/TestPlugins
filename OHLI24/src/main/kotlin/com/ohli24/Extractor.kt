@@ -1,145 +1,267 @@
-package com.ohli24
+package com.linkkf
 
-import com.lagradost.cloudstream3.SubtitleFile
+import android.util.Log
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.newSubtitleFile
-import com.lagradost.cloudstream3.utils.ExtractorApi
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import java.net.URI
 
-class MichealCDN : Cdndania() {
-    override val name = "MichealCDN"
-    override val mainUrl = "https://michealcdn.com"
-}
+class LinkkfExtractor {
+    companion object {
+        private const val TAG = "LinkkfExtractor"
+        private const val USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
 
-open class Cdndania : ExtractorApi() {
-    override val name = "CDNdania"
-    override val mainUrl = "https://cdndania.com"
-    override val requiresReferer = true
-    
-    // [v1.1 추가] 완벽한 위장을 위한 브라우저 User-Agent
-    private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    // 최신 자막 도메인 (기본)
+    private val SUBTITLE_BASE_URL = "https://subk.xyk2.top/s"
 
-    override suspend fun getUrl(
-        url: String,
-        referer: String?,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ) {
-        println("[OHLI24 v1.1] getUrl 호출됨 - url: $url, referer: $referer")
-        val host= getBaseUrl(url)
-        
-        if (url.contains("/video/")) {
-            try {
-                // 기존 로직 유지 (자막 추출)
-                val doc = app.get(url, referer = referer).document.selectFirst("script:containsData(playerjsSubtitle)")?.data().orEmpty()
-                val srtRegex = Regex("""playerjsSubtitle\s*=\s*"[^"]*(https?://[^"]+\.srt)"""")
-                val srtUrl = srtRegex.find(doc)?.groupValues?.get(1) ?: ""
-                println("[OHLI24 v1.1] 자막 URL 추출: $srtUrl")
+    // 기존 자막 도메인 (Fallback)
+    private val SUBTITLE_FALLBACK_BASE_URL = "https://k1.sub1.top/s"
 
-                val extractedHash = url.substringAfterLast("/")
-                val m3u8Url = "$host/player/index.php?data=$extractedHash&do=getVideo"
-                val header= mapOf("x-requested-with" to "XMLHttpRequest")
-                
-                // referer가 null일 경우 "null" 문자열이 들어가는 것 방지
-                val safeReferer = referer ?: ""
-                val formdata= mapOf("hash" to extractedHash, "r" to safeReferer)
-                
-                println("[OHLI24 v1.1] 비디오 소스 API 요청: $m3u8Url")
-                val response = app.post(m3u8Url, headers=header, data = formdata).parsedSafe<Response>()
-                
-                response?.videoSource?.let { m3u8 ->
-                    println("[OHLI24 v1.1] API 응답 비디오 소스 획득: $m3u8")
+    data class LinkkfResult(
+        val m3u8Url: String,
+        val subtitleUrl: String,
+        val fallbackSubtitleUrl: String = "",
+        val needsWebView: Boolean = false,
+        val referer: String
+    )
 
-                    // [v1.1 수정] ExoPlayer 3002 에러 방지를 위한 강력한 위장 헤더 구성
-                    val streamHeaders = mapOf(
-                        "User-Agent" to DESKTOP_UA,
-                        "Referer" to url, // 빈값("") 대신 실제 비디오 iframe 주소를 삽입
-                        "Origin" to host,
-                        "Accept" to "*/*",
-                        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
-                    )
+    /**
+     * Linkani watch 페이지에서 플레이어 정보를 가능한 한 정적으로 추출한다.
+     *
+     * 1) actual_url 직접 추출
+     * 2) HTML/script 안의 m3u8 직접 추출
+     * 3) 둘 다 실패하면 null 반환 -> Linkkf.loadLinks()가 WebView fallback 수행
+     */
+    suspend fun extract(url: String, referer: String): LinkkfResult? {
+        val headers = mapOf(
+            "User-Agent" to USER_AGENT,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer" to referer
+        )
 
-                    var finalUrl = m3u8
+        return try {
+            Log.d(TAG, "[START] watchUrl=$url referer=$referer")
 
-                    // [v1.1 수정] 텍스트 파일 용량 초과 예외(OOM) 방어 및 내용 안전 파싱
-                    try {
-                        println("[OHLI24 v1.1] M3U8(.txt) 안전 검증 시작...")
-                        val m3u8Res = app.get(m3u8, headers = streamHeaders)
-                        
-                        val content = try {
-                            m3u8Res.text.trim()
-                        } catch (e: Exception) {
-                            println("[OHLI24 v1.1] text 추출 오류 발생(용량 초과 가능성). document.text() 로 대체합니다.")
-                            m3u8Res.document.text().trim()
-                        }
-                        
-                        if (content.length < 500) {
-                            println("[OHLI24 v1.1] 응답 내용(미리보기): ${content.take(200)}")
-                        }
-
-                        // 진짜 M3U8이 아니라면, 내부에 실제 M3U8 링크가 숨겨져 있는지 탐색
-                        if (!content.startsWith("#EXTM3U")) {
-                            println("[OHLI24 v1.1] ❌ 주의: 응답이 #EXTM3U로 시작하지 않습니다. (에러 3002 원인)")
-                            val innerM3u8Regex = Regex("""(https?://[^"']+\.m3u8[^"']*)""")
-                            innerM3u8Regex.find(content)?.let {
-                                finalUrl = it.groupValues[1]
-                                println("[OHLI24 v1.1] 내용에서 실제 M3U8 추출 성공: $finalUrl")
-                            } ?: println("[OHLI24 v1.1] 내부에 M3U8 주소가 없습니다. 원본 URL($finalUrl)을 유지합니다.")
-                        } else {
-                            println("[OHLI24 v1.1] ✅ 정상적인 M3U8 텍스트로 확인됨.")
-                        }
-                    } catch (e: Exception) {
-                        println("[OHLI24 v1.1] M3U8 검증 중 에러 발생 (재생 시도 속행): ${e.message}")
-                    }
-
-                    // 추출기 링크 생성 및 콜백
-                    callback(
-                        newExtractorLink(
-                            "CDN",
-                            "CDN",
-                            url = finalUrl,
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.headers = streamHeaders
-                            this.referer = url
-                            this.quality = Qualities.P1080.value
-                        }
-                    )
-                    println("[OHLI24 v1.1] ExtractorLink 콜백 전달 완료")
-
-                    if (srtUrl.isNotBlank()) {
-                        subtitleCallback.invoke(
-                            newSubtitleFile(
-                                "Korean",
-                                srtUrl
-                            )
-                        )
-                        println("[OHLI24 v1.1] SubtitleFile 콜백 전달 완료")
-                    }
-                } ?: run {
-                    println("[OHLI24 v1.1] API 응답에서 videoSource가 null입니다.")
+            val response = app.get(url, headers = headers)
+            val finalPageUrl = response.url
+            val doc = response.document
+            val html = doc.html()
+            val scripts = doc.select("script")
+                .map { script ->
+                    val data = script.data()
+                    if (data.isNotBlank()) data else script.html()
                 }
-            } catch (e: Exception) {
-                println("[OHLI24 v1.1] 전체 파싱 중 예외 발생: ${e.message}")
+                .filter { it.isNotBlank() }
+
+            Log.d(
+                TAG,
+                "[PAGE] finalUrl=$finalPageUrl htmlLength=${html.length} scripts=${scripts.size}"
+            )
+
+            // 플레이어와 직접 관련된 script만 먼저 고른다.
+            // 일반 페이지의 canonical/schema `url`을 자막 키로 오인하면
+            // /s/https://linkani.tv/ani/.../.vtt 같은 잘못된 주소가 만들어진다.
+            val playerSource = scripts.firstOrNull {
+                it.contains("actual_url", ignoreCase = true)
+            } ?: scripts.firstOrNull {
+                it.contains(".m3u8", ignoreCase = true)
+            } ?: scripts.firstOrNull {
+                it.contains("var player_", ignoreCase = true)
             }
+
+            val actualUrlRaw = playerSource?.let { extractJsField(it, "actual_url") }
+                ?: scripts.firstNotNullOfOrNull { extractJsField(it, "actual_url") }
+                ?: extractJsField(html, "actual_url")
+
+            // 자막은 우선 플레이어 script 안의 직접 .vtt 주소를 찾고,
+            // 없을 때만 같은 playerSource 안의 정확한 `url` 필드를 proxy key로 사용한다.
+            val directSubtitleRaw = playerSource?.let { findVtt(it) }
+                ?: scripts.firstNotNullOfOrNull { findVtt(it) }
+
+            val rawSubtitleKey = playerSource?.let { extractJsField(it, "url") }
+            val subtitleKey = rawSubtitleKey
+                ?.takeIf { isUsableSubtitleProxyKey(it) }
+
+            val directSubtitleUrl = directSubtitleRaw
+                ?.let { resolveUrl(finalPageUrl.ifBlank { url }, it) }
+                .orEmpty()
+
+            val subtitleUrl = when {
+                directSubtitleUrl.isNotEmpty() -> directSubtitleUrl
+                subtitleKey != null -> buildSubtitleProxyUrl(SUBTITLE_BASE_URL, subtitleKey)
+                else -> ""
+            }
+
+            val fallbackSubtitleUrl = when {
+                directSubtitleUrl.isNotEmpty() -> ""
+                subtitleKey != null -> buildSubtitleProxyUrl(SUBTITLE_FALLBACK_BASE_URL, subtitleKey)
+                else -> ""
+            }
+
+            Log.d(
+                TAG,
+                "[SUBTITLE] playerSource=${playerSource != null} direct=${directSubtitleUrl.isNotEmpty()} " +
+                    "rawKey=${rawSubtitleKey ?: "<none>"} accepted=${subtitleKey != null}"
+            )
+
+            if (!actualUrlRaw.isNullOrBlank()) {
+                val actualUrl = resolveUrl(finalPageUrl.ifBlank { url }, actualUrlRaw)
+                val directM3u8 = actualUrl.contains(".m3u8", ignoreCase = true)
+
+                Log.d(
+                    TAG,
+                    "[ACTUAL_URL] found=true directM3u8=$directM3u8 url=$actualUrl subtitleKey=${!subtitleKey.isNullOrBlank()}"
+                )
+
+                return LinkkfResult(
+                    m3u8Url = actualUrl,
+                    subtitleUrl = subtitleUrl,
+                    fallbackSubtitleUrl = fallbackSubtitleUrl,
+                    needsWebView = !directM3u8,
+                    referer = finalPageUrl.ifBlank { url }
+                )
+            }
+
+            // actual_url 구조가 바뀌어도 HTML/JS에 m3u8가 노출되어 있으면 직접 회수한다.
+            val directM3u8Raw = playerSource?.let { findM3u8(it) }
+                ?: scripts.firstNotNullOfOrNull { findM3u8(it) }
+                ?: findM3u8(html)
+
+            if (!directM3u8Raw.isNullOrBlank()) {
+                val directM3u8 = resolveUrl(finalPageUrl.ifBlank { url }, directM3u8Raw)
+                Log.d(TAG, "[M3U8_STATIC] url=$directM3u8")
+
+                return LinkkfResult(
+                    m3u8Url = directM3u8,
+                    subtitleUrl = subtitleUrl,
+                    fallbackSubtitleUrl = fallbackSubtitleUrl,
+                    needsWebView = false,
+                    referer = finalPageUrl.ifBlank { url }
+                )
+            }
+
+            Log.w(
+                TAG,
+                "[NO_STATIC_STREAM] actual_url/m3u8 not found; WebView fallback required. url=$url"
+            )
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "[EXTRACT_ERROR] url=$url ${e.javaClass.simpleName}: ${e.message}", e)
+            null
         }
     }
 
-    private fun getBaseUrl(url: String): String {
-        return URI(url).let { "${it.scheme}://${it.host}" }
+    /**
+     * JSON과 일반 JS object 양쪽을 처리한다.
+     * 예:
+     *   "actual_url":"..."
+     *   'actual_url':'...'
+     *   actual_url: "..."
+     *   actual_url = '...'
+     */
+    private fun extractJsField(source: String, key: String): String? {
+        if (source.isBlank()) return null
+
+        val escapedKey = Regex.escape(key)
+        val patterns = listOf(
+            Regex("""[\"']$escapedKey[\"']\s*:\s*[\"']([^\"']+)[\"']""", RegexOption.IGNORE_CASE),
+            Regex("""\b$escapedKey\b\s*[:=]\s*[\"']([^\"']+)[\"']""", RegexOption.IGNORE_CASE)
+        )
+
+        for (pattern in patterns) {
+            val value = pattern.find(source)?.groupValues?.getOrNull(1)
+            if (!value.isNullOrBlank()) return decodeJsUrl(value)
+        }
+        return null
+    }
+
+    /**
+     * subtitle proxy key는 player object 내부의 상대 키/경로여야 한다.
+     * 작품 상세 URL 같은 절대 URL을 허용하면
+     * https://sub.../s/https://linkani.../.vtt 형태의 잘못된 주소가 생성된다.
+     */
+    private fun isUsableSubtitleProxyKey(raw: String): Boolean {
+        val value = decodeJsUrl(raw).trim()
+        if (value.isBlank()) return false
+        if (value.startsWith("http://", ignoreCase = true)) return false
+        if (value.startsWith("https://", ignoreCase = true)) return false
+        if (value.startsWith("//")) return false
+        if (value.contains(".m3u8", ignoreCase = true)) return false
+        return true
+    }
+
+    private fun buildSubtitleProxyUrl(base: String, rawKey: String): String {
+        val key = decodeJsUrl(rawKey).trim().trimStart('/')
+        return if (key.endsWith(".vtt", ignoreCase = true)) {
+            "$base/$key"
+        } else {
+            "$base/$key.vtt"
+        }
+    }
+
+    private fun findVtt(source: String): String? {
+        if (source.isBlank()) return null
+
+        val normalized = decodeJsUrl(source)
+
+        val absolute = Regex(
+            """https?://[^\s\"'<>\\]+?\.vtt(?:\?[^\s\"'<>\\]*)?""",
+            RegexOption.IGNORE_CASE
+        ).find(normalized)?.value
+        if (!absolute.isNullOrBlank()) return absolute
+
+        val protocolRelative = Regex(
+            """//[^\s\"'<>\\]+?\.vtt(?:\?[^\s\"'<>\\]*)?""",
+            RegexOption.IGNORE_CASE
+        ).find(normalized)?.value
+        if (!protocolRelative.isNullOrBlank()) return protocolRelative
+
+        return Regex(
+            """(?:^|[\"'=:(\s])(/[^\s\"'<>\\]+?\.vtt(?:\?[^\s\"'<>\\]*)?)""",
+            RegexOption.IGNORE_CASE
+        ).find(normalized)?.groupValues?.getOrNull(1)
+    }
+
+    private fun findM3u8(source: String): String? {
+        if (source.isBlank()) return null
+
+        val normalized = decodeJsUrl(source)
+        val absolute = Regex(
+            """https?://[^\s\"'<>\\]+?\.m3u8(?:\?[^\s\"'<>\\]*)?""",
+            RegexOption.IGNORE_CASE
+        ).find(normalized)?.value
+        if (!absolute.isNullOrBlank()) return absolute
+
+        return Regex(
+            """//[^\s\"'<>\\]+?\.m3u8(?:\?[^\s\"'<>\\]*)?""",
+            RegexOption.IGNORE_CASE
+        ).find(normalized)?.value
+    }
+
+    private fun decodeJsUrl(value: String): String {
+        return value
+            .trim()
+            .replace("\\/", "/")
+            .replace("\\u002F", "/", ignoreCase = true)
+            .replace("\\u003A", ":", ignoreCase = true)
+            .replace("\\u003D", "=", ignoreCase = true)
+            .replace("\\u0026", "&", ignoreCase = true)
+            .replace("&amp;", "&")
+    }
+
+    private fun resolveUrl(baseUrl: String, rawUrl: String): String {
+        val value = decodeJsUrl(rawUrl)
+        if (value.startsWith("http://", ignoreCase = true) ||
+            value.startsWith("https://", ignoreCase = true)
+        ) {
+            return value
+        }
+        if (value.startsWith("//")) return "https:$value"
+
+        return try {
+            URI(baseUrl).resolve(value).toString()
+        } catch (_: Exception) {
+            value
+        }
     }
 }
-
-data class Response(
-    val hls: Boolean,
-    val videoImage: String,
-    val videoSource: String,
-    val securedLink: String,
-    val downloadLinks: List<Any?>,
-    val attachmentLinks: List<Any?>,
-    val ck: String,
-)
