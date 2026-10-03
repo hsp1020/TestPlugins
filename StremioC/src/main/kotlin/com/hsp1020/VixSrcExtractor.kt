@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.CancellationException
+import java.net.URI
 
 object VixSrcExtractor {
 
@@ -27,6 +28,12 @@ object VixSrcExtractor {
         """["']?asn["']?\s*:\s*["']?([^"',}\s]+)["']?""".toRegex()
     private val B_REGEX =
         """["']?b["']?\s*[:=]\s*["']?([^"'&,}\s]+)["']?""".toRegex()
+    private val HLS_ATTRIBUTE_REGEX =
+        """([A-Z0-9-]+)=("[^"]*"|[^,]*)""".toRegex(RegexOption.IGNORE_CASE)
+    private val RESOLUTION_REGEX =
+        """RESOLUTION\s*=\s*(\d+)x(\d+)""".toRegex(RegexOption.IGNORE_CASE)
+    private val RENDITION_HEIGHT_REGEX =
+        """(?:[?&]rendition=|[/_-])(\d{3,4})p(?:[&/?_.-]|$)""".toRegex(RegexOption.IGNORE_CASE)
 
     private data class MasterPlaylistData(
         val url: String?,
@@ -34,6 +41,11 @@ object VixSrcExtractor {
         val expires: String,
         val b: String?,
         val asn: String?
+    )
+
+    private data class HlsVariant(
+        val url: String,
+        val height: Int
     )
 
     private fun normalizeVixUrl(rawUrl: String): String {
@@ -52,16 +64,37 @@ object VixSrcExtractor {
         }
     }
 
+    private fun resolveHlsUrl(baseUrl: String, rawUrl: String): String {
+        val cleaned = rawUrl
+            .trim()
+            .trim('"', '\'')
+            .replace("\\u0026", "&")
+            .replace("\\/", "/")
+            .replace("&amp;", "&")
+
+        if (cleaned.startsWith("http://", ignoreCase = true) ||
+            cleaned.startsWith("https://", ignoreCase = true)
+        ) {
+            return cleaned
+        }
+
+        return try {
+            URI(baseUrl).resolve(cleaned).toString()
+        } catch (_: Exception) {
+            when {
+                cleaned.startsWith("//") -> "https:$cleaned"
+                cleaned.startsWith("/") -> BASE_URL + cleaned
+                else -> baseUrl.substringBeforeLast('/', BASE_URL) + "/" + cleaned
+            }
+        }
+    }
+
     private fun appendQueryParamIfMissing(url: String, key: String, value: String?): String {
         if (value.isNullOrBlank()) return url
         if (Regex("(?:[?&])${Regex.escape(key)}=").containsMatchIn(url)) return url
         return url + if (url.contains('?')) "&$key=$value" else "?$key=$value"
     }
 
-    /**
-     * masterPlaylist 내부에는 params { ... } 같은 중첩 객체가 있어 단순 {.*?} 정규식으로는
-     * 실제 url까지 안정적으로 잡을 수 없다. marker 이후의 작은 블록에서 필드를 개별 추출한다.
-     */
     private fun parseMasterPlaylist(rawHtml: String): MasterPlaylistData? {
         val markerIndex = rawHtml.indexOf("window.masterPlaylist")
             .takeIf { it >= 0 }
@@ -101,7 +134,79 @@ object VixSrcExtractor {
         return url
     }
 
-    @Suppress("UNUSED_PARAMETER")
+    private fun parseAttributes(line: String): Map<String, String> =
+        HLS_ATTRIBUTE_REGEX.findAll(line).associate { match ->
+            match.groupValues[1].uppercase() to match.groupValues[2].trim().trim('"')
+        }
+
+    private fun parseVariants(masterUrl: String, masterText: String): List<HlsVariant> {
+        val lines = masterText.lineSequence().map { it.trim() }.toList()
+        val variants = mutableListOf<HlsVariant>()
+
+        var index = 0
+        while (index < lines.size) {
+            val line = lines[index]
+            if (!line.startsWith("#EXT-X-STREAM-INF", ignoreCase = true)) {
+                index++
+                continue
+            }
+
+            var uriIndex = index + 1
+            while (uriIndex < lines.size &&
+                (lines[uriIndex].isBlank() || lines[uriIndex].startsWith('#'))
+            ) {
+                uriIndex++
+            }
+
+            if (uriIndex >= lines.size) break
+
+            val childUrl = resolveHlsUrl(masterUrl, lines[uriIndex])
+            val resolutionHeight = RESOLUTION_REGEX.find(line)
+                ?.groupValues
+                ?.getOrNull(2)
+                ?.toIntOrNull()
+            val renditionHeight = RENDITION_HEIGHT_REGEX.find(childUrl)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+
+            variants += HlsVariant(
+                url = childUrl,
+                height = resolutionHeight ?: renditionHeight ?: 0
+            )
+            index = uriIndex + 1
+        }
+
+        return variants.distinctBy { it.url }
+    }
+
+    private fun emitMasterSubtitles(
+        masterUrl: String,
+        masterText: String,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ) {
+        val emittedUrls = mutableSetOf<String>()
+
+        masterText.lineSequence()
+            .map { it.trim() }
+            .filter { it.startsWith("#EXT-X-MEDIA:", ignoreCase = true) }
+            .forEach { line ->
+                val attributes = parseAttributes(line.substringAfter(':'))
+                if (!attributes["TYPE"].equals("SUBTITLES", ignoreCase = true)) return@forEach
+
+                val rawUri = attributes["URI"]?.takeIf { it.isNotBlank() } ?: return@forEach
+                val subtitleUrl = resolveHlsUrl(masterUrl, rawUri)
+                if (!emittedUrls.add(subtitleUrl)) return@forEach
+
+                val label = attributes["NAME"]
+                    ?.takeIf { it.isNotBlank() }
+                    ?: attributes["LANGUAGE"]?.takeIf { it.isNotBlank() }
+                    ?: "VixSrc"
+
+                subtitleCallback(SubtitleFile(label, subtitleUrl))
+            }
+    }
+
     suspend fun invokeVixSrc(
         loadData: StremioC.LoadData,
         targetType: String,
@@ -165,7 +270,6 @@ object VixSrcExtractor {
                     "&expires=${playlistData.expires}&h=1&lang=en"
             }
 
-            // API/embed 응답의 세션 쿠키를 플레이리스트 요청에도 전달한다.
             val cookies = mutableMapOf<String, String>()
             listOf(apiResponse.headers, embedResponse.headers).forEach { headers ->
                 headers.forEach cookieLoop@ { pair ->
@@ -197,8 +301,9 @@ object VixSrcExtractor {
                     if (cookieHeader.isNotEmpty()) put("Cookie", cookieHeader)
                 }
 
+            var masterText: String? = null
+
             val finalHeaders = if (isMovie) {
-                // 영화는 VixSrc 측 Referer 검증 변화에 대응해 실제 M3U8을 반환하는 조합을 사용한다.
                 val candidates = listOf(
                     playerHeaders("$BASE_URL/", includeOrigin = true),
                     playerHeaders(apiUrl, includeOrigin = true),
@@ -207,17 +312,14 @@ object VixSrcExtractor {
 
                 var verified: MutableMap<String, String>? = null
                 for (headers in candidates) {
-                    val valid = try {
-                        StremioC.customSession
-                            .get(masterPlaylistUrl, headers = headers)
-                            .text
-                            .trimStart()
-                            .startsWith("#EXTM3U")
+                    val text = try {
+                        StremioC.customSession.get(masterPlaylistUrl, headers = headers).text
                     } catch (_: Exception) {
-                        false
+                        null
                     }
-                    if (valid) {
+                    if (text?.trimStart()?.startsWith("#EXTM3U") == true) {
                         verified = headers
+                        masterText = text
                         break
                     }
                 }
@@ -227,13 +329,36 @@ object VixSrcExtractor {
                     return
                 }
             } else {
-                // TV 경로는 기존 정상 동작을 그대로 유지한다.
-                playerHeaders(embedUrl, includeOrigin = false)
+                val headers = playerHeaders(embedUrl, includeOrigin = false)
+                masterText = try {
+                    StremioC.customSession
+                        .get(masterPlaylistUrl, headers = headers)
+                        .text
+                        .takeIf { it.trimStart().startsWith("#EXTM3U") }
+                } catch (_: Exception) {
+                    null
+                }
+                headers
             }
 
+            val master = masterText
+            if (master != null) {
+                emitMasterSubtitles(masterPlaylistUrl, master, subtitleCallback)
+            }
+
+            val selectedVariant = master
+                ?.let { parseVariants(masterPlaylistUrl, it) }
+                ?.maxByOrNull { it.height }
+
+            val playbackUrl = selectedVariant?.url ?: masterPlaylistUrl
+            val playbackQuality = selectedVariant
+                ?.height
+                ?.takeIf { it > 0 }
+                ?: Qualities.P1080.value
+
             callback(
-                newExtractorLink("VixSrc", "VixSrc", masterPlaylistUrl, ExtractorLinkType.M3U8) {
-                    quality = Qualities.P1080.value
+                newExtractorLink("VixSrc", "VixSrc", playbackUrl, ExtractorLinkType.M3U8) {
+                    quality = playbackQuality
                     headers = finalHeaders
                 }
             )
