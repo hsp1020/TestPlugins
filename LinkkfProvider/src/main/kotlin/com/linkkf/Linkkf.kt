@@ -90,7 +90,7 @@ class Linkkf : MainAPI() {
             airingInfo?.let { add("방영 정보：${it}년") }
             originalTitle?.let { add("원제：$it") }
             add(description)
-        }.joinToString("\n")
+        }.joinToString("<br>")
 
         val genreRow = doc.select(".detail-info-desc li").firstOrNull { li ->
             li.selectFirst("span")?.text()?.contains("장르") == true
