@@ -137,7 +137,7 @@ class OHLI24 : MainAPI() {
                 this.year = year
                 tags = genres
                 posterUrl = poster
-                plot = plot
+                this.plot = plot
             }
         }
 
@@ -146,7 +146,7 @@ class OHLI24 : MainAPI() {
             this.year = year
             tags = genres
             posterUrl = poster
-            plot = plot
+            this.plot = plot
         }
     }
 
