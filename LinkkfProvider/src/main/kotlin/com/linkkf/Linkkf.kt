@@ -86,7 +86,7 @@ class Linkkf : MainAPI() {
             ?.trim()
             ?.takeIf { it.isNotBlank() }
 
-        val plot = buildList {
+        val detailPlot = buildList {
             airingInfo?.let { add("방영 정보：${it}년") }
             originalTitle?.let { add("원제：$it") }
             add(description)
@@ -140,7 +140,7 @@ class Linkkf : MainAPI() {
 
         return newAnimeLoadResponse(title, fullUrl, TvType.Anime) {
             posterUrl = poster
-            plot = plot
+            this.plot = detailPlot
             this.tags = tags
             this.year = year
             if (subEpisodes.isNotEmpty()) addEpisodes(DubStatus.Subbed, subEpisodes)
