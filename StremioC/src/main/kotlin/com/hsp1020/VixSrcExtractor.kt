@@ -23,14 +23,13 @@ import java.net.URI
 object VixSrcExtractor {
 
     private const val BASE_URL = "https://vixsrc.to"
-    private const val MASTER_PLAYLIST_BLOCK_LEN = 2500
     private const val USER_AGENT =
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
     private const val ACCEPT_LANGUAGE = "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
-    private const val PROVIDER_SOURCE = "StremioC"
-    private const val SYNTHETIC_HOST = "vixsrc.to"
-    private const val SYNTHETIC_PATH_PREFIX = "/__cs3_vixsrc__/"
+    private const val MASTER_BLOCK_LEN = 2500
+    private const val SOURCE = "StremioC"
     private const val SYNTHETIC_PREFIX = "VIXSRC_SYNTHETIC_MASTER_V1\n"
+    private const val SYNTHETIC_PATH = "/__cs3_vixsrc__/"
 
     private val EMBED_REGEX = """(/embed/(\d+)[^"'\s]*)""".toRegex()
     private val PLAYLIST_URL_REGEX =
@@ -43,14 +42,14 @@ object VixSrcExtractor {
         """["']?asn["']?\s*:\s*["']?([^"',}\s]+)["']?""".toRegex()
     private val B_REGEX =
         """["']?b["']?\s*[:=]\s*["']?([^"'&,}\s]+)["']?""".toRegex()
-    private val HLS_ATTRIBUTE_REGEX =
+    private val ATTRIBUTE_REGEX =
         """([A-Z0-9-]+)=("[^"]*"|[^,]*)""".toRegex(RegexOption.IGNORE_CASE)
     private val RESOLUTION_REGEX =
         """RESOLUTION\s*=\s*(\d+)x(\d+)""".toRegex(RegexOption.IGNORE_CASE)
     private val RENDITION_HEIGHT_REGEX =
         """(?:[?&]rendition=|[/_-])(\d{3,4})p(?:[&/?_.-]|$)""".toRegex(RegexOption.IGNORE_CASE)
 
-    private data class MasterPlaylistData(
+    private data class PlaylistData(
         val url: String?,
         val token: String,
         val expires: String,
@@ -58,7 +57,7 @@ object VixSrcExtractor {
         val asn: String?
     )
 
-    private data class HlsVariant(
+    private data class Variant(
         val url: String,
         val width: Int,
         val height: Int,
@@ -68,7 +67,7 @@ object VixSrcExtractor {
         val audioGroup: String?
     )
 
-    private data class HlsAudioTrack(
+    private data class AudioTrack(
         val groupId: String,
         val name: String,
         val language: String?,
@@ -78,74 +77,67 @@ object VixSrcExtractor {
         val autoSelect: Boolean
     )
 
-    private data class HlsSubtitleTrack(
+    private data class SubtitleTrack(
         val label: String,
         val playlistUrl: String
     )
 
-    private fun normalizeVixUrl(rawUrl: String): String {
-        val cleaned = rawUrl
-            .replace("\\u0026", "&")
-            .replace("\\/", "/")
-            .replace("&amp;", "&")
-            .trim()
+    private data class MasterResult(
+        val text: String?,
+        val headers: MutableMap<String, String>
+    )
 
+    private fun decodeEscapes(value: String): String = value
+        .replace("\\u0026", "&")
+        .replace("\\/", "/")
+        .replace("&amp;", "&")
+
+    private fun cleanUrl(raw: String): String = decodeEscapes(raw).trim().trim('"', '\'')
+
+    private fun absoluteVixUrl(raw: String): String {
+        val url = cleanUrl(raw)
         return when {
-            cleaned.startsWith("https://", ignoreCase = true) ||
-                cleaned.startsWith("http://", ignoreCase = true) -> cleaned
-            cleaned.startsWith("//") -> "https:$cleaned"
-            cleaned.startsWith("/") -> BASE_URL + cleaned
-            else -> "$BASE_URL/${cleaned.trimStart('/')}"
+            url.startsWith("http://", true) || url.startsWith("https://", true) -> url
+            url.startsWith("//") -> "https:$url"
+            url.startsWith("/") -> BASE_URL + url
+            else -> "$BASE_URL/${url.trimStart('/')}"
         }
     }
 
-    private fun resolveHlsUrl(baseUrl: String, rawUrl: String): String {
-        val cleaned = rawUrl
-            .trim()
-            .trim('"', '\'')
-            .replace("\\u0026", "&")
-            .replace("\\/", "/")
-            .replace("&amp;", "&")
-
-        if (cleaned.startsWith("http://", ignoreCase = true) ||
-            cleaned.startsWith("https://", ignoreCase = true)
-        ) {
-            return cleaned
-        }
+    private fun resolveUrl(baseUrl: String, raw: String): String {
+        val url = cleanUrl(raw)
+        if (url.startsWith("http://", true) || url.startsWith("https://", true)) return url
 
         return try {
-            URI(baseUrl).resolve(cleaned).toString()
+            URI(baseUrl).resolve(url).toString()
         } catch (_: Exception) {
             when {
-                cleaned.startsWith("//") -> "https:$cleaned"
-                cleaned.startsWith("/") -> BASE_URL + cleaned
-                else -> baseUrl.substringBeforeLast('/', BASE_URL) + "/" + cleaned
+                url.startsWith("//") -> "https:$url"
+                url.startsWith("/") -> BASE_URL + url
+                else -> baseUrl.substringBeforeLast('/', BASE_URL) + "/" + url
             }
         }
     }
 
-    private fun appendQueryParamIfMissing(url: String, key: String, value: String?): String {
+    private fun appendQuery(url: String, key: String, value: String?): String {
         if (value.isNullOrBlank()) return url
         if (Regex("(?:[?&])${Regex.escape(key)}=").containsMatchIn(url)) return url
-        return url + if (url.contains('?')) "&$key=$value" else "?$key=$value"
+        return url + if ('?' in url) "&$key=$value" else "?$key=$value"
     }
 
-    private fun parseMasterPlaylist(rawHtml: String): MasterPlaylistData? {
-        val markerIndex = rawHtml.indexOf("window.masterPlaylist")
+    private fun parsePlaylistData(html: String): PlaylistData? {
+        val start = html.indexOf("window.masterPlaylist")
             .takeIf { it >= 0 }
-            ?: rawHtml.indexOf("masterPlaylist").takeIf { it >= 0 }
+            ?: html.indexOf("masterPlaylist").takeIf { it >= 0 }
             ?: return null
 
-        val block = rawHtml
-            .substring(markerIndex, minOf(rawHtml.length, markerIndex + MASTER_PLAYLIST_BLOCK_LEN))
-            .replace("\\u0026", "&")
-            .replace("\\/", "/")
-            .replace("&amp;", "&")
-
+        val block = decodeEscapes(
+            html.substring(start, minOf(html.length, start + MASTER_BLOCK_LEN))
+        )
         val token = TOKEN_REGEX.find(block)?.groupValues?.get(1) ?: return null
         val expires = EXPIRY_REGEX.find(block)?.groupValues?.get(1) ?: return null
 
-        return MasterPlaylistData(
+        return PlaylistData(
             url = PLAYLIST_URL_REGEX.find(block)?.groupValues?.get(1),
             token = token,
             expires = expires,
@@ -154,34 +146,34 @@ object VixSrcExtractor {
         )
     }
 
-    private fun buildMoviePlaylistUrl(actualVid: String, data: MasterPlaylistData): String {
-        var url = data.url
-            ?.takeIf { it.isNotBlank() }
-            ?.let(::normalizeVixUrl)
-            ?: "$BASE_URL/playlist/$actualVid"
+    private fun buildMasterUrl(vid: String, data: PlaylistData, isMovie: Boolean): String {
+        var url = if (isMovie) {
+            data.url?.takeIf(String::isNotBlank)?.let(::absoluteVixUrl) ?: "$BASE_URL/playlist/$vid"
+        } else {
+            "$BASE_URL/playlist/$vid"
+        }
 
-        url = appendQueryParamIfMissing(url, "b", data.b)
-        url = appendQueryParamIfMissing(url, "token", data.token)
-        url = appendQueryParamIfMissing(url, "expires", data.expires)
-        url = appendQueryParamIfMissing(url, "h", "1")
-        url = appendQueryParamIfMissing(url, "asn", data.asn)
-        url = appendQueryParamIfMissing(url, "lang", "en")
-        return url
+        url = appendQuery(url, "b", data.b)
+        url = appendQuery(url, "token", data.token)
+        url = appendQuery(url, "expires", data.expires)
+        url = appendQuery(url, "h", "1")
+        if (isMovie) url = appendQuery(url, "asn", data.asn)
+        return appendQuery(url, "lang", "en")
     }
 
-    private fun parseAttributes(line: String): Map<String, String> =
-        HLS_ATTRIBUTE_REGEX.findAll(line).associate { match ->
+    private fun attributes(line: String): Map<String, String> =
+        ATTRIBUTE_REGEX.findAll(line).associate { match ->
             match.groupValues[1].uppercase() to match.groupValues[2].trim().trim('"')
         }
 
-    private fun parseVariants(masterUrl: String, masterText: String): List<HlsVariant> {
-        val lines = masterText.lineSequence().map { it.trim() }.toList()
-        val variants = mutableListOf<HlsVariant>()
-
+    private fun parseVariants(masterUrl: String, master: String): List<Variant> {
+        val lines = master.lineSequence().map(String::trim).toList()
+        val result = mutableListOf<Variant>()
         var index = 0
+
         while (index < lines.size) {
             val line = lines[index]
-            if (!line.startsWith("#EXT-X-STREAM-INF", ignoreCase = true)) {
+            if (!line.startsWith("#EXT-X-STREAM-INF", true)) {
                 index++
                 continue
             }
@@ -189,233 +181,151 @@ object VixSrcExtractor {
             var uriIndex = index + 1
             while (uriIndex < lines.size &&
                 (lines[uriIndex].isBlank() || lines[uriIndex].startsWith('#'))
-            ) {
-                uriIndex++
-            }
+            ) uriIndex++
             if (uriIndex >= lines.size) break
 
-            val attributes = parseAttributes(line.substringAfter(':'))
-            val childUrl = resolveHlsUrl(masterUrl, lines[uriIndex])
-
-            val resolution = attributes["RESOLUTION"]
-                ?.split('x', limit = 2)
-                ?.takeIf { it.size == 2 }
+            val attrs = attributes(line.substringAfter(':'))
+            val childUrl = resolveUrl(masterUrl, lines[uriIndex])
+            val resolution = attrs["RESOLUTION"]?.split('x', limit = 2)
             val width = resolution?.getOrNull(0)?.toIntOrNull() ?: 0
-            val resolutionHeight = resolution?.getOrNull(1)?.toIntOrNull()
+            val height = resolution?.getOrNull(1)?.toIntOrNull()
                 ?: RESOLUTION_REGEX.find(line)?.groupValues?.getOrNull(2)?.toIntOrNull()
-            val renditionHeight = RENDITION_HEIGHT_REGEX.find(childUrl)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?.toIntOrNull()
+                ?: RENDITION_HEIGHT_REGEX.find(childUrl)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: 0
 
-            variants += HlsVariant(
-                url = childUrl,
-                width = width,
-                height = resolutionHeight ?: renditionHeight ?: 0,
-                bandwidth = attributes["BANDWIDTH"]?.toLongOrNull() ?: 0L,
-                averageBandwidth = attributes["AVERAGE-BANDWIDTH"]?.toLongOrNull() ?: 0L,
-                codecs = attributes["CODECS"]?.takeIf { it.isNotBlank() },
-                audioGroup = attributes["AUDIO"]?.takeIf { it.isNotBlank() }
-            )
+            if (height > 0) {
+                result += Variant(
+                    url = childUrl,
+                    width = width,
+                    height = height,
+                    bandwidth = attrs["BANDWIDTH"]?.toLongOrNull() ?: 0L,
+                    averageBandwidth = attrs["AVERAGE-BANDWIDTH"]?.toLongOrNull() ?: 0L,
+                    codecs = attrs["CODECS"]?.takeIf(String::isNotBlank),
+                    audioGroup = attrs["AUDIO"]?.takeIf(String::isNotBlank)
+                )
+            }
             index = uriIndex + 1
         }
 
-        return variants
-            .distinctBy { it.url }
-            .filter { it.height > 0 }
-            .groupBy { it.height }
+        return result
+            .distinctBy(Variant::url)
+            .groupBy(Variant::height)
             .values
-            .mapNotNull { sameHeight -> sameHeight.maxByOrNull { it.bandwidth } }
-            .sortedByDescending { it.height }
+            .mapNotNull { variants -> variants.maxByOrNull(Variant::bandwidth) }
+            .sortedByDescending(Variant::height)
     }
 
-    private fun parseAudioTracks(masterUrl: String, masterText: String): List<HlsAudioTrack> =
-        masterText.lineSequence()
-            .map { it.trim() }
-            .filter { it.startsWith("#EXT-X-MEDIA:", ignoreCase = true) }
-            .mapNotNull { line ->
-                val attributes = parseAttributes(line.substringAfter(':'))
-                if (!attributes["TYPE"].equals("AUDIO", ignoreCase = true)) return@mapNotNull null
+    private fun mediaEntries(master: String, type: String): Sequence<Map<String, String>> =
+        master.lineSequence()
+            .map(String::trim)
+            .filter { it.startsWith("#EXT-X-MEDIA:", true) }
+            .map { attributes(it.substringAfter(':')) }
+            .filter { it["TYPE"].equals(type, true) }
 
-                val groupId = attributes["GROUP-ID"]?.takeIf { it.isNotBlank() }
-                    ?: return@mapNotNull null
-                val rawUri = attributes["URI"]?.takeIf { it.isNotBlank() }
-                    ?: return@mapNotNull null
-
-                HlsAudioTrack(
+    private fun parseAudioTracks(masterUrl: String, master: String): List<AudioTrack> =
+        mediaEntries(master, "AUDIO")
+            .mapNotNull { attrs ->
+                val groupId = attrs["GROUP-ID"]?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                val uri = attrs["URI"]?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                AudioTrack(
                     groupId = groupId,
-                    name = attributes["NAME"]?.takeIf { it.isNotBlank() } ?: "Audio",
-                    language = attributes["LANGUAGE"]?.takeIf { it.isNotBlank() },
-                    channels = attributes["CHANNELS"]?.takeIf { it.isNotBlank() },
-                    url = resolveHlsUrl(masterUrl, rawUri),
-                    isDefault = attributes["DEFAULT"].equals("YES", ignoreCase = true),
-                    autoSelect = attributes["AUTOSELECT"].equals("YES", ignoreCase = true)
+                    name = attrs["NAME"]?.takeIf(String::isNotBlank) ?: "Audio",
+                    language = attrs["LANGUAGE"]?.takeIf(String::isNotBlank),
+                    channels = attrs["CHANNELS"]?.takeIf(String::isNotBlank),
+                    url = resolveUrl(masterUrl, uri),
+                    isDefault = attrs["DEFAULT"].equals("YES", true),
+                    autoSelect = attrs["AUTOSELECT"].equals("YES", true)
                 )
             }
             .distinctBy { it.groupId to it.url }
             .toList()
 
-    private fun matchingAudioTracks(
-        variant: HlsVariant,
-        audioTracks: List<HlsAudioTrack>
-    ): List<HlsAudioTrack> {
-        val group = variant.audioGroup ?: return emptyList()
-        return audioTracks.filter { it.groupId == group }
-    }
-
-    private fun hlsQuote(value: String): String =
+    private fun quote(value: String): String =
         "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
-    private fun buildSyntheticMaster(
-        variant: HlsVariant,
-        audioTracks: List<HlsAudioTrack>
-    ): String? {
-        val matchedAudio = matchingAudioTracks(variant, audioTracks)
+    private fun buildSyntheticMaster(variant: Variant, allAudio: List<AudioTrack>): String? {
+        val audio = variant.audioGroup
+            ?.let { group -> allAudio.filter { it.groupId == group } }
+            .orEmpty()
 
-        // A variant referencing an AUDIO group is video-only. Without its matching
-        // audio rendition, exposing the child directly would produce silent playback.
-        if (variant.audioGroup != null && matchedAudio.isEmpty()) return null
-
-        val hasDefaultAudio = matchedAudio.any { it.isDefault }
+        if (variant.audioGroup != null && audio.isEmpty()) return null
+        val hasDefault = audio.any(AudioTrack::isDefault)
 
         return buildString {
             appendLine("#EXTM3U")
             appendLine("#EXT-X-VERSION:3")
             appendLine("#EXT-X-INDEPENDENT-SEGMENTS")
 
-            matchedAudio.forEachIndexed { index, audio ->
+            audio.forEachIndexed { index, track ->
                 val attrs = mutableListOf(
                     "TYPE=AUDIO",
-                    "GROUP-ID=${hlsQuote(audio.groupId)}",
-                    "NAME=${hlsQuote(audio.name)}",
-                    "DEFAULT=${if (audio.isDefault || (!hasDefaultAudio && index == 0)) "YES" else "NO"}",
-                    "AUTOSELECT=${if (audio.autoSelect || index == 0) "YES" else "NO"}"
+                    "GROUP-ID=${quote(track.groupId)}",
+                    "NAME=${quote(track.name)}",
+                    "DEFAULT=${if (track.isDefault || (!hasDefault && index == 0)) "YES" else "NO"}",
+                    "AUTOSELECT=${if (track.autoSelect || index == 0) "YES" else "NO"}"
                 )
-                audio.language?.let { attrs += "LANGUAGE=${hlsQuote(it)}" }
-                audio.channels?.let { attrs += "CHANNELS=${hlsQuote(it)}" }
-                attrs += "URI=${hlsQuote(audio.url)}"
+                track.language?.let { attrs += "LANGUAGE=${quote(it)}" }
+                track.channels?.let { attrs += "CHANNELS=${quote(it)}" }
+                attrs += "URI=${quote(track.url)}"
                 appendLine("#EXT-X-MEDIA:${attrs.joinToString(",")}")
             }
 
-            val streamAttrs = mutableListOf(
-                "BANDWIDTH=${variant.bandwidth.coerceAtLeast(1L)}"
-            )
-            if (variant.averageBandwidth > 0L) {
+            val streamAttrs = mutableListOf("BANDWIDTH=${variant.bandwidth.coerceAtLeast(1L)}")
+            if (variant.averageBandwidth > 0) {
                 streamAttrs += "AVERAGE-BANDWIDTH=${variant.averageBandwidth}"
             }
-            if (variant.width > 0 && variant.height > 0) {
-                streamAttrs += "RESOLUTION=${variant.width}x${variant.height}"
-            }
-            variant.codecs?.let { streamAttrs += "CODECS=${hlsQuote(it)}" }
-            variant.audioGroup?.let { streamAttrs += "AUDIO=${hlsQuote(it)}" }
+            if (variant.width > 0) streamAttrs += "RESOLUTION=${variant.width}x${variant.height}"
+            variant.codecs?.let { streamAttrs += "CODECS=${quote(it)}" }
+            variant.audioGroup?.let { streamAttrs += "AUDIO=${quote(it)}" }
 
             appendLine("#EXT-X-STREAM-INF:${streamAttrs.joinToString(",")}")
             appendLine(variant.url)
         }
     }
 
-    private fun syntheticMasterUrl(actualVid: String, height: Int): String =
-        "https://$SYNTHETIC_HOST${SYNTHETIC_PATH_PREFIX}$actualVid/${height}p.m3u8"
-
-    /**
-     * Intercepts only the synthetic per-resolution master URL. Real VixSrc child
-     * playlists/segments continue through the normal OkHttp request path.
-     *
-     * StremioC.getVideoInterceptor() must delegate to this method.
-     */
-    fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
-        val payload = extractorLink.extractorData
-            ?.takeIf { it.startsWith(SYNTHETIC_PREFIX) }
-            ?.removePrefix(SYNTHETIC_PREFIX)
-            ?: return null
-
-        return Interceptor { chain ->
-            val request = chain.request()
-            if (request.url.host.equals(SYNTHETIC_HOST, ignoreCase = true) &&
-                request.url.encodedPath.startsWith(SYNTHETIC_PATH_PREFIX)
-            ) {
-                Response.Builder()
-                    .request(request)
-                    .protocol(Protocol.HTTP_1_1)
-                    .code(200)
-                    .message("OK")
-                    .header("Content-Type", "application/vnd.apple.mpegurl")
-                    .header("Cache-Control", "no-store")
-                    .body(
-                        payload.toResponseBody(
-                            "application/vnd.apple.mpegurl".toMediaType()
-                        )
-                    )
-                    .build()
-            } else {
-                chain.proceed(request)
-            }
-        }
-    }
-
-    private fun parseSubtitleTracks(masterUrl: String, masterText: String): List<HlsSubtitleTrack> =
-        masterText.lineSequence()
-            .map { it.trim() }
-            .filter { it.startsWith("#EXT-X-MEDIA:", ignoreCase = true) }
-            .mapNotNull { line ->
-                val attributes = parseAttributes(line.substringAfter(':'))
-                if (!attributes["TYPE"].equals("SUBTITLES", ignoreCase = true)) return@mapNotNull null
-
-                val rawUri = attributes["URI"]?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                val label = attributes["NAME"]
-                    ?.takeIf { it.isNotBlank() }
-                    ?: attributes["LANGUAGE"]?.takeIf { it.isNotBlank() }
+    private fun parseSubtitleTracks(masterUrl: String, master: String): List<SubtitleTrack> =
+        mediaEntries(master, "SUBTITLES")
+            .mapNotNull { attrs ->
+                val uri = attrs["URI"]?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                val label = attrs["NAME"]?.takeIf(String::isNotBlank)
+                    ?: attrs["LANGUAGE"]?.takeIf(String::isNotBlank)
                     ?: "VixSrc"
 
-                HlsSubtitleTrack(
-                    label = label,
-                    playlistUrl = resolveHlsUrl(masterUrl, rawUri)
-                )
+                SubtitleTrack(label, resolveUrl(masterUrl, uri))
             }
             .distinctBy { it.label to it.playlistUrl }
             .toList()
 
-    private suspend fun resolveSubtitleVttUrl(
-        track: HlsSubtitleTrack,
-        headers: Map<String, String>
-    ): String? {
-        val responseText = StremioC.customSession.get(track.playlistUrl, headers = headers).text
-        val trimmed = responseText.trimStart()
+    private suspend fun resolveVtt(track: SubtitleTrack, headers: Map<String, String>): String? {
+        val text = StremioC.customSession.get(track.playlistUrl, headers = headers).text
+        val trimmed = text.trimStart()
+        if (trimmed.startsWith("WEBVTT", true)) return track.playlistUrl
+        if (!trimmed.startsWith("#EXTM3U", true)) return null
 
-        // Some providers may return the subtitle file directly instead of an HLS subtitle playlist.
-        if (trimmed.startsWith("WEBVTT", ignoreCase = true)) return track.playlistUrl
-        if (!trimmed.startsWith("#EXTM3U", ignoreCase = true)) return null
-
-        val mediaUrls = responseText.lineSequence()
-            .map { it.trim() }
-            .filter { it.isNotBlank() && !it.startsWith('#') }
-            .map { resolveHlsUrl(track.playlistUrl, it) }
+        val urls = text.lineSequence()
+            .map(String::trim)
+            .filter { it.isNotEmpty() && !it.startsWith('#') }
+            .map { resolveUrl(track.playlistUrl, it) }
             .toList()
 
-        // VixSrc currently exposes one full-length VTT per language. Do not emit a partial
-        // subtitle if the server changes to a multi-segment subtitle playlist.
-        return mediaUrls.singleOrNull()
-            ?.takeIf { it.contains(".vtt", ignoreCase = true) }
+        return urls.singleOrNull()?.takeIf { it.contains(".vtt", true) }
     }
 
-    private suspend fun emitResolvedSubtitles(
+    private suspend fun emitSubtitles(
         masterUrl: String,
-        masterText: String,
+        master: String,
         headers: Map<String, String>,
-        subtitleCallback: (SubtitleFile) -> Unit
+        callback: (SubtitleFile) -> Unit
     ) = coroutineScope {
         val semaphore = Semaphore(6)
-        parseSubtitleTracks(masterUrl, masterText)
+        parseSubtitleTracks(masterUrl, master)
             .map { track ->
                 async {
                     semaphore.withPermit {
                         try {
-                            resolveSubtitleVttUrl(track, headers)
-                                ?.let { vttUrl ->
-                                    newSubtitleFile(track.label, vttUrl) {
-                                        this.headers = headers
-                                    }
-                                }
+                            resolveVtt(track, headers)?.let { url ->
+                                newSubtitleFile(track.label, url) { this.headers = headers }
+                            }
                         } catch (c: CancellationException) {
                             throw c
                         } catch (_: Exception) {
@@ -426,7 +336,143 @@ object VixSrcExtractor {
             }
             .awaitAll()
             .filterNotNull()
-            .forEach(subtitleCallback)
+            .forEach(callback)
+    }
+
+    private fun apiHeaders(referer: String) = mapOf(
+        "Referer" to referer,
+        "Accept" to "application/json, text/plain, */*",
+        "Accept-Language" to ACCEPT_LANGUAGE,
+        "User-Agent" to USER_AGENT
+    )
+
+    private fun embedHeaders(referer: String) = mapOf(
+        "Referer" to referer,
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language" to ACCEPT_LANGUAGE,
+        "User-Agent" to USER_AGENT,
+        "Sec-Ch-Ua" to "\"Chromium\";v=\"137\", \"Not/A)Brand\";v=\"24\"",
+        "Sec-Ch-Ua-Mobile" to "?0",
+        "Sec-Ch-Ua-Platform" to "\"Linux\"",
+        "Sec-Fetch-Dest" to "iframe",
+        "Sec-Fetch-Mode" to "navigate",
+        "Sec-Fetch-Site" to "same-origin"
+    )
+
+    private fun collectCookies(vararg headerSets: Iterable<Pair<String, String>>): String {
+        val cookies = linkedMapOf<String, String>()
+        for (headers in headerSets) {
+            for ((name, value) in headers) {
+                if (!name.equals("Set-Cookie", true)) continue
+                val cookie = value.substringBefore(';')
+                val separator = cookie.indexOf('=')
+                if (separator > 0) {
+                    cookies[cookie.substring(0, separator).trim()] =
+                        cookie.substring(separator + 1).trim()
+                }
+            }
+        }
+        return cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+    }
+
+    private fun playerHeaders(
+        referer: String,
+        cookie: String,
+        includeOrigin: Boolean
+    ): MutableMap<String, String> = linkedMapOf(
+        "Referer" to referer,
+        "Accept" to "*/*",
+        "Accept-Language" to ACCEPT_LANGUAGE,
+        "User-Agent" to USER_AGENT,
+        "Sec-Ch-Ua" to "\"Chromium\";v=\"137\", \"Not/A)Brand\";v=\"24\"",
+        "Sec-Ch-Ua-Mobile" to "?0",
+        "Sec-Ch-Ua-Platform" to "\"Linux\"",
+        "Sec-Fetch-Dest" to "empty",
+        "Sec-Fetch-Mode" to "cors",
+        "Sec-Fetch-Site" to "same-origin"
+    ).apply {
+        if (includeOrigin) put("Origin", BASE_URL)
+        if (cookie.isNotEmpty()) put("Cookie", cookie)
+    }
+
+    private suspend fun fetchMaster(
+        isMovie: Boolean,
+        apiUrl: String,
+        embedUrl: String,
+        masterUrl: String,
+        cookie: String
+    ): MasterResult? {
+        if (!isMovie) {
+            val headers = playerHeaders(embedUrl, cookie, includeOrigin = false)
+            val text = try {
+                StremioC.customSession.get(masterUrl, headers = headers).text
+                    .takeIf { it.trimStart().startsWith("#EXTM3U") }
+            } catch (_: Exception) {
+                null
+            }
+            return MasterResult(text, headers)
+        }
+
+        val candidates = listOf(
+            playerHeaders("$BASE_URL/", cookie, includeOrigin = true),
+            playerHeaders(apiUrl, cookie, includeOrigin = true),
+            playerHeaders(embedUrl, cookie, includeOrigin = true)
+        )
+
+        for (headers in candidates) {
+            val text = try {
+                StremioC.customSession.get(masterUrl, headers = headers).text
+            } catch (_: Exception) {
+                null
+            }
+            if (text?.trimStart()?.startsWith("#EXTM3U") == true) {
+                return MasterResult(text, headers)
+            }
+        }
+        return null
+    }
+
+    private suspend fun emitFallback(
+        url: String,
+        headers: Map<String, String>,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        callback(
+            newExtractorLink("VixSrc", "VixSrc", url, ExtractorLinkType.M3U8) {
+                quality = Qualities.P1080.value
+                this.headers = headers
+            }
+        )
+    }
+
+    /**
+     * Supplies the in-memory one-resolution HLS master generated by this extractor.
+     * StremioC.getVideoInterceptor() delegates here; all real VixSrc requests pass through.
+     */
+    fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
+        val master = extractorLink.extractorData
+            ?.takeIf { it.startsWith(SYNTHETIC_PREFIX) }
+            ?.removePrefix(SYNTHETIC_PREFIX)
+            ?: return null
+
+        return Interceptor { chain ->
+            val request = chain.request()
+            if (request.url.host.equals("vixsrc.to", true) &&
+                request.url.encodedPath.startsWith(SYNTHETIC_PATH)
+            ) {
+                Response.Builder()
+                    .request(request)
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .header("Content-Type", "application/vnd.apple.mpegurl")
+                    .header("Cache-Control", "no-store")
+                    .body(master.toResponseBody("application/vnd.apple.mpegurl".toMediaType()))
+                    .build()
+            } else {
+                chain.proceed(request)
+            }
+        }
     }
 
     suspend fun invokeVixSrc(
@@ -440,187 +486,58 @@ object VixSrcExtractor {
         try {
             val id = loadData.tmdbId?.toString() ?: loadData.imdbId ?: return
             val isMovie = targetType == "movie" || (globalSeason == null && globalEpisode == null)
-            val requestUrl = if (isMovie) {
-                "$BASE_URL/movie/$id"
-            } else {
-                "$BASE_URL/tv/$id/$globalSeason/$globalEpisode"
-            }
-            val apiUrl = if (isMovie) {
-                "$BASE_URL/api/movie/$id"
-            } else {
-                "$BASE_URL/api/tv/$id/$globalSeason/$globalEpisode"
-            }
+            val suffix = if (isMovie) "movie/$id" else "tv/$id/$globalSeason/$globalEpisode"
+            val requestUrl = "$BASE_URL/$suffix"
+            val apiUrl = "$BASE_URL/api/$suffix"
 
-            val apiHeaders = mapOf(
-                "Referer" to requestUrl,
-                "Accept" to "application/json, text/plain, */*",
-                "Accept-Language" to ACCEPT_LANGUAGE,
-                "User-Agent" to USER_AGENT
+            val apiResponse = StremioC.customSession.get(apiUrl, headers = apiHeaders(requestUrl))
+            val embed = EMBED_REGEX.find(apiResponse.text.replace("\\/", "/")) ?: return
+            val vid = embed.groupValues[2]
+            val embedUrl = BASE_URL + embed.groupValues[1]
+
+            val embedResponse = StremioC.customSession.get(
+                embedUrl,
+                headers = embedHeaders(requestUrl)
             )
-            val embedHeaders = mapOf(
-                "Referer" to requestUrl,
-                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-                "Accept-Language" to ACCEPT_LANGUAGE,
-                "User-Agent" to USER_AGENT,
-                "Sec-Ch-Ua" to """"Chromium";v="137", "Not/A)Brand";v="24"""",
-                "Sec-Ch-Ua-Mobile" to "?0",
-                "Sec-Ch-Ua-Platform" to """"Linux"""",
-                "Sec-Fetch-Dest" to "iframe",
-                "Sec-Fetch-Mode" to "navigate",
-                "Sec-Fetch-Site" to "same-origin"
-            )
+            val playlistData = parsePlaylistData(embedResponse.text) ?: return
+            val masterUrl = buildMasterUrl(vid, playlistData, isMovie)
+            val cookie = collectCookies(apiResponse.headers, embedResponse.headers)
+            val masterResult = fetchMaster(isMovie, apiUrl, embedUrl, masterUrl, cookie) ?: return
+            val master = masterResult.text
 
-            val apiResponse = StremioC.customSession.get(apiUrl, headers = apiHeaders)
-            val embedMatch = EMBED_REGEX.find(apiResponse.text.replace("\\/", "/")) ?: run {
-                println("[STREMIOSUB-VIXSRC] Embed URL not found")
-                return
-            }
-
-            val actualVid = embedMatch.groupValues[2]
-            val embedUrl = BASE_URL + embedMatch.groupValues[1]
-            val embedResponse = StremioC.customSession.get(embedUrl, headers = embedHeaders)
-            val playlistData = parseMasterPlaylist(embedResponse.text) ?: run {
-                println("[STREMIOSUB-VIXSRC] masterPlaylist data not found")
-                return
-            }
-
-            val masterPlaylistUrl = if (isMovie) {
-                buildMoviePlaylistUrl(actualVid, playlistData)
-            } else {
-                val bParam = playlistData.b?.let { "b=$it&" } ?: ""
-                "$BASE_URL/playlist/$actualVid?${bParam}token=${playlistData.token}" +
-                    "&expires=${playlistData.expires}&h=1&lang=en"
-            }
-
-            val cookies = mutableMapOf<String, String>()
-            listOf(apiResponse.headers, embedResponse.headers).forEach { headers ->
-                headers.forEach cookieLoop@ { pair ->
-                    if (!pair.first.equals("Set-Cookie", ignoreCase = true)) return@cookieLoop
-                    val cookie = pair.second.substringBefore(';')
-                    val separator = cookie.indexOf('=')
-                    if (separator > 0) {
-                        cookies[cookie.substring(0, separator).trim()] =
-                            cookie.substring(separator + 1).trim()
-                    }
-                }
-            }
-            val cookieHeader = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
-
-            fun playerHeaders(referer: String, includeOrigin: Boolean): MutableMap<String, String> =
-                mapOf(
-                    "Referer" to referer,
-                    "Accept" to "*/*",
-                    "Accept-Language" to ACCEPT_LANGUAGE,
-                    "User-Agent" to USER_AGENT,
-                    "Sec-Ch-Ua" to """"Chromium";v="137", "Not/A)Brand";v="24"""",
-                    "Sec-Ch-Ua-Mobile" to "?0",
-                    "Sec-Ch-Ua-Platform" to """"Linux"""",
-                    "Sec-Fetch-Dest" to "empty",
-                    "Sec-Fetch-Mode" to "cors",
-                    "Sec-Fetch-Site" to "same-origin"
-                ).toMutableMap().apply {
-                    if (includeOrigin) put("Origin", BASE_URL)
-                    if (cookieHeader.isNotEmpty()) put("Cookie", cookieHeader)
-                }
-
-            var masterText: String? = null
-
-            val finalHeaders = if (isMovie) {
-                val candidates = listOf(
-                    playerHeaders("$BASE_URL/", includeOrigin = true),
-                    playerHeaders(apiUrl, includeOrigin = true),
-                    playerHeaders(embedUrl, includeOrigin = true)
-                )
-
-                var verified: MutableMap<String, String>? = null
-                for (headers in candidates) {
-                    val text = try {
-                        StremioC.customSession.get(masterPlaylistUrl, headers = headers).text
-                    } catch (_: Exception) {
-                        null
-                    }
-                    if (text?.trimStart()?.startsWith("#EXTM3U") == true) {
-                        verified = headers
-                        masterText = text
-                        break
-                    }
-                }
-
-                verified ?: run {
-                    println("[STREMIOSUB-VIXSRC] Movie playlist verification failed")
-                    return
-                }
-            } else {
-                val headers = playerHeaders(embedUrl, includeOrigin = false)
-                masterText = try {
-                    StremioC.customSession
-                        .get(masterPlaylistUrl, headers = headers)
-                        .text
-                        .takeIf { it.trimStart().startsWith("#EXTM3U") }
-                } catch (_: Exception) {
-                    null
-                }
-                headers
-            }
-
-            val master = masterText
             if (master == null) {
-                callback(
-                    newExtractorLink("VixSrc", "VixSrc", masterPlaylistUrl, ExtractorLinkType.M3U8) {
-                        quality = Qualities.P1080.value
-                        headers = finalHeaders
-                    }
-                )
+                emitFallback(masterUrl, masterResult.headers, callback)
                 return
             }
 
-            emitResolvedSubtitles(masterPlaylistUrl, master, finalHeaders, subtitleCallback)
+            emitSubtitles(masterUrl, master, masterResult.headers, subtitleCallback)
 
-            val variants = parseVariants(masterPlaylistUrl, master)
-            val availableAudioTracks = parseAudioTracks(masterPlaylistUrl, master)
+            val variants = parseVariants(masterUrl, master)
+            val audioTracks = parseAudioTracks(masterUrl, master)
+            var emitted = false
 
-            if (variants.isEmpty()) {
-                callback(
-                    newExtractorLink("VixSrc", "VixSrc", masterPlaylistUrl, ExtractorLinkType.M3U8) {
-                        quality = Qualities.P1080.value
-                        headers = finalHeaders
-                    }
-                )
-                return
-            }
-
-            var emittedVariantCount = 0
             for (variant in variants) {
-                val syntheticMaster = buildSyntheticMaster(variant, availableAudioTracks)
-                    ?: continue
-
+                val syntheticMaster = buildSyntheticMaster(variant, audioTracks) ?: continue
                 callback(
                     newExtractorLink(
-                        PROVIDER_SOURCE,
+                        SOURCE,
                         "VixSrc ${variant.height}p",
-                        syntheticMasterUrl(actualVid, variant.height),
+                        "$BASE_URL$SYNTHETIC_PATH$vid/${variant.height}p.m3u8",
                         ExtractorLinkType.M3U8
                     ) {
                         quality = variant.height
-                        headers = finalHeaders
+                        headers = masterResult.headers
                         extractorData = SYNTHETIC_PREFIX + syntheticMaster
                     }
                 )
-                emittedVariantCount++
+                emitted = true
             }
 
-            if (emittedVariantCount == 0) {
-                callback(
-                    newExtractorLink("VixSrc", "VixSrc", masterPlaylistUrl, ExtractorLinkType.M3U8) {
-                        quality = Qualities.P1080.value
-                        headers = finalHeaders
-                    }
-                )
-            }
+            if (!emitted) emitFallback(masterUrl, masterResult.headers, callback)
         } catch (c: CancellationException) {
             throw c
-        } catch (e: Exception) {
-            println("[STREMIOSUB-VIXSRC] ${e.javaClass.simpleName}: ${e.message}")
+        } catch (_: Exception) {
+            // VixSrc is optional. A provider failure must not break other StremioC sources.
         }
     }
 }
