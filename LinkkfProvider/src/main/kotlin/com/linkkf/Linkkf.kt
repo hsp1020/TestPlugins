@@ -75,11 +75,11 @@ class Linkkf : MainAPI() {
             ?: "다시보기"
 
         val infoText = doc.selectFirst(".box.layout-box.gap.tv")?.text().orEmpty()
-        val airingInfo = Regex("""방영\\s*정보\\s*[：:]\\s*(\\d{4})\\s*년""")
+        val airingInfo = Regex("""방영\s*정보\s*[：:]\s*(\d{4})\s*년""")
             .find(infoText)
             ?.groupValues
             ?.getOrNull(1)
-        val originalTitle = Regex("""원제\\s*[：:]\\s*(.+)$""")
+        val originalTitle = Regex("""원제\s*[：:]\s*(.+)$""")
             .find(infoText)
             ?.groupValues
             ?.getOrNull(1)
@@ -90,7 +90,7 @@ class Linkkf : MainAPI() {
             airingInfo?.let { add("방영 정보：${it}년") }
             originalTitle?.let { add("원제：$it") }
             add(description)
-        }.joinToString("\\n")
+        }.joinToString("\n")
 
         val genreRow = doc.select(".detail-info-desc li").firstOrNull { li ->
             li.selectFirst("span")?.text()?.contains("장르") == true
