@@ -80,18 +80,18 @@ class KotbcExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[Kotbc v7] ===== KOTBC popup resolver =====")
-        println("[Kotbc v7] page=$pageUrl")
-        println("[Kotbc v7] expectedPlayer=$expectedPlayerUrl")
+        println("[Kotbc v7.1] ===== KOTBC popup resolver =====")
+        println("[Kotbc v7.1] page=$pageUrl")
+        println("[Kotbc v7.1] expectedPlayer=$expectedPlayerUrl")
 
         val wrapperUrl = resolveWrapperViaRealPopup(pageUrl)
 
         if (wrapperUrl.isNullOrBlank()) {
-            println("[Kotbc v7] ❌ glamov wrapper URL 획득 실패")
+            println("[Kotbc v7.1] ❌ glamov wrapper URL 획득 실패")
             return
         }
 
-        println("[Kotbc v7] ✅ wrapper=$wrapperUrl")
+        println("[Kotbc v7.1] ✅ wrapper=$wrapperUrl")
 
         val inspected = inspectWrapper(
             wrapperUrl = wrapperUrl,
@@ -101,9 +101,9 @@ class KotbcExtractor : ExtractorApi() {
         val actualIframe = inspected?.iframeUrl
 
         if (!actualIframe.isNullOrBlank()) {
-            println("[Kotbc v7] wrapper iframe=$actualIframe")
+            println("[Kotbc v7.1] wrapper iframe=$actualIframe")
         } else {
-            println("[Kotbc v7] ⚠️ app.get() wrapper iframe 검증 실패/미확인")
+            println("[Kotbc v7.1] ⚠️ app.get() wrapper iframe 검증 실패/미확인")
         }
 
         if (
@@ -114,14 +114,14 @@ class KotbcExtractor : ExtractorApi() {
             val actualNormalized = normalizeComparableUrl(actualIframe)
 
             if (expectedNormalized == actualNormalized) {
-                println("[Kotbc v7] ✅ Inertia body.url == wrapper iframe")
+                println("[Kotbc v7.1] ✅ Inertia body.url == wrapper iframe")
             } else {
                 /*
                  * popup에서 얻은 wrapper가 브라우저 실측의 authoritative 값이다.
                  * mismatch는 로그만 남기고 wrapper 재생은 계속한다.
                  */
                 println(
-                    "[Kotbc v7] ⚠️ player mismatch: " +
+                    "[Kotbc v7.1] ⚠️ player mismatch: " +
                         "expected=$expectedPlayerUrl actual=$actualIframe"
                 )
             }
@@ -164,7 +164,7 @@ class KotbcExtractor : ExtractorApi() {
             }
 
             isGlamovWrapper(normalizedUrl) -> {
-                println("[Kotbc v7] legacy wrapper=$normalizedUrl")
+                println("[Kotbc v7.1] legacy wrapper=$normalizedUrl")
                 extractFromWrapper(
                     wrapperUrl = normalizedUrl,
                     pageReferer = safeReferer,
@@ -174,7 +174,7 @@ class KotbcExtractor : ExtractorApi() {
             }
 
             else -> {
-                println("[Kotbc v7] ⚠️ legacy direct player fallback=$normalizedUrl")
+                println("[Kotbc v7.1] ⚠️ legacy direct player fallback=$normalizedUrl")
                 extractDirectPlayer(
                     playerUrl = normalizedUrl,
                     referer = safeReferer,
@@ -239,7 +239,7 @@ class KotbcExtractor : ExtractorApi() {
         fun inspectPossibleWrapper(raw: String?) {
             val wrapper = extractGlamovWrapper(raw.orEmpty())
             if (!wrapper.isNullOrBlank()) {
-                println("[Kotbc v7] 🎯 wrapper captured=$wrapper")
+                println("[Kotbc v7.1] 🎯 wrapper captured=$wrapper")
                 finish(wrapper)
             }
         }
@@ -278,7 +278,7 @@ class KotbcExtractor : ExtractorApi() {
                         window.open = function() {
                             try {
                                 var u = arguments.length ? String(arguments[0] || '') : '';
-                                console.log('KOTBC_V7_OPEN ' + u);
+                                console.log('KOTBC_V7_1_OPEN ' + u);
                             } catch(e) {}
                             return originalOpen.apply(this, arguments);
                         };
@@ -298,7 +298,7 @@ class KotbcExtractor : ExtractorApi() {
 
                                 try {
                                     console.log(
-                                        'KOTBC_V7_FETCH ' +
+                                        'KOTBC_V7_1_FETCH ' +
                                         String((init && init.method) || 'GET') +
                                         ' ' + requestUrl +
                                         ' body=' + String((init && init.body) || '').slice(0, 500)
@@ -311,7 +311,7 @@ class KotbcExtractor : ExtractorApi() {
                                     var clone = response.clone();
                                     clone.text().then(function(body) {
                                         console.log(
-                                            'KOTBC_V7_FETCH_RESP ' +
+                                            'KOTBC_V7_1_FETCH_RESP ' +
                                             String(response.url || requestUrl) +
                                             ' status=' + response.status +
                                             ' body=' + String(body || '').slice(0, 1200)
@@ -333,7 +333,7 @@ class KotbcExtractor : ExtractorApi() {
                                     this.__kotbcMethod = method;
                                     this.__kotbcUrl = url;
                                     console.log(
-                                        'KOTBC_V7_XHR ' +
+                                        'KOTBC_V7_1_XHR ' +
                                         String(method || 'GET') +
                                         ' ' + String(url || '')
                                     );
@@ -346,7 +346,7 @@ class KotbcExtractor : ExtractorApi() {
                                 try {
                                     var self = this;
                                     console.log(
-                                        'KOTBC_V7_XHR_SEND ' +
+                                        'KOTBC_V7_1_XHR_SEND ' +
                                         String(self.__kotbcUrl || '') +
                                         ' body=' + String(body || '').slice(0, 500)
                                     );
@@ -354,7 +354,7 @@ class KotbcExtractor : ExtractorApi() {
                                     self.addEventListener('load', function() {
                                         try {
                                             console.log(
-                                                'KOTBC_V7_XHR_RESP ' +
+                                                'KOTBC_V7_1_XHR_RESP ' +
                                                 String(self.responseURL || self.__kotbcUrl || '') +
                                                 ' status=' + self.status +
                                                 ' body=' + String(self.responseText || '').slice(0, 1200)
@@ -375,7 +375,7 @@ class KotbcExtractor : ExtractorApi() {
             """.trimIndent()
 
             view.evaluateJavascript(js) { raw ->
-                println("[Kotbc v7] hook=$raw")
+                println("[Kotbc v7.1] hook=$raw")
             }
         }
 
@@ -475,7 +475,7 @@ class KotbcExtractor : ExtractorApi() {
             """.trimIndent()
 
             view.evaluateJavascript(js) { raw ->
-                println("[Kotbc v7] watchClick=$raw")
+                println("[Kotbc v7.1] watchClick=$raw")
 
                 if (raw?.contains("CLICKED:", ignoreCase = false) == true) {
                     buttonClicked.set(true)
@@ -512,10 +512,10 @@ class KotbcExtractor : ExtractorApi() {
                         val message = consoleMessage?.message().orEmpty()
 
                         if (
-                            message.startsWith("KOTBC_V7_") ||
+                            message.startsWith("KOTBC_V7_1_") ||
                             message.contains("glamov.com/detail.php", ignoreCase = true)
                         ) {
-                            println("[Kotbc v7 JS] $message")
+                            println("[Kotbc v7.1 JS] $message")
                             inspectPossibleWrapper(message)
                         }
 
@@ -529,7 +529,7 @@ class KotbcExtractor : ExtractorApi() {
                         resultMsg: Message?
                     ): Boolean {
                         println(
-                            "[Kotbc v7] onCreateWindow " +
+                            "[Kotbc v7.1] onCreateWindow " +
                                 "dialog=$isDialog userGesture=$isUserGesture"
                         )
 
@@ -546,7 +546,7 @@ class KotbcExtractor : ExtractorApi() {
                             ): Boolean {
                                 val message = consoleMessage?.message().orEmpty()
                                 if (message.isNotBlank()) {
-                                    println("[Kotbc v7 CHILD JS] $message")
+                                    println("[Kotbc v7.1 CHILD JS] $message")
                                     inspectPossibleWrapper(message)
                                 }
                                 return true
@@ -560,7 +560,7 @@ class KotbcExtractor : ExtractorApi() {
                                 favicon: android.graphics.Bitmap?
                             ) {
                                 super.onPageStarted(childView, url, favicon)
-                                println("[Kotbc v7] child pageStarted=$url")
+                                println("[Kotbc v7.1] child pageStarted=$url")
                                 inspectPossibleWrapper(url)
                             }
 
@@ -569,7 +569,7 @@ class KotbcExtractor : ExtractorApi() {
                                 url: String?
                             ) {
                                 super.onPageFinished(childView, url)
-                                println("[Kotbc v7] child pageFinished=$url")
+                                println("[Kotbc v7.1] child pageFinished=$url")
                                 inspectPossibleWrapper(url)
                             }
 
@@ -578,11 +578,11 @@ class KotbcExtractor : ExtractorApi() {
                                 request: WebResourceRequest?
                             ): Boolean {
                                 val next = request?.url?.toString().orEmpty()
-                                println("[Kotbc v7] child navigate=$next")
+                                println("[Kotbc v7.1] child navigate=$next")
 
                                 val wrapper = extractGlamovWrapper(next)
                                 return if (!wrapper.isNullOrBlank()) {
-                                    println("[Kotbc v7] 🎯 child wrapper navigate=$wrapper")
+                                    println("[Kotbc v7.1] 🎯 child wrapper navigate=$wrapper")
                                     finish(wrapper)
                                     true
                                 } else {
@@ -606,7 +606,7 @@ class KotbcExtractor : ExtractorApi() {
                         favicon: android.graphics.Bitmap?
                     ) {
                         super.onPageStarted(view, url, favicon)
-                        println("[Kotbc v7] parent pageStarted=$url")
+                        println("[Kotbc v7.1] parent pageStarted=$url")
                     }
 
                     override fun onPageFinished(
@@ -614,7 +614,7 @@ class KotbcExtractor : ExtractorApi() {
                         url: String?
                     ) {
                         super.onPageFinished(view, url)
-                        println("[Kotbc v7] parent pageFinished=$url")
+                        println("[Kotbc v7.1] parent pageFinished=$url")
 
                         if (
                             url?.contains("kotbc2.com", ignoreCase = true) != true ||
@@ -655,25 +655,25 @@ class KotbcExtractor : ExtractorApi() {
 
                 /*
                  * 최종 실패에도 coroutine은 반드시 종료한다.
-                 * 실패 시 바로 앞의 KOTBC_V7_FETCH/XHR/OPEN 로그가 진단 자료가 된다.
+                 * 실패 시 바로 앞의 KOTBC_V7_1_FETCH/XHR/OPEN 로그가 진단 자료가 된다.
                  */
                 handler.postDelayed(
                     {
                         if (!completed.get()) {
-                            println("[Kotbc v7] ❌ wrapper resolver timeout")
+                            println("[Kotbc v7.1] ❌ wrapper resolver timeout")
                             finish(null)
                         }
                     },
                     15000L
                 )
 
-                println("[Kotbc v7] parent loadUrl=$pageUrl")
+                println("[Kotbc v7.1] parent loadUrl=$pageUrl")
                 parent.loadUrl(
                     pageUrl,
                     mapOf("User-Agent" to desktopUa)
                 )
             } catch (e: Exception) {
-                println("[Kotbc v7] popup resolver init error=${e.message}")
+                println("[Kotbc v7.1] popup resolver init error=${e.message}")
                 finish(null)
             }
         }
@@ -717,7 +717,7 @@ class KotbcExtractor : ExtractorApi() {
                 ?.let { makeAbsoluteUrl(finalUrl, it) }
 
             println(
-                "[Kotbc v7] wrapper inspect: " +
+                "[Kotbc v7.1] wrapper inspect: " +
                     "HTTP=${response.isSuccessful} final=$finalUrl iframe=$iframeUrl"
             )
 
@@ -726,7 +726,7 @@ class KotbcExtractor : ExtractorApi() {
                 iframeUrl = iframeUrl
             )
         } catch (e: Exception) {
-            println("[Kotbc v7] wrapper inspect error=${e.message}")
+            println("[Kotbc v7.1] wrapper inspect error=${e.message}")
             null
         }
     }
@@ -741,7 +741,7 @@ class KotbcExtractor : ExtractorApi() {
         expectedPlayerUrl: String?,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[Kotbc v7] wrapper WebView start=$wrapperUrl")
+        println("[Kotbc v7.1] wrapper WebView start=$wrapperUrl")
 
         val captured = runMediaWebView(
             startUrl = wrapperUrl,
@@ -752,14 +752,14 @@ class KotbcExtractor : ExtractorApi() {
         )
 
         if (captured == null) {
-            println("[Kotbc v7] ❌ wrapper에서 manifest 캡처 실패")
+            println("[Kotbc v7.1] ❌ wrapper에서 manifest 캡처 실패")
             return
         }
 
         val resolved = resolveCapturedUrl(captured)
 
         if (resolved == null) {
-            println("[Kotbc v7] ❌ manifest 해석 실패")
+            println("[Kotbc v7.1] ❌ manifest 해석 실패")
             return
         }
 
@@ -788,7 +788,7 @@ class KotbcExtractor : ExtractorApi() {
         if (resolved != null) {
             emitLink(resolved, callback)
         } else {
-            println("[Kotbc v7] ❌ legacy direct player 실패")
+            println("[Kotbc v7.1] ❌ legacy direct player 실패")
         }
     }
 
@@ -896,7 +896,7 @@ class KotbcExtractor : ExtractorApi() {
                             message.contains("m3u8", ignoreCase = true) ||
                             message.contains("manifest", ignoreCase = true)
                         ) {
-                            println("[Kotbc v7 MEDIA JS] $message")
+                            println("[Kotbc v7.1 MEDIA JS] $message")
                         }
 
                         return true
@@ -910,7 +910,7 @@ class KotbcExtractor : ExtractorApi() {
                         favicon: android.graphics.Bitmap?
                     ) {
                         super.onPageStarted(v, url, favicon)
-                        println("[Kotbc v7 MEDIA] pageStarted=$url")
+                        println("[Kotbc v7.1 MEDIA] pageStarted=$url")
 
                         if (
                             url?.contains("nnmo0oi1.com/video/", ignoreCase = true) == true
@@ -941,9 +941,9 @@ class KotbcExtractor : ExtractorApi() {
                             lower.contains("nnmo0oi1.com/video/")
                         ) {
                             if (playerFrameSeen.compareAndSet(false, true)) {
-                                println("[Kotbc v7 MEDIA] ✅ nnmo player frame seen=$requestUrl")
+                                println("[Kotbc v7.1 MEDIA] ✅ nnmo player frame seen=$requestUrl")
                             } else {
-                                println("[Kotbc v7 MEDIA] nnmo=$requestUrl")
+                                println("[Kotbc v7.1 MEDIA] nnmo=$requestUrl")
                             }
                         }
 
@@ -954,7 +954,7 @@ class KotbcExtractor : ExtractorApi() {
                         if (isManifest) {
                             if (playerFrameSeen.get()) {
                                 println(
-                                    "[Kotbc v7 MEDIA] 🎯 manifest " +
+                                    "[Kotbc v7.1 MEDIA] 🎯 manifest " +
                                         "${request?.method ?: "GET"} $requestUrl"
                                 )
 
@@ -963,7 +963,7 @@ class KotbcExtractor : ExtractorApi() {
                                         url = requestUrl,
                                         headers = capturedHeaders(
                                             request,
-                                            v?.url ?: startUrl
+                                            expectedPlayerUrl ?: startUrl
                                         )
                                     )
                                 )
@@ -972,7 +972,7 @@ class KotbcExtractor : ExtractorApi() {
                                  * wrapper 광고가 먼저 HLS를 요청해도 콘텐츠로 오인하지 않는다.
                                  */
                                 println(
-                                    "[Kotbc v7 MEDIA] ignore pre-player manifest=$requestUrl"
+                                    "[Kotbc v7.1 MEDIA] ignore pre-player manifest=$requestUrl"
                                 )
                             }
 
@@ -1003,14 +1003,14 @@ class KotbcExtractor : ExtractorApi() {
                                 )
 
                         if (isLegacyPlaylist) {
-                            println("[Kotbc v7 MEDIA] legacyCandidate=$requestUrl")
+                            println("[Kotbc v7.1 MEDIA] legacyCandidate=$requestUrl")
 
                             finish(
                                 InterceptResult(
                                     url = requestUrl,
                                     headers = capturedHeaders(
                                         request,
-                                        v?.url ?: startUrl
+                                        expectedPlayerUrl ?: startUrl
                                     )
                                 )
                             )
@@ -1024,7 +1024,7 @@ class KotbcExtractor : ExtractorApi() {
                         url: String?
                     ) {
                         super.onPageFinished(v, url)
-                        println("[Kotbc v7 MEDIA] pageFinished=$url")
+                        println("[Kotbc v7.1 MEDIA] pageFinished=$url")
                     }
                 }
 
@@ -1032,7 +1032,7 @@ class KotbcExtractor : ExtractorApi() {
                     {
                         if (!finished.get()) {
                             println(
-                                "[Kotbc v7 MEDIA] ❌ timeout " +
+                                "[Kotbc v7.1 MEDIA] ❌ timeout " +
                                     "playerFrameSeen=${playerFrameSeen.get()}"
                             )
                             finish(null)
@@ -1050,13 +1050,13 @@ class KotbcExtractor : ExtractorApi() {
                 }
 
                 println(
-                    "[Kotbc v7 MEDIA] load=$startUrl " +
+                    "[Kotbc v7.1 MEDIA] load=$startUrl " +
                         "referer=$initialReferer"
                 )
 
                 view.loadUrl(startUrl, headers)
             } catch (e: Exception) {
-                println("[Kotbc v7 MEDIA] init error=${e.message}")
+                println("[Kotbc v7.1 MEDIA] init error=${e.message}")
                 finish(null)
             }
         }
@@ -1086,6 +1086,7 @@ class KotbcExtractor : ExtractorApi() {
                 .replace("\\u0026", "&")
 
             if (text.trimStart().startsWith("#EXTM3U")) {
+                println("[Kotbc v7.1] ✅ legacy playlist body is #EXTM3U: ${captured.url}")
                 captured
             } else {
                 val manifest = Regex(
@@ -1101,7 +1102,7 @@ class KotbcExtractor : ExtractorApi() {
                 }
             }
         } catch (e: Exception) {
-            println("[Kotbc v7] captured URL resolve error=${e.message}")
+            println("[Kotbc v7.1] captured URL resolve error=${e.message}")
             null
         }
     }
@@ -1133,8 +1134,8 @@ class KotbcExtractor : ExtractorApi() {
                 ExtractorLinkType.M3U8
             }
 
-        println("[Kotbc v7] ✅ final=${result.url}")
-        println("[Kotbc v7] finalHeaders=$headers")
+        println("[Kotbc v7.1] ✅ final=${result.url}")
+        println("[Kotbc v7.1] finalHeaders=$headers")
 
         callback(
             newExtractorLink(
