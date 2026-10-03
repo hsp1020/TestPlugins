@@ -19,6 +19,16 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
 import kotlin.coroutines.resume
 
+/**
+ * KOTBC Extractor v5.2
+ *
+ * 핵심:
+ * - nnmo player를 top-level로 직접 열지 않고 KOTBC 부모 페이지를 먼저 연다.
+ * - 부모 문서 안에 nnmo player iframe을 주입해 실제 사이트의 embed/referrer 컨텍스트를 재현한다.
+ * - 부모 경로 실패 시 기존 direct player WebView를 fallback으로 한 번 더 시도한다.
+ * - nnmo 관련 네트워크 요청을 로그에 남겨 실제 media endpoint를 추적 가능하게 한다.
+ * - timeout 시 반드시 coroutine을 종료한다.
+ */
 class KotbcExtractor : ExtractorApi() {
     override val name = "KOTBC"
     override val mainUrl = "https://nnmo0oi1.com"
@@ -40,24 +50,57 @@ class KotbcExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val outerReferer = referer
-            ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
-            ?: "${Kotbc.currentMainUrl}/"
+        val outerReferer = normalizeOuterReferer(
+            referer
+                ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+                ?: "${Kotbc.currentMainUrl}/"
+        )
 
-        println("[Kotbc v5.1] player=$url")
-        println("[Kotbc v5.1] outerReferer=$outerReferer")
+        println("[Kotbc v5.2] player=$url")
+        println("[Kotbc v5.2] outerReferer=$outerReferer")
 
-        val captured = runWebViewHook(url, outerReferer)
+        /*
+         * 1차: 실제 사이트 구조 재현
+         * KOTBC 부모 페이지 -> nnmo iframe
+         */
+        val parentCaptured =
+            if (outerReferer.contains("kotbc2.com", ignoreCase = true)) {
+                println("[Kotbc v5.2] parent-flow 시작")
+                runWebViewHook(
+                    startUrl = outerReferer,
+                    playerUrl = url,
+                    outerReferer = outerReferer,
+                    parentMode = true,
+                    timeoutMs = 12000L
+                )
+            } else {
+                null
+            }
+
+        val captured = parentCaptured ?: run {
+            /*
+             * 2차 fallback:
+             * parent-flow가 실패한 경우에만 기존처럼 player 직접 로드.
+             */
+            println("[Kotbc v5.2] parent-flow 실패 -> direct fallback")
+            runWebViewHook(
+                startUrl = url,
+                playerUrl = url,
+                outerReferer = outerReferer,
+                parentMode = false,
+                timeoutMs = 10000L
+            )
+        }
 
         if (captured == null) {
-            println("[Kotbc v5.1] ❌ manifest 캡처 실패")
+            println("[Kotbc v5.2] ❌ manifest 캡처 실패")
             return
         }
 
         val resolved = resolveCapturedUrl(captured)
 
         if (resolved == null) {
-            println("[Kotbc v5.1] ❌ captured URL에서 manifest 해석 실패")
+            println("[Kotbc v5.2] ❌ captured URL에서 manifest 해석 실패")
             return
         }
 
@@ -65,10 +108,28 @@ class KotbcExtractor : ExtractorApi() {
     }
 
     /**
-     * .m3u8이면 그대로 사용.
-     * 과거 player2/glamov 계열의 .html/.txt playlist URL이면 내용을 한 번 읽어
-     * 내부 m3u8을 찾는다.
+     * 구버전 payload/cache에 영화 URL이 /slug/slug 형태로 남아 있어도 방어한다.
      */
+    private fun normalizeOuterReferer(value: String): String {
+        return try {
+            val parts = value.split("/")
+
+            if (
+                parts.size >= 5 &&
+                parts.last().isNotBlank() &&
+                parts[parts.lastIndex] == parts[parts.lastIndex - 1]
+            ) {
+                val normalized = parts.dropLast(1).joinToString("/")
+                println("[Kotbc v5.2] referer 중복 slug 보정: $normalized")
+                normalized
+            } else {
+                value
+            }
+        } catch (_: Exception) {
+            value
+        }
+    }
+
     private suspend fun resolveCapturedUrl(
         captured: InterceptResult
     ): InterceptResult? {
@@ -103,7 +164,7 @@ class KotbcExtractor : ExtractorApi() {
                 }
             }
         } catch (e: Exception) {
-            println("[Kotbc v5.1] captured URL resolve 실패: ${e.message}")
+            println("[Kotbc v5.2] captured URL resolve 실패: ${e.message}")
             null
         }
     }
@@ -128,8 +189,8 @@ class KotbcExtractor : ExtractorApi() {
             headers["Cookie"] = cookie
         }
 
-        println("[Kotbc v5.1] ✅ final=${result.url}")
-        println("[Kotbc v5.1] headers=$headers")
+        println("[Kotbc v5.2] ✅ final=${result.url}")
+        println("[Kotbc v5.2] headers=$headers")
 
         callback(
             newExtractorLink(
@@ -144,12 +205,16 @@ class KotbcExtractor : ExtractorApi() {
     }
 
     private suspend fun runWebViewHook(
+        startUrl: String,
         playerUrl: String,
-        outerReferer: String
+        outerReferer: String,
+        parentMode: Boolean,
+        timeoutMs: Long
     ) = suspendCancellableCoroutine<InterceptResult?> { cont ->
         val handler = Handler(Looper.getMainLooper())
         var webView: WebView? = null
         var finished = false
+        var playerIframeInjected = false
 
         fun finish(result: InterceptResult?) {
             if (finished) return
@@ -183,10 +248,6 @@ class KotbcExtractor : ExtractorApi() {
                 headers["User-Agent"] = desktopUa
             }
 
-            /*
-             * manifest 요청에는 KOTBC 상세페이지가 아니라
-             * 실제 player 페이지를 Referer로 쓰는 것이 우선이다.
-             */
             if (headers.keys.none { it.equals("Referer", ignoreCase = true) }) {
                 headers["Referer"] = fallbackReferer
             }
@@ -217,8 +278,11 @@ class KotbcExtractor : ExtractorApi() {
 
                 CookieManager.getInstance().apply {
                     setAcceptCookie(true)
+
                     try {
-                        webView?.let { setAcceptThirdPartyCookies(it, true) }
+                        webView?.let {
+                            setAcceptThirdPartyCookies(it, true)
+                        }
                     } catch (_: Exception) {
                     }
                 }
@@ -243,9 +307,10 @@ class KotbcExtractor : ExtractorApi() {
                         if (
                             msg.contains("error", ignoreCase = true) ||
                             msg.contains("m3u8", ignoreCase = true) ||
-                            msg.contains("manifest", ignoreCase = true)
+                            msg.contains("manifest", ignoreCase = true) ||
+                            msg.contains("player", ignoreCase = true)
                         ) {
-                            println("[Kotbc v5.1] console=$msg")
+                            println("[Kotbc v5.2] console=$msg")
                         }
 
                         return super.onConsoleMessage(consoleMessage)
@@ -258,17 +323,40 @@ class KotbcExtractor : ExtractorApi() {
                         request: WebResourceRequest?
                     ): WebResourceResponse? {
                         val reqUrl = request?.url?.toString().orEmpty()
-                        val lower = reqUrl.lowercase()
 
                         if (reqUrl.isBlank()) {
                             return super.shouldInterceptRequest(view, request)
                         }
 
+                        val lower = reqUrl.lowercase()
+
                         /*
-                         * 실제 HLS manifest는 host에 관계없이 즉시 캡처.
+                         * 진단 로그:
+                         * nnmo / player / media 후보 요청만 출력한다.
+                         * 광고/일반 CSS/이미지는 제외해 로그 폭증을 막는다.
+                         */
+                        val isInterestingRequest =
+                            lower.contains("nnmo0oi1.com") ||
+                                lower.contains("/video/") ||
+                                lower.contains(".m3u8") ||
+                                lower.contains(".mpd") ||
+                                lower.contains(".mp4") ||
+                                lower.contains("manifest") ||
+                                lower.contains("playlist") ||
+                                lower.contains("master")
+
+                        if (isInterestingRequest) {
+                            println(
+                                "[Kotbc v5.2 NET] " +
+                                    "${request?.method ?: "GET"} $reqUrl"
+                            )
+                        }
+
+                        /*
+                         * HLS manifest는 host에 관계없이 즉시 캡처.
                          */
                         if (lower.contains(".m3u8")) {
-                            println("[Kotbc v5.1] m3u8=$reqUrl")
+                            println("[Kotbc v5.2] m3u8=$reqUrl")
 
                             finish(
                                 InterceptResult(
@@ -285,7 +373,6 @@ class KotbcExtractor : ExtractorApi() {
 
                         /*
                          * 구형 비표준 playlist fallback.
-                         * 일반 세그먼트 _123.html 은 제외.
                          */
                         val isHtmlSegment =
                             Regex(""".*_[0-9]+\.html(\?.*)?$""")
@@ -305,7 +392,7 @@ class KotbcExtractor : ExtractorApi() {
                                 )
 
                         if (isLegacyPlaylist) {
-                            println("[Kotbc v5.1] legacyCandidate=$reqUrl")
+                            println("[Kotbc v5.2] legacyCandidate=$reqUrl")
 
                             finish(
                                 InterceptResult(
@@ -327,12 +414,44 @@ class KotbcExtractor : ExtractorApi() {
                     ) {
                         super.onPageFinished(view, finishedUrl)
 
-                        println("[Kotbc v5.1] pageFinished=$finishedUrl")
+                        println(
+                            "[Kotbc v5.2] pageFinished=" +
+                                "$finishedUrl parentMode=$parentMode"
+                        )
 
                         /*
-                         * 플레이어가 사용자 클릭 전까지 manifest를 요청하지 않는 경우 대비.
+                         * 실제 사이트의 embed 구조를 강제로 재현:
+                         * KOTBC 부모 문서 안에 nnmo player를 iframe으로 넣는다.
+                         *
+                         * top-level direct load와 달리:
+                         * - window.parent/top 관계가 생기고
+                         * - document.referrer가 KOTBC 페이지가 되며
+                         * - referrerPolicy=unsafe-url로 실제 사이트 동작과 맞춘다.
                          */
-                        triggerPlayback(view)
+                        if (
+                            parentMode &&
+                            !playerIframeInjected &&
+                            finishedUrl?.contains(
+                                "kotbc2.com",
+                                ignoreCase = true
+                            ) == true
+                        ) {
+                            playerIframeInjected = true
+
+                            handler.postDelayed(
+                                {
+                                    if (!finished) {
+                                        injectPlayerIframe(
+                                            view = view,
+                                            playerUrl = playerUrl
+                                        )
+                                    }
+                                },
+                                300
+                            )
+                        } else if (!parentMode) {
+                            triggerPlayback(view)
+                        }
 
                         handler.postDelayed(
                             {
@@ -345,7 +464,7 @@ class KotbcExtractor : ExtractorApi() {
                                     )
                                 }
                             },
-                            1500
+                            1800
                         )
 
                         handler.postDelayed(
@@ -361,19 +480,18 @@ class KotbcExtractor : ExtractorApi() {
                                     )
                                 }
                             },
-                            4500
+                            5000
                         )
                     }
                 }
 
-                /*
-                 * 반드시 15초 안에 coroutine을 종료한다.
-                 * 기존 v5는 timeout 후 JS probe가 빈 결과면 finish(null)을 호출하지 않는 버그가 있었다.
-                 */
                 handler.postDelayed(
                     {
                         if (!finished) {
-                            println("[Kotbc v5.1] ⏱ timeout final probe")
+                            println(
+                                "[Kotbc v5.2] ⏱ timeout final probe " +
+                                    "parentMode=$parentMode"
+                            )
 
                             probeResources(
                                 view = webView,
@@ -383,28 +501,80 @@ class KotbcExtractor : ExtractorApi() {
                             )
                         }
                     },
-                    15000
+                    timeoutMs
                 )
 
-                println("[Kotbc v5.1] loadUrl=$playerUrl")
+                println(
+                    "[Kotbc v5.2] loadUrl=$startUrl " +
+                        "parentMode=$parentMode"
+                )
 
-                webView?.loadUrl(
-                    playerUrl,
-                    mapOf(
-                        "Referer" to outerReferer,
-                        "User-Agent" to desktopUa
+                if (parentMode) {
+                    webView?.loadUrl(
+                        startUrl,
+                        mapOf(
+                            "User-Agent" to desktopUa
+                        )
                     )
-                )
+                } else {
+                    webView?.loadUrl(
+                        startUrl,
+                        mapOf(
+                            "Referer" to outerReferer,
+                            "User-Agent" to desktopUa
+                        )
+                    )
+                }
             } catch (e: Exception) {
-                println("[Kotbc v5.1] WebView init 실패: ${e.message}")
+                println("[Kotbc v5.2] WebView init 실패: ${e.message}")
                 finish(null)
             }
         }
     }
 
-    /**
-     * nnmo/JWPlayer/video.js 계열에서 실제 play 동작을 유도한다.
-     */
+    private fun injectPlayerIframe(
+        view: WebView?,
+        playerUrl: String
+    ) {
+        if (view == null) return
+
+        val quotedPlayerUrl = JSONObject.quote(playerUrl)
+
+        val js = """
+            (function() {
+                try {
+                    var old = document.getElementById('kotbc-cs-player');
+                    if (old) old.remove();
+
+                    var frame = document.createElement('iframe');
+                    frame.id = 'kotbc-cs-player';
+                    frame.src = $quotedPlayerUrl;
+                    frame.referrerPolicy = 'unsafe-url';
+                    frame.allow = 'autoplay; fullscreen';
+                    frame.setAttribute('allowfullscreen', 'true');
+
+                    frame.style.position = 'fixed';
+                    frame.style.left = '0';
+                    frame.style.top = '0';
+                    frame.style.width = '100vw';
+                    frame.style.height = '100vh';
+                    frame.style.zIndex = '2147483647';
+                    frame.style.border = '0';
+
+                    (document.body || document.documentElement).appendChild(frame);
+
+                    return frame.src;
+                } catch(e) {
+                    return 'ERR:' + String(e);
+                }
+            })();
+        """.trimIndent()
+
+        view.evaluateJavascript(js) { raw ->
+            println("[Kotbc v5.2] iframe inject result=$raw")
+        }
+    }
+
     private fun triggerPlayback(view: WebView?) {
         if (view == null) return
 
@@ -433,6 +603,18 @@ class KotbcExtractor : ExtractorApi() {
                             if (el) el.click();
                         } catch(e) {}
                     });
+
+                    /*
+                     * KOTBC 원본 페이지의 "바로 보기" 버튼도 같이 시도한다.
+                     */
+                    document.querySelectorAll('button, a').forEach(function(el) {
+                        try {
+                            const text = (el.innerText || el.textContent || '').trim();
+                            if (text.indexOf('바로 보기') >= 0) {
+                                el.click();
+                            }
+                        } catch(e) {}
+                    });
                 } catch(e) {}
             })();
         """.trimIndent()
@@ -440,10 +622,6 @@ class KotbcExtractor : ExtractorApi() {
         view.evaluateJavascript(js, null)
     }
 
-    /**
-     * shouldInterceptRequest에서 놓친 경우
-     * DOM + PerformanceResourceTiming에서 m3u8을 찾는다.
-     */
     private fun probeResources(
         view: WebView?,
         playerUrl: String,
@@ -473,14 +651,34 @@ class KotbcExtractor : ExtractorApi() {
                             });
                     }
 
-                    const hit = Array.from(new Set(urls)).find(function(u) {
+                    const unique = Array.from(new Set(urls));
+
+                    const hit = unique.find(function(u) {
                         return typeof u === 'string' &&
                             u.toLowerCase().indexOf('.m3u8') >= 0;
                     });
 
-                    return hit || '';
+                    if (hit) return hit;
+
+                    /*
+                     * 최종 실패 시 다음 로그 분석용으로
+                     * nnmo/media 관련 resource 목록을 반환한다.
+                     */
+                    const debug = unique.filter(function(u) {
+                        if (typeof u !== 'string') return false;
+                        const x = u.toLowerCase();
+
+                        return x.indexOf('nnmo0oi1.com') >= 0 ||
+                            x.indexOf('/video/') >= 0 ||
+                            x.indexOf('.mpd') >= 0 ||
+                            x.indexOf('.mp4') >= 0 ||
+                            x.indexOf('manifest') >= 0 ||
+                            x.indexOf('playlist') >= 0;
+                    }).slice(-20);
+
+                    return 'DEBUG:' + JSON.stringify(debug);
                 } catch(e) {
-                    return '';
+                    return 'DEBUG_ERROR:' + String(e);
                 }
             })();
         """.trimIndent()
@@ -498,7 +696,7 @@ class KotbcExtractor : ExtractorApi() {
                 value.startsWith("http://") ||
                 value.startsWith("https://")
             ) {
-                println("[Kotbc v5.1] jsM3u8=$value")
+                println("[Kotbc v5.2] jsM3u8=$value")
 
                 finish(
                     InterceptResult(
@@ -510,7 +708,8 @@ class KotbcExtractor : ExtractorApi() {
                     )
                 )
             } else if (finishOnMiss) {
-                println("[Kotbc v5.1] ❌ final probe에서도 m3u8 없음")
+                println("[Kotbc v5.2] probeDebug=$value")
+                println("[Kotbc v5.2] ❌ final probe에서도 m3u8 없음")
                 finish(null)
             }
         }
