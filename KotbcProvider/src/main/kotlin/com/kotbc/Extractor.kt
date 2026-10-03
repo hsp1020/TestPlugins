@@ -1,42 +1,48 @@
-// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/KotbcProvider/src/main/kotlin/com/kotbc/Extractor.kt
 package com.kotbc
 
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.webkit.ConsoleMessage
+import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.webkit.CookieManager
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.suspendCancellableCoroutine
-import java.net.URI
-import java.util.Collections
+import org.json.JSONObject
 import kotlin.coroutines.resume
 
 /**
- * KotbcExtractor v4.1
- * - [v4.1] 변수 섀도잉 및 스레드 충돌로 인한 메모리 누수/크래시 취약점 완벽 교정
- * - [v4.0] 동적 mainUrl 동기화: 하드코딩된 Referer 대신 Kotbc 클래스에서 자동 갱신된 currentMainUrl을 안전하게 사용
- * - [v3.5] security error(도용 방지) 우회를 위해 WebView의 실제 Request Header를 통째로 추출하여 재사용
+ * KOTBC Extractor v5
+ *
+ * 변경점:
+ * 1. 특정 player host allowlist에 의존하지 않고 실제 HLS manifest 요청을 우선 캡처.
+ * 2. Provider에서 전달한 정확한 KOTBC 상세/회차 URL을 Referer로 사용.
+ * 3. third-party cookie / mixed content / autoplay / DOM storage 등 WebView player 설정 보강.
+ * 4. shouldInterceptRequest에서 놓친 경우 JS + PerformanceResourceTiming으로 m3u8 재탐색.
+ * 5. console / page error / media candidate 로그 추가.
  */
 class KotbcExtractor : ExtractorApi() {
     override val name = "KOTBC"
-    override val mainUrl = "https://mov.glamov.com"
+    override val mainUrl = "https://nnmo0oi1.com"
     override val requiresReferer = true
-    
-    private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
-    data class InterceptResult(val url: String, val headers: Map<String, String>)
+    private val desktopUa =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) " +
+            "Chrome/121.0.0.0 Safari/537.36"
+
+    data class InterceptResult(
+        val url: String,
+        val headers: Map<String, String>
+    )
 
     override suspend fun getUrl(
         url: String,
@@ -44,155 +50,408 @@ class KotbcExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[Kotbc v4.1] getUrl 실행: $url")
-        extract(url, referer, subtitleCallback, callback)
+        println("[Kotbc v5] getUrl: $url")
+        extract(url, referer, callback)
     }
 
-    suspend fun extract(
+    private suspend fun extract(
         url: String,
         referer: String?,
-        subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val safeReferer = if (referer.isNullOrEmpty() || referer.contains("m136")) {
-            Kotbc.currentMainUrl + "/"
-        } else {
-            referer
-        }
-        
-        println("[Kotbc v4.1] 최종 참조용 Referer: $safeReferer")
-        val hookResult = runWebViewHook(url, safeReferer)
-        
-        if (hookResult != null) {
-            var finalUrl = hookResult.url
-            println("[Kotbc v4.1] WebView 캡처 성공: $finalUrl")
-            
-            val headers = hookResult.headers.toMutableMap()
-            
-            if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
-                headers["User-Agent"] = DESKTOP_UA
-            }
+        val safeReferer = referer
+            ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+            ?: "${Kotbc.currentMainUrl}/"
 
-            val cookie = CookieManager.getInstance().getCookie(finalUrl)
-            if (!cookie.isNullOrEmpty()) {
-                headers["Cookie"] = cookie
-                println("[Kotbc v4.1] 쿠키 셋팅 완료: $cookie")
-            }
+        println("[Kotbc v5] Referer: $safeReferer")
 
-            println("[Kotbc v4.1] 최종적으로 사용할 위장 헤더: $headers")
-
-            try {
-                println("[Kotbc v4.1] 캡처된 URL 본문 다운로드 및 파싱 시도: $finalUrl")
-                val response = app.get(finalUrl, headers = headers)
-                
-                val content = try {
-                    response.text.trim()
-                } catch (e: Exception) {
-                    println("[Kotbc v4.1] text 파싱 에러 (textLarge 시도): ${e.message}")
-                    response.document.text().trim() 
-                }
-
-                println("[Kotbc v4.1] ================= 본문 내용 시작 =================")
-                println(content.take(2000))
-                if (content.length > 2000) println("... (이하 생략됨, 총 길이: ${content.length}) ...")
-                println("[Kotbc v4.1] ================= 본문 내용 끝 ===================")
-
-                if (content.contains("security error")) {
-                    println("[Kotbc v4.1] ❌ 여전히 보안 에러(security error) 발생. 서버가 다른 토큰을 요구할 수 있습니다.")
-                } else if (!content.startsWith("#EXTM3U")) {
-                    println("[Kotbc v4.1] 본문이 M3U8 포맷이 아님. 내부 M3U8 링크 추출 탐색")
-                    val m3u8Regex = Regex("""(https?://[^"']+\.m3u8[^"']*)""")
-                    m3u8Regex.find(content)?.let {
-                        finalUrl = it.groupValues[1]
-                        println("[Kotbc v4.1] 실제 M3U8 주소 추출 성공: $finalUrl")
-                    } ?: run {
-                        println("[Kotbc v4.1] 본문에서 M3U8 링크를 찾지 못함. 원본 URL 유지.")
-                    }
-                } else {
-                    println("[Kotbc v4.1] 캡처된 URL 본문이 정상적인 #EXTM3U 포맷입니다.")
-                }
-            } catch (e: Exception) {
-                println("[Kotbc v4.1] 파싱 중 치명적 예외 발생: ${e.message}")
-            }
-
-            callback(newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
-                this.headers = headers
-            })
-            println("[Kotbc v4.1] 최종 ExtractorLink 전달 완료: $finalUrl")
+        /*
+         * 먼저 정적 HTML/JS 안에 m3u8이 직접 박혀 있는지 확인한다.
+         * 성공하면 WebView를 띄울 이유가 없다.
+         */
+        directManifestProbe(url, safeReferer)?.let { direct ->
+            println("[Kotbc v5] direct manifest 성공: ${direct.url}")
+            emitLink(direct, callback)
             return true
-        } else {
-            println("[Kotbc v4.1] WebView 캡처 실패")
+        }
+
+        val hook = runWebViewHook(url, safeReferer)
+
+        if (hook == null) {
+            println("[Kotbc v5] ❌ WebView manifest 캡처 실패")
             return false
+        }
+
+        println("[Kotbc v5] ✅ WebView manifest 캡처: ${hook.url}")
+        emitLink(hook, callback)
+        return true
+    }
+
+    private suspend fun directManifestProbe(
+        url: String,
+        referer: String
+    ): InterceptResult? {
+        return try {
+            val headers = mapOf(
+                "User-Agent" to desktopUa,
+                "Referer" to referer,
+                "Accept" to "*/*"
+            )
+
+            val response = app.get(url, headers = headers)
+            val text = response.text
+
+            val manifest = extractManifestFromText(text)
+                ?: return null
+
+            InterceptResult(
+                url = manifest,
+                headers = headers
+            )
+        } catch (e: Exception) {
+            println("[Kotbc v5] direct probe skip: ${e.message}")
+            null
         }
     }
 
-    private suspend fun runWebViewHook(url: String, referer: String) = suspendCancellableCoroutine<InterceptResult?> { cont ->
-        println("[Kotbc v4.1] WebView 훅 실행: $url")
+    private fun extractManifestFromText(text: String): String? {
+        val normalized = text
+            .replace("\\/", "/")
+            .replace("\\u002F", "/")
+            .replace("\\u0026", "&")
+
+        return Regex(
+            """https?://[^\s"'<>\\]+\.m3u8(?:\?[^\s"'<>\\]*)?""",
+            RegexOption.IGNORE_CASE
+        )
+            .find(normalized)
+            ?.value
+    }
+
+    private fun emitLink(
+        result: InterceptResult,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val headers = result.headers.toMutableMap()
+
+        if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
+            headers["User-Agent"] = desktopUa
+        }
+
+        val cookie = try {
+            CookieManager.getInstance().getCookie(result.url)
+        } catch (_: Exception) {
+            null
+        }
+
+        if (!cookie.isNullOrBlank()) {
+            headers["Cookie"] = cookie
+        }
+
+        callback(
+            newExtractorLink(
+                name,
+                name,
+                result.url,
+                ExtractorLinkType.M3U8
+            ) {
+                this.headers = headers
+            }
+        )
+
+        println("[Kotbc v5] ExtractorLink 전달: ${result.url}")
+    }
+
+    private suspend fun runWebViewHook(
+        url: String,
+        referer: String
+    ) = suspendCancellableCoroutine<InterceptResult?> { cont ->
         val handler = Handler(Looper.getMainLooper())
         var webView: WebView? = null
-        
+        var finished = false
+
+        fun finish(result: InterceptResult?) {
+            if (finished) return
+            finished = true
+
+            handler.removeCallbacksAndMessages(null)
+
+            if (cont.isActive) {
+                cont.resume(result)
+            }
+
+            handler.post {
+                try {
+                    webView?.stopLoading()
+                    webView?.destroy()
+                    webView = null
+                } catch (_: Exception) {
+                }
+            }
+        }
+
         cont.invokeOnCancellation {
             handler.post {
-                try { webView?.destroy(); webView = null } catch(e: Exception) {}
+                try {
+                    webView?.stopLoading()
+                    webView?.destroy()
+                    webView = null
+                } catch (_: Exception) {
+                }
             }
         }
 
         handler.post {
             try {
-                val context: Context = (CloudStreamApp.context ?: app) as Context
-                // [수정: 변수 섀도잉 방어] val을 제거하여 외부 생명주기 변수와 동기화 보장
+                val context: Context = CloudStreamApp.context
+                    ?: run {
+                        finish(null)
+                        return@post
+                    }
+
                 webView = WebView(context)
-                
+
+                CookieManager.getInstance().apply {
+                    setAcceptCookie(true)
+                    try {
+                        webView?.let { setAcceptThirdPartyCookies(it, true) }
+                    } catch (_: Exception) {
+                    }
+                }
+
                 webView?.settings?.apply {
                     javaScriptEnabled = true
                     domStorageEnabled = true
-                    userAgentString = DESKTOP_UA
+                    databaseEnabled = true
+                    mediaPlaybackRequiresUserGesture = false
+                    userAgentString = desktopUa
+                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                    javaScriptCanOpenWindowsAutomatically = true
+                    setSupportMultipleWindows(false)
                 }
 
-                val discoveryTimeout = Runnable {
-                    if (cont.isActive) {
-                        println("[Kotbc v4.1] WebView Timeout")
-                        try { webView?.destroy(); webView = null } catch (e: Exception) {}
-                        cont.resume(null)
+                webView?.webChromeClient = object : WebChromeClient() {
+                    override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                        val message = consoleMessage?.message().orEmpty()
+                        if (
+                            message.contains("error", ignoreCase = true) ||
+                            message.contains("m3u8", ignoreCase = true) ||
+                            message.contains("player", ignoreCase = true) ||
+                            message.contains("manifest", ignoreCase = true)
+                        ) {
+                            println("[Kotbc v5] console: $message")
+                        }
+                        return super.onConsoleMessage(consoleMessage)
                     }
                 }
-                handler.postDelayed(discoveryTimeout, 15000)
+
+                val timeout = Runnable {
+                    if (!finished) {
+                        println("[Kotbc v5] ⏱ WebView Timeout")
+                        probeWebViewResources(webView, ::finish)
+                    }
+                }
+
+                handler.postDelayed(timeout, 15000)
 
                 webView?.webViewClient = object : WebViewClient() {
-                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                        val reqUrl = request?.url?.toString() ?: ""
-                        
-                        val isSegment = Regex("""_[0-9]+\.(html|ts)(\?.*)?$""").containsMatchIn(reqUrl)
+                    override fun shouldInterceptRequest(
+                        view: WebView?,
+                        request: WebResourceRequest?
+                    ): WebResourceResponse? {
+                        val reqUrl = request?.url?.toString().orEmpty()
+
+                        if (reqUrl.isBlank()) {
+                            return super.shouldInterceptRequest(view, request)
+                        }
+
+                        val lower = reqUrl.lowercase()
+
+                        /*
+                         * 세그먼트는 최종 재생 URL이 아니므로 제외.
+                         */
+                        val isSegment =
+                            lower.matches(Regex(""".*\.(ts|m4s|mp4)(\?.*)?$""")) ||
+                                lower.matches(Regex(""".*_[0-9]+\.(html|ts)(\?.*)?$"""))
+
                         if (isSegment) {
                             return super.shouldInterceptRequest(view, request)
                         }
 
-                        if ((reqUrl.contains(".m3u8") || reqUrl.contains(".html") || reqUrl.contains("master") || reqUrl.contains(".txt")) 
-                            && (Regex("p[1-9][0-9]?player2\\.xyz").containsMatchIn(reqUrl)  || reqUrl.contains("bunny-frame") || reqUrl.contains("glamov") || reqUrl.contains("nnmo0oi1.com"))) {
-                            
-                            println("[Kotbc v4.1] Target URL Intercepted: $reqUrl")
-                            
-                            // [수정: 불완전한 콜백 해제 및 스레드 충돌 방어] 일괄 소각 및 메인 스레드 파괴 강제
-                            handler.removeCallbacksAndMessages(null)
-                            
-                            if (cont.isActive) {
-                                val requestHeaders = request?.requestHeaders ?: emptyMap()
-                                println("[Kotbc v4.1] 브라우저 원본 요청 헤더 캡처 성공")
-                                
-                                handler.post { try { webView?.destroy(); webView = null } catch (e: Exception) {} }
-                                cont.resume(InterceptResult(reqUrl, requestHeaders))
+                        /*
+                         * 핵심 수정:
+                         * CDN host가 바뀌어도 .m3u8이면 무조건 manifest로 인정한다.
+                         */
+                        val isHlsManifest =
+                            lower.contains(".m3u8") ||
+                                (
+                                    (lower.contains("master") ||
+                                        lower.contains("playlist") ||
+                                        lower.contains("manifest") ||
+                                        lower.contains("index")) &&
+                                        !lower.contains(".js") &&
+                                        !lower.contains(".css") &&
+                                        !lower.contains(".png") &&
+                                        !lower.contains(".jpg")
+                                    )
+
+                        /*
+                         * 과거 player2/glamov 구조의 비표준 playlist fallback.
+                         */
+                        val isLegacyPlaylist =
+                            (
+                                lower.contains("player2.") ||
+                                    lower.contains("bunny-frame") ||
+                                    lower.contains("glamov")
+                                ) &&
+                                (
+                                    lower.contains(".html") ||
+                                        lower.contains(".txt")
+                                    )
+
+                        if (isHlsManifest || isLegacyPlaylist) {
+                            println("[Kotbc v5] candidate: $reqUrl")
+
+                            val requestHeaders = request?.requestHeaders
+                                ?.toMutableMap()
+                                ?: mutableMapOf()
+
+                            if (
+                                requestHeaders.keys.none {
+                                    it.equals("Referer", ignoreCase = true)
+                                }
+                            ) {
+                                requestHeaders["Referer"] = referer
                             }
-                            return null
+
+                            if (
+                                requestHeaders.keys.none {
+                                    it.equals("User-Agent", ignoreCase = true)
+                                }
+                            ) {
+                                requestHeaders["User-Agent"] = desktopUa
+                            }
+
+                            /*
+                             * .m3u8이면 즉시 종료.
+                             * 비표준 html/txt는 JS/performance probe가 m3u8을 더 찾도록
+                             * 바로 종료하지 않고 후보 로그만 남긴다.
+                             */
+                            if (lower.contains(".m3u8")) {
+                                finish(
+                                    InterceptResult(
+                                        url = reqUrl,
+                                        headers = requestHeaders
+                                    )
+                                )
+                            }
                         }
+
                         return super.shouldInterceptRequest(view, request)
+                    }
+
+                    override fun onPageFinished(view: WebView?, finishedUrl: String?) {
+                        super.onPageFinished(view, finishedUrl)
+
+                        println("[Kotbc v5] pageFinished: $finishedUrl")
+
+                        handler.postDelayed(
+                            {
+                                if (!finished) {
+                                    probeWebViewResources(view, ::finish)
+                                }
+                            },
+                            1200
+                        )
+
+                        handler.postDelayed(
+                            {
+                                if (!finished) {
+                                    probeWebViewResources(view, ::finish)
+                                }
+                            },
+                            4000
+                        )
                     }
                 }
 
-                webView?.loadUrl(url, mapOf("Referer" to referer))
+                println("[Kotbc v5] WebView loadUrl: $url")
 
+                webView?.loadUrl(
+                    url,
+                    mapOf(
+                        "Referer" to referer,
+                        "User-Agent" to desktopUa
+                    )
+                )
             } catch (e: Exception) {
-                println("[Kotbc v4.1] WebView Init Error: ${e.message}")
-                if (cont.isActive) cont.resume(null)
+                println("[Kotbc v5] WebView Init Error: ${e.message}")
+                finish(null)
+            }
+        }
+    }
+
+    /**
+     * shouldInterceptRequest가 blob/XHR 내부 변환 때문에 manifest를 놓치는 경우 대비.
+     * DOM의 video/source/iframe src와 PerformanceResourceTiming 목록에서 m3u8을 찾는다.
+     */
+    private fun probeWebViewResources(
+        view: WebView?,
+        finish: (InterceptResult?) -> Unit
+    ) {
+        if (view == null) {
+            finish(null)
+            return
+        }
+
+        val js = """
+            (function() {
+                try {
+                    const urls = [];
+
+                    document.querySelectorAll('video[src], source[src], iframe[src]').forEach(function(el) {
+                        if (el.src) urls.push(el.src);
+                    });
+
+                    if (window.performance && performance.getEntriesByType) {
+                        performance.getEntriesByType('resource').forEach(function(e) {
+                            if (e && e.name) urls.push(e.name);
+                        });
+                    }
+
+                    const unique = Array.from(new Set(urls));
+                    const hls = unique.find(function(u) {
+                        return typeof u === 'string' && u.toLowerCase().indexOf('.m3u8') >= 0;
+                    });
+
+                    return hls || '';
+                } catch (e) {
+                    return '';
+                }
+            })();
+        """.trimIndent()
+
+        view.evaluateJavascript(js) { raw ->
+            try {
+                val value = JSONObject("""{"value":$raw}""")
+                    .optString("value")
+                    .trim()
+
+                if (value.startsWith("http://") || value.startsWith("https://")) {
+                    println("[Kotbc v5] JS/performance manifest: $value")
+
+                    finish(
+                        InterceptResult(
+                            url = value,
+                            headers = mapOf(
+                                "User-Agent" to desktopUa,
+                                "Referer" to (view.url ?: Kotbc.currentMainUrl)
+                            )
+                        )
+                    )
+                }
+            } catch (e: Exception) {
+                println("[Kotbc v5] JS probe decode 실패: ${e.message}")
             }
         }
     }
