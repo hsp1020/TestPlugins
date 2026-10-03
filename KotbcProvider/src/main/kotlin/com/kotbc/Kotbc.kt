@@ -17,12 +17,10 @@ import java.net.URLEncoder
 class Kotbc : MainAPI() {
     companion object {
         private const val DEFAULT_DOMAIN = "https://k01.kotbc2.com"
-
-        // 사이트 구조가 mXX -> kXX로 완전히 변경되었으므로
-        // 구버전 SharedPreferences(m200 등)를 다시 읽지 않도록 캐시 네임스페이스를 분리한다.
         private const val PREFS_NAME = "Kotbc_Domain_Cache_v2"
         private const val PREF_KEY = "current_domain"
         private const val PLAYER_DATA_PREFIX = "KOTBC_PLAYER:"
+        private const val POPULAR_CATALOG = "__popular_top10__"
 
         var currentMainUrl = DEFAULT_DOMAIN
         var isDomainChecked = false
@@ -38,8 +36,6 @@ class Kotbc : MainAPI() {
                 ?.edit()
                 ?.putString(PREF_KEY, normalized)
                 ?.apply()
-
-            println("[Kotbc DBG] 💾 영구 도메인 저장 완료: $normalized")
         }
     }
 
@@ -54,24 +50,14 @@ class Kotbc : MainAPI() {
         TvType.AsianDrama
     )
 
-    /*
-     * 현재 KOTBC:
-     * /영화
-     * /드라마
-     * /예능시사
-     * /해외드라마
-     */
     override val mainPage = mainPageOf(
+        POPULAR_CATALOG to "KOTBC 인기 TOP 10",
         "%EC%98%81%ED%99%94" to "영화",
         "%EB%93%9C%EB%9D%BC%EB%A7%88" to "드라마",
         "%EC%98%88%EB%8A%A5%EC%8B%9C%EC%82%AC" to "예능/시사",
         "%ED%95%B4%EC%99%B8%EB%93%9C%EB%9D%BC%EB%A7%88" to "해외드라마"
     )
 
-    /**
-     * 구형 list-box 시그니처는 폐기됨.
-     * 현재 페이지에 공통으로 존재하는 Inertia data-page와 검색 input을 생존 시그니처로 사용한다.
-     */
     private fun isValidSiteDocument(doc: Document): Boolean {
         return doc.selectFirst("script[data-page=app][type=application/json]") != null &&
             (
@@ -80,169 +66,98 @@ class Kotbc : MainAPI() {
                 )
     }
 
+    private suspend fun probeDomain(url: String): String? {
+        return try {
+            val response = app.get(url, timeout = 3L)
+            if (response.isSuccessful && isValidSiteDocument(response.document)) {
+                response.url.trimEnd('/')
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            null
+        }
+    }
+
     private suspend fun checkAndUpdateDomain() {
         if (isDomainChecked) return
 
         domainMutex.withLock {
             if (isDomainChecked) return@withLock
 
-            val prefs = CloudStreamApp.context
+            val cached = CloudStreamApp.context
                 ?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-
-            val cachedDomain = prefs
                 ?.getString(PREF_KEY, null)
                 ?.trimEnd('/')
 
-            if (!cachedDomain.isNullOrBlank()) {
-                currentMainUrl = cachedDomain
-                mainUrl = currentMainUrl
-                println("[Kotbc DBG] 📂 캐시된 k도메인 로드: $currentMainUrl")
-            } else {
-                currentMainUrl = DEFAULT_DOMAIN
-                mainUrl = currentMainUrl
-            }
+            currentMainUrl = cached ?: DEFAULT_DOMAIN
+            mainUrl = currentMainUrl
 
-            println("[Kotbc DBG] 🔄 현재 도메인 유효성 체크 -> $currentMainUrl")
-
-            try {
-                val res = app.get(currentMainUrl, timeout = 3L)
-                val finalUrl = res.url.trimEnd('/')
-                val valid = res.isSuccessful && isValidSiteDocument(res.document)
-
-                if (valid) {
-                    if (finalUrl != currentMainUrl) {
-                        println("[Kotbc DBG] 🔄 리다이렉트 감지: $currentMainUrl -> $finalUrl")
-                        saveDomain(finalUrl)
-                        mainUrl = currentMainUrl
-                    }
-
-                    isDomainChecked = true
-                    println("[Kotbc DBG] ✅ 활성 도메인 확정 -> $mainUrl")
-                    return@withLock
-                }
-
-                println(
-                    "[Kotbc DBG] ⚠️ 현재 도메인 검증 실패 " +
-                        "(HTTP=${res.isSuccessful}, 신규시그니처=$valid)"
-                )
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                println("[Kotbc DBG] ❌ 현재 도메인 접속 실패: ${e.message}")
-            }
-
-            // 공식 베이스 도메인이 새 kXX 주소로 리다이렉트하는 경우 우선 사용한다.
-            try {
-                println("[Kotbc DBG] 🌐 베이스 도메인 kotbc2.com 폴백")
-                val res = app.get("https://kotbc2.com", timeout = 3L)
-                val finalUrl = res.url.trimEnd('/')
-
-                if (res.isSuccessful && isValidSiteDocument(res.document)) {
-                    println("[Kotbc DBG] ✅ 베이스 도메인 리다이렉트 성공 -> $finalUrl")
-                    saveDomain(finalUrl)
-                    mainUrl = currentMainUrl
-                    isDomainChecked = true
-                    return@withLock
-                }
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-            }
-
-            val match = Regex("""https?://k(\d+)\.kotbc2\.com""", RegexOption.IGNORE_CASE)
-                .find(currentMainUrl)
-
-            val startNum = match
-                ?.groupValues
-                ?.getOrNull(1)
-                ?.toIntOrNull()
-                ?: 1
-
-            println(
-                "[Kotbc DBG] 🚀 k도메인 탐색 시작: " +
-                    "k${startNum.toString().padStart(2, '0')}"
-            )
-
-            var foundDomain: String? = null
-
-            coroutineScope {
-                val candidates = (startNum..startNum + 200).map { num ->
-                    "https://k${num.toString().padStart(2, '0')}.kotbc2.com"
-                }
-
-                for (chunk in candidates.chunked(5)) {
-                    val results = chunk.map { testUrl ->
-                        async {
-                            println("[Kotbc DBG] 🔄 후보 검증 -> $testUrl")
-
-                            try {
-                                val res = app.get(testUrl, timeout = 3L)
-
-                                if (res.isSuccessful && isValidSiteDocument(res.document)) {
-                                    res.url.trimEnd('/')
-                                } else {
-                                    null
-                                }
-                            } catch (e: Exception) {
-                                if (e is CancellationException) throw e
-                                null
-                            }
-                        }
-                    }.awaitAll()
-
-                    foundDomain = results.firstOrNull { it != null }
-
-                    if (foundDomain != null) {
-                        return@coroutineScope
-                    }
-                }
-            }
-
-            if (foundDomain != null) {
-                println("[Kotbc DBG] ✨ k도메인 탐색 성공: $foundDomain")
-                saveDomain(foundDomain!!)
+            probeDomain(currentMainUrl)?.let {
+                saveDomain(it)
                 mainUrl = currentMainUrl
                 isDomainChecked = true
                 return@withLock
             }
 
-            println(
-                "[Kotbc DBG] 💀 탐색 실패: " +
-                    "k${startNum.toString().padStart(2, '0')} ~ " +
-                    "k${(startNum + 200).toString().padStart(2, '0')}"
-            )
+            probeDomain("https://kotbc2.com")?.let {
+                saveDomain(it)
+                mainUrl = currentMainUrl
+                isDomainChecked = true
+                return@withLock
+            }
 
-            // 무한 브루트포스를 막기 위해 이번 프로세스에서는 재탐색하지 않는다.
+            val startNum = Regex(
+                """https?://k(\d+)\.kotbc2\.com""",
+                RegexOption.IGNORE_CASE
+            ).find(currentMainUrl)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+                ?: 1
+
+            var found: String? = null
+
+            coroutineScope {
+                val candidates = (startNum..startNum + 200).map { number ->
+                    "https://k${number.toString().padStart(2, '0')}.kotbc2.com"
+                }
+
+                for (chunk in candidates.chunked(5)) {
+                    val results = chunk.map { candidate ->
+                        async { probeDomain(candidate) }
+                    }.awaitAll()
+
+                    found = results.firstOrNull { it != null }
+                    if (found != null) return@coroutineScope
+                }
+            }
+
+            found?.let {
+                saveDomain(it)
+                mainUrl = currentMainUrl
+            }
+
             isDomainChecked = true
         }
     }
 
-    /**
-     * 현재 사이트에는 구형 /bbs/search.php가 없다.
-     *
-     * 검색 API는 첨부 소스만으로 확정할 수 없으므로,
-     * 홈 SSR에 노출되는 4개 섹션의 최신 작품을 대상으로 안전한 검색 fallback을 제공한다.
-     */
     override suspend fun search(query: String): List<SearchResponse> {
-        val qLower = query.lowercase()
-
-        if (qLower.startsWith("!kotbc ")) {
-            val userDomain = query
-                .substring(7)
-                .trim()
-                .trimEnd('/')
-
-            if (userDomain.startsWith("http")) {
-                println("[Kotbc DBG] 🔧 수동 도메인 갱신: $userDomain")
-                saveDomain(userDomain)
+        if (query.lowercase().startsWith("!kotbc ")) {
+            val domain = query.substring(7).trim().trimEnd('/')
+            if (domain.startsWith("http")) {
+                saveDomain(domain)
                 mainUrl = currentMainUrl
                 isDomainChecked = true
 
                 return listOf(
                     newMovieSearchResponse(
-                        "✅ Kotbc 갱신 성공: $userDomain",
-                        userDomain,
+                        "✅ Kotbc 갱신 성공: $domain",
+                        domain,
                         TvType.Movie
                     ) {
-                        this.posterUrl = ""
+                        posterUrl = ""
                     }
                 )
             }
@@ -251,23 +166,14 @@ class Kotbc : MainAPI() {
         }
 
         checkAndUpdateDomain()
-        println("[Kotbc DBG] 🔍 검색 fallback: $query")
 
         return try {
-            val doc = app.get(mainUrl).document
-            val normalizedQuery = query.trim()
-
-            parseHomeSections(doc)
-                .filter {
-                    it.name.contains(normalizedQuery, ignoreCase = true)
-                }
+            val normalized = query.trim()
+            parseHomeSections(app.get(mainUrl).document)
+                .filter { it.name.contains(normalized, ignoreCase = true) }
                 .distinctBy { it.url }
-                .also {
-                    println("[Kotbc DBG] 🔍 검색 결과 수: ${it.size}")
-                }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            println("[Kotbc DBG] ❌ 검색 실패: ${e.message}")
             emptyList()
         }
     }
@@ -278,99 +184,150 @@ class Kotbc : MainAPI() {
     ): HomePageResponse {
         checkAndUpdateDomain()
 
+        if (request.data == POPULAR_CATALOG) {
+            val items = if (page == 1) loadPopularTop10() else emptyList()
+            return newHomePageResponse(
+                request.name,
+                items,
+                hasNext = false
+            )
+        }
+
         val pageUrl = buildString {
             append(mainUrl)
             append("/")
             append(request.data)
-
-            if (page > 1) {
-                append("?page=")
-                append(page)
-            }
+            if (page > 1) append("?page=$page")
         }
-
-        println(
-            "[Kotbc DBG] 📄 메인페이지 로드: " +
-                "카테고리=${request.name}, 페이지=$page, url=$pageUrl"
-        )
 
         return try {
             val doc = app.get(pageUrl).document
             val type = if (request.name == "영화") TvType.Movie else TvType.TvSeries
-
-            val list = doc
+            val items = doc
                 .select("a.group.block")
-                .mapNotNull { card -> card.toCardSearchResponse(type) }
+                .mapNotNull { it.toCardSearchResponse(type) }
                 .distinctBy { it.url }
-
-            println("[Kotbc DBG] 📄 ${request.name} 아이템 수: ${list.size}")
 
             newHomePageResponse(
                 request.name,
-                list,
-                hasNext = list.isNotEmpty()
+                items,
+                hasNext = items.isNotEmpty()
             )
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-
-            println(
-                "[Kotbc DBG] ❌ 메인페이지 실패: " +
-                    "${request.name} page=$page / ${e.message}"
-            )
-
-            newHomePageResponse(
-                request.name,
-                emptyList(),
-                hasNext = false
-            )
+            newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
     }
 
     /**
-     * 루트 홈 페이지의 4개 섹션을 검색 fallback 용도로 파싱한다.
-     * 각 section의 h2 텍스트로 영화/시리즈 타입을 구분한다.
+     * 루트 / 의 props.sections에는 최신 카테고리만 있고 인기순위는 없다.
+     * 작품 상세 페이지의 props.popular가 사이트 공통 "인기 작품" TOP10이다.
+     *
+     * 홈의 첫 작품을 seed로 상세 페이지 하나만 열어 popular[0..9]를 가져온다.
      */
+    private suspend fun loadPopularTop10(): List<SearchResponse> {
+        return try {
+            val homeDoc = app.get(mainUrl).document
+            val typeMap = parseHomeTypeMap(homeDoc)
+
+            val seedHref = homeDoc
+                .selectFirst("a.group.block[href]")
+                ?.attr("href")
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?: return emptyList()
+
+            val detailDoc = app.get(resolveUrl(seedHref)).document
+            val popular = inertiaProps(detailDoc)
+                ?.optJSONArray("popular")
+                ?: return emptyList()
+
+            buildList {
+                for (index in 0 until minOf(popular.length(), 10)) {
+                    val item = popular.optJSONObject(index) ?: continue
+                    val title = item.optString("title").trim()
+                    val slug = item.optString("slug").trim()
+                    if (title.isEmpty() || slug.isEmpty()) continue
+
+                    val url = "$mainUrl/${encodePathSegment(slug)}"
+                    val poster = resolveStorageThumbnail(
+                        item.optString("thumbnail").trim()
+                    )
+                    val type = typeMap[slug] ?: TvType.TvSeries
+
+                    add(
+                        if (type == TvType.Movie) {
+                            newMovieSearchResponse("${index + 1}. $title", url, TvType.Movie) {
+                                posterUrl = poster
+                            }
+                        } else {
+                            newTvSeriesSearchResponse("${index + 1}. $title", url, TvType.TvSeries) {
+                                posterUrl = poster
+                            }
+                        }
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            emptyList()
+        }
+    }
+
     private fun parseHomeSections(doc: Document): List<SearchResponse> {
         return doc.select("section")
             .flatMap { section ->
-                val sectionName = section.selectFirst("h2")
-                    ?.text()
-                    ?.trim()
+                val label = section.selectFirst("h2")?.text()?.trim()
                     ?: return@flatMap emptyList()
 
-                val type = if (sectionName == "영화") {
-                    TvType.Movie
-                } else if (
-                    sectionName == "드라마" ||
-                    sectionName == "예능시사" ||
-                    sectionName == "해외드라마"
-                ) {
-                    TvType.TvSeries
-                } else {
-                    return@flatMap emptyList()
+                val type = when (label) {
+                    "영화" -> TvType.Movie
+                    "드라마", "예능시사", "해외드라마" -> TvType.TvSeries
+                    else -> return@flatMap emptyList()
                 }
 
                 section.select("a.group.block")
-                    .mapNotNull { card -> card.toCardSearchResponse(type) }
+                    .mapNotNull { it.toCardSearchResponse(type) }
             }
     }
 
     /**
-     * 신규 카드 DOM:
-     *
-     * <a class="group block" href="/작품-slug">
-     *   <article>
-     *     <img alt="작품명" src="/storage/...">
-     *     ...
-     *     <h3 title="작품명">작품명</h3>
-     *   </article>
-     * </a>
+     * TOP10 항목에는 movie/series 종류가 없으므로,
+     * 메인 props.sections에 같이 노출된 작품은 card_meta.kind로 타입을 보강한다.
+     * 메인에 없는 과거 인기작은 TvSeries로 표시되지만 load() 시 실제 타입으로 교정된다.
      */
+    private fun parseHomeTypeMap(doc: Document): Map<String, TvType> {
+        val props = inertiaProps(doc) ?: return emptyMap()
+        val sections = props.optJSONArray("sections") ?: return emptyMap()
+        val result = mutableMapOf<String, TvType>()
+
+        for (i in 0 until sections.length()) {
+            val section = sections.optJSONObject(i) ?: continue
+            val items = section.optJSONArray("items") ?: continue
+
+            for (j in 0 until items.length()) {
+                val item = items.optJSONObject(j) ?: continue
+                val slug = item.optString("slug").trim()
+                if (slug.isEmpty()) continue
+
+                val kind = item
+                    .optJSONObject("card_meta")
+                    ?.optString("kind")
+                    ?.lowercase()
+
+                result[slug] = if (kind == "movie") {
+                    TvType.Movie
+                } else {
+                    TvType.TvSeries
+                }
+            }
+        }
+
+        return result
+    }
+
     private fun Element.toCardSearchResponse(type: TvType): SearchResponse? {
-        val href = attr("href")
-            .trim()
-            .takeIf { it.isNotEmpty() }
-            ?: return null
+        val href = attr("href").trim().takeIf { it.isNotEmpty() } ?: return null
 
         val title = selectFirst("h3[title]")
             ?.attr("title")
@@ -382,29 +339,21 @@ class Kotbc : MainAPI() {
                 ?.takeIf { it.isNotEmpty() }
             ?: return null
 
-        val posterUrl = selectFirst("img[alt]")
+        val poster = selectFirst("img[alt]")
             ?.attr("src")
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
             ?.let { resolveUrl(it) }
 
-        val absoluteUrl = resolveUrl(href)
+        val url = resolveUrl(href)
 
         return if (type == TvType.Movie) {
-            newMovieSearchResponse(
-                title,
-                absoluteUrl,
-                TvType.Movie
-            ) {
-                this.posterUrl = posterUrl
+            newMovieSearchResponse(title, url, TvType.Movie) {
+                posterUrl = poster
             }
         } else {
-            newTvSeriesSearchResponse(
-                title,
-                absoluteUrl,
-                TvType.TvSeries
-            ) {
-                this.posterUrl = posterUrl
+            newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
+                posterUrl = poster
             }
         }
     }
@@ -416,320 +365,175 @@ class Kotbc : MainAPI() {
         val videoUrl: String?
     )
 
-    /**
-     * KOTBC 신규 구조의 진짜 원본 데이터.
-     *
-     * <script data-page="app" type="application/json">
-     *   props.episodes.data[]
-     * </script>
-     *
-     * DOM 회차 목록은 Vue/Inertia 렌더 상태에 따라 app.get()에서 비어 보일 수 있으므로
-     * JSON을 1순위로 사용하고 DOM은 fallback으로만 사용한다.
-     */
-    private fun parseInertiaEpisodes(doc: Document): List<ParsedEpisode> {
+    private data class PlayerPayload(
+        val playerUrl: String,
+        val refererUrl: String
+    )
+
+    private fun inertiaProps(doc: Document): JSONObject? {
         return try {
-            val script = doc.selectFirst("script[data-page=app][type=application/json]")
-                ?: return emptyList()
+            val script = doc.selectFirst(
+                "script[data-page=app][type=application/json]"
+            ) ?: return null
 
-            val rawJson = script.data()
-                .ifBlank { script.html() }
-                .trim()
+            val raw = script.data().ifBlank { script.html() }.trim()
+            if (raw.isEmpty()) return null
 
-            if (rawJson.isEmpty()) return emptyList()
-
-            val root = JSONObject(rawJson)
-            val props = root.optJSONObject("props") ?: return emptyList()
-            val episodesObject = props.optJSONObject("episodes") ?: return emptyList()
-            val data = episodesObject.optJSONArray("data") ?: return emptyList()
-
-            buildList {
-                for (index in 0 until data.length()) {
-                    val item = data.optJSONObject(index) ?: continue
-
-                    val name = item.optString("title")
-                        .trim()
-                        .takeIf { it.isNotEmpty() }
-                        ?: continue
-
-                    val number = item.optInt("sort", -1)
-                        .takeIf { it >= 0 }
-                        ?: Regex("""(\d+)\s*화""")
-                            .find(name)
-                            ?.groupValues
-                            ?.getOrNull(1)
-                            ?.toIntOrNull()
-
-                    val slug = item.optString("slug")
-                        .trim()
-                        .takeIf { it.isNotEmpty() }
-
-                    val body = item.optJSONObject("body")
-                    val videoUrl = body
-                        ?.optString("url")
-                        ?.trim()
-                        ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
-
-                    add(
-                        ParsedEpisode(
-                            name = name,
-                            number = number,
-                            slug = slug,
-                            videoUrl = videoUrl
-                        )
-                    )
-                }
-            }
-        } catch (e: Exception) {
-            println("[Kotbc DBG] ⚠️ Inertia episodes JSON 파싱 실패: ${e.message}")
-            emptyList()
+            JSONObject(raw).optJSONObject("props")
+        } catch (_: Exception) {
+            null
         }
     }
 
-    /**
-     * DOM fallback.
-     * 신규 사이트에서 정상 SSR이 내려오면 동작하지만, JSON 파싱보다 우선하지 않는다.
-     */
+    private fun parseInertiaEpisodes(doc: Document): List<ParsedEpisode> {
+        val data = inertiaProps(doc)
+            ?.optJSONObject("episodes")
+            ?.optJSONArray("data")
+            ?: return emptyList()
+
+        return buildList {
+            for (index in 0 until data.length()) {
+                val item = data.optJSONObject(index) ?: continue
+                val name = item.optString("title")
+                    .trim()
+                    .takeIf { it.isNotEmpty() }
+                    ?: continue
+
+                val number = item.optInt("sort", -1)
+                    .takeIf { it >= 0 }
+                    ?: Regex("""(\d+)\s*화""")
+                        .find(name)
+                        ?.groupValues
+                        ?.getOrNull(1)
+                        ?.toIntOrNull()
+
+                val slug = item.optString("slug")
+                    .trim()
+                    .takeIf { it.isNotEmpty() }
+
+                val videoUrl = item
+                    .optJSONObject("body")
+                    ?.optString("url")
+                    ?.trim()
+                    ?.takeIf {
+                        it.startsWith("http://") || it.startsWith("https://")
+                    }
+
+                add(ParsedEpisode(name, number, slug, videoUrl))
+            }
+        }
+    }
+
     private fun parseDomEpisodes(doc: Document): List<ParsedEpisode> {
-        val episodeSection = doc.select("section")
-            .firstOrNull { section ->
-                section.select("span")
-                    .any { span -> span.text().trim() == "회차 목록" }
+        val section = doc.select("section")
+            .firstOrNull { candidate ->
+                candidate.select("span")
+                    .any { it.text().trim() == "회차 목록" }
             }
             ?: return emptyList()
 
-        return episodeSection
+        return section
             .select("ul[data-infinite-scroll-page] a[href]")
             .mapNotNull { link ->
-                val href = link.attr("href")
-                    .trim()
+                val href = link.attr("href").trim()
                     .takeIf { it.isNotEmpty() }
                     ?: return@mapNotNull null
 
-                val episodeName = link.text()
-                    .trim()
+                val name = link.text().trim()
                     .takeIf { it.isNotEmpty() }
                     ?: return@mapNotNull null
 
                 val number = Regex("""(\d+)\s*화""")
-                    .find(episodeName)
+                    .find(name)
                     ?.groupValues
                     ?.getOrNull(1)
                     ?.toIntOrNull()
 
-                // DOM에는 body.url이 없으므로 href를 slug 대용으로 보관한다.
-                ParsedEpisode(
-                    name = episodeName,
-                    number = number,
-                    slug = href,
-                    videoUrl = null
-                )
+                ParsedEpisode(name, number, href, null)
             }
             .distinctBy { it.slug ?: it.name }
     }
 
     private fun packPlayerData(playerUrl: String, refererUrl: String): String {
-        val payload = JSONObject()
+        return PLAYER_DATA_PREFIX + JSONObject()
             .put("url", playerUrl)
             .put("referer", refererUrl)
             .toString()
-
-        return PLAYER_DATA_PREFIX + payload
     }
 
-    private fun unpackPlayerData(data: String): Pair<String, String>? {
-        /*
-         * CloudStream은 Episode.data / Movie.data가 http(s) URL이 아니면
-         * provider mainUrl 기준 상대 URL로 보정할 수 있다.
-         *
-         * 예:
-         *   KOTBC_PLAYER:{...}
-         * ->
-         *   https://k01.kotbc2.com/KOTBC_PLAYER:{...}
-         *
-         * 따라서 startsWith()가 아니라 marker 위치를 찾아 JSON payload만 분리한다.
-         */
-        val markerIndex = data.indexOf(PLAYER_DATA_PREFIX)
-        if (markerIndex < 0) return null
+    private fun unpackPlayerData(data: String): PlayerPayload? {
+        val marker = data.indexOf(PLAYER_DATA_PREFIX)
+        if (marker < 0) return null
 
         return try {
-            val payloadText = data.substring(
-                markerIndex + PLAYER_DATA_PREFIX.length
-            )
-
-            val payload = JSONObject(payloadText)
-            val playerUrl = payload.optString("url").trim()
-            val refererUrl = payload.optString("referer").trim()
+            val json = JSONObject(data.substring(marker + PLAYER_DATA_PREFIX.length))
+            val player = json.optString("url").trim()
+            val referer = json.optString("referer").trim().ifEmpty { mainUrl }
 
             if (
-                !playerUrl.startsWith("http://") &&
-                !playerUrl.startsWith("https://")
+                player.startsWith("http://") ||
+                player.startsWith("https://")
             ) {
-                println("[Kotbc DBG] ⚠️ player payload URL 비정상: $playerUrl")
-                null
+                PlayerPayload(player, referer)
             } else {
-                playerUrl to refererUrl.ifEmpty { mainUrl }
+                null
             }
-        } catch (e: Exception) {
-            println("[Kotbc DBG] ⚠️ player data decode 실패: ${e.message}")
+        } catch (_: Exception) {
             null
         }
     }
 
     private fun buildEpisodeData(
         targetUrl: String,
-        parsed: ParsedEpisode
+        episode: ParsedEpisode
     ): String? {
-        val slug = parsed.slug
-
-        /*
-         * 신형 KOTBC는 영화도 내부적으로 1개짜리 episode를 사용한다.
-         *
-         * 드라마:
-         *   /작품-slug/회차-slug
-         *
-         * 영화:
-         *   /작품-slug/작품-slug
-         *
-         * 영화라고 targetUrl만 사용하면 상위 작품 페이지가 열려
-         * "바로 보기" 버튼/playing 컨텍스트가 없다.
-         */
-        val episodePageUrl = when {
-            slug.isNullOrBlank() -> targetUrl
-            slug.startsWith("/") -> resolveUrl(slug)
-            else -> targetUrl.trimEnd('/') + "/" + encodePathSegment(slug)
+        val pageUrl = when {
+            episode.slug.isNullOrBlank() -> targetUrl
+            episode.slug.startsWith("/") -> resolveUrl(episode.slug)
+            else -> targetUrl.trimEnd('/') + "/" + encodePathSegment(episode.slug)
         }
 
-        /*
-         * video URL만 넘기면 nnmo player가 원래 KOTBC 문서 Referer를 잃는다.
-         * player URL + 실제 재생 상세 페이지 URL을 함께 전달한다.
-         */
-        parsed.videoUrl?.let { playerUrl ->
-            return packPlayerData(playerUrl, episodePageUrl)
-        }
-
-        return episodePageUrl
+        return episode.videoUrl?.let {
+            packPlayerData(it, pageUrl)
+        } ?: pageUrl
     }
 
     private fun encodePathSegment(value: String): String {
         return URLEncoder.encode(value, "UTF-8")
             .replace("+", "%20")
+            .replace("%2F", "/")
     }
 
-    /**
-     * 회차 페이지 fallback에서 "현재 회차"의 body.url 하나만 선택한다.
-     * 페이지 JSON에는 전체 회차의 body.url이 같이 들어 있으므로 전부 실행하면 안 된다.
-     */
-    private fun findCurrentEpisodeVideoUrl(doc: Document): String? {
-        val parsed = parseInertiaEpisodes(doc)
-        if (parsed.isEmpty()) return null
+    private fun resolveStorageThumbnail(value: String?): String? {
+        val raw = value?.trim().orEmpty()
+        if (raw.isEmpty()) return null
 
-        val pageTitle = doc.selectFirst("meta[property=og:title]")
-            ?.attr("content")
-            ?.trim()
-            .orEmpty()
-            .ifBlank {
-                doc.selectFirst("h1")
-                    ?.text()
-                    ?.trim()
-                    .orEmpty()
-            }
-
-        val currentNumber = Regex("""(\d+)\s*화""")
-            .find(pageTitle)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.toIntOrNull()
-
-        if (currentNumber != null) {
-            parsed.firstOrNull { it.number == currentNumber }
-                ?.videoUrl
-                ?.let { return it }
+        if (
+            raw.startsWith("http://") ||
+            raw.startsWith("https://") ||
+            raw.startsWith("/")
+        ) {
+            return resolveUrl(raw)
         }
 
-        // 영화처럼 회차가 실제로 하나뿐인 경우에만 안전하게 단일 URL 사용.
-        if (parsed.size == 1) {
-            return parsed.first().videoUrl
+        val path = if (raw.startsWith("storage/")) {
+            "/$raw"
+        } else {
+            "/storage/$raw"
         }
 
-        return null
+        return resolveUrl(path)
     }
 
-    override suspend fun load(url: String): LoadResponse {
-        checkAndUpdateDomain()
-
-        val targetUrl = normalizeTargetUrl(url)
-        println("[Kotbc DBG] 🎬 상세페이지 로드: $targetUrl")
-
-        val response = app.get(targetUrl)
-        val doc = response.document
-
-        val title = doc.selectFirst("h1")
-            ?.text()
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?: doc.selectFirst("meta[property=og:title]")
-                ?.attr("content")
-                ?.trim()
-                ?.takeIf { it.isNotEmpty() }
-            ?: "Unknown"
-
+    private fun parseInfoTags(doc: Document): List<String> {
         val infoSection = doc.select("section")
-            .firstOrNull { section ->
-                section.selectFirst("h1") != null
-            }
+            .firstOrNull { it.selectFirst("h1") != null }
 
-        val poster = infoSection
-            ?.select("img[alt]")
-            ?.firstOrNull { img ->
-                img.attr("alt").trim() == title
-            }
-            ?.attr("src")
-            ?.takeIf { it.isNotBlank() }
-            ?.let { resolveUrl(it) }
-            ?: doc.selectFirst("meta[property=og:image]")
-                ?.attr("content")
-                ?.takeIf { it.isNotBlank() }
-                ?.let { resolveUrl(it) }
-
-        val description = doc.selectFirst("meta[property=og:description]")
-            ?.attr("content")
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?: infoSection
-                ?.select("p")
-                ?.firstOrNull { p ->
-                    p.classNames().contains("line-clamp-4")
-                }
-                ?.text()
-                ?.trim()
-
-        val summary = infoSection
-            ?.select("p")
-            ?.map { it.text().trim() }
-            ?.firstOrNull { value ->
-                value.contains(" · ") &&
-                    (
-                        value.contains("영화") ||
-                            value.contains("드라마") ||
-                            value.contains("총 ")
-                        )
-            }
-            .orEmpty()
-
-        val isMovie = summary.contains("영화") && !summary.contains("드라마")
-
-        val metadataTags = infoSection
+        val metadata = infoSection
             ?.select("dl > div")
             ?.mapNotNull { row ->
-                val label = row.selectFirst("dt")
-                    ?.text()
-                    ?.trim()
-                    .orEmpty()
-
-                val value = row.selectFirst("dd")
-                    ?.text()
-                    ?.trim()
-                    .orEmpty()
+                val label = row.selectFirst("dt")?.text()?.trim().orEmpty()
+                val value = row.selectFirst("dd")?.text()?.trim().orEmpty()
 
                 if (label.isNotEmpty() && value.isNotEmpty()) {
                     "$label: $value"
@@ -739,87 +543,131 @@ class Kotbc : MainAPI() {
             }
             .orEmpty()
 
-        val genreTags = infoSection
+        val genres = infoSection
             ?.select("a[href]")
-            ?.mapNotNull { a ->
-                val href = a.attr("href")
-                val value = a.text().trim()
+            ?.mapNotNull { link ->
+                val href = link.attr("href")
+                val text = link.text().trim()
 
-                if (href.startsWith("/?tag=") && value.startsWith("#")) {
-                    value.removePrefix("#")
-                        .trim()
-                        .takeIf { it.isNotEmpty() }
+                if (href.startsWith("/?tag=") && text.startsWith("#")) {
+                    text.removePrefix("#").trim().takeIf { it.isNotEmpty() }
                 } else {
                     null
                 }
             }
             .orEmpty()
 
-        val tags = (genreTags + metadataTags).distinct()
+        return (genres + metadata).distinct()
+    }
 
-        val inertiaEpisodes = parseInertiaEpisodes(doc)
-        val parsedEpisodes = if (inertiaEpisodes.isNotEmpty()) {
-            println(
-                "[Kotbc DBG] ✅ Inertia 회차 파싱 성공: " +
-                    "${inertiaEpisodes.size}개 / videoUrl=" +
-                    "${inertiaEpisodes.count { !it.videoUrl.isNullOrBlank() }}개"
-            )
-            inertiaEpisodes
-        } else {
-            val domEpisodes = parseDomEpisodes(doc)
-            println("[Kotbc DBG] ⚠️ Inertia 회차 0개 -> DOM fallback ${domEpisodes.size}개")
-            domEpisodes
-        }
+    override suspend fun load(url: String): LoadResponse {
+        checkAndUpdateDomain()
+
+        val targetUrl = normalizeTargetUrl(url)
+        val doc = app.get(targetUrl).document
+        val props = inertiaProps(doc)
+        val comic = props?.optJSONObject("comic")
+        val cardMeta = comic?.optJSONObject("card_meta")
+
+        val title = comic
+            ?.optString("title")
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: doc.selectFirst("h1")
+                ?.text()
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+            ?: doc.selectFirst("meta[property=og:title]")
+                ?.attr("content")
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+            ?: "Unknown"
+
+        val poster = resolveStorageThumbnail(
+            comic?.optString("thumbnail")
+        ) ?: doc.selectFirst("meta[property=og:image]")
+            ?.attr("content")
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { resolveUrl(it) }
+
+        val description = comic
+            ?.optString("description")
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: doc.selectFirst("meta[property=og:description]")
+                ?.attr("content")
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+
+        val summary = doc.select("section")
+            .firstOrNull { it.selectFirst("h1") != null }
+            ?.select("p")
+            ?.map { it.text().trim() }
+            ?.firstOrNull {
+                it.contains(" · ") &&
+                    (
+                        it.contains("영화") ||
+                            it.contains("드라마") ||
+                            it.contains("총 ")
+                        )
+            }
+            .orEmpty()
+
+        val category = comic?.optString("category").orEmpty()
+        val isMovie =
+            cardMeta?.optString("kind")?.equals("movie", ignoreCase = true) == true ||
+                (category.contains("영화") && !category.contains("드라마")) ||
+                (summary.contains("영화") && !summary.contains("드라마"))
+
+        val year = comic
+            ?.optString("published_at")
+            ?.take(4)
+            ?.toIntOrNull()
+            ?: Regex("""\b(?:19|20)\d{2}\b""")
+                .find(summary)
+                ?.value
+                ?.toIntOrNull()
+
+        val runtime = comic
+            ?.optInt("runtime", 0)
+            ?.takeIf { it > 0 }
+
+        val tags = parseInfoTags(doc)
+
+        val parsedEpisodes = parseInertiaEpisodes(doc)
+            .ifEmpty { parseDomEpisodes(doc) }
 
         val episodes = parsedEpisodes
             .mapNotNull { parsed ->
-                val episodeData = buildEpisodeData(targetUrl, parsed)
+                val data = buildEpisodeData(targetUrl, parsed)
                     ?: return@mapNotNull null
 
-                newEpisode(episodeData) {
-                    this.name = parsed.name
-                    this.episode = parsed.number
-                    this.posterUrl = poster
+                newEpisode(data) {
+                    name = parsed.name
+                    episode = parsed.number
+                    posterUrl = poster
                 }
             }
             .distinctBy { it.data }
 
-        println(
-            "[Kotbc DBG] 🎬 상세 파싱 완료: " +
-                "title=$title, movie=$isMovie, " +
-                "parsed=${parsedEpisodes.size}, episodes=${episodes.size}, summary=$summary"
-        )
-
         return if (isMovie) {
-            /*
-             * 영화도 KOTBC 내부적으로 episodes.data 1개를 사용한다.
-             * data payload에는 예상 nnmo URL과 실제 KOTBC 재생 상세 페이지 URL을 함께 보관한다.
-             * loadLinks()에서 재생 상세 페이지의 실제 '바로 보기'를 실행해 glamov wrapper를 확정한다.
-             */
-            val playData = episodes.firstOrNull()?.data
-
-            if (playData.isNullOrBlank()) {
-                println("[Kotbc DBG] ⚠️ 영화 재생 data를 찾지 못함: $targetUrl")
-            } else {
-                println("[Kotbc DBG] 🎞️ 영화 직접 재생 data -> $playData")
-            }
+            val playData = episodes.firstOrNull()?.data ?: targetUrl
 
             newMovieLoadResponse(
                 title,
                 targetUrl,
                 TvType.Movie,
-                playData ?: targetUrl
+                playData
             ) {
-                this.posterUrl = poster
-                this.plot = description
+                posterUrl = poster
+                plot = description
                 this.tags = tags
+                this.year = year
+                this.duration = runtime
             }
         } else {
-            /*
-             * 기존의 "파싱 실패 시 가짜 1개 episode 생성" 로직 제거.
-             * 파싱 실패는 그대로 0개로 남겨야 원인을 숨기지 않는다.
-             */
-            val sortedEpisodes = episodes.sortedWith(
+            val sorted = episodes.sortedWith(
                 compareBy<Episode> { it.episode ?: Int.MAX_VALUE }
                     .thenBy { it.name.orEmpty() }
             )
@@ -828,11 +676,12 @@ class Kotbc : MainAPI() {
                 title,
                 targetUrl,
                 TvType.TvSeries,
-                sortedEpisodes
+                sorted
             ) {
-                this.posterUrl = poster
-                this.plot = description
+                posterUrl = poster
+                plot = description
                 this.tags = tags
+                this.year = year
             }
         }
     }
@@ -843,207 +692,62 @@ class Kotbc : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val rawData = data.trim()
+        val raw = data.trim()
+        if (raw.isEmpty()) return false
 
-        if (rawData.isEmpty()) {
-            println("[Kotbc DBG] ❌ loadLinks data가 비어 있음")
-            return false
-        }
-
-        /*
-         * 정상 경로: load()가 player URL과 실제 KOTBC 회차/영화 페이지 Referer를
-         * 하나의 payload로 묶어 전달한다.
-         */
-        unpackPlayerData(rawData)?.let { (playerUrl, refererUrl) ->
-            println("[Kotbc DBG] 🔗 player payload -> $playerUrl")
-            println("[Kotbc DBG] 🔗 player referer -> $refererUrl")
-
+        unpackPlayerData(raw)?.let { payload ->
             KotbcExtractor().getUrlFromKotbcPage(
-                pageUrl = refererUrl,
-                expectedPlayerUrl = playerUrl,
+                pageUrl = payload.refererUrl,
+                expectedPlayerUrl = payload.playerUrl,
                 subtitleCallback = subtitleCallback,
                 callback = callback
             )
-
             return true
         }
 
-        /*
-         * 구버전/캐시된 Episode.data 호환.
-         */
         if (
-            (rawData.startsWith("http://") || rawData.startsWith("https://")) &&
-            !rawData.contains("kotbc2.com", ignoreCase = true)
+            (raw.startsWith("http://") || raw.startsWith("https://")) &&
+            !raw.contains("kotbc2.com", ignoreCase = true)
         ) {
-            println("[Kotbc DBG] 🔗 구버전 직접 player URL -> $rawData")
-
             KotbcExtractor().getUrl(
-                rawData,
+                raw,
                 mainUrl,
                 subtitleCallback,
                 callback
             )
-
             return true
         }
 
-        val targetUrl = normalizeTargetUrl(rawData)
-        println("[Kotbc DBG] 🔗 KOTBC 페이지 링크 추출 시작: $targetUrl")
+        KotbcExtractor().getUrlFromKotbcPage(
+            pageUrl = normalizeTargetUrl(raw),
+            expectedPlayerUrl = null,
+            subtitleCallback = subtitleCallback,
+            callback = callback
+        )
 
-        try {
-            val response = app.get(targetUrl)
-            val doc = response.document
-
-            /*
-             * 신규 회차 페이지:
-             * 화면에는 "바로 보기" 버튼만 보이지만 Inertia JSON에는
-             * 전체 episodes.data가 있으며 현재 회차와 일치하는 body.url을 하나 고를 수 있다.
-             */
-            val currentVideoUrl = findCurrentEpisodeVideoUrl(doc)
-
-            if (!currentVideoUrl.isNullOrBlank()) {
-                println("[Kotbc DBG] ✅ 현재 회차 Inertia player -> $currentVideoUrl")
-
-                KotbcExtractor().getUrlFromKotbcPage(
-                    pageUrl = targetUrl,
-                    expectedPlayerUrl = currentVideoUrl,
-                    subtitleCallback = subtitleCallback,
-                    callback = callback
-                )
-
-                return true
-            }
-
-            /*
-             * 실제 동영상 wrapper 페이지처럼 iframe이 SSR로 직접 존재하는 경우.
-             */
-            val iframeUrl = doc.select("iframe[src]")
-                .mapNotNull { iframe ->
-                    iframe.attr("src")
-                        .trim()
-                        .takeIf { it.isNotEmpty() }
-                        ?.let { resolveUrl(it) }
-                }
-                .firstOrNull { url ->
-                    url.contains("/video/", ignoreCase = true) ||
-                        url.contains("/embed/", ignoreCase = true) ||
-                        url.contains("player", ignoreCase = true)
-                }
-
-            if (!iframeUrl.isNullOrBlank()) {
-                println("[Kotbc DBG] ✅ iframe player -> $iframeUrl")
-
-                KotbcExtractor().getUrl(
-                    iframeUrl,
-                    mainUrl,
-                    subtitleCallback,
-                    callback
-                )
-
-                return true
-            }
-
-            /*
-             * 과거 KOTBC form 구조 fallback.
-             */
-            val legacyForm = doc.selectFirst("form.tt2")
-                ?: doc.selectFirst("form.tt")
-
-            if (legacyForm != null) {
-                val action = legacyForm.attr("action")
-                val vParam = legacyForm
-                    .selectFirst("input[name=v]")
-                    ?.attr("value")
-
-                if (action.isNotEmpty() && !vParam.isNullOrEmpty()) {
-                    val playerUrl = resolveUrl(action) + "?v=$vParam"
-
-                    println("[Kotbc DBG] 🔗 구형 form player -> $playerUrl")
-
-                    KotbcExtractor().getUrl(
-                        playerUrl,
-                        targetUrl,
-                        subtitleCallback,
-                        callback
-                    )
-
-                    return true
-                }
-            }
-
-            /*
-             * data-url / data-src 최후 fallback.
-             */
-            val dataUrl = doc
-                .select("[data-url], [data-src]")
-                .flatMap { element ->
-                    listOf(
-                        element.attr("data-url"),
-                        element.attr("data-src")
-                    )
-                }
-                .map { it.trim() }
-                .filter { it.startsWith("http") || it.startsWith("//") }
-                .map { resolveUrl(it) }
-                .firstOrNull { url ->
-                    url.contains("/video/", ignoreCase = true) ||
-                        url.contains("/embed/", ignoreCase = true) ||
-                        url.contains("player", ignoreCase = true)
-                }
-
-            if (!dataUrl.isNullOrBlank()) {
-                println("[Kotbc DBG] 🔗 data-* player -> $dataUrl")
-
-                KotbcExtractor().getUrl(
-                    dataUrl,
-                    mainUrl,
-                    subtitleCallback,
-                    callback
-                )
-
-                return true
-            }
-
-            println("[Kotbc DBG] ⚠️ 영상 player URL을 찾지 못함: $targetUrl")
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            println("[Kotbc DBG] ❌ 영상 링크 추출 실패: ${e.message}")
-        }
-
-        return false
+        return true
     }
 
     private fun normalizeTargetUrl(url: String): String {
         val value = url.trim()
-
         if (value.isEmpty()) return mainUrl
 
-        /*
-         * 외부 player URL은 절대 KOTBC host로 변환하지 않는다.
-         * 예: https://nnmo0oi1.com/video/... 그대로 유지.
-         */
         if (value.startsWith("http://") || value.startsWith("https://")) {
             if (!value.contains("kotbc2.com", ignoreCase = true)) {
                 return value
             }
 
-            /*
-             * 과거 mXX/kXX KOTBC 절대 URL만 현재 활성 mainUrl로 host 교체.
-             */
-            val pathAndQuery = value.replace(
+            val path = value.replace(
                 Regex("""https?://[^/]+""", RegexOption.IGNORE_CASE),
                 ""
             )
 
-            return mainUrl + pathAndQuery
+            return mainUrl + path
         }
 
         return resolveUrl(value)
     }
 
-    /**
-     * 신규 사이트는 /bbs/ 기준이 아니라 사이트 root 기준 상대경로를 사용한다.
-     */
     private fun resolveUrl(url: String): String {
         val value = url.trim()
 
