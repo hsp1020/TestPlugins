@@ -577,14 +577,24 @@ class Kotbc : MainAPI() {
 
     private fun buildEpisodeData(
         targetUrl: String,
-        parsed: ParsedEpisode
+        parsed: ParsedEpisode,
+        isMovie: Boolean
     ): String? {
         val slug = parsed.slug
 
-        val episodePageUrl = when {
-            slug.isNullOrBlank() -> targetUrl
-            slug.startsWith("/") -> resolveUrl(slug)
-            else -> targetUrl.trimEnd('/') + "/" + encodePathSegment(slug)
+        /*
+         * 영화의 episodes.data에도 작품 slug가 들어오는 경우가 있다.
+         * 이를 회차 slug처럼 targetUrl 뒤에 다시 붙이면
+         * /작품/작품 형태의 잘못된 Referer가 된다.
+         */
+        val episodePageUrl = if (isMovie) {
+            targetUrl
+        } else {
+            when {
+                slug.isNullOrBlank() -> targetUrl
+                slug.startsWith("/") -> resolveUrl(slug)
+                else -> targetUrl.trimEnd('/') + "/" + encodePathSegment(slug)
+            }
         }
 
         /*
@@ -761,7 +771,7 @@ class Kotbc : MainAPI() {
 
         val episodes = parsedEpisodes
             .mapNotNull { parsed ->
-                val episodeData = buildEpisodeData(targetUrl, parsed)
+                val episodeData = buildEpisodeData(targetUrl, parsed, isMovie)
                     ?: return@mapNotNull null
 
                 newEpisode(episodeData) {
