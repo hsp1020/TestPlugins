@@ -41,10 +41,71 @@ class OHLI24 : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val document = app.post("$mainUrl/${request.data}&page=$page", timeout = 100).document
+        val url = "$mainUrl/${request.data}&page=$page"
+        println("[OHLI24][MAIN] GET start name=${request.name} page=$page url=$url")
 
-        val home = document.select("div.list-row").mapNotNull {
-                it.toSearchResult()
+        val response = app.get(
+            url,
+            timeout = 100,
+            headers = mapOf(
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Cache-Control" to "no-cache",
+                "Pragma" to "no-cache",
+                "Referer" to "$mainUrl/"
+            )
+        )
+
+        val html = response.text
+        val document = response.document
+        val pageTitle = document.title().trim()
+        val lower = html.lowercase()
+
+        val blockedMarkers = listOf(
+            "just a moment",
+            "attention required",
+            "cf-browser-verification",
+            "cf-chl-",
+            "challenge-platform",
+            "checking your browser",
+            "access denied",
+            "403 forbidden",
+            "error 403",
+            "captcha",
+            "enable javascript"
+        ).filter { lower.contains(it) }
+
+        val rows = document.select("div.list-row")
+        val postTitles = document.select("div.post-title, .post-title")
+        val itemSubjects = document.select("a.item-subject")
+
+        println(
+            "[OHLI24][MAIN] response html=${html.length} title='$pageTitle' " +
+                "listRows=${rows.size} postTitles=${postTitles.size} itemSubjects=${itemSubjects.size}"
+        )
+
+        if (blockedMarkers.isNotEmpty()) {
+            println("[OHLI24][BLOCK] suspected anti-bot page markers=${blockedMarkers.joinToString()}")
+        }
+
+        val home = rows.mapNotNull { it.toSearchResult() }
+        println("[OHLI24][MAIN] parsed=${home.size}/${rows.size}")
+
+        if (rows.isEmpty() || home.isEmpty()) {
+            val bodySample = document.body()?.text()
+                ?.replace(Regex("\\s+"), " ")
+                ?.take(500)
+                .orEmpty()
+            val listLikeClasses = document.select("div[class*=list]")
+                .map { it.className() }
+                .filter { it.isNotBlank() }
+                .distinct()
+                .take(15)
+
+            println("[OHLI24][DIAG] EMPTY main page")
+            println("[OHLI24][DIAG] title='$pageTitle'")
+            println("[OHLI24][DIAG] bodySample=$bodySample")
+            println("[OHLI24][DIAG] listLikeClasses=${listLikeClasses.joinToString()}")
         }
 
         return newHomePageResponse(
@@ -53,30 +114,70 @@ class OHLI24 : MainAPI() {
                 list = home,
                 isHorizontalImages = false
             ),
-            hasNext = true
+            hasNext = home.isNotEmpty()
         )
     }
 
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val title = this.selectFirst("div.post-title")?.text() ?: return null
-        val rawHref = this.select("div.list-desc a").attr("href")
+        val title = selectFirst(
+            "div.post-title, .post-title, a.item-subject, div.list-desc a"
+        )?.text()?.trim().orEmpty()
 
-        val href = fixUrl(
-            if (rawHref.startsWith("./") || rawHref.startsWith("board.php")) {
-                "$mainUrl/bbs/${rawHref.removePrefix("./")}"
-            } else {
-                rawHref
-            }
-        )
-
-        val posterUrl = fixUrl(this.select("img").attr("src"))
-        val score = this.select("div.rating").text()
-        return newMovieSearchResponse(title, href, TvType.Movie) {
-            this.posterUrl = posterUrl
-            this.score = Score.from10(score)
+        if (title.isBlank()) {
+            println(
+                "[OHLI24][PARSE] skip row: title missing " +
+                    "class='${className()}' text='${text().take(120)}'"
+            )
+            return null
         }
 
+        val rawHref = selectFirst(
+            "div.list-desc a[href], a.item-subject[href], a[href*='board.php'][href], a[href]"
+        )?.attr("href")?.trim().orEmpty()
+
+        if (rawHref.isBlank()) {
+            println("[OHLI24][PARSE] skip '$title': href missing")
+            return null
+        }
+
+        val href = normalizeSiteUrl(rawHref)
+
+        val img = selectFirst("img")
+        val rawPoster = img?.let { image ->
+            listOf("src", "data-src", "data-original", "data-lazy-src", "data-ezsrc")
+                .asSequence()
+                .map { image.attr(it).trim() }
+                .firstOrNull { value ->
+                    value.isNotBlank() &&
+                        !value.startsWith("data:", ignoreCase = true) &&
+                        value != "#"
+                }
+        }.orEmpty()
+
+        val posterUrl = rawPoster.takeIf { it.isNotBlank() }?.let(::normalizeSiteUrl)
+        val score = select("div.rating, .rating").text().trim()
+
+        return newMovieSearchResponse(title, href, TvType.Movie) {
+            this.posterUrl = posterUrl
+            if (score.isNotBlank()) {
+                this.score = Score.from10(score)
+            }
+        }
+    }
+
+    private fun normalizeSiteUrl(rawUrl: String): String {
+        val url = rawUrl.trim()
+        return when {
+            url.startsWith("http://", ignoreCase = true) ||
+                url.startsWith("https://", ignoreCase = true) -> url
+            url.startsWith("//") -> "https:$url"
+            url.startsWith("../") -> "$mainUrl/${url.removePrefix("../")}"
+            url.startsWith("./") -> "$mainUrl/bbs/${url.removePrefix("./")}"
+            url.startsWith("board.php") || url.startsWith("search.php") -> "$mainUrl/bbs/$url"
+            url.startsWith("/") -> "$mainUrl$url"
+            else -> fixUrl(url)
+        }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
