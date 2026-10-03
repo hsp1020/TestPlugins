@@ -120,6 +120,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     private var lastManifestUrl: String = ""
     private var lastCacheTime: Long = 0
 
+    // StremioC class 내부에 추가
+    // ExtractorLink import는 기존 StremioC.kt에 이미 존재함.
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): okhttp3.Interceptor? =
+    VixSrcExtractor.getVideoInterceptor(extractorLink)
+
+    
     private data class PreparedMainPageManifest(
         val manifestUrl: String,
         val rawSignature: String,
