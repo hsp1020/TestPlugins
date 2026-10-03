@@ -3,6 +3,7 @@ package com.kotbc
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.Message
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
@@ -14,25 +15,37 @@ import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.ExtractorApi
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.suspendCancellableCoroutine
-import org.json.JSONObject
+import java.net.URI
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 
 /**
- * KOTBC Extractor v5.3
+ * KOTBC Extractor v7.0
  *
- * 핵심:
- * - KOTBC 부모 페이지의 실제 '바로 보기' 버튼을 실행한다.
- * - window.open/새 창 wrapper를 현재 WebView navigation으로 변환해 실제 wrapper 흐름을 보존한다.
- * - 임의 nnmo iframe 주입은 제거한다.
- * - wrapper 흐름 실패 시 기존 direct player WebView를 fallback으로 한 번 더 시도한다.
- * - nnmo 관련 네트워크 요청을 로그에 남겨 실제 media endpoint를 추적 가능하게 한다.
- * - timeout 시 반드시 coroutine을 종료한다.
+ * 2026-10-03 Cloud Browser 실측 구조:
+ *
+ *   KOTBC 상세/회차 페이지
+ *        -> "바로 보기"
+ *        -> 새 창 about:blank
+ *        -> https://mov.glamov.com/detail.php?v=<회차별 토큰>
+ *        -> wrapper 내부 <iframe src="https://nnmo0oi1.com/video/...">
+ *        -> 실제 media manifest
+ *
+ * 핵심 원칙:
+ * - reader/path로 wrapper URL을 추측하지 않는다.
+ * - Inertia body.url(nnmo)을 곧바로 top-level로 열지 않는다.
+ * - 실제 popup WebView에서 glamov wrapper URL을 캡처한다.
+ * - wrapper 자체를 WebView로 로드해 nnmo iframe/referrer 흐름을 브라우저와 동일하게 유지한다.
+ * - popup URL을 못 잡을 때는 fetch/XHR instrumentation 로그로 실제 요청을 남긴다.
  */
 class KotbcExtractor : ExtractorApi() {
     override val name = "KOTBC"
-    override val mainUrl = "https://nnmo0oi1.com"
+    override val mainUrl = "https://mov.glamov.com"
     override val requiresReferer = true
 
     private val desktopUa =
@@ -45,63 +58,708 @@ class KotbcExtractor : ExtractorApi() {
         val headers: Map<String, String>
     )
 
+    private data class WrapperInfo(
+        val wrapperUrl: String,
+        val iframeUrl: String?
+    )
+
+    /**
+     * 신규 사이트의 정상 진입점.
+     *
+     * pageUrl:
+     *   실제 KOTBC 작품/회차 페이지
+     *
+     * expectedPlayerUrl:
+     *   Inertia props.playing.body.url 또는 episodes.data[].body.url.
+     *   wrapper 주소가 아니라 wrapper 내부 nnmo iframe 주소이며,
+     *   wrapper 검증용으로만 사용한다.
+     */
+    suspend fun getUrlFromKotbcPage(
+        pageUrl: String,
+        expectedPlayerUrl: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        println("[Kotbc v7] ===== KOTBC popup resolver =====")
+        println("[Kotbc v7] page=$pageUrl")
+        println("[Kotbc v7] expectedPlayer=$expectedPlayerUrl")
+
+        val wrapperUrl = resolveWrapperViaRealPopup(pageUrl)
+
+        if (wrapperUrl.isNullOrBlank()) {
+            println("[Kotbc v7] ❌ glamov wrapper URL 획득 실패")
+            return
+        }
+
+        println("[Kotbc v7] ✅ wrapper=$wrapperUrl")
+
+        val inspected = inspectWrapper(
+            wrapperUrl = wrapperUrl,
+            pageReferer = pageUrl
+        )
+
+        val actualIframe = inspected?.iframeUrl
+
+        if (!actualIframe.isNullOrBlank()) {
+            println("[Kotbc v7] wrapper iframe=$actualIframe")
+        } else {
+            println("[Kotbc v7] ⚠️ app.get() wrapper iframe 검증 실패/미확인")
+        }
+
+        if (
+            !expectedPlayerUrl.isNullOrBlank() &&
+            !actualIframe.isNullOrBlank()
+        ) {
+            val expectedNormalized = normalizeComparableUrl(expectedPlayerUrl)
+            val actualNormalized = normalizeComparableUrl(actualIframe)
+
+            if (expectedNormalized == actualNormalized) {
+                println("[Kotbc v7] ✅ Inertia body.url == wrapper iframe")
+            } else {
+                /*
+                 * popup에서 얻은 wrapper가 브라우저 실측의 authoritative 값이다.
+                 * mismatch는 로그만 남기고 wrapper 재생은 계속한다.
+                 */
+                println(
+                    "[Kotbc v7] ⚠️ player mismatch: " +
+                        "expected=$expectedPlayerUrl actual=$actualIframe"
+                )
+            }
+        }
+
+        extractFromWrapper(
+            wrapperUrl = wrapperUrl,
+            pageReferer = pageUrl,
+            expectedPlayerUrl = actualIframe ?: expectedPlayerUrl,
+            callback = callback
+        )
+    }
+
+    /**
+     * 구버전 캐시/legacy form 호환.
+     *
+     * - glamov wrapper가 직접 들어오면 wrapper부터 시작.
+     * - KOTBC URL이면 신규 popup resolver로 보낸다.
+     * - nnmo 등 외부 player URL은 최후 호환용 direct fallback.
+     */
     override suspend fun getUrl(
         url: String,
         referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val outerReferer = normalizeOuterReferer(
-            referer
-                ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
-                ?: "${Kotbc.currentMainUrl}/"
-        )
+        val normalizedUrl = url.trim()
+        val safeReferer = referer
+            ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+            ?: "${Kotbc.currentMainUrl}/"
 
-        println("[Kotbc v5.3] player=$url")
-        println("[Kotbc v5.3] outerReferer=$outerReferer")
-
-        /*
-         * 1차: 실제 사이트 구조 재현
-         * KOTBC 부모 페이지 -> nnmo iframe
-         */
-        val parentCaptured =
-            if (outerReferer.contains("kotbc2.com", ignoreCase = true)) {
-                println("[Kotbc v5.3] parent-flow 시작")
-                runWebViewHook(
-                    startUrl = outerReferer,
-                    playerUrl = url,
-                    outerReferer = outerReferer,
-                    parentMode = true,
-                    timeoutMs = 12000L
+        when {
+            normalizedUrl.contains("kotbc2.com", ignoreCase = true) -> {
+                getUrlFromKotbcPage(
+                    pageUrl = normalizedUrl,
+                    expectedPlayerUrl = null,
+                    subtitleCallback = subtitleCallback,
+                    callback = callback
                 )
-            } else {
+            }
+
+            isGlamovWrapper(normalizedUrl) -> {
+                println("[Kotbc v7] legacy wrapper=$normalizedUrl")
+                extractFromWrapper(
+                    wrapperUrl = normalizedUrl,
+                    pageReferer = safeReferer,
+                    expectedPlayerUrl = null,
+                    callback = callback
+                )
+            }
+
+            else -> {
+                println("[Kotbc v7] ⚠️ legacy direct player fallback=$normalizedUrl")
+                extractDirectPlayer(
+                    playerUrl = normalizedUrl,
+                    referer = safeReferer,
+                    callback = callback
+                )
+            }
+        }
+    }
+
+    /**
+     * 실제 사이트의 window.open() 흐름을 그대로 재현한다.
+     *
+     * Cloud Browser 실측:
+     *   child: about:blank -> mov.glamov.com/detail.php?v=...
+     *
+     * popup을 현재 parent WebView로 덮어쓰지 않는다.
+     * WebChromeClient.onCreateWindow()에서 실제 child WebView를 만들어
+     * child navigation URL을 감시한다.
+     */
+    private suspend fun resolveWrapperViaRealPopup(
+        pageUrl: String
+    ): String? = suspendCancellableCoroutine { cont ->
+        val handler = Handler(Looper.getMainLooper())
+        val completed = AtomicBoolean(false)
+        val buttonClicked = AtomicBoolean(false)
+
+        var parentView: WebView? = null
+        val childViews = mutableListOf<WebView>()
+
+        fun destroyAll() {
+            try {
+                parentView?.stopLoading()
+                parentView?.destroy()
+            } catch (_: Exception) {
+            }
+            parentView = null
+
+            childViews.forEach { child ->
+                try {
+                    child.stopLoading()
+                    child.destroy()
+                } catch (_: Exception) {
+                }
+            }
+            childViews.clear()
+        }
+
+        fun finish(value: String?) {
+            if (!completed.compareAndSet(false, true)) return
+
+            handler.removeCallbacksAndMessages(null)
+
+            if (cont.isActive) {
+                cont.resume(value)
+            }
+
+            handler.post {
+                destroyAll()
+            }
+        }
+
+        fun inspectPossibleWrapper(raw: String?) {
+            val wrapper = extractGlamovWrapper(raw.orEmpty())
+            if (!wrapper.isNullOrBlank()) {
+                println("[Kotbc v7] 🎯 wrapper captured=$wrapper")
+                finish(wrapper)
+            }
+        }
+
+        fun configureCommonSettings(view: WebView, multiWindow: Boolean) {
+            view.settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                databaseEnabled = true
+                mediaPlaybackRequiresUserGesture = false
+                userAgentString = desktopUa
+                mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                javaScriptCanOpenWindowsAutomatically = true
+                setSupportMultipleWindows(multiWindow)
+            }
+
+            CookieManager.getInstance().apply {
+                setAcceptCookie(true)
+                try {
+                    setAcceptThirdPartyCookies(view, true)
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        fun installHooks(view: WebView) {
+            val js = """
+                (function() {
+                    try {
+                        if (window.__kotbc_cs7_hooked) {
+                            return 'ALREADY_HOOKED';
+                        }
+                        window.__kotbc_cs7_hooked = true;
+
+                        var originalOpen = window.open;
+                        window.open = function() {
+                            try {
+                                var u = arguments.length ? String(arguments[0] || '') : '';
+                                console.log('KOTBC_V7_OPEN ' + u);
+                            } catch(e) {}
+                            return originalOpen.apply(this, arguments);
+                        };
+
+                        if (window.fetch) {
+                            var originalFetch = window.fetch;
+                            window.fetch = async function() {
+                                var input = arguments[0];
+                                var init = arguments[1] || {};
+                                var requestUrl = '';
+
+                                try {
+                                    requestUrl = typeof input === 'string'
+                                        ? input
+                                        : (input && input.url ? input.url : String(input));
+                                } catch(e) {}
+
+                                try {
+                                    console.log(
+                                        'KOTBC_V7_FETCH ' +
+                                        String((init && init.method) || 'GET') +
+                                        ' ' + requestUrl +
+                                        ' body=' + String((init && init.body) || '').slice(0, 500)
+                                    );
+                                } catch(e) {}
+
+                                var response = await originalFetch.apply(this, arguments);
+
+                                try {
+                                    var clone = response.clone();
+                                    clone.text().then(function(body) {
+                                        console.log(
+                                            'KOTBC_V7_FETCH_RESP ' +
+                                            String(response.url || requestUrl) +
+                                            ' status=' + response.status +
+                                            ' body=' + String(body || '').slice(0, 1200)
+                                        );
+                                    }).catch(function(){});
+                                } catch(e) {}
+
+                                return response;
+                            };
+                        }
+
+                        if (window.XMLHttpRequest) {
+                            var X = XMLHttpRequest.prototype;
+                            var originalXOpen = X.open;
+                            var originalXSend = X.send;
+
+                            X.open = function(method, url) {
+                                try {
+                                    this.__kotbcMethod = method;
+                                    this.__kotbcUrl = url;
+                                    console.log(
+                                        'KOTBC_V7_XHR ' +
+                                        String(method || 'GET') +
+                                        ' ' + String(url || '')
+                                    );
+                                } catch(e) {}
+
+                                return originalXOpen.apply(this, arguments);
+                            };
+
+                            X.send = function(body) {
+                                try {
+                                    var self = this;
+                                    console.log(
+                                        'KOTBC_V7_XHR_SEND ' +
+                                        String(self.__kotbcUrl || '') +
+                                        ' body=' + String(body || '').slice(0, 500)
+                                    );
+
+                                    self.addEventListener('load', function() {
+                                        try {
+                                            console.log(
+                                                'KOTBC_V7_XHR_RESP ' +
+                                                String(self.responseURL || self.__kotbcUrl || '') +
+                                                ' status=' + self.status +
+                                                ' body=' + String(self.responseText || '').slice(0, 1200)
+                                            );
+                                        } catch(e) {}
+                                    });
+                                } catch(e) {}
+
+                                return originalXSend.apply(this, arguments);
+                            };
+                        }
+
+                        return 'HOOKED';
+                    } catch(e) {
+                        return 'HOOK_ERROR:' + String(e);
+                    }
+                })();
+            """.trimIndent()
+
+            view.evaluateJavascript(js) { raw ->
+                println("[Kotbc v7] hook=$raw")
+            }
+        }
+
+        fun clickPlaybackButton(view: WebView) {
+            if (completed.get() || buttonClicked.get()) return
+
+            val js = """
+                (function() {
+                    try {
+                        var nodes = Array.prototype.slice.call(
+                            document.querySelectorAll('button')
+                        ).filter(function(el) {
+                            try {
+                                var style = window.getComputedStyle(el);
+                                return !el.disabled &&
+                                    style.display !== 'none' &&
+                                    style.visibility !== 'hidden';
+                            } catch(e) {
+                                return !el.disabled;
+                            }
+                        });
+
+                        function textOf(el) {
+                            return String(
+                                el.innerText ||
+                                el.textContent ||
+                                el.getAttribute('aria-label') ||
+                                ''
+                            ).replace(/\s+/g, ' ').trim();
+                        }
+
+                        var exactWords = [
+                            '바로 보기',
+                            '바로보기',
+                            '시청하기',
+                            '재생',
+                            '영화 보기',
+                            '영화보기',
+                            '영상 보기',
+                            '영상보기',
+                            '감상하기'
+                        ];
+
+                        var target = null;
+
+                        for (var i = 0; i < exactWords.length && !target; i++) {
+                            var word = exactWords[i];
+                            target = nodes.find(function(el) {
+                                var t = textOf(el);
+                                return t === word || t.indexOf(word) >= 0;
+                            }) || null;
+                        }
+
+                        /*
+                         * 현재 회차 페이지에서 실측된 blue action button fallback.
+                         * 검색/북마크/평점/요청 버튼은 제외한다.
+                         */
+                        if (!target) {
+                            target = nodes.find(function(el) {
+                                var t = textOf(el);
+                                var c = String(el.className || '');
+
+                                if (
+                                    t.indexOf('검색') >= 0 ||
+                                    t.indexOf('북마크') >= 0 ||
+                                    t.indexOf('요청') >= 0 ||
+                                    t.indexOf('첫 화') >= 0 ||
+                                    t.indexOf('메뉴') >= 0
+                                ) {
+                                    return false;
+                                }
+
+                                return c.indexOf('bg-[#1247d5]') >= 0 ||
+                                    (
+                                        c.indexOf('bg-brand-600') >= 0 &&
+                                        el.closest('main, section')
+                                    );
+                            }) || null;
+                        }
+
+                        var labels = nodes.map(textOf)
+                            .filter(function(x) { return x; })
+                            .slice(0, 40);
+
+                        if (!target) {
+                            return 'NO_BUTTONS:' + JSON.stringify(labels);
+                        }
+
+                        var label = textOf(target);
+                        target.click();
+
+                        return 'CLICKED:' + label;
+                    } catch(e) {
+                        return 'CLICK_ERROR:' + String(e);
+                    }
+                })();
+            """.trimIndent()
+
+            view.evaluateJavascript(js) { raw ->
+                println("[Kotbc v7] watchClick=$raw")
+
+                if (raw?.contains("CLICKED:", ignoreCase = false) == true) {
+                    buttonClicked.set(true)
+                }
+            }
+        }
+
+        cont.invokeOnCancellation {
+            handler.post {
+                destroyAll()
+            }
+        }
+
+        handler.post {
+            try {
+                val context: Context = CloudStreamApp.context
+                    ?: run {
+                        finish(null)
+                        return@post
+                    }
+
+                parentView = WebView(context)
+                val parent = parentView ?: run {
+                    finish(null)
+                    return@post
+                }
+
+                configureCommonSettings(parent, multiWindow = true)
+
+                parent.webChromeClient = object : WebChromeClient() {
+                    override fun onConsoleMessage(
+                        consoleMessage: ConsoleMessage?
+                    ): Boolean {
+                        val message = consoleMessage?.message().orEmpty()
+
+                        if (
+                            message.startsWith("KOTBC_V7_") ||
+                            message.contains("glamov.com/detail.php", ignoreCase = true)
+                        ) {
+                            println("[Kotbc v7 JS] $message")
+                            inspectPossibleWrapper(message)
+                        }
+
+                        return true
+                    }
+
+                    override fun onCreateWindow(
+                        view: WebView?,
+                        isDialog: Boolean,
+                        isUserGesture: Boolean,
+                        resultMsg: Message?
+                    ): Boolean {
+                        println(
+                            "[Kotbc v7] onCreateWindow " +
+                                "dialog=$isDialog userGesture=$isUserGesture"
+                        )
+
+                        val transport =
+                            resultMsg?.obj as? WebView.WebViewTransport
+                                ?: return false
+
+                        val child = WebView(context)
+                        configureCommonSettings(child, multiWindow = false)
+
+                        child.webChromeClient = object : WebChromeClient() {
+                            override fun onConsoleMessage(
+                                consoleMessage: ConsoleMessage?
+                            ): Boolean {
+                                val message = consoleMessage?.message().orEmpty()
+                                if (message.isNotBlank()) {
+                                    println("[Kotbc v7 CHILD JS] $message")
+                                    inspectPossibleWrapper(message)
+                                }
+                                return true
+                            }
+                        }
+
+                        child.webViewClient = object : WebViewClient() {
+                            override fun onPageStarted(
+                                childView: WebView?,
+                                url: String?,
+                                favicon: android.graphics.Bitmap?
+                            ) {
+                                super.onPageStarted(childView, url, favicon)
+                                println("[Kotbc v7] child pageStarted=$url")
+                                inspectPossibleWrapper(url)
+                            }
+
+                            override fun onPageFinished(
+                                childView: WebView?,
+                                url: String?
+                            ) {
+                                super.onPageFinished(childView, url)
+                                println("[Kotbc v7] child pageFinished=$url")
+                                inspectPossibleWrapper(url)
+                            }
+
+                            override fun shouldOverrideUrlLoading(
+                                childView: WebView?,
+                                request: WebResourceRequest?
+                            ): Boolean {
+                                val next = request?.url?.toString().orEmpty()
+                                println("[Kotbc v7] child navigate=$next")
+
+                                val wrapper = extractGlamovWrapper(next)
+                                return if (!wrapper.isNullOrBlank()) {
+                                    println("[Kotbc v7] 🎯 child wrapper navigate=$wrapper")
+                                    finish(wrapper)
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                        }
+
+                        childViews.add(child)
+
+                        transport.webView = child
+                        resultMsg?.sendToTarget()
+                        return true
+                    }
+                }
+
+                parent.webViewClient = object : WebViewClient() {
+                    override fun onPageStarted(
+                        view: WebView?,
+                        url: String?,
+                        favicon: android.graphics.Bitmap?
+                    ) {
+                        super.onPageStarted(view, url, favicon)
+                        println("[Kotbc v7] parent pageStarted=$url")
+                    }
+
+                    override fun onPageFinished(
+                        view: WebView?,
+                        url: String?
+                    ) {
+                        super.onPageFinished(view, url)
+                        println("[Kotbc v7] parent pageFinished=$url")
+
+                        if (
+                            url?.contains("kotbc2.com", ignoreCase = true) != true ||
+                            view == null
+                        ) {
+                            return
+                        }
+
+                        installHooks(view)
+
+                        /*
+                         * Vue hydration 시점을 고려해 세 번만 재시도한다.
+                         * 실제 클릭이 한 번 성공하면 buttonClicked로 중복 클릭 방지.
+                         */
+                        handler.postDelayed(
+                            { clickPlaybackButton(view) },
+                            350L
+                        )
+                        handler.postDelayed(
+                            { clickPlaybackButton(view) },
+                            1200L
+                        )
+                        handler.postDelayed(
+                            { clickPlaybackButton(view) },
+                            3000L
+                        )
+                    }
+
+                    override fun shouldOverrideUrlLoading(
+                        view: WebView?,
+                        request: WebResourceRequest?
+                    ): Boolean {
+                        val next = request?.url?.toString().orEmpty()
+                        inspectPossibleWrapper(next)
+                        return false
+                    }
+                }
+
+                /*
+                 * 최종 실패에도 coroutine은 반드시 종료한다.
+                 * 실패 시 바로 앞의 KOTBC_V7_FETCH/XHR/OPEN 로그가 진단 자료가 된다.
+                 */
+                handler.postDelayed(
+                    {
+                        if (!completed.get()) {
+                            println("[Kotbc v7] ❌ wrapper resolver timeout")
+                            finish(null)
+                        }
+                    },
+                    15000L
+                )
+
+                println("[Kotbc v7] parent loadUrl=$pageUrl")
+                parent.loadUrl(
+                    pageUrl,
+                    mapOf("User-Agent" to desktopUa)
+                )
+            } catch (e: Exception) {
+                println("[Kotbc v7] popup resolver init error=${e.message}")
+                finish(null)
+            }
+        }
+    }
+
+    /**
+     * popup에서 얻은 wrapper HTML을 가볍게 검증한다.
+     * 이 검증이 실패해도 popup URL 자체가 authoritative이므로 WebView 재생은 계속한다.
+     */
+    private suspend fun inspectWrapper(
+        wrapperUrl: String,
+        pageReferer: String
+    ): WrapperInfo? {
+        return try {
+            val headers = mutableMapOf(
+                "User-Agent" to desktopUa,
+                "Referer" to pageReferer
+            )
+
+            val cookie = try {
+                CookieManager.getInstance().getCookie(wrapperUrl)
+            } catch (_: Exception) {
                 null
             }
 
-        val captured = parentCaptured ?: run {
-            /*
-             * 2차 fallback:
-             * parent-flow가 실패한 경우에만 기존처럼 player 직접 로드.
-             */
-            println("[Kotbc v5.3] parent-flow 실패 -> direct fallback")
-            runWebViewHook(
-                startUrl = url,
-                playerUrl = url,
-                outerReferer = outerReferer,
-                parentMode = false,
-                timeoutMs = 10000L
+            if (!cookie.isNullOrBlank()) {
+                headers["Cookie"] = cookie
+            }
+
+            val response = app.get(
+                wrapperUrl,
+                headers = headers
             )
+
+            val finalUrl = response.url
+            val iframeUrl = response.document
+                .selectFirst("#movie_player iframe[src], iframe[src*=\"nnmo0oi1.com/video/\"]")
+                ?.attr("src")
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { makeAbsoluteUrl(finalUrl, it) }
+
+            println(
+                "[Kotbc v7] wrapper inspect: " +
+                    "HTTP=${response.isSuccessful} final=$finalUrl iframe=$iframeUrl"
+            )
+
+            WrapperInfo(
+                wrapperUrl = finalUrl,
+                iframeUrl = iframeUrl
+            )
+        } catch (e: Exception) {
+            println("[Kotbc v7] wrapper inspect error=${e.message}")
+            null
         }
+    }
+
+    /**
+     * 실제 브라우저 구조 그대로 wrapper를 top-level로 열고,
+     * wrapper 내부 nnmo iframe이 만드는 media 요청을 가로챈다.
+     */
+    private suspend fun extractFromWrapper(
+        wrapperUrl: String,
+        pageReferer: String,
+        expectedPlayerUrl: String?,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        println("[Kotbc v7] wrapper WebView start=$wrapperUrl")
+
+        val captured = runMediaWebView(
+            startUrl = wrapperUrl,
+            initialReferer = pageReferer,
+            expectedPlayerUrl = expectedPlayerUrl,
+            startIsPlayer = false,
+            timeoutMs = 15000L
+        )
 
         if (captured == null) {
-            println("[Kotbc v5.3] ❌ manifest 캡처 실패")
+            println("[Kotbc v7] ❌ wrapper에서 manifest 캡처 실패")
             return
         }
 
         val resolved = resolveCapturedUrl(captured)
 
         if (resolved == null) {
-            println("[Kotbc v5.3] ❌ captured URL에서 manifest 해석 실패")
+            println("[Kotbc v7] ❌ manifest 해석 실패")
             return
         }
 
@@ -109,32 +767,310 @@ class KotbcExtractor : ExtractorApi() {
     }
 
     /**
-     * 구버전 payload/cache에 영화 URL이 /slug/slug 형태로 남아 있어도 방어한다.
+     * 구버전 direct nnmo payload만을 위한 호환 fallback.
+     * 신규 정상 경로에서는 사용하지 않는다.
      */
-    private fun normalizeOuterReferer(value: String): String {
-        return try {
-            val parts = value.split("/")
+    private suspend fun extractDirectPlayer(
+        playerUrl: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val captured = runMediaWebView(
+            startUrl = playerUrl,
+            initialReferer = referer,
+            expectedPlayerUrl = playerUrl,
+            startIsPlayer = true,
+            timeoutMs = 10000L
+        )
 
-            if (
-                parts.size >= 5 &&
-                parts.last().isNotBlank() &&
-                parts[parts.lastIndex] == parts[parts.lastIndex - 1]
-            ) {
-                val normalized = parts.dropLast(1).joinToString("/")
-                println("[Kotbc v5.3] referer 중복 slug 보정: $normalized")
-                normalized
-            } else {
-                value
+        val resolved = captured?.let { resolveCapturedUrl(it) }
+
+        if (resolved != null) {
+            emitLink(resolved, callback)
+        } else {
+            println("[Kotbc v7] ❌ legacy direct player 실패")
+        }
+    }
+
+    private suspend fun runMediaWebView(
+        startUrl: String,
+        initialReferer: String,
+        expectedPlayerUrl: String?,
+        startIsPlayer: Boolean,
+        timeoutMs: Long
+    ): InterceptResult? = suspendCancellableCoroutine { cont ->
+        val handler = Handler(Looper.getMainLooper())
+        val finished = AtomicBoolean(false)
+        val playerFrameSeen = AtomicBoolean(startIsPlayer)
+        var webView: WebView? = null
+
+        fun destroy() {
+            try {
+                webView?.stopLoading()
+                webView?.destroy()
+            } catch (_: Exception) {
             }
-        } catch (_: Exception) {
-            value
+            webView = null
+        }
+
+        fun finish(result: InterceptResult?) {
+            if (!finished.compareAndSet(false, true)) return
+
+            handler.removeCallbacksAndMessages(null)
+
+            if (cont.isActive) {
+                cont.resume(result)
+            }
+
+            handler.post {
+                destroy()
+            }
+        }
+
+        fun capturedHeaders(
+            request: WebResourceRequest?,
+            fallbackReferer: String
+        ): Map<String, String> {
+            val headers = request?.requestHeaders
+                ?.toMutableMap()
+                ?: mutableMapOf()
+
+            if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
+                headers["User-Agent"] = desktopUa
+            }
+
+            if (headers.keys.none { it.equals("Referer", ignoreCase = true) }) {
+                headers["Referer"] = fallbackReferer
+            }
+
+            return headers
+        }
+
+        cont.invokeOnCancellation {
+            handler.post {
+                destroy()
+            }
+        }
+
+        handler.post {
+            try {
+                val context: Context = CloudStreamApp.context
+                    ?: run {
+                        finish(null)
+                        return@post
+                    }
+
+                webView = WebView(context)
+                val view = webView ?: run {
+                    finish(null)
+                    return@post
+                }
+
+                view.settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    databaseEnabled = true
+                    mediaPlaybackRequiresUserGesture = false
+                    userAgentString = desktopUa
+                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                    javaScriptCanOpenWindowsAutomatically = true
+                    setSupportMultipleWindows(false)
+                }
+
+                CookieManager.getInstance().apply {
+                    setAcceptCookie(true)
+                    try {
+                        setAcceptThirdPartyCookies(view, true)
+                    } catch (_: Exception) {
+                    }
+                }
+
+                view.webChromeClient = object : WebChromeClient() {
+                    override fun onConsoleMessage(
+                        consoleMessage: ConsoleMessage?
+                    ): Boolean {
+                        val message = consoleMessage?.message().orEmpty()
+
+                        if (
+                            message.contains("error", ignoreCase = true) ||
+                            message.contains("m3u8", ignoreCase = true) ||
+                            message.contains("manifest", ignoreCase = true)
+                        ) {
+                            println("[Kotbc v7 MEDIA JS] $message")
+                        }
+
+                        return true
+                    }
+                }
+
+                view.webViewClient = object : WebViewClient() {
+                    override fun onPageStarted(
+                        v: WebView?,
+                        url: String?,
+                        favicon: android.graphics.Bitmap?
+                    ) {
+                        super.onPageStarted(v, url, favicon)
+                        println("[Kotbc v7 MEDIA] pageStarted=$url")
+
+                        if (
+                            url?.contains("nnmo0oi1.com/video/", ignoreCase = true) == true
+                        ) {
+                            playerFrameSeen.set(true)
+                        }
+                    }
+
+                    override fun shouldInterceptRequest(
+                        v: WebView?,
+                        request: WebResourceRequest?
+                    ): WebResourceResponse? {
+                        val requestUrl = request?.url?.toString().orEmpty()
+
+                        if (requestUrl.isBlank()) {
+                            return super.shouldInterceptRequest(v, request)
+                        }
+
+                        val lower = requestUrl.lowercase()
+
+                        val expectedMatch =
+                            !expectedPlayerUrl.isNullOrBlank() &&
+                                normalizeComparableUrl(requestUrl) ==
+                                normalizeComparableUrl(expectedPlayerUrl)
+
+                        if (
+                            expectedMatch ||
+                            lower.contains("nnmo0oi1.com/video/")
+                        ) {
+                            if (playerFrameSeen.compareAndSet(false, true)) {
+                                println("[Kotbc v7 MEDIA] ✅ nnmo player frame seen=$requestUrl")
+                            } else {
+                                println("[Kotbc v7 MEDIA] nnmo=$requestUrl")
+                            }
+                        }
+
+                        val isManifest =
+                            lower.contains(".m3u8") ||
+                                lower.contains(".mpd")
+
+                        if (isManifest) {
+                            if (playerFrameSeen.get()) {
+                                println(
+                                    "[Kotbc v7 MEDIA] 🎯 manifest " +
+                                        "${request?.method ?: "GET"} $requestUrl"
+                                )
+
+                                finish(
+                                    InterceptResult(
+                                        url = requestUrl,
+                                        headers = capturedHeaders(
+                                            request,
+                                            v?.url ?: startUrl
+                                        )
+                                    )
+                                )
+                            } else {
+                                /*
+                                 * wrapper 광고가 먼저 HLS를 요청해도 콘텐츠로 오인하지 않는다.
+                                 */
+                                println(
+                                    "[Kotbc v7 MEDIA] ignore pre-player manifest=$requestUrl"
+                                )
+                            }
+
+                            return super.shouldInterceptRequest(v, request)
+                        }
+
+                        /*
+                         * 과거 KOTBC가 쓰던 비표준 playlist 계열.
+                         * nnmo frame을 실제로 본 이후에만 허용한다.
+                         */
+                        val isSegment =
+                            Regex(""".*_[0-9]+\.(html|ts)(\?.*)?$""")
+                                .matches(lower)
+
+                        val isLegacyPlaylist =
+                            !isSegment &&
+                                playerFrameSeen.get() &&
+                                (
+                                    lower.contains("player2.") ||
+                                    lower.contains("bunny-frame") ||
+                                    lower.contains("glamov") ||
+                                    lower.contains("nnmo0oi1.com")
+                                ) &&
+                                (
+                                    lower.contains(".html") ||
+                                    lower.contains(".txt") ||
+                                    lower.contains("master")
+                                )
+
+                        if (isLegacyPlaylist) {
+                            println("[Kotbc v7 MEDIA] legacyCandidate=$requestUrl")
+
+                            finish(
+                                InterceptResult(
+                                    url = requestUrl,
+                                    headers = capturedHeaders(
+                                        request,
+                                        v?.url ?: startUrl
+                                    )
+                                )
+                            )
+                        }
+
+                        return super.shouldInterceptRequest(v, request)
+                    }
+
+                    override fun onPageFinished(
+                        v: WebView?,
+                        url: String?
+                    ) {
+                        super.onPageFinished(v, url)
+                        println("[Kotbc v7 MEDIA] pageFinished=$url")
+                    }
+                }
+
+                handler.postDelayed(
+                    {
+                        if (!finished.get()) {
+                            println(
+                                "[Kotbc v7 MEDIA] ❌ timeout " +
+                                    "playerFrameSeen=${playerFrameSeen.get()}"
+                            )
+                            finish(null)
+                        }
+                    },
+                    timeoutMs
+                )
+
+                val headers = mutableMapOf(
+                    "User-Agent" to desktopUa
+                )
+
+                if (initialReferer.isNotBlank()) {
+                    headers["Referer"] = initialReferer
+                }
+
+                println(
+                    "[Kotbc v7 MEDIA] load=$startUrl " +
+                        "referer=$initialReferer"
+                )
+
+                view.loadUrl(startUrl, headers)
+            } catch (e: Exception) {
+                println("[Kotbc v7 MEDIA] init error=${e.message}")
+                finish(null)
+            }
         }
     }
 
     private suspend fun resolveCapturedUrl(
         captured: InterceptResult
     ): InterceptResult? {
-        if (captured.url.contains(".m3u8", ignoreCase = true)) {
+        val lower = captured.url.lowercase()
+
+        if (
+            lower.contains(".m3u8") ||
+            lower.contains(".mpd")
+        ) {
             return captured
         }
 
@@ -153,7 +1089,7 @@ class KotbcExtractor : ExtractorApi() {
                 captured
             } else {
                 val manifest = Regex(
-                    """https?://[^\s"'<>\\]+\.m3u8(?:\?[^\s"'<>\\]*)?""",
+                    """https?://[^\s"'<>\\]+\.(?:m3u8|mpd)(?:\?[^\s"'<>\\]*)?""",
                     RegexOption.IGNORE_CASE
                 ).find(text)?.value
 
@@ -165,7 +1101,7 @@ class KotbcExtractor : ExtractorApi() {
                 }
             }
         } catch (e: Exception) {
-            println("[Kotbc v5.3] captured URL resolve 실패: ${e.message}")
+            println("[Kotbc v7] captured URL resolve error=${e.message}")
             null
         }
     }
@@ -190,577 +1126,78 @@ class KotbcExtractor : ExtractorApi() {
             headers["Cookie"] = cookie
         }
 
-        println("[Kotbc v5.3] ✅ final=${result.url}")
-        println("[Kotbc v5.3] headers=$headers")
+        val type =
+            if (result.url.contains(".mpd", ignoreCase = true)) {
+                ExtractorLinkType.DASH
+            } else {
+                ExtractorLinkType.M3U8
+            }
+
+        println("[Kotbc v7] ✅ final=${result.url}")
+        println("[Kotbc v7] finalHeaders=$headers")
 
         callback(
             newExtractorLink(
                 name,
                 name,
                 result.url,
-                ExtractorLinkType.M3U8
+                type
             ) {
                 this.headers = headers
             }
         )
     }
 
-    private suspend fun runWebViewHook(
-        startUrl: String,
-        playerUrl: String,
-        outerReferer: String,
-        parentMode: Boolean,
-        timeoutMs: Long
-    ) = suspendCancellableCoroutine<InterceptResult?> { cont ->
-        val handler = Handler(Looper.getMainLooper())
-        var webView: WebView? = null
-        var finished = false
-        var watchButtonClicked = false
+    private fun isGlamovWrapper(url: String): Boolean {
+        val lower = url.lowercase()
 
-        fun finish(result: InterceptResult?) {
-            if (finished) return
-            finished = true
-
-            handler.removeCallbacksAndMessages(null)
-
-            if (cont.isActive) {
-                cont.resume(result)
-            }
-
-            handler.post {
-                try {
-                    webView?.stopLoading()
-                    webView?.destroy()
-                    webView = null
-                } catch (_: Exception) {
-                }
-            }
-        }
-
-        fun makeHeaders(
-            request: WebResourceRequest?,
-            fallbackReferer: String
-        ): Map<String, String> {
-            val headers = request?.requestHeaders
-                ?.toMutableMap()
-                ?: mutableMapOf()
-
-            if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
-                headers["User-Agent"] = desktopUa
-            }
-
-            if (headers.keys.none { it.equals("Referer", ignoreCase = true) }) {
-                headers["Referer"] = fallbackReferer
-            }
-
-            return headers
-        }
-
-        cont.invokeOnCancellation {
-            handler.post {
-                try {
-                    webView?.stopLoading()
-                    webView?.destroy()
-                    webView = null
-                } catch (_: Exception) {
-                }
-            }
-        }
-
-        handler.post {
-            try {
-                val context: Context = CloudStreamApp.context
-                    ?: run {
-                        finish(null)
-                        return@post
-                    }
-
-                webView = WebView(context)
-
-                CookieManager.getInstance().apply {
-                    setAcceptCookie(true)
-
-                    try {
-                        webView?.let {
-                            setAcceptThirdPartyCookies(it, true)
-                        }
-                    } catch (_: Exception) {
-                    }
-                }
-
-                webView?.settings?.apply {
-                    javaScriptEnabled = true
-                    domStorageEnabled = true
-                    databaseEnabled = true
-                    mediaPlaybackRequiresUserGesture = false
-                    userAgentString = desktopUa
-                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                    javaScriptCanOpenWindowsAutomatically = true
-                    setSupportMultipleWindows(false)
-                }
-
-                webView?.webChromeClient = object : WebChromeClient() {
-                    override fun onConsoleMessage(
-                        consoleMessage: ConsoleMessage?
-                    ): Boolean {
-                        val msg = consoleMessage?.message().orEmpty()
-
-                        if (
-                            msg.contains("error", ignoreCase = true) ||
-                            msg.contains("m3u8", ignoreCase = true) ||
-                            msg.contains("manifest", ignoreCase = true) ||
-                            msg.contains("player", ignoreCase = true)
-                        ) {
-                            println("[Kotbc v5.3] console=$msg")
-                        }
-
-                        return super.onConsoleMessage(consoleMessage)
-                    }
-                }
-
-                webView?.webViewClient = object : WebViewClient() {
-                    override fun onPageStarted(
-                        view: WebView?,
-                        url: String?,
-                        favicon: android.graphics.Bitmap?
-                    ) {
-                        super.onPageStarted(view, url, favicon)
-                        println(
-                            "[Kotbc v5.3] pageStarted=" +
-                                "$url parentMode=$parentMode"
-                        )
-                    }
-
-                    override fun shouldInterceptRequest(
-                        view: WebView?,
-                        request: WebResourceRequest?
-                    ): WebResourceResponse? {
-                        val reqUrl = request?.url?.toString().orEmpty()
-
-                        if (reqUrl.isBlank()) {
-                            return super.shouldInterceptRequest(view, request)
-                        }
-
-                        val lower = reqUrl.lowercase()
-
-                        /*
-                         * 진단 로그:
-                         * nnmo / player / media 후보 요청만 출력한다.
-                         * 광고/일반 CSS/이미지는 제외해 로그 폭증을 막는다.
-                         */
-                        val isInterestingRequest =
-                            lower.contains("nnmo0oi1.com") ||
-                                lower.contains("/video/") ||
-                                lower.contains(".m3u8") ||
-                                lower.contains(".mpd") ||
-                                lower.contains(".mp4") ||
-                                lower.contains("manifest") ||
-                                lower.contains("playlist") ||
-                                lower.contains("master")
-
-                        if (isInterestingRequest) {
-                            println(
-                                "[Kotbc v5.3 NET] " +
-                                    "${request?.method ?: "GET"} $reqUrl"
-                            )
-                        }
-
-                        /*
-                         * HLS manifest는 host에 관계없이 즉시 캡처.
-                         */
-                        if (lower.contains(".m3u8")) {
-                            println("[Kotbc v5.3] m3u8=$reqUrl")
-
-                            finish(
-                                InterceptResult(
-                                    url = reqUrl,
-                                    headers = makeHeaders(
-                                        request,
-                                        view?.url ?: playerUrl
-                                    )
-                                )
-                            )
-
-                            return super.shouldInterceptRequest(view, request)
-                        }
-
-                        /*
-                         * 구형 비표준 playlist fallback.
-                         */
-                        val isHtmlSegment =
-                            Regex(""".*_[0-9]+\.html(\?.*)?$""")
-                                .matches(lower)
-
-                        val isLegacyPlaylist =
-                            !isHtmlSegment &&
-                                (
-                                    lower.contains("player2.") ||
-                                    lower.contains("bunny-frame") ||
-                                    lower.contains("glamov")
-                                ) &&
-                                (
-                                    lower.contains(".html") ||
-                                    lower.contains(".txt") ||
-                                    lower.contains("master")
-                                )
-
-                        if (isLegacyPlaylist) {
-                            println("[Kotbc v5.3] legacyCandidate=$reqUrl")
-
-                            finish(
-                                InterceptResult(
-                                    url = reqUrl,
-                                    headers = makeHeaders(
-                                        request,
-                                        view?.url ?: playerUrl
-                                    )
-                                )
-                            )
-                        }
-
-                        return super.shouldInterceptRequest(view, request)
-                    }
-
-                    override fun onPageFinished(
-                        view: WebView?,
-                        finishedUrl: String?
-                    ) {
-                        super.onPageFinished(view, finishedUrl)
-
-                        println(
-                            "[Kotbc v5.3] pageFinished=" +
-                                "$finishedUrl parentMode=$parentMode"
-                        )
-
-                        /*
-                         * v5.3:
-                         * 실제 KOTBC "바로 보기" 버튼이 window.open()/새 창으로 여는
-                         * wrapper 페이지를 그대로 타게 한다.
-                         *
-                         * 다만 headless WebView에서는 새 창을 별도로 만들지 않고,
-                         * window.open()을 현재 WebView navigation으로 변환한다.
-                         * 이렇게 하면:
-                         *   KOTBC 회차 페이지
-                         *     -> 실제 wrapper 페이지
-                         *       -> wrapper 내부 nnmo iframe
-                         * 순서를 그대로 재현할 수 있다.
-                         */
-                        if (
-                            parentMode &&
-                            !watchButtonClicked &&
-                            finishedUrl?.contains(
-                                "kotbc2.com",
-                                ignoreCase = true
-                            ) == true
-                        ) {
-                            watchButtonClicked = true
-
-                            handler.postDelayed(
-                                {
-                                    if (!finished) {
-                                        openWatchInSameWindow(view)
-                                    }
-                                },
-                                400
-                            )
-                        } else if (!parentMode) {
-                            triggerPlayback(view)
-                        }
-
-                        handler.postDelayed(
-                            {
-                                if (!finished) {
-                                    probeResources(
-                                        view = view,
-                                        playerUrl = playerUrl,
-                                        finishOnMiss = false,
-                                        finish = ::finish
-                                    )
-                                }
-                            },
-                            1800
-                        )
-
-                        handler.postDelayed(
-                            {
-                                if (!finished) {
-                                    /*
-                                     * parentMode에서는 KOTBC의 "바로 보기"를 이미
-                                     * openWatchInSameWindow()에서 한 번만 실행한다.
-                                     * 여기서 다시 클릭하면 popup/wrapper 흐름을 깨뜨릴 수 있다.
-                                     */
-                                    if (!parentMode) {
-                                        triggerPlayback(view)
-                                    }
-
-                                    probeResources(
-                                        view = view,
-                                        playerUrl = playerUrl,
-                                        finishOnMiss = false,
-                                        finish = ::finish
-                                    )
-                                }
-                            },
-                            5000
-                        )
-                    }
-                }
-
-                handler.postDelayed(
-                    {
-                        if (!finished) {
-                            println(
-                                "[Kotbc v5.3] ⏱ timeout final probe " +
-                                    "parentMode=$parentMode"
-                            )
-
-                            probeResources(
-                                view = webView,
-                                playerUrl = playerUrl,
-                                finishOnMiss = true,
-                                finish = ::finish
-                            )
-                        }
-                    },
-                    timeoutMs
-                )
-
-                println(
-                    "[Kotbc v5.3] loadUrl=$startUrl " +
-                        "parentMode=$parentMode"
-                )
-
-                if (parentMode) {
-                    webView?.loadUrl(
-                        startUrl,
-                        mapOf(
-                            "User-Agent" to desktopUa
-                        )
-                    )
-                } else {
-                    webView?.loadUrl(
-                        startUrl,
-                        mapOf(
-                            "Referer" to outerReferer,
-                            "User-Agent" to desktopUa
-                        )
-                    )
-                }
-            } catch (e: Exception) {
-                println("[Kotbc v5.3] WebView init 실패: ${e.message}")
-                finish(null)
-            }
-        }
+        return lower.contains("mov.glamov.com") &&
+            lower.contains("detail.php") &&
+            lower.contains("v=")
     }
 
-    /**
-     * 실제 KOTBC "바로 보기" 흐름을 탄다.
-     *
-     * 사이트가 window.open()/target=_blank로 wrapper를 띄우더라도
-     * headless WebView에서 새 창을 버리지 않고 현재 WebView로 이어 붙인다.
-     *
-     * v5.2처럼 nnmo iframe을 임의로 삽입하지 않는다.
-     * 실제 wrapper 페이지가 가진 origin/referrer/cookie 흐름을 보존하는 것이 목적이다.
-     */
-    private fun openWatchInSameWindow(
-        view: WebView?
-    ) {
-        if (view == null) return
+    private fun extractGlamovWrapper(raw: String): String? {
+        if (raw.isBlank()) return null
 
-        val js = """
-            (function() {
-                try {
-                    if (!window.__kotbc_cs_open_patched) {
-                        window.__kotbc_cs_open_patched = true;
+        val normalized = raw
+            .replace("\\/", "/")
+            .replace("\\u002F", "/")
+            .replace("\\u0026", "&")
+            .replace("&amp;", "&")
 
-                        window.open = function(url, target, features) {
-                            try {
-                                console.log(
-                                    'KOTBC_CS_WINDOW_OPEN:' +
-                                    String(url || '')
-                                );
-
-                                if (
-                                    url &&
-                                    String(url) !== 'about:blank' &&
-                                    String(url) !== ''
-                                ) {
-                                    window.location.href = String(url);
-                                }
-                            } catch(e) {
-                                console.log(
-                                    'KOTBC_CS_WINDOW_OPEN_ERR:' +
-                                    String(e)
-                                );
-                            }
-
-                            /*
-                             * 호출 측이:
-                             *   var w = window.open('');
-                             *   w.location = actualUrl;
-                             * 같은 패턴을 써도 현재 WebView가 actualUrl로 이동한다.
-                             */
-                            return window;
-                        };
-                    }
-
-                    var nodes = Array.prototype.slice.call(
-                        document.querySelectorAll('button, a')
-                    );
-
-                    var btn = nodes.find(function(el) {
-                        var text = (
-                            el.innerText ||
-                            el.textContent ||
-                            ''
-                        ).trim();
-
-                        return text.indexOf('바로 보기') >= 0;
-                    });
-
-                    if (!btn) {
-                        return 'NO_WATCH_BUTTON';
-                    }
-
-                    btn.click();
-                    return 'WATCH_CLICKED';
-                } catch(e) {
-                    return 'ERR:' + String(e);
-                }
-            })();
-        """.trimIndent()
-
-        view.evaluateJavascript(js) { raw ->
-            println("[Kotbc v5.3] watchClick=$raw")
-        }
+        return Regex(
+            """https?://mov\.glamov\.com/detail\.php\?[^ \t\r\n"'<>\\]*v=[A-Za-z0-9_-]+[^ \t\r\n"'<>\\]*""",
+            RegexOption.IGNORE_CASE
+        ).find(normalized)?.value
     }
 
-    private fun triggerPlayback(view: WebView?) {
-        if (view == null) return
-
-        val js = """
-            (function() {
-                try {
-                    document.querySelectorAll('video').forEach(function(v) {
-                        try {
-                            v.muted = true;
-                            const p = v.play();
-                            if (p && p.catch) p.catch(function(){});
-                        } catch(e) {}
-                    });
-
-                    [
-                        '.jw-icon-playback',
-                        '.jw-display-icon-container',
-                        '.vjs-big-play-button',
-                        '.plyr__control--overlaid',
-                        '[aria-label="Play"]',
-                        '[aria-label="재생"]',
-                        '[title="Play"]'
-                    ].forEach(function(sel) {
-                        try {
-                            const el = document.querySelector(sel);
-                            if (el) el.click();
-                        } catch(e) {}
-                    });
-
-                } catch(e) {}
-            })();
-        """.trimIndent()
-
-        view.evaluateJavascript(js, null)
+    private fun normalizeComparableUrl(url: String): String {
+        return url.trim()
+            .replace("\\/", "/")
+            .trimEnd('/')
     }
 
-    private fun probeResources(
-        view: WebView?,
-        playerUrl: String,
-        finishOnMiss: Boolean,
-        finish: (InterceptResult?) -> Unit
-    ) {
-        if (view == null) {
-            if (finishOnMiss) finish(null)
-            return
+    private fun makeAbsoluteUrl(
+        baseUrl: String,
+        value: String
+    ): String {
+        val candidate = value.trim()
+
+        if (
+            candidate.startsWith("http://") ||
+            candidate.startsWith("https://")
+        ) {
+            return candidate
         }
 
-        val js = """
-            (function() {
-                try {
-                    const urls = [];
+        if (candidate.startsWith("//")) {
+            return "https:$candidate"
+        }
 
-                    document.querySelectorAll(
-                        'video[src], source[src], iframe[src]'
-                    ).forEach(function(el) {
-                        if (el.src) urls.push(el.src);
-                    });
-
-                    if (window.performance && performance.getEntriesByType) {
-                        performance.getEntriesByType('resource')
-                            .forEach(function(e) {
-                                if (e && e.name) urls.push(e.name);
-                            });
-                    }
-
-                    const unique = Array.from(new Set(urls));
-
-                    const hit = unique.find(function(u) {
-                        return typeof u === 'string' &&
-                            u.toLowerCase().indexOf('.m3u8') >= 0;
-                    });
-
-                    if (hit) return hit;
-
-                    /*
-                     * 최종 실패 시 다음 로그 분석용으로
-                     * nnmo/media 관련 resource 목록을 반환한다.
-                     */
-                    const debug = unique.filter(function(u) {
-                        if (typeof u !== 'string') return false;
-                        const x = u.toLowerCase();
-
-                        return x.indexOf('nnmo0oi1.com') >= 0 ||
-                            x.indexOf('/video/') >= 0 ||
-                            x.indexOf('.mpd') >= 0 ||
-                            x.indexOf('.mp4') >= 0 ||
-                            x.indexOf('manifest') >= 0 ||
-                            x.indexOf('playlist') >= 0;
-                    }).slice(-20);
-
-                    return 'DEBUG:' + JSON.stringify(debug);
-                } catch(e) {
-                    return 'DEBUG_ERROR:' + String(e);
-                }
-            })();
-        """.trimIndent()
-
-        view.evaluateJavascript(js) { raw ->
-            val value = try {
-                JSONObject("""{"v":$raw}""")
-                    .optString("v")
-                    .trim()
-            } catch (_: Exception) {
-                ""
-            }
-
-            if (
-                value.startsWith("http://") ||
-                value.startsWith("https://")
-            ) {
-                println("[Kotbc v5.3] jsM3u8=$value")
-
-                finish(
-                    InterceptResult(
-                        url = value,
-                        headers = mapOf(
-                            "User-Agent" to desktopUa,
-                            "Referer" to (view.url ?: playerUrl)
-                        )
-                    )
-                )
-            } else if (finishOnMiss) {
-                println("[Kotbc v5.3] probeDebug=$value")
-                println("[Kotbc v5.3] ❌ final probe에서도 m3u8 없음")
-                finish(null)
-            }
+        return try {
+            URI(baseUrl).resolve(candidate).toString()
+        } catch (_: Exception) {
+            candidate
         }
     }
 }
