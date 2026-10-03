@@ -14,12 +14,6 @@ import org.jsoup.nodes.Element
 import org.json.JSONObject
 import java.net.URLEncoder
 
-/**
- * KOTBC Provider v7.2
- * - content_id 기반 /glamov-token/{id} 직접 wrapper 획득
- * - 영화처럼 "바로 보기" 버튼이 없는 페이지 지원
- * - 직접 API 실패 시 기존 popup resolver 폴백
- */
 class Kotbc : MainAPI() {
     companion object {
         private const val DEFAULT_DOMAIN = "https://k01.kotbc2.com"
@@ -419,8 +413,7 @@ class Kotbc : MainAPI() {
         val name: String,
         val number: Int?,
         val slug: String?,
-        val videoUrl: String?,
-        val contentId: Long?
+        val videoUrl: String?
     )
 
     /**
@@ -476,34 +469,12 @@ class Kotbc : MainAPI() {
                         ?.trim()
                         ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
 
-                    /*
-                     * glamov-token API는 episode/content의 content_id를 사용한다.
-                     *
-                     * 실제 확인:
-                     *   episodes.data[].content_id = 63181
-                     *   POST /glamov-token/63181
-                     *
-                     * 신규 데이터에서 content_id가 직접 없을 경우
-                     * item.content.id를 동일한 의미의 fallback으로 사용한다.
-                     */
-                    val directContentId = item
-                        .optLong("content_id", -1L)
-                        .takeIf { it > 0L }
-
-                    val nestedContentId = item
-                        .optJSONObject("content")
-                        ?.optLong("id", -1L)
-                        ?.takeIf { it > 0L }
-
-                    val contentId = directContentId ?: nestedContentId
-
                     add(
                         ParsedEpisode(
                             name = name,
                             number = number,
                             slug = slug,
-                            videoUrl = videoUrl,
-                            contentId = contentId
+                            videoUrl = videoUrl
                         )
                     )
                 }
@@ -550,36 +521,22 @@ class Kotbc : MainAPI() {
                     name = episodeName,
                     number = number,
                     slug = href,
-                    videoUrl = null,
-                    contentId = null
+                    videoUrl = null
                 )
             }
             .distinctBy { it.slug ?: it.name }
     }
 
-    private data class PlayerPayload(
-        val playerUrl: String,
-        val refererUrl: String,
-        val contentId: Long?
-    )
-
-    private fun packPlayerData(
-        playerUrl: String,
-        refererUrl: String,
-        contentId: Long?
-    ): String {
+    private fun packPlayerData(playerUrl: String, refererUrl: String): String {
         val payload = JSONObject()
             .put("url", playerUrl)
             .put("referer", refererUrl)
+            .toString()
 
-        if (contentId != null && contentId > 0L) {
-            payload.put("content_id", contentId)
-        }
-
-        return PLAYER_DATA_PREFIX + payload.toString()
+        return PLAYER_DATA_PREFIX + payload
     }
 
-    private fun unpackPlayerData(data: String): PlayerPayload? {
+    private fun unpackPlayerData(data: String): Pair<String, String>? {
         /*
          * CloudStream은 Episode.data / Movie.data가 http(s) URL이 아니면
          * provider mainUrl 기준 상대 URL로 보정할 수 있다.
@@ -603,10 +560,6 @@ class Kotbc : MainAPI() {
             val playerUrl = payload.optString("url").trim()
             val refererUrl = payload.optString("referer").trim()
 
-            val contentId = payload
-                .optLong("content_id", -1L)
-                .takeIf { it > 0L }
-
             if (
                 !playerUrl.startsWith("http://") &&
                 !playerUrl.startsWith("https://")
@@ -614,11 +567,7 @@ class Kotbc : MainAPI() {
                 println("[Kotbc DBG] ⚠️ player payload URL 비정상: $playerUrl")
                 null
             } else {
-                PlayerPayload(
-                    playerUrl = playerUrl,
-                    refererUrl = refererUrl.ifEmpty { mainUrl },
-                    contentId = contentId
-                )
+                playerUrl to refererUrl.ifEmpty { mainUrl }
             }
         } catch (e: Exception) {
             println("[Kotbc DBG] ⚠️ player data decode 실패: ${e.message}")
@@ -628,36 +577,34 @@ class Kotbc : MainAPI() {
 
     private fun buildEpisodeData(
         targetUrl: String,
-        parsed: ParsedEpisode,
-        isMovie: Boolean
+        parsed: ParsedEpisode
     ): String? {
         val slug = parsed.slug
 
         /*
-         * 영화의 episodes.data에도 작품 slug가 들어오는 경우가 있다.
-         * 이를 회차 slug처럼 targetUrl 뒤에 다시 붙이면
-         * /작품/작품 형태의 잘못된 Referer가 된다.
+         * 신형 KOTBC는 영화도 내부적으로 1개짜리 episode를 사용한다.
+         *
+         * 드라마:
+         *   /작품-slug/회차-slug
+         *
+         * 영화:
+         *   /작품-slug/작품-slug
+         *
+         * 영화라고 targetUrl만 사용하면 상위 작품 페이지가 열려
+         * "바로 보기" 버튼/playing 컨텍스트가 없다.
          */
-        val episodePageUrl = if (isMovie) {
-            targetUrl
-        } else {
-            when {
-                slug.isNullOrBlank() -> targetUrl
-                slug.startsWith("/") -> resolveUrl(slug)
-                else -> targetUrl.trimEnd('/') + "/" + encodePathSegment(slug)
-            }
+        val episodePageUrl = when {
+            slug.isNullOrBlank() -> targetUrl
+            slug.startsWith("/") -> resolveUrl(slug)
+            else -> targetUrl.trimEnd('/') + "/" + encodePathSegment(slug)
         }
 
         /*
          * video URL만 넘기면 nnmo player가 원래 KOTBC 문서 Referer를 잃는다.
-         * player URL + 정확한 회차/영화 페이지 URL을 함께 전달한다.
+         * player URL + 실제 재생 상세 페이지 URL을 함께 전달한다.
          */
         parsed.videoUrl?.let { playerUrl ->
-            return packPlayerData(
-                playerUrl = playerUrl,
-                refererUrl = episodePageUrl,
-                contentId = parsed.contentId
-            )
+            return packPlayerData(playerUrl, episodePageUrl)
         }
 
         return episodePageUrl
@@ -826,7 +773,7 @@ class Kotbc : MainAPI() {
 
         val episodes = parsedEpisodes
             .mapNotNull { parsed ->
-                val episodeData = buildEpisodeData(targetUrl, parsed, isMovie)
+                val episodeData = buildEpisodeData(targetUrl, parsed)
                     ?: return@mapNotNull null
 
                 newEpisode(episodeData) {
@@ -846,8 +793,8 @@ class Kotbc : MainAPI() {
         return if (isMovie) {
             /*
              * 영화도 KOTBC 내부적으로 episodes.data 1개를 사용한다.
-             * data payload에는 예상 nnmo URL과 실제 KOTBC 작품 페이지 URL을 함께 보관한다.
-             * loadLinks()에서 작품 페이지의 실제 popup을 실행해 glamov wrapper를 확정한다.
+             * data payload에는 예상 nnmo URL과 실제 KOTBC 재생 상세 페이지 URL을 함께 보관한다.
+             * loadLinks()에서 재생 상세 페이지의 실제 '바로 보기'를 실행해 glamov wrapper를 확정한다.
              */
             val playData = episodes.firstOrNull()?.data
 
@@ -890,98 +837,6 @@ class Kotbc : MainAPI() {
         }
     }
 
-    /**
-     * 신형 KOTBC의 실제 wrapper 획득 API.
-     *
-     * 브라우저/로그에서 확인된 흐름:
-     *   POST /glamov-token/{content_id}
-     *   -> {"url":"https://mov.glamov.com/detail.php?v=..."}
-     *
-     * 페이지 GET으로 같은 세션의 CSRF 토큰을 얻은 뒤 AJAX와 동일한 헤더로 POST한다.
-     * 실패하면 null을 반환하고 기존 실제-popup resolver로 폴백한다.
-     */
-    private suspend fun resolveGlamovWrapperDirect(
-        pageUrl: String,
-        contentId: Long
-    ): String? {
-        if (contentId <= 0L) return null
-
-        return try {
-            println(
-                "[Kotbc DBG] 🎫 glamov token 직접 요청 준비: " +
-                    "contentId=$contentId page=$pageUrl"
-            )
-
-            val pageResponse = app.get(pageUrl)
-            if (!pageResponse.isSuccessful) {
-                println(
-                    "[Kotbc DBG] ⚠️ glamov token용 페이지 GET 실패: " +
-                        "HTTP=${pageResponse.code}"
-                )
-                return null
-            }
-
-            val csrfToken = pageResponse.document
-                .selectFirst("meta[name=csrf-token]")
-                ?.attr("content")
-                ?.trim()
-                ?.takeIf { it.isNotEmpty() }
-
-            if (csrfToken.isNullOrBlank()) {
-                println("[Kotbc DBG] ⚠️ glamov token CSRF 토큰 없음")
-                return null
-            }
-
-            val apiUrl = "${mainUrl.trimEnd('/')}/glamov-token/$contentId"
-
-            val headers = mapOf(
-                "Accept" to "application/json, text/plain, */*",
-                "X-Requested-With" to "XMLHttpRequest",
-                "X-CSRF-TOKEN" to csrfToken,
-                "Origin" to mainUrl.trimEnd('/'),
-                "Referer" to pageUrl
-            )
-
-            println("[Kotbc DBG] 🎫 POST $apiUrl")
-
-            val response = app.post(
-                apiUrl,
-                headers = headers,
-                data = emptyMap<String, String>()
-            )
-
-            val body = response.text.trim()
-
-            println(
-                "[Kotbc DBG] 🎫 glamov token 응답: " +
-                    "HTTP=${response.code} body=${body.take(300)}"
-            )
-
-            if (!response.isSuccessful || body.isBlank()) {
-                return null
-            }
-
-            val wrapperUrl = try {
-                JSONObject(body)
-                    .optString("url")
-                    .trim()
-            } catch (_: Exception) {
-                ""
-            }
-
-            wrapperUrl.takeIf {
-                it.startsWith("https://mov.glamov.com/detail.php", ignoreCase = true) ||
-                    it.startsWith("http://mov.glamov.com/detail.php", ignoreCase = true)
-            }?.also {
-                println("[Kotbc DBG] ✅ glamov wrapper 직접 획득 -> $it")
-            }
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            println("[Kotbc DBG] ⚠️ glamov token 직접 요청 실패: ${e.message}")
-            null
-        }
-    }
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -999,45 +854,9 @@ class Kotbc : MainAPI() {
          * 정상 경로: load()가 player URL과 실제 KOTBC 회차/영화 페이지 Referer를
          * 하나의 payload로 묶어 전달한다.
          */
-        unpackPlayerData(rawData)?.let { payload ->
-            val playerUrl = payload.playerUrl
-            val refererUrl = payload.refererUrl
-            val contentId = payload.contentId
-
+        unpackPlayerData(rawData)?.let { (playerUrl, refererUrl) ->
             println("[Kotbc DBG] 🔗 player payload -> $playerUrl")
             println("[Kotbc DBG] 🔗 player referer -> $refererUrl")
-            println("[Kotbc DBG] 🔗 player contentId -> $contentId")
-
-            /*
-             * v7.2 정상 경로:
-             * content_id가 있으면 사이트의 실제 glamov-token API를 직접 호출한다.
-             *
-             * 영화 페이지에는 "바로 보기" 버튼이 없는 경우가 있어
-             * popup click resolver만으로는 wrapper를 얻을 수 없다.
-             *
-             * API 실패/구버전 payload(content_id 없음)일 때만 기존 popup resolver로 폴백.
-             */
-            if (contentId != null) {
-                val wrapperUrl = resolveGlamovWrapperDirect(
-                    pageUrl = refererUrl,
-                    contentId = contentId
-                )
-
-                if (!wrapperUrl.isNullOrBlank()) {
-                    KotbcExtractor().getUrl(
-                        wrapperUrl,
-                        refererUrl,
-                        subtitleCallback,
-                        callback
-                    )
-                    return true
-                }
-
-                println(
-                    "[Kotbc DBG] ⚠️ glamov 직접 API 실패 -> " +
-                        "기존 popup resolver 폴백"
-                )
-            }
 
             KotbcExtractor().getUrlFromKotbcPage(
                 pageUrl = refererUrl,
