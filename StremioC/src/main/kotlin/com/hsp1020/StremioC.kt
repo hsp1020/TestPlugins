@@ -1637,6 +1637,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         res?.streams?.forEach { stream ->
                             stream.runCallback(
                                 this@StremioC,
+                                name,
                                 stremioSubtitleCallback,
                                 subtitleCallback,
                                 wrappedCallback
@@ -1833,9 +1834,15 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         )
     }
 
-    private fun getIntegrationStremioAddons(): List<Pair<String, Boolean>> {
+    private data class IntegrationStremioAddon(
+        val name: String,
+        val url: String,
+        val subtitleOnly: Boolean
+    )
+
+    private fun getIntegrationStremioAddons(): List<IntegrationStremioAddon> {
         val context = CloudStreamApp.context ?: return emptyList()
-        val addons = linkedSetOf<Pair<String, Boolean>>()
+        val addons = linkedMapOf<Pair<String, Boolean>, IntegrationStremioAddon>()
 
         if (isIntegrationEnabled("cinestream_integration_enabled") && getCineStreamProvider() != null) {
             getKey<String>("stremio_addons")
@@ -1847,12 +1854,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val key = "stremio_${parts[0].trim().lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')}"
                     getKey<Boolean>(key) != false
                 }
-                ?.mapNotNull { parts ->
-                    parts[1].trim().takeIf(String::isNotBlank)?.let {
-                        it to parts[2].equals("SUBTITLE", ignoreCase = true)
-                    }
+                ?.forEach { parts ->
+                    val url = parts[1].trim().takeIf(String::isNotBlank) ?: return@forEach
+                    val subtitleOnly = parts[2].equals("SUBTITLE", ignoreCase = true)
+                    addons.putIfAbsent(
+                        url to subtitleOnly,
+                        IntegrationStremioAddon(parts[0].trim().ifBlank { url }, url, subtitleOnly)
+                    )
                 }
-                ?.forEach(addons::add)
         }
 
         if (isIntegrationEnabled("streamplay_integration_enabled") && getStreamPlayProvider() != null) {
@@ -1865,13 +1874,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     root.forEach { item ->
                         val url = item.get("link").textOrNull()?.trim()?.takeIf { it.isNotBlank() } ?: return@forEach
                         val subtitleOnly = item.get("type").textOrNull()?.equals("SUBTITLE", ignoreCase = true) == true
-                        addons.add(url to subtitleOnly)
+                        val name = item.get("name").textOrNull()?.trim()?.takeIf { it.isNotBlank() } ?: url
+                        addons.putIfAbsent(
+                            url to subtitleOnly,
+                            IntegrationStremioAddon(name, url, subtitleOnly)
+                        )
                     }
                 }
             }.onFailure { it.printStackTrace() }
         }
 
-        return addons.toList()
+        return addons.values.toList()
     }
 
     private suspend fun invokeTmdbStremioIntegrationFallback(
@@ -1902,18 +1915,18 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         if (addons.isEmpty()) return
 
         supervisorScope {
-            addons.map { (addonUrl, subtitleOnly) ->
+            addons.map { addon ->
                 async(Dispatchers.IO) {
                     runSuspendCatching {
-                        val cleanBaseUrl = addonUrl.fixSourceUrl().cleanBaseUrl()
+                        val cleanBaseUrl = addon.url.fixSourceUrl().cleanBaseUrl()
                         if (cleanBaseUrl.isBlank()) return@runSuspendCatching
 
-                        val querySuffix = addonUrl.substringAfter("?", "")
+                        val querySuffix = addon.url.substringAfter("?", "")
                             .takeIf { it.isNotEmpty() }
                             ?.let { "?$it" }
                             ?: ""
 
-                        if (subtitleOnly) {
+                        if (addon.subtitleOnly) {
                             val requestUrl = "$cleanBaseUrl/subtitles/$targetType/${encodedId}.json$querySuffix"
                             val text = customSession.get(requestUrl, timeout = 15L).text
                             val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
@@ -1931,6 +1944,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             res?.streams?.forEach { stream ->
                                 stream.runCallback(
                                     this@StremioC,
+                                    addon.name,
                                     stremioSubtitleCallback,
                                     extractorSubtitleCallback,
                                     callback
@@ -2984,10 +2998,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     ) {
         suspend fun runCallback(
             provider: StremioC,
+            sourceName: String,
             stremioSubtitleCallback: (SubtitleFile) -> Unit,
             extractorSubtitleCallback: (SubtitleFile) -> Unit,
             callback: (ExtractorLink) -> Unit
         ) {
+            val displaySource = sourceName.takeIf { it.isNotBlank() } ?: name ?: ""
+
             if (url != null) {
                 val lowerUrl = url.lowercase()
                 val linkType = when {
@@ -3002,7 +3019,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     else -> ExtractorLinkType.VIDEO 
                 }
 
-                callback.invoke(newExtractorLink(name ?: "", fixSourceName(name, description ?: title), url, linkType) {
+                val displayTitle = description ?: title ?: name ?: ""
+                callback.invoke(newExtractorLink(displaySource, "[$displaySource] $displayTitle", url, linkType) {
                     this.quality = getQuality(listOf(description, title, name))
                     this.headers = behaviorHints?.proxyHeaders?.request ?: behaviorHints?.headers ?: mapOf()
                 })
@@ -3010,7 +3028,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             if (ytId != null) loadExtractor("https://m.youtube.com/watch?v=$ytId", extractorSubtitleCallback, callback)
             if (externalUrl != null) loadExtractor(externalUrl, extractorSubtitleCallback, callback)
-            if (infoHash != null) callback.invoke(newExtractorLink(name ?: "", fixSourceName(name, description ?: title), "magnet:?xt=urn:btih:${infoHash}") { this.quality = Qualities.Unknown.value })
+            if (infoHash != null) {
+                val displayTitle = description ?: title ?: name ?: ""
+                callback.invoke(newExtractorLink(displaySource, "[$displaySource] $displayTitle", "magnet:?xt=urn:btih:${infoHash}") {
+                    this.quality = Qualities.Unknown.value
+                })
+            }
 
             val hasPlayableTarget = url != null || ytId != null || externalUrl != null || infoHash != null
             if (hasPlayableTarget) {
