@@ -1454,7 +1454,21 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         // Only deduplicate subtitles supplied directly by Stremio addons.
         // CloudStream extractors/integrations must keep using the original callback.
         val seenStremioSubtitles = Collections.synchronizedSet(mutableSetOf<String>())
+        val stremioSourceNames = mutableSetOf<String>().apply {
+            name.trim().takeIf { it.isNotEmpty() }?.let { add(it.lowercase()) }
+            getIntegrationStremioAddons().forEach { addon ->
+                addon.name.trim().takeIf { it.isNotEmpty() }?.let { add(it.lowercase()) }
+            }
+        }
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
+            val sourceKey = link.source
+                .removeSuffix("🧲")
+                .removeSuffix(" Magnet")
+                .trim()
+                .lowercase()
+            if (sourceKey in stremioSourceNames) {
+                link.quality = Qualities.Unknown.value
+            }
             if (seenLinks.add(Triple(link.url, link.referer, link.headers.toMap()))) {
                 callback(link)
             }
