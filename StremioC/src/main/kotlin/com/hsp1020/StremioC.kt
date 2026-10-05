@@ -1668,6 +1668,18 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             { 
                 invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, integrationSubtitleCallback, wrappedCallback) 
             },
+            {
+                invokeTmdbStremioIntegrationFallback(
+                    loadData,
+                    targetType,
+                    globalId,
+                    globalSeason,
+                    globalEpisode,
+                    stremioSubtitleCallback,
+                    subtitleCallback,
+                    wrappedCallback
+                )
+            },
             { 
                 invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, integrationSubtitleCallback, wrappedCallback) 
             },
@@ -1819,6 +1831,101 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             "isCartoon" to loadData.isCartoon,
             "isMovie" to media.isMovie
         )
+    }
+
+    private fun getIntegrationStremioStreamAddons(): List<String> {
+        val context = CloudStreamApp.context ?: return emptyList()
+        val urls = linkedSetOf<String>()
+
+        if (isIntegrationEnabled("cinestream_integration_enabled") && getCineStreamProvider() != null) {
+            getKey<String>("stremio_addons")
+                ?.lineSequence()
+                ?.filter { it.isNotBlank() }
+                ?.map { it.split("|") }
+                ?.filter { it.size >= 3 && !it[2].equals("SUBTITLE", ignoreCase = true) }
+                ?.filter { parts ->
+                    val key = "stremio_${parts[0].trim().lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')}"
+                    getKey<Boolean>(key) != false
+                }
+                ?.mapNotNull { it[1].trim().takeIf(String::isNotBlank) }
+                ?.forEach(urls::add)
+        }
+
+        if (isIntegrationEnabled("streamplay_integration_enabled") && getStreamPlayProvider() != null) {
+            val raw = context.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
+                .getString("streamplay_stremio_addon_saved_links", null)
+
+            runCatching {
+                val root = raw?.let { parseJson<JsonNode>(it) }
+                if (root != null && root.isArray) {
+                    root.forEach { item ->
+                        if (item.get("type").textOrNull()?.equals("SUBTITLE", ignoreCase = true) == true) return@forEach
+                        item.get("link").textOrNull()?.trim()?.takeIf { it.isNotBlank() }?.let(urls::add)
+                    }
+                }
+            }.onFailure { it.printStackTrace() }
+        }
+
+        return urls.toList()
+    }
+
+    private suspend fun invokeTmdbStremioIntegrationFallback(
+        loadData: LoadData,
+        targetType: String,
+        globalId: String?,
+        globalSeason: Int?,
+        globalEpisode: Int?,
+        stremioSubtitleCallback: (SubtitleFile) -> Unit,
+        extractorSubtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        if (targetType != "movie" && targetType != "series") return
+
+        val media = integrationData(loadData, targetType, globalId, globalSeason, globalEpisode)
+        if (!media.imdbId.isNullOrBlank()) return
+
+        val tmdbId = media.tmdbId ?: return
+        val stremioId = if (targetType == "series") {
+            val season = media.season ?: return
+            val episode = media.episode ?: return
+            "tmdb:$tmdbId:$season:$episode"
+        } else {
+            "tmdb:$tmdbId"
+        }
+        val encodedId = stremioId.urlEncode()
+        val addons = getIntegrationStremioStreamAddons()
+        if (addons.isEmpty()) return
+
+        supervisorScope {
+            addons.distinct().map { addonUrl ->
+                async(Dispatchers.IO) {
+                    runSuspendCatching {
+                        val cleanBaseUrl = addonUrl.fixSourceUrl().cleanBaseUrl()
+                        if (cleanBaseUrl.isBlank()) return@runSuspendCatching
+
+                        val querySuffix = addonUrl.substringAfter("?", "")
+                            .takeIf { it.isNotEmpty() }
+                            ?.let { "?$it" }
+                            ?: ""
+                        val requestUrl = "$cleanBaseUrl/stream/$targetType/${encodedId}.json$querySuffix"
+                        val text = customSession.get(requestUrl, timeout = 25L).text
+                        val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
+
+                        res?.streams?.forEach { stream ->
+                            stream.runCallback(
+                                this@StremioC,
+                                stremioSubtitleCallback,
+                                extractorSubtitleCallback,
+                                callback
+                            )
+                        }
+                    }.onFailure { error ->
+                        if (error is CancellationException) throw error
+                        error.printStackTrace()
+                    }
+                }
+            }.awaitAll()
+        }
     }
     
     
