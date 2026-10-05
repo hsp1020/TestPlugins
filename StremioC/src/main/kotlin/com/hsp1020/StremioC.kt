@@ -3002,7 +3002,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     else -> ExtractorLinkType.VIDEO 
                 }
 
-                callback.invoke(newExtractorLink(name ?: "", fixSourceName(name, title), url, linkType) {
+                callback.invoke(newExtractorLink(name ?: "", fixSourceName(name, description ?: title), url, linkType) {
                     this.quality = getQuality(listOf(description, title, name))
                     this.headers = behaviorHints?.proxyHeaders?.request ?: behaviorHints?.headers ?: mapOf()
                 })
@@ -3010,7 +3010,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             if (ytId != null) loadExtractor("https://m.youtube.com/watch?v=$ytId", extractorSubtitleCallback, callback)
             if (externalUrl != null) loadExtractor(externalUrl, extractorSubtitleCallback, callback)
-            if (infoHash != null) callback.invoke(newExtractorLink(name ?: "", title ?: name ?: "", "magnet:?xt=urn:btih:${infoHash}") { this.quality = Qualities.Unknown.value })
+            if (infoHash != null) callback.invoke(newExtractorLink(name ?: "", fixSourceName(name, description ?: title), "magnet:?xt=urn:btih:${infoHash}") { this.quality = Qualities.Unknown.value })
 
             val hasPlayableTarget = url != null || ytId != null || externalUrl != null || infoHash != null
             if (hasPlayableTarget) {
