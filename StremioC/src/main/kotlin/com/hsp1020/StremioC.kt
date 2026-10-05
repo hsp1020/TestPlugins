@@ -1833,22 +1833,26 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         )
     }
 
-    private fun getIntegrationStremioStreamAddons(): List<String> {
+    private fun getIntegrationStremioAddons(): List<Pair<String, Boolean>> {
         val context = CloudStreamApp.context ?: return emptyList()
-        val urls = linkedSetOf<String>()
+        val addons = linkedSetOf<Pair<String, Boolean>>()
 
         if (isIntegrationEnabled("cinestream_integration_enabled") && getCineStreamProvider() != null) {
             getKey<String>("stremio_addons")
                 ?.lineSequence()
                 ?.filter { it.isNotBlank() }
                 ?.map { it.split("|") }
-                ?.filter { it.size >= 3 && !it[2].equals("SUBTITLE", ignoreCase = true) }
+                ?.filter { it.size >= 3 }
                 ?.filter { parts ->
                     val key = "stremio_${parts[0].trim().lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')}"
                     getKey<Boolean>(key) != false
                 }
-                ?.mapNotNull { it[1].trim().takeIf(String::isNotBlank) }
-                ?.forEach(urls::add)
+                ?.mapNotNull { parts ->
+                    parts[1].trim().takeIf(String::isNotBlank)?.let {
+                        it to parts[2].equals("SUBTITLE", ignoreCase = true)
+                    }
+                }
+                ?.forEach(addons::add)
         }
 
         if (isIntegrationEnabled("streamplay_integration_enabled") && getStreamPlayProvider() != null) {
@@ -1859,14 +1863,15 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val root = raw?.let { parseJson<JsonNode>(it) }
                 if (root != null && root.isArray) {
                     root.forEach { item ->
-                        if (item.get("type").textOrNull()?.equals("SUBTITLE", ignoreCase = true) == true) return@forEach
-                        item.get("link").textOrNull()?.trim()?.takeIf { it.isNotBlank() }?.let(urls::add)
+                        val url = item.get("link").textOrNull()?.trim()?.takeIf { it.isNotBlank() } ?: return@forEach
+                        val subtitleOnly = item.get("type").textOrNull()?.equals("SUBTITLE", ignoreCase = true) == true
+                        addons.add(url to subtitleOnly)
                     }
                 }
             }.onFailure { it.printStackTrace() }
         }
 
-        return urls.toList()
+        return addons.toList()
     }
 
     private suspend fun invokeTmdbStremioIntegrationFallback(
@@ -1893,11 +1898,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             "tmdb:$tmdbId"
         }
         val encodedId = stremioId.urlEncode()
-        val addons = getIntegrationStremioStreamAddons()
+        val addons = getIntegrationStremioAddons()
         if (addons.isEmpty()) return
 
         supervisorScope {
-            addons.distinct().map { addonUrl ->
+            addons.map { (addonUrl, subtitleOnly) ->
                 async(Dispatchers.IO) {
                     runSuspendCatching {
                         val cleanBaseUrl = addonUrl.fixSourceUrl().cleanBaseUrl()
@@ -1907,17 +1912,30 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             .takeIf { it.isNotEmpty() }
                             ?.let { "?$it" }
                             ?: ""
-                        val requestUrl = "$cleanBaseUrl/stream/$targetType/${encodedId}.json$querySuffix"
-                        val text = customSession.get(requestUrl, timeout = 25L).text
-                        val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
 
-                        res?.streams?.forEach { stream ->
-                            stream.runCallback(
-                                this@StremioC,
-                                stremioSubtitleCallback,
-                                extractorSubtitleCallback,
-                                callback
-                            )
+                        if (subtitleOnly) {
+                            val requestUrl = "$cleanBaseUrl/subtitles/$targetType/${encodedId}.json$querySuffix"
+                            val text = customSession.get(requestUrl, timeout = 15L).text
+                            val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
+
+                            res?.subtitles?.forEach { sub ->
+                                val subtitleUrl = sub.url ?: return@forEach
+                                val lang = sub.lang ?: sub.lang_code ?: "Unknown"
+                                stremioSubtitleCallback.invoke(newSubtitleFile(lang, subtitleUrl))
+                            }
+                        } else {
+                            val requestUrl = "$cleanBaseUrl/stream/$targetType/${encodedId}.json$querySuffix"
+                            val text = customSession.get(requestUrl, timeout = 25L).text
+                            val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
+
+                            res?.streams?.forEach { stream ->
+                                stream.runCallback(
+                                    this@StremioC,
+                                    stremioSubtitleCallback,
+                                    extractorSubtitleCallback,
+                                    callback
+                                )
+                            }
                         }
                     }.onFailure { error ->
                         if (error is CancellationException) throw error
