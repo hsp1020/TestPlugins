@@ -38,6 +38,7 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        if (referer?.trimEnd('/') != "https://streamed.pk") return
         coroutineScope {
             try {
                 val videoUrl = withContext(Dispatchers.Main) {
