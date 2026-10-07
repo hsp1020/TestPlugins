@@ -420,16 +420,57 @@ class MovieKing : MainAPI() {
         val poster = passedPoster ?: doc.selectFirst(".single-video-left img")?.attr("src") ?: ""
         val intro = doc.selectFirst(".single-video-info-content h6:contains(소개)")?.nextElementSibling()?.text()?.trim() ?: "설명이 없습니다."
 
+        val detailInfo = doc.select(".single-video-info-content p.text-secondary")
+            .mapNotNull { element ->
+                val key = element.selectFirst("b")?.text()?.trim() ?: return@mapNotNull null
+                val value = element.text().substringAfter(":", "").trim()
+                if (value.isBlank()) null else key to value
+            }
+            .toMap()
+
+        val year = detailInfo["개봉"]
+            ?.let { Regex("""\b\d{4}\b""").find(it)?.value?.toIntOrNull() }
+
+        val tags = mutableListOf<String>().apply {
+            detailInfo["장르"]
+                ?.split(",")
+                ?.map { it.trim() }
+                ?.filter { it.isNotBlank() }
+                ?.let { addAll(it) }
+
+            detailInfo["나라"]
+                ?.takeIf { it.isNotBlank() }
+                ?.let { add("나라: $it") }
+
+            detailInfo["출연"]
+                ?.takeIf { it.isNotBlank() }
+                ?.let { add("출연: $it") }
+
+            detailInfo["감독"]
+                ?.takeIf { it.isNotBlank() }
+                ?.let { add("감독: $it") }
+        }
+
         val episodeList = doc.select(".video-slider-right-list .eps_a").map {
             newEpisode(fixUrl(it.attr("href"))) { this.name = it.text().trim() }
         }.reversed()
 
-        println("[MovieKing DBG] 🎬 파싱 완료: 에피소드 수=${episodeList.size}")
+        println("[MovieKing DBG] 🎬 파싱 완료: 에피소드 수=${episodeList.size}, 연도=${year ?: "없음"}, 태그=${tags.size}개")
 
         return if (episodeList.size <= 1) {
-            newMovieLoadResponse(title, finalUrl, TvType.Movie, finalUrl) { this.posterUrl = fixUrl(poster); this.plot = intro }
+            newMovieLoadResponse(title, finalUrl, TvType.Movie, finalUrl) {
+                this.posterUrl = fixUrl(poster)
+                this.year = year
+                this.plot = intro
+                this.tags = tags
+            }
         } else {
-            newTvSeriesLoadResponse(title, finalUrl, TvType.TvSeries, episodeList) { this.posterUrl = fixUrl(poster); this.plot = intro }
+            newTvSeriesLoadResponse(title, finalUrl, TvType.TvSeries, episodeList) {
+                this.posterUrl = fixUrl(poster)
+                this.year = year
+                this.plot = intro
+                this.tags = tags
+            }
         }
     }
 
