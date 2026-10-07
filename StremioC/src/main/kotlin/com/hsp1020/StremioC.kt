@@ -1443,6 +1443,21 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val targetType = loadData.type ?: if ((loadData.season ?: 0) > 0 || (loadData.episode ?: 0) > 0) "series" else "movie"
         
         val actualIsMovie = targetType == "movie" || (loadData.season == null && loadData.episode == null)
+
+        // Keep the original Stremio type for addon/VixSrc requests. CineStream and
+        // StreamPlay only understand movie/series, so normalize non-standard types
+        // only when this item already has a valid IMDb identity.
+        val integrationImdbId = listOf(loadData.imdbId, globalId, loadData.id)
+            .firstNotNullOfOrNull { candidate ->
+                candidate?.substringBefore(':')?.takeIf { IMDB_ID_REGEX.matches(it) }
+            }
+        val integrationTargetType = if (targetType == "movie" || targetType == "series") {
+            targetType
+        } else if (integrationImdbId != null) {
+            if (actualIsMovie) "movie" else "series"
+        } else {
+            targetType
+        }
         
         val globalSeason = if (actualIsMovie) null else loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 } ?: 1
         val globalEpisode = if (actualIsMovie) null else loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 } ?: 1
@@ -1681,7 +1696,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
             },
             { 
-                invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, integrationSubtitleCallback, wrappedCallback) 
+                invokeCineStream(loadData, integrationTargetType, globalId, globalSeason, globalEpisode, isCasting, integrationSubtitleCallback, wrappedCallback) 
             },
             {
                 invokeTmdbStremioIntegrationFallback(
@@ -1696,7 +1711,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 )
             },
             { 
-                invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, integrationSubtitleCallback, wrappedCallback) 
+                invokeStreamPlay(loadData, integrationTargetType, globalId, globalSeason, globalEpisode, isCasting, integrationSubtitleCallback, wrappedCallback) 
             },
             {
                 if (isIntegrationEnabled("vixsrc_integration_enabled")) {
