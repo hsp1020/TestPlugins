@@ -202,7 +202,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 
     fun getUnifiedMetaUrl(type: String, id: String): String {
-        val (syncUrl, syncMap) = getSyncSettings()
+        val (syncUrl, syncMap, _) = getSyncSettings()
         val currentCleanUrl = mainUrl.cleanBaseUrl().lowercase()
         val isSyncEnabled = syncMap[currentCleanUrl] ?: false
 
@@ -216,7 +216,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 
     fun getTargetApiName(): String {
-        val (_, syncMap) = getSyncSettings()
+        val (_, syncMap, _) = getSyncSettings()
         val currentCleanUrl = mainUrl.cleanBaseUrl().lowercase()
         val isSyncEnabled = syncMap[currentCleanUrl] ?: false
 
@@ -239,7 +239,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         private const val SETTINGS_CACHE_TTL = 60_000L
 
         // SharedPreferences 반복 파싱 부하 개선을 위한 3초 생명주기 캐시 바인딩
-        private data class SyncSettings(val syncUrl: String, val syncMap: Map<String, Boolean>)
+        private data class SyncSettings(val syncUrl: String, val syncMap: Map<String, Boolean>, val historySyncMap: Map<String, Boolean>)
         @Volatile private var cachedSyncSettings: SyncSettings? = null
         @Volatile private var cachedSyncSettingsTime: Long = 0
         private const val SYNC_SETTINGS_TTL = 3000L
@@ -255,11 +255,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 if (doubleCached != null && (now - cachedSyncSettingsTime) < SYNC_SETTINGS_TTL) {
                     return doubleCached
                 }
-                val context = CloudStreamApp.context ?: return SyncSettings("", emptyMap())
+                val context = CloudStreamApp.context ?: return SyncSettings("", emptyMap(), emptyMap())
                 val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
                 val syncUrl = prefs.getString("history_sync_url", "") ?: ""
                 val json = prefs.getString("stremio_saved_links", null)
                 val map = mutableMapOf<String, Boolean>()
+                val historyMap = mutableMapOf<String, Boolean>()
                 if (json != null) {
                     try {
                         val arr = org.json.JSONArray(json)
@@ -268,13 +269,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             val link = obj.optString("link", "").cleanBaseUrl().lowercase()
                             if (link.isNotBlank()) {
                                 map[link] = obj.optBoolean("isSyncEnabled", true)
+                                historyMap[link] = obj.optBoolean("isHistorySyncEnabled", map[link] ?: true)
                             }
                         }
                     } catch (e: Exception) {
                         e.printStackTrace()
                     }
                 }
-                val result = SyncSettings(syncUrl, map)
+                val result = SyncSettings(syncUrl, map, historyMap)
                 cachedSyncSettings = result
                 cachedSyncSettingsTime = System.currentTimeMillis()
                 return result
@@ -1508,9 +1510,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val cleanBaseUrl = currentMainUrl.fixSourceUrl().cleanBaseUrl()
         val querySuffix = currentMainUrl.substringAfter("?", "").takeIf { it.isNotEmpty() }?.let { "?$it" } ?: ""
 
-        val (syncUrl, syncMap) = getSyncSettings()
+        val (syncUrl, _, historySyncMap) = getSyncSettings()
         val currentCleanUrl = currentMainUrl.cleanBaseUrl().lowercase()
-        val isSyncEnabled = syncMap[currentCleanUrl] ?: false
+        val isHistorySyncEnabled = historySyncMap[currentCleanUrl] ?: false
 
         val customHosts = withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
@@ -1619,12 +1621,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             addonUrl: String,
             id: String?,
             season: Int?,
-            episode: Int?
+            episode: Int?,
+            requestType: String = targetType
         ) {
             if (addonUrl.isBlank() || id.isNullOrBlank()) return
 
             val subId = buildStremioId(
-                targetType,
+                requestType,
                 id,
                 season,
                 episode,
@@ -1640,7 +1643,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 ?.let { "?$it" }
                 ?: ""
             val subtitleRequestUrl =
-                "$cleanSubtitleBase/subtitles/$targetType/${subId.urlEncode()}.json$subtitleSuffix"
+                "$cleanSubtitleBase/subtitles/$requestType/${subId.urlEncode()}.json$subtitleSuffix"
 
             if (!requestedSubtitleUrls.add(subtitleRequestUrl)) return
 
@@ -1686,12 +1689,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 )
             },
             {
-                if (isSyncEnabled && syncUrl.isNotBlank()) {
+                if (isHistorySyncEnabled && syncUrl.isNotBlank()) {
                     fetchStremioSubtitles(
                         syncUrl,
                         globalId ?: primaryId,
                         globalSeason,
-                        globalEpisode
+                        globalEpisode,
+                        integrationTargetType
                     )
                 }
             },
