@@ -38,6 +38,8 @@ internal class DetailBackdropLayout(private val root: View) {
     private val originalTvMargin = (tvColumn?.layoutParams as? ViewGroup.MarginLayoutParams)?.topMargin
     private val originalLogoX = logo?.translationX ?: 0f
     private val originalLogoY = logo?.translationY ?: 0f
+    private val originalLogoScaleX = logo?.scaleX ?: 1f
+    private val originalLogoScaleY = logo?.scaleY ?: 1f
     private val originalTitleAlpha = title?.alpha ?: 1f
     private var fade: View? = null
     private var titleOverlay: TextView? = null
@@ -55,6 +57,13 @@ internal class DetailBackdropLayout(private val root: View) {
             p.marginStart = left; p.topMargin = top; view.layoutParams = p
         }
     }
+    private fun scaleLogo(doubleSize: Boolean) {
+        val factor = if (doubleSize) 2f else 1f
+        val x = originalLogoScaleX * factor
+        val y = originalLogoScaleY * factor
+        if (logo?.scaleX != x) logo?.scaleX = x
+        if (logo?.scaleY != y) logo?.scaleY = y
+    }
     private val preDraw = ViewTreeObserver.OnPreDrawListener {
         runCatching { update() }; true
     }
@@ -69,7 +78,7 @@ internal class DetailBackdropLayout(private val root: View) {
         }
         titleOverlay = TextView(root.context).also { overlay ->
             title?.let {
-                overlay.setTextSize(TypedValue.COMPLEX_UNIT_PX, it.textSize)
+                overlay.setTextSize(TypedValue.COMPLEX_UNIT_PX, it.textSize * 2f)
                 overlay.typeface = it.typeface
                 overlay.setTextColor(it.currentTextColor)
             }
@@ -97,13 +106,14 @@ internal class DetailBackdropLayout(private val root: View) {
             showTitle(false)
             logo?.translationX = originalLogoX
             logo?.translationY = originalLogoY
+            scaleLogo(false)
             return
         }
         val landscape = root.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val tablet = root.resources.configuration.smallestScreenWidthDp >= 600
-        val split = tv || landscape
+        val split = tv || landscape || tablet
         val bannerHeight = when {
-            tv || (landscape && tablet) -> dp(400)
+            tv || tablet -> dp(400)
             landscape -> min(dp(300), (root.height * 0.70f).roundToInt())
             else -> dp(260)
         }
@@ -120,16 +130,18 @@ internal class DetailBackdropLayout(private val root: View) {
             showTitle(false)
             logo?.translationX = originalLogoX
             logo?.translationY = originalLogoY
+            scaleLogo(false)
             return
         }
 
         val hasLogo = logo?.visibility == View.VISIBLE && logo.drawable != null && logo.width > 0
+        scaleLogo(hasLogo)
         val titleText = if (!hasLogo && title?.visibility == View.VISIBLE)
             title.text?.toString()?.trim().orEmpty() else ""
-        val labelWidth = if (hasLogo) logo!!.width else if (titleText.isNotEmpty())
-            min((title!!.paint.measureText(titleText) + dp(24)).roundToInt(),
+        val labelWidth = if (hasLogo) (logo!!.width * logo.scaleX).roundToInt() else if (titleText.isNotEmpty())
+            min((titleOverlay!!.paint.measureText(titleText) + dp(24)).roundToInt(),
                 (container.width * 0.36f).roundToInt()) else 0
-        val gap = if (labelWidth > 0) dp(24) else 0
+        val gap = if (labelWidth > 0) dp(72) else 0
         val maxWidth = (container.width - labelWidth - gap - dp(24)).coerceAtLeast(1)
         val drawable = image.drawable
         val iw = drawable?.intrinsicWidth ?: 0
@@ -147,8 +159,10 @@ internal class DetailBackdropLayout(private val root: View) {
         place(image, imageWidth, imageHeight, imageLeft, imageTop)
         place(fade, min(dp(72), imageWidth / 5), imageHeight, imageLeft, imageTop)
         if (hasLogo) {
-            logo?.translationX = groupLeft - logo!!.left.toFloat()
-            logo?.translationY = bannerHeight / 2f - (logo.top + logo.height / 2f)
+            // Account for the centered pivot when scaling the original ImageView.
+            logo?.translationX = groupLeft - logo!!.left + (logo.scaleX - 1f) * logo.pivotX
+            logo?.translationY = (bannerHeight - logo.height * logo.scaleY) / 2f -
+                logo.top + (logo.scaleY - 1f) * logo.pivotY
         } else {
             logo?.translationX = originalLogoX
             logo?.translationY = originalLogoY
@@ -174,6 +188,7 @@ internal class DetailBackdropLayout(private val root: View) {
         fade?.let { holder?.removeView(it) }; fade = null
         logo?.translationX = originalLogoX
         logo?.translationY = originalLogoY
+        scaleLogo(false)
         originalHeroHeight?.let { height(phoneHero, it) }
         originalHolderHeight?.let { height(holder, it) }
         originalPicture?.let { picture?.layoutParams = FrameLayout.LayoutParams(it) }
