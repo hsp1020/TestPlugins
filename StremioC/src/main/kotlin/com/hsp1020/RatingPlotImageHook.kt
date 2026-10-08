@@ -107,12 +107,12 @@ internal class RatingPlotImageHook(
 
     private fun attach(f: Fragment, root: View) {
         val className = f.javaClass.name
-        if (!className.contains("ResultFragment")) return
         if (watchers.containsKey(f)) { trace("ATTACH skip=already-watching class=$className"); return }
         if (className !in setOf(
+                "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer",
                 "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
                 "com.lagradost.cloudstream3.ui.result.ResultFragmentTv"
-            )) { trace("ATTACH skip=fragment-class class=$className"); return }
+            )) return
         val apiName = f.arguments?.getString("apiName")
         if (apiName == null) { trace("ATTACH skip=missing-apiName class=$className"); return }
         if (apiName != "StremioC" && !APIHolder.allProviders.any {
