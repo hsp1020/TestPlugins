@@ -106,7 +106,7 @@ internal class DetailBackdropLayout(private val root: View) {
                 overlay.typeface = it.typeface
                 overlay.setTextColor(it.currentTextColor)
             }
-            overlay.maxLines = 2
+            overlay.maxLines = 4
             overlay.ellipsize = TextUtils.TruncateAt.END
             overlay.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             overlay.visibility = View.GONE
@@ -170,7 +170,7 @@ internal class DetailBackdropLayout(private val root: View) {
         val labelWidth = if (hasLogo) (logo!!.width * logo.scaleX).roundToInt() else if (titleText.isNotEmpty())
             min((titleOverlay!!.paint.measureText(titleText) + dp(24)).roundToInt(),
                 (container.width * 0.36f).roundToInt()) else 0
-        val gap = if (labelWidth > 0) dp(55) else 0
+        val gap = if (labelWidth > 0) dp(30) else 0
         val maxWidth = (container.width - labelWidth - gap - dp(24)).coerceAtLeast(1)
         val drawable = image.drawable
         val iw = drawable?.intrinsicWidth ?: 0
