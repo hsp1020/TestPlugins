@@ -15,6 +15,7 @@ import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
+import androidx.preference.PreferenceManager
 import kotlin.math.*
 
 /** StremioC detail backdrop only. Original CloudStream toolbar and player remain untouched. */
@@ -123,6 +124,11 @@ internal class DetailBackdropLayout(private val root: View) {
     fun start() {
         val container = holder ?: return
         if (started || picture == null) return
+        // CloudStream uses this same preference for its built-in trailer UI.
+        val context = root.context
+        val keyId = context.resources.getIdentifier("show_trailers_key", "string", context.packageName)
+        if (keyId == 0 || PreferenceManager.getDefaultSharedPreferences(context)
+                .getBoolean(context.getString(keyId), true)) return
         started = true
         if (splitMode()) stage() // Hide both before either asynchronous image load completes.
         val directions = listOf(
