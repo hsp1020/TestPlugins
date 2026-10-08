@@ -207,7 +207,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Sync Metadata Base URL"
+                android:text="Sync Addon Base URL"
                 android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
@@ -215,7 +215,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Aiometadata addon URL (Required)"
+                android:text="Aiometadata addon URL (Metadata / History)"
                 android:textColor="#AAAAAA"
                 android:textSize="12sp"
                 android:layout_marginTop="2dp" />
