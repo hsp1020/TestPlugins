@@ -1653,9 +1653,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
 
                 res?.subtitles?.forEach { sub ->
-                    val subtitleUrl = sub.url ?: return@forEach
-                    val lang = sub.lang ?: sub.lang_code ?: "Unknown"
-                    stremioSubtitleCallback.invoke(newSubtitleFile(lang, subtitleUrl))
+                    sub.toCloudStreamSubtitle(if (addonUrl == currentMainUrl) name else null)
+                        ?.let(stremioSubtitleCallback)
                 }
             }.onFailure { it.printStackTrace() }
         }
@@ -1966,9 +1965,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
 
                             res?.subtitles?.forEach { sub ->
-                                val subtitleUrl = sub.url ?: return@forEach
-                                val lang = sub.lang ?: sub.lang_code ?: "Unknown"
-                                stremioSubtitleCallback.invoke(newSubtitleFile(lang, subtitleUrl))
+                                sub.toCloudStreamSubtitle(addon.name)?.let(stremioSubtitleCallback)
                             }
                         } else {
                             val requestUrl = "$cleanBaseUrl/stream/$targetType/${encodedId}.json$querySuffix"
@@ -3014,7 +3011,35 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private data class StreamsResponse(@JsonProperty("streams") val streams: List<Stream>)    
     private data class SubtitlesResponse(@JsonProperty("subtitles") val subtitles: List<Subtitle>?)
-    private data class Subtitle(@JsonProperty("url") val url: String?, @JsonProperty("lang") val lang: String?, @JsonProperty("lang_code") val lang_code: String?, @JsonProperty("id") val id: String?)    
+    private data class Subtitle(
+        @JsonProperty("url") val url: String?,
+        @JsonProperty("lang") val lang: String?,
+        @JsonProperty("lang_code") val lang_code: String?,
+        @JsonProperty("id") val id: String?,
+        @JsonProperty("label") val label: JsonNode? = null,
+        @JsonProperty("name") val name: JsonNode? = null
+    )
+
+    private suspend fun Subtitle.toCloudStreamSubtitle(addonName: String?, normalizeLanguage: Boolean = false): SubtitleFile? {
+        val subtitleUrl = url ?: return null
+        val rawLang = lang ?: lang_code ?: "Unknown"
+        val language = SubtitleHelper.fromTagToEnglishLanguageName(rawLang) ?: rawLang
+        val mainLabel = label.textOrNull()?.trim()?.takeIf { !it.equals(language, true) }
+        val responseSource = name.textOrNull()?.trim()
+        // Preserve the old language and automatic-selection behavior when no metadata exists.
+        if (mainLabel == null && responseSource == null) {
+            return newSubtitleFile(if (normalizeLanguage) language else rawLang, subtitleUrl)
+        }
+        val sourceLabel = (responseSource ?: addonName?.trim()?.takeIf { it.isNotEmpty() })
+            ?.takeUnless { it.equals(mainLabel, true) || it.equals(language, true) }
+        val displayName = buildString {
+            append(language)
+            append(" (Stremio)")
+            if (mainLabel != null) { append(" · "); append(mainLabel) }
+            if (sourceLabel != null) { append(" — "); append(sourceLabel) }
+        }
+        return newSubtitleFile(displayName, subtitleUrl)
+    }
     private data class ProxyHeaders(@JsonProperty("request") val request: Map<String, String>?)   
     private data class BehaviorHints(@JsonProperty("proxyHeaders") val proxyHeaders: ProxyHeaders?, @JsonProperty("headers") val headers: Map<String, String>?)
 
@@ -3072,10 +3097,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val hasPlayableTarget = url != null || ytId != null || externalUrl != null || infoHash != null
             if (hasPlayableTarget) {
                 subtitles.forEach { sub ->
-                    val lang = sub.lang ?: sub.lang_code ?: "Unknown"
-                    val parsedLang = SubtitleHelper.fromTagToEnglishLanguageName(lang) ?: lang
-                    val subtitleUrl = sub.url ?: return@forEach
-                    stremioSubtitleCallback.invoke(newSubtitleFile(parsedLang, subtitleUrl))
+                    provider.run { sub.toCloudStreamSubtitle(sourceName, normalizeLanguage = true) }?.let(stremioSubtitleCallback)
                 }
             }
         }
