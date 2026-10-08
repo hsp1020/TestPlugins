@@ -38,7 +38,9 @@ private val RATING_SOURCES = mapOf(
     "mc" to RatingMeta("MC", "🎯", 8),
     "rottentomatoes" to RatingMeta("RT", "🍅", 9),
     "tomatoes" to RatingMeta("RT", "🍅", 9),
-    "rt" to RatingMeta("RT", "🍅", 9)
+    "rt" to RatingMeta("RT", "🍅", 9),
+    "rogerebert" to RatingMeta("RE", "👍", 10),
+    "re" to RatingMeta("RE", "👍", 10)
 )
 
 suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false, mediaType: String = "movie"): List<String> {
@@ -84,6 +86,7 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false, mediaType:
             if (value.isNaN() || value <= 0.0) continue
             
             val scaledValue = when (sourceKey) {
+                "rogerebert", "re" -> value * 2.5
                 "letterboxd", "lb" -> ratingObj.optDouble("score").takeUnless { it.isNaN() }
                     ?.div(10.0) ?: if (value > 5.0) value else value * 2.0
                 "tmdb", "trakt", "metacritic", "mc", "tomatoes", "rottentomatoes", "rt", "tomatoesaudience", "audiencescore", "popcorn", "audience" -> value / 10.0
@@ -93,7 +96,7 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false, mediaType:
             val roundedValue = round(scaledValue * 10) / 10.0
             if (roundedValue <= 0.0) continue
             
-            if (sourceKey == "metacriticuser" || sourceKey == "rogerebert" || sourceKey == "re") continue
+            if (sourceKey == "metacriticuser") continue
             val meta = RATING_SOURCES[sourceKey] ?: RatingMeta(sourceKey.uppercase(), "🏷️", 99)
             val icon = when (meta.name) {
                 "RT" -> when {
