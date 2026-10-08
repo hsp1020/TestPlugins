@@ -102,15 +102,27 @@ internal class DetailBackdropLayout(private val root: View) {
         }
         val pictureWidth = holder.width - left
         val photo = picture.drawable
+        // Fit the entire original image into the allotted slot. Never stretch or crop it.
+        // Portrait phone screens intentionally retain CloudStream's existing CENTER_CROP.
+        val fit = split && photo != null && photo.intrinsicWidth > 0 && photo.intrinsicHeight > 0
+        val fittedWidth = if (!split) initialPoster?.width ?: ViewGroup.LayoutParams.MATCH_PARENT
+            else if (fit) min(pictureWidth,
+                (totalHeight.toDouble() * photo!!.intrinsicWidth / photo.intrinsicHeight)
+                    .roundToInt().coerceAtLeast(1)) else pictureWidth
+        val fittedHeight = if (!split) initialPoster?.height ?: ViewGroup.LayoutParams.MATCH_PARENT
+            else if (fit) min(totalHeight,
+                (fittedWidth.toDouble() * photo!!.intrinsicHeight / photo.intrinsicWidth)
+                    .roundToInt().coerceAtLeast(1)) else totalHeight
+        val imageLeft = if (split) holder.width - fittedWidth else 0
         val key: List<Any?> = listOf(root.width, root.height, orientation, tablet, totalHeight,
-            holder.width, logoVisible, logoRight, titleWidth, left, photo, picture.layoutParams.height,
+            holder.width, logoVisible, logoRight, titleWidth, left, photo, fittedWidth, fittedHeight,
+            picture.layoutParams.width, picture.layoutParams.height, picture.scaleType,
             phoneHero?.layoutParams?.height, backdropHolder?.layoutParams?.height)
         if (key == lastKey) return
         lastKey = key
 
         if (tv) {
             setHeight(holder, totalHeight)
-            setHeight(picture, totalHeight)
             // Original TV layout has a 225dp top margin under a 275dp backdrop.
             (tvColumn?.layoutParams as? ViewGroup.MarginLayoutParams)?.let { p ->
                 val target = dp(350)
@@ -123,24 +135,33 @@ internal class DetailBackdropLayout(private val root: View) {
             // The toolbar is outside this hero; never overlay the app buttons.
             setHeight(phoneHero, totalHeight)
         }
+        val targetScale = if (split) ImageView.ScaleType.FIT_CENTER else initialScaleType
+        if (targetScale != null && picture.scaleType != targetScale) picture.scaleType = targetScale
         (picture.layoutParams as? FrameLayout.LayoutParams)?.let { p ->
-            if (p.width != pictureWidth || p.gravity != Gravity.END) {
-                p.width = pictureWidth
-                p.gravity = Gravity.END
+            val gravity = if (split) Gravity.END or Gravity.CENTER_VERTICAL
+                else initialPoster?.gravity ?: Gravity.START
+            if (p.width != fittedWidth || p.height != fittedHeight || p.gravity != gravity) {
+                p.width = fittedWidth
+                p.height = fittedHeight
+                p.gravity = gravity
                 picture.layoutParams = p
             }
         }
-        // Dark gradient only at the new left edge of the picture.
-        fun resizeFade(fade: View?, start: Int) {
-            val p = fade?.layoutParams as? FrameLayout.LayoutParams ?: return
-            val fadeWidth = if (start == 0) 0 else min(dp(72), pictureWidth / 5)
-            if (p.width != fadeWidth || p.marginStart != start) {
+        // Fade only along the image's actual left edge, not its full reserved slot.
+        backdropFade?.let { fade ->
+            val p = fade.layoutParams as? FrameLayout.LayoutParams ?: return@let
+            val fadeWidth = if (!split || imageLeft == 0) 0 else min(dp(72), fittedWidth / 5)
+            val fadeHeight = if (split) fittedHeight else ViewGroup.LayoutParams.MATCH_PARENT
+            val gravity = if (split) Gravity.START or Gravity.CENTER_VERTICAL else Gravity.START
+            if (p.width != fadeWidth || p.height != fadeHeight ||
+                p.marginStart != imageLeft || p.gravity != gravity) {
                 p.width = fadeWidth
-                p.marginStart = start
+                p.height = fadeHeight
+                p.marginStart = imageLeft
+                p.gravity = gravity
                 fade.layoutParams = p
             }
         }
-        resizeFade(backdropFade, left)
     }
 
     fun stop() {
@@ -154,7 +175,10 @@ internal class DetailBackdropLayout(private val root: View) {
         initialHolderHeight?.let { setHeight(backdropHolder, it) }
         initialPoster?.let { picture.layoutParams = FrameLayout.LayoutParams(it) }
         initialScaleType?.let { picture.scaleType = it }
-        initialImageMatrix?.let { picture.imageMatrix = it }
+        if (tv && initialScaleType == ImageView.ScaleType.MATRIX) {
+            // PercentageCropImageView must rebuild its own matrix on restoration.
+            picture.drawable?.let { picture.setImageDrawable(it) }
+        } else initialImageMatrix?.let { picture.imageMatrix = it }
         (tvColumn?.layoutParams as? ViewGroup.MarginLayoutParams)?.let { params ->
             initialTvMargin?.let {
                 params.topMargin = it
