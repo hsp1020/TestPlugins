@@ -536,7 +536,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private data class MdbTarget(
         val id: String,
-        val isTmdb: Boolean
+        val isTmdb: Boolean,
+        val mediaType: String
     )
 
     private data class SpeculativeMdbResult(
@@ -560,9 +561,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     private fun isKitsuOrMalId(id: String?): Boolean =
         id?.startsWith("kitsu:") == true || id?.startsWith("mal:") == true
 
-    private fun directMdbTarget(id: String?): MdbTarget? = when {
-        id?.startsWith("tt") == true -> MdbTarget(id, false)
-        id?.startsWith("tmdb:") == true -> MdbTarget(id.removePrefix("tmdb:"), true)
+    private fun directMdbTarget(id: String?, mediaType: String = "tv"): MdbTarget? = when {
+        id?.startsWith("tt") == true -> MdbTarget(id, false, mediaType)
+        id?.startsWith("tmdb:") == true -> MdbTarget(id.removePrefix("tmdb:"), true, mediaType)
         else -> null
     }
 
@@ -578,11 +579,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             !entry.tmdbIdExt.isNullOrBlank() -> entry.tmdbIdExt
             else -> null
         } ?: return null
-        return MdbTarget(id, id == resolvedTmdbId || !id.startsWith("tt"))
+        return MdbTarget(id, id == resolvedTmdbId || !id.startsWith("tt"), detailMediaType(entry.type))
     }
 
     private suspend fun fetchMdbAttempt(target: MdbTarget): SpeculativeMdbResult {
-        val attempt = runSuspendCatching { fetchMdbListRatings(target.id, target.isTmdb) }
+        val attempt = runSuspendCatching { fetchMdbListRatings(target.id, target.isTmdb, target.mediaType) }
         return SpeculativeMdbResult(
             target = target,
             ratings = attempt.getOrDefault(emptyList<String>()),
@@ -1191,7 +1192,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val urlHint = rememberedHint ?: parsedUrlHint
         val hintMediaType = detailMediaType(urlHint?.type)
         val mdbEnabled = isIntegrationEnabled("mdblist_enabled", default = false)
-        val directMdbHint = directMdbTarget(urlHint?.id)
+        val directMdbHint = directMdbTarget(urlHint?.id, hintMediaType)
 
         val hintedKitsuId = urlHint?.id?.takeIf { isKitsuOrMalId(it) }
         val speculativeKitsuDeferred: Deferred<KitsuResolvedMeta?>? = hintedKitsuId?.let { id ->
@@ -1203,8 +1204,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             directMdbHint != null -> launchMdbAttempt(directMdbHint)
             speculativeKitsuDeferred != null -> async(Dispatchers.IO) {
                 val resolved = speculativeKitsuDeferred.await() ?: return@async null
-                val target = resolved.tmdbId?.let { MdbTarget(it, true) }
-                    ?: resolved.imdbId?.let { MdbTarget(it, false) }
+                val target = resolved.tmdbId?.let { MdbTarget(it, true, hintMediaType) }
+                    ?: resolved.imdbId?.let { MdbTarget(it, false, hintMediaType) }
                     ?: return@async null
                 fetchMdbAttempt(target)
             }
@@ -1405,8 +1406,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         if (actualMdbTarget == null) {
             val resolvedImdb = resolvedIdHolder[0]?.takeIf { it.startsWith("tt") }
             val resolvedTmdb = resolvedIdHolder[1]?.takeIf { it.isNotBlank() }
-            actualMdbTarget = resolvedImdb?.let { MdbTarget(it, false) }
-                ?: resolvedTmdb?.let { MdbTarget(it, true) }
+            actualMdbTarget = resolvedImdb?.let { MdbTarget(it, false, authoritativeMediaType) }
+                ?: resolvedTmdb?.let { MdbTarget(it, true, authoritativeMediaType) }
         }
 
         val finalMdbTarget = actualMdbTarget
@@ -1422,7 +1423,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
 
             if (mdbRatings.isNotEmpty()) {
-                val ratingStr = mdbRatings.joinToString("  ")
+                val ratingStr = "\u2063" + mdbRatings.joinToString("  ")
                 val currentPlot = loadRes.plot
                 loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr<br>$currentPlot" else ratingStr
                 loadRes.score = Score.from10(0)
