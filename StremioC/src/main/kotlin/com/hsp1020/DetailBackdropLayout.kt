@@ -4,7 +4,9 @@ import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.drawable.GradientDrawable
-import android.text.TextUtils
+import android.text.Layout
+import android.text.StaticLayout
+import android.text.TextPaint
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -47,6 +49,10 @@ internal class DetailBackdropLayout(private val root: View) {
     private val originalShadowVisibility = shadow?.visibility
     private val edges = mutableListOf<View>()
     private var titleOverlay: TextView? = null
+    private var baseTitlePaint: TextPaint? = null
+    private var lastFitText = ""
+    private var lastFitWidth = -1
+    private var lastFitHeight = -1
     private var started = false
     private fun dp(v: Int) = (v * root.resources.displayMetrics.density).roundToInt()
     private fun height(view: View?, value: Int) {
@@ -67,6 +73,37 @@ internal class DetailBackdropLayout(private val root: View) {
         val y = originalLogoScaleY * factor
         if (logo?.scaleX != x) logo?.scaleX = x
         if (logo?.scaleY != y) logo?.scaleY = y
+    }
+    // Fit the complete title into at most four lines and the actual backdrop image height.
+    // No minimum readable size or ellipsis: extremely long titles may become very small.
+    private fun fitTitle(overlay: TextView, text: String, width: Int, maxHeight: Int) {
+        if (text.isEmpty() || (text == lastFitText && width == lastFitWidth && maxHeight == lastFitHeight)) return
+        val paint = TextPaint(baseTitlePaint ?: overlay.paint)
+        fun fits(size: Float): Boolean {
+            paint.textSize = size
+            val layout = StaticLayout.Builder.obtain(text, 0, text.length, paint, (width - 2).coerceAtLeast(1))
+                .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                .setIncludePad(overlay.includeFontPadding)
+                .setLineSpacing(overlay.lineSpacingExtra, overlay.lineSpacingMultiplier)
+                .setBreakStrategy(overlay.breakStrategy)
+                .setHyphenationFrequency(overlay.hyphenationFrequency)
+                .build()
+            return layout.lineCount <= 4 && layout.height <= maxHeight
+        }
+        var size = paint.textSize
+        if (!fits(size)) {
+            var low = 0f
+            var high = size
+            repeat(18) {
+                val mid = (low + high) / 2f
+                if (fits(mid)) low = mid else high = mid
+            }
+            size = low.coerceAtLeast(0.00001f) // Numeric safeguard only, not a readability floor.
+        }
+        if (overlay.textSize != size) overlay.setTextSize(TypedValue.COMPLEX_UNIT_PX, size)
+        lastFitText = text
+        lastFitWidth = width
+        lastFitHeight = maxHeight
     }
     private val preDraw = ViewTreeObserver.OnPreDrawListener {
         runCatching { update() }; true
@@ -106,8 +143,10 @@ internal class DetailBackdropLayout(private val root: View) {
                 overlay.typeface = it.typeface
                 overlay.setTextColor(it.currentTextColor)
             }
+            baseTitlePaint = TextPaint(overlay.paint)
+            lastFitWidth = -1
             overlay.maxLines = 4
-            overlay.ellipsize = TextUtils.TruncateAt.END
+            overlay.ellipsize = null
             overlay.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             overlay.visibility = View.GONE
             container.addView(overlay, FrameLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -166,11 +205,11 @@ internal class DetailBackdropLayout(private val root: View) {
         val hasLogo = logo?.visibility == View.VISIBLE && logo.drawable != null && logo.width > 0
         scaleLogo(hasLogo)
         val titleText = if (!hasLogo && title?.visibility == View.VISIBLE)
-            title.text?.toString()?.trim().orEmpty() else ""
+            title.text?.toString()?.trim()?.replace('\n', ' ')?.replace('\r', ' ').orEmpty() else ""
         val labelWidth = if (hasLogo) (logo!!.width * logo.scaleX).roundToInt() else if (titleText.isNotEmpty())
-            min((titleOverlay!!.paint.measureText(titleText) + dp(24)).roundToInt(),
+            min(((baseTitlePaint ?: titleOverlay!!.paint).measureText(titleText) + dp(24)).roundToInt(),
                 (container.width * 0.36f).roundToInt()) else 0
-        val gap = if (labelWidth > 0) dp(30) else 0
+        val gap = if (labelWidth > 0) dp(45) else 0
         val maxWidth = (container.width - labelWidth - gap - dp(24)).coerceAtLeast(1)
         val drawable = image.drawable
         val iw = drawable?.intrinsicWidth ?: 0
@@ -211,6 +250,7 @@ internal class DetailBackdropLayout(private val root: View) {
         }
         titleOverlay?.let { overlay ->
             if (overlay.text.toString() != titleText) overlay.text = titleText
+            if (titleText.isNotEmpty()) fitTitle(overlay, titleText, labelWidth, imageHeight)
             val p = overlay.layoutParams as? FrameLayout.LayoutParams
             if (p != null && (p.width != labelWidth || p.gravity != (Gravity.START or Gravity.CENTER_VERTICAL) || p.marginStart != groupLeft)) {
                 p.width = labelWidth
@@ -230,6 +270,7 @@ internal class DetailBackdropLayout(private val root: View) {
         if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(preDraw)
         showTitle(false)
         titleOverlay?.let { holder?.removeView(it) }; titleOverlay = null
+        baseTitlePaint = null
         edges.forEach { holder?.removeView(it) }; edges.clear()
         shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
         visibility(true)
