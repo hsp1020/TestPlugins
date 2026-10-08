@@ -1660,10 +1660,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             runSuspendCatching {
                 val text = customSession.get(subtitleRequestUrl, timeout = 15L).text
                 val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
-                com.lagradost.api.Log.d("StremioC", "subtitle-labels-v2 direct count=${res?.subtitles?.size ?: 0} rawLabel=${text.contains("\"label\"")} parsedLabel=${res?.subtitles?.count { it.label.textOrNull() != null } ?: 0}")
+                com.lagradost.api.Log.d("StremioC", "subtitle-labels-v2 direct count=${res?.subtitles?.size ?: 0} rawLabel=${text.contains("\"label\"")} parsedLabel=${res?.subtitles?.count { it.label.textOrNull() != null } ?: 0} responseNames=${res?.subtitles?.count { it.name.textOrNull() != null } ?: 0}")
+                val addonSource = getActualStremioAddonName(addonUrl)
+                    ?: name.takeIf { addonUrl == currentMainUrl && !it.equals("StremioC", true) }
                 res?.subtitles?.forEach { sub ->
-                    val source = if (addonUrl == currentMainUrl) name else cleanSubtitleBase.toHttpUrlOrNull()?.host
-                    sub.toCloudStreamSubtitle(source)?.let(stremioSubtitleCallback)
+                    sub.toCloudStreamSubtitle(addonSource)?.let(stremioSubtitleCallback)
                 }
             }.onFailure { it.printStackTrace() }
         }
@@ -1881,6 +1882,31 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val url: String,
         val subtitleOnly: Boolean
     )
+
+    // Read actual addon identity; never infer it from an individual subtitle download URL.
+    // StremioC may already have the manifest cached from normal addon loading.
+    private fun getActualStremioAddonName(addonUrl: String): String? {
+        val context = CloudStreamApp.context ?: return null
+        val manifestPrefs = context.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
+        val manifestJson = manifestPrefs.getString(stremioCatalogKey(addonUrl), null)
+        val manifestName = manifestJson?.let { raw ->
+            runCatching { parseJson<JsonNode>(raw).get("name").textOrNull()?.trim() }.getOrNull()
+        }
+        if (!manifestName.isNullOrBlank() && !manifestName.equals("StremioC", true)) return manifestName
+
+        val savedJson = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+            .getString("stremio_saved_links", null) ?: return null
+        val saved = runCatching { org.json.JSONArray(savedJson) }.getOrNull() ?: return null
+        val target = stremioManifestUrl(addonUrl)
+        for (i in 0 until saved.length()) {
+            val entry = saved.optJSONObject(i) ?: continue
+            val link = entry.optString("link").takeIf { it.isNotBlank() } ?: continue
+            if (stremioManifestUrl(link) != target) continue
+            val declaredName = entry.optString("name").trim()
+            if (declaredName.isNotBlank() && !declaredName.equals("StremioC", true)) return declaredName
+        }
+        return null
+    }
 
     private fun getIntegrationStremioAddons(): List<IntegrationStremioAddon> {
         val context = CloudStreamApp.context ?: return emptyList()
@@ -3034,12 +3060,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val rawLang = lang ?: lang_code ?: "Unknown"
         val language = SubtitleHelper.fromTagToEnglishLanguageName(rawLang) ?: rawLang
         val mainLabel = label.textOrNull()?.trim()?.takeIf { !it.equals(language, true) }
-        val responseSource = name.textOrNull()?.trim()
-        val sourceLabel = (responseSource ?: addonName?.trim()?.takeIf { it.isNotEmpty() })
-            ?.takeUnless { it.equals(mainLabel, true) || it.equals(language, true) }
+        val responseSource = name.textOrNull()?.trim()?.takeIf {
+            it.isNotBlank() && !it.equals("StremioC", true) && !it.startsWith("http", true) &&
+                !it.equals(mainLabel, true) && !it.equals(language, true)
+        }
+        val sourceLabel = responseSource ?: addonName?.trim()?.takeIf {
+            it.isNotBlank() && !it.equals("StremioC", true) && !it.startsWith("http", true) &&
+                !it.equals(mainLabel, true) && !it.equals(language, true)
+        }
         // Keep non-labeled subtitles unchanged only if no source can be identified.
         if (mainLabel == null && sourceLabel == null) {
-            return newSubtitleFile(if (normalizeLanguage) language else rawLang, subtitleUrl)
+            return newSubtitleFile(if (normalizeLanguage) language else "$language (Stremio)", subtitleUrl)
         }
         val displayName = buildString {
             append(language)
