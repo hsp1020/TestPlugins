@@ -474,17 +474,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             return null
         }
 
-        fun isIntegrationEnabled(prefKey: String): Boolean {
+        fun isIntegrationEnabled(prefKey: String, default: Boolean = true): Boolean {
             val now = System.currentTimeMillis()
-            val cached = settingsCache[prefKey]
+            val cached = if (prefKey == "mdblist_enabled") null else settingsCache[prefKey]
             if (cached != null && (now - cached.second) < 60000L) {
                 return cached.first
             }
 
-            val context = CloudStreamApp.context ?: return true
+            val context = CloudStreamApp.context ?: return default
             val possibleNames = listOf("StremioC", "StremioC_preferences", "stremio_preferences", "com.hsp1020_preferences", context.packageName + "_preferences")
             
-            var isEnabled = true
+            var isEnabled = default
             for (name in possibleNames) {
                 val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
                 if (prefs.contains(prefKey)) {
@@ -493,7 +493,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
             }
             
-            settingsCache[prefKey] = Pair(isEnabled, now)
+            if (prefKey != "mdblist_enabled") settingsCache[prefKey] = Pair(isEnabled, now)
             return isEnabled
         }
 
@@ -1105,9 +1105,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             return newHomePageResponse(emptyList(), hasNext = false)
         }
 
-        val mappedItems = metas.map { meta ->
+        val mappedItems = metas.mapNotNull { meta ->
             val type = meta.type ?: "movie"
-            val id = meta.id ?: ""
+            val id = meta.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
             val title = meta.name?.takeIf { it.isNotBlank() }
                 ?: "[${type.replaceFirstChar { it.uppercase() }}] $id"
             val metaUrl = getUnifiedMetaUrl(type, id)
@@ -1190,7 +1190,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
         val urlHint = rememberedHint ?: parsedUrlHint
         val hintMediaType = detailMediaType(urlHint?.type)
-        val mdbEnabled = isIntegrationEnabled("mdblist_enabled")
+        val mdbEnabled = isIntegrationEnabled("mdblist_enabled", default = false)
         val directMdbHint = directMdbTarget(urlHint?.id)
 
         val hintedKitsuId = urlHint?.id?.takeIf { isKitsuOrMalId(it) }
@@ -1425,7 +1425,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val ratingStr = mdbRatings.joinToString("  ")
                 val currentPlot = loadRes.plot
                 loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr<br>$currentPlot" else ratingStr
-                loadRes.score = null
+                loadRes.score = Score.from10(0)
             }
         }
 
