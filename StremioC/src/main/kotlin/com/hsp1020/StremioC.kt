@@ -3065,7 +3065,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     private fun cleanSubtitleDisplayLabel(label: String, language: String): String? {
         var cleaned = label.trim()
         // Drop only a complete, repeated language prefix followed by a display separator.
-        val repeatedPrefix = Regex("^${Regex.escape(language)}\\s*(?:[·|:]|\\s[-—–]\\s)\\s*", RegexOption.IGNORE_CASE)
+        val repeatedPrefix = Regex("^${Regex.escape(language)}\\s*(?:[·•|:]|\\s[-—–]\\s)\\s*", RegexOption.IGNORE_CASE)
         while (repeatedPrefix.containsMatchIn(cleaned)) {
             cleaned = repeatedPrefix.replaceFirst(cleaned, "").trim()
         }
@@ -3076,8 +3076,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             else match.value
         }.trim()
         if (cleaned != beforeParentheses) {
-            cleaned = cleaned.trimStart('·', '|', ' ').trim()
-            cleaned = Regex("\\s+[·|]\\s*[·|]\\s+").replace(cleaned, " · ")
+            cleaned = cleaned.trimStart('·', '•', '|', ' ').trim()
+            cleaned = Regex("\\s+[·•|]\\s*[·•|]\\s+").replace(cleaned, " · ")
         }
         return cleaned.takeIf { it.isNotBlank() }
     }
