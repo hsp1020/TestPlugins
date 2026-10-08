@@ -192,6 +192,7 @@ class StremioCPlugin : Plugin() {
                     RatingPlotImageHook(appContext, pluginResources).also { it.start() }
                 }.onFailure { Log.w("StremioCPlugin", "Rating image hook unavailable: ${it.message}") }.getOrNull()
             }
+            android.util.Log.i("StremioCRating", "INIT resourcesPresent=${resources != null} hookStarted=${ratingPlotHook != null}")
         }
         
         val activity = context as? AppCompatActivity
