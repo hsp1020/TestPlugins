@@ -1435,6 +1435,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { e.printStackTrace(); null } ?: return false
+        com.lagradost.api.Log.d("StremioC", "subtitle-labels-v2 active provider=$name")
         
         val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
             loadData.imdbId
@@ -1579,7 +1580,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         // Keep the original URL-based label handling for subtitles returned by
         // CineStream, StreamPlay and VixSrc. These providers can also return
         // CloudStream subtitles, so do not deduplicate them here.
+        val externalSubtitleLogged = java.util.concurrent.atomic.AtomicBoolean(false)
         val integrationSubtitleCallback: (SubtitleFile) -> Unit = { sub ->
+            if (sub.lang.contains("(Stremio)", ignoreCase = true) && externalSubtitleLogged.compareAndSet(false, true)) {
+                com.lagradost.api.Log.d("StremioC", "subtitle-labels-v2 external callback present")
+            }
             val subtitleUrl = sub.url
             try {
                 val start = subtitleUrl.indexOf("://")
@@ -1608,8 +1613,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
         }
 
+        val labeledSubtitleLogged = java.util.concurrent.atomic.AtomicBoolean(false)
         val stremioSubtitleCallback: (SubtitleFile) -> Unit = { sub ->
             if (sub.url.isNotBlank() && seenStremioSubtitles.add(sub.url)) {
+                if (sub.lang.contains(" · ") && labeledSubtitleLogged.compareAndSet(false, true)) {
+                    com.lagradost.api.Log.d("StremioC", "subtitle-labels-v2 labeled callback forwarded")
+                }
                 integrationSubtitleCallback.invoke(sub)
             }
         }
@@ -1651,10 +1660,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             runSuspendCatching {
                 val text = customSession.get(subtitleRequestUrl, timeout = 15L).text
                 val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
-
+                com.lagradost.api.Log.d("StremioC", "subtitle-labels-v2 direct count=${res?.subtitles?.size ?: 0} rawLabel=${text.contains("\"label\"")} parsedLabel=${res?.subtitles?.count { it.label.textOrNull() != null } ?: 0}")
                 res?.subtitles?.forEach { sub ->
-                    sub.toCloudStreamSubtitle(if (addonUrl == currentMainUrl) name else null)
-                        ?.let(stremioSubtitleCallback)
+                    val source = if (addonUrl == currentMainUrl) name else cleanSubtitleBase.toHttpUrlOrNull()?.host
+                    sub.toCloudStreamSubtitle(source)?.let(stremioSubtitleCallback)
                 }
             }.onFailure { it.printStackTrace() }
         }
@@ -1963,7 +1972,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             val requestUrl = "$cleanBaseUrl/subtitles/$targetType/${encodedId}.json$querySuffix"
                             val text = customSession.get(requestUrl, timeout = 15L).text
                             val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
-
+                            com.lagradost.api.Log.d("StremioC", "subtitle-labels-v2 fallback count=${res?.subtitles?.size ?: 0} rawLabel=${text.contains("\"label\"")} parsedLabel=${res?.subtitles?.count { it.label.textOrNull() != null } ?: 0}")
                             res?.subtitles?.forEach { sub ->
                                 sub.toCloudStreamSubtitle(addon.name)?.let(stremioSubtitleCallback)
                             }
@@ -3026,12 +3035,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val language = SubtitleHelper.fromTagToEnglishLanguageName(rawLang) ?: rawLang
         val mainLabel = label.textOrNull()?.trim()?.takeIf { !it.equals(language, true) }
         val responseSource = name.textOrNull()?.trim()
-        // Preserve the old language and automatic-selection behavior when no metadata exists.
-        if (mainLabel == null && responseSource == null) {
-            return newSubtitleFile(if (normalizeLanguage) language else rawLang, subtitleUrl)
-        }
         val sourceLabel = (responseSource ?: addonName?.trim()?.takeIf { it.isNotEmpty() })
             ?.takeUnless { it.equals(mainLabel, true) || it.equals(language, true) }
+        // Keep non-labeled subtitles unchanged only if no source can be identified.
+        if (mainLabel == null && sourceLabel == null) {
+            return newSubtitleFile(if (normalizeLanguage) language else rawLang, subtitleUrl)
+        }
         val displayName = buildString {
             append(language)
             append(" (Stremio)")
@@ -3096,6 +3105,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             val hasPlayableTarget = url != null || ytId != null || externalUrl != null || infoHash != null
             if (hasPlayableTarget) {
+                if (subtitles.isNotEmpty()) com.lagradost.api.Log.d("StremioC", "subtitle-labels-v2 embedded count=${subtitles.size} labeled=${subtitles.count { it.label.textOrNull() != null }}")
                 subtitles.forEach { sub ->
                     provider.run { sub.toCloudStreamSubtitle(sourceName, normalizeLanguage = true) }?.let(stremioSubtitleCallback)
                 }
