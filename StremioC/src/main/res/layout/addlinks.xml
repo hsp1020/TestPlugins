@@ -50,7 +50,19 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
-        android:text="Enable Sync"
+        android:text="Metadata Sync"
+        android:textColor="#FFFFFF"
+        android:textSize="14sp"
+        android:focusable="true"
+        android:background="?android:attr/selectableItemBackground"
+        android:padding="5dp" />
+
+    <Switch
+        android:id="@+id/switchHistorySync"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="History Sync"
         android:textColor="#FFFFFF"
         android:textSize="14sp"
         android:focusable="true"
