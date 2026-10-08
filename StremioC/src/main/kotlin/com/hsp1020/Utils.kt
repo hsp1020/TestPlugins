@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.APIHolder.unixTimeMS
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.getQualityFromName
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -27,22 +28,20 @@ private val RATING_SOURCES = mapOf(
     "imdb" to RatingMeta("IMDb", "⭐", 2),
     "letterboxd" to RatingMeta("LB", "🟢", 3),
     "lb" to RatingMeta("LB", "🟢", 3),
-    "metacriticuser" to RatingMeta("MCU", "👥", 4),
     "audiencescore" to RatingMeta("Popcorn", "🍿", 5),
     "tomatoesaudience" to RatingMeta("Popcorn", "🍿", 5),
     "popcorn" to RatingMeta("Popcorn", "🍿", 5),
+    "audience" to RatingMeta("Popcorn", "🍿", 5),
     "trakt" to RatingMeta("Trakt", "Ⓣ", 6),
     "tmdb" to RatingMeta("TMDB", "🎬", 7),
     "metacritic" to RatingMeta("MC", "🎯", 8),
     "mc" to RatingMeta("MC", "🎯", 8),
     "rottentomatoes" to RatingMeta("RT", "🍅", 9),
     "tomatoes" to RatingMeta("RT", "🍅", 9),
-    "rt" to RatingMeta("RT", "🍅", 9),
-    "rogerebert" to RatingMeta("RE", "👍", 10),
-    "re" to RatingMeta("RE", "👍", 10)
+    "rt" to RatingMeta("RT", "🍅", 9)
 )
 
-suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<String> {
+suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false, mediaType: String = "movie"): List<String> {
     if (id.isNullOrBlank()) return emptyList()
 
     val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return emptyList()
@@ -54,12 +53,27 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
     if (!mdbListEnabled || mdbListApiKey.isBlank()) return emptyList()
     
     return try {
-        val idParam = if (isTmdb) "tm" else "i"
-        val url = "https://mdblist.com/api/?apikey=$mdbListApiKey&$idParam=$id"
-        
-        val json = JSONObject(app.get(url, timeout = 15L).text)
+        val provider = if (isTmdb) "tmdb" else "imdb"
+        val type = if (mediaType == "movie") "movie" else "show"
+        val modernUrl = "https://api.mdblist.com/$provider/$type/$id/?apikey=$mdbListApiKey&append_to_response=keyword"
+        val json = try {
+            JSONObject(app.get(modernUrl, timeout = 15L).text).also {
+                if (it.optJSONArray("ratings") == null) error("MDBList missing ratings")
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            val idParam = if (isTmdb) "tm" else "i"
+            JSONObject(app.get("https://mdblist.com/api/?apikey=$mdbListApiKey&$idParam=$id", timeout = 15L).text)
+        }
         val ratingsArray = json.optJSONArray("ratings") ?: return emptyList()
-        
+        val keywords = json.optJSONArray("keywords")
+        val certifications = (0 until (keywords?.length() ?: 0)).mapNotNull { i ->
+            val value = keywords?.opt(i)
+            (if (value is JSONObject) value.optString("name") else value as? String)
+                ?.substringAfterLast('.')?.lowercase()
+        }.toSet()
+
         val results = mutableListOf<Pair<RatingMeta, Double>>()
         
         for (i in 0 until ratingsArray.length()) {
@@ -70,26 +84,42 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
             if (value.isNaN() || value <= 0.0) continue
             
             val scaledValue = when (sourceKey) {
-                "letterboxd", "lb" -> value * 2.0
-                "rogerebert", "re" -> value * 2.5
-                "tmdb", "trakt", "metacritic", "mc", "tomatoes", "rottentomatoes", "rt", "tomatoesaudience", "audiencescore", "popcorn" -> value / 10.0
+                "letterboxd", "lb" -> ratingObj.optDouble("score").takeUnless { it.isNaN() }
+                    ?.div(10.0) ?: if (value > 5.0) value else value * 2.0
+                "tmdb", "trakt", "metacritic", "mc", "tomatoes", "rottentomatoes", "rt", "tomatoesaudience", "audiencescore", "popcorn", "audience" -> value / 10.0
                 else -> value
             }
             
             val roundedValue = round(scaledValue * 10) / 10.0
             if (roundedValue <= 0.0) continue
             
+            if (sourceKey == "metacriticuser" || sourceKey == "rogerebert" || sourceKey == "re") continue
             val meta = RATING_SOURCES[sourceKey] ?: RatingMeta(sourceKey.uppercase(), "🏷️", 99)
-            results.add(meta to roundedValue)
+            val icon = when (meta.name) {
+                "RT" -> when {
+                    "certified-fresh" in certifications && scaledValue >= 7.0 -> "🍅\u2060\u2060"
+                    scaledValue < 6.0 -> "🍅\u2060"
+                    else -> "🍅"
+                }
+                "Popcorn" -> when {
+                    "certified-hot" in certifications && scaledValue >= 8.0 -> "🍿\u2060\u2060"
+                    scaledValue < 6.0 -> "🍿\u2060"
+                    else -> "🍿"
+                }
+                else -> meta.icon
+            }
+            results.add(meta.copy(icon = icon) to roundedValue)
         }
         
         results.sortBy { it.first.sortOrder }
         results.map { (meta, score) ->
             "${meta.icon} ${String.format(Locale.US, "%.1f", score)}"
         }
-    } catch (e: Exception) { 
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
         e.printStackTrace()
-        emptyList() 
+        emptyList()
     }
 }
 
