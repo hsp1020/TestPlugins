@@ -59,7 +59,8 @@ data class LinkItem(
     val name: String,
     val link: String,
     val type: String,
-    val isSyncEnabled: Boolean = true
+    val isSyncEnabled: Boolean = true,
+    val isHistorySyncEnabled: Boolean = true
 )
 
 object SettingsRepository {
@@ -90,7 +91,8 @@ object SettingsRepository {
                         name = obj.optString("name", ""),
                         link = obj.optString("link", ""),
                         type = obj.optString("type", "StremioC"),
-                        isSyncEnabled = obj.optBoolean("isSyncEnabled", true)
+                        isSyncEnabled = obj.optBoolean("isSyncEnabled", true),
+                        isHistorySyncEnabled = obj.optBoolean("isHistorySyncEnabled", obj.optBoolean("isSyncEnabled", true))
                     )
                 )
             }
@@ -110,6 +112,7 @@ object SettingsRepository {
                 put("link", item.link)
                 put("type", item.type)
                 put("isSyncEnabled", item.isSyncEnabled)
+                put("isHistorySyncEnabled", item.isHistorySyncEnabled)
             }
             arr.put(obj)
         }
@@ -1063,6 +1066,7 @@ class SettingsBottomFragment(
         val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
         val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
         val switchLinkSync = try { dialogView.findView<Switch>("switchLinkSync") } catch (t: Throwable) { null }
+        val switchHistorySync = try { dialogView.findView<Switch>("switchHistorySync") } catch (t: Throwable) { null }
         
         etName?.background = getButtonBg()
         etName?.setTextColor(Color.WHITE)
@@ -1077,6 +1081,7 @@ class SettingsBottomFragment(
         if (isEdit) etLink?.setText(itemToEdit?.link)
 
         switchLinkSync?.isChecked = itemToEdit?.isSyncEnabled ?: true
+        switchHistorySync?.isChecked = itemToEdit?.isHistorySyncEnabled ?: true
 
         val footer = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1109,6 +1114,7 @@ class SettingsBottomFragment(
             val link = etLink.text.toString().trim()
             val type = "StremioC"
             val isSync = switchLinkSync?.isChecked ?: true
+            val isHistorySync = switchHistorySync?.isChecked ?: true
 
             if (link.isEmpty()) { showToast("Please enter a link"); return@setOnClickListener }
             val valid = try { val uri = link.toUri(); val scheme = uri.scheme?.lowercase(); scheme == "http" || scheme == "https" } catch (_: Exception) { false }
@@ -1118,14 +1124,14 @@ class SettingsBottomFragment(
                 val updatedList = SettingsRepository.loadLinks(sharedPref)
                 val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
                 if (indexInDb != -1) {
-                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type, isSyncEnabled = isSync)
+                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type, isSyncEnabled = isSync, isHistorySyncEnabled = isHistorySync)
                     updatedList[indexInDb] = newItem
                     SettingsRepository.saveLinks(sharedPref, updatedList)
                     (rv?.adapter as? LinksAdapter)?.updateItem(newItem, position)
                     showToast("Link Updated Successfully")
                 }
             } else {
-                val item = LinkItem(name = name.ifBlank { link }, link = link, type = type, isSyncEnabled = isSync)
+                val item = LinkItem(name = name.ifBlank { link }, link = link, type = type, isSyncEnabled = isSync, isHistorySyncEnabled = isHistorySync)
                 try {
                     val list = SettingsRepository.loadLinks(sharedPref)
                     list.add(0, item)
@@ -1775,7 +1781,7 @@ private fun showLanguageSelectDialog() {
             holder.tvName.text = item.name
             holder.tvLink.text = item.link
             holder.tvType.text = item.type
-            holder.tvSyncBadge.visibility = if (item.isSyncEnabled) View.VISIBLE else View.GONE
+            holder.tvSyncBadge.visibility = if (item.isSyncEnabled || item.isHistorySyncEnabled) View.VISIBLE else View.GONE
             holder.btnDelete.setOnClickListener { onDelete(item) }
             holder.itemView.setOnClickListener { onEdit(item, position) }
         }
