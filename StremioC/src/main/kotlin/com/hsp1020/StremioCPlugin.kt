@@ -2,6 +2,8 @@
 package com.hsp1020
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.content.SharedPreferences
 import androidx.appcompat.app.AppCompatActivity
 import com.lagradost.api.Log
@@ -28,6 +30,8 @@ class StremioCPlugin : Plugin() {
     private val PREF_FILE = "StremioC"
     private val PREF_KEY_LINKS = "stremio_saved_links"
     private val pluginIoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val ratingUiHandler = Handler(Looper.getMainLooper())
+    private var ratingPlotHook: RatingPlotImageHook? = null
 
     private fun prefsToJson(prefs: SharedPreferences): JSONObject {
         val json = JSONObject()
@@ -178,12 +182,31 @@ class StremioCPlugin : Plugin() {
             e.printStackTrace()
         }
         reload(appContext)
+
+        // Only overlays existing MDBList emojis with bundled logos.
+        // No changes to MDBList fetching, metadata, stream URLs, subtitles or ranking.
+        ratingUiHandler.post {
+            runCatching { ratingPlotHook?.stop() }
+            ratingPlotHook = resources?.let { pluginResources ->
+                runCatching {
+                    RatingPlotImageHook(appContext, pluginResources).also { it.start() }
+                }.onFailure { Log.w("StremioCPlugin", "Rating image hook unavailable: ${it.message}") }.getOrNull()
+            }
+        }
         
         val activity = context as? AppCompatActivity
         openSettings = {
             val frag = SettingsBottomFragment(this, appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE))
             activity?.supportFragmentManager?.let { fm -> frag.show(fm, "Frag") }
         }
+    }
+
+    override fun beforeUnload() {
+        ratingUiHandler.post {
+            runCatching { ratingPlotHook?.stop() }
+            ratingPlotHook = null
+        }
+        super.beforeUnload()
     }
 
     fun reload(context: Context) {
