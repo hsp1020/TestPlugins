@@ -1619,7 +1619,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 if (sub.lang.contains(" · ") && labeledSubtitleLogged.compareAndSet(false, true)) {
                     com.lagradost.api.Log.d("StremioC", "subtitle-labels-v2 labeled callback forwarded")
                 }
-                integrationSubtitleCallback.invoke(sub)
+                // These subtitles originated in StremioC, not external integrations.
+                // Do not re-append the legacy (Stremio) marker.
+                subtitleCallback.invoke(sub)
             }
         }
 
@@ -3055,11 +3057,36 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("name") val name: JsonNode? = null
     )
 
-    private suspend fun Subtitle.toCloudStreamSubtitle(addonName: String?, normalizeLanguage: Boolean = false): SubtitleFile? {
+    // Use CloudStream's language catalog; no hardcoded language names or subtitle sources.
+    private val subtitleLanguageNames by lazy {
+        SubtitleHelper.languages.map { it.languageName.lowercase(java.util.Locale.ROOT) }.toSet()
+    }
+
+    private fun cleanSubtitleDisplayLabel(label: String, language: String): String? {
+        var cleaned = label.trim()
+        // Drop only a complete, repeated language prefix followed by a display separator.
+        val repeatedPrefix = Regex("^${Regex.escape(language)}\\s*(?:[·|:]|\\s[-—–]\\s)\\s*", RegexOption.IGNORE_CASE)
+        while (repeatedPrefix.containsMatchIn(cleaned)) {
+            cleaned = repeatedPrefix.replaceFirst(cleaned, "").trim()
+        }
+        // Parenthesized *full language names*, not release names or filename fragments.
+        val beforeParentheses = cleaned
+        cleaned = Regex("\\s*\\(([^()]+)\\)").replace(cleaned) { match ->
+            if (match.groupValues[1].trim().lowercase(java.util.Locale.ROOT) in subtitleLanguageNames) ""
+            else match.value
+        }.trim()
+        if (cleaned != beforeParentheses) {
+            cleaned = cleaned.trimStart('·', '|', ' ').trim()
+            cleaned = Regex("\\s+[·|]\\s*[·|]\\s+").replace(cleaned, " · ")
+        }
+        return cleaned.takeIf { it.isNotBlank() }
+    }
+
+    private suspend fun Subtitle.toCloudStreamSubtitle(addonName: String?): SubtitleFile? {
         val subtitleUrl = url ?: return null
         val rawLang = lang ?: lang_code ?: "Unknown"
         val language = SubtitleHelper.fromTagToEnglishLanguageName(rawLang) ?: rawLang
-        val mainLabel = label.textOrNull()?.trim()?.takeIf { !it.equals(language, true) }
+        val mainLabel = label.textOrNull()?.let { cleanSubtitleDisplayLabel(it, language) }
         val responseSource = name.textOrNull()?.trim()?.takeIf {
             it.isNotBlank() && !it.equals("StremioC", true) && !it.startsWith("http", true) &&
                 !it.equals(mainLabel, true) && !it.equals(language, true)
@@ -3068,14 +3095,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             it.isNotBlank() && !it.equals("StremioC", true) && !it.startsWith("http", true) &&
                 !it.equals(mainLabel, true) && !it.equals(language, true)
         }
-        // Keep non-labeled subtitles unchanged only if no source can be identified.
         if (mainLabel == null && sourceLabel == null) {
-            return newSubtitleFile(if (normalizeLanguage) language else "$language (Stremio)", subtitleUrl)
+            return newSubtitleFile(language, subtitleUrl)
         }
         val displayName = buildString {
             append(language)
-            append(" (Stremio)")
-            if (mainLabel != null) { append(" · "); append(mainLabel) }
+            if (mainLabel != null && !mainLabel.equals(language, true)) { append(" · "); append(mainLabel) }
             if (sourceLabel != null) { append(" — "); append(sourceLabel) }
         }
         return newSubtitleFile(displayName, subtitleUrl)
@@ -3138,7 +3163,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             if (hasPlayableTarget) {
                 if (subtitles.isNotEmpty()) com.lagradost.api.Log.d("StremioC", "subtitle-labels-v2 embedded count=${subtitles.size} labeled=${subtitles.count { it.label.textOrNull() != null }}")
                 subtitles.forEach { sub ->
-                    provider.run { sub.toCloudStreamSubtitle(sourceName, normalizeLanguage = true) }?.let(stremioSubtitleCallback)
+                    provider.run { sub.toCloudStreamSubtitle(sourceName) }?.let(stremioSubtitleCallback)
                 }
             }
         }
