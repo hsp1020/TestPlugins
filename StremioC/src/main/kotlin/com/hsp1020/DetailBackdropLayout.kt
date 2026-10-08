@@ -41,7 +41,11 @@ internal class DetailBackdropLayout(private val root: View) {
     private val originalLogoScaleX = logo?.scaleX ?: 1f
     private val originalLogoScaleY = logo?.scaleY ?: 1f
     private val originalTitleAlpha = title?.alpha ?: 1f
-    private var fade: View? = null
+    private val originalLogoAlpha = logo?.alpha ?: 1f
+    private val originalPictureAlpha = picture?.alpha ?: 1f
+    private val shadow = holder?.getChildAt(1) // Existing CloudStream bottom shadow.
+    private val originalShadowVisibility = shadow?.visibility
+    private val edges = mutableListOf<View>()
     private var titleOverlay: TextView? = null
     private var started = false
     private fun dp(v: Int) = (v * root.resources.displayMetrics.density).roundToInt()
@@ -67,14 +71,34 @@ internal class DetailBackdropLayout(private val root: View) {
     private val preDraw = ViewTreeObserver.OnPreDrawListener {
         runCatching { update() }; true
     }
+    private fun splitMode() = phoneHero == null ||
+        root.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE ||
+        root.resources.configuration.smallestScreenWidthDp >= 600
+    private fun visibility(show: Boolean) {
+        picture?.alpha = if (show) originalPictureAlpha else 0f
+        logo?.alpha = if (show) originalLogoAlpha else 0f
+    }
+    private fun stage() {
+        visibility(false)
+        title?.alpha = 0f
+        titleOverlay?.visibility = View.GONE
+    }
     fun start() {
         val container = holder ?: return
         if (started || picture == null) return
         started = true
-        fade = View(root.context).also {
-            it.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
-                intArrayOf(Color.BLACK, Color.TRANSPARENT))
-            container.addView(it, 1, FrameLayout.LayoutParams(0, 0))
+        if (splitMode()) stage() // Hide both before either asynchronous image load completes.
+        val directions = listOf(
+            GradientDrawable.Orientation.LEFT_RIGHT,
+            GradientDrawable.Orientation.RIGHT_LEFT,
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            GradientDrawable.Orientation.BOTTOM_TOP
+        )
+        directions.forEachIndexed { index, direction ->
+            edges += View(root.context).also {
+                it.background = GradientDrawable(direction, intArrayOf(Color.BLACK, Color.TRANSPARENT))
+                container.addView(it, 1 + index, FrameLayout.LayoutParams(0, 0))
+            }
         }
         titleOverlay = TextView(root.context).also { overlay ->
             title?.let {
@@ -104,9 +128,11 @@ internal class DetailBackdropLayout(private val root: View) {
         // Leave the built-in trailer player in charge while it is active.
         if (!tv && trailer?.visibility == View.GONE) {
             showTitle(false)
+            visibility(true)
             logo?.translationX = originalLogoX
             logo?.translationY = originalLogoY
             scaleLogo(false)
+            shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
             return
         }
         val landscape = root.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -126,14 +152,17 @@ internal class DetailBackdropLayout(private val root: View) {
         if (!split) {
             image.scaleType = originalScale ?: ImageView.ScaleType.CENTER_CROP
             originalPicture?.let { place(image, it.width, it.height, it.marginStart, it.topMargin) }
-            place(fade, 0, 0, 0, 0)
+            edges.forEach { place(it, 0, 0, 0, 0) }
+            shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
             showTitle(false)
+            visibility(true)
             logo?.translationX = originalLogoX
             logo?.translationY = originalLogoY
             scaleLogo(false)
             return
         }
 
+        // logo visibility becomes VISIBLE before Coil has finished decoding its drawable.
         val hasLogo = logo?.visibility == View.VISIBLE && logo.drawable != null && logo.width > 0
         scaleLogo(hasLogo)
         val titleText = if (!hasLogo && title?.visibility == View.VISIBLE)
@@ -141,11 +170,13 @@ internal class DetailBackdropLayout(private val root: View) {
         val labelWidth = if (hasLogo) (logo!!.width * logo.scaleX).roundToInt() else if (titleText.isNotEmpty())
             min((titleOverlay!!.paint.measureText(titleText) + dp(24)).roundToInt(),
                 (container.width * 0.36f).roundToInt()) else 0
-        val gap = if (labelWidth > 0) dp(72) else 0
+        val gap = if (labelWidth > 0) dp(55) else 0
         val maxWidth = (container.width - labelWidth - gap - dp(24)).coerceAtLeast(1)
         val drawable = image.drawable
         val iw = drawable?.intrinsicWidth ?: 0
         val ih = drawable?.intrinsicHeight ?: 0
+        val ready = iw > 0 && ih > 0 && (hasLogo || titleText.isNotEmpty())
+        if (!ready) { stage(); return }
         val imageWidth = if (iw > 0 && ih > 0)
             min(maxWidth, (bannerHeight.toDouble() * iw / ih).roundToInt().coerceAtLeast(1))
             else maxWidth
@@ -156,8 +187,19 @@ internal class DetailBackdropLayout(private val root: View) {
         val imageLeft = groupLeft + labelWidth + gap
         val imageTop = (bannerHeight - imageHeight) / 2
         if (image.scaleType != ImageView.ScaleType.FIT_CENTER) image.scaleType = ImageView.ScaleType.FIT_CENTER
+        // Keep the pair hidden until BOTH assets are ready AND the final measured layout is stable.
+        val stable = image.width == imageWidth && image.height == imageHeight &&
+            image.left == imageLeft && image.top == imageTop
+        if (!stable) stage()
         place(image, imageWidth, imageHeight, imageLeft, imageTop)
-        place(fade, min(dp(72), imageWidth / 5), imageHeight, imageLeft, imageTop)
+        val featherX = min(dp(72), imageWidth / 5)
+        val featherY = min(dp(72), imageHeight / 5)
+        place(edges[0], featherX, imageHeight, imageLeft, imageTop)
+        place(edges[1], featherX, imageHeight, imageLeft + imageWidth - featherX, imageTop)
+        place(edges[2], imageWidth, featherY, imageLeft, imageTop)
+        place(edges[3], imageWidth, featherY, imageLeft, imageTop + imageHeight - featherY)
+        // Avoid double-darkening the bottom: the built-in shadow covered the whole parent.
+        shadow?.visibility = View.INVISIBLE
         if (hasLogo) {
             // Account for the centered pivot when scaling the original ImageView.
             logo?.translationX = groupLeft - logo!!.left + (logo.scaleX - 1f) * logo.pivotX
@@ -177,7 +219,10 @@ internal class DetailBackdropLayout(private val root: View) {
                 overlay.layoutParams = p
             }
         }
-        showTitle(titleText.isNotEmpty())
+        if (stable) {
+            showTitle(titleText.isNotEmpty())
+            visibility(true)
+        } else stage()
     }
     fun stop() {
         if (!started) return
@@ -185,7 +230,9 @@ internal class DetailBackdropLayout(private val root: View) {
         if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(preDraw)
         showTitle(false)
         titleOverlay?.let { holder?.removeView(it) }; titleOverlay = null
-        fade?.let { holder?.removeView(it) }; fade = null
+        edges.forEach { holder?.removeView(it) }; edges.clear()
+        shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
+        visibility(true)
         logo?.translationX = originalLogoX
         logo?.translationY = originalLogoY
         scaleLogo(false)
