@@ -111,7 +111,10 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         lastFitHeight = maxHeight
     }
     private val preDraw = ViewTreeObserver.OnPreDrawListener {
-        runCatching { update() }.onFailure { recoverOriginalLayout() }; true
+        runCatching { update() }.onFailure {
+            android.util.Log.e("StremioCBackdrop", "Split layout update failed", it)
+            recoverOriginalLayout()
+        }; true
     }
     private fun splitMode() = phoneHero == null ||
         root.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE ||
@@ -221,7 +224,10 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             container.addView(overlay, FrameLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
         root.viewTreeObserver.addOnPreDrawListener(preDraw)
-        runCatching { update() }.onFailure { recoverOriginalLayout() }
+        runCatching { update() }.onFailure {
+            android.util.Log.e("StremioCBackdrop", "Split layout start failed", it)
+            recoverOriginalLayout()
+        }
     }
     private fun showTitle(show: Boolean) {
         val visibility = if (show) View.VISIBLE else View.GONE
@@ -234,10 +240,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (splitFallback) { revealRecoveredLayout(); return }
         val container = holder ?: return
         val image = picture ?: return
-        if (container.width <= 0 || root.width <= 0) {
-            if (splitMode() && ++pendingSplitFrames >= 8) recoverOriginalLayout()
-            return
-        }
+        // A not-yet-measured tablet/TV is loading, not a failed layout.
+        if (container.width <= 0 || root.width <= 0) return
         // With trailers enabled we never enter this layout path (see start()).
         // A GONE trailer holder means inactive, not an active player.
         val landscape = root.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -375,9 +379,19 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             logo?.alpha = if (hasLogo) originalLogoAlpha else 0f
         } else {
             stage()
-            // Bounded recovery: if layout coordinates cannot settle, restore the
-            // native screen once, rather than displaying half-repositioned art.
-            if (++pendingSplitFrames >= 8) recoverOriginalLayout()
+            // If a parent keeps invalidating layout, commit the same calculated
+            // bounds directly before revealing; never switch normal tablet/TV
+            // loading to the permanently locked native-layout fallback.
+            if (++pendingSplitFrames >= 8) {
+                image.layout(imageLeft, imageTop, imageLeft + imageWidth, imageTop + imageHeight)
+                if (image.width == imageWidth && image.height == imageHeight &&
+                    image.left == imageLeft && image.top == imageTop) {
+                    pendingSplitFrames = 0
+                    showTitle(titleText.isNotEmpty())
+                    image.alpha = if (iw > 0 && ih > 0) originalPictureAlpha else 0f
+                    logo?.alpha = if (hasLogo) originalLogoAlpha else 0f
+                }
+            }
         }
     }
     fun stop() {
