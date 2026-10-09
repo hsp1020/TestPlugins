@@ -167,10 +167,18 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         }
     }
     private fun portraitMode() = phoneHero != null && !splitMode()
+    private fun maskPortraitTitle(): Boolean =
+        detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true &&
+            !(detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true &&
+              logo?.visibility == View.VISIBLE && logo.drawable != null && logo.width > 0)
     private fun updatePortraitTitle() {
         if (!portraitMode()) return
-        if (detailUrl?.let { StremioC.fallbackLogoTitles[it] } != true) return
-        if (logo?.visibility == View.VISIBLE && logo.drawable != null &&
+        if (detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true) {
+            val alpha = if (maskPortraitTitle()) 0f else originalTitleAlpha
+            if (title?.alpha != alpha) title?.alpha = alpha
+        }
+        if (detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true &&
+            logo?.visibility == View.VISIBLE && logo.drawable != null &&
             !title?.text.isNullOrBlank() && title?.visibility != View.VISIBLE) {
             title?.visibility = View.VISIBLE
             forcedPortraitTitle = true
@@ -185,6 +193,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val trailersEnabled = keyId == 0 || PreferenceManager.getDefaultSharedPreferences(context)
             .getBoolean(context.getString(keyId), true)
         if (trailersEnabled && !portraitMode()) return
+        if (portraitMode() && maskPortraitTitle()) title?.alpha = 0f
         started = true
         splitFallback = false
         nativeRecoveryFrames = 0
@@ -228,10 +237,10 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             recoverOriginalLayout()
         }
     }
-    private fun showTitle(show: Boolean) {
+    private fun showTitle(show: Boolean, hideOriginal: Boolean = false) {
         val visibility = if (show) View.VISIBLE else View.GONE
         if (titleOverlay?.visibility != visibility) titleOverlay?.visibility = visibility
-        val alpha = if (show) 0f else originalTitleAlpha
+        val alpha = if (show || hideOriginal) 0f else originalTitleAlpha
         if (title?.alpha != alpha) title?.alpha = alpha
     }
     private fun update() {
@@ -262,7 +271,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             originalPicture?.let { place(image, it.width, it.height, it.marginStart, it.topMargin) }
             edges.forEach { place(it, 0, 0, 0, 0) }
             shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
-            showTitle(false)
+            showTitle(false, hideOriginal = maskPortraitTitle())
             visibility(true)
             logo?.translationX = originalLogoX
             logo?.translationY = originalLogoY
@@ -273,6 +282,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
 
         // logo visibility becomes VISIBLE before Coil has finished decoding its drawable.
         val hasLogo = logo?.visibility == View.VISIBLE && logo.drawable != null && logo.width > 0
+        val expectedLogo = detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true
+        val logoPending = expectedLogo && !hasLogo
         val foreignLogo = hasLogo && detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true
         val titleText = if (foreignLogo || !hasLogo)
             title?.text?.toString()?.trim()?.replace('\n', ' ')?.replace('\r', ' ').orEmpty() else ""
@@ -375,7 +386,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         // WITHOUT staging already visible assets back to alpha=0.
         if (image.width == imageWidth && image.height == imageHeight &&
             image.left == imageLeft && image.top == imageTop) {
-            showTitle(titleText.isNotEmpty())
+            showTitle(titleText.isNotEmpty() && !logoPending, hideOriginal = expectedLogo && !foreignLogo)
             if (iw > 0 && ih > 0) image.alpha = originalPictureAlpha
             if (hasLogo) logo?.alpha = originalLogoAlpha
         }
@@ -387,7 +398,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (forcedPortraitTitle && logo?.visibility == View.VISIBLE && logo.drawable != null)
             title?.visibility = View.GONE
         forcedPortraitTitle = false
-        if (portraitTitleOnly) { portraitTitleOnly = false; return }
+        if (portraitTitleOnly) { portraitTitleOnly = false; title?.alpha = originalTitleAlpha; return }
         showTitle(false)
         titleOverlay?.let { holder?.removeView(it) }; titleOverlay = null
         baseTitlePaint = null
