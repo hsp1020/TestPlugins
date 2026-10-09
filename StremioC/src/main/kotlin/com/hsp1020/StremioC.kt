@@ -1216,6 +1216,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     
     override suspend fun load(url: String): LoadResponse = coroutineScope {
         val parsedUrlHint = parseDetailUrlHint(url)
+        // The requested detail URL is the immutable source identity. A metadata
+        // synchronizer may return an IMDb meta.id for the same Kitsu entry.
+        val requestedKitsuId = parsedUrlHint?.id?.takeIf { it.startsWith("kitsu:") }
         val rememberedHint = detailLoadHints[url]?.takeIf { cached ->
             parsedUrlHint != null &&
                 cached.id == parsedUrlHint.id &&
@@ -1311,6 +1314,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             speculativeKitsuDeferred?.cancel()
         }
 
+        if (requestedKitsuId != null || res.id?.startsWith("kitsu:") == true) {
+            com.lagradost.api.Log.d("StremioC", "id-route-v2 load requested=$requestedKitsuId metaId=${res.id}")
+        }
         val normalizedId = try { normalizeId(res.id ?: "") } catch (e: Exception) { e.printStackTrace(); res.id ?: "" }
         val encodedId = normalizedId.urlEncode()
 
@@ -1431,7 +1437,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             fetchedMalId = fetchedMalId,
             resolvedTmdbId = resolvedTmdbId,
             kitsuVideos = kitsuVideos,
-            resolvedIdHolder = resolvedIdHolder
+            resolvedIdHolder = resolvedIdHolder,
+            requestedKitsuId = requestedKitsuId
         )
 
         var actualMdbTarget = resolvedMdbTarget(res, resolvedTmdbId, resolvedImdbId)
@@ -1501,6 +1508,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val globalEpisode = if (actualIsMovie) null else loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 } ?: 1
 
         val primaryStremioId = buildStremioId(targetType, primaryId, loadData.season, loadData.episode) ?: primaryId
+        if (loadData.originalKitsuId != null || loadData.kitsuId != null) {
+            com.lagradost.api.Log.d("StremioC", "id-route-v2 provider=$name source=${loadData.originalKitsuId} video=${loadData.id} direct=$primaryStremioId global=$globalId")
+        }
         val encodedPrimaryId = primaryStremioId.urlEncode()
 
         val seenLinks = Collections.synchronizedSet(mutableSetOf<Triple<String, String, Map<String, String>>>())
@@ -1684,6 +1694,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 "$cleanSubtitleBase/subtitles/$requestType/${subId.urlEncode()}.json$subtitleSuffix"
 
             if (!requestedSubtitleUrls.add(subtitleRequestUrl)) return
+            if (loadData.originalKitsuId != null && addonUrl == currentMainUrl) {
+                com.lagradost.api.Log.d("StremioC", "id-route-v2 direct-subtitle type=$requestType id=$subId")
+            }
 
             runSuspendCatching {
                 val text = customSession.get(subtitleRequestUrl, timeout = 15L).text
@@ -1703,6 +1716,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 if (cleanBaseUrl.isNotBlank() && encodedPrimaryId.isNotBlank()) {
                     runSuspendCatching {
                         val streamRequestUrl = "$cleanBaseUrl/stream/$targetType/${encodedPrimaryId}.json$querySuffix"
+                        if (loadData.originalKitsuId != null) {
+                            com.lagradost.api.Log.d("StremioC", "id-route-v2 direct-stream type=$targetType id=$primaryStremioId")
+                        }
                         val text = customSession.get(streamRequestUrl, timeout = 25L).text
                         val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
                         res?.streams?.forEach { stream ->
@@ -2794,10 +2810,15 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             fetchedMalId: Int? = null, 
             resolvedTmdbId: String? = null,
             kitsuVideos: List<Video>? = null,
-            resolvedIdHolder: Array<String?>? = null
+            resolvedIdHolder: Array<String?>? = null,
+            requestedKitsuId: String? = null
         ): LoadResponse = coroutineScope {
             val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
-            val originalKitsuId = this@CatalogEntry.id?.takeIf { it.startsWith("kitsu:") }
+            val originalKitsuId = requestedKitsuId
+                ?: this@CatalogEntry.id?.takeIf { it.startsWith("kitsu:") }
+            if (originalKitsuId != null) {
+                com.lagradost.api.Log.d("StremioC", "id-route-v2 metaSource=$originalKitsuId metaId=${this@CatalogEntry.id}")
+            }
 
             var finalImdbId = if (this@CatalogEntry.id?.startsWith("tt") == true) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
