@@ -164,10 +164,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private fun getCineStreamProvider(): MainAPI? {
         if (getKey<Boolean>("ProviderCineStream") == false) return null
-        if (cachedCineStreamProvider != null) return cachedCustomCineStreamProvider()
+        if (cachedCineStreamProvider != null) return cachedCineStreamProvider
 
         synchronized(StremioC::class.java) {
-            if (cachedCineStreamProvider != null) return cachedCustomCineStreamProvider()
+            if (cachedCineStreamProvider != null) return cachedCineStreamProvider
 
             val provider = getSafeAllProviders().find { it.name.equals("CineStream", true) }
                 ?: loadProviderDynamically("megix", "com.megix.CineStreamProvider")
@@ -176,8 +176,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             return provider
         }
     }
-
-    private fun cachedCustomCineStreamProvider(): MainAPI? = cachedCineStreamProvider
 
     private fun isStreamPlayApiEnabled(apiName: String): Boolean {
         val context = CloudStreamApp.context ?: return true
@@ -188,10 +186,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private fun getStreamPlayProvider(): MainAPI? {
         if (!isStreamPlayApiEnabled("StreamPlay")) return null
-        if (cachedStreamPlayProvider != null) return cachedCustomStreamPlayProvider()
+        if (cachedStreamPlayProvider != null) return cachedStreamPlayProvider
 
         synchronized(StremioC::class.java) {
-            if (cachedStreamPlayProvider != null) return cachedCustomStreamPlayProvider()
+            if (cachedStreamPlayProvider != null) return cachedStreamPlayProvider
 
             val provider = getSafeAllProviders().find { it.name.equals("StreamPlay", true) }
                 ?: loadProviderDynamically(
@@ -202,8 +200,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             return provider
         }
     }
-
-    private fun cachedCustomStreamPlayProvider(): MainAPI? = cachedStreamPlayProvider
 
     private fun getStreamPlayAnimeProvider(): MainAPI? {
         if (!isStreamPlayApiEnabled("StreamPlay-Anime")) return null
@@ -331,7 +327,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @Volatile private var cachedCineStreamProvider: MainAPI? = null
         @Volatile private var cachedStreamPlayProvider: MainAPI? = null
 
-        @Volatile private var hasSyncedCineStreamSettings = false
         
         @Volatile private var cachedClassLoaderRef: WeakReference<ClassLoader>? = null
 
@@ -1568,22 +1563,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             
             val context = CloudStreamApp.context
             
-            try {
-                if (context != null) {
-                    val sharedPrefsDir = java.io.File(context.applicationInfo.dataDir, "shared_prefs")
-                    if (sharedPrefsDir.exists() && sharedPrefsDir.isDirectory) {
-                        sharedPrefsDir.listFiles()?.forEach { file ->
-                            val name = file.name.removeSuffix(".xml")
-                            val p = context.getSharedPreferences(name, Context.MODE_PRIVATE)
-                            if (p.contains("stremio_addons")) {
-                            }
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-
             val raw = try { 
                 val rebuildPrefs = context?.getSharedPreferences("rebuild_preference", Context.MODE_PRIVATE)
                 var rawValue = rebuildPrefs?.getString("stremio_addons", "") ?: ""
@@ -3345,23 +3324,7 @@ private data class TmdbDetailResponse(
     @JsonProperty("external_ids") val external_ids: ExternalIds? = null, 
     @JsonProperty("translations") val translations: TmdbTranslations? = null,
     @JsonProperty("vote_average") val vote_average: Double? = null
-) {
-    fun toTmdbMedia(mediaType: String): TmdbMedia {
-        return TmdbMedia(
-            id = this.id,
-            name = this.name ?: this.title,
-            title = this.title ?: this.name,
-            originalTitle = this.original_title ?: this.original_name,
-            mediaType = mediaType,
-            poster_path = this.posterPath,
-            overview = this.overview,
-            origin_country = this.origin_country,
-            original_language = this.original_language,
-            releaseDate = this.releaseDate,
-            firstAirDate = this.firstAirDate
-        )
-    }
-}
+)
 
 private data class TmdbImages(@JsonProperty("logos") val logos: List<TmdbLogo>? = null)
 private data class TmdbLogo(
