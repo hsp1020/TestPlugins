@@ -793,32 +793,51 @@ class SettingsBottomFragment(
 
         val extraUrlContainer = view.findView<LinearLayout>("containerStreamSubtitleUrls")
         val extraUrlToggle = view.findView<TextView>("toggleStreamSubtitleUrls")
+        val urlControlSize = (40 * ctx.resources.displayMetrics.density + 0.5f).toInt()
+        val urlFieldPadding = (10 * ctx.resources.displayMetrics.density + 0.5f).toInt()
         fun addExtraUrlField(initial: String = "") {
-            val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+            val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
             val field = EditText(ctx).apply {
                 hint = "Addon Base URL"
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
                 setText(initial)
                 textSize = 14f
                 setTextColor(Color.WHITE)
-                setHintTextColor(Color.GRAY)
-                background = getButtonBg()
+                setHintTextColor(Color.parseColor("#555555"))
+                setPadding(urlFieldPadding, urlFieldPadding, urlFieldPadding, urlFieldPadding)
+                setBackgroundColor(Color.TRANSPARENT)
                 isSingleLine = true
             }
             row.addView(field, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            row.addView(Button(ctx).apply {
+            row.addView(TextView(ctx).apply {
                 text = "−"
-                isAllCaps = false
+                contentDescription = "Remove addon URL"
+                textSize = 20f
+                setTextColor(Color.LTGRAY)
+                gravity = android.view.Gravity.CENTER
+                isClickable = true
+                isFocusable = true
+                val ripple = android.util.TypedValue()
+                ctx.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)
+                setBackgroundResource(ripple.resourceId)
                 setOnClickListener {
                     if (extraUrlContainer.childCount > 1) extraUrlContainer.removeView(row)
                     else field.setText("")
                 }
-            }, LinearLayout.LayoutParams((48 * ctx.resources.displayMetrics.density).toInt(), LinearLayout.LayoutParams.WRAP_CONTENT))
-            row.addView(Button(ctx).apply {
+            }, LinearLayout.LayoutParams(urlControlSize, urlControlSize))
+            row.addView(TextView(ctx).apply {
                 text = "+"
-                isAllCaps = false
+                contentDescription = "Add addon URL"
+                textSize = 20f
+                setTextColor(Color.LTGRAY)
+                gravity = android.view.Gravity.CENTER
+                isClickable = true
+                isFocusable = true
+                val ripple = android.util.TypedValue()
+                ctx.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)
+                setBackgroundResource(ripple.resourceId)
                 setOnClickListener { addExtraUrlField() }
-            }, LinearLayout.LayoutParams((48 * ctx.resources.displayMetrics.density).toInt(), LinearLayout.LayoutParams.WRAP_CONTENT))
+            }, LinearLayout.LayoutParams(urlControlSize, urlControlSize))
             extraUrlContainer.addView(row)
         }
         val extraUrls = runCatching {
@@ -829,6 +848,7 @@ class SettingsBottomFragment(
         fun setExtraUrlExpanded(expanded: Boolean) {
             extraUrlContainer.visibility = if (expanded) View.VISIBLE else View.GONE
             extraUrlToggle.text = if (expanded) "▲" else "▼"
+            extraUrlToggle.contentDescription = if (expanded) "Collapse addon URLs" else "Expand addon URLs"
             sharedPref.edit().putBoolean(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_EXPANDED, expanded).apply()
         }
         setExtraUrlExpanded(sharedPref.getBoolean(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_EXPANDED, true))
