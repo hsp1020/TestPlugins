@@ -30,7 +30,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private val picture = find(if (tv) "background_poster" else "result_poster_background") as? ImageView
     private val logo = find(if (tv) "background_poster_watermark_badge_holder" else "background_poster_watermark_badge") as? ImageView
     private val title = find("result_title") as? TextView
-    private val trailer = if (tv) null else find("result_smallscreen_holder")
     private val tvColumn = if (tv)
         ((find("result_finish_loading") as? ViewGroup)?.getChildAt(0) as? ViewGroup)?.getChildAt(0) else null
     private val originalHeroHeight = phoneHero?.layoutParams?.height
