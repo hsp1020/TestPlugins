@@ -57,7 +57,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private var started = false
     private var portraitTitleOnly = false
     private var forcedPortraitTitle = false
-    private var pendingSplitFrames = 0
+    // Asset alphas are staged once during start(); no re-staging on pre-draw.
     private var splitFallback = false
     private var nativeRecoveryFrames = 0
     private fun dp(v: Int) = (v * root.resources.displayMetrics.density).roundToInt()
@@ -186,7 +186,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             .getBoolean(context.getString(keyId), true)
         if (trailersEnabled && !portraitMode()) return
         started = true
-        pendingSplitFrames = 0
         splitFallback = false
         nativeRecoveryFrames = 0
         if (trailersEnabled) {
@@ -301,11 +300,14 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val imageLeft = groupLeft + labelWidth + gap
         val imageTop = (bannerHeight - imageHeight) / 2
         if (image.scaleType != ImageView.ScaleType.FIT_CENTER) image.scaleType = ImageView.ScaleType.FIT_CENTER
-        // Reveal each drawable only after final dimensions AND coordinates are committed.
-        var stable = image.width == imageWidth && image.height == imageHeight &&
-            image.left == imageLeft && image.top == imageTop
-        if (!stable) stage()
+        // Persist the target geometry, then commit it *in this pre-draw*.
+        // Comparing current bounds and re-staging on every frame caused the
+        // tablet/TV to alternate between visible and alpha=0 indefinitely.
         place(image, imageWidth, imageHeight, imageLeft, imageTop)
+        if (image.width != imageWidth || image.height != imageHeight ||
+            image.left != imageLeft || image.top != imageTop) {
+            image.layout(imageLeft, imageTop, imageLeft + imageWidth, imageTop + imageHeight)
+        }
         val featherX = min(dp(72), imageWidth / 5)
         val featherY = min(dp(72), imageHeight / 5)
         place(edges[0], featherX, imageHeight, imageLeft, imageTop)
@@ -323,12 +325,10 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val verticalGap = if (foreignLogo && titleText.isNotEmpty()) dp(8).coerceAtMost((imageHeight - 2).coerceAtLeast(0)) else 0
         var titleHeight = 0
         titleOverlay?.let { overlay ->
-            if (overlay.text.toString() != titleText) { overlay.text = titleText; stable = false }
+            if (overlay.text.toString() != titleText) overlay.text = titleText
             if (titleText.isNotEmpty()) {
-                val previousSize = overlay.textSize
                 fitTitle(overlay, titleText, labelWidth,
                     if (foreignLogo) (imageHeight - requestedLogoHeight - verticalGap).coerceAtLeast(1) else imageHeight)
-                if (overlay.textSize != previousSize) stable = false
                 if (foreignLogo) {
                     overlay.measure(View.MeasureSpec.makeMeasureSpec(labelWidth, View.MeasureSpec.EXACTLY),
                         View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
@@ -365,33 +365,19 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 p.marginStart = groupLeft
                 p.topMargin = top
                 overlay.layoutParams = p
-                stable = false
             }
             if (overlay.gravity != (if (foreignLogo) Gravity.CENTER else Gravity.START)) {
                 overlay.gravity = if (foreignLogo) Gravity.CENTER else Gravity.START
-                stable = false
             }
         }
-        if (stable) {
-            pendingSplitFrames = 0
+        // All geometry has been committed. Reveal only assets with decoded data.
+        // Later drawable arrivals/parent relayouts are repositioned in pre-draw,
+        // WITHOUT staging already visible assets back to alpha=0.
+        if (image.width == imageWidth && image.height == imageHeight &&
+            image.left == imageLeft && image.top == imageTop) {
             showTitle(titleText.isNotEmpty())
-            image.alpha = if (iw > 0 && ih > 0) originalPictureAlpha else 0f
-            logo?.alpha = if (hasLogo) originalLogoAlpha else 0f
-        } else {
-            stage()
-            // If a parent keeps invalidating layout, commit the same calculated
-            // bounds directly before revealing; never switch normal tablet/TV
-            // loading to the permanently locked native-layout fallback.
-            if (++pendingSplitFrames >= 8) {
-                image.layout(imageLeft, imageTop, imageLeft + imageWidth, imageTop + imageHeight)
-                if (image.width == imageWidth && image.height == imageHeight &&
-                    image.left == imageLeft && image.top == imageTop) {
-                    pendingSplitFrames = 0
-                    showTitle(titleText.isNotEmpty())
-                    image.alpha = if (iw > 0 && ih > 0) originalPictureAlpha else 0f
-                    logo?.alpha = if (hasLogo) originalLogoAlpha else 0f
-                }
-            }
+            if (iw > 0 && ih > 0) image.alpha = originalPictureAlpha
+            if (hasLogo) logo?.alpha = originalLogoAlpha
         }
     }
     fun stop() {
