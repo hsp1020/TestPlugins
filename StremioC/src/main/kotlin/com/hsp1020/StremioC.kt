@@ -814,7 +814,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 id?.startsWith("kitsu:") == true || id?.startsWith("mal:") == true -> {
                     val parts = id.split(":")
                     val baseId = if (parts.size >= 2) "${parts[0]}:${parts[1]}" else id
-                    if (isSubtitle) "$baseId:$season:$episode" else "$baseId:$episode"
+                    if (isSubtitle && id.startsWith("mal:")) "$baseId:$season:$episode" else "$baseId:$episode"
                 }
                 id?.endsWith(":$season:$episode") == true -> id
                 else -> "$id:$season:$episode"
