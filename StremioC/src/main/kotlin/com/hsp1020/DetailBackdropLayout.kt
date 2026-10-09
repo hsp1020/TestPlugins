@@ -19,7 +19,7 @@ import androidx.preference.PreferenceManager
 import kotlin.math.*
 
 /** StremioC detail backdrop only. Original CloudStream toolbar and player remain untouched. */
-internal class DetailBackdropLayout(private val root: View) {
+internal class DetailBackdropLayout(private val root: View, private val detailUrl: String? = null) {
     private fun find(name: String): View? {
         val id = root.resources.getIdentifier(name, "id", root.context.packageName)
         return if (id == 0) null else root.findViewById(id)
@@ -210,11 +210,14 @@ internal class DetailBackdropLayout(private val root: View) {
         // logo visibility becomes VISIBLE before Coil has finished decoding its drawable.
         val hasLogo = logo?.visibility == View.VISIBLE && logo.drawable != null && logo.width > 0
         scaleLogo(hasLogo)
-        val titleText = if (!hasLogo && title?.visibility == View.VISIBLE)
-            title.text?.toString()?.trim()?.replace('\n', ' ')?.replace('\r', ' ').orEmpty() else ""
-        val labelWidth = if (hasLogo) (logo!!.width * logo.scaleX).roundToInt() else if (titleText.isNotEmpty())
+        val foreignLogo = hasLogo && detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true
+        val titleText = if (foreignLogo || (!hasLogo && title?.visibility == View.VISIBLE))
+            title?.text?.toString()?.trim()?.replace('\n', ' ')?.replace('\r', ' ').orEmpty() else ""
+        val titleWidth = if (titleText.isNotEmpty())
             min(((baseTitlePaint ?: titleOverlay!!.paint).measureText(titleText) + dp(24)).roundToInt(),
                 (container.width * 0.36f).roundToInt()) else 0
+        val logoWidth = if (hasLogo) (logo!!.width * logo.scaleX).roundToInt() else 0
+        val labelWidth = max(logoWidth, titleWidth)
         val gap = if (labelWidth > 0) dp(45) else 0
         val maxWidth = (container.width - labelWidth - gap - dp(24)).coerceAtLeast(1)
         val drawable = image.drawable
@@ -245,24 +248,51 @@ internal class DetailBackdropLayout(private val root: View) {
         place(edges[3], imageWidth, featherY, imageLeft, imageTop + imageHeight - featherY)
         // Avoid double-darkening the bottom: the built-in shadow covered the whole parent.
         shadow?.visibility = View.INVISIBLE
+        val logoHeight = if (hasLogo) (logo!!.height * logo.scaleY).roundToInt() else 0
+        val verticalGap = if (foreignLogo && titleText.isNotEmpty()) dp(8) else 0
+        var titleHeight = 0
+        titleOverlay?.let { overlay ->
+            if (overlay.text.toString() != titleText) { overlay.text = titleText; stable = false }
+            if (titleText.isNotEmpty()) {
+                val previousSize = overlay.textSize
+                fitTitle(overlay, titleText, labelWidth,
+
+                    if (foreignLogo) (imageHeight - logoHeight - verticalGap).coerceAtLeast(1) else imageHeight)
+                if (overlay.textSize != previousSize) stable = false
+                if (foreignLogo) {
+                    overlay.measure(View.MeasureSpec.makeMeasureSpec(labelWidth, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+                    titleHeight = overlay.measuredHeight
+                }
+            }
+        }
+        val groupTop = ((bannerHeight - logoHeight - verticalGap - titleHeight) / 2f).coerceAtLeast(0f)
         if (hasLogo) {
             // Account for the centered pivot when scaling the original ImageView.
-            logo?.translationX = groupLeft - logo!!.left + (logo.scaleX - 1f) * logo.pivotX
-            logo?.translationY = (bannerHeight - logo.height * logo.scaleY) / 2f -
+            logo?.translationX = groupLeft + (if (foreignLogo) (labelWidth - logoWidth) / 2 else 0) -
+                logo!!.left + (logo.scaleX - 1f) * logo.pivotX
+            logo?.translationY = (if (foreignLogo) groupTop else (bannerHeight - logoHeight) / 2f) -
                 logo.top + (logo.scaleY - 1f) * logo.pivotY
         } else {
             logo?.translationX = originalLogoX
             logo?.translationY = originalLogoY
         }
         titleOverlay?.let { overlay ->
-            if (overlay.text.toString() != titleText) overlay.text = titleText
-            if (titleText.isNotEmpty()) fitTitle(overlay, titleText, labelWidth, imageHeight)
+            val gravity = if (foreignLogo) Gravity.TOP or Gravity.START else Gravity.START or Gravity.CENTER_VERTICAL
+            val top = if (foreignLogo) (groupTop + logoHeight + verticalGap).roundToInt() else 0
             val p = overlay.layoutParams as? FrameLayout.LayoutParams
-            if (p != null && (p.width != labelWidth || p.gravity != (Gravity.START or Gravity.CENTER_VERTICAL) || p.marginStart != groupLeft)) {
+            if (p != null && (p.width != labelWidth || p.gravity != gravity ||
+                        p.marginStart != groupLeft || p.topMargin != top)) {
                 p.width = labelWidth
-                p.gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                p.gravity = gravity
                 p.marginStart = groupLeft
+                p.topMargin = top
                 overlay.layoutParams = p
+                stable = false
+            }
+            if (overlay.gravity != (if (foreignLogo) Gravity.CENTER else Gravity.START)) {
+                overlay.gravity = if (foreignLogo) Gravity.CENTER else Gravity.START
+                stable = false
             }
         }
         if (stable) {
