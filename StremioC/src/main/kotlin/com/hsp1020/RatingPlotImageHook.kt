@@ -109,11 +109,11 @@ internal class RatingPlotImageHook(
         val resId = root.resources.getIdentifier("result_description", "id", root.context.packageName)
         if (resId == 0) return
         val view = root.findViewById<TextView>(resId) ?: return
-        watchers[f] = Watcher(view, root).also { it.start() }
+        watchers[f] = Watcher(view, root, f.arguments?.getString("url")).also { it.start() }
     }
 
-    private inner class Watcher(private val view: TextView, root: View) : TextWatcher {
-        private val backdrop = DetailBackdropLayout(root)
+    private inner class Watcher(private val view: TextView, root: View, detailUrl: String?) : TextWatcher {
+        private val backdrop = DetailBackdropLayout(root, detailUrl)
         private var changing = false
         fun start() { view.addTextChangedListener(this); runCatching { backdrop.start() }; runCatching { render() } }
         fun detach() { view.removeTextChangedListener(this); runCatching { backdrop.stop() }; runCatching { restore() } }
