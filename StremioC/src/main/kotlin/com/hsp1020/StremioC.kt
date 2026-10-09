@@ -1702,6 +1702,19 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val mappingDeferred = async(Dispatchers.IO, start = CoroutineStart.LAZY) {
             if (!actualIsMovie) fetchAnimeSeasonMapping(loadData) else null
         }
+        // Stremio subtitle requests use the mapped TVDB season and original episode.
+        // One mapping response is shared within this loadLinks call; it is never cached.
+        suspend fun mappedAnimeSubtitleId(): String? {
+            if (actualIsMovie || !(loadData.isAnime || loadData.originalKitsuId != null ||
+                    loadData.kitsuId != null || loadData.id?.startsWith("kitsu:") == true ||
+                    loadData.malId != null || loadData.anilistId != null ||
+                    (loadData.isCartoon && loadData.isAsian))) return null
+            val mapped = mappingDeferred.await() ?: return null
+            val imdb = mapped.imdbId ?: return null
+            val season = mapped.tvdbSeason ?: return null
+            val episode = loadData.episode?.takeIf { it > 0 } ?: return null
+            return "$imdb:$season:$episode"
+        }
         runAllAsync(
             {
                 if (cleanBaseUrl.isNotBlank() && encodedPrimaryId.isNotBlank()) {
@@ -1724,12 +1737,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             {
                 // Fetch subtitle resources exposed by the currently selected
                 // Stremio addon itself (e.g. AIOStreams aggregated subtitles).
-                fetchStremioSubtitles(
-                    currentMainUrl,
-                    primaryId,
-                    loadData.season,
-                    loadData.episode
-                )
+                val mappedId = mappedAnimeSubtitleId()
+                if (mappedId != null) {
+                    fetchStremioSubtitles(currentMainUrl, mappedId, null, null, "series")
+                } else if (!primaryId.startsWith("kitsu:") || actualIsMovie) {
+                    fetchStremioSubtitles(currentMainUrl, primaryId, loadData.season, loadData.episode)
+                }
             },
             {
                 if (isHistorySyncEnabled && syncUrl.isNotBlank()) {
@@ -1774,7 +1787,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                                         }
                                     }.onFailure { it.printStackTrace() }
                                 }, {
-                                    fetchStremioSubtitles(addonUrl, reqId, season, episode, extraType, addon.name)
+                                    val mappedId = mappedAnimeSubtitleId()
+                                    if (mappedId != null) {
+                                        fetchStremioSubtitles(addonUrl, mappedId, null, null, "series", addon.name)
+                                    } else if (!reqId.startsWith("kitsu:") || actualIsMovie) {
+                                        fetchStremioSubtitles(addonUrl, reqId, season, episode, extraType, addon.name)
+                                    }
                                 })
                             }
                         }
@@ -1812,7 +1830,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         
     private data class AnimeSeasonMapping(
         val kitsuId: String?, val malId: Int?, val aniListId: Int?, val tmdbId: Int?,
-        val tmdbSeason: Int?, val tmdbEpisode: Int?, val title: String?
+        val tmdbSeason: Int?, val tmdbEpisode: Int?, val title: String?,
+        val imdbId: String?, val tvdbSeason: Int?
     )
 
     private suspend fun fetchAnimeSeasonMapping(loadData: LoadData): AnimeSeasonMapping? {
@@ -1881,7 +1900,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 tmdbId = ids.get("themoviedbId").intOrNull()?.takeIf { it > 0 },
                 tmdbSeason = tmdbSeason,
                 tmdbEpisode = tmdbEpisode,
-                title = data.get("title").textOrNull()
+                title = data.get("title").textOrNull(),
+                imdbId = resolvedImdb?.takeIf { IMDB_ID_REGEX.matches(it) },
+                tvdbSeason = data.get("tvdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
             )
         }.getOrNull()
     }
