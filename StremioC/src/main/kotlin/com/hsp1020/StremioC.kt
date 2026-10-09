@@ -108,9 +108,14 @@ private fun JsonNode?.intOrNull(): Int? {
 
 // Language filtering is built into the existing TMDB detail call; never request a second page.
 private fun tmdbLogoLanguages(knownOriginal: String?): String {
+    val preferred = CloudStreamApp.context
+        ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+        ?.getString("tmdb_language_code", "en-US")
+        ?.substringBefore('-')?.trim()?.lowercase()
+        ?.takeIf { it.isNotEmpty() } ?: "en"
     val original = knownOriginal?.trim()?.lowercase()
         ?.takeIf { it.length == 2 && it.all(Char::isLetter) }
-    return listOfNotNull("en", original).distinct().joinToString(",")
+    return listOfNotNull(preferred, "en", original).distinct().joinToString(",")
 }
 
 open class StremioC(override var mainUrl: String, override var name: String) : MainAPI() {
@@ -799,7 +804,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val prefs = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
         val tmdbKey = prefs?.getString("tmdb_api_key", "") ?: ""
         builder.addQueryParameter("api_key", tmdbKey)
-        val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
+        val langCode = prefs?.getString("tmdb_language_code", "en-US") ?: "en-US"
         builder.addQueryParameter("language", langCode)
         params.forEach { (key, value) -> builder.addQueryParameter(key, value) }
         return builder.build().toString()
@@ -1404,7 +1409,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             targetTmdbId != null && speculativeTmdbDetail == null
         ) {
             async(Dispatchers.IO) {
-                fetchTmdbDetailForLoad(targetTmdbId, targetTmdbMediaType, res.original_language)
+                fetchTmdbDetailForLoad(targetTmdbId, targetTmdbMediaType,
+                    res.original_language ?: res.providerArt?.originalLanguage)
             }
         } else {
             null
@@ -2452,6 +2458,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val fetchedLogoFallback: Boolean = false
     )
 
+    private data class ProviderArtInfo(
+        @JsonProperty("originalLanguage") val originalLanguage: String? = null
+    )
+
     private data class CatalogEntry(
         @JsonProperty("name") val name: String? = null, 
         @JsonProperty("id") val id: String? = null, 
@@ -2466,6 +2476,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("imdbRating") val imdbRating: String? = null, 
         @JsonProperty("type") val type: String? = null,
         @JsonProperty("original_language") val original_language: String? = null,
+        @JsonProperty("_providerArt") val providerArt: ProviderArtInfo? = null,
         @JsonProperty("videos") val videos: List<Video>? = null, 
         @JsonProperty("genre") val genre: List<String>? = null, 
         @JsonProperty("genres") val genres: List<String>? = null,
@@ -2548,7 +2559,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             val context = CloudStreamApp.context
             val prefs = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-            val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
+            val langCode = prefs?.getString("tmdb_language_code", "en-US") ?: "en-US"
             val customPosterEnabled = prefs?.getBoolean("custom_poster_enabled", false) ?: false
             val customPosterBase = prefs?.getString("custom_poster_url", "") ?: ""
             
@@ -2851,7 +2862,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val safePrefetchedDetail = preFetchedDetail?.takeIf {
                         preFetchedDetailTmdbId == tmdbIdStr && preFetchedDetailMediaType == refinedMediaType
                     }
-                    tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!, refinedMediaType == "movie", finalImdbId, finalType, finalVideos, safePrefetchedDetail, detailedEntry.original_language ?: this@CatalogEntry.original_language)
+                    tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!, refinedMediaType == "movie", finalImdbId, finalType, finalVideos, safePrefetchedDetail, detailedEntry.original_language ?: detailedEntry.providerArt?.originalLanguage
+                        ?: this@CatalogEntry.original_language ?: this@CatalogEntry.providerArt?.originalLanguage)
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
