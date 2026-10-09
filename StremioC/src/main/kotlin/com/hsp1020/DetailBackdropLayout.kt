@@ -116,7 +116,9 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         logo?.alpha = if (show) originalLogoAlpha else 0f
     }
     private fun stage() {
-        visibility(false)
+        // Never conceal CloudStream's loaded backdrop/logo while waiting for
+        // the split layout to settle; the pre-draw callback may not run again.
+        visibility(true)
         title?.alpha = 0f
         titleOverlay?.visibility = View.GONE
     }
