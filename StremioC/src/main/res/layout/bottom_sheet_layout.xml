@@ -229,18 +229,18 @@
                     android:clickable="true"
                     android:focusable="true" />
             </LinearLayout>
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Stremio Stream &amp; Subtitle Sources"
+                android:textColor="#AAAAAA"
+                android:textSize="12sp"
+                android:layout_marginTop="2dp" />
             <LinearLayout
                 android:id="@+id/containerStreamSubtitleUrls"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical" />
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Left: Addon Name   ·   Right: Manifest JSON URL"
-                android:textColor="#AAAAAA"
-                android:textSize="12sp"
-                android:layout_marginTop="2dp" />
         </LinearLayout>
 
         <!-- History & Library Sync URL Input (MDBList Ratings 위로 이동 완료) -->
