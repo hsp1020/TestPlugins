@@ -239,12 +239,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         private const val SETTINGS_CACHE_TTL = 60_000L
 
         // SharedPreferences 반복 파싱 부하 개선을 위한 3초 생명주기 캐시 바인딩
+        private data class StreamSubtitleAddon(val name: String, val url: String)
         private data class SyncSettings(
             val syncUrl: String,
             val syncMap: Map<String, Boolean>,
             val historySyncMap: Map<String, Boolean>,
             val streamSubtitleMap: Map<String, Boolean>,
-            val streamSubtitleUrls: List<String>
+            val streamSubtitleUrls: List<StreamSubtitleAddon>
         )
         @Volatile private var cachedSyncSettings: SyncSettings? = null
         @Volatile private var cachedSyncSettingsTime: Long = 0
@@ -291,8 +292,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
                 val extraUrls = runCatching {
                     val arr = org.json.JSONArray(prefs.getString("stream_subtitle_addon_urls", "[]"))
-                    (0 until arr.length()).mapNotNull { i -> arr.optString(i).trim().takeIf { it.isNotBlank() } }
-                }.getOrDefault(emptyList()).distinct()
+                    (0 until arr.length()).mapNotNull { i ->
+                        when (val entry = arr.opt(i)) {
+                            is org.json.JSONObject -> StreamSubtitleAddon(entry.optString("name").trim(), entry.optString("url").trim())
+                            is String -> StreamSubtitleAddon("", entry.trim()) // Legacy URL-only settings
+                            else -> null
+                        }?.takeIf { it.url.isNotBlank() }
+                    }
+                }.getOrDefault(emptyList()).distinctBy { stremioManifestUrl(it.url) }
                 val result = SyncSettings(syncUrl, map, historyMap, extraMap, extraUrls)
                 cachedSyncSettings = result
                 cachedSyncSettingsTime = System.currentTimeMillis()
@@ -1534,11 +1541,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val currentCleanUrl = currentMainUrl.cleanBaseUrl().lowercase()
         val isHistorySyncEnabled = historySyncMap[currentCleanUrl] ?: false
         val extraUrls = if (syncSettings.streamSubtitleMap[currentCleanUrl] == true) {
-            syncSettings.streamSubtitleUrls.filter { url ->
-                val parsed = url.toHttpUrlOrNull()
+            syncSettings.streamSubtitleUrls.filter { addon ->
+                val parsed = addon.url.toHttpUrlOrNull()
                 parsed != null && (parsed.scheme == "http" || parsed.scheme == "https")
-            }.distinctBy { stremioManifestUrl(it) }
-                .filterNot { stremioManifestUrl(it) == stremioManifestUrl(currentMainUrl) }
+            }.filterNot { stremioManifestUrl(it.url) == stremioManifestUrl(currentMainUrl) }
         } else emptyList()
 
         val customHosts = withContext(Dispatchers.IO) {
@@ -1659,7 +1665,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             id: String?,
             season: Int?,
             episode: Int?,
-            requestType: String = targetType
+            requestType: String = targetType,
+            preferredName: String? = null
         ) {
             if (addonUrl.isBlank() || id.isNullOrBlank()) return
 
@@ -1688,10 +1695,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val text = customSession.get(subtitleRequestUrl, timeout = 15L).text
                 val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
                 com.lagradost.api.Log.d("StremioC", "subtitle-labels-v2 direct count=${res?.subtitles?.size ?: 0} rawLabel=${text.contains("\"label\"")} parsedLabel=${res?.subtitles?.count { it.label.textOrNull() != null } ?: 0} responseNames=${res?.subtitles?.count { it.name.textOrNull() != null } ?: 0}")
-                val addonSource = getActualStremioAddonName(addonUrl)
+                val addonSource = preferredName?.takeIf { it.isNotBlank() }
+                    ?: getActualStremioAddonName(addonUrl)
                     ?: name.takeIf { addonUrl == currentMainUrl && !it.equals("StremioC", true) }
                 res?.subtitles?.forEach { sub ->
-                    sub.toCloudStreamSubtitle(addonSource)?.let(stremioSubtitleCallback)
+                    sub.toCloudStreamSubtitle(addonSource, preferredName)?.let(stremioSubtitleCallback)
                 }
             }.onFailure { it.printStackTrace() }
         }
@@ -1740,9 +1748,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 if (extraUrls.isNotEmpty()) coroutineScope {
                     val limiter = Semaphore(4)
                     val reqId = integrationImdbId ?: globalId.takeIf { it.isNotBlank() }
-                    extraUrls.map { addonUrl -> async(Dispatchers.IO) {
+                    extraUrls.map { addon -> async(Dispatchers.IO) {
                         limiter.withPermit {
                             if (!reqId.isNullOrBlank()) {
+                                val addonUrl = addon.url
                                 val actualUrl = addonUrl.fixSourceUrl()
                                 val base = actualUrl.cleanBaseUrl()
                                 val suffix = actualUrl.substringAfter("?", "").takeIf { it.isNotEmpty() }
@@ -1751,7 +1760,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                                 val episode = if (integrationImdbId != null) globalEpisode else loadData.episode
                                 val extraType = integrationTargetType
                                 val extId = buildStremioId(extraType, reqId, season, episode) ?: reqId
-                                val source = getActualStremioAddonName(addonUrl)
+                                val source = addon.name.takeIf { it.isNotBlank() }
+                                    ?: getActualStremioAddonName(addonUrl)
                                     ?: base.toHttpUrlOrNull()?.host.orEmpty()
                                 if (source.isNotBlank()) stremioSourceNames.add(source.lowercase())
                                 runAllAsync({
@@ -1761,11 +1771,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                                         val streams = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
                                         streams?.streams?.forEach { stream ->
                                             stream.runCallback(this@StremioC, source,
-                                                stremioSubtitleCallback, subtitleCallback, wrappedCallback)
+                                                stremioSubtitleCallback, subtitleCallback, wrappedCallback,
+                                                preferredName = addon.name)
                                         }
                                     }.onFailure { it.printStackTrace() }
                                 }, {
-                                    fetchStremioSubtitles(addonUrl, reqId, season, episode, extraType)
+                                    fetchStremioSubtitles(addonUrl, reqId, season, episode, extraType, addon.name)
                                 })
                             }
                         }
@@ -3143,7 +3154,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return cleaned.takeIf { it.isNotBlank() }
     }
 
-    private suspend fun Subtitle.toCloudStreamSubtitle(addonName: String?): SubtitleFile? {
+    private suspend fun Subtitle.toCloudStreamSubtitle(addonName: String?, preferredName: String? = null): SubtitleFile? {
         val subtitleUrl = url ?: return null
         val rawLang = lang ?: lang_code ?: "Unknown"
         val language = SubtitleHelper.fromTagToEnglishLanguageName(rawLang) ?: rawLang
@@ -3152,10 +3163,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             it.isNotBlank() && !it.equals("StremioC", true) && !it.startsWith("http", true) &&
                 !it.equals(mainLabel, true) && !it.equals(language, true)
         }
-        val sourceLabel = responseSource ?: addonName?.trim()?.takeIf {
-            it.isNotBlank() && !it.equals("StremioC", true) && !it.startsWith("http", true) &&
-                !it.equals(mainLabel, true) && !it.equals(language, true)
-        }
+        val sourceLabel = preferredName?.trim()?.takeIf { it.isNotBlank() }
+            ?: (responseSource ?: addonName?.trim())?.takeIf {
+                it.isNotBlank() && !it.equals("StremioC", true) && !it.startsWith("http", true) &&
+                    !it.equals(mainLabel, true) && !it.equals(language, true)
+            }
         if (mainLabel == null && sourceLabel == null) {
             return newSubtitleFile(language, subtitleUrl)
         }
@@ -3186,7 +3198,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             sourceName: String,
             stremioSubtitleCallback: (SubtitleFile) -> Unit,
             extractorSubtitleCallback: (SubtitleFile) -> Unit,
-            callback: (ExtractorLink) -> Unit
+            callback: (ExtractorLink) -> Unit,
+            preferredName: String? = null
         ) {
             val displaySource = sourceName.takeIf { it.isNotBlank() } ?: name ?: ""
 
@@ -3224,7 +3237,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             if (hasPlayableTarget) {
                 if (subtitles.isNotEmpty()) com.lagradost.api.Log.d("StremioC", "subtitle-labels-v2 embedded count=${subtitles.size} labeled=${subtitles.count { it.label.textOrNull() != null }}")
                 subtitles.forEach { sub ->
-                    provider.run { sub.toCloudStreamSubtitle(sourceName) }?.let(stremioSubtitleCallback)
+                    provider.run { sub.toCloudStreamSubtitle(sourceName, preferredName) }?.let(stremioSubtitleCallback)
                 }
             }
         }
