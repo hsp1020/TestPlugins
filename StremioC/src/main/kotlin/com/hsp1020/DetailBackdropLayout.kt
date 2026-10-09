@@ -55,6 +55,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private var lastFitWidth = -1
     private var lastFitHeight = -1
     private var started = false
+    private var portraitTitleOnly = false
+    private var forcedPortraitTitle = false
+    private var pendingSplitFrames = 0
+    private var splitFallback = false
+    private var nativeRecoveryFrames = 0
     private fun dp(v: Int) = (v * root.resources.displayMetrics.density).roundToInt()
     private fun height(view: View?, value: Int) {
         val p = view?.layoutParams ?: return
@@ -106,7 +111,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         lastFitHeight = maxHeight
     }
     private val preDraw = ViewTreeObserver.OnPreDrawListener {
-        runCatching { update() }; true
+        runCatching { update() }.onFailure { recoverOriginalLayout() }; true
     }
     private fun splitMode() = phoneHero == null ||
         root.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE ||
@@ -116,11 +121,57 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         logo?.alpha = if (show) originalLogoAlpha else 0f
     }
     private fun stage() {
-        // Never conceal CloudStream's loaded backdrop/logo while waiting for
-        // the split layout to settle; the pre-draw callback may not run again.
-        visibility(true)
+        // Neither async drawable may paint at CloudStream's original geometry.
+        picture?.alpha = 0f
+        logo?.alpha = 0f
         title?.alpha = 0f
         titleOverlay?.visibility = View.GONE
+    }
+    private fun recoverOriginalLayout() {
+        if (splitFallback || portraitTitleOnly) return
+        if (!splitMode()) { visibility(true); return }
+        splitFallback = true // Do not re-enter the split layout and cause a visible jump.
+        nativeRecoveryFrames = 0
+        edges.forEach { place(it, 0, 0, 0, 0) }
+        shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
+        originalHeroHeight?.let { height(phoneHero, it) }
+        originalHolderHeight?.let { height(holder, it) }
+        originalPicture?.let { picture?.layoutParams = FrameLayout.LayoutParams(it) }
+        originalScale?.let { picture?.scaleType = it }
+        if (tv && originalScale == ImageView.ScaleType.MATRIX)
+            picture?.drawable?.let { picture?.setImageDrawable(it) }
+        else originalMatrix?.let { picture?.imageMatrix = it }
+        logo?.translationX = originalLogoX
+        logo?.translationY = originalLogoY
+        scaleLogo(false)
+        (tvColumn?.layoutParams as? ViewGroup.MarginLayoutParams)?.let { p ->
+            originalTvMargin?.let { p.topMargin = it; tvColumn.layoutParams = p }
+        }
+        // The restored native layoutParams must pass through measure/layout before
+        // we reveal them; otherwise fallback itself can produce a visible jump.
+        stage()
+    }
+    private fun revealRecoveredLayout() {
+        val old = originalPicture
+        val image = picture
+        val placed = image != null && (old == null ||
+            ((old.width <= 0 || image.width == old.width) &&
+             (old.height <= 0 || image.height == old.height) &&
+             image.left == old.marginStart && image.top == old.topMargin))
+        if (placed || ++nativeRecoveryFrames >= 8) {
+            showTitle(false)
+            visibility(true)
+        }
+    }
+    private fun portraitMode() = phoneHero != null && !splitMode()
+    private fun updatePortraitTitle() {
+        if (!portraitMode()) return
+        if (detailUrl?.let { StremioC.fallbackLogoTitles[it] } != true) return
+        if (logo?.visibility == View.VISIBLE && logo.drawable != null &&
+            !title?.text.isNullOrBlank() && title?.visibility != View.VISIBLE) {
+            title?.visibility = View.VISIBLE
+            forcedPortraitTitle = true
+        }
     }
     fun start() {
         val container = holder ?: return
@@ -128,10 +179,21 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         // CloudStream uses this same preference for its built-in trailer UI.
         val context = root.context
         val keyId = context.resources.getIdentifier("show_trailers_key", "string", context.packageName)
-        if (keyId == 0 || PreferenceManager.getDefaultSharedPreferences(context)
-                .getBoolean(context.getString(keyId), true)) return
+        val trailersEnabled = keyId == 0 || PreferenceManager.getDefaultSharedPreferences(context)
+            .getBoolean(context.getString(keyId), true)
+        if (trailersEnabled && !portraitMode()) return
         started = true
-        if (splitMode()) stage() // Hide both before either asynchronous image load completes.
+        pendingSplitFrames = 0
+        splitFallback = false
+        nativeRecoveryFrames = 0
+        if (trailersEnabled) {
+            // Only correct the native title; do not touch trailer layout or overlays.
+            portraitTitleOnly = true
+            root.viewTreeObserver.addOnPreDrawListener(preDraw)
+            updatePortraitTitle()
+            return
+        }
+        if (splitMode()) stage() // Hide both assets before their first native-layout draw.
         val directions = listOf(
             GradientDrawable.Orientation.LEFT_RIGHT,
             GradientDrawable.Orientation.RIGHT_LEFT,
@@ -159,7 +221,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             container.addView(overlay, FrameLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
         root.viewTreeObserver.addOnPreDrawListener(preDraw)
-        update()
+        runCatching { update() }.onFailure { recoverOriginalLayout() }
     }
     private fun showTitle(show: Boolean) {
         val visibility = if (show) View.VISIBLE else View.GONE
@@ -168,19 +230,16 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (title?.alpha != alpha) title?.alpha = alpha
     }
     private fun update() {
+        if (portraitTitleOnly) { updatePortraitTitle(); return }
+        if (splitFallback) { revealRecoveredLayout(); return }
         val container = holder ?: return
         val image = picture ?: return
-        if (container.width <= 0 || root.width <= 0) return
-        // Leave the built-in trailer player in charge while it is active.
-        if (!tv && trailer?.visibility == View.GONE) {
-            showTitle(false)
-            visibility(true)
-            logo?.translationX = originalLogoX
-            logo?.translationY = originalLogoY
-            scaleLogo(false)
-            shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
+        if (container.width <= 0 || root.width <= 0) {
+            if (splitMode() && ++pendingSplitFrames >= 8) recoverOriginalLayout()
             return
         }
+        // With trailers enabled we never enter this layout path (see start()).
+        // A GONE trailer holder means inactive, not an active player.
         val landscape = root.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val tablet = root.resources.configuration.smallestScreenWidthDp >= 600
         val split = tv || landscape || tablet
@@ -205,13 +264,14 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             logo?.translationX = originalLogoX
             logo?.translationY = originalLogoY
             scaleLogo(false)
+            updatePortraitTitle()
             return
         }
 
         // logo visibility becomes VISIBLE before Coil has finished decoding its drawable.
         val hasLogo = logo?.visibility == View.VISIBLE && logo.drawable != null && logo.width > 0
         val foreignLogo = hasLogo && detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true
-        val titleText = if (foreignLogo || (!hasLogo && title?.visibility == View.VISIBLE))
+        val titleText = if (foreignLogo || !hasLogo)
             title?.text?.toString()?.trim()?.replace('\n', ' ')?.replace('\r', ' ').orEmpty() else ""
         val maxLabelWidth = (container.width * 0.36f).roundToInt().coerceAtLeast(1)
         val titleWidth = if (titleText.isNotEmpty())
@@ -224,19 +284,20 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val drawable = image.drawable
         val iw = drawable?.intrinsicWidth ?: 0
         val ih = drawable?.intrinsicHeight ?: 0
-        val ready = iw > 0 && ih > 0 && (hasLogo || titleText.isNotEmpty())
-        if (!ready) { stage(); return }
+        // A missing logo is not a reason to hide a loaded backdrop forever.
+        // Without a decoded backdrop, position a 16:9 slot; keep its alpha at 0.
+        // The logo/title can still recover independently when their data arrives.
         val imageWidth = if (iw > 0 && ih > 0)
             min(maxWidth, (bannerHeight.toDouble() * iw / ih).roundToInt().coerceAtLeast(1))
-            else maxWidth
+            else min(maxWidth, (bannerHeight.toDouble() * 16 / 9).roundToInt().coerceAtLeast(1))
         val imageHeight = if (iw > 0 && ih > 0)
             min(bannerHeight, (imageWidth.toDouble() * ih / iw).roundToInt().coerceAtLeast(1))
-            else bannerHeight
+            else min(bannerHeight, (imageWidth.toDouble() * 9 / 16).roundToInt().coerceAtLeast(1))
         val groupLeft = ((container.width - labelWidth - gap - imageWidth) / 2).coerceAtLeast(0)
         val imageLeft = groupLeft + labelWidth + gap
         val imageTop = (bannerHeight - imageHeight) / 2
         if (image.scaleType != ImageView.ScaleType.FIT_CENTER) image.scaleType = ImageView.ScaleType.FIT_CENTER
-        // Keep the pair hidden until BOTH assets are ready AND the final measured layout is stable.
+        // Reveal each drawable only after final dimensions AND coordinates are committed.
         var stable = image.width == imageWidth && image.height == imageHeight &&
             image.left == imageLeft && image.top == imageTop
         if (!stable) stage()
@@ -308,14 +369,25 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             }
         }
         if (stable) {
+            pendingSplitFrames = 0
             showTitle(titleText.isNotEmpty())
-            visibility(true)
-        } else stage()
+            image.alpha = if (iw > 0 && ih > 0) originalPictureAlpha else 0f
+            logo?.alpha = if (hasLogo) originalLogoAlpha else 0f
+        } else {
+            stage()
+            // Bounded recovery: if layout coordinates cannot settle, restore the
+            // native screen once, rather than displaying half-repositioned art.
+            if (++pendingSplitFrames >= 8) recoverOriginalLayout()
+        }
     }
     fun stop() {
         if (!started) return
         started = false
         if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(preDraw)
+        if (forcedPortraitTitle && logo?.visibility == View.VISIBLE && logo.drawable != null)
+            title?.visibility = View.GONE
+        forcedPortraitTitle = false
+        if (portraitTitleOnly) { portraitTitleOnly = false; return }
         showTitle(false)
         titleOverlay?.let { holder?.removeView(it) }; titleOverlay = null
         baseTitlePaint = null
