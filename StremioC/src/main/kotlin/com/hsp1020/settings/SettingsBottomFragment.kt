@@ -1039,7 +1039,7 @@ class SettingsBottomFragment(
             val extraUrlList = (0 until extraUrlContainer.childCount).mapNotNull { i ->
                 val row = extraUrlContainer.getChildAt(i) as LinearLayout
                 val addonName = (row.getChildAt(0) as EditText).text.toString().trim()
-                val addonUrl = (row.getChildAt(1) as EditText).text.toString().trim()
+                val addonUrl = (row.getChildAt(2) as EditText).text.toString().trim()
                 addonUrl.takeIf { it.isNotBlank() }?.let { addonName to it }
             }.distinctBy { stremioManifestUrl(it.second) }
             if (extraUrlList.any { (_, url) ->
