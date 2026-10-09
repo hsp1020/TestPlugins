@@ -60,7 +60,8 @@ data class LinkItem(
     val link: String,
     val type: String,
     val isSyncEnabled: Boolean = true,
-    val isHistorySyncEnabled: Boolean = true
+    val isHistorySyncEnabled: Boolean = true,
+    val isStreamSubtitleSyncEnabled: Boolean = false
 )
 
 object SettingsRepository {
@@ -69,6 +70,8 @@ object SettingsRepository {
     const val PREF_KEY_STREAMPLAY_ENABLED = "streamplay_integration_enabled"
     const val PREF_KEY_VIXSRC_ENABLED = "vixsrc_integration_enabled"
     const val PREF_KEY_HISTORY_SYNC_URL = "history_sync_url"
+    const val PREF_KEY_STREAM_SUBTITLE_URLS = "stream_subtitle_addon_urls"
+    const val PREF_KEY_STREAM_SUBTITLE_EXPANDED = "stream_subtitle_urls_expanded"
     
     const val PREF_KEY_TMDB_LANG_CODE = "tmdb_language_code"
     const val PREF_KEY_CUSTOM_POSTER_ENABLED = "custom_poster_enabled"
@@ -92,7 +95,8 @@ object SettingsRepository {
                         link = obj.optString("link", ""),
                         type = obj.optString("type", "StremioC"),
                         isSyncEnabled = obj.optBoolean("isSyncEnabled", true),
-                        isHistorySyncEnabled = obj.optBoolean("isHistorySyncEnabled", obj.optBoolean("isSyncEnabled", true))
+                        isHistorySyncEnabled = obj.optBoolean("isHistorySyncEnabled", obj.optBoolean("isSyncEnabled", true)),
+                        isStreamSubtitleSyncEnabled = obj.optBoolean("isStreamSubtitleSyncEnabled", false)
                     )
                 )
             }
@@ -113,12 +117,14 @@ object SettingsRepository {
                 put("type", item.type)
                 put("isSyncEnabled", item.isSyncEnabled)
                 put("isHistorySyncEnabled", item.isHistorySyncEnabled)
+                put("isStreamSubtitleSyncEnabled", item.isStreamSubtitleSyncEnabled)
             }
             arr.put(obj)
         }
         val editor = sharedPref.edit()
         editor.putString(PREF_KEY_LINKS, arr.toString())
         editor.commit()
+        StremioC.invalidateSyncSettingsCache()
     }
 
     fun isIntegrationEnabled(sharedPref: SharedPreferences, key: String, default: Boolean = true): Boolean {
@@ -785,6 +791,49 @@ class SettingsBottomFragment(
             }
         }
 
+        val extraUrlContainer = view.findView<LinearLayout>("containerStreamSubtitleUrls")
+        val extraUrlToggle = view.findView<TextView>("toggleStreamSubtitleUrls")
+        fun addExtraUrlField(initial: String = "") {
+            val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+            val field = EditText(ctx).apply {
+                hint = "Addon Base URL"
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                setText(initial)
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                setHintTextColor(Color.GRAY)
+                background = getButtonBg()
+                isSingleLine = true
+            }
+            row.addView(field, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(Button(ctx).apply {
+                text = "−"
+                isAllCaps = false
+                setOnClickListener {
+                    if (extraUrlContainer.childCount > 1) extraUrlContainer.removeView(row)
+                    else field.setText("")
+                }
+            }, LinearLayout.LayoutParams((48 * ctx.resources.displayMetrics.density).toInt(), LinearLayout.LayoutParams.WRAP_CONTENT))
+            row.addView(Button(ctx).apply {
+                text = "+"
+                isAllCaps = false
+                setOnClickListener { addExtraUrlField() }
+            }, LinearLayout.LayoutParams((48 * ctx.resources.displayMetrics.density).toInt(), LinearLayout.LayoutParams.WRAP_CONTENT))
+            extraUrlContainer.addView(row)
+        }
+        val extraUrls = runCatching {
+            JSONArray(sharedPref.getString(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_URLS, "[]"))
+        }.getOrNull()
+        if (extraUrls == null || extraUrls.length() == 0) addExtraUrlField()
+        else (0 until extraUrls.length()).forEach { addExtraUrlField(extraUrls.optString(it)) }
+        fun setExtraUrlExpanded(expanded: Boolean) {
+            extraUrlContainer.visibility = if (expanded) View.VISIBLE else View.GONE
+            extraUrlToggle.text = if (expanded) "▲" else "▼"
+            sharedPref.edit().putBoolean(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_EXPANDED, expanded).apply()
+        }
+        setExtraUrlExpanded(sharedPref.getBoolean(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_EXPANDED, true))
+        extraUrlToggle.setOnClickListener { setExtraUrlExpanded(extraUrlContainer.visibility != View.VISIBLE) }
+
         val layoutHistorySyncUrl: View = try { view.findView("layoutHistorySyncUrl") } catch (e: Throwable) { throw Exception("layoutHistorySyncUrl View not found", e) }
         val etHistorySyncUrl: EditText = try { view.findView("etHistorySyncUrl") } catch (e: Throwable) { throw Exception("etHistorySyncUrl EditText not found", e) }
 
@@ -955,9 +1004,22 @@ class SettingsBottomFragment(
             val switchStreamPlay = view.findView<Switch>("switchStreamPlay")
             val switchVixSrc = view.findView<Switch>("switchVixSrc")
 
+            val extraUrlList = (0 until extraUrlContainer.childCount).mapNotNull { i ->
+                val field = (extraUrlContainer.getChildAt(i) as LinearLayout).getChildAt(0) as EditText
+                field.text.toString().trim().takeIf { it.isNotBlank() }
+            }.distinct()
+            if (extraUrlList.any { url ->
+                    runCatching { val uri = url.toUri();
+                        (uri.scheme?.lowercase() !in setOf("http", "https")) || uri.host.isNullOrBlank()
+                    }.getOrDefault(true)
+                }) {
+                showToast("Invalid stream/subtitle addon URL")
+                return@setOnClickListener
+            }
             val editor = sharedPref.edit()
             editor.putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, tmdbApiKeyVal)
             editor.putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim())
+            editor.putString(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_URLS, JSONArray(extraUrlList).toString())
             editor.putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
             editor.putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim())
             
@@ -968,6 +1030,7 @@ class SettingsBottomFragment(
             editor.putBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, switchStreamPlay.isChecked)
             editor.putBoolean(SettingsRepository.PREF_KEY_VIXSRC_ENABLED, switchVixSrc.isChecked)
             editor.commit()
+            StremioC.invalidateSyncSettingsCache()
 
             val stremioCJson = prefsToJson(sharedPref).toString()
             val stremioCHash = stremioCJson.hashCode().toString()
@@ -1065,6 +1128,7 @@ class SettingsBottomFragment(
         
         val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
         val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
+        val switchStreamSubtitleSync = try { dialogView.findView<Switch>("switchStreamSubtitleSync") } catch (_: Throwable) { null }
         val switchLinkSync = try { dialogView.findView<Switch>("switchLinkSync") } catch (t: Throwable) { null }
         val switchHistorySync = try { dialogView.findView<Switch>("switchHistorySync") } catch (t: Throwable) { null }
         
@@ -1080,6 +1144,7 @@ class SettingsBottomFragment(
         etLink?.setPadding(25, 0, 25, 0) 
         if (isEdit) etLink?.setText(itemToEdit?.link)
 
+        switchStreamSubtitleSync?.isChecked = itemToEdit?.isStreamSubtitleSyncEnabled ?: false
         switchLinkSync?.isChecked = itemToEdit?.isSyncEnabled ?: true
         switchHistorySync?.isChecked = itemToEdit?.isHistorySyncEnabled ?: true
 
@@ -1113,6 +1178,7 @@ class SettingsBottomFragment(
             val name = etName.text.toString().trim()
             val link = etLink.text.toString().trim()
             val type = "StremioC"
+            val isExtraSync = switchStreamSubtitleSync?.isChecked ?: false
             val isSync = switchLinkSync?.isChecked ?: true
             val isHistorySync = switchHistorySync?.isChecked ?: true
 
@@ -1124,14 +1190,14 @@ class SettingsBottomFragment(
                 val updatedList = SettingsRepository.loadLinks(sharedPref)
                 val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
                 if (indexInDb != -1) {
-                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type, isSyncEnabled = isSync, isHistorySyncEnabled = isHistorySync)
+                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type, isSyncEnabled = isSync, isHistorySyncEnabled = isHistorySync, isStreamSubtitleSyncEnabled = isExtraSync)
                     updatedList[indexInDb] = newItem
                     SettingsRepository.saveLinks(sharedPref, updatedList)
                     (rv?.adapter as? LinksAdapter)?.updateItem(newItem, position)
                     showToast("Link Updated Successfully")
                 }
             } else {
-                val item = LinkItem(name = name.ifBlank { link }, link = link, type = type, isSyncEnabled = isSync, isHistorySyncEnabled = isHistorySync)
+                val item = LinkItem(name = name.ifBlank { link }, link = link, type = type, isSyncEnabled = isSync, isHistorySyncEnabled = isHistorySync, isStreamSubtitleSyncEnabled = isExtraSync)
                 try {
                     val list = SettingsRepository.loadLinks(sharedPref)
                     list.add(0, item)
@@ -1781,7 +1847,7 @@ private fun showLanguageSelectDialog() {
             holder.tvName.text = item.name
             holder.tvLink.text = item.link
             holder.tvType.text = item.type
-            holder.tvSyncBadge.visibility = if (item.isSyncEnabled || item.isHistorySyncEnabled) View.VISIBLE else View.GONE
+            holder.tvSyncBadge.visibility = if (item.isSyncEnabled || item.isHistorySyncEnabled || item.isStreamSubtitleSyncEnabled) View.VISIBLE else View.GONE
             holder.btnDelete.setOnClickListener { onDelete(item) }
             holder.itemView.setOnClickListener { onEdit(item, position) }
         }
