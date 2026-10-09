@@ -1502,9 +1502,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val globalEpisode = if (actualIsMovie) null else loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 } ?: 1
 
         val primaryStremioId = buildStremioId(targetType, primaryId, loadData.season, loadData.episode) ?: primaryId
-        if (loadData.originalKitsuId != null) {
-            com.lagradost.api.Log.d("StremioC", "kitsu-route main-stream=$primaryStremioId main-subtitle=${buildStremioId(targetType, primaryId, loadData.season, loadData.episode, isSubtitle = true)} external=$globalId")
-        }
         val encodedPrimaryId = primaryStremioId.urlEncode()
 
         val seenLinks = Collections.synchronizedSet(mutableSetOf<Triple<String, String, Map<String, String>>>())
@@ -1762,9 +1759,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                                     ?: getActualStremioAddonName(addonUrl)
                                     ?: base.toHttpUrlOrNull()?.host.orEmpty()
                                 if (source.isNotBlank()) stremioSourceNames.add(source.lowercase())
-                                if (loadData.originalKitsuId != null) {
-                                    com.lagradost.api.Log.d("StremioC", "kitsu-route extra=$source stream=$extId subtitle=${buildStremioId(extraType, reqId, season, episode, isSubtitle = true)}")
-                                }
                                 runAllAsync({
                                     runSuspendCatching {
                                         val requestUrl = "$base/stream/$extraType/${extId.urlEncode()}.json$suffix"
