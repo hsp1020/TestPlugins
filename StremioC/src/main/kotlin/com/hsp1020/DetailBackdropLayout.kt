@@ -243,8 +243,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (title?.alpha != alpha) title?.alpha = alpha
     }
     private fun update() {
+        // An already-queued pre-draw can run after stop() removed the edge views.
+        if (!started) return
         if (portraitTitleOnly) { updatePortraitTitle(); return }
         if (splitFallback) { revealRecoveredLayout(); return }
+        if (edges.size < 4) return
         val container = holder ?: return
         val image = picture ?: return
         // A not-yet-measured tablet/TV is loading, not a failed layout.
