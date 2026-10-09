@@ -795,25 +795,31 @@ class SettingsBottomFragment(
         val extraUrlToggle = view.findView<TextView>("toggleStreamSubtitleUrls")
         val urlControlSize = (40 * ctx.resources.displayMetrics.density + 0.5f).toInt()
         val urlFieldPadding = (10 * ctx.resources.displayMetrics.density + 0.5f).toInt()
-        fun addExtraUrlField(initial: String = "") {
+        fun addExtraUrlField(initialName: String = "", initialUrl: String = "") {
             val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
-            val field = EditText(ctx).apply {
-                hint = "Addon Base URL"
-                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-                setText(initial)
+            fun newField(hintText: String, value: String, isUrl: Boolean) = EditText(ctx).apply {
+                hint = hintText
+                inputType = InputType.TYPE_CLASS_TEXT or
+                    (if (isUrl) InputType.TYPE_TEXT_VARIATION_URI else InputType.TYPE_TEXT_FLAG_CAP_SENTENCES)
+                setText(value)
                 textSize = 14f
                 setTextColor(Color.WHITE)
-                setHintTextColor(Color.parseColor("#555555"))
+                setHintTextColor(Color.parseColor("#777777"))
                 setPadding(urlFieldPadding, urlFieldPadding, urlFieldPadding, urlFieldPadding)
                 setBackgroundColor(Color.TRANSPARENT)
                 isSingleLine = true
             }
-            row.addView(field, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            val nameField = newField("Addon Name", initialName, false)
+            val urlField = newField("Manifest JSON URL", initialUrl, true)
+            row.addView(nameField, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.85f))
+            row.addView(View(ctx).apply { setBackgroundColor(Color.parseColor("#444444")) },
+                LinearLayout.LayoutParams((ctx.resources.displayMetrics.density + 0.5f).toInt(), urlFieldPadding * 2))
+            row.addView(urlField, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f))
             row.addView(TextView(ctx).apply {
                 text = "−"
                 contentDescription = "Remove addon URL"
                 textSize = 20f
-                setTextColor(Color.LTGRAY)
+                setTextColor(Color.WHITE)
                 gravity = android.view.Gravity.CENTER
                 isClickable = true
                 isFocusable = true
@@ -822,14 +828,14 @@ class SettingsBottomFragment(
                 setBackgroundResource(ripple.resourceId)
                 setOnClickListener {
                     if (extraUrlContainer.childCount > 1) extraUrlContainer.removeView(row)
-                    else field.setText("")
+                    else { nameField.setText(""); urlField.setText("") }
                 }
             }, LinearLayout.LayoutParams(urlControlSize, urlControlSize))
             row.addView(TextView(ctx).apply {
                 text = "+"
                 contentDescription = "Add addon URL"
                 textSize = 20f
-                setTextColor(Color.LTGRAY)
+                setTextColor(Color.WHITE)
                 gravity = android.view.Gravity.CENTER
                 isClickable = true
                 isFocusable = true
@@ -844,7 +850,13 @@ class SettingsBottomFragment(
             JSONArray(sharedPref.getString(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_URLS, "[]"))
         }.getOrNull()
         if (extraUrls == null || extraUrls.length() == 0) addExtraUrlField()
-        else (0 until extraUrls.length()).forEach { addExtraUrlField(extraUrls.optString(it)) }
+        else (0 until extraUrls.length()).forEach { i ->
+            when (val entry = extraUrls.opt(i)) {
+                is JSONObject -> addExtraUrlField(entry.optString("name"), entry.optString("url"))
+                is String -> addExtraUrlField(initialUrl = entry) // Legacy URL-only settings
+                else -> addExtraUrlField()
+            }
+        }
         fun setExtraUrlExpanded(expanded: Boolean) {
             extraUrlContainer.visibility = if (expanded) View.VISIBLE else View.GONE
             extraUrlToggle.text = if (expanded) "▲" else "▼"
@@ -1025,10 +1037,12 @@ class SettingsBottomFragment(
             val switchVixSrc = view.findView<Switch>("switchVixSrc")
 
             val extraUrlList = (0 until extraUrlContainer.childCount).mapNotNull { i ->
-                val field = (extraUrlContainer.getChildAt(i) as LinearLayout).getChildAt(0) as EditText
-                field.text.toString().trim().takeIf { it.isNotBlank() }
-            }.distinct()
-            if (extraUrlList.any { url ->
+                val row = extraUrlContainer.getChildAt(i) as LinearLayout
+                val addonName = (row.getChildAt(0) as EditText).text.toString().trim()
+                val addonUrl = (row.getChildAt(1) as EditText).text.toString().trim()
+                addonUrl.takeIf { it.isNotBlank() }?.let { addonName to it }
+            }.distinctBy { stremioManifestUrl(it.second) }
+            if (extraUrlList.any { (_, url) ->
                     runCatching { val uri = url.toUri();
                         (uri.scheme?.lowercase() !in setOf("http", "https")) || uri.host.isNullOrBlank()
                     }.getOrDefault(true)
@@ -1039,7 +1053,11 @@ class SettingsBottomFragment(
             val editor = sharedPref.edit()
             editor.putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, tmdbApiKeyVal)
             editor.putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim())
-            editor.putString(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_URLS, JSONArray(extraUrlList).toString())
+            editor.putString(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_URLS, JSONArray().apply {
+                extraUrlList.forEach { (addonName, addonUrl) ->
+                    put(JSONObject().put("name", addonName).put("url", addonUrl))
+                }
+            }.toString())
             editor.putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
             editor.putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim())
             
