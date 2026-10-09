@@ -2699,7 +2699,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             return FetchedTmdbData(
                 if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
-                detailRes.overview, selectedLogo?.file_path?.let { "https://image.tmdb.org/t/p/w500$it" },
+                detailRes.overview, selectedLogo?.file_path?.let { path ->
+                    // TMDB serves a PNG rasterization at the same file basename as an SVG.
+                    val rasterPath = if (path.endsWith(".svg", ignoreCase = true))
+                        path.dropLast(4) + ".png" else path
+                    "https://image.tmdb.org/t/p/w500$rasterPath"
+                },
                 fetchedTrailers, fetchedRecommendations, if (isMovie) detailRes.runtime else null, fetchedAgeRating, crewList + castList,
                 (detailRes.releaseDate ?: detailRes.firstAirDate)?.split("-")?.first()?.toIntOrNull(),
                 if (detailRes.status == "Returning Series") ShowStatus.Ongoing else ShowStatus.Completed, episodeTmdbMeta, detailRes.origin_country,
