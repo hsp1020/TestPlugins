@@ -236,7 +236,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val imageTop = (bannerHeight - imageHeight) / 2
         if (image.scaleType != ImageView.ScaleType.FIT_CENTER) image.scaleType = ImageView.ScaleType.FIT_CENTER
         // Keep the pair hidden until BOTH assets are ready AND the final measured layout is stable.
-        val stable = image.width == imageWidth && image.height == imageHeight &&
+        var stable = image.width == imageWidth && image.height == imageHeight &&
             image.left == imageLeft && image.top == imageTop
         if (!stable) stage()
         place(image, imageWidth, imageHeight, imageLeft, imageTop)
