@@ -1469,13 +1469,15 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { e.printStackTrace(); null } ?: return false
         com.lagradost.api.Log.d("StremioC", "subtitle-labels-v2 active provider=$name")
         
-        val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
+        val legacyPrimaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
             loadData.imdbId
         } else {
             loadData.id ?: ""
         }
 
-        val globalId = if (!loadData.imdbId.isNullOrBlank()) loadData.imdbId else primaryId
+        // Only the original Kitsu item's own Stremio stream/subtitle requests use Kitsu.
+        val primaryId = loadData.originalKitsuId ?: legacyPrimaryId
+        val globalId = if (!loadData.imdbId.isNullOrBlank()) loadData.imdbId else legacyPrimaryId
         val targetType = loadData.type ?: if ((loadData.season ?: 0) > 0 || (loadData.episode ?: 0) > 0) "series" else "movie"
         
         val actualIsMovie = targetType == "movie" || (loadData.season == null && loadData.episode == null)
@@ -2306,7 +2308,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("anilistId") val anilistId: Int? = null,
         @JsonProperty("malId") val malId: Int? = null,
         @JsonProperty("kitsuId") val kitsuId: String? = null,
-        @JsonProperty("addonUrl") val addonUrl: String? = null
+        @JsonProperty("addonUrl") val addonUrl: String? = null,
+        @JsonProperty("originalKitsuId") val originalKitsuId: String? = null
     )
     
     data class Manifest(val catalogs: List<Catalog>)
@@ -2704,7 +2707,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             aniListId: Int?, 
             malId: Int?,
             kitsuId: String?,
-            year: Int? = null // ★ year 매개변수 추가
+            year: Int? = null, // ★ year 매개변수 추가
+            originalKitsuId: String? = null
         ): List<Episode> {
             val videos = targetVideos ?: emptyList()
             
@@ -2767,7 +2771,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         imdbSeason, imdbEpisode, originalTitle, englishTitle, 
                         aniListId, malId, kitsuId,
                         provider.mainUrl,
-                        year // ★ toEpisode 메서드로 year 매개변수 위임 전달
+                        year, // ★ toEpisode 메서드로 year 매개변수 위임 전달
+                        originalKitsuId
                     )
                     processedEpisodes.add(ep)
                 }
@@ -2792,6 +2797,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             resolvedIdHolder: Array<String?>? = null
         ): LoadResponse = coroutineScope {
             val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
+            val originalKitsuId = this@CatalogEntry.id?.takeIf { it.startsWith("kitsu:") }
 
             var finalImdbId = if (this@CatalogEntry.id?.startsWith("tt") == true) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
@@ -2983,7 +2989,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         kitsuId = this@CatalogEntry.kitsuIdExt,
                         originalTitle = tmdbData?.fetchedOriginalTitle,
                         englishTitle = tmdbData?.fetchedEnglishTitle,
-                        addonUrl = provider.mainUrl
+                        addonUrl = provider.mainUrl,
+                        originalKitsuId = originalKitsuId
                     )
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
@@ -3025,7 +3032,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     finalAniId, 
                     finalMalId, 
                     this@CatalogEntry.kitsuIdExt,
-                    tmdbData?.fetchedYear // ★ 수집된 출시 연도(year) 인자 전달 추가
+                    tmdbData?.fetchedYear, // ★ 수집된 출시 연도(year) 인자 전달 추가
+                    originalKitsuId
                 )
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
@@ -3096,7 +3104,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             malId: Int?, 
             kitsuId: String?, 
             addonUrl: String? = null,
-            year: Int? = null // ★ year 매개변수 추가
+            year: Int? = null, // ★ year 매개변수 추가
+            originalKitsuId: String? = null
         ): Episode { // ★ 누락되었던 닫는 괄호, 반환 타입, 시작 중괄호 추가
             val tmdbEp = tmdbMetaMap["${displaySeason}_${displayEpisode}"] ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
             val finalAirDate = tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@Video.firstAired ?: this@Video.released
@@ -3124,7 +3133,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 anilistId = aniListId,
                 malId = malId,
                 kitsuId = kitsuId,
-                addonUrl = addonUrl
+                addonUrl = addonUrl,
+                originalKitsuId = originalKitsuId
             )) {
                 val rawTitle = this@Video.name ?: this@Video.title ?: "Episode $displayEpisode"
                 val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
