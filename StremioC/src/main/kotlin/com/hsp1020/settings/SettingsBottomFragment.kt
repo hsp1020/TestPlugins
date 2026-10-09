@@ -809,8 +809,8 @@ class SettingsBottomFragment(
                 setBackgroundColor(Color.TRANSPARENT)
                 isSingleLine = true
             }
-            val nameField = newField("Addon Name", initialName, false)
-            val urlField = newField("Manifest JSON URL", initialUrl, true)
+            val nameField = newField("Name", initialName, false)
+            val urlField = newField("Addon URL", initialUrl, true)
             row.addView(nameField, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.85f))
             row.addView(View(ctx).apply { setBackgroundColor(Color.parseColor("#444444")) },
                 LinearLayout.LayoutParams((ctx.resources.displayMetrics.density + 0.5f).toInt(), urlFieldPadding * 2))
