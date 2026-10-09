@@ -44,6 +44,16 @@
         android:layout_marginBottom="10dp"
         android:background="@android:color/transparent" />
 
+    <Switch
+        android:id="@+id/switchStreamSubtitleSync"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="Stream / Subtitle Sync"
+        android:textColor="#FFFFFF"
+        android:textSize="14sp"
+        android:padding="5dp" />
+
     <!-- 개별 동기화 ON/OFF 조작을 위한 스위치 추가 -->
     <Switch
         android:id="@+id/switchLinkSync"
