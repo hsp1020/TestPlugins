@@ -68,8 +68,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             p.marginStart = left; p.topMargin = top; view.layoutParams = p
         }
     }
-    private fun scaleLogo(doubleSize: Boolean) {
-        val factor = if (doubleSize) 2f else 1f
+    private fun scaleLogo(doubleSize: Boolean, factor: Float = if (doubleSize) 2f else 1f) {
         val x = originalLogoScaleX * factor
         val y = originalLogoScaleY * factor
         if (logo?.scaleX != x) logo?.scaleX = x
@@ -209,15 +208,15 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
 
         // logo visibility becomes VISIBLE before Coil has finished decoding its drawable.
         val hasLogo = logo?.visibility == View.VISIBLE && logo.drawable != null && logo.width > 0
-        scaleLogo(hasLogo)
         val foreignLogo = hasLogo && detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true
         val titleText = if (foreignLogo || (!hasLogo && title?.visibility == View.VISIBLE))
             title?.text?.toString()?.trim()?.replace('\n', ' ')?.replace('\r', ' ').orEmpty() else ""
+        val maxLabelWidth = (container.width * 0.36f).roundToInt().coerceAtLeast(1)
         val titleWidth = if (titleText.isNotEmpty())
             min(((baseTitlePaint ?: titleOverlay!!.paint).measureText(titleText) + dp(24)).roundToInt(),
-                (container.width * 0.36f).roundToInt()) else 0
-        val logoWidth = if (hasLogo) (logo!!.width * logo.scaleX).roundToInt() else 0
-        val labelWidth = max(logoWidth, titleWidth)
+                maxLabelWidth) else 0
+        val logoFullWidth = if (hasLogo) (logo!!.width * abs(originalLogoScaleX) * 2f).roundToInt() else 0
+        val labelWidth = max(min(logoFullWidth, maxLabelWidth), titleWidth)
         val gap = if (labelWidth > 0) dp(45) else 0
         val maxWidth = (container.width - labelWidth - gap - dp(24)).coerceAtLeast(1)
         val drawable = image.drawable
@@ -248,16 +247,20 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         place(edges[3], imageWidth, featherY, imageLeft, imageTop + imageHeight - featherY)
         // Avoid double-darkening the bottom: the built-in shadow covered the whole parent.
         shadow?.visibility = View.INVISIBLE
-        val logoHeight = if (hasLogo) (logo!!.height * logo.scaleY).roundToInt() else 0
-        val verticalGap = if (foreignLogo && titleText.isNotEmpty()) dp(8) else 0
+        // Enforce both the 36%-wide label and the actual FIT_CENTER image bounds.
+        val baseLogoWidth = if (hasLogo) logo!!.width * abs(originalLogoScaleX) else 0f
+        val baseLogoHeight = if (hasLogo) logo!!.height * abs(originalLogoScaleY) else 0f
+        var logoFactor = if (hasLogo && baseLogoWidth > 0f)
+            min(2f, min(labelWidth, imageWidth).toFloat() / baseLogoWidth) else 1f
+        val requestedLogoHeight = (baseLogoHeight * logoFactor).roundToInt()
+        val verticalGap = if (foreignLogo && titleText.isNotEmpty()) dp(8).coerceAtMost((imageHeight - 2).coerceAtLeast(0)) else 0
         var titleHeight = 0
         titleOverlay?.let { overlay ->
             if (overlay.text.toString() != titleText) { overlay.text = titleText; stable = false }
             if (titleText.isNotEmpty()) {
                 val previousSize = overlay.textSize
                 fitTitle(overlay, titleText, labelWidth,
-
-                    if (foreignLogo) (imageHeight - logoHeight - verticalGap).coerceAtLeast(1) else imageHeight)
+                    if (foreignLogo) (imageHeight - requestedLogoHeight - verticalGap).coerceAtLeast(1) else imageHeight)
                 if (overlay.textSize != previousSize) stable = false
                 if (foreignLogo) {
                     overlay.measure(View.MeasureSpec.makeMeasureSpec(labelWidth, View.MeasureSpec.EXACTLY),
@@ -266,10 +269,17 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 }
             }
         }
+        if (hasLogo && baseLogoHeight > 0f) {
+            val availableHeight = (imageHeight - titleHeight - verticalGap).coerceAtLeast(0)
+            logoFactor = min(logoFactor, availableHeight / baseLogoHeight)
+        }
+        if (hasLogo) scaleLogo(true, logoFactor)
+        val logoWidth = if (hasLogo) (logo!!.width * abs(logo.scaleX)).roundToInt() else 0
+        val logoHeight = if (hasLogo) (logo!!.height * abs(logo.scaleY)).roundToInt() else 0
         val groupTop = ((bannerHeight - logoHeight - verticalGap - titleHeight) / 2f).coerceAtLeast(0f)
         if (hasLogo) {
             // Account for the centered pivot when scaling the original ImageView.
-            logo?.translationX = groupLeft + (if (foreignLogo) (labelWidth - logoWidth) / 2 else 0) -
+            logo?.translationX = groupLeft + (labelWidth - logoWidth) / 2 -
                 logo!!.left + (logo.scaleX - 1f) * logo.pivotX
             logo?.translationY = (if (foreignLogo) groupTop else (bannerHeight - logoHeight) / 2f) -
                 logo.top + (logo.scaleY - 1f) * logo.pivotY
