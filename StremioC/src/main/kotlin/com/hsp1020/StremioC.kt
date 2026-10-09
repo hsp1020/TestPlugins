@@ -106,16 +106,14 @@ private fun JsonNode?.intOrNull(): Int? {
     return try { this.asInt() } catch (e: Exception) { null }
 }
 
-// Language filtering is built into the existing TMDB detail call; never request a second page.
-private fun tmdbLogoLanguages(knownOriginal: String?): String {
+// Query configured-language and English logos in the existing TMDB detail call.
+private fun tmdbLogoLanguages(): String {
     val preferred = CloudStreamApp.context
         ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
         ?.getString("tmdb_language_code", "en-US")
         ?.substringBefore('-')?.trim()?.lowercase()
         ?.takeIf { it.isNotEmpty() } ?: "en"
-    val original = knownOriginal?.trim()?.lowercase()
-        ?.takeIf { it.length == 2 && it.all(Char::isLetter) }
-    return listOfNotNull(preferred, "en", original).distinct().joinToString(",")
+    return listOf(preferred, "en").distinct().joinToString(",")
 }
 
 open class StremioC(override var mainUrl: String, override var name: String) : MainAPI() {
@@ -767,8 +765,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private suspend fun fetchTmdbDetailForLoad(
         tmdbId: String,
-        mediaType: String,
-        knownOriginal: String? = null
+        mediaType: String
     ): TmdbDetailResponse? {
         val detailAppend = if (mediaType == "movie") {
             "release_dates,credits,images,videos,external_ids,recommendations,translations"
@@ -776,7 +773,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             "content_ratings,credits,images,videos,external_ids,recommendations,translations"
         }
         val detailUrl = buildTmdbUrl("/$mediaType/$tmdbId",
-            "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages(knownOriginal))
+            "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages())
         val cached = tmdbDetailsCache[detailUrl]
         val result: TmdbDetailResponse? = if (cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL) {
             cached.first
@@ -1410,8 +1407,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             targetTmdbId != null && speculativeTmdbDetail == null
         ) {
             async(Dispatchers.IO) {
-                fetchTmdbDetailForLoad(targetTmdbId, targetTmdbMediaType,
-                    res.original_language ?: res.providerArt?.originalLanguage)
+                fetchTmdbDetailForLoad(targetTmdbId, targetTmdbMediaType)
             }
         } else {
             null
@@ -2460,7 +2456,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     )
 
     private data class ProviderArtInfo(
-        @JsonProperty("originalLanguage") val originalLanguage: String? = null
+        @JsonProperty("logo") val logo: String? = null
     )
 
     private data class CatalogEntry(
@@ -2531,14 +2527,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         private suspend fun fetchTmdbDetails(
             provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
-            stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null,
-            knownOriginal: String? = null
+            stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null
         ): FetchedTmdbData {
             var fetchedRecommendations: List<SearchResponse>? = null
             
             val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
             val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr",
-                "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages(knownOriginal))
+                "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages())
             val cacheKey = detailUrl
             val cached = tmdbDetailsCache[cacheKey]
             val detailRes = preFetchedDetail ?: if (cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL) {
@@ -2684,15 +2679,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 enTranslation ?: detailRes.original_title ?: detailRes.original_name
             }
 
-            // AIOMetadata priority limited to configured language > English > original.
-            // No arbitrary-language or language-neutral logo: use text when all three are absent.
+            // TMDB preference: configured language, then English. Addon logo is the final fallback.
             val preferred = langCode.substringBefore('-').lowercase()
-            val original = detailRes.original_language?.lowercase()
             val selectedLogo = detailRes.images?.logos.orEmpty()
                 .filter { logo ->
                     val language = logo.iso_639_1?.lowercase()
-                    !logo.file_path.isNullOrBlank() && (language == preferred || language == "en" ||
-                        (original != null && language == original))
+                    !logo.file_path.isNullOrBlank() && (language == preferred || language == "en")
                 }
                 .maxWithOrNull(compareBy<TmdbLogo> {
                     when (it.iso_639_1?.lowercase()) { preferred -> 3; "en" -> 2; else -> 1 }
@@ -2868,8 +2860,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val safePrefetchedDetail = preFetchedDetail?.takeIf {
                         preFetchedDetailTmdbId == tmdbIdStr && preFetchedDetailMediaType == refinedMediaType
                     }
-                    tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!, refinedMediaType == "movie", finalImdbId, finalType, finalVideos, safePrefetchedDetail, detailedEntry.original_language ?: detailedEntry.providerArt?.originalLanguage
-                        ?: this@CatalogEntry.original_language ?: this@CatalogEntry.providerArt?.originalLanguage)
+                    tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!, refinedMediaType == "movie", finalImdbId, finalType, finalVideos, safePrefetchedDetail)
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -2977,11 +2968,18 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val hasAnimeTrackerIds = finalMalId != null || finalAniId != null || this@CatalogEntry.kitsuIdExt != null
             val finalMovieType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.AnimeMovie else TvType.Movie
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
+            val addonLogo = sequenceOf(detailedEntry.logo, detailedEntry.providerArt?.logo,
+                this@CatalogEntry.logo, this@CatalogEntry.providerArt?.logo)
+                .firstOrNull { !it.isNullOrBlank() }
+            val finalLogo = tmdbData?.fetchedLogo?.takeIf { it.isNotBlank() } ?: addonLogo
+            // The addon does not expose the logo's language: keep the text title alongside it.
+            val finalLogoFallback = if (tmdbData?.fetchedLogo.isNullOrBlank())
+                finalLogo != null else tmdbData?.fetchedLogoFallback == true
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id ?: "")
-                StremioC.fallbackLogoTitles[metaUrl] = tmdbData?.fetchedLogoFallback == true
-                StremioC.expectedLogoByUrl[metaUrl] = !tmdbData?.fetchedLogo.isNullOrBlank()
+                StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
+                StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
                 val resolvedMovieId = if (finalType == "other" && finalVideos?.size == 1) {
                     finalVideos[0].id ?: movieId
                 } else {
@@ -3015,7 +3013,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations 
                     addTrailer(finalTrailers); this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
-                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }
+                    finalLogo?.let { this.logoUrl = it }
 
                     val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
                     validImdb?.let { addImdbId(it) }
@@ -3051,8 +3049,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     tmdbData?.fetchedYear // ★ 수집된 출시 연도(year) 인자 전달 추가
                 )
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
-                StremioC.fallbackLogoTitles[metaUrl] = tmdbData?.fetchedLogoFallback == true
-                StremioC.expectedLogoByUrl[metaUrl] = !tmdbData?.fetchedLogo.isNullOrBlank()
+                StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
+                StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
                 val response = provider.newTvSeriesLoadResponse(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
                 ) {
@@ -3063,7 +3061,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations
                     addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
-                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }
+                    finalLogo?.let { this.logoUrl = it }
                     
                     val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
                     validImdb?.let { addImdbId(it) }
