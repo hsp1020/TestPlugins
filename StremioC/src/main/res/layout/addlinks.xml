@@ -52,6 +52,8 @@
         android:text="Stream / Subtitle Sync"
         android:textColor="#FFFFFF"
         android:textSize="14sp"
+        android:focusable="true"
+        android:background="?android:attr/selectableItemBackground"
         android:padding="5dp" />
 
     <!-- 개별 동기화 ON/OFF 조작을 위한 스위치 추가 -->
@@ -59,7 +61,7 @@
         android:id="@+id/switchLinkSync"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="4dp"
         android:text="Metadata Sync"
         android:textColor="#FFFFFF"
         android:textSize="14sp"
