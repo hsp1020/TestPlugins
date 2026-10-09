@@ -809,8 +809,8 @@ class SettingsBottomFragment(
                 setBackgroundColor(Color.TRANSPARENT)
                 isSingleLine = true
             }
-            val nameField = newField("Name", initialName, false)
-            val urlField = newField("Addon URL", initialUrl, true)
+            val nameField = newField("Addon Name", initialName, false)
+            val urlField = newField("Manifest JSON URL", initialUrl, true)
             row.addView(nameField, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.85f))
             row.addView(View(ctx).apply { setBackgroundColor(Color.parseColor("#444444")) },
                 LinearLayout.LayoutParams((ctx.resources.displayMetrics.density + 0.5f).toInt(), urlFieldPadding * 2))
@@ -1254,7 +1254,7 @@ private fun showLanguageSelectDialog() {
         val currentSavedCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "en-US") ?: "en-US"
         
         var selectedCode = currentSavedCode
-        var selectedLangName = LANGUAGES.find { it.second == currentSavedCode }?.first ?: "South Korea (Korean)"
+        var selectedLangName = LANGUAGES.find { it.second == currentSavedCode }?.first ?: "United States (English)"
 
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
