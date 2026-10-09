@@ -186,7 +186,6 @@ class SettingsBottomFragment(
         var isGenresEnabled: Boolean = true
     )
 
-    private var activeSubDialog: AlertDialog? = null 
     private var searchJob: Job? = null 
 
     private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.parseColor("#000000")); cornerRadius = 25f }
@@ -279,6 +278,18 @@ class SettingsBottomFragment(
         return json
     }
 
+    private fun recordBackupSnapshot(prefs: SharedPreferences, completeKey: String, hashKey: String, backupKey: String) {
+        val json = prefsToJson(prefs).toString()
+        val hash = json.hashCode().toString()
+        val editor = prefs.edit()
+        editor.putBoolean(completeKey, true)
+        editor.putString(hashKey, hash)
+        editor.commit()
+        try {
+            CloudStreamApp.setKey(backupKey, json)
+        } catch (t: Throwable) { t.printStackTrace() }
+    }
+
     private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
         val keys = json.keys()
         while (keys.hasNext()) {
@@ -302,7 +313,6 @@ class SettingsBottomFragment(
     }
 
     private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {
-        activeSubDialog = dialog
         dialog.setCanceledOnTouchOutside(false)
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.setOnShowListener {
@@ -344,6 +354,14 @@ class SettingsBottomFragment(
                StremioC.loadProviderDynamically("phisher", "com.phisher98.StreamPlay") != null
     }
 
+    private fun dialogButton(ctx: Context?, label: String, params: LinearLayout.LayoutParams) = Button(ctx).apply {
+        text = label
+        setTextColor(Color.WHITE)
+        isAllCaps = false
+        background = getButtonBg()
+        layoutParams = params
+    }
+
     private fun showSavedPopup(ctx: Context, title: String, message: String, onConfirm: () -> Unit = {}) {
         val container = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
@@ -364,13 +382,7 @@ class SettingsBottomFragment(
                 setPadding(0, 0, 0, 30)
             })
         }
-        val okBtn = Button(ctx).apply {
-            text = "OK"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-        }
+        val okBtn = dialogButton(ctx, "OK", LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         container.addView(okBtn)
 
         val dlg = AlertDialog.Builder(ctx).setView(container).create()
@@ -510,13 +522,7 @@ class SettingsBottomFragment(
                             setPadding(0, 0, 0, 30)
                         })
                     }
-                    val okBtn = Button(ctx).apply {
-                        text = "OK"
-                        setTextColor(Color.WHITE)
-                        isAllCaps = false
-                        background = getButtonBg()
-                        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                    }
+                    val okBtn = dialogButton(ctx, "OK", LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
                     container.addView(okBtn)
 
                     val dlg = AlertDialog.Builder(ctx).setView(container).create()
@@ -566,20 +572,8 @@ class SettingsBottomFragment(
                     
                     if (!isActive) return@launch
 
-                    val cancelBtn = Button(ctx).apply {
-                        text = "Cancel"
-                        setTextColor(Color.WHITE)
-                        isAllCaps = false
-                        background = getButtonBg()
-                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
-                    }
-                    val restoreBtn = Button(ctx).apply {
-                        text = "Restore"
-                        setTextColor(Color.WHITE)
-                        isAllCaps = false
-                        background = getButtonBg()
-                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
-                    }
+                    val cancelBtn = dialogButton(ctx, "Cancel", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) })
+                    val restoreBtn = dialogButton(ctx, "Restore", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) })
 
                     val container = LinearLayout(ctx).apply {
                         orientation = LinearLayout.VERTICAL
@@ -662,17 +656,7 @@ class SettingsBottomFragment(
                                     }
                                     editor.commit()
 
-                                    val finalStremioCJson = prefsToJson(sharedPref).toString()
-                                    val finalStremioCHash = finalStremioCJson.hashCode().toString()
-                                    
-                                    val se = sharedPref.edit()
-                                    se.putBoolean("stremio_c_restore_complete", true)
-                                    se.putString("stremio_c_last_applied_backup_hash", finalStremioCHash)
-                                    se.commit()
-
-                                    try {
-                                        CloudStreamApp.setKey("native_backup_stremioc", finalStremioCJson)
-                                    } catch (t: Throwable) { t.printStackTrace() }
+                                    recordBackupSnapshot(sharedPref, "stremio_c_restore_complete", "stremio_c_last_applied_backup_hash", "native_backup_stremioc")
 
                                     val isStreamPlayInBackup = parsedJson.optBoolean("stream_play_enabled", false)
                                     val isStreamPlayEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, false) ?: false
@@ -685,17 +669,7 @@ class SettingsBottomFragment(
                                             jsonToPrefs(streamPlayData, editorSP)
                                             editorSP.commit()
 
-                                            val finalStreamPlayJson = prefsToJson(streamPlayPrefs).toString()
-                                            val finalStreamPlayHash = finalStreamPlayJson.hashCode().toString()
-                                            
-                                            val seSP = streamPlayPrefs.edit()
-                                            seSP.putBoolean("streamplay_restore_complete", true)
-                                            seSP.putString("streamplay_last_applied_backup_hash", finalStreamPlayHash)
-                                            seSP.commit()
-
-                                            try {
-                                                CloudStreamApp.setKey("native_backup_streamplay", finalStreamPlayJson)
-                                            } catch (t: Throwable) { t.printStackTrace() }
+                                            recordBackupSnapshot(streamPlayPrefs, "streamplay_restore_complete", "streamplay_last_applied_backup_hash", "native_backup_streamplay")
                                         }
                                     }
 
@@ -729,17 +703,7 @@ class SettingsBottomFragment(
                                     jsonToPrefs(parsedJson, editor)
                                     editor.commit()
 
-                                    val finalStremioCJson = prefsToJson(sharedPref).toString()
-                                    val finalStremioCHash = finalStremioCJson.hashCode().toString()
-                                    
-                                    val se = sharedPref.edit()
-                                    se.putBoolean("stremio_c_restore_complete", true)
-                                    se.putString("stremio_c_last_applied_backup_hash", finalStremioCHash)
-                                    se.commit()
-
-                                    try {
-                                        CloudStreamApp.setKey("native_backup_stremioc", finalStremioCJson)
-                                    } catch (t: Throwable) { t.printStackTrace() }
+                                    recordBackupSnapshot(sharedPref, "stremio_c_restore_complete", "stremio_c_last_applied_backup_hash", "native_backup_stremioc")
                                 }
                             }
                             
@@ -755,38 +719,8 @@ class SettingsBottomFragment(
 
                 } catch (e: Exception) {
                     e.printStackTrace()
-                    val okBtn = Button(ctx).apply {
-                        text = "OK"
-                        setTextColor(Color.WHITE)
-                        isAllCaps = false
-                        background = getButtonBg()
-                        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                    }
-
-                    val errContainer = LinearLayout(ctx).apply {
-                        orientation = LinearLayout.VERTICAL
-                        setPadding(40, 40, 40, 40)
-                        background = getDarkThemeBg()
-                        addView(TextView(ctx).apply {
-                            text = "Invalid Backup Data"
-                            textSize = 18f
-                            setTextColor(Color.WHITE)
-                            typeface = android.graphics.Typeface.DEFAULT_BOLD
-                            setPadding(0, 0, 0, 20)
-                            gravity = android.view.Gravity.CENTER
-                        })
-                        addView(TextView(ctx).apply {
-                            text = "No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again."
-                            setTextColor(Color.LTGRAY)
-                            textSize = 14f
-                            setPadding(0, 0, 0, 30)
-                        })
-                        addView(okBtn)
-                    }
-                    val errDlg = AlertDialog.Builder(ctx).setView(errContainer).create()
-                    setupCustomDialog(errDlg, errContainer)
-                    okBtn.setOnClickListener { errDlg.dismiss() }
-                    errDlg.show()
+                    showSavedPopup(ctx, "Invalid Backup Data",
+                        "No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again.")
                 }
             }
         }
@@ -968,21 +902,9 @@ class SettingsBottomFragment(
                             gravity = android.view.Gravity.CENTER
                         })
 
-                        val optEdit = Button(ctx).apply {
-                            text = "Edit Link Info"
-                            setTextColor(Color.WHITE)
-                            isAllCaps = false
-                            background = getButtonBg()
-                            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 15) }
-                        }
+                        val optEdit = dialogButton(ctx, "Edit Link Info", LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 15) })
                         
-                        val optCatalog = Button(ctx).apply {
-                            text = "Configure Catalogs & Genres"
-                            setTextColor(Color.WHITE)
-                            isAllCaps = false
-                            background = getButtonBg()
-                            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                        }
+                        val optCatalog = dialogButton(ctx, "Configure Catalogs & Genres", LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                         
                         choiceContainer.addView(optEdit)
                         choiceContainer.addView(optCatalog)
@@ -1008,13 +930,7 @@ class SettingsBottomFragment(
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(0, 20, 0, 0)
             }
-            val closeBtn = Button(ctx).apply {
-                text = "Close"
-                setTextColor(Color.WHITE)
-                isAllCaps = false
-                background = getButtonBg()
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            }
+            val closeBtn = dialogButton(ctx, "Close", LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
             footer.addView(closeBtn)
             dialogView.addView(footer)
 
@@ -1070,45 +986,13 @@ class SettingsBottomFragment(
             editor.commit()
             StremioC.invalidateSyncSettingsCache()
 
-            val stremioCJson = prefsToJson(sharedPref).toString()
-            val stremioCHash = stremioCJson.hashCode().toString()
-            
-            val se = sharedPref.edit()
-            se.putBoolean("stremio_c_restore_complete", true)
-            se.putString("stremio_c_last_applied_backup_hash", stremioCHash)
-            se.commit()
-
-            try {
-                CloudStreamApp.setKey("native_backup_stremioc", stremioCJson)
-            } catch (t: Throwable) { t.printStackTrace() }
+            recordBackupSnapshot(sharedPref, "stremio_c_restore_complete", "stremio_c_last_applied_backup_hash", "native_backup_stremioc")
 
             val streamPlayPrefs = context.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
-            val streamPlayJson = prefsToJson(streamPlayPrefs).toString()
-            val streamPlayHash = streamPlayJson.hashCode().toString()
-            
-            val seSP = streamPlayPrefs.edit()
-            seSP.putBoolean("streamplay_restore_complete", true)
-            seSP.putString("streamplay_last_applied_backup_hash", streamPlayHash)
-            seSP.commit()
+            recordBackupSnapshot(streamPlayPrefs, "streamplay_restore_complete", "streamplay_last_applied_backup_hash", "native_backup_streamplay")
 
-            try {
-                CloudStreamApp.setKey("native_backup_streamplay", streamPlayJson)
-            } catch (t: Throwable) { t.printStackTrace() }
-
-            val cancelBtn = Button(context).apply {
-                text = "No"
-                setTextColor(Color.WHITE)
-                isAllCaps = false
-                background = getButtonBg()
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
-            }
-            val restartBtn = Button(context).apply {
-                text = "Yes"
-                setTextColor(Color.WHITE)
-                isAllCaps = false
-                background = getButtonBg()
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
-            }
+            val cancelBtn = dialogButton(context, "No", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) })
+            val restartBtn = dialogButton(context, "Yes", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) })
 
             val container = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
@@ -1190,20 +1074,8 @@ class SettingsBottomFragment(
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 30, 0, 0)
         }
-        val saveBtn = Button(ctx).apply {
-            text = if (isEdit) "Update" else "Save"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
-        }
-        val cancelBtn = Button(ctx).apply {
-            text = "Cancel"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
-        }
+        val saveBtn = dialogButton(ctx, if (isEdit) "Update" else "Save", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) })
+        val cancelBtn = dialogButton(ctx, "Cancel", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) })
         footer.addView(cancelBtn)
         footer.addView(saveBtn)
         dialogView.addView(footer)
@@ -1378,20 +1250,8 @@ private fun showLanguageSelectDialog() {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 30, 0, 0)
         }
-        val applyBtn = Button(context).apply {
-            text = "Apply"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
-        }
-        val cancelBtn = Button(context).apply {
-            text = "Cancel"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
-        }
+        val applyBtn = dialogButton(context, "Apply", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) })
+        val cancelBtn = dialogButton(context, "Cancel", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) })
         footer.addView(cancelBtn)
         footer.addView(applyBtn)
         container.addView(footer)
@@ -1775,24 +1635,8 @@ private fun showLanguageSelectDialog() {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 30, 0, 0)
         }
-        val cancelBtn = Button(context).apply {
-            text = "Cancel"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(0, 0, 15, 0)
-            }
-        }
-        val saveBtn = Button(context).apply {
-            text = "Save"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(15, 0, 0, 0)
-            }
-        }
+        val cancelBtn = dialogButton(context, "Cancel", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) })
+        val saveBtn = dialogButton(context, "Save", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) })
         footer.addView(cancelBtn)
         footer.addView(saveBtn)
         dialogContainer.addView(footer)
