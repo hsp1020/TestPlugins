@@ -1501,6 +1501,20 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val globalSeason = if (actualIsMovie) null else loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 } ?: 1
         val globalEpisode = if (actualIsMovie) null else loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 } ?: 1
 
+        // TEMP DIAGNOSTIC ONLY: captures the selected episode data, not addon URLs/tokens.
+        com.lagradost.api.Log.d("SC_SEASON_DIAG", "LOAD " + mapOf(
+            "provider" to name, "id" to loadData.id, "originalKitsuId" to loadData.originalKitsuId,
+            "imdbId" to loadData.imdbId, "tmdbId" to loadData.tmdbId, "kitsuId" to loadData.kitsuId,
+            "malId" to loadData.malId, "anilistId" to loadData.anilistId,
+            "type" to targetType, "season" to loadData.season, "episode" to loadData.episode,
+            "imdbSeason" to loadData.imdbSeason, "imdbEpisode" to loadData.imdbEpisode,
+            "title" to loadData.title, "englishTitle" to loadData.englishTitle,
+            "originalTitle" to loadData.originalTitle, "firstAired" to loadData.firstAired,
+            "year" to loadData.year, "airedYear" to loadData.airedYear, "isAnime" to loadData.isAnime,
+            "integrationType" to integrationTargetType, "globalSeason" to globalSeason,
+            "globalEpisode" to globalEpisode
+        ).toJson())
+
         val primaryStremioId = buildStremioId(targetType, primaryId, loadData.season, loadData.episode) ?: primaryId
         val encodedPrimaryId = primaryStremioId.urlEncode()
 
@@ -2123,11 +2137,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 standardImdbRoute: Boolean = false
             ) {
                 try {
+                    val cineJson = cinePayload(
+                        loadData, targetType, media, animeRoute,
+                        japaneseTitle, standardImdbRoute
+                    ).toJson()
+                    com.lagradost.api.Log.d("SC_SEASON_DIAG", "CINE anime=$animeRoute jp=$japaneseTitle standardImdb=$standardImdbRoute $cineJson")
                     cineStreamProvider.loadLinks(
-                        cinePayload(
-                            loadData, targetType, media, animeRoute,
-                            japaneseTitle, standardImdbRoute
-                        ).toJson(),
+                        cineJson,
                         isCasting,
                         subtitleCallback,
                         trackedCallback
@@ -2194,8 +2210,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             if (!media.isAnime) {
                 if (streamPlayProvider != null) {
                     withTimeoutOrNull(55000L) {
+                        val spJson = streamPlayPayload(loadData, targetType, media).toJson()
+                        com.lagradost.api.Log.d("SC_SEASON_DIAG", "STREAMPLAY nonAnime $spJson")
                         streamPlayProvider.loadLinks(
-                            streamPlayPayload(loadData, targetType, media).toJson(),
+                            spJson,
                             isCasting, subtitleCallback, callback
                         )
                     }
@@ -2230,9 +2248,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                                 "isBollywood" to loadData.isBollywood,
                                 "isCartoon" to loadData.isCartoon
                             )
+                            val spaJson = animePayload.toJson()
+                            com.lagradost.api.Log.d("SC_SEASON_DIAG", "STREAMPLAY_ANIME $spaJson")
                             withTimeoutOrNull(35000L) {
                                 animeProvider.loadLinks(
-                                    animePayload.toJson(), isCasting, subtitleCallback, callback
+                                    spaJson, isCasting, subtitleCallback, callback
                                 )
                             }
                         } catch (e: CancellationException) {
@@ -2246,8 +2266,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val anime = async(Dispatchers.IO) {
                         try {
                             withTimeoutOrNull(35000L) {
+                                val spJson = streamPlayPayload(loadData, targetType, media).toJson()
+                                com.lagradost.api.Log.d("SC_SEASON_DIAG", "STREAMPLAY anime $spJson")
                                 streamPlayProvider.loadLinks(
-                                    streamPlayPayload(loadData, targetType, media).toJson(),
+                                    spJson,
                                     isCasting, subtitleCallback, callback
                                 )
                             }
@@ -2261,10 +2283,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         async(Dispatchers.IO) {
                             try {
                                 withTimeoutOrNull(35000L) {
+                                    val spJson = streamPlayPayload(
+                                        loadData, targetType, media, generalAnimeRoute = true
+                                    ).toJson()
+                                    com.lagradost.api.Log.d("SC_SEASON_DIAG", "STREAMPLAY general $spJson")
                                     streamPlayProvider.loadLinks(
-                                        streamPlayPayload(
-                                            loadData, targetType, media, generalAnimeRoute = true
-                                        ).toJson(),
+                                        spJson,
                                         isCasting, subtitleCallback, callback
                                     )
                                 }
