@@ -338,6 +338,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @Volatile private var cachedClassLoaderRef: WeakReference<ClassLoader>? = null
 
         internal val fallbackLogoTitles = lruCacheMap<String, Boolean>(200)
+        internal val expectedLogoByUrl = lruCacheMap<String, Boolean>(200)
         private val tmdbDetailsCache = lruCacheMap<String, Pair<TmdbDetailResponse, Long>>(100)
         private val tmdbSeasonCache = lruCacheMap<String, Pair<TmdbSeasonDetail, Long>>(150)
         private val kitsuMetaCache = lruCacheMap<String, Pair<String, Long>>(100)
@@ -2980,6 +2981,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = tmdbData?.fetchedLogoFallback == true
+                StremioC.expectedLogoByUrl[metaUrl] = !tmdbData?.fetchedLogo.isNullOrBlank()
                 val resolvedMovieId = if (finalType == "other" && finalVideos?.size == 1) {
                     finalVideos[0].id ?: movieId
                 } else {
@@ -3050,6 +3052,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 )
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = tmdbData?.fetchedLogoFallback == true
+                StremioC.expectedLogoByUrl[metaUrl] = !tmdbData?.fetchedLogo.isNullOrBlank()
                 val response = provider.newTvSeriesLoadResponse(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
                 ) {
