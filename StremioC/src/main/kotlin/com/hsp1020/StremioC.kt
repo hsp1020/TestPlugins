@@ -1158,7 +1158,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 canonicalDetailType(cached.type) == canonicalDetailType(parsedUrlHint.type)
         }
         val urlHint = rememberedHint ?: parsedUrlHint
-        val hintedImdbId = urlHint?.id?.takeIf { IMDB_ID_REGEX.matches(it) }
+        val hintedImdbId = (urlHint?.id ?: if (url.startsWith("{"))
+            runCatching { parseJson<CatalogEntry>(url)?.id }.getOrNull() else null)
+            ?.takeIf { IMDB_ID_REGEX.matches(it) }
         val speculativeImdbAnimeDeferred = hintedImdbId?.let { id ->
             async(Dispatchers.IO) {
                 fetchAnimeSeasonMapping(LoadData(id = id, imdbId = id, isAnime = true))
@@ -1377,7 +1379,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             resolvedTmdbId = resolvedTmdbId,
             resolvedIdHolder = resolvedIdHolder,
             requestedAnimeId = requestedAnimeId,
-            prefetchedAnimeMapping = speculativeImdbAnimeDeferred?.takeIf { hintMatchesAuthoritative },
+            prefetchedAnimeMapping = speculativeImdbAnimeDeferred?.takeIf { hintedImdbId == res.id },
             prefetchedAnimeImdbId = hintedImdbId
         )
 
@@ -2988,6 +2990,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 finalImdbId?.let { IMDB_ID_REGEX.matches(it) } == true &&
                 (isMovieForSync || ((finalType == "series" || finalType == "tv") && videoSeasons.size == 1))
             val detailSyncMapping = if (useImdbSyncMapping) {
+                if (prefetchedAnimeImdbId != finalImdbId) prefetchedAnimeMapping?.cancel()
                 prefetchedAnimeMapping?.takeIf { prefetchedAnimeImdbId == finalImdbId }
                     ?: async(Dispatchers.IO) {
                         provider.fetchAnimeSeasonMapping(LoadData(
