@@ -200,6 +200,14 @@ class SettingsBottomFragment(
     private var searchJob: Job? = null 
 
     private fun dp(value: Int) = (value * hostContext.resources.displayMetrics.density + 0.5f).toInt()
+    // Use one font family in the main sheet, nested dialogs, and list rows.
+    private fun normalizeTypeface(view: View) {
+        if (view is TextView) {
+            val weight = if (view.typeface?.isBold == true) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL
+            view.typeface = android.graphics.Typeface.create("sans-serif", weight)
+        }
+        if (view is ViewGroup) for (i in 0 until view.childCount) normalizeTypeface(view.getChildAt(i))
+    }
     private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.BLACK); cornerRadius = dp(12).toFloat() }
     private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#171717")); setStroke(dp(1), Color.parseColor("#303030")); cornerRadius = dp(8).toFloat() }
     private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#292929")); setStroke(dp(1), Color.parseColor("#404040")); cornerRadius = dp(8).toFloat() }
@@ -325,6 +333,7 @@ class SettingsBottomFragment(
     }
 
     private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {
+        normalizeTypeface(contentView)
         dialog.setCanceledOnTouchOutside(false)
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.setOnShowListener {
@@ -354,7 +363,7 @@ class SettingsBottomFragment(
     private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
         val id = getCachedResId(name, "layout")
         val layout = res.getLayout(id)
-        return inflater.inflate(layout, container, false)
+        return inflater.inflate(layout, container, false).also(::normalizeTypeface)
     }
 
     private fun isCineStreamInstalled(): Boolean {
@@ -370,7 +379,7 @@ class SettingsBottomFragment(
     private fun dialogButton(ctx: Context, label: String, params: LinearLayout.LayoutParams) = TextView(ctx).apply {
         text = label
         textSize = 14f
-        typeface = android.graphics.Typeface.DEFAULT_BOLD
+        typeface = android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.BOLD)
         setTextColor(Color.WHITE)
         gravity = android.view.Gravity.CENTER
         setPadding(dp(10), dp(10), dp(10), dp(10))
@@ -756,7 +765,7 @@ class SettingsBottomFragment(
         val extraUrlContainer = view.findView<LinearLayout>("containerStreamSubtitleUrls")
         val extraUrlToggle = view.findView<ImageView>("toggleStreamSubtitleUrls")
         val urlControlSize = (40 * ctx.resources.displayMetrics.density + 0.5f).toInt()
-        val urlFieldPadding = (10 * ctx.resources.displayMetrics.density + 0.5f).toInt()
+        val urlFieldPadding = dp(12)
         fun addExtraUrlField(initialName: String = "", initialUrl: String = "") {
             val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
             fun newField(hintText: String, value: String, isUrl: Boolean) = EditText(ctx).apply {
@@ -767,20 +776,23 @@ class SettingsBottomFragment(
                 textSize = 14f
                 setTextColor(Color.WHITE)
                 setHintTextColor(Color.parseColor("#777777"))
-                setPadding(urlFieldPadding, urlFieldPadding, urlFieldPadding, urlFieldPadding)
+                setPadding(urlFieldPadding, 0, urlFieldPadding, 0)
+                gravity = android.view.Gravity.CENTER_VERTICAL
                 background = getCardBg()
                 isSingleLine = true
             }
             val nameField = newField("Name", initialName, false)
             val urlField = newField("Addon URL", initialUrl, true)
-            row.addView(nameField, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.85f))
+            row.addView(nameField, LinearLayout.LayoutParams(0, dp(35), 0.85f))
             row.addView(View(ctx).apply { setBackgroundColor(Color.parseColor("#444444")) },
                 LinearLayout.LayoutParams((ctx.resources.displayMetrics.density + 0.5f).toInt(), urlFieldPadding * 2))
-            row.addView(urlField, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f))
-            row.addView(ImageView(ctx).apply {
-                setImageDrawable(getDrawable("addon_collapse_icon"))
+            row.addView(urlField, LinearLayout.LayoutParams(0, dp(35), 2f))
+            row.addView(TextView(ctx).apply {
+                text = "−"
+                textSize = 20f
+                setTextColor(Color.WHITE)
+                gravity = android.view.Gravity.CENTER
                 contentDescription = "Remove addon URL"
-                setPadding(dp(9), dp(9), dp(9), dp(9))
                 isClickable = true
                 isFocusable = true
                 val ripple = android.util.TypedValue()
@@ -791,10 +803,12 @@ class SettingsBottomFragment(
                     else { nameField.setText(""); urlField.setText("") }
                 }
             }, LinearLayout.LayoutParams(urlControlSize, urlControlSize))
-            row.addView(ImageView(ctx).apply {
-                setImageDrawable(getDrawable("addon_expand_icon"))
+            row.addView(TextView(ctx).apply {
+                text = "+"
+                textSize = 20f
+                setTextColor(Color.WHITE)
+                gravity = android.view.Gravity.CENTER
                 contentDescription = "Add addon URL"
-                setPadding(dp(9), dp(9), dp(9), dp(9))
                 isClickable = true
                 isFocusable = true
                 val ripple = android.util.TypedValue()
@@ -802,6 +816,7 @@ class SettingsBottomFragment(
                 setBackgroundResource(ripple.resourceId)
                 setOnClickListener { addExtraUrlField() }
             }, LinearLayout.LayoutParams(urlControlSize, urlControlSize))
+            normalizeTypeface(row)
             extraUrlContainer.addView(row)
         }
         val extraUrls = runCatching {
@@ -934,7 +949,7 @@ class SettingsBottomFragment(
                         choiceContainer.addView(optCatalog)
 
                         val choiceDlg = AlertDialog.Builder(ctx).setView(choiceContainer).create()
-                        choiceDlg.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+                        setupCustomDialog(choiceDlg, choiceContainer)
                         
                         optEdit.setOnClickListener {
                             choiceDlg.dismiss()
@@ -1175,9 +1190,11 @@ private fun showLanguageSelectDialog() {
             setHintTextColor(Color.parseColor("#777777"))
             setTextColor(Color.WHITE)
             textSize = 14f
-            setPadding(dp(12), dp(12), dp(12), dp(12))
+            setPadding(dp(12), 0, dp(12), 0)
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            isSingleLine = true
             background = getCardBg()
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(35)).apply {
                 setMargins(0, 0, 0, 20)
             }
         }
@@ -1223,6 +1240,7 @@ private fun showLanguageSelectDialog() {
                 }
                 rowLayout.addView(tvName)
                 rowLayout.addView(tvCheck)
+                normalizeTypeface(rowLayout)
                 return VH(rowLayout, tvName, tvCheck)
             }
 
@@ -1484,11 +1502,12 @@ private fun showLanguageSelectDialog() {
                     inputType = InputType.TYPE_CLASS_NUMBER
                     imeOptions = EditorInfo.IME_ACTION_DONE
                     setTextColor(Color.WHITE)
-                    textSize = 12f
-                    setPadding(10, 10, 10, 10)
-                    background = getButtonBg()
+                    textSize = 14f
+                    setPadding(dp(8), 0, dp(8), 0)
+                    background = getCardBg()
                     gravity = android.view.Gravity.CENTER
-                    layoutParams = LinearLayout.LayoutParams(90, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    isSingleLine = true
+                    layoutParams = LinearLayout.LayoutParams(90, dp(35)).apply {
                         setMargins(0, 0, 15, 0)
                     }
                     setOnClickListener {
@@ -1513,6 +1532,7 @@ private fun showLanguageSelectDialog() {
                 layout.addView(etOrder)
                 layout.addView(checkbox)
                 layout.addView(genreSwitch)
+                normalizeTypeface(layout)
                 return VH(layout, checkbox, etOrder, genreSwitch, dragHandle)
             }
 
@@ -1748,6 +1768,7 @@ private fun showLanguageSelectDialog() {
             val layoutId = getCachedResId("item_saved_link", "layout")
             val v = LayoutInflater.from(parent.context).inflate(res.getLayout(layoutId), parent, false)
             v.background = getCardBg()
+            normalizeTypeface(v)
             return VH(v).also { it.btnDelete.setImageDrawable(getDrawable("delete_icon")) }
         }
 

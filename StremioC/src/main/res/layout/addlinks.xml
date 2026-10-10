@@ -26,6 +26,8 @@
         android:textColor="#FFFFFF"
         android:textColorHint="#666666"
         android:textSize="14sp"
+        android:fontFamily="sans-serif"
+        android:gravity="center_vertical"
         android:paddingHorizontal="12dp"
         android:background="@android:color/transparent" />
 
@@ -40,6 +42,8 @@
         android:textColor="#FFFFFF"
         android:textColorHint="#666666"
         android:textSize="14sp"
+        android:fontFamily="sans-serif"
+        android:gravity="center_vertical"
         android:paddingHorizontal="12dp"
         android:layout_marginBottom="10dp"
         android:background="@android:color/transparent" />

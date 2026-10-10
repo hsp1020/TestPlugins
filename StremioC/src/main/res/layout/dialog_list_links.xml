@@ -22,7 +22,7 @@
         android:layout_height="wrap_content"
         android:text="No saved catalogs"
         android:textColor="#888888"
-        android:textSize="15sp"
+        android:textSize="14sp"
         android:gravity="center"
         android:padding="24dp"
         android:visibility="gone"/>
