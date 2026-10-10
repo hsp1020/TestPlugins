@@ -11,9 +11,9 @@
         android:layout_height="wrap_content"
         android:text="List Catalogs"
         android:textColor="#FFFFFF"
-        android:textSize="20sp"
+        android:textSize="18sp"
         android:textStyle="bold"
-        android:gravity="center"
+        android:gravity="start"
         android:paddingBottom="20dp"/>
 
     <TextView

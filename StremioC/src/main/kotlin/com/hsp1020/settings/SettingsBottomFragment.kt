@@ -16,7 +16,6 @@ import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.text.InputType
-import android.widget.Button
 import android.widget.CompoundButton
 import android.widget.EditText
 import android.widget.ImageButton
@@ -368,13 +367,19 @@ class SettingsBottomFragment(
                StremioC.loadProviderDynamically("phisher", "com.phisher98.StreamPlay") != null
     }
 
-    private fun dialogButton(ctx: Context?, label: String, params: LinearLayout.LayoutParams) = Button(ctx).apply {
+    private fun dialogButton(ctx: Context, label: String, params: LinearLayout.LayoutParams) = TextView(ctx).apply {
         text = label
         textSize = 14f
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
         setTextColor(Color.WHITE)
-        isAllCaps = false
-        minHeight = dp(48)
-        background = getButtonBg()
+        gravity = android.view.Gravity.CENTER
+        setPadding(dp(10), dp(10), dp(10), dp(10))
+        minHeight = dp(40)
+        isClickable = true
+        isFocusable = true
+        val ripple = android.util.TypedValue()
+        ctx.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)
+        setBackgroundResource(ripple.resourceId)
         layoutParams = params
     }
 
@@ -773,7 +778,7 @@ class SettingsBottomFragment(
                 LinearLayout.LayoutParams((ctx.resources.displayMetrics.density + 0.5f).toInt(), urlFieldPadding * 2))
             row.addView(urlField, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f))
             row.addView(ImageView(ctx).apply {
-                setImageDrawable(getDrawable("delete_icon"))
+                setImageDrawable(getDrawable("addon_collapse_icon"))
                 contentDescription = "Remove addon URL"
                 setPadding(dp(9), dp(9), dp(9), dp(9))
                 isClickable = true
@@ -787,7 +792,7 @@ class SettingsBottomFragment(
                 }
             }, LinearLayout.LayoutParams(urlControlSize, urlControlSize))
             row.addView(ImageView(ctx).apply {
-                setImageDrawable(getDrawable("add_icon"))
+                setImageDrawable(getDrawable("addon_expand_icon"))
                 contentDescription = "Add addon URL"
                 setPadding(dp(9), dp(9), dp(9), dp(9))
                 isClickable = true
@@ -1065,7 +1070,7 @@ class SettingsBottomFragment(
         if (titleTv != null) {
             titleTv.text = if (isEdit) "Edit Catalog" else "Add Catalogs"
             titleTv.setTextColor(Color.WHITE)
-            titleTv.textSize = 20f
+            titleTv.textSize = 18f
             titleTv.typeface = android.graphics.Typeface.DEFAULT_BOLD
             titleTv.gravity = android.view.Gravity.START
         }
@@ -1158,7 +1163,7 @@ private fun showLanguageSelectDialog() {
 
         container.addView(TextView(context).apply {
             text = "TMDB Language"
-            textSize = 20f
+            textSize = 18f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
             setPadding(0, 0, 0, dp(20))
@@ -1169,7 +1174,7 @@ private fun showLanguageSelectDialog() {
             hint = "Search language..."
             setHintTextColor(Color.parseColor("#777777"))
             setTextColor(Color.WHITE)
-            textSize = 15f
+            textSize = 14f
             setPadding(dp(12), dp(12), dp(12), dp(12))
             background = getCardBg()
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
@@ -1207,7 +1212,7 @@ private fun showLanguageSelectDialog() {
                 }
                 // 가로 전체를 차지하여 체크 아이콘을 우측 끝으로 밀어냅니다.
                 val tvName = TextView(context).apply {
-                    textSize = 15f
+                    textSize = 14f
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 }
                 val tvCheck = ImageView(context).apply {
@@ -1227,7 +1232,7 @@ private fun showLanguageSelectDialog() {
                 holder.tvName.text = langName
                 
                 holder.tvName.setTextColor(Color.WHITE)
-                holder.view.background = if (isSelected) getButtonBg() else getCardBg() 
+                holder.view.background = if (isSelected) getCardBg() else ColorDrawable(Color.TRANSPARENT) 
                 holder.tvCheck.visibility = if (isSelected) View.VISIBLE else View.GONE
                 
                 holder.view.setOnClickListener {
@@ -1422,11 +1427,11 @@ private fun showLanguageSelectDialog() {
 
         val titleView = TextView(context).apply {
             text = "$addonName - Catalog Settings"
-            textSize = 20f
+            textSize = 18f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
             setPadding(0, 0, 0, 30)
-            gravity = android.view.Gravity.CENTER
+            gravity = android.view.Gravity.START
         }
         dialogContainer.addView(titleView)
 
@@ -1494,7 +1499,7 @@ private fun showLanguageSelectDialog() {
                 }
                 
                 val checkbox = CheckBox(context).apply {
-                    textSize = 15f
+                    textSize = 14f
                     setTextColor(Color.WHITE)
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 }
