@@ -200,24 +200,12 @@ class SettingsBottomFragment(
     private var searchJob: Job? = null 
 
     private fun dp(value: Int) = (value * hostContext.resources.displayMetrics.density + 0.5f).toInt()
-    // Prefer Noto Sans installed on the device; avoid embedding font binaries.
-    private val notoSansBase: android.graphics.Typeface by lazy {
-        listOf(
-            "/system/fonts/NotoSans-Regular.ttf",
-            "/system/fonts/NotoSans-Regular.otf",
-            "/system/fonts/NotoSansCJK-Regular.ttc",
-            "/system/fonts/NotoSansKR-Regular.otf"
-        ).asSequence().mapNotNull { path ->
-            runCatching {
-                java.io.File(path).takeIf { it.isFile }?.let { android.graphics.Typeface.createFromFile(it) }
-            }.getOrNull()
-        }.firstOrNull() ?: android.graphics.Typeface.create("Noto Sans", android.graphics.Typeface.NORMAL)
-    }
-    private fun uiTypeface(bold: Boolean) = android.graphics.Typeface.create(
-        notoSansBase, if (bold) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL
-    )
+    // Use one font family in the main sheet, nested dialogs, and list rows.
     private fun normalizeTypeface(view: View) {
-        if (view is TextView) view.typeface = uiTypeface(view.typeface?.isBold == true)
+        if (view is TextView) {
+            val weight = if (view.typeface?.isBold == true) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL
+            view.typeface = android.graphics.Typeface.create("sans-serif", weight)
+        }
         if (view is ViewGroup) for (i in 0 until view.childCount) normalizeTypeface(view.getChildAt(i))
     }
     private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.BLACK); cornerRadius = dp(12).toFloat() }
@@ -391,7 +379,7 @@ class SettingsBottomFragment(
     private fun dialogButton(ctx: Context, label: String, params: LinearLayout.LayoutParams) = TextView(ctx).apply {
         text = label
         textSize = 14f
-        typeface = uiTypeface(true)
+        typeface = android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.BOLD)
         setTextColor(Color.WHITE)
         gravity = android.view.Gravity.CENTER
         setPadding(dp(10), dp(10), dp(10), dp(10))
@@ -413,7 +401,7 @@ class SettingsBottomFragment(
                 text = title
                 textSize = 18f
                 setTextColor(Color.WHITE)
-                typeface = uiTypeface(true)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
                 setPadding(0, 0, 0, 20)
                 gravity = android.view.Gravity.CENTER
             })
@@ -555,7 +543,7 @@ class SettingsBottomFragment(
                             text = "Export Successful"
                             textSize = 18f
                             setTextColor(Color.WHITE)
-                            typeface = uiTypeface(true)
+                            typeface = android.graphics.Typeface.DEFAULT_BOLD
                             setPadding(0, 0, 0, 20)
                             gravity = android.view.Gravity.CENTER
                         })
@@ -632,7 +620,7 @@ class SettingsBottomFragment(
                             text = "Backup Data Detected"
                             textSize = 18f
                             setTextColor(Color.WHITE)
-                            typeface = uiTypeface(true)
+                            typeface = android.graphics.Typeface.DEFAULT_BOLD
                             setPadding(0, 0, 0, 20)
                             gravity = android.view.Gravity.CENTER
                         })
@@ -677,7 +665,7 @@ class SettingsBottomFragment(
                                 text = "Restoring Data"
                                 textSize = 18f
                                 setTextColor(Color.WHITE)
-                                typeface = uiTypeface(true)
+                                typeface = android.graphics.Typeface.DEFAULT_BOLD
                                 setPadding(0, 0, 0, 20)
                                 gravity = android.view.Gravity.CENTER
                             })
@@ -863,7 +851,6 @@ class SettingsBottomFragment(
 
         val btnSelectLanguage: ImageView = try { view.findView("btnSelectLanguage") } catch (e: Throwable) { throw Exception("btnSelectLanguage ImageView not found", e) }
         val switchCustomPoster: Switch = try { view.findView("switchCustomPoster") } catch (e: Throwable) { throw Exception("switchCustomPoster Switch not found", e) }
-        val xrdbSubLabel: View = view.findView("tvXrdbSubLabel")
         val layoutCustomPosterUrl: View = try { view.findView("layoutCustomPosterUrl") } catch (e: Throwable) { throw Exception("layoutCustomPosterUrl View not found", e) }
         val etCustomPosterUrl: EditText = try { view.findView("etCustomPosterUrl") } catch (e: Throwable) { throw Exception("etCustomPosterUrl EditText not found", e) }
 
@@ -872,12 +859,10 @@ class SettingsBottomFragment(
 
         val isPosterEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_CUSTOM_POSTER_ENABLED, false)
         switchCustomPoster.isChecked = isPosterEnabled
-        xrdbSubLabel.visibility = if (isPosterEnabled) View.VISIBLE else View.GONE
         layoutCustomPosterUrl.visibility = if (isPosterEnabled) View.VISIBLE else View.GONE
         etCustomPosterUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, ""))
 
         switchCustomPoster.setOnCheckedChangeListener { _, isChecked ->
-            xrdbSubLabel.visibility = if (isChecked) View.VISIBLE else View.GONE
             layoutCustomPosterUrl.visibility = if (isChecked) View.VISIBLE else View.GONE
         }
 
@@ -887,7 +872,6 @@ class SettingsBottomFragment(
 
         val etTmdbApiKey: EditText = try { view.findView("etTmdbApiKey") } catch (e: Throwable) { throw Exception("etTmdbApiKey EditText not found", e) }
         val switchMdbList: Switch = try { view.findView("switchMdbList") } catch (e: Throwable) { throw Exception("switchMdbList Switch not found", e) }
-        val mdbListSubLabel: View = view.findView("tvMdbListSubLabel")
         val layoutMdbList: View = try { view.findView("layoutMdbList") } catch (e: Throwable) { throw Exception("layoutMdbList View not found", e) }
         val etMdbListApiKey: EditText = try { view.findView("etMdbListApiKey") } catch (e: Throwable) { throw Exception("etMdbListApiKey EditText not found", e) }
 
@@ -895,12 +879,10 @@ class SettingsBottomFragment(
 
         val isMdbListEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, false)
         switchMdbList.isChecked = isMdbListEnabled
-        mdbListSubLabel.visibility = if (isMdbListEnabled) View.VISIBLE else View.GONE
         layoutMdbList.visibility = if (isMdbListEnabled) View.VISIBLE else View.GONE
         etMdbListApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, ""))
 
         switchMdbList.setOnCheckedChangeListener { _, isChecked ->
-            mdbListSubLabel.visibility = if (isChecked) View.VISIBLE else View.GONE
             layoutMdbList.visibility = if (isChecked) View.VISIBLE else View.GONE
         }
 
@@ -953,7 +935,7 @@ class SettingsBottomFragment(
                         choiceContainer.addView(TextView(ctx).apply {
                             text = itemToEdit.name
                             textSize = 18f
-                            typeface = uiTypeface(true)
+                            typeface = android.graphics.Typeface.DEFAULT_BOLD
                             setTextColor(Color.WHITE)
                             setPadding(0, 0, 0, 30)
                             gravity = android.view.Gravity.CENTER
@@ -1059,7 +1041,7 @@ class SettingsBottomFragment(
                     text = "Save & Reload"
                     textSize = 18f
                     setTextColor(Color.WHITE)
-                    typeface = uiTypeface(true)
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
                     setPadding(0, 0, 0, 20)
                     gravity = android.view.Gravity.CENTER
                 })
@@ -1104,7 +1086,7 @@ class SettingsBottomFragment(
             titleTv.text = if (isEdit) "Edit Catalog" else "Add Catalogs"
             titleTv.setTextColor(Color.WHITE)
             titleTv.textSize = 18f
-            titleTv.typeface = uiTypeface(true)
+            titleTv.typeface = android.graphics.Typeface.DEFAULT_BOLD
             titleTv.gravity = android.view.Gravity.START
         }
         
@@ -1197,7 +1179,7 @@ private fun showLanguageSelectDialog() {
         container.addView(TextView(context).apply {
             text = "TMDB Language"
             textSize = 18f
-            typeface = uiTypeface(true)
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
             setPadding(0, 0, 0, dp(20))
             gravity = android.view.Gravity.START
@@ -1464,7 +1446,7 @@ private fun showLanguageSelectDialog() {
         val titleView = TextView(context).apply {
             text = "$addonName - Catalog Settings"
             textSize = 18f
-            typeface = uiTypeface(true)
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
             setPadding(0, 0, 0, 30)
             gravity = android.view.Gravity.START
