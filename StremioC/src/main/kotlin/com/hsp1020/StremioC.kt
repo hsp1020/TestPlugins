@@ -1793,13 +1793,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             "aiostreams.viren070.me"
         )
         for (host in hosts) {
-            val mapping = withTimeoutOrNull(2_500L) {
-                runSuspendCatching {
-            val response = customSession.get(
-                "https://$host/api/v1/anime?$query",
-                headers = mapOf("Cache-Control" to "no-cache, no-store", "Pragma" to "no-cache"),
-                timeout = 3L
-            ).text
+            val mapping = runSuspendCatching {
+            val response = withTimeoutOrNull(2_500L) {
+                customSession.get(
+                    "https://$host/api/v1/anime?$query",
+                    headers = mapOf("Cache-Control" to "no-cache, no-store", "Pragma" to "no-cache"),
+                    timeout = 3L
+                ).text
+            } ?: return@runSuspendCatching null
             val root = parseJson<JsonNode>(response)
             if (root.get("success")?.asBoolean() != true) return@runSuspendCatching null
             val data = root.get("data") ?: return@runSuspendCatching null
@@ -1845,8 +1846,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 imdbSeason = data.get("imdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 },
                 traktSeason = data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
             )
-                }.getOrNull()
-            }
+            }.getOrNull()
             if (mapping != null) return mapping
         }
         return null
