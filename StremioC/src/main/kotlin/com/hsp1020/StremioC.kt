@@ -1254,7 +1254,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             speculativeMdbDeferred?.cancel()
             speculativeTmdbDeferred?.cancel()
             speculativeKitsuDeferred?.cancel()
-            speculativeImdbAnimeDeferred?.cancel()
+            // This lookup only depends on the IMDb ID, not movie/series type.
+            if (hintedImdbId != res.id) speculativeImdbAnimeDeferred?.cancel()
         }
 
         val normalizedId = try { normalizeId(res.id ?: "") } catch (e: Exception) { e.printStackTrace(); res.id ?: "" }
@@ -1379,9 +1380,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             resolvedTmdbId = resolvedTmdbId,
             resolvedIdHolder = resolvedIdHolder,
             requestedAnimeId = requestedAnimeId,
-            prefetchedAnimeMapping = speculativeImdbAnimeDeferred?.takeIf {
-                hintedImdbId == res.id && (urlHint == null || hintMatchesAuthoritative)
-            },
+            prefetchedAnimeMapping = speculativeImdbAnimeDeferred?.takeIf { hintedImdbId == res.id },
             prefetchedAnimeImdbId = hintedImdbId
         )
 
@@ -1815,8 +1814,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val season = loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 }
         val episode = loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 }
         val query = when {
-            byKitsu || id == kitsuId && imdbId == null -> "idType=kitsuId&idValue=$id"
-            byMal || imdbId == null && malLookupId != null -> "idType=malId&idValue=$id"
+            byMal -> "idType=malId&idValue=$id"
+            byKitsu || (id == kitsuId && imdbId == null) -> "idType=kitsuId&idValue=$id"
+            imdbId == null && malLookupId != null -> "idType=malId&idValue=$id"
             else -> "idType=imdbId&idValue=$id" +
                 (if (season != null) "&season=$season" else "") +
                 (if (episode != null) "&episode=$episode" else "")
@@ -1850,8 +1850,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             if ((byMal || imdbId == null && kitsuId == null && malLookupId != null) &&
                 ids.get("malId").intOrNull() != malLookupId) return@runSuspendCatching null
             if (imdbId != null && resolvedImdb != imdbId) return@runSuspendCatching null
-            if (resolvedKitsu == null && loadData.episode != null && loadData.originalKitsuId == null)
-                return@runSuspendCatching null
             if (resolvedKitsu == null && ids.get("malId").intOrNull() == null &&
                 ids.get("anilistId").intOrNull() == null) return@runSuspendCatching null
             // AIOStreams may return its first record if season matching fails.
@@ -3036,7 +3034,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription<br>$originalName"
             }
 
-            val movieId = this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id ?: ""
+            val movieId = originalAnimeId ?: this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" }
+                ?: this@CatalogEntry.id ?: ""
             if (tmdbData != null && finalVideos.isNullOrEmpty() && tmdbData.episodeTmdbMeta.isNotEmpty()) {
                 val generatedVideos = tmdbData.episodeTmdbMeta.mapNotNull { (key, tmdbEp) ->
                     val parts = key.split("_")
@@ -3143,7 +3142,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         isCartoon = isCartoon,
                         anilistId = finalAniId,
                         malId = finalMalId,
-                        kitsuId = this@CatalogEntry.kitsuIdExt,
+                        kitsuId = finalKitsuId?.toString() ?: this@CatalogEntry.kitsuIdExt,
                         originalTitle = tmdbData?.fetchedOriginalTitle,
                         englishTitle = tmdbData?.fetchedEnglishTitle,
                         addonUrl = provider.mainUrl,
@@ -3179,7 +3178,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     tmdbData?.fetchedEnglishTitle, 
                     finalAniId, 
                     finalMalId, 
-                    this@CatalogEntry.kitsuIdExt,
+                    finalKitsuId?.toString() ?: this@CatalogEntry.kitsuIdExt,
                     tmdbData?.fetchedYear, // ★ 수집된 출시 연도(year) 인자 전달 추가
                     originalAnimeId
                 )
