@@ -9,7 +9,6 @@ import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.getKey
 import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
-import com.lagradost.cloudstream3.DubStatus
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
@@ -30,14 +29,13 @@ import com.lagradost.cloudstream3.ShowStatus
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.addDate
-import com.lagradost.cloudstream3.addEpisodes
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newSubtitleFile
-import com.lagradost.cloudstream3.newAnimeLoadResponse
+import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.runAllAsync
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -1832,11 +1830,19 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             if (resolvedKitsu == null) return@runSuspendCatching null
             // AIOStreams may return its first record if season matching fails.
             // Do not silently accept a different season for an IMDb episode.
-            if (!byKitsu && season != null && (season > 1 || forDetail)) {
-                // Do not use title aliases to accept a mismatched season.
-                val seasons = listOf("imdb", "tvdb", "trakt", "tmdb")
-                    .map { data.get(it)?.get("seasonNumber").intOrNull() }
-                if (season !in seasons) return@runSuspendCatching null
+            if (!byKitsu && season != null) {
+                // For detail-page sync IDs, prefer IMDb's season numbering, falling
+                // back to TVDB only when IMDb does not supply a season number.
+                // TMDB season numbering is not a safe basis for this decision.
+                val matches = if (forDetail) {
+                    val imdbSeason = data.get("imdb")?.get("seasonNumber").intOrNull()
+                    val tvdbSeason = data.get("tvdb")?.get("seasonNumber").intOrNull()
+                    (imdbSeason ?: tvdbSeason) == season
+                } else {
+                    season <= 1 || listOf("imdb", "tvdb", "trakt", "tmdb")
+                        .any { data.get(it)?.get("seasonNumber").intOrNull() == season }
+                }
+                if (!matches) return@runSuspendCatching null
             }
             val tmdb = data.get("tmdb")
             val first = tmdb?.get("fromEpisode").intOrNull()?.takeIf { it > 0 }
@@ -2553,8 +2559,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val fetchedOriginalTitle: String?,
         val fetchedEnglishTitle: String?,
         val fetchedVoteAverage: Double? = null,
-        val fetchedLogoFallback: Boolean = false,
-        val fetchedSeasonCount: Int? = null
+        val fetchedLogoFallback: Boolean = false
     )
 
     private data class ProviderArtInfo(
@@ -2806,8 +2811,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 detailRes.original_title ?: detailRes.original_name,
                 extractedEnglishTitle,
                 detailRes.vote_average,
-                selectedLogo != null && selectedLogo.iso_639_1?.lowercase() != preferred,
-                detailRes.number_of_seasons
+                selectedLogo != null && selectedLogo.iso_639_1?.lowercase() != preferred
             )
         }
 
@@ -2958,15 +2962,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val finalType = detailedEntry.type ?: this@CatalogEntry.type
 
             // Start an uncached IMDb anime ID lookup in parallel with TMDB metadata.
-            // Only a single known season may receive season-specific tracker IDs.
+            // Scope tracker IDs to an unambiguous season in Stremio's episode list,
+            // not TMDB's total-season count.
             val videoSeasons = finalVideos.orEmpty().mapNotNull {
                 it.seasonNumber?.takeIf { number -> number > 0 }
             }.distinct()
             val imdbAnimeCandidate = originalKitsuId == null &&
                 finalImdbId?.let { IMDB_ID_REGEX.matches(it) } == true &&
-                finalGenre?.any {
+                (finalGenre?.any {
                     it.contains("Anime", true) || it.contains("Animation", true)
-                } == true
+                } == true || (detailedEntry.original_language ?: this@CatalogEntry.original_language)
+                    ?.equals("ja", ignoreCase = true) == true)
             val imdbSeasonForSync = videoSeasons.singleOrNull()
             val isMovieForSync = finalType == "movie" || isSingleMovie(finalType ?: "", finalVideos)
             val detailSyncMapping = if (imdbAnimeCandidate &&
@@ -3047,7 +3053,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val isAnimeFromMetadata = originalKitsuId != null || fetchedMalId != null || finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
             val useImdbSyncMapping = (isAnimeFromMetadata || imdbAnimeCandidate) && (
                 isMovieForSync || ((finalType == "series" || finalType == "tv") &&
-                    imdbSeasonForSync != null && tmdbData?.fetchedSeasonCount == 1)
+                    imdbSeasonForSync != null)
             )
             val imdbSyncMapping = if (useImdbSyncMapping) detailSyncMapping?.await()
                 else { detailSyncMapping?.cancel(); null }
@@ -3167,10 +3173,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
-                val response = provider.newAnimeLoadResponse(
-                    finalName, metaUrl, finalSeriesType
+                val response = provider.newTvSeriesLoadResponse(
+                    finalName, metaUrl, finalSeriesType, finalEpisodes
                 ) {
-                    addEpisodes(DubStatus.Subbed, finalEpisodes)
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
                     this.plot = finalDescription
