@@ -32,6 +32,7 @@ class StremioCPlugin : Plugin() {
     private val pluginIoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val ratingUiHandler = Handler(Looper.getMainLooper())
     private var ratingPlotHook: RatingPlotImageHook? = null
+    private var activeSettingsDialog: SettingsBottomFragment? = null
 
     private fun prefsToJson(prefs: SharedPreferences): JSONObject {
         val json = JSONObject()
@@ -196,13 +197,19 @@ class StremioCPlugin : Plugin() {
         
         val activity = context as? AppCompatActivity
         openSettings = {
-            val frag = SettingsBottomFragment(this, appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE))
-            activity?.supportFragmentManager?.let { fm -> frag.show(fm, "Frag") }
+            activity?.let { host ->
+                activeSettingsDialog?.dismiss()
+                val settings = SettingsBottomFragment(this, appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE), host)
+                activeSettingsDialog = settings
+                settings.show { if (activeSettingsDialog === settings) activeSettingsDialog = null }
+            }
         }
     }
 
     override fun beforeUnload() {
         ratingUiHandler.post {
+            activeSettingsDialog?.dismiss()
+            activeSettingsDialog = null
             runCatching { ratingPlotHook?.stop() }
             ratingPlotHook = null
         }
