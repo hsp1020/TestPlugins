@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.getKey
 import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
+import com.lagradost.cloudstream3.DubStatus
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
@@ -29,13 +30,14 @@ import com.lagradost.cloudstream3.ShowStatus
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.addDate
+import com.lagradost.cloudstream3.addEpisodes
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newSubtitleFile
-import com.lagradost.cloudstream3.newTvSeriesLoadResponse
+import com.lagradost.cloudstream3.newAnimeLoadResponse
 import com.lagradost.cloudstream3.runAllAsync
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -3085,6 +3087,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     addTrailer(finalTrailers); this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
                     finalLogo?.let { this.logoUrl = it }
 
+                    finalAniId?.let { addAniListId(it) }
                     val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
                     validImdb?.let { addImdbId(it) }
                     if (validImdb == null) {
@@ -3092,7 +3095,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     }
                     
                     finalMalId?.let { addMalId(it) }
-                    finalAniId?.let { addAniListId(it) }
                     finalKitsuId?.let { syncData["kitsu"] = it.toString() }
 
                     this.apiName = provider.getTargetApiName()
@@ -3123,9 +3125,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
-                val response = provider.newTvSeriesLoadResponse(
-                    finalName, metaUrl, finalSeriesType, finalEpisodes
+                val response = provider.newAnimeLoadResponse(
+                    finalName, metaUrl, finalSeriesType
                 ) {
+                    addEpisodes(DubStatus.Subbed, finalEpisodes)
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
                     this.plot = finalDescription
@@ -3135,6 +3138,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
                     finalLogo?.let { this.logoUrl = it }
                     
+                    finalAniId?.let { addAniListId(it) }
                     val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
                     validImdb?.let { addImdbId(it) }
                     if (validImdb == null) {
@@ -3142,7 +3146,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     }
                     
                     finalMalId?.let { addMalId(it) }
-                    finalAniId?.let { addAniListId(it) }
                     finalKitsuId?.let { syncData["kitsu"] = it.toString() }
 
                     this.apiName = provider.getTargetApiName()
