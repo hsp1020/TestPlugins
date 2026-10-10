@@ -423,6 +423,11 @@ class SettingsBottomFragment(
         val ctx = hostContext
         val appContext = ctx.applicationContext
         val view = getLayout("bottom_sheet_layout", LayoutInflater.from(ctx), null)
+        // Plugin drawable IDs cannot be resolved safely by the host XML inflater.
+        // Apply theme backgrounds after inflation using the plugin-independent drawable.
+        listOf("etTmdbApiKey", "etMdbListApiKey", "etCustomPosterUrl", "etHistorySyncUrl").forEach { id ->
+            view.findView<EditText>(id).background = getCardBg()
+        }
 
         val addlinks: ImageView = try { view.findView("addlinks") } catch (e: Throwable) { throw Exception("addlinks ImageView not found", e) }
         val showlinks: ImageView = try { view.findView("showlinks") } catch (e: Throwable) { throw Exception("showlinks ImageView not found", e) }
@@ -1737,8 +1742,8 @@ private fun showLanguageSelectDialog() {
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
             val layoutId = getCachedResId("item_saved_link", "layout")
             val v = LayoutInflater.from(parent.context).inflate(res.getLayout(layoutId), parent, false)
-            v.background = getCardBg() 
-            return VH(v)
+            v.background = getCardBg()
+            return VH(v).also { it.btnDelete.setImageDrawable(getDrawable("delete_icon")) }
         }
 
         override fun onBindViewHolder(holder: VH, position: Int) {
