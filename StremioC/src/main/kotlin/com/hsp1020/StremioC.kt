@@ -3093,7 +3093,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     
                     finalMalId?.let { addMalId(it) }
                     finalAniId?.let { addAniListId(it) }
-                    finalKitsuId?.let { addKitsuId(it) }
+                    finalKitsuId?.let { syncData["kitsu"] = it.toString() }
 
                     this.apiName = provider.getTargetApiName()
                 }
@@ -3143,7 +3143,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     
                     finalMalId?.let { addMalId(it) }
                     finalAniId?.let { addAniListId(it) }
-                    finalKitsuId?.let { addKitsuId(it) }
+                    finalKitsuId?.let { syncData["kitsu"] = it.toString() }
 
                     this.apiName = provider.getTargetApiName()
                 }
