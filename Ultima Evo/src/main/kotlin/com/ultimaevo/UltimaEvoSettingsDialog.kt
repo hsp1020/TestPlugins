@@ -27,7 +27,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.google.android.material.bottomsheet.BottomSheetDialogFragment
+import androidx.fragment.app.DialogFragment
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
@@ -46,7 +46,7 @@ import java.util.zip.GZIPOutputStream
 import kotlin.text.Charsets
 import com.lagradost.cloudstream3.MainAPI
 
-class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
+class UltimaEvoSettingsDialog : DialogFragment() {
 
     private var lastClickTime: Long = 0
     private var activeAlertDialog: AlertDialog? = null
@@ -117,6 +117,19 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val restartIntent = android.content.Intent.makeRestartActivityTask(componentName)
             context.startActivity(restartIntent)
             Runtime.getRuntime().exit(0)
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        dialog?.window?.apply {
+            val metrics = resources.displayMetrics
+            val width = minOf((500 * metrics.density).toInt(), (metrics.widthPixels * 0.9f).toInt()).coerceAtLeast(1)
+            val height = (metrics.heightPixels * 0.88f).toInt().coerceAtLeast(1)
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setGravity(Gravity.CENTER)
+            setLayout(width, height)
+            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
     }
 

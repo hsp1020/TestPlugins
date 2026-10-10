@@ -29,7 +29,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.util.Base64
 import android.app.AlertDialog
-import com.google.android.material.bottomsheet.BottomSheetDialog
+import android.app.Dialog
 import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -146,13 +146,13 @@ class SettingsBottomFragment(
     private val hostContext: Context
 ) {
     // The sheet is not restored by FragmentManager during Activity recreation.
-    private val sheet = BottomSheetDialog(hostContext)
+    private val settingsDialog = Dialog(hostContext)
     private val uiScope = MainScope()
     private val hostOwner = hostContext as? LifecycleOwner
     private val closeOnDestroy = LifecycleEventObserver { _, event ->
         if (event == Lifecycle.Event.ON_DESTROY) dismiss()
     }
-    fun dismiss() = sheet.dismiss()
+    fun dismiss() = settingsDialog.dismiss()
 
     companion object {
         val LANGUAGES = listOf(
@@ -426,9 +426,9 @@ class SettingsBottomFragment(
     
     @SuppressLint("DiscouragedApi")
     fun show(onDismiss: () -> Unit = {}) {
-        sheet.setCancelable(true)
-        sheet.setCanceledOnTouchOutside(false)
-        sheet.setOnDismissListener {
+        settingsDialog.setCancelable(true)
+        settingsDialog.setCanceledOnTouchOutside(false)
+        settingsDialog.setOnDismissListener {
             hostOwner?.lifecycle?.removeObserver(closeOnDestroy)
             searchJob?.cancel()
             uiScope.cancel()
@@ -745,7 +745,7 @@ class SettingsBottomFragment(
                             }
                             
                             delay(1500)
-                            if (isActive && sheet.isShowing) {
+                            if (isActive && settingsDialog.isShowing) {
                                 loadingDlg.dismiss()
                                 dismiss()
                                 restartApp(appContext)
@@ -1067,10 +1067,18 @@ class SettingsBottomFragment(
             dlg.show()
         }
 
-        sheet.setContentView(view)
+        settingsDialog.setContentView(view)
         hostOwner?.lifecycle?.addObserver(closeOnDestroy)
-        sheet.show()
-        sheet.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        settingsDialog.show()
+        settingsDialog.window?.apply {
+            val metrics = hostContext.resources.displayMetrics
+            val width = minOf((500 * metrics.density).toInt(), (metrics.widthPixels * 0.9f).toInt()).coerceAtLeast(1)
+            val height = (metrics.heightPixels * 0.88f).toInt().coerceAtLeast(1)
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setGravity(android.view.Gravity.CENTER)
+            setLayout(width, height)
+            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        }
     }
 
     private fun showLinkEditorDialog(isEdit: Boolean, itemToEdit: LinkItem?, position: Int, rv: RecyclerView?) {
