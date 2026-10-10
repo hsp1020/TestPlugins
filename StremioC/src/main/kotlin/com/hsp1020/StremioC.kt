@@ -3014,7 +3014,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             var finalAniId = fetchedAniListId
             val finalKitsuId = originalKitsuId?.removePrefix("kitsu:")
                 ?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
-                ?: this@CatalogEntry.kitsuIdExt?.toIntOrNull()?.takeIf { it > 0 }
 
             val cleanImdbId = finalImdbId?.let { idStr ->
                 val parts = idStr.split(":")
@@ -3034,7 +3033,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val finalRatingValue = finalImdbRating?.takeIf { it.isNotBlank() && it != "null" } 
                                    ?: tmdbData?.fetchedVoteAverage?.toString()
 
-            val hasAnimeTrackerIds = finalMalId != null || finalAniId != null || finalKitsuId != null
+            val hasAnimeTrackerIds = finalMalId != null || finalAniId != null ||
+                this@CatalogEntry.kitsuIdExt != null || finalKitsuId != null
             val finalMovieType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.AnimeMovie else TvType.Movie
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
             val addonLogo = sequenceOf(detailedEntry.logo, detailedEntry.providerArt?.logo,
