@@ -1379,7 +1379,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             resolvedTmdbId = resolvedTmdbId,
             resolvedIdHolder = resolvedIdHolder,
             requestedAnimeId = requestedAnimeId,
-            prefetchedAnimeMapping = speculativeImdbAnimeDeferred?.takeIf { hintedImdbId == res.id },
+            prefetchedAnimeMapping = speculativeImdbAnimeDeferred?.takeIf {
+                hintedImdbId == res.id && (urlHint == null || hintMatchesAuthoritative)
+            },
             prefetchedAnimeImdbId = hintedImdbId
         )
 
@@ -1848,6 +1850,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             if ((byMal || imdbId == null && kitsuId == null && malLookupId != null) &&
                 ids.get("malId").intOrNull() != malLookupId) return@runSuspendCatching null
             if (imdbId != null && resolvedImdb != imdbId) return@runSuspendCatching null
+            if (resolvedKitsu == null && loadData.episode != null && loadData.originalKitsuId == null)
+                return@runSuspendCatching null
             if (resolvedKitsu == null && ids.get("malId").intOrNull() == null &&
                 ids.get("anilistId").intOrNull() == null) return@runSuspendCatching null
             // AIOStreams may return its first record if season matching fails.
