@@ -188,11 +188,11 @@
                 android:layout_height="wrap_content"
                 android:hint="Enter TMDb API Key"
                 android:textColor="#FFFFFF"
-                android:textColorHint="#555555"
+                android:textColorHint="#777777"
                 android:textSize="14sp"
                 android:padding="10dp"
                 android:layout_marginTop="5dp"
-                android:background="@android:color/transparent"
+                android:background="@drawable/addon_field_bg"
                 android:singleLine="true" />
         </LinearLayout>
 
@@ -269,11 +269,11 @@
                 android:layout_height="wrap_content"
                 android:hint="https://aiometadata.elfhosted.com/stremio/..."
                 android:textColor="#FFFFFF"
-                android:textColorHint="#555555"
+                android:textColorHint="#777777"
                 android:textSize="14sp"
                 android:padding="10dp"
                 android:layout_marginTop="5dp"
-                android:background="@android:color/transparent"
+                android:background="@drawable/addon_field_bg"
                 android:singleLine="true" />
         </LinearLayout>
 
@@ -324,11 +324,11 @@
                 android:layout_height="wrap_content"
                 android:hint="Enter MdbList API Key"
                 android:textColor="#FFFFFF"
-                android:textColorHint="#555555"
+                android:textColorHint="#777777"
                 android:textSize="14sp"
                 android:padding="10dp"
                 android:layout_marginTop="5dp"
-                android:background="@android:color/transparent"
+                android:background="@drawable/addon_field_bg"
                 android:singleLine="true" />
         </LinearLayout>
 
@@ -370,6 +370,15 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="XRDB Addon URL"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:text="Applies only to TMDB recommendation posters."
                 android:textColor="#AAAAAA"
                 android:textSize="12sp" />
 
@@ -379,11 +388,11 @@
                 android:layout_height="wrap_content"
                 android:hint="https://extendedratings.com/poster/..."
                 android:textColor="#FFFFFF"
-                android:textColorHint="#555555"
+                android:textColorHint="#777777"
                 android:textSize="14sp"
                 android:padding="10dp"
                 android:layout_marginTop="5dp"
-                android:background="@android:color/transparent"
+                android:background="@drawable/addon_field_bg"
                 android:singleLine="true" />
         </LinearLayout>
 
