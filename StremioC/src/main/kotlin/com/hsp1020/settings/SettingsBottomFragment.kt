@@ -1072,7 +1072,7 @@ class SettingsBottomFragment(
         settingsDialog.show()
         settingsDialog.window?.apply {
             val metrics = hostContext.resources.displayMetrics
-            val width = minOf((500 * metrics.density).toInt(), (metrics.widthPixels * 0.9f).toInt()).coerceAtLeast(1)
+            val width = minOf((1000 * metrics.density).toInt(), (metrics.widthPixels * 0.9f).toInt()).coerceAtLeast(1)
             val height = (metrics.heightPixels * 0.88f).toInt().coerceAtLeast(1)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setGravity(android.view.Gravity.CENTER)

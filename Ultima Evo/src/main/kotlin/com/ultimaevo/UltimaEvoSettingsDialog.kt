@@ -124,7 +124,7 @@ class UltimaEvoSettingsDialog : DialogFragment() {
         super.onStart()
         dialog?.window?.apply {
             val metrics = resources.displayMetrics
-            val width = minOf((500 * metrics.density).toInt(), (metrics.widthPixels * 0.9f).toInt()).coerceAtLeast(1)
+            val width = minOf((1000 * metrics.density).toInt(), (metrics.widthPixels * 0.9f).toInt()).coerceAtLeast(1)
             val height = (metrics.heightPixels * 0.88f).toInt().coerceAtLeast(1)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setGravity(Gravity.CENTER)
