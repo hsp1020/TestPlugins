@@ -1823,8 +1823,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 ids.get("malId").intOrNull() != malLookupId) return@runSuspendCatching null
             if (!byKitsu && imdbId != null && resolvedImdb != imdbId) return@runSuspendCatching null
             if (byKitsu && imdbId != null && resolvedImdb != imdbId) return@runSuspendCatching null
-            if (resolvedKitsu == null || (ids.get("malId").intOrNull() ?: 0) <= 0 &&
-                (ids.get("anilistId").intOrNull() ?: 0) <= 0) return@runSuspendCatching null
+            if (resolvedKitsu == null) return@runSuspendCatching null
             // AIOStreams may return its first record if season matching fails.
             // Do not silently accept a different season for an IMDb episode.
             if (!byKitsu && season != null && season > 1) {
