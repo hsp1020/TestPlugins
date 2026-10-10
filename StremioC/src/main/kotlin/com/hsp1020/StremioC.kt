@@ -342,6 +342,19 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val catalogSkipState = ConcurrentHashMap<String, Int>()
         private val catalogGenerations = ConcurrentHashMap<String, Long>()
 
+        private val aioAnimeSession by lazy {
+            val client = app.baseClient.newBuilder()
+                .protocols(listOf(Protocol.HTTP_1_1))
+                .connectTimeout(1_500, TimeUnit.MILLISECONDS)
+                .readTimeout(2_500, TimeUnit.MILLISECONDS)
+                .cache(null)
+                .build()
+            Requests(client).apply {
+                responseParser = app.responseParser
+                defaultHeaders = app.defaultHeaders
+            }
+        }
+
         val customSession by lazy {
             val newClient = app.baseClient.newBuilder()
                 .protocols(listOf(Protocol.HTTP_1_1))
@@ -1190,9 +1203,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
             speculativeKitsuDeferred != null -> async(Dispatchers.IO) {
                 val resolved = speculativeKitsuDeferred.await() ?: return@async null
-                if (!resolved.tmdbId.isNullOrBlank()) {
-                    val detail = fetchTmdbDetailForLoad(resolved.tmdbId, hintMediaType)
-                    SpeculativeTmdbChain(resolved.imdbId, resolved.tmdbId, hintMediaType, false, detail)
+                val tmdbId = resolved.tmdbId?.toString()
+                if (!tmdbId.isNullOrBlank()) {
+                    val detail = fetchTmdbDetailForLoad(tmdbId, hintMediaType)
+                    SpeculativeTmdbChain(resolved.imdbId, tmdbId, hintMediaType, false, detail)
                 } else if (!resolved.imdbId.isNullOrBlank()) {
                     val find = fetchTmdbFindForLoad(resolved.imdbId) ?: return@async null
                     val detail = fetchTmdbDetailForLoad(find.first, find.second)
@@ -1794,13 +1808,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         )
         for (host in hosts) {
             val mapping = runSuspendCatching {
-            val response = withTimeoutOrNull(2_500L) {
-                customSession.get(
-                    "https://$host/api/v1/anime?$query",
-                    headers = mapOf("Cache-Control" to "no-cache, no-store", "Pragma" to "no-cache"),
-                    timeout = 3L
-                ).text
-            } ?: return@runSuspendCatching null
+            val response = aioAnimeSession.get(
+                "https://$host/api/v1/anime?$query",
+                headers = mapOf("Cache-Control" to "no-cache, no-store", "Pragma" to "no-cache")
+            ).text
             val root = parseJson<JsonNode>(response)
             if (root.get("success")?.asBoolean() != true) return@runSuspendCatching null
             val data = root.get("data") ?: return@runSuspendCatching null
