@@ -1151,13 +1151,19 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     
     override suspend fun load(url: String): LoadResponse = coroutineScope {
         val parsedUrlHint = parseDetailUrlHint(url)
-        val requestedKitsuId = parsedUrlHint?.id?.takeIf { it.startsWith("kitsu:") }
+        val requestedAnimeId = parsedUrlHint?.id?.takeIf { isKitsuOrMalId(it) }
         val rememberedHint = detailLoadHints[url]?.takeIf { cached ->
             parsedUrlHint != null &&
                 cached.id == parsedUrlHint.id &&
                 canonicalDetailType(cached.type) == canonicalDetailType(parsedUrlHint.type)
         }
         val urlHint = rememberedHint ?: parsedUrlHint
+        val hintedImdbId = urlHint?.id?.takeIf { IMDB_ID_REGEX.matches(it) }
+        val speculativeImdbAnimeDeferred = hintedImdbId?.let { id ->
+            async(Dispatchers.IO) {
+                fetchAnimeSeasonMapping(LoadData(id = id, imdbId = id, isAnime = true))
+            }
+        }
         val hintMediaType = detailMediaType(urlHint?.type)
         val mdbEnabled = isIntegrationEnabled("mdblist_enabled", default = false)
         val directMdbHint = directMdbTarget(urlHint?.id, hintMediaType)
@@ -1246,6 +1252,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             speculativeMdbDeferred?.cancel()
             speculativeTmdbDeferred?.cancel()
             speculativeKitsuDeferred?.cancel()
+            speculativeImdbAnimeDeferred?.cancel()
         }
 
         val normalizedId = try { normalizeId(res.id ?: "") } catch (e: Exception) { e.printStackTrace(); res.id ?: "" }
@@ -1268,6 +1275,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val isKitsuOrMal = isKitsuOrMalId(res.id)
         var fetchedAniListId: Int? = null
         var fetchedMalId: Int? = null
+        var fetchedKitsuId: String? = null
         var resolvedImdbId: String? = null
         var resolvedTmdbId: String? = null
 
@@ -1284,6 +1292,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 resolvedTmdbId = resolved.tmdbId?.toString()
                 fetchedAniListId = resolved.aniListId
                 fetchedMalId = resolved.malId
+                fetchedKitsuId = resolved.kitsuId
             }
         }
 
@@ -1347,7 +1356,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         var finalProcessedId = res.id
         val imdbId = resolvedImdbId ?: preFetchedTmdbDetail?.external_ids?.imdb_id
-        if (!imdbId.isNullOrBlank() && (imdbId.startsWith("tt") || imdbId.startsWith("kitsu:"))) {
+        if (!imdbId.isNullOrBlank() && (imdbId.startsWith("tt") || isKitsuOrMalId(imdbId))) {
             finalProcessedId = imdbId
         }
 
@@ -1364,9 +1373,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             preFetchedFindImdbId = validatedFindImdbId,
             fetchedAniListId = fetchedAniListId,
             fetchedMalId = fetchedMalId,
+            fetchedKitsuId = fetchedKitsuId,
             resolvedTmdbId = resolvedTmdbId,
             resolvedIdHolder = resolvedIdHolder,
-            requestedKitsuId = requestedKitsuId
+            requestedAnimeId = requestedAnimeId,
+            prefetchedAnimeMapping = speculativeImdbAnimeDeferred?.takeIf { hintMatchesAuthoritative },
+            prefetchedAnimeImdbId = hintedImdbId
         )
 
         var actualMdbTarget = resolvedMdbTarget(res, resolvedTmdbId, resolvedImdbId)
@@ -1637,7 +1649,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         // One mapping response is shared within this loadLinks call; it is never cached.
         suspend fun mappedAnimeStremioId(): String? {
             if (actualIsMovie || !(loadData.isAnime || loadData.originalKitsuId != null ||
-                    loadData.kitsuId != null || loadData.id?.startsWith("kitsu:") == true ||
+                    loadData.kitsuId != null || isKitsuOrMalId(loadData.id) ||
                     loadData.malId != null || loadData.anilistId != null ||
                     (loadData.isCartoon && loadData.isAsian))) return null
             val mapped = mappingDeferred.await() ?: return null
@@ -1680,7 +1692,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val mappedId = mappedAnimeStremioId()
                 if (mappedId != null) {
                     fetchStremioSubtitles(currentMainUrl, mappedId, null, null, "series")
-                } else if (!primaryId.startsWith("kitsu:") || actualIsMovie) {
+                } else if (!isKitsuOrMalId(primaryId) || actualIsMovie) {
                     fetchStremioSubtitles(currentMainUrl, primaryId, loadData.season, loadData.episode)
                 }
             },
@@ -1730,7 +1742,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                                     val mappedId = mappedAnimeStremioId()
                                     if (mappedId != null) {
                                         fetchStremioSubtitles(addonUrl, mappedId, null, null, "series", addon.name)
-                                    } else if (!reqId.startsWith("kitsu:") || actualIsMovie) {
+                                    } else if (!isKitsuOrMalId(reqId) || actualIsMovie) {
                                         fetchStremioSubtitles(addonUrl, reqId, season, episode, extraType, addon.name)
                                     }
                                 })
@@ -1776,7 +1788,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     )
 
     private suspend fun fetchAnimeSeasonMapping(loadData: LoadData): AnimeSeasonMapping? {
-        val kitsuId = (loadData.originalKitsuId ?: loadData.kitsuId
+        val kitsuId = (loadData.originalKitsuId?.takeIf { it.startsWith("kitsu:") } ?: loadData.kitsuId
             ?: loadData.id?.takeIf { it.startsWith("kitsu:") })
             ?.removePrefix("kitsu:")?.substringBefore(':')
             ?.takeIf { it.isNotBlank() && it.all(Char::isDigit) }
@@ -1784,16 +1796,23 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             ?.substringBefore(':')?.takeIf { IMDB_ID_REGEX.matches(it) }
         if (!loadData.isAnime && kitsuId == null && loadData.malId == null &&
             loadData.anilistId == null && !(loadData.isCartoon && loadData.isAsian)) return null
-        val byKitsu = loadData.originalKitsuId != null && kitsuId != null
-        val malLookupId = loadData.malId?.takeIf { it > 0 }
+        val byKitsu = loadData.originalKitsuId?.startsWith("kitsu:") == true && kitsuId != null
+        val malLookupId = loadData.originalKitsuId?.takeIf { it.startsWith("mal:") }
+            ?.removePrefix("mal:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
+            ?: loadData.malId?.takeIf { it > 0 }
             ?: loadData.id?.takeIf { it.startsWith("mal:") }
                 ?.removePrefix("mal:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
-        val id = if (byKitsu) kitsuId else imdbId ?: kitsuId ?: malLookupId?.toString() ?: return null
+        val byMal = loadData.originalKitsuId?.startsWith("mal:") == true && malLookupId != null
+        val id = when {
+            byKitsu -> kitsuId
+            byMal -> malLookupId.toString()
+            else -> imdbId ?: kitsuId ?: malLookupId?.toString() ?: return null
+        }
         val season = loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 }
         val episode = loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 }
         val query = when {
             byKitsu || id == kitsuId && imdbId == null -> "idType=kitsuId&idValue=$id"
-            imdbId == null && malLookupId != null -> "idType=malId&idValue=$id"
+            byMal || imdbId == null && malLookupId != null -> "idType=malId&idValue=$id"
             else -> "idType=imdbId&idValue=$id" +
                 (if (season != null) "&season=$season" else "") +
                 (if (episode != null) "&episode=$episode" else "")
@@ -1807,6 +1826,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             "aiostreams.viren070.me"
         )
         for (host in hosts) {
+            var noMapping = false
             val mapping = runSuspendCatching {
             val response = aioAnimeSession.get(
                 "https://$host/api/v1/anime?$query",
@@ -1814,19 +1834,23 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             ).text
             val root = parseJson<JsonNode>(response)
             if (root.get("success")?.asBoolean() != true) return@runSuspendCatching null
+            if (root.get("data")?.isNull == true) {
+                noMapping = true
+                return@runSuspendCatching null
+            }
             val data = root.get("data") ?: return@runSuspendCatching null
             val ids = data.get("mappings") ?: return@runSuspendCatching null
             val resolvedKitsu = ids.get("kitsuId").intOrNull()?.takeIf { it > 0 }?.toString()
             val resolvedImdb = ids.get("imdbId").textOrNull()
             if (byKitsu && resolvedKitsu != kitsuId) return@runSuspendCatching null
-            if (imdbId == null && kitsuId == null && malLookupId != null &&
+            if ((byMal || imdbId == null && kitsuId == null && malLookupId != null) &&
                 ids.get("malId").intOrNull() != malLookupId) return@runSuspendCatching null
-            if (!byKitsu && imdbId != null && resolvedImdb != imdbId) return@runSuspendCatching null
-            if (byKitsu && imdbId != null && resolvedImdb != imdbId) return@runSuspendCatching null
-            if (resolvedKitsu == null) return@runSuspendCatching null
+            if (imdbId != null && resolvedImdb != imdbId) return@runSuspendCatching null
+            if (resolvedKitsu == null && ids.get("malId").intOrNull() == null &&
+                ids.get("anilistId").intOrNull() == null) return@runSuspendCatching null
             // AIOStreams may return its first record if season matching fails.
             // Do not silently accept a different season for an IMDb episode.
-            if (!byKitsu && season != null && season > 1) {
+            if (!byKitsu && !byMal && season != null && season > 1) {
                 val mappedSeason = data.get("imdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
                     ?: data.get("tvdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
                     ?: data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
@@ -1839,9 +1863,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val localEpisode = loadData.episode?.takeIf { it > 0 }
             val tmdbEpisode = when {
                 tmdbSeason == null || localEpisode == null -> null
-                first != null -> if (!byKitsu && season == tmdbSeason && localEpisode >= first)
+                first != null -> if (!byKitsu && !byMal && season == tmdbSeason && localEpisode >= first)
                     localEpisode else first + localEpisode - 1
-                !byKitsu && season == tmdbSeason -> localEpisode
+                !byKitsu && !byMal && season == tmdbSeason -> localEpisode
                 else -> null // No proven offset between these coordinate systems.
             }
             AnimeSeasonMapping(
@@ -1858,6 +1882,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 traktSeason = data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
             )
             }.getOrNull()
+            if (noMapping) return null
             if (mapping != null) return mapping
         }
         return null
@@ -1897,7 +1922,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             ?: loadData.id?.takeIf { it.startsWith("tmdb:") }
                 ?.removePrefix("tmdb:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
         val kitsuId = (mapping?.kitsuId ?: loadData.kitsuId
-            ?: loadData.originalKitsuId
+            ?: loadData.originalKitsuId?.takeIf { it.startsWith("kitsu:") }
             ?: loadData.id?.takeIf { it.startsWith("kitsu:") }
                 ?.removePrefix("kitsu:"))
             ?.removePrefix("kitsu:")?.substringBefore(':')
@@ -2423,7 +2448,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("malId") val malId: Int? = null,
         @JsonProperty("kitsuId") val kitsuId: String? = null,
         @JsonProperty("addonUrl") val addonUrl: String? = null,
-        @JsonProperty("originalKitsuId") val originalKitsuId: String? = null
+        @JsonProperty("originalKitsuId") val originalKitsuId: String? = null // Original kitsu: or mal: ID
     )
     
     data class Manifest(val catalogs: List<Catalog>)
@@ -2907,14 +2932,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             preFetchedFind: Pair<String, String>? = null,
             preFetchedFindImdbId: String? = null,
             fetchedAniListId: Int? = null, 
-            fetchedMalId: Int? = null, 
+            fetchedMalId: Int? = null,
+            fetchedKitsuId: String? = null,
             resolvedTmdbId: String? = null,
             resolvedIdHolder: Array<String?>? = null,
-            requestedKitsuId: String? = null
+            requestedAnimeId: String? = null,
+            prefetchedAnimeMapping: Deferred<AnimeSeasonMapping?>? = null,
+            prefetchedAnimeImdbId: String? = null
         ): LoadResponse = coroutineScope {
             val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
-            val originalKitsuId = requestedKitsuId
-                ?: this@CatalogEntry.id?.takeIf { it.startsWith("kitsu:") }
+            val originalAnimeId = requestedAnimeId
+                ?: this@CatalogEntry.id?.takeIf { it.startsWith("kitsu:") || it.startsWith("mal:") }
 
             var finalImdbId = if (this@CatalogEntry.id?.startsWith("tt") == true) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
@@ -2950,33 +2978,26 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val finalImdbRating = detailedEntry.imdbRating ?: this@CatalogEntry.imdbRating
             val finalType = detailedEntry.type ?: this@CatalogEntry.type
 
-            // Start an uncached IMDb anime ID lookup in parallel with TMDB metadata.
-            // Scope tracker IDs to an unambiguous season in Stremio's episode list,
-            // not TMDB's total-season count.
+            // IMDb mapping has no season/episode in the detail-page request.
+            // Multi-season series cannot share a single anime tracking identity.
             val videoSeasons = finalVideos.orEmpty().mapNotNull {
                 it.seasonNumber?.takeIf { number -> number > 0 }
             }.distinct()
-            val imdbAnimeCandidate = originalKitsuId == null &&
-                finalImdbId?.let { IMDB_ID_REGEX.matches(it) } == true &&
-                (finalGenre?.any {
-                    it.contains("Anime", true) || it.contains("Animation", true)
-                } == true || (detailedEntry.original_language ?: this@CatalogEntry.original_language)
-                    ?.equals("ja", ignoreCase = true) == true)
-            val imdbSeasonForSync = videoSeasons.singleOrNull()
             val isMovieForSync = finalType == "movie" || isSingleMovie(finalType ?: "", finalVideos)
-            val detailSyncMapping = if (imdbAnimeCandidate &&
-                (isMovieForSync || (finalType == "series" || finalType == "tv") && imdbSeasonForSync != null)
-            ) {
-                async(Dispatchers.IO) {
-                    provider.fetchAnimeSeasonMapping(LoadData(
-                        id = finalImdbId,
-                        imdbId = finalImdbId,
-                        isAnime = true,
-                        season = if (isMovieForSync) null else imdbSeasonForSync,
-                        episode = if (isMovieForSync) null else 1
-                    ))
-                }
-            } else null
+            val useImdbSyncMapping = originalAnimeId == null &&
+                finalImdbId?.let { IMDB_ID_REGEX.matches(it) } == true &&
+                (isMovieForSync || ((finalType == "series" || finalType == "tv") && videoSeasons.size == 1))
+            val detailSyncMapping = if (useImdbSyncMapping) {
+                prefetchedAnimeMapping?.takeIf { prefetchedAnimeImdbId == finalImdbId }
+                    ?: async(Dispatchers.IO) {
+                        provider.fetchAnimeSeasonMapping(LoadData(
+                            id = finalImdbId, imdbId = finalImdbId, isAnime = true
+                        ))
+                    }
+            } else {
+                prefetchedAnimeMapping?.cancel()
+                null
+            }
 
             if (findApiDeferred != null) {
                 val findResult = findApiDeferred.await()
@@ -3037,20 +3058,18 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val isBollywood = countries.any { it.contains("IN", true) || it.contains("India", true) }
             val isAsian = countries.any { it.contains("KR", true) || it.contains("JP", true) || it.contains("CN", true) || it.contains("TH", true) || it.contains("TW", true) }
             val isCartoon = finalGenre?.any { it.contains("Animation", true) } == true
-            val isAnimeFromMetadata = originalKitsuId != null || fetchedMalId != null || finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
-            val useImdbSyncMapping = (isAnimeFromMetadata || imdbAnimeCandidate) && (
-                isMovieForSync || ((finalType == "series" || finalType == "tv") &&
-                    imdbSeasonForSync != null)
-            )
-            val imdbSyncMapping = if (useImdbSyncMapping) detailSyncMapping?.await()
-                else { detailSyncMapping?.cancel(); null }
+            val isAnimeFromMetadata = originalAnimeId != null || fetchedMalId != null || finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
+            val imdbSyncMapping = detailSyncMapping?.await()
             val isAnimeMedia = isAnimeFromMetadata || imdbSyncMapping != null
 
-            var finalMalId = imdbSyncMapping?.malId ?: fetchedMalId
-            var finalAniId = imdbSyncMapping?.aniListId ?: fetchedAniListId
+            val finalMalId = imdbSyncMapping?.malId ?: fetchedMalId
+                ?: originalAnimeId?.takeIf { it.startsWith("mal:") }
+                    ?.removePrefix("mal:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
+            val finalAniId = imdbSyncMapping?.aniListId ?: fetchedAniListId
             val finalKitsuId = imdbSyncMapping?.kitsuId?.toIntOrNull()?.takeIf { it > 0 }
-                ?: originalKitsuId?.removePrefix("kitsu:")
-                    ?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
+                ?: fetchedKitsuId?.toIntOrNull()?.takeIf { it > 0 }
+                ?: originalAnimeId?.takeIf { it.startsWith("kitsu:") }
+                    ?.removePrefix("kitsu:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
 
             val cleanImdbId = finalImdbId?.let { idStr ->
                 val parts = idStr.split(":")
@@ -3121,7 +3140,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         originalTitle = tmdbData?.fetchedOriginalTitle,
                         englishTitle = tmdbData?.fetchedEnglishTitle,
                         addonUrl = provider.mainUrl,
-                        originalKitsuId = originalKitsuId
+                        originalKitsuId = originalAnimeId
                     )
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
@@ -3155,7 +3174,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     finalMalId, 
                     this@CatalogEntry.kitsuIdExt,
                     tmdbData?.fetchedYear, // ★ 수집된 출시 연도(year) 인자 전달 추가
-                    originalKitsuId
+                    originalAnimeId
                 )
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
