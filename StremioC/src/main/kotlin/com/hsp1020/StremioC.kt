@@ -1790,11 +1790,20 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 (if (season != null) "&season=$season" else "") +
                 (if (episode != null) "&episode=$episode" else "")
         }
-        return runSuspendCatching {
+        val hosts = listOf(
+            "aiostreams.elfhosted.com",
+            "aiostreams.fortheweak.cloud",
+            "aiostreamsfortheweebsstable.midnightignite.me",
+            "aio.atbphosting.com",
+            "aiostreams.stremio.ru",
+            "aiostreams.viren070.me"
+        )
+        for ((index, host) in hosts.withIndex()) {
+            val mapping = runSuspendCatching {
             val response = customSession.get(
-                "https://aiostreamsfortheweebsstable.midnightignite.me/api/v1/anime?$query",
+                "https://$host/api/v1/anime?$query",
                 headers = mapOf("Cache-Control" to "no-cache, no-store", "Pragma" to "no-cache"),
-                timeout = 8L
+                timeout = if (index == 0) 5L else 3L
             ).text
             val root = parseJson<JsonNode>(response)
             if (root.get("success")?.asBoolean() != true) return@runSuspendCatching null
@@ -1843,7 +1852,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 tvdbSeason = data.get("tvdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 },
                 imdbSeason = data.get("imdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
             )
-        }.getOrNull()
+            }.getOrNull()
+            if (mapping != null) return mapping
+        }
+        return null
     }
 
     private data class IntegrationData(
