@@ -4,12 +4,12 @@
     android:layout_height="wrap_content"
     android:orientation="vertical"
     android:padding="20dp"
-    android:background="@android:color/transparent">
+    android:background="@drawable/addon_field_bg">
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Add Link"
+        android:text="Add Catalogs"
         android:textColor="#FFFFFF"
         android:gravity="center"
         android:textSize="20sp"

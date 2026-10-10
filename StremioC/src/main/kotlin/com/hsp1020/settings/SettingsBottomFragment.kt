@@ -9,7 +9,6 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
-import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -31,9 +30,12 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.util.Base64
 import android.app.AlertDialog
-import com.google.android.material.bottomsheet.BottomSheetDialogFragment
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import androidx.core.net.toUri
-import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
+import kotlinx.coroutines.cancel
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.ItemTouchHelper
@@ -50,6 +52,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.withContext
 import java.util.Collections
 import com.lagradost.cloudstream3.MainAPI
@@ -140,8 +143,17 @@ object SettingsRepository {
 
 class SettingsBottomFragment(
     private val plugin: StremioCPlugin,
-    private val sharedPref: SharedPreferences
-) : BottomSheetDialogFragment() {
+    private val sharedPref: SharedPreferences,
+    private val hostContext: Context
+) {
+    // The sheet is not restored by FragmentManager during Activity recreation.
+    private val sheet = BottomSheetDialog(hostContext)
+    private val uiScope = MainScope()
+    private val hostOwner = hostContext as? LifecycleOwner
+    private val closeOnDestroy = LifecycleEventObserver { _, event ->
+        if (event == Lifecycle.Event.ON_DESTROY) dismiss()
+    }
+    fun dismiss() = sheet.dismiss()
 
     companion object {
         val LANGUAGES = listOf(
@@ -188,9 +200,10 @@ class SettingsBottomFragment(
 
     private var searchJob: Job? = null 
 
-    private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.parseColor("#000000")); cornerRadius = 25f }
-    private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
-    private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f }
+    private fun dp(value: Int) = (value * hostContext.resources.displayMetrics.density + 0.5f).toInt()
+    private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.BLACK); cornerRadius = dp(12).toFloat() }
+    private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#171717")); setStroke(dp(1), Color.parseColor("#303030")); cornerRadius = dp(8).toFloat() }
+    private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#292929")); setStroke(dp(1), Color.parseColor("#404040")); cornerRadius = dp(8).toFloat() }
 
     private fun getCineStreamClassLoader(): ClassLoader? {
         try {
@@ -316,6 +329,7 @@ class SettingsBottomFragment(
         dialog.setCanceledOnTouchOutside(false)
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
             dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
@@ -356,8 +370,10 @@ class SettingsBottomFragment(
 
     private fun dialogButton(ctx: Context?, label: String, params: LinearLayout.LayoutParams) = Button(ctx).apply {
         text = label
+        textSize = 14f
         setTextColor(Color.WHITE)
         isAllCaps = false
+        minHeight = dp(48)
         background = getButtonBg()
         layoutParams = params
     }
@@ -395,16 +411,18 @@ class SettingsBottomFragment(
     }
     
     @SuppressLint("DiscouragedApi")
-    override fun onCreateView(
-        inflater: LayoutInflater, container: ViewGroup?,
-        savedInstanceState: Bundle?
-    ): View {
-        isCancelable = true
-        dialog?.setCanceledOnTouchOutside(false)
-        
-        val ctx = requireContext()
+    fun show(onDismiss: () -> Unit = {}) {
+        sheet.setCancelable(true)
+        sheet.setCanceledOnTouchOutside(false)
+        sheet.setOnDismissListener {
+            hostOwner?.lifecycle?.removeObserver(closeOnDestroy)
+            searchJob?.cancel()
+            uiScope.cancel()
+            onDismiss()
+        }
+        val ctx = hostContext
         val appContext = ctx.applicationContext
-        val view = getLayout("bottom_sheet_layout", inflater, container)
+        val view = getLayout("bottom_sheet_layout", LayoutInflater.from(ctx), null)
 
         val addlinks: ImageView = try { view.findView("addlinks") } catch (e: Throwable) { throw Exception("addlinks ImageView not found", e) }
         val showlinks: ImageView = try { view.findView("showlinks") } catch (e: Throwable) { throw Exception("showlinks ImageView not found", e) }
@@ -428,7 +446,7 @@ class SettingsBottomFragment(
             val isStreamPlayExportActive = try { view.findView<Switch>("switchStreamPlay").isChecked } catch (_: Throwable) { false }
             val isCineStreamExportActive = try { view.findView<Switch>("switchCineStream").isChecked } catch (_: Throwable) { false }
 
-            viewLifecycleOwner.lifecycleScope.launch {
+            uiScope.launch {
                 try {
                     val backupStr = withContext(Dispatchers.IO) {
                         val json = JSONObject()
@@ -537,7 +555,7 @@ class SettingsBottomFragment(
         }
 
         tvImport.setOnClickListener {
-            val ctx = requireContext()
+            val ctx = hostContext
             val appContext = ctx.applicationContext
             val clipboard = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clipData = clipboard.primaryClip
@@ -550,7 +568,7 @@ class SettingsBottomFragment(
                 return@setOnClickListener
             }
 
-            viewLifecycleOwner.lifecycleScope.launch {
+            uiScope.launch {
                 try {
                     val parsedJson = withContext(Dispatchers.IO) {
                         val decodedBytes = Base64.decode(clipboardText, Base64.NO_WRAP)
@@ -644,7 +662,7 @@ class SettingsBottomFragment(
                         setupCustomDialog(loadingDlg, loadingContainer)
                         loadingDlg.show()
 
-                        viewLifecycleOwner.lifecycleScope.launch {
+                        uiScope.launch {
                             withContext(Dispatchers.IO) {
                                 val editor = sharedPref.edit()
                                 
@@ -708,7 +726,7 @@ class SettingsBottomFragment(
                             }
                             
                             delay(1500)
-                            if (isActive && isAdded) {
+                            if (isActive && sheet.isShowing) {
                                 loadingDlg.dismiss()
                                 dismiss()
                                 restartApp(appContext)
@@ -726,7 +744,7 @@ class SettingsBottomFragment(
         }
 
         val extraUrlContainer = view.findView<LinearLayout>("containerStreamSubtitleUrls")
-        val extraUrlToggle = view.findView<TextView>("toggleStreamSubtitleUrls")
+        val extraUrlToggle = view.findView<ImageView>("toggleStreamSubtitleUrls")
         val urlControlSize = (40 * ctx.resources.displayMetrics.density + 0.5f).toInt()
         val urlFieldPadding = (10 * ctx.resources.displayMetrics.density + 0.5f).toInt()
         fun addExtraUrlField(initialName: String = "", initialUrl: String = "") {
@@ -740,7 +758,7 @@ class SettingsBottomFragment(
                 setTextColor(Color.WHITE)
                 setHintTextColor(Color.parseColor("#777777"))
                 setPadding(urlFieldPadding, urlFieldPadding, urlFieldPadding, urlFieldPadding)
-                setBackgroundColor(Color.TRANSPARENT)
+                background = getCardBg()
                 isSingleLine = true
             }
             val nameField = newField("Name", initialName, false)
@@ -749,12 +767,10 @@ class SettingsBottomFragment(
             row.addView(View(ctx).apply { setBackgroundColor(Color.parseColor("#444444")) },
                 LinearLayout.LayoutParams((ctx.resources.displayMetrics.density + 0.5f).toInt(), urlFieldPadding * 2))
             row.addView(urlField, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f))
-            row.addView(TextView(ctx).apply {
-                text = "−"
+            row.addView(ImageView(ctx).apply {
+                setImageDrawable(getDrawable("delete_icon"))
                 contentDescription = "Remove addon URL"
-                textSize = 20f
-                setTextColor(Color.WHITE)
-                gravity = android.view.Gravity.CENTER
+                setPadding(dp(9), dp(9), dp(9), dp(9))
                 isClickable = true
                 isFocusable = true
                 val ripple = android.util.TypedValue()
@@ -765,12 +781,10 @@ class SettingsBottomFragment(
                     else { nameField.setText(""); urlField.setText("") }
                 }
             }, LinearLayout.LayoutParams(urlControlSize, urlControlSize))
-            row.addView(TextView(ctx).apply {
-                text = "+"
+            row.addView(ImageView(ctx).apply {
+                setImageDrawable(getDrawable("add_icon"))
                 contentDescription = "Add addon URL"
-                textSize = 20f
-                setTextColor(Color.WHITE)
-                gravity = android.view.Gravity.CENTER
+                setPadding(dp(9), dp(9), dp(9), dp(9))
                 isClickable = true
                 isFocusable = true
                 val ripple = android.util.TypedValue()
@@ -793,7 +807,7 @@ class SettingsBottomFragment(
         }
         fun setExtraUrlExpanded(expanded: Boolean) {
             extraUrlContainer.visibility = if (expanded) View.VISIBLE else View.GONE
-            extraUrlToggle.text = if (expanded) "▲" else "▼"
+            extraUrlToggle.setImageDrawable(getDrawable(if (expanded) "addon_collapse_icon" else "addon_expand_icon"))
             extraUrlToggle.contentDescription = if (expanded) "Collapse addon URLs" else "Expand addon URLs"
             sharedPref.edit().putBoolean(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_EXPANDED, expanded).apply()
         }
@@ -856,7 +870,7 @@ class SettingsBottomFragment(
             val dialogView = getLayout("dialog_list_links", inflater, null) as LinearLayout
             
             dialogView.background = getDarkThemeBg()
-            dialogView.setPadding(40, 40, 40, 40)
+            dialogView.setPadding(dp(20), dp(20), dp(20), dp(20))
             
             val rv: RecyclerView = dialogView.findView("rvLinks")
             val tvNoLinks: TextView = dialogView.findView("tvNoLinks")
@@ -941,7 +955,7 @@ class SettingsBottomFragment(
         }
 
         saveIcon.setOnClickListener {
-            val context = this.context ?: return@setOnClickListener
+            val context = hostContext
             val tmdbApiKeyVal = etTmdbApiKey.text.toString().trim()
             if (tmdbApiKeyVal.isEmpty()) {
                 showToast("TMDB API key is a required field")
@@ -1028,24 +1042,27 @@ class SettingsBottomFragment(
             dlg.show()
         }
 
-        return view
+        sheet.setContentView(view)
+        hostOwner?.lifecycle?.addObserver(closeOnDestroy)
+        sheet.show()
+        sheet.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
     }
 
     private fun showLinkEditorDialog(isEdit: Boolean, itemToEdit: LinkItem?, position: Int, rv: RecyclerView?) {
-        val ctx = requireContext()
+        val ctx = hostContext
         val inflater = LayoutInflater.from(ctx)
         val dialogView = getLayout("addlinks", inflater, null) as LinearLayout
         
         dialogView.background = getDarkThemeBg()
-        dialogView.setPadding(40, 40, 40, 40)
+        dialogView.setPadding(dp(20), dp(20), dp(20), dp(20))
         
         val titleTv = dialogView.getChildAt(0) as? TextView
         if (titleTv != null) {
-            titleTv.text = if (isEdit) "Edit Link" else "Add Link"
+            titleTv.text = if (isEdit) "Edit Catalog" else "Add Catalogs"
             titleTv.setTextColor(Color.WHITE)
             titleTv.textSize = 20f
             titleTv.typeface = android.graphics.Typeface.DEFAULT_BOLD
-            titleTv.gravity = android.view.Gravity.CENTER
+            titleTv.gravity = android.view.Gravity.START
         }
         
         val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
@@ -1054,16 +1071,16 @@ class SettingsBottomFragment(
         val switchLinkSync = try { dialogView.findView<Switch>("switchLinkSync") } catch (t: Throwable) { null }
         val switchHistorySync = try { dialogView.findView<Switch>("switchHistorySync") } catch (t: Throwable) { null }
         
-        etName?.background = getButtonBg()
+        etName?.background = getCardBg()
         etName?.setTextColor(Color.WHITE)
-        etName?.setHintTextColor(Color.GRAY)
-        etName?.setPadding(25, 0, 25, 0) 
+        etName?.setHintTextColor(Color.parseColor("#777777"))
+        etName?.setPadding(dp(12), 0, dp(12), 0) 
         if (isEdit) etName?.setText(itemToEdit?.name)
         
-        etLink?.background = getButtonBg()
+        etLink?.background = getCardBg()
         etLink?.setTextColor(Color.WHITE)
-        etLink?.setHintTextColor(Color.GRAY)
-        etLink?.setPadding(25, 0, 25, 0) 
+        etLink?.setHintTextColor(Color.parseColor("#777777"))
+        etLink?.setPadding(dp(12), 0, dp(12), 0) 
         if (isEdit) etLink?.setText(itemToEdit?.link)
 
         switchStreamSubtitleSync?.isChecked = itemToEdit?.isStreamSubtitleSyncEnabled ?: false
@@ -1122,7 +1139,7 @@ class SettingsBottomFragment(
     }
 
 private fun showLanguageSelectDialog() {
-        val context = requireContext()
+        val context = hostContext
         val currentSavedCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "en-US") ?: "en-US"
         
         var selectedCode = currentSavedCode
@@ -1130,25 +1147,26 @@ private fun showLanguageSelectDialog() {
 
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(40, 40, 40, 40)
+            setPadding(dp(20), dp(20), dp(20), dp(20))
             background = getDarkThemeBg()
         }
 
         container.addView(TextView(context).apply {
-            text = "Select TMDB Language"
+            text = "TMDB Language"
             textSize = 20f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setPadding(0, 0, 0, 20)
-            gravity = android.view.Gravity.CENTER
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, dp(20))
+            gravity = android.view.Gravity.START
         })
 
         val searchBar = EditText(context).apply {
             hint = "Search language..."
-            setHintTextColor(Color.GRAY)
+            setHintTextColor(Color.parseColor("#777777"))
             setTextColor(Color.WHITE)
             textSize = 15f
-            setPadding(25, 20, 25, 20)
-            background = getButtonBg()
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = getCardBg()
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 setMargins(0, 0, 0, 20)
             }
@@ -1157,7 +1175,8 @@ private fun showLanguageSelectDialog() {
 
         val rv = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 600)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                minOf(dp(380), (context.resources.displayMetrics.heightPixels * 0.50f).toInt()))
         }
         container.addView(rv)
 
@@ -1170,13 +1189,13 @@ private fun showLanguageSelectDialog() {
 
             private var filteredList = originalList.toMutableList()
 
-            inner class VH(val view: LinearLayout, val tvName: TextView, val tvCheck: TextView) : RecyclerView.ViewHolder(view)
+            inner class VH(val view: LinearLayout, val tvName: TextView, val tvCheck: ImageView) : RecyclerView.ViewHolder(view)
 
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
                 val rowLayout = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(10, 20, 10, 20)
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
                     isClickable = true
                     focusable = View.FOCUSABLE
                     layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -1186,11 +1205,11 @@ private fun showLanguageSelectDialog() {
                     textSize = 15f
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 }
-                val tvCheck = TextView(context).apply {
-                    text = "✓"
-                    textSize = 16f
-                    setTextColor(Color.parseColor("#FF0000")) // 빨간색 적용
-                    setPadding(10, 0, 10, 0)
+                val tvCheck = ImageView(context).apply {
+                    setImageDrawable(getDrawable("addon_check_icon"))
+                    contentDescription = "Selected language"
+                    setPadding(dp(10), 0, dp(10), 0)
+                    layoutParams = LinearLayout.LayoutParams(dp(40), dp(24))
                 }
                 rowLayout.addView(tvName)
                 rowLayout.addView(tvCheck)
@@ -1202,8 +1221,8 @@ private fun showLanguageSelectDialog() {
                 val isSelected = code == selectedCode
                 holder.tvName.text = langName
                 
-                // 선택되었을 때만 글자색 빨간색(#FF0000) 및 체크표시 활성화
-                holder.tvName.setTextColor(if (isSelected) Color.parseColor("#FF0000") else Color.WHITE) 
+                holder.tvName.setTextColor(Color.WHITE)
+                holder.view.background = if (isSelected) getButtonBg() else getCardBg() 
                 holder.tvCheck.visibility = if (isSelected) View.VISIBLE else View.GONE
                 
                 holder.view.setOnClickListener {
@@ -1237,7 +1256,7 @@ private fun showLanguageSelectDialog() {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 searchJob?.cancel()
-                searchJob = viewLifecycleOwner.lifecycleScope.launch {
+                searchJob = uiScope.launch {
                     delay(150) 
                     val query = s.toString().trim().lowercase()
                     adapter.filter(query)
@@ -1276,7 +1295,7 @@ private fun showLanguageSelectDialog() {
     }
 
     private fun showCatalogConfigDialog(item: LinkItem) {
-        val context = requireContext()
+        val context = hostContext
         migrateStremioCatalogSettings(sharedPref, item.link)
         val uniqueId = stremioCatalogKey(item.link) 
         
@@ -1295,7 +1314,7 @@ private fun showLanguageSelectDialog() {
         setupCustomDialog(progressDialog, progressContainer)
         progressDialog.show()
 
-        viewLifecycleOwner.lifecycleScope.launch {
+        uiScope.launch {
             val currentUrl = stremioManifestUrl(item.link)
 
             val manifestText = withContext(Dispatchers.IO) {
@@ -1367,7 +1386,7 @@ private fun showLanguageSelectDialog() {
     }
 
     private fun displayCatalogListDialog(addonName: String, flatTabs: List<ConfigFlatTab>, linkUrl: String) {
-        val context = requireContext()
+        val context = hostContext
         val prefs = sharedPref
         migrateStremioCatalogSettings(prefs, linkUrl)
         val uniqueId = stremioCatalogKey(linkUrl)
@@ -1689,8 +1708,6 @@ private fun showLanguageSelectDialog() {
         } catch (e: Throwable) { e.printStackTrace() }
     }
 
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {}
-
     private fun restartApp(appContext: Context) {
         val packageManager = appContext.packageManager
         val intent = packageManager.getLaunchIntentForPackage(appContext.packageName)
@@ -1719,7 +1736,7 @@ private fun showLanguageSelectDialog() {
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
             val layoutId = getCachedResId("item_saved_link", "layout")
-            val v = layoutInflater.inflate(res.getLayout(layoutId), parent, false)
+            val v = LayoutInflater.from(parent.context).inflate(res.getLayout(layoutId), parent, false)
             v.background = getCardBg() 
             return VH(v)
         }

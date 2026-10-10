@@ -97,7 +97,7 @@
                 android:layout_width="0dp"
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:text="Add Link"
+                android:text="Add Catalogs"
                 android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
@@ -124,7 +124,7 @@
                 android:layout_width="0dp"
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:text="List Link"
+                android:text="List Catalogs"
                 android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
@@ -188,11 +188,11 @@
                 android:layout_height="wrap_content"
                 android:hint="Enter TMDb API Key"
                 android:textColor="#FFFFFF"
-                android:textColorHint="#555555"
+                android:textColorHint="#777777"
                 android:textSize="14sp"
                 android:padding="10dp"
                 android:layout_marginTop="5dp"
-                android:background="@android:color/transparent"
+                android:background="@drawable/addon_field_bg"
                 android:singleLine="true" />
         </LinearLayout>
 
@@ -211,20 +211,16 @@
                     android:layout_width="0dp"
                     android:layout_weight="1"
                     android:layout_height="wrap_content"
-                    android:text="Stream / Subtitle Addon Base URL"
+                    android:text="Stream / Subtitle Addon URL"
                     android:textColor="#FFFFFF"
                     android:textSize="18sp"
                     android:textStyle="bold" />
-                <TextView
+                <ImageView
                     android:id="@+id/toggleStreamSubtitleUrls"
                     android:layout_width="40dp"
-                    android:layout_height="36dp"
-                    android:gravity="center"
+                    android:layout_height="40dp"
+                    android:padding="8dp"
                     android:contentDescription="Collapse addon URLs"
-                    android:text="▲"
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp"
-                    android:padding="5dp"
                     android:background="?android:attr/selectableItemBackground"
                     android:clickable="true"
                     android:focusable="true" />
@@ -254,7 +250,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Sync Addon Base URL"
+                android:text="Meta / History Addon URL"
                 android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
@@ -262,7 +258,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Aiometadata addon URL (Metadata / History)"
+                android:text="Aiometadata addon URL"
                 android:textColor="#AAAAAA"
                 android:textSize="12sp"
                 android:layout_marginTop="2dp" />
@@ -273,11 +269,11 @@
                 android:layout_height="wrap_content"
                 android:hint="https://aiometadata.elfhosted.com/stremio/..."
                 android:textColor="#FFFFFF"
-                android:textColorHint="#555555"
+                android:textColorHint="#777777"
                 android:textSize="14sp"
                 android:padding="10dp"
                 android:layout_marginTop="5dp"
-                android:background="@android:color/transparent"
+                android:background="@drawable/addon_field_bg"
                 android:singleLine="true" />
         </LinearLayout>
 
@@ -328,11 +324,11 @@
                 android:layout_height="wrap_content"
                 android:hint="Enter MdbList API Key"
                 android:textColor="#FFFFFF"
-                android:textColorHint="#555555"
+                android:textColorHint="#777777"
                 android:textSize="14sp"
                 android:padding="10dp"
                 android:layout_marginTop="5dp"
-                android:background="@android:color/transparent"
+                android:background="@drawable/addon_field_bg"
                 android:singleLine="true" />
         </LinearLayout>
 
@@ -373,7 +369,16 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="TMDB Recommendation Poster URL (Required)"
+                android:text="XRDB Addon URL"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:text="Applies only to TMDB recommendation posters."
                 android:textColor="#AAAAAA"
                 android:textSize="12sp" />
 
@@ -383,11 +388,11 @@
                 android:layout_height="wrap_content"
                 android:hint="https://extendedratings.com/poster/..."
                 android:textColor="#FFFFFF"
-                android:textColorHint="#555555"
+                android:textColorHint="#777777"
                 android:textSize="14sp"
                 android:padding="10dp"
                 android:layout_marginTop="5dp"
-                android:background="@android:color/transparent"
+                android:background="@drawable/addon_field_bg"
                 android:singleLine="true" />
         </LinearLayout>
 

@@ -26,7 +26,7 @@
             android:layout_marginStart="8dp"
             android:background="?android:attr/selectableItemBackgroundBorderless"
             android:contentDescription="Delete"
-            android:src="@android:drawable/ic_menu_delete"
+            android:src="@drawable/delete_icon"
             android:tint="#FF5555" />
 
         <TextView
