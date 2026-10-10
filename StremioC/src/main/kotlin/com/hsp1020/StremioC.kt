@@ -1831,10 +1831,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             // AIOStreams may return its first record if season matching fails.
             // Do not silently accept a different season for an IMDb episode.
             if (!byKitsu && season != null && season > 1) {
-                // Match any supported season coordinate, consistent with stream/subtitle mapping.
-                val seasons = listOf("imdb", "tvdb", "trakt", "tmdb")
-                    .map { data.get(it)?.get("seasonNumber").intOrNull() }
-                if (season !in seasons) return@runSuspendCatching null
+                val mappedSeason = data.get("imdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
+                    ?: data.get("tvdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
+                    ?: data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
+                    ?: data.get("tmdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
+                if (mappedSeason != season) return@runSuspendCatching null
             }
             val tmdb = data.get("tmdb")
             val first = tmdb?.get("fromEpisode").intOrNull()?.takeIf { it > 0 }
