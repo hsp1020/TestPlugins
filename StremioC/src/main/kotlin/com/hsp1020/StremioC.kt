@@ -1279,9 +1279,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val authoritativeMetaUrl = getUnifiedMetaUrl(res.type ?: "movie", res.id ?: "")
         val reuseHintedMeta = hintMatchesAuthoritative && hintedMetaUrl == authoritativeMetaUrl
         if (!reuseHintedMeta) hintedMetaDeferred?.cancel()
-        val addonDeferred: Deferred<CatalogEntry?> = when {
-            authoritativeMetaUrl == url && initialMetaFromResponse != null ->
-                async(Dispatchers.IO) { initialMetaFromResponse }
+        val addonDeferred: Deferred<CatalogEntry?>? = when {
+            // The primary response already contains this exact metadata URL;
+            // don't issue another GET (or create a deferred for the same object).
+            authoritativeMetaUrl == url && (initialMetaFromResponse != null || !res.id.isNullOrBlank()) -> null
             reuseHintedMeta && hintedMetaDeferred != null -> hintedMetaDeferred
             else -> async(Dispatchers.IO) {
                 fetchSecondaryMeta(authoritativeMetaUrl, res.id ?: "")
