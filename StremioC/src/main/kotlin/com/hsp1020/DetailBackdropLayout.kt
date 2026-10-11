@@ -177,12 +177,20 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             replaceBackground(LayerDrawable(arrayOf(horizontal, bottom)))
         }
     }
+    private fun paletteBitmap(drawable: Drawable?): Bitmap? {
+        if (drawable is BitmapDrawable) return drawable.bitmap
+        // CloudStream's Coil 3 loader uses a 200ms CrossfadeDrawable. Its public
+        // "end" is the finished image; reflection avoids a new plugin dependency.
+        if (drawable?.javaClass?.name != "coil3.transition.CrossfadeDrawable") return null
+        val end = runCatching { drawable.javaClass.getMethod("getEnd").invoke(drawable) }.getOrNull()
+        return (end as? BitmapDrawable)?.bitmap
+    }
     private fun trackBackdrop(drawable: Drawable?) {
         if (trackedArtwork === drawable) return
         trackedArtwork = drawable
         paletteJob?.cancel()
         showArtworkPalette(null)
-        val bitmap = (drawable as? BitmapDrawable)?.bitmap ?: return
+        val bitmap = paletteBitmap(drawable) ?: return
         paletteJob = paletteScope.launch {
             val colors = runCatching { sampleArtwork(bitmap) }.getOrNull() ?: return@launch
             if (!isActive) return@launch
