@@ -2,7 +2,13 @@ package com.hsp1020
 
 import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.Shader
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.Matrix
 import android.graphics.drawable.ColorDrawable
@@ -58,7 +64,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private data class ArtworkColors(val left: Int, val center: Int, val right: Int)
     private var artworkColors: ArtworkColors? = null
     private var trackedArtwork: Drawable? = null
-    private var edgeTints: IntArray? = null
     private val paletteScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var paletteJob: Job? = null
 
@@ -151,6 +156,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         else if (container.background !== appliedHolderBackground) return
         appliedHolderBackground = background
         container.background = background
+        edges.forEach { it.invalidate() }
     }
     private fun useThemeBackground(enabled: Boolean) {
         val container = holder ?: return
@@ -165,7 +171,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     }
     private fun showArtworkPalette(colors: ArtworkColors?) {
         artworkColors = colors
-        edgeTints = null
         if (colors == null) {
             replaceBackground(ColorDrawable(fadeColor))
         } else {
@@ -200,24 +205,37 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             }
         }
     }
-    private fun updateEdgeColors(left: Int, width: Int, totalWidth: Int) {
-        val colors = artworkColors
-        fun colorAt(x: Int): Int {
-            if (colors == null) return fadeColor
-            val t = (x.toFloat() / totalWidth.coerceAtLeast(1)).coerceIn(0f, 1f)
-            return if (t <= 0.5f) blend(colors.left, colors.center, t * 2f)
-            else blend(colors.center, colors.right, (t - 0.5f) * 2f)
+    // Draw the holder's real background in its own coordinate space and smoothly
+    // reveal it at the artwork's edges, without changing the Coil ImageView.
+    private class EdgeFadeView(private val frame: FrameLayout, private val side: Int) : View(frame.context) {
+        private val mask = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
         }
-        val tints = intArrayOf(colorAt(left), colorAt(left + width),
-            colors?.center ?: fadeColor, fadeColor)
-        if (tints.contentEquals(edgeTints)) return
-        edgeTints = tints
-        val directions = arrayOf(GradientDrawable.Orientation.LEFT_RIGHT,
-            GradientDrawable.Orientation.RIGHT_LEFT, GradientDrawable.Orientation.TOP_BOTTOM,
-            GradientDrawable.Orientation.BOTTOM_TOP)
-        edges.forEachIndexed { index, view ->
-            view.background = GradientDrawable(directions[index],
-                intArrayOf(tints[index], Color.TRANSPARENT))
+
+        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+            super.onSizeChanged(w, h, oldw, oldh)
+            if (w <= 0 || h <= 0) { mask.shader = null; return }
+            val colors = intArrayOf(Color.WHITE, Color.argb(215, 255, 255, 255),
+                Color.argb(128, 255, 255, 255), Color.argb(40, 255, 255, 255), Color.TRANSPARENT)
+            val stops = floatArrayOf(0f, 0.25f, 0.5f, 0.75f, 1f)
+            val x0 = if (side == 1) w.toFloat() else 0f
+            val y0 = if (side == 3) h.toFloat() else 0f
+            val x1 = if (side == 0) w.toFloat() else 0f
+            val y1 = if (side == 2) h.toFloat() else 0f
+            mask.shader = LinearGradient(x0, y0, x1, y1, colors, stops, Shader.TileMode.CLAMP)
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            val backdrop = frame.background ?: return
+            if (width <= 0 || height <= 0 || mask.shader == null) return
+            // DST_IN is isolated to the edge strip; it cannot erase the image or logo.
+            val layer = canvas.saveLayer(0f, 0f, width.toFloat(), height.toFloat(), null)
+            val saved = canvas.save()
+            canvas.translate(-left.toFloat(), -top.toFloat())
+            backdrop.draw(canvas)
+            canvas.restoreToCount(saved)
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), mask)
+            canvas.restoreToCount(layer)
         }
     }
     private val originalShadowVisibility = shadow?.visibility
@@ -244,6 +262,13 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             p.marginStart != left || p.topMargin != top) {
             p.width = width; p.height = height; p.gravity = Gravity.TOP or Gravity.START
             p.marginStart = left; p.topMargin = top; view.layoutParams = p
+        }
+    }
+    private fun placeEdge(view: View, width: Int, height: Int, left: Int, top: Int) {
+        place(view, width, height, left, top)
+        if (view.width != width || view.height != height || view.left != left || view.top != top) {
+            view.layout(left, top, left + width, top + height)
+            view.invalidate() // Moving a strip changes its holder-background sample coordinates.
         }
     }
     private fun scaleLogo(doubleSize: Boolean, factor: Float = if (doubleSize) 2f else 1f) {
@@ -312,7 +337,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (!splitMode()) { visibility(true); return }
         splitFallback = true // Do not re-enter the split layout and cause a visible jump.
         nativeRecoveryFrames = 0
-        edges.forEach { place(it, 0, 0, 0, 0) }
+        edges.forEach { placeEdge(it, 0, 0, 0, 0) }
         shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
         originalHeroHeight?.let { height(phoneHero, it) }
         originalHolderHeight?.let { height(holder, it) }
@@ -389,15 +414,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         )
         fadeColor = try { colors.getColor(0, Color.BLACK) } finally { colors.recycle() }
         if (splitMode()) useThemeBackground(true)
-        val directions = listOf(
-            GradientDrawable.Orientation.LEFT_RIGHT,
-            GradientDrawable.Orientation.RIGHT_LEFT,
-            GradientDrawable.Orientation.TOP_BOTTOM,
-            GradientDrawable.Orientation.BOTTOM_TOP
-        )
-        directions.forEachIndexed { index, direction ->
-            edges += View(root.context).also {
-                it.background = GradientDrawable(direction, intArrayOf(fadeColor, Color.TRANSPARENT))
+        repeat(4) { index ->
+            edges += EdgeFadeView(container, index).also {
                 container.addView(it, 1 + index, FrameLayout.LayoutParams(0, 0))
             }
         }
@@ -462,7 +480,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             useThemeBackground(false)
             image.scaleType = originalScale ?: ImageView.ScaleType.CENTER_CROP
             originalPicture?.let { place(image, it.width, it.height, it.marginStart, it.topMargin) }
-            edges.forEach { place(it, 0, 0, 0, 0) }
+            edges.forEach { placeEdge(it, 0, 0, 0, 0) }
             shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
             showTitle(false, hideOriginal = maskPortraitTitle())
             visibility(true)
@@ -514,13 +532,12 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             image.left != imageLeft || image.top != imageTop) {
             image.layout(imageLeft, imageTop, imageLeft + imageWidth, imageTop + imageHeight)
         }
-        val featherX = min(dp(72), imageWidth / 5)
-        val featherY = min(dp(72), imageHeight / 5)
-        place(edges[0], featherX, imageHeight, imageLeft, imageTop)
-        place(edges[1], featherX, imageHeight, imageLeft + imageWidth - featherX, imageTop)
-        place(edges[2], imageWidth, featherY, imageLeft, imageTop)
-        place(edges[3], imageWidth, featherY, imageLeft, imageTop + imageHeight - featherY)
-        updateEdgeColors(imageLeft, imageWidth, container.width)
+        val featherX = min(dp(112), imageWidth / 4)
+        val featherY = min(dp(84), imageHeight / 4)
+        placeEdge(edges[0], featherX, imageHeight, imageLeft, imageTop)
+        placeEdge(edges[1], featherX, imageHeight, imageLeft + imageWidth - featherX, imageTop)
+        placeEdge(edges[2], imageWidth, featherY, imageLeft, imageTop)
+        placeEdge(edges[3], imageWidth, featherY, imageLeft, imageTop + imageHeight - featherY)
         // Avoid double-darkening the bottom: the built-in shadow covered the whole parent.
         shadow?.visibility = View.INVISIBLE
         // Enforce both the 36%-wide label and the actual FIT_CENTER image bounds.
