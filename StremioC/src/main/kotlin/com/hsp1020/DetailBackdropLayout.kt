@@ -215,11 +215,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 intArrayOf(colors.left, colors.center, colors.right))
             val bottom = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(Color.TRANSPARENT, fadeColor))
-            // Keep the bottom scrim at 5% of the current banner height (API 21+).
+            // Keep the bottom scrim at 3% of the current banner height (API 21+).
             replaceBackground(object : LayerDrawable(arrayOf(horizontal, bottom)) {
                 override fun onBoundsChange(bounds: Rect) {
                     super.onBoundsChange(bounds)
-                    val fadeHeight = (bounds.height() * 0.05f).roundToInt()
+                    val fadeHeight = (bounds.height() * 0.03f).roundToInt()
                     getDrawable(1).setBounds(bounds.left,
                         (bounds.bottom - fadeHeight).coerceAtLeast(bounds.top), bounds.right, bounds.bottom)
                 }
@@ -315,6 +315,28 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private val originalShadowVisibility = shadow?.visibility
     private var edge: EdgeFadeView? = null
     private var topScrim: View? = null
+    private fun installTopScrim(context: android.content.Context) {
+        // result_top_bar and result_top_holder are siblings; render above the hero.
+        val barAttr = context.resources.getIdentifier("primaryGrayBackground", "attr", context.packageName)
+        val barColors = context.theme.obtainStyledAttributes(
+            intArrayOf(if (barAttr != 0) barAttr else android.R.attr.colorBackground))
+        val barColor = try { barColors.getColor(0, fadeColor) } finally { barColors.recycle() }
+        topScrim = View(context).also {
+            it.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(barColor, barColor and 0x00FFFFFF))
+            it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            ((phoneHero as? FrameLayout) ?: holder)?.addView(it,
+                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, Gravity.TOP))
+        }
+    }
+    private fun resizeTopScrim(height: Int) {
+        if (height <= 0) return
+        topScrim?.let { scrim ->
+            val params = scrim.layoutParams
+            val target = (height * 0.03f).roundToInt().coerceAtLeast(1)
+            if (params.height != target) { params.height = target; scrim.layoutParams = params }
+        }
+    }
     private var titleOverlay: TextView? = null
     private var baseTitlePaint: TextPaint? = null
     private var lastFitText = ""
@@ -505,7 +527,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         splitFallback = false
         nativeRecoveryFrames = 0
         if (trailersEnabled) {
-            // Only correct the native title; do not touch trailer layout or overlays.
+            // Keep native artwork/trailer geometry; only overlay the narrow top scrim.
+            installTopScrim(context)
             portraitTitleOnly = true
             root.viewTreeObserver.addOnPreDrawListener(preDraw)
             updatePortraitTitle()
@@ -536,19 +559,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             overlay.visibility = View.GONE
             container.addView(overlay, FrameLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
-        // result_top_bar and result_top_holder are siblings; render above the entire hero.
-        val barAttr = context.resources.getIdentifier("primaryGrayBackground", "attr", context.packageName)
-        val barColors = context.theme.obtainStyledAttributes(
-            intArrayOf(if (barAttr != 0) barAttr else android.R.attr.colorBackground))
-        val barColor = try { barColors.getColor(0, fadeColor) } finally { barColors.recycle() }
-        topScrim = View(context).also {
-            it.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(barColor, barColor and 0x00FFFFFF))
-            it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            it.visibility = if (splitMode()) View.VISIBLE else View.INVISIBLE
-            ((phoneHero as? FrameLayout) ?: container).addView(it,
-                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, Gravity.TOP))
-        }
+        installTopScrim(context)
         root.viewTreeObserver.addOnPreDrawListener(preDraw)
         runCatching { update() }.onFailure {
             android.util.Log.e("StremioCBackdrop", "Split layout start failed", it)
@@ -564,7 +575,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private fun update() {
         // An already-queued pre-draw can run after stop() removed the edge views.
         if (!started) return
-        if (portraitTitleOnly) { updatePortraitTitle(); return }
+        if (portraitTitleOnly) {
+            resizeTopScrim(phoneHero?.height ?: 0)
+            updatePortraitTitle()
+            return
+        }
         if (splitFallback) { revealRecoveredLayout(); return }
         val edgeView = edge ?: return
         val container = holder ?: return
@@ -580,16 +595,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             landscape -> min(dp(300), (root.height * 0.70f).roundToInt())
             else -> dp(260)
         }
+        resizeTopScrim(bannerHeight)
         if (split) {
-            // Only resize when the banner height changes; avoid per-frame relayout.
-            topScrim?.let { scrim ->
-                val targetHeight = (bannerHeight * 0.05f).roundToInt().coerceAtLeast(1)
-                val params = scrim.layoutParams
-                if (params.height != targetHeight) {
-                    params.height = targetHeight
-                    scrim.layoutParams = params
-                }
-            }
             val logoView = logo
             val key = layoutKey(container, image)
             if (key == lastLayout &&
@@ -609,7 +616,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             }
         } else height(phoneHero, bannerHeight)
         if (!split) {
-            if (topScrim?.visibility != View.INVISIBLE) topScrim?.visibility = View.INVISIBLE
             lastLayout = null
             if (trackedArtwork != null) {
                 paletteJob?.cancel()
@@ -763,12 +769,12 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (forcedPortraitTitle && logo?.visibility == View.VISIBLE && logo.drawable != null)
             title?.visibility = View.GONE
         forcedPortraitTitle = false
+        topScrim?.let { ((phoneHero as? FrameLayout) ?: holder)?.removeView(it) }; topScrim = null
         if (portraitTitleOnly) { portraitTitleOnly = false; title?.alpha = originalTitleAlpha; return }
         showTitle(false)
         titleOverlay?.let { holder?.removeView(it) }; titleOverlay = null
         baseTitlePaint = null
         edge?.let { holder?.removeView(it) }; edge = null
-        topScrim?.let { ((phoneHero as? FrameLayout) ?: holder)?.removeView(it) }; topScrim = null
         restoreOriginalGeometry()
         visibility(true)
     }
