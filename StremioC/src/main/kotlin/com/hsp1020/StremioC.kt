@@ -1372,7 +1372,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val preFetchedTmdbDetail = speculativeTmdbDetail ?: normalTmdbDeferred?.await()
         // Movie collections are independent of the second metadata addon's response.
         // Fetch them as soon as an authoritative movie detail exposes a collection ID.
-        val collectionDeferred = if (targetTmdbMediaType == "movie") {
+        val collectionDeferred: Deferred<List<TmdbMedia>>? = if (targetTmdbMediaType == "movie") {
             preFetchedTmdbDetail?.belongs_to_collection?.id?.let { collectionId ->
                 async(Dispatchers.IO) {
                     runSuspendCatching {
