@@ -3,6 +3,8 @@ package com.hsp1020
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Matrix
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.text.Layout
 import android.text.StaticLayout
@@ -46,6 +48,28 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private val originalLogoAlpha = logo?.alpha ?: 1f
     private val originalPictureAlpha = picture?.alpha ?: 1f
     private val shadow = holder?.getChildAt(1) // Existing CloudStream bottom shadow.
+    private var previousHolderBackground: Drawable? = null
+    private var appliedHolderBackground: ColorDrawable? = null
+    private var fadeColor = Color.BLACK
+
+    // ColorDrawable is replaced, not mutated: restoring it must not alter CloudStream's drawable.
+    private fun useThemeBackground(enabled: Boolean) {
+        val container = holder ?: return
+        if (enabled) {
+            if (appliedHolderBackground == null) {
+                previousHolderBackground = container.background
+                val background = ColorDrawable(fadeColor)
+                appliedHolderBackground = background
+                container.background = background
+            }
+        } else {
+            val background = appliedHolderBackground ?: return
+            // Do not overwrite a background installed by the host after our own.
+            if (container.background === background) container.background = previousHolderBackground
+            appliedHolderBackground = null
+            previousHolderBackground = null
+        }
+    }
     private val originalShadowVisibility = shadow?.visibility
     private val edges = mutableListOf<View>()
     private var titleOverlay: TextView? = null
@@ -131,6 +155,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     }
     private fun recoverOriginalLayout() {
         if (splitFallback || portraitTitleOnly) return
+        useThemeBackground(false)
         if (!splitMode()) { visibility(true); return }
         splitFallback = true // Do not re-enter the split layout and cause a visible jump.
         nativeRecoveryFrames = 0
@@ -209,7 +234,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val colors = context.theme.obtainStyledAttributes(
             intArrayOf(if (colorAttr != 0) colorAttr else android.R.attr.colorBackground)
         )
-        val fadeColor = try { colors.getColor(0, Color.BLACK) } finally { colors.recycle() }
+        fadeColor = try { colors.getColor(0, Color.BLACK) } finally { colors.recycle() }
+        if (splitMode()) useThemeBackground(true)
         val directions = listOf(
             GradientDrawable.Orientation.LEFT_RIGHT,
             GradientDrawable.Orientation.RIGHT_LEFT,
@@ -275,6 +301,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             }
         } else height(phoneHero, bannerHeight)
         if (!split) {
+            useThemeBackground(false)
             image.scaleType = originalScale ?: ImageView.ScaleType.CENTER_CROP
             originalPicture?.let { place(image, it.width, it.height, it.marginStart, it.topMargin) }
             edges.forEach { place(it, 0, 0, 0, 0) }
@@ -288,6 +315,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             return
         }
 
+        useThemeBackground(true)
         // logo visibility becomes VISIBLE before Coil has finished decoding its drawable.
         val hasLogo = logo?.visibility == View.VISIBLE && logo.drawable != null && logo.width > 0
         val expectedLogo = detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true
@@ -402,6 +430,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     fun stop() {
         if (!started) return
         started = false
+        useThemeBackground(false)
         if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(preDraw)
         if (forcedPortraitTitle && logo?.visibility == View.VISIBLE && logo.drawable != null)
             title?.visibility = View.GONE
