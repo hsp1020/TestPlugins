@@ -64,6 +64,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private data class ArtworkColors(val left: Int, val center: Int, val right: Int)
     private var artworkColors: ArtworkColors? = null
     private var trackedArtwork: Drawable? = null
+    private var trackedBitmap: Bitmap? = null
     private val paletteScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var paletteJob: Job? = null
 
@@ -170,6 +171,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         }
     }
     private fun showArtworkPalette(colors: ArtworkColors?) {
+        if (artworkColors == colors && appliedHolderBackground != null) return
         artworkColors = colors
         if (colors == null) {
             replaceBackground(ColorDrawable(fadeColor))
@@ -193,14 +195,19 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private fun trackBackdrop(drawable: Drawable?) {
         if (trackedArtwork === drawable) return
         trackedArtwork = drawable
+        val bitmap = paletteBitmap(drawable)
+        // Coil can replace its crossfade wrapper with the same decoded bitmap.
+        if (trackedBitmap === bitmap) return
+        trackedBitmap = bitmap
         paletteJob?.cancel()
-        showArtworkPalette(null)
-        val bitmap = paletteBitmap(drawable) ?: return
+        if (artworkColors != null) showArtworkPalette(null)
+        if (bitmap == null) return
         paletteJob = paletteScope.launch {
             val colors = runCatching { sampleArtwork(bitmap) }.getOrNull() ?: return@launch
             if (!isActive) return@launch
             withContext(Dispatchers.Main.immediate) {
-                if (started && !splitFallback && splitMode() && picture?.drawable === drawable)
+                if (started && !splitFallback && splitMode() &&
+                    trackedBitmap === bitmap && paletteBitmap(picture?.drawable) === bitmap)
                     showArtworkPalette(colors)
             }
         }
@@ -250,8 +257,15 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private var forcedPortraitTitle = false
     // Asset alphas are staged once during start(); no re-staging on pre-draw.
     private var splitFallback = false
+    private var edgeLayerType = View.LAYER_TYPE_NONE
     private var nativeRecoveryFrames = 0
-    private fun dp(v: Int) = (v * root.resources.displayMetrics.density).roundToInt()
+    private val density = root.resources.displayMetrics.density
+    private fun dp(v: Int) = (v * density).roundToInt()
+    private fun edgeLayer(type: Int) {
+        if (edgeLayerType == type) return
+        edgeLayerType = type
+        edges.forEach { it.setLayerType(type, null) }
+    }
     private fun height(view: View?, value: Int) {
         val p = view?.layoutParams ?: return
         if (p.height != value) { p.height = value; view.layoutParams = p }
@@ -328,16 +342,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         title?.alpha = 0f
         titleOverlay?.visibility = View.GONE
     }
-    private fun recoverOriginalLayout() {
-        if (splitFallback || portraitTitleOnly) return
-        paletteJob?.cancel()
-        trackedArtwork = null
-        artworkColors = null
-        useThemeBackground(false)
-        if (!splitMode()) { visibility(true); return }
-        splitFallback = true // Do not re-enter the split layout and cause a visible jump.
-        nativeRecoveryFrames = 0
-        edges.forEach { placeEdge(it, 0, 0, 0, 0) }
+    private fun restoreGeometry() {
         shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
         originalHeroHeight?.let { height(phoneHero, it) }
         originalHolderHeight?.let { height(holder, it) }
@@ -352,6 +357,20 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         (tvColumn?.layoutParams as? ViewGroup.MarginLayoutParams)?.let { p ->
             originalTvMargin?.let { p.topMargin = it; tvColumn.layoutParams = p }
         }
+    }
+    private fun recoverOriginalLayout() {
+        if (splitFallback || portraitTitleOnly) return
+        paletteJob?.cancel()
+        trackedArtwork = null
+        trackedBitmap = null
+        artworkColors = null
+        useThemeBackground(false)
+        if (!splitMode()) { visibility(true); return }
+        splitFallback = true // Do not re-enter the split layout and cause a visible jump.
+        nativeRecoveryFrames = 0
+        edgeLayer(View.LAYER_TYPE_NONE)
+        edges.forEach { placeEdge(it, 0, 0, 0, 0) }
+        restoreGeometry()
         // The restored native layoutParams must pass through measure/layout before
         // we reveal them; otherwise fallback itself can produce a visible jump.
         stage()
@@ -475,11 +494,13 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             if (trackedArtwork != null) {
                 paletteJob?.cancel()
                 trackedArtwork = null
+                trackedBitmap = null
                 artworkColors = null
             }
             useThemeBackground(false)
             image.scaleType = originalScale ?: ImageView.ScaleType.CENTER_CROP
             originalPicture?.let { place(image, it.width, it.height, it.marginStart, it.topMargin) }
+            edgeLayer(View.LAYER_TYPE_NONE)
             edges.forEach { placeEdge(it, 0, 0, 0, 0) }
             shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
             showTitle(false, hideOriginal = maskPortraitTitle())
@@ -534,6 +555,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         }
         val featherX = min(dp(112), imageWidth / 4)
         val featherY = min(dp(84), imageHeight / 4)
+        // Cache the composited strips only when all four fit within ~1 MiB GPU
+        // storage; otherwise use normal drawing without a persistent texture.
+        val edgePixels = 2L * (featherX.toLong() * imageHeight + featherY.toLong() * imageWidth)
+        edgeLayer(if (container.isHardwareAccelerated && edgePixels <= 262_144L)
+            View.LAYER_TYPE_HARDWARE else View.LAYER_TYPE_NONE)
         placeEdge(edges[0], featherX, imageHeight, imageLeft, imageTop)
         placeEdge(edges[1], featherX, imageHeight, imageLeft + imageWidth - featherX, imageTop)
         placeEdge(edges[2], imageWidth, featherY, imageLeft, imageTop)
@@ -554,8 +580,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 fitTitle(overlay, titleText, labelWidth,
                     if (foreignLogo) (imageHeight - requestedLogoHeight - verticalGap).coerceAtLeast(1) else imageHeight)
                 if (foreignLogo) {
-                    overlay.measure(View.MeasureSpec.makeMeasureSpec(labelWidth, View.MeasureSpec.EXACTLY),
-                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+                    if (overlay.isLayoutRequested || overlay.measuredWidth != labelWidth ||
+                        overlay.measuredHeight <= 0) {
+                        overlay.measure(View.MeasureSpec.makeMeasureSpec(labelWidth, View.MeasureSpec.EXACTLY),
+                            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+                    }
                     titleHeight = overlay.measuredHeight
                 }
             }
@@ -600,8 +629,10 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (image.width == imageWidth && image.height == imageHeight &&
             image.left == imageLeft && image.top == imageTop) {
             showTitle(titleText.isNotEmpty() && !logoPending, hideOriginal = expectedLogo && !foreignLogo)
-            if (iw > 0 && ih > 0) image.alpha = originalPictureAlpha
-            if (hasLogo) logo?.alpha = originalLogoAlpha
+            if (iw > 0 && ih > 0 && image.alpha != originalPictureAlpha)
+                image.alpha = originalPictureAlpha
+            if (hasLogo && logo?.alpha != originalLogoAlpha)
+                logo?.alpha = originalLogoAlpha
         }
     }
     fun stop() {
@@ -610,6 +641,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         paletteJob?.cancel()
         paletteScope.cancel()
         trackedArtwork = null
+        trackedBitmap = null
         artworkColors = null
         useThemeBackground(false)
         if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(preDraw)
@@ -620,21 +652,9 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         showTitle(false)
         titleOverlay?.let { holder?.removeView(it) }; titleOverlay = null
         baseTitlePaint = null
+        edgeLayer(View.LAYER_TYPE_NONE)
         edges.forEach { holder?.removeView(it) }; edges.clear()
-        shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
+        restoreGeometry()
         visibility(true)
-        logo?.translationX = originalLogoX
-        logo?.translationY = originalLogoY
-        scaleLogo(false)
-        originalHeroHeight?.let { height(phoneHero, it) }
-        originalHolderHeight?.let { height(holder, it) }
-        originalPicture?.let { picture?.layoutParams = FrameLayout.LayoutParams(it) }
-        originalScale?.let { picture?.scaleType = it }
-        if (tv && originalScale == ImageView.ScaleType.MATRIX)
-            picture?.drawable?.let { picture?.setImageDrawable(it) }
-        else originalMatrix?.let { picture?.imageMatrix = it }
-        (tvColumn?.layoutParams as? ViewGroup.MarginLayoutParams)?.let { p ->
-            originalTvMargin?.let { p.topMargin = it; tvColumn.layoutParams = p }
-        }
     }
 }
