@@ -1370,6 +1370,19 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
         val preFetchedTmdbDetail = speculativeTmdbDetail ?: normalTmdbDeferred?.await()
+        // Movie collections are independent of the second metadata addon's response.
+        // Fetch them as soon as an authoritative movie detail exposes a collection ID.
+        val collectionDeferred = if (targetTmdbMediaType == "movie") {
+            preFetchedTmdbDetail?.belongs_to_collection?.id?.let { collectionId ->
+                async(Dispatchers.IO) {
+                    runSuspendCatching {
+                        val text = customSession.get(buildTmdbUrl("/collection/$collectionId")).text
+                        if (text.isNotBlank()) parseJson<TmdbCollectionDetail>(text).parts
+                            ?: emptyList() else emptyList()
+                    }.getOrDefault(emptyList())
+                }
+            }
+        } else null
 
         var finalProcessedId = res.id
         val imdbId = resolvedImdbId ?: preFetchedTmdbDetail?.external_ids?.imdb_id
@@ -1386,6 +1399,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             preFetchedDetail = preFetchedTmdbDetail,
             preFetchedDetailTmdbId = targetTmdbId,
             preFetchedDetailMediaType = targetTmdbMediaType,
+            preFetchedCollection = collectionDeferred,
             preFetchedFind = validatedFindResult,
             preFetchedFindImdbId = validatedFindImdbId,
             fetchedAniListId = fetchedAniListId,
@@ -1397,6 +1411,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             prefetchedAnimeMapping = speculativeImdbAnimeDeferred?.takeIf { hintedImdbId == res.id },
             prefetchedAnimeImdbId = hintedImdbId
         )
+        collectionDeferred?.cancel() // No remaining prefetch when the final media type differs.
 
         var actualMdbTarget = resolvedMdbTarget(res, resolvedTmdbId, resolvedImdbId)
         if (actualMdbTarget == null) {
@@ -2666,7 +2681,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         private suspend fun fetchTmdbDetails(
             provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
-            stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null
+            stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null,
+            preFetchedCollection: Deferred<List<TmdbMedia>>? = null
         ): FetchedTmdbData {
             var fetchedRecommendations: List<SearchResponse>? = null
             
@@ -2734,7 +2750,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     }
                 } else null
 
-                val collectionDeferred = async(Dispatchers.IO) {
+                val collectionDeferred = preFetchedCollection ?: async(Dispatchers.IO) {
                     val collectionId = detailRes.belongs_to_collection?.id
                     val active = isMovie && collectionId != null
                     val parts: List<TmdbMedia> = if (active) {
@@ -2947,6 +2963,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             preFetchedDetail: TmdbDetailResponse? = null,
             preFetchedDetailTmdbId: String? = null,
             preFetchedDetailMediaType: String? = null,
+            preFetchedCollection: Deferred<List<TmdbMedia>>? = null,
             preFetchedFind: Pair<String, String>? = null,
             preFetchedFindImdbId: String? = null,
             fetchedAniListId: Int? = null, 
@@ -3030,7 +3047,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val safePrefetchedDetail = preFetchedDetail?.takeIf {
                         preFetchedDetailTmdbId == tmdbIdStr && preFetchedDetailMediaType == refinedMediaType
                     }
-                    tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!, refinedMediaType == "movie", finalImdbId, finalType, finalVideos, safePrefetchedDetail)
+                    tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!,
+                        refinedMediaType == "movie", finalImdbId, finalType, finalVideos,
+                        safePrefetchedDetail, if (safePrefetchedDetail != null) preFetchedCollection else null)
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
