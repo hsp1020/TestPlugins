@@ -307,6 +307,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val imageWidth: Int, val imageHeight: Int
     )
     private var lastLayout: LayoutKey? = null
+    private var logoDiagnosticStage = 0 // 0: unlogged, 1: image ready/logo pending, 2: final
 
     private fun layoutKey(container: FrameLayout, image: ImageView): LayoutKey {
         val logoView = logo
@@ -705,6 +706,18 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (image.width == imageWidth && image.height == imageHeight &&
             image.left == imageLeft && image.top == imageTop) {
             showTitle(titleText.isNotEmpty() && !logoPending, hideOriginal = expectedLogo && !foreignLogo)
+            // At most one settled snapshot per detail; one extra if the logo was still decoding.
+            if (iw > 0 && ih > 0 && !root.isLayoutRequested && !container.isLayoutRequested &&
+                (logoDiagnosticStage == 0 || (logoDiagnosticStage == 1 && !logoPending))) {
+                android.util.Log.d("StremioCLogoDiag",
+                    "phase=view detailUrl=$detailUrl tv=$tv hasLogo=$hasLogo" +
+                    " expectedLogo=$expectedLogo fallbackFlag=${detailUrl?.let { StremioC.fallbackLogoTitles[it] }}" +
+                    " foreignLogo=$foreignLogo logoPending=$logoPending" +
+                    " titleText=${titleText.take(100)}" +
+                    " nativeTitle=${title?.text?.toString()?.replace('\n', ' ')?.take(100)}" +
+                    " overlayVisibility=${titleOverlay?.visibility}")
+                logoDiagnosticStage = if (logoPending) 1 else 2
+            }
             if (iw > 0 && ih > 0 && image.alpha != originalPictureAlpha)
                 image.alpha = originalPictureAlpha
             if (hasLogo && logo?.alpha != originalLogoAlpha)
