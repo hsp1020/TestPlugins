@@ -292,6 +292,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     }
     private val originalShadowVisibility = shadow?.visibility
     private var edge: EdgeFadeView? = null
+    private var topScrim: View? = null
     private var titleOverlay: TextView? = null
     private var baseTitlePaint: TextPaint? = null
     private var lastFitText = ""
@@ -313,6 +314,17 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private var lastLayout: LayoutKey? = null
     private var lastTitle: String? = null
     private val lastImageBounds = IntArray(4)
+
+    private fun layoutKey(container: FrameLayout, image: ImageView): LayoutKey {
+        val logoView = logo
+        return LayoutKey(root.width, root.height, container.width,
+            root.resources.configuration.orientation,
+            root.resources.configuration.smallestScreenWidthDp,
+            image.drawable, logoView?.drawable, logoView?.visibility ?: View.GONE,
+            logoView?.width ?: 0, logoView?.height ?: 0, title?.visibility ?: View.GONE,
+            detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true,
+            detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true)
+    }
     private val density = root.resources.displayMetrics.density
     private fun dp(v: Int) = (v * density).roundToInt()
     private fun height(view: View?, value: Int) {
@@ -419,6 +431,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         splitFallback = true // Do not re-enter the split layout and cause a visible jump.
         nativeRecoveryFrames = 0
         edge?.let { placeEdge(it, 0, 0, 0, 0) }
+        topScrim?.visibility = View.INVISIBLE
         restoreOriginalGeometry()
         // The restored native layoutParams must pass through measure/layout before
         // we reveal them; otherwise fallback itself can produce a visible jump.
@@ -499,6 +512,22 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             overlay.visibility = View.GONE
             container.addView(overlay, FrameLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
+        // Overlay the image and parent backdrop to blend into CloudStream's actual
+        // toolbar surface; unlike fadeColor, this also matches light-theme toolbars.
+        val barAttr = context.resources.getIdentifier("primaryGrayBackground", "attr", context.packageName)
+        val barColors = context.theme.obtainStyledAttributes(
+            intArrayOf(if (barAttr != 0) barAttr else android.R.attr.colorBackground))
+        val barColor = try { barColors.getColor(0, fadeColor) } finally { barColors.recycle() }
+        topScrim = View(context).also {
+            it.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(barColor,
+                    Color.argb(150, Color.red(barColor), Color.green(barColor), Color.blue(barColor)),
+                    barColor and 0x00FFFFFF))
+            it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            it.visibility = if (splitMode()) View.VISIBLE else View.INVISIBLE
+            container.addView(it, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(64), Gravity.TOP))
+        }
         root.viewTreeObserver.addOnPreDrawListener(preDraw)
         runCatching { update() }.onFailure {
             android.util.Log.e("StremioCBackdrop", "Split layout start failed", it)
@@ -533,13 +562,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         }
         if (split) {
             val logoView = logo
-            val key = LayoutKey(root.width, root.height, container.width,
-                root.resources.configuration.orientation,
-                root.resources.configuration.smallestScreenWidthDp,
-                image.drawable, logoView?.drawable, logoView?.visibility ?: View.GONE,
-                logoView?.width ?: 0, logoView?.height ?: 0, title?.visibility ?: View.GONE,
-                detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true,
-                detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true)
+            val key = layoutKey(container, image)
             if (key == lastLayout && TextUtils.equals(title?.text, lastTitle) &&
                 !root.isLayoutRequested && !container.isLayoutRequested &&
                 !image.isLayoutRequested && logoView?.isLayoutRequested != true &&
@@ -559,6 +582,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             }
         } else height(phoneHero, bannerHeight)
         if (!split) {
+            if (topScrim?.visibility != View.INVISIBLE) topScrim?.visibility = View.INVISIBLE
             lastLayout = null
             if (trackedArtwork != null) {
                 paletteJob?.cancel()
@@ -582,6 +606,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         }
 
         useThemeBackground(true)
+        if (topScrim?.visibility != View.VISIBLE) topScrim?.visibility = View.VISIBLE
         // logo visibility becomes VISIBLE before Coil has finished decoding its drawable.
         val hasLogo = logo?.visibility == View.VISIBLE && logo.drawable != null && logo.width > 0
         val expectedLogo = detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true
@@ -700,12 +725,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             // Cache only ready assets after their geometry has finished relayout.
             if (iw > 0 && ih > 0 && !logoPending && !root.isLayoutRequested &&
                 !container.isLayoutRequested && !image.isLayoutRequested) {
-                lastLayout = LayoutKey(root.width, root.height, container.width,
-                    root.resources.configuration.orientation,
-                    root.resources.configuration.smallestScreenWidthDp,
-                    image.drawable, logo?.drawable, logo?.visibility ?: View.GONE,
-                    logo?.width ?: 0, logo?.height ?: 0, title?.visibility ?: View.GONE,
-                    expectedLogo, detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true)
+                lastLayout = layoutKey(container, image)
                 lastTitle = title?.text?.toString()
                 lastImageBounds[0] = image.left
                 lastImageBounds[1] = image.top
@@ -733,6 +753,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         titleOverlay?.let { holder?.removeView(it) }; titleOverlay = null
         baseTitlePaint = null
         edge?.let { holder?.removeView(it) }; edge = null
+        topScrim?.let { holder?.removeView(it) }; topScrim = null
         restoreOriginalGeometry()
         visibility(true)
     }
