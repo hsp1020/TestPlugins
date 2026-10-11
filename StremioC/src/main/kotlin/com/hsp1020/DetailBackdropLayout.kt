@@ -194,11 +194,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 intArrayOf(colors.left, colors.center, colors.right))
             val bottom = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(Color.TRANSPARENT, fadeColor))
-            // Keep the bottom scrim at 7.5% of the current banner height (API 21+).
+            // Keep the bottom scrim at 5% of the current banner height (API 21+).
             replaceBackground(object : LayerDrawable(arrayOf(horizontal, bottom)) {
                 override fun onBoundsChange(bounds: Rect) {
                     super.onBoundsChange(bounds)
-                    val fadeHeight = (bounds.height() * 0.075f).roundToInt()
+                    val fadeHeight = (bounds.height() * 0.05f).roundToInt()
                     getDrawable(1).setBounds(bounds.left,
                         (bounds.bottom - fadeHeight).coerceAtLeast(bounds.top), bounds.right, bounds.bottom)
                 }
@@ -551,7 +551,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (split) {
             // Only resize when the banner height changes; avoid per-frame relayout.
             topScrim?.let { scrim ->
-                val targetHeight = (bannerHeight * 0.075f).roundToInt().coerceAtLeast(1)
+                val targetHeight = (bannerHeight * 0.05f).roundToInt().coerceAtLeast(1)
                 val params = scrim.layoutParams
                 if (params.height != targetHeight) {
                     params.height = targetHeight
