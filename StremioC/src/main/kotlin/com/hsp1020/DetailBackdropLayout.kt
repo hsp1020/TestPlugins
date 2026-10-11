@@ -69,6 +69,27 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private var trackedBitmap: Bitmap? = null
     private val paletteScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var paletteJob: Job? = null
+    private var viewStartedMs = 0L
+    private var drawableReadyMs = 0L
+    private var firstRevealLogged = false
+    private fun perf(event: String, values: String) {
+        android.util.Log.d("StremioCPerf", "$event detailKey=${detailUrl?.hashCode() ?: 0} $values")
+    }
+    private fun noteDrawableReady(drawable: Drawable?) {
+        if (viewStartedMs == 0L || drawableReadyMs != 0L) return
+        val bitmap = paletteBitmap(drawable) ?: return
+        drawableReadyMs = android.os.SystemClock.elapsedRealtime()
+        perf("drawable_ready",
+            "fromViewMs=${drawableReadyMs - viewStartedMs} size=${bitmap.width}x${bitmap.height}")
+    }
+    private fun noteFirstReveal(image: ImageView) {
+        if (firstRevealLogged || drawableReadyMs == 0L ||
+            image.alpha <= 0f || image.visibility != View.VISIBLE) return
+        firstRevealLogged = true
+        val now = android.os.SystemClock.elapsedRealtime()
+        perf("reveal_ready",
+            "fromViewMs=${now - viewStartedMs} fromDrawableMs=${now - drawableReadyMs} split=${splitMode()}")
+    }
 
     private fun blend(a: Int, b: Int, fraction: Float): Int {
         val t = fraction.coerceIn(0f, 1f)
@@ -224,11 +245,19 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         showArtworkPalette(null) // Never retain colors from the previous image.
         if (bitmap == null) return
         paletteJob = paletteScope.launch {
-            val colors = runCatching { sampleArtwork(bitmap) }.getOrNull() ?: return@launch
+            val computeStartedMs = android.os.SystemClock.elapsedRealtime()
+            val colors = runCatching { sampleArtwork(bitmap) }.getOrNull()
+            val computeMs = android.os.SystemClock.elapsedRealtime() - computeStartedMs
             if (!isActive) return@launch
+            perf("palette_computed", "elapsedMs=$computeMs available=${colors != null}")
+            if (colors == null) return@launch
             withContext(Dispatchers.Main.immediate) {
                 if (started && !splitFallback && splitMode() && trackedBitmap === bitmap &&
-                    paletteBitmap(picture?.drawable) === bitmap) showArtworkPalette(colors)
+                    paletteBitmap(picture?.drawable) === bitmap) {
+                    showArtworkPalette(colors)
+                    perf("palette_applied",
+                        "fromDrawableMs=${android.os.SystemClock.elapsedRealtime() - drawableReadyMs} computeMs=$computeMs")
+                }
             }
         }
     }
@@ -471,6 +500,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (trailersEnabled && !portraitMode()) return
         if (portraitMode() && maskPortraitTitle()) title?.alpha = 0f
         started = true
+        viewStartedMs = android.os.SystemClock.elapsedRealtime()
+        perf("view_start", "split=${splitMode()}")
         splitFallback = false
         nativeRecoveryFrames = 0
         if (trailersEnabled) {
@@ -538,6 +569,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val edgeView = edge ?: return
         val container = holder ?: return
         val image = picture ?: return
+        noteDrawableReady(image.drawable)
         // A not-yet-measured tablet/TV is loading, not a failed layout.
         if (container.width <= 0 || root.width <= 0) return
         val landscape = root.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -591,6 +623,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
             showTitle(false, hideOriginal = maskPortraitTitle())
             visibility(true)
+            noteFirstReveal(image)
             logo?.translationX = originalLogoX
             logo?.translationY = originalLogoY
             scaleLogo()
@@ -707,6 +740,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             showTitle(titleText.isNotEmpty() && !logoPending, hideOriginal = expectedLogo && !foreignLogo)
             if (iw > 0 && ih > 0 && image.alpha != originalPictureAlpha)
                 image.alpha = originalPictureAlpha
+            noteFirstReveal(image)
             if (hasLogo && logo?.alpha != originalLogoAlpha)
                 logo?.alpha = originalLogoAlpha
             // Cache only ready assets after their geometry has finished relayout.
