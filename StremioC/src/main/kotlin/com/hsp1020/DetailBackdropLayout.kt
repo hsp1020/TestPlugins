@@ -1,6 +1,15 @@
 package com.hsp1020
 
+import android.app.Activity
+import android.content.ContextWrapper
 import android.content.res.Configuration
+import android.os.Build
+import android.os.Debug
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.view.FrameMetrics
+import android.view.Window
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -72,15 +81,111 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private var viewStartedMs = 0L
     private var drawableReadyMs = 0L
     private var firstRevealLogged = false
+    private var firstDrawableLogged = false
+    private val diagnosticsHandler = Handler(Looper.getMainLooper())
+    private var metricsWindow: Window? = null
+    private var metricsListener: Window.OnFrameMetricsAvailableListener? = null
+    private var lastSlowFrameMs = 0L
+    private var gcCount = -1L
+    private var gcTime = -1L
+    private var blockingGc = -1L
+    private var bytesAllocated = -1L
+    private var bytesFreed = -1L
+    private var mainProbeJob: Job? = null
+    private fun artStat(key: String): Long =
+        if (Build.VERSION.SDK_INT >= 23)
+            runCatching { Debug.getRuntimeStat(key)?.toLongOrNull() ?: -1L }.getOrDefault(-1L)
+        else -1L
+    private fun heapMb() = (Runtime.getRuntime().totalMemory() -
+        Runtime.getRuntime().freeMemory()) / 1048576
+    private val gcSampler = object : Runnable {
+        override fun run() {
+            if (!started) return
+            val count = artStat("art.gc.gc-count")
+            val time = artStat("art.gc.gc-time")
+            val blocking = artStat("art.gc.blocking-gc-count")
+            val allocated = artStat("art.gc.bytes-allocated")
+            val freed = artStat("art.gc.bytes-freed")
+            val gcDelta = if (gcCount >= 0 && count >= 0) count - gcCount else -1
+            val allocDelta = if (bytesAllocated >= 0 && allocated >= 0) allocated - bytesAllocated else -1
+            if (gcDelta > 0 || allocDelta >= 16L * 1048576) {
+                perf("gc_activity", "gcDelta=$gcDelta gcTimeDeltaMs=${time - gcTime} " +
+                    "blockingGcDelta=${blocking - blockingGc} allocatedMb=${allocDelta / 1048576} " +
+                    "freedMb=${(freed - bytesFreed) / 1048576} heapMb=${heapMb()}")
+            }
+            gcCount = count; gcTime = time; blockingGc = blocking
+            bytesAllocated = allocated; bytesFreed = freed
+            diagnosticsHandler.postDelayed(this, 1000L)
+        }
+    }
+    private fun startDiagnostics() {
+        gcCount = artStat("art.gc.gc-count")
+        gcTime = artStat("art.gc.gc-time")
+        blockingGc = artStat("art.gc.blocking-gc-count")
+        bytesAllocated = artStat("art.gc.bytes-allocated")
+        bytesFreed = artStat("art.gc.bytes-freed")
+        diagnosticsHandler.postDelayed(gcSampler, 1000L)
+        mainProbeJob = paletteScope.launch {
+            while (isActive) {
+                val postedAt = SystemClock.uptimeMillis()
+                withContext(Dispatchers.Main) {
+                    val lag = SystemClock.uptimeMillis() - postedAt
+                    if (started && lag >= 100) perf("main_thread_lag",
+                        "queueMs=$lag heapMb=${heapMb()} gcCount=${artStat("art.gc.gc-count")}")
+                }
+                delay(250)
+            }
+        }
+        if (Build.VERSION.SDK_INT < 24) return
+        var context = root.context
+        while (context is ContextWrapper && context !is Activity) context = context.baseContext
+        val window = (context as? Activity)?.window ?: return
+        val listener = Window.OnFrameMetricsAvailableListener { _, frame, dropped ->
+            if (!started) return@OnFrameMetricsAvailableListener
+            val total = frame.getMetric(FrameMetrics.TOTAL_DURATION) / 1000000
+            if (total < 80 && dropped == 0) return@OnFrameMetricsAvailableListener
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastSlowFrameMs < 750) return@OnFrameMetricsAvailableListener
+            lastSlowFrameMs = now
+            fun ms(id: Int) = frame.getMetric(id) / 1000000
+            perf("slow_frame", "totalMs=$total unknownMs=${ms(FrameMetrics.UNKNOWN_DELAY_DURATION)} " +
+                "inputMs=${ms(FrameMetrics.INPUT_HANDLING_DURATION)} " +
+                "animationMs=${ms(FrameMetrics.ANIMATION_DURATION)} " +
+                "layoutMs=${ms(FrameMetrics.LAYOUT_MEASURE_DURATION)} " +
+                "drawMs=${ms(FrameMetrics.DRAW_DURATION)} syncMs=${ms(FrameMetrics.SYNC_DURATION)} " +
+                "commandMs=${ms(FrameMetrics.COMMAND_ISSUE_DURATION)} " +
+                "swapMs=${ms(FrameMetrics.SWAP_BUFFERS_DURATION)} " +
+                "droppedCallbacks=$dropped gcCount=${artStat("art.gc.gc-count")} heapMb=${heapMb()}")
+        }
+        runCatching {
+            window.addOnFrameMetricsAvailableListener(listener, diagnosticsHandler)
+            metricsWindow = window; metricsListener = listener
+        }.onFailure { android.util.Log.w("StremioCPerf", "frame_metrics_unavailable", it) }
+    }
+    private fun stopDiagnostics() {
+        diagnosticsHandler.removeCallbacks(gcSampler)
+        mainProbeJob?.cancel(); mainProbeJob = null
+        if (Build.VERSION.SDK_INT >= 24) metricsListener?.let { listener ->
+            runCatching { metricsWindow?.removeOnFrameMetricsAvailableListener(listener) }
+        }
+        metricsListener = null; metricsWindow = null
+    }
     private fun perf(event: String, values: String) {
         android.util.Log.d("StremioCPerf", "$event detailKey=${detailUrl?.hashCode() ?: 0} $values")
     }
     private fun noteDrawableReady(drawable: Drawable?) {
-        if (viewStartedMs == 0L || drawableReadyMs != 0L) return
+        if (viewStartedMs == 0L) return
+        if (drawable != null && !firstDrawableLogged) {
+            firstDrawableLogged = true
+            perf("image_view_drawable", "fromViewMs=${SystemClock.elapsedRealtime() - viewStartedMs} " +
+                "type=${drawable.javaClass.simpleName} atMs=${SystemClock.elapsedRealtime()}")
+        }
+        if (drawableReadyMs != 0L) return
         val bitmap = paletteBitmap(drawable) ?: return
-        drawableReadyMs = android.os.SystemClock.elapsedRealtime()
-        perf("drawable_ready",
-            "fromViewMs=${drawableReadyMs - viewStartedMs} size=${bitmap.width}x${bitmap.height}")
+        drawableReadyMs = SystemClock.elapsedRealtime()
+        perf("drawable_ready", "fromViewMs=${drawableReadyMs - viewStartedMs} " +
+            "atMs=$drawableReadyMs type=${drawable?.javaClass?.simpleName} " +
+            "config=${bitmap.config} size=${bitmap.width}x${bitmap.height}")
     }
     private fun noteFirstReveal(image: ImageView) {
         if (firstRevealLogged || drawableReadyMs == 0L ||
@@ -523,7 +628,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (portraitMode() && maskPortraitTitle()) title?.alpha = 0f
         started = true
         viewStartedMs = android.os.SystemClock.elapsedRealtime()
-        perf("view_start", "split=${splitMode()}")
+        perf("view_start", "split=${splitMode()} atMs=$viewStartedMs")
+        startDiagnostics()
         splitFallback = false
         nativeRecoveryFrames = 0
         if (trailersEnabled) {
@@ -754,6 +860,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     fun stop() {
         if (!started) return
         started = false
+        stopDiagnostics()
         paletteJob?.cancel()
         paletteScope.cancel()
         trackedArtwork = null
