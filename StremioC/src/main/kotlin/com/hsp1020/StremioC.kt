@@ -1149,9 +1149,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
     }
     
-    override suspend fun load(url: String): LoadResponse {
-        val loadStartedMs = android.os.SystemClock.elapsedRealtime()
-        val response = coroutineScope {
+    override suspend fun load(url: String): LoadResponse = coroutineScope {
         suspend fun fetchSecondaryMeta(metaUrl: String, expectedId: String): CatalogEntry? =
             runSuspendCatching {
                 val text = customSession.get(metaUrl).text
@@ -1451,12 +1449,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
         return@coroutineScope loadRes
-        }
-        val metadataReadyMs = android.os.SystemClock.elapsedRealtime()
-        android.util.Log.d("StremioCPerf",
-            "metadata_ready requestKey=${url.hashCode()} detailKey=${response.url.hashCode()} " +
-                "atMs=$metadataReadyMs elapsedMs=${metadataReadyMs - loadStartedMs}")
-        return response
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
