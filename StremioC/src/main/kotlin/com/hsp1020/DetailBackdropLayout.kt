@@ -509,7 +509,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             it.visibility = if (splitMode()) View.VISIBLE else View.INVISIBLE
             ((phoneHero as? FrameLayout) ?: container).addView(it,
-                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(96), Gravity.TOP))
+                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48), Gravity.TOP))
         }
         root.viewTreeObserver.addOnPreDrawListener(preDraw)
         runCatching { update() }.onFailure {
