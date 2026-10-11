@@ -1451,6 +1451,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
         return@coroutineScope loadRes
+        }
+        android.util.Log.d("StremioCPerf",
+            "metadata_ready requestKey=${url.hashCode()} detailKey=${response.url.hashCode()} " +
+                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - loadStartedMs}")
+        return response
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
@@ -3244,10 +3249,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 return@coroutineScope response.apply { attachMappedIds() }
             }           
         }
-        android.util.Log.d("StremioCPerf",
-            "metadata_ready requestKey=${url.hashCode()} detailKey=${response.url.hashCode()} " +
-                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - loadStartedMs}")
-        return response
     }
 
     private data class Video(
