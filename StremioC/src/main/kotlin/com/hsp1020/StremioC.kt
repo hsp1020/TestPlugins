@@ -2613,7 +2613,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val fetchedOriginalTitle: String?,
         val fetchedEnglishTitle: String?,
         val fetchedVoteAverage: Double? = null,
-        val fetchedLogoFallback: Boolean = false
+        val fetchedLogoFallback: Boolean = false,
+        val fetchedGenreIds: List<Int> = emptyList()
     )
 
     private data class ProviderArtInfo(
@@ -2866,7 +2867,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 detailRes.original_title ?: detailRes.original_name,
                 extractedEnglishTitle,
                 detailRes.vote_average,
-                selectedLogo != null && selectedLogo.iso_639_1?.lowercase() != preferred
+                selectedLogo != null && selectedLogo.iso_639_1?.lowercase() != preferred,
+                detailRes.genres.orEmpty().mapNotNull { it.id }
             )
         }
 
@@ -3103,7 +3105,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val countries = tmdbData?.fetchedOriginCountry ?: emptyList()
             val isBollywood = countries.any { it.contains("IN", true) || it.contains("India", true) }
             val isAsian = countries.any { it.contains("KR", true) || it.contains("JP", true) || it.contains("CN", true) || it.contains("TH", true) || it.contains("TW", true) }
-            val isCartoon = finalGenre?.any { it.contains("Animation", true) } == true
+            val isCartoon = tmdbData?.fetchedGenreIds?.contains(16) == true ||
+                finalGenre?.any { it.contains("Animation", true) } == true
             val isAnimeFromMetadata = originalAnimeId != null || fetchedMalId != null || finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
             val imdbSyncMapping = detailSyncMapping?.await()
             val isAnimeMedia = isAnimeFromMetadata || imdbSyncMapping != null
@@ -3487,8 +3490,11 @@ private data class TmdbTranslations(@JsonProperty("translations") val translatio
 private data class TmdbTranslationItem(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("iso_639_1") val iso_639_1: String?, @JsonProperty("data") val data: TmdbTranslationData?)
 private data class TmdbTranslationData(@JsonProperty("title") val title: String?, @JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?)
 
+private data class TmdbGenre(@JsonProperty("id") val id: Int? = null)
+
 private data class TmdbDetailResponse(
     @JsonProperty("id") val id: Int? = null,
+    @JsonProperty("genres") val genres: List<TmdbGenre>? = null,
     @JsonProperty("number_of_seasons") val number_of_seasons: Int? = null,
     @JsonProperty("title") val title: String? = null, 
     @JsonProperty("name") val name: String? = null, 
