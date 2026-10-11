@@ -64,7 +64,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private data class ArtworkColors(val left: Int, val center: Int, val right: Int)
     private var artworkColors: ArtworkColors? = null
     private var trackedArtwork: Drawable? = null
-    private var trackedBitmap: Bitmap? = null
     private val paletteScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var paletteJob: Job? = null
 
@@ -171,7 +170,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         }
     }
     private fun showArtworkPalette(colors: ArtworkColors?) {
-        if (artworkColors == colors && appliedHolderBackground != null) return
         artworkColors = colors
         if (colors == null) {
             replaceBackground(ColorDrawable(fadeColor))
@@ -195,19 +193,14 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private fun trackBackdrop(drawable: Drawable?) {
         if (trackedArtwork === drawable) return
         trackedArtwork = drawable
-        val bitmap = paletteBitmap(drawable)
-        // Coil can replace its crossfade wrapper with the same decoded bitmap.
-        if (trackedBitmap === bitmap) return
-        trackedBitmap = bitmap
         paletteJob?.cancel()
-        if (artworkColors != null) showArtworkPalette(null)
-        if (bitmap == null) return
+        showArtworkPalette(null)
+        val bitmap = paletteBitmap(drawable) ?: return
         paletteJob = paletteScope.launch {
             val colors = runCatching { sampleArtwork(bitmap) }.getOrNull() ?: return@launch
             if (!isActive) return@launch
             withContext(Dispatchers.Main.immediate) {
-                if (started && !splitFallback && splitMode() &&
-                    trackedBitmap === bitmap && paletteBitmap(picture?.drawable) === bitmap)
+                if (started && !splitFallback && splitMode() && picture?.drawable === drawable)
                     showArtworkPalette(colors)
             }
         }
@@ -257,34 +250,29 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private var forcedPortraitTitle = false
     // Asset alphas are staged once during start(); no re-staging on pre-draw.
     private var splitFallback = false
-    private var edgeLayerType = View.LAYER_TYPE_NONE
     private var nativeRecoveryFrames = 0
     private val density = root.resources.displayMetrics.density
     private fun dp(v: Int) = (v * density).roundToInt()
-    private fun edgeLayer(type: Int) {
-        if (edgeLayerType == type) return
-        edgeLayerType = type
-        edges.forEach { it.setLayerType(type, null) }
-    }
     private fun height(view: View?, value: Int) {
         val p = view?.layoutParams ?: return
         if (p.height != value) { p.height = value; view.layoutParams = p }
     }
-    private fun place(view: View?, width: Int, height: Int, left: Int, top: Int, sync: Boolean = false) {
-        val target = view ?: return
-        val p = target.layoutParams as? FrameLayout.LayoutParams ?: return
+    private fun place(view: View?, width: Int, height: Int, left: Int, top: Int) {
+        val p = view?.layoutParams as? FrameLayout.LayoutParams ?: return
         if (p.width != width || p.height != height || p.gravity != (Gravity.TOP or Gravity.START) ||
             p.marginStart != left || p.topMargin != top) {
             p.width = width; p.height = height; p.gravity = Gravity.TOP or Gravity.START
-            p.marginStart = left; p.topMargin = top; target.layoutParams = p
-        }
-        if (sync && (target.width != width || target.height != height ||
-                target.left != left || target.top != top)) {
-            target.layout(left, top, left + width, top + height)
-            if (target is EdgeFadeView) target.invalidate()
+            p.marginStart = left; p.topMargin = top; view.layoutParams = p
         }
     }
-    private fun scaleLogo(factor: Float = 1f) {
+    private fun placeEdge(view: View, width: Int, height: Int, left: Int, top: Int) {
+        place(view, width, height, left, top)
+        if (view.width != width || view.height != height || view.left != left || view.top != top) {
+            view.layout(left, top, left + width, top + height)
+            view.invalidate() // Moving a strip changes its holder-background sample coordinates.
+        }
+    }
+    private fun scaleLogo(doubleSize: Boolean, factor: Float = if (doubleSize) 2f else 1f) {
         val x = originalLogoScaleX * factor
         val y = originalLogoScaleY * factor
         if (logo?.scaleX != x) logo?.scaleX = x
@@ -341,7 +329,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         title?.alpha = 0f
         titleOverlay?.visibility = View.GONE
     }
-    private fun restoreGeometry() {
+    private fun restoreOriginalGeometry() {
         shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
         originalHeroHeight?.let { height(phoneHero, it) }
         originalHolderHeight?.let { height(holder, it) }
@@ -352,7 +340,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         else originalMatrix?.let { picture?.imageMatrix = it }
         logo?.translationX = originalLogoX
         logo?.translationY = originalLogoY
-        scaleLogo()
+        scaleLogo(false)
         (tvColumn?.layoutParams as? ViewGroup.MarginLayoutParams)?.let { p ->
             originalTvMargin?.let { p.topMargin = it; tvColumn.layoutParams = p }
         }
@@ -361,15 +349,13 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (splitFallback || portraitTitleOnly) return
         paletteJob?.cancel()
         trackedArtwork = null
-        trackedBitmap = null
         artworkColors = null
         useThemeBackground(false)
         if (!splitMode()) { visibility(true); return }
         splitFallback = true // Do not re-enter the split layout and cause a visible jump.
         nativeRecoveryFrames = 0
-        edgeLayer(View.LAYER_TYPE_NONE)
-        edges.forEach { place(it, 0, 0, 0, 0, sync = true) }
-        restoreGeometry()
+        edges.forEach { placeEdge(it, 0, 0, 0, 0) }
+        restoreOriginalGeometry()
         // The restored native layoutParams must pass through measure/layout before
         // we reveal them; otherwise fallback itself can produce a visible jump.
         stage()
@@ -446,6 +432,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             baseTitlePaint = TextPaint(overlay.paint)
             lastFitWidth = -1
             overlay.maxLines = 4
+            overlay.ellipsize = null
             overlay.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             overlay.visibility = View.GONE
             container.addView(overlay, FrameLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -472,6 +459,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val image = picture ?: return
         // A not-yet-measured tablet/TV is loading, not a failed layout.
         if (container.width <= 0 || root.width <= 0) return
+        // With trailers enabled we never enter this layout path (see start()).
+        // A GONE trailer holder means inactive, not an active player.
         val landscape = root.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val tablet = root.resources.configuration.smallestScreenWidthDp >= 600
         val split = tv || landscape || tablet
@@ -490,20 +479,18 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             if (trackedArtwork != null) {
                 paletteJob?.cancel()
                 trackedArtwork = null
-                trackedBitmap = null
                 artworkColors = null
             }
             useThemeBackground(false)
             image.scaleType = originalScale ?: ImageView.ScaleType.CENTER_CROP
             originalPicture?.let { place(image, it.width, it.height, it.marginStart, it.topMargin) }
-            edgeLayer(View.LAYER_TYPE_NONE)
-            edges.forEach { place(it, 0, 0, 0, 0, sync = true) }
+            edges.forEach { placeEdge(it, 0, 0, 0, 0) }
             shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
             showTitle(false, hideOriginal = maskPortraitTitle())
             visibility(true)
             logo?.translationX = originalLogoX
             logo?.translationY = originalLogoY
-            scaleLogo()
+            scaleLogo(false)
             updatePortraitTitle()
             return
         }
@@ -528,10 +515,15 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         trackBackdrop(drawable)
         val iw = drawable?.intrinsicWidth ?: 0
         val ih = drawable?.intrinsicHeight ?: 0
-        // The 16:9 placeholder reserves geometry while the backdrop is decoding.
-        val aspect = if (iw > 0 && ih > 0) iw.toDouble() / ih else 16.0 / 9
-        val imageWidth = min(maxWidth, (bannerHeight * aspect).roundToInt().coerceAtLeast(1))
-        val imageHeight = min(bannerHeight, (imageWidth / aspect).roundToInt().coerceAtLeast(1))
+        // A missing logo is not a reason to hide a loaded backdrop forever.
+        // Without a decoded backdrop, position a 16:9 slot; keep its alpha at 0.
+        // The logo/title can still recover independently when their data arrives.
+        val imageWidth = if (iw > 0 && ih > 0)
+            min(maxWidth, (bannerHeight.toDouble() * iw / ih).roundToInt().coerceAtLeast(1))
+            else min(maxWidth, (bannerHeight.toDouble() * 16 / 9).roundToInt().coerceAtLeast(1))
+        val imageHeight = if (iw > 0 && ih > 0)
+            min(bannerHeight, (imageWidth.toDouble() * ih / iw).roundToInt().coerceAtLeast(1))
+            else min(bannerHeight, (imageWidth.toDouble() * 9 / 16).roundToInt().coerceAtLeast(1))
         val groupLeft = ((container.width - labelWidth - gap - imageWidth) / 2).coerceAtLeast(0)
         val imageLeft = groupLeft + labelWidth + gap
         val imageTop = (bannerHeight - imageHeight) / 2
@@ -539,17 +531,17 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         // Persist the target geometry, then commit it *in this pre-draw*.
         // Comparing current bounds and re-staging on every frame caused the
         // tablet/TV to alternate between visible and alpha=0 indefinitely.
-        place(image, imageWidth, imageHeight, imageLeft, imageTop, sync = true)
+        place(image, imageWidth, imageHeight, imageLeft, imageTop)
+        if (image.width != imageWidth || image.height != imageHeight ||
+            image.left != imageLeft || image.top != imageTop) {
+            image.layout(imageLeft, imageTop, imageLeft + imageWidth, imageTop + imageHeight)
+        }
         val featherX = min(dp(112), imageWidth / 4)
         val featherY = min(dp(84), imageHeight / 4)
-        // Cache edge compositing only below ~1 MiB total GPU texture storage.
-        val edgePixels = 2L * (featherX.toLong() * imageHeight + featherY.toLong() * imageWidth)
-        edgeLayer(if (container.isHardwareAccelerated && edgePixels <= 262_144L)
-            View.LAYER_TYPE_HARDWARE else View.LAYER_TYPE_NONE)
-        place(edges[0], featherX, imageHeight, imageLeft, imageTop, sync = true)
-        place(edges[1], featherX, imageHeight, imageLeft + imageWidth - featherX, imageTop, sync = true)
-        place(edges[2], imageWidth, featherY, imageLeft, imageTop, sync = true)
-        place(edges[3], imageWidth, featherY, imageLeft, imageTop + imageHeight - featherY, sync = true)
+        placeEdge(edges[0], featherX, imageHeight, imageLeft, imageTop)
+        placeEdge(edges[1], featherX, imageHeight, imageLeft + imageWidth - featherX, imageTop)
+        placeEdge(edges[2], imageWidth, featherY, imageLeft, imageTop)
+        placeEdge(edges[3], imageWidth, featherY, imageLeft, imageTop + imageHeight - featherY)
         // Avoid double-darkening the bottom: the built-in shadow covered the whole parent.
         shadow?.visibility = View.INVISIBLE
         // Enforce both the 36%-wide label and the actual FIT_CENTER image bounds.
@@ -566,11 +558,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 fitTitle(overlay, titleText, labelWidth,
                     if (foreignLogo) (imageHeight - requestedLogoHeight - verticalGap).coerceAtLeast(1) else imageHeight)
                 if (foreignLogo) {
-                    if (overlay.isLayoutRequested || overlay.measuredWidth != labelWidth ||
-                        overlay.measuredHeight <= 0) {
-                        overlay.measure(View.MeasureSpec.makeMeasureSpec(labelWidth, View.MeasureSpec.EXACTLY),
-                            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
-                    }
+                    overlay.measure(View.MeasureSpec.makeMeasureSpec(labelWidth, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
                     titleHeight = overlay.measuredHeight
                 }
             }
@@ -579,7 +568,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             val availableHeight = (imageHeight - titleHeight - verticalGap).coerceAtLeast(0)
             logoFactor = min(logoFactor, availableHeight / baseLogoHeight)
         }
-        if (hasLogo) scaleLogo(logoFactor)
+        if (hasLogo) scaleLogo(true, logoFactor)
         val logoWidth = if (hasLogo) (logo!!.width * abs(logo.scaleX)).roundToInt() else 0
         val logoHeight = if (hasLogo) (logo!!.height * abs(logo.scaleY)).roundToInt() else 0
         val groupTop = ((bannerHeight - logoHeight - verticalGap - titleHeight) / 2f).coerceAtLeast(0f)
@@ -609,7 +598,9 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 overlay.gravity = if (foreignLogo) Gravity.CENTER else Gravity.START
             }
         }
-        // Reveal only decoded assets, without restaging on subsequent frames.
+        // All geometry has been committed. Reveal only assets with decoded data.
+        // Later drawable arrivals/parent relayouts are repositioned in pre-draw,
+        // WITHOUT staging already visible assets back to alpha=0.
         if (image.width == imageWidth && image.height == imageHeight &&
             image.left == imageLeft && image.top == imageTop) {
             showTitle(titleText.isNotEmpty() && !logoPending, hideOriginal = expectedLogo && !foreignLogo)
@@ -625,7 +616,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         paletteJob?.cancel()
         paletteScope.cancel()
         trackedArtwork = null
-        trackedBitmap = null
         artworkColors = null
         useThemeBackground(false)
         if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(preDraw)
@@ -636,9 +626,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         showTitle(false)
         titleOverlay?.let { holder?.removeView(it) }; titleOverlay = null
         baseTitlePaint = null
-        edgeLayer(View.LAYER_TYPE_NONE)
         edges.forEach { holder?.removeView(it) }; edges.clear()
-        restoreGeometry()
+        restoreOriginalGeometry()
         visibility(true)
     }
 }
