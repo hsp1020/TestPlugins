@@ -575,7 +575,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (tv) {
             height(container, bannerHeight)
             (tvColumn?.layoutParams as? ViewGroup.MarginLayoutParams)?.let { p ->
-                if (p.topMargin != dp(350)) { p.topMargin = dp(350); tvColumn?.layoutParams = p }
+                if (p.topMargin != bannerHeight) { p.topMargin = bannerHeight; tvColumn?.layoutParams = p }
             }
         } else height(phoneHero, bannerHeight)
         if (!split) {
