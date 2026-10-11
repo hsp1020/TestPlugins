@@ -1,11 +1,14 @@
 package com.hsp1020
 
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.Matrix
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
@@ -18,6 +21,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.preference.PreferenceManager
+import kotlinx.coroutines.*
 import kotlin.math.*
 
 /** StremioC detail backdrop only. Original CloudStream toolbar and player remain untouched. */
@@ -49,25 +53,163 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private val originalPictureAlpha = picture?.alpha ?: 1f
     private val shadow = holder?.getChildAt(1) // Existing CloudStream bottom shadow.
     private var previousHolderBackground: Drawable? = null
-    private var appliedHolderBackground: ColorDrawable? = null
+    private var appliedHolderBackground: Drawable? = null
     private var fadeColor = Color.BLACK
+    private data class ArtworkColors(val left: Int, val center: Int, val right: Int)
+    private var artworkColors: ArtworkColors? = null
+    private var trackedArtwork: Drawable? = null
+    private var edgeTints: IntArray? = null
+    private val paletteScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var paletteJob: Job? = null
 
-    // ColorDrawable is replaced, not mutated: restoring it must not alter CloudStream's drawable.
+    private fun blend(a: Int, b: Int, fraction: Float): Int {
+        val t = fraction.coerceIn(0f, 1f)
+        fun mix(x: Int, y: Int) = (x + (y - x) * t).roundToInt().coerceIn(0, 255)
+        return Color.rgb(mix(Color.red(a), Color.red(b)), mix(Color.green(a), Color.green(b)),
+            mix(Color.blue(a), Color.blue(b)))
+    }
+
+    // Palette-inspired whole-image histogram with center prominence and side color averages.
+    // Runs on Dispatchers.Default, not in the layout/pre-draw callback.
+    private fun sampleArtwork(source: Bitmap): ArtworkColors? {
+        if (source.isRecycled || source.width <= 0 || source.height <= 0) return null
+        val hardware = android.os.Build.VERSION.SDK_INT >= 26 && source.config == Bitmap.Config.HARDWARE
+        if (hardware && source.byteCount > 12 * 1024 * 1024) return null
+        val software = if (hardware) source.copy(Bitmap.Config.ARGB_8888, false) ?: return null else source
+        try {
+            val w = 72
+            val h = 40
+            val thumb = Bitmap.createScaledBitmap(software, w, h, true)
+            try {
+                val pixels = IntArray(w * h)
+                thumb.getPixels(pixels, 0, w, 0, 0, w, h)
+                val count = IntArray(4096)
+                val reds = IntArray(4096)
+                val greens = IntArray(4096)
+                val blues = IntArray(4096)
+                val side = Array(2) { LongArray(4) }
+                val total = LongArray(4)
+                for (i in pixels.indices) {
+                    val pixel = pixels[i]
+                    if (Color.alpha(pixel) < 128) continue
+                    val r = Color.red(pixel)
+                    val g = Color.green(pixel)
+                    val b = Color.blue(pixel)
+                    val x = i % w
+                    val bucket = ((r shr 4) shl 8) or ((g shr 4) shl 4) or (b shr 4)
+                    val weight = if (x >= w / 4 && x < 3 * w / 4) 2 else 1
+                    count[bucket] += weight
+                    reds[bucket] += r * weight
+                    greens[bucket] += g * weight
+                    blues[bucket] += b * weight
+                    total[0]++
+                    total[1] += r.toLong()
+                    total[2] += g.toLong()
+                    total[3] += b.toLong()
+                    val region = if (x < w / 3) 0 else if (x >= 2 * w / 3) 1 else -1
+                    if (region >= 0) {
+                        val chroma = max(r, max(g, b)) - min(r, min(g, b))
+                        val strength = 1L + chroma / 80
+                        side[region][0] += strength
+                        side[region][1] += strength * r
+                        side[region][2] += strength * g
+                        side[region][3] += strength * b
+                    }
+                }
+                if (total[0] == 0L) return null
+                fun average(a: LongArray, fallback: Int) = if (a[0] == 0L) fallback else
+                    Color.rgb((a[1] / a[0]).toInt(), (a[2] / a[0]).toInt(), (a[3] / a[0]).toInt())
+                val base = average(total, fadeColor)
+                var best = -1
+                var bestScore = -1L
+                for (i in count.indices) {
+                    if (count[i] == 0) continue
+                    val chroma = max(reds[i], max(greens[i], blues[i])) -
+                        min(reds[i], min(greens[i], blues[i]))
+                    val score = count[i].toLong() * (80 + chroma / count[i] / 2)
+                    if (score > bestScore) { bestScore = score; best = i }
+                }
+                val prominent = if (best < 0) base else Color.rgb(reds[best] / count[best],
+                    greens[best] / count[best], blues[best] / count[best])
+                val center = blend(base, prominent, 0.45f)
+                val left = blend(average(side[0], center), center, 0.28f)
+                val right = blend(average(side[1], center), center, 0.28f)
+                return ArtworkColors(blend(left, fadeColor, 0.12f),
+                    blend(center, fadeColor, 0.12f), blend(right, fadeColor, 0.12f))
+            } finally {
+                if (thumb !== software) thumb.recycle()
+            }
+        } finally {
+            if (software !== source) software.recycle()
+        }
+    }
+
+    // The original CloudStream background is retained by identity and never mutated.
+    private fun replaceBackground(background: Drawable) {
+        val container = holder ?: return
+        if (appliedHolderBackground == null) previousHolderBackground = container.background
+        else if (container.background !== appliedHolderBackground) return
+        appliedHolderBackground = background
+        container.background = background
+    }
     private fun useThemeBackground(enabled: Boolean) {
         val container = holder ?: return
         if (enabled) {
-            if (appliedHolderBackground == null) {
-                previousHolderBackground = container.background
-                val background = ColorDrawable(fadeColor)
-                appliedHolderBackground = background
-                container.background = background
-            }
+            if (appliedHolderBackground == null) replaceBackground(ColorDrawable(fadeColor))
         } else {
-            val background = appliedHolderBackground ?: return
-            // Do not overwrite a background installed by the host after our own.
-            if (container.background === background) container.background = previousHolderBackground
+            val ours = appliedHolderBackground ?: return
+            if (container.background === ours) container.background = previousHolderBackground
             appliedHolderBackground = null
             previousHolderBackground = null
+        }
+    }
+    private fun showArtworkPalette(colors: ArtworkColors?) {
+        artworkColors = colors
+        edgeTints = null
+        if (colors == null) {
+            replaceBackground(ColorDrawable(fadeColor))
+        } else {
+            val horizontal = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(colors.left, colors.center, colors.right))
+            // The final third fades into the actual app theme, not a fixed black.
+            val bottom = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(Color.TRANSPARENT, Color.TRANSPARENT, Color.TRANSPARENT, fadeColor))
+            replaceBackground(LayerDrawable(arrayOf(horizontal, bottom)))
+        }
+    }
+    private fun trackBackdrop(drawable: Drawable?) {
+        if (trackedArtwork === drawable) return
+        trackedArtwork = drawable
+        paletteJob?.cancel()
+        showArtworkPalette(null)
+        val bitmap = (drawable as? BitmapDrawable)?.bitmap ?: return
+        paletteJob = paletteScope.launch {
+            val colors = runCatching { sampleArtwork(bitmap) }.getOrNull() ?: return@launch
+            if (!isActive) return@launch
+            withContext(Dispatchers.Main.immediate) {
+                if (started && !splitFallback && splitMode() && picture?.drawable === drawable)
+                    showArtworkPalette(colors)
+            }
+        }
+    }
+    private fun updateEdgeColors(left: Int, width: Int, totalWidth: Int) {
+        val colors = artworkColors
+        fun colorAt(x: Int): Int {
+            if (colors == null) return fadeColor
+            val t = (x.toFloat() / totalWidth.coerceAtLeast(1)).coerceIn(0f, 1f)
+            return if (t <= 0.5f) blend(colors.left, colors.center, t * 2f)
+            else blend(colors.center, colors.right, (t - 0.5f) * 2f)
+        }
+        val tints = intArrayOf(colorAt(left), colorAt(left + width),
+            colors?.center ?: fadeColor, fadeColor)
+        if (tints.contentEquals(edgeTints)) return
+        edgeTints = tints
+        val directions = arrayOf(GradientDrawable.Orientation.LEFT_RIGHT,
+            GradientDrawable.Orientation.RIGHT_LEFT, GradientDrawable.Orientation.TOP_BOTTOM,
+            GradientDrawable.Orientation.BOTTOM_TOP)
+        edges.forEachIndexed { index, view ->
+            view.background = GradientDrawable(directions[index],
+                intArrayOf(tints[index], Color.TRANSPARENT))
         }
     }
     private val originalShadowVisibility = shadow?.visibility
@@ -155,6 +297,9 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     }
     private fun recoverOriginalLayout() {
         if (splitFallback || portraitTitleOnly) return
+        paletteJob?.cancel()
+        trackedArtwork = null
+        artworkColors = null
         useThemeBackground(false)
         if (!splitMode()) { visibility(true); return }
         splitFallback = true // Do not re-enter the split layout and cause a visible jump.
@@ -301,6 +446,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             }
         } else height(phoneHero, bannerHeight)
         if (!split) {
+            if (trackedArtwork != null) {
+                paletteJob?.cancel()
+                trackedArtwork = null
+                artworkColors = null
+            }
             useThemeBackground(false)
             image.scaleType = originalScale ?: ImageView.ScaleType.CENTER_CROP
             originalPicture?.let { place(image, it.width, it.height, it.marginStart, it.topMargin) }
@@ -332,6 +482,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val gap = if (labelWidth > 0) dp(45) else 0
         val maxWidth = (container.width - labelWidth - gap - dp(24)).coerceAtLeast(1)
         val drawable = image.drawable
+        trackBackdrop(drawable)
         val iw = drawable?.intrinsicWidth ?: 0
         val ih = drawable?.intrinsicHeight ?: 0
         // A missing logo is not a reason to hide a loaded backdrop forever.
@@ -361,6 +512,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         place(edges[1], featherX, imageHeight, imageLeft + imageWidth - featherX, imageTop)
         place(edges[2], imageWidth, featherY, imageLeft, imageTop)
         place(edges[3], imageWidth, featherY, imageLeft, imageTop + imageHeight - featherY)
+        updateEdgeColors(imageLeft, imageWidth, container.width)
         // Avoid double-darkening the bottom: the built-in shadow covered the whole parent.
         shadow?.visibility = View.INVISIBLE
         // Enforce both the 36%-wide label and the actual FIT_CENTER image bounds.
@@ -430,6 +582,10 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     fun stop() {
         if (!started) return
         started = false
+        paletteJob?.cancel()
+        paletteScope.cancel()
+        trackedArtwork = null
+        artworkColors = null
         useThemeBackground(false)
         if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(preDraw)
         if (forcedPortraitTitle && logo?.visibility == View.VISIBLE && logo.drawable != null)
