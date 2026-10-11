@@ -19,6 +19,7 @@ import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
 import android.text.Layout
+import android.text.TextUtils
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.util.TypedValue
@@ -67,6 +68,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private data class ArtworkColors(val left: Int, val center: Int, val right: Int)
     private var artworkColors: ArtworkColors? = null
     private var trackedArtwork: Drawable? = null
+    private var trackedBitmap: Bitmap? = null
     private val paletteScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var paletteJob: Job? = null
 
@@ -210,15 +212,19 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private fun trackBackdrop(drawable: Drawable?) {
         if (trackedArtwork === drawable) return
         trackedArtwork = drawable
+        val bitmap = paletteBitmap(drawable)
+        // Coil may replace its crossfade wrapper while retaining the decoded bitmap.
+        if (bitmap != null && trackedBitmap === bitmap) return
+        trackedBitmap = bitmap
         paletteJob?.cancel()
-        showArtworkPalette(null)
-        val bitmap = paletteBitmap(drawable) ?: return
+        showArtworkPalette(null) // Never retain colors from the previous image.
+        if (bitmap == null) return
         paletteJob = paletteScope.launch {
             val colors = runCatching { sampleArtwork(bitmap) }.getOrNull() ?: return@launch
             if (!isActive) return@launch
             withContext(Dispatchers.Main.immediate) {
-                if (started && !splitFallback && splitMode() && picture?.drawable === drawable)
-                    showArtworkPalette(colors)
+                if (started && !splitFallback && splitMode() && trackedBitmap === bitmap &&
+                    paletteBitmap(picture?.drawable) === bitmap) showArtworkPalette(colors)
             }
         }
     }
@@ -297,6 +303,16 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     // Asset alphas are staged once during start(); no re-staging on pre-draw.
     private var splitFallback = false
     private var nativeRecoveryFrames = 0
+    private data class LayoutKey(
+        val rootWidth: Int, val rootHeight: Int, val holderWidth: Int,
+        val orientation: Int, val smallestWidth: Int,
+        val picture: Drawable?, val logo: Drawable?, val logoVisibility: Int,
+        val logoWidth: Int, val logoHeight: Int, val titleVisibility: Int,
+        val expectedLogo: Boolean, val fallbackLogo: Boolean
+    )
+    private var lastLayout: LayoutKey? = null
+    private var lastTitle: String? = null
+    private val lastImageBounds = IntArray(4)
     private val density = root.resources.displayMetrics.density
     private fun dp(v: Int) = (v * density).roundToInt()
     private fun height(view: View?, value: Int) {
@@ -395,6 +411,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (splitFallback || portraitTitleOnly) return
         paletteJob?.cancel()
         trackedArtwork = null
+        trackedBitmap = null
+        lastLayout = null
         artworkColors = null
         useThemeBackground(false)
         if (!splitMode()) { visibility(true); return }
@@ -513,6 +531,27 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             landscape -> min(dp(300), (root.height * 0.70f).roundToInt())
             else -> dp(260)
         }
+        if (split) {
+            val logoView = logo
+            val key = LayoutKey(root.width, root.height, container.width,
+                root.resources.configuration.orientation,
+                root.resources.configuration.smallestScreenWidthDp,
+                image.drawable, logoView?.drawable, logoView?.visibility ?: View.GONE,
+                logoView?.width ?: 0, logoView?.height ?: 0, title?.visibility ?: View.GONE,
+                detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true,
+                detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true)
+            if (key == lastLayout && TextUtils.equals(title?.text, lastTitle) &&
+                !root.isLayoutRequested && !container.isLayoutRequested &&
+                !image.isLayoutRequested && logoView?.isLayoutRequested != true &&
+                image.left == lastImageBounds[0] && image.top == lastImageBounds[1] &&
+                image.width == lastImageBounds[2] && image.height == lastImageBounds[3] &&
+                edgeView.width == image.width && edgeView.height == image.height &&
+                edgeView.left == image.left && edgeView.top == image.top &&
+                (image.drawable == null || image.alpha == originalPictureAlpha) &&
+                (logoView?.drawable == null || logoView.alpha == originalLogoAlpha) &&
+                shadow?.visibility == View.INVISIBLE) return
+            lastLayout = null
+        }
         if (tv) {
             height(container, bannerHeight)
             (tvColumn?.layoutParams as? ViewGroup.MarginLayoutParams)?.let { p ->
@@ -520,9 +559,12 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             }
         } else height(phoneHero, bannerHeight)
         if (!split) {
+            lastLayout = null
             if (trackedArtwork != null) {
                 paletteJob?.cancel()
                 trackedArtwork = null
+                trackedBitmap = null
+                lastLayout = null
                 artworkColors = null
             }
             useThemeBackground(false)
@@ -600,8 +642,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 fitTitle(overlay, titleText, labelWidth,
                     if (foreignLogo) (imageHeight - requestedLogoHeight - verticalGap).coerceAtLeast(1) else imageHeight)
                 if (foreignLogo) {
-                    overlay.measure(View.MeasureSpec.makeMeasureSpec(labelWidth, View.MeasureSpec.EXACTLY),
-                        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+                    if (overlay.isLayoutRequested || overlay.measuredWidth != labelWidth ||
+                        overlay.measuredHeight <= 0) {
+                        overlay.measure(View.MeasureSpec.makeMeasureSpec(labelWidth, View.MeasureSpec.EXACTLY),
+                            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+                    }
                     titleHeight = overlay.measuredHeight
                 }
             }
@@ -616,10 +661,12 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val groupTop = ((bannerHeight - logoHeight - verticalGap - titleHeight) / 2f).coerceAtLeast(0f)
         if (hasLogo) {
             // Account for the centered pivot when scaling the original ImageView.
-            logo?.translationX = groupLeft + (labelWidth - logoWidth) / 2 -
+            val newX = groupLeft + (labelWidth - logoWidth) / 2 -
                 logo!!.left + (logo.scaleX - 1f) * logo.pivotX
-            logo?.translationY = (if (foreignLogo) groupTop else (bannerHeight - logoHeight) / 2f) -
+            val newY = (if (foreignLogo) groupTop else (bannerHeight - logoHeight) / 2f) -
                 logo.top + (logo.scaleY - 1f) * logo.pivotY
+            if (logo.translationX != newX) logo.translationX = newX
+            if (logo.translationY != newY) logo.translationY = newY
         } else {
             logo?.translationX = originalLogoX
             logo?.translationY = originalLogoY
@@ -650,6 +697,21 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 image.alpha = originalPictureAlpha
             if (hasLogo && logo?.alpha != originalLogoAlpha)
                 logo?.alpha = originalLogoAlpha
+            // Cache only ready assets after their geometry has finished relayout.
+            if (iw > 0 && ih > 0 && !logoPending && !root.isLayoutRequested &&
+                !container.isLayoutRequested && !image.isLayoutRequested) {
+                lastLayout = LayoutKey(root.width, root.height, container.width,
+                    root.resources.configuration.orientation,
+                    root.resources.configuration.smallestScreenWidthDp,
+                    image.drawable, logo?.drawable, logo?.visibility ?: View.GONE,
+                    logo?.width ?: 0, logo?.height ?: 0, title?.visibility ?: View.GONE,
+                    expectedLogo, detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true)
+                lastTitle = title?.text?.toString()
+                lastImageBounds[0] = image.left
+                lastImageBounds[1] = image.top
+                lastImageBounds[2] = image.width
+                lastImageBounds[3] = image.height
+            }
         }
     }
     fun stop() {
@@ -658,6 +720,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         paletteJob?.cancel()
         paletteScope.cancel()
         trackedArtwork = null
+        trackedBitmap = null
+        lastLayout = null
         artworkColors = null
         useThemeBackground(false)
         if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(preDraw)
