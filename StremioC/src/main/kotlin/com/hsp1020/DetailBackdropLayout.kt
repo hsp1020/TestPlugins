@@ -19,7 +19,6 @@ import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
 import android.text.Layout
-import android.text.TextUtils
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.util.TypedValue
@@ -66,7 +65,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private var appliedHolderBackground: Drawable? = null
     private var fadeColor = Color.BLACK
     private data class ArtworkColors(val left: Int, val center: Int, val right: Int)
-    private var artworkColors: ArtworkColors? = null
     private var trackedArtwork: Drawable? = null
     private var trackedBitmap: Bitmap? = null
     private val paletteScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -189,7 +187,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         }
     }
     private fun showArtworkPalette(colors: ArtworkColors?) {
-        artworkColors = colors
         if (colors == null) {
             replaceBackground(ColorDrawable(fadeColor))
         } else {
@@ -228,63 +225,52 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             }
         }
     }
-    // Draw the holder's real background in its own coordinate space and smoothly
-    // reveal it at the artwork's edges, without changing the Coil ImageView.
-    // One view batches the original four edge strips. Each strip keeps its
-    // original narrow saveLayer and mask, avoiding a full-image GPU layer.
+    // Four original narrow compositing strips in one View, without full-screen layers.
     private class EdgeFadeView(private val frame: FrameLayout) : View(frame.context) {
         private val masks = Array(4) { Paint(Paint.ANTI_ALIAS_FLAG).apply {
             xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
         } }
         private val areas = Array(4) { RectF() }
-        private var featherX = 0
-        private var featherY = 0
-
+        private val colors = intArrayOf(Color.WHITE, Color.argb(215, 255, 255, 255),
+            Color.argb(128, 255, 255, 255), Color.argb(40, 255, 255, 255), Color.TRANSPARENT)
+        private val stops = floatArrayOf(0f, 0.25f, 0.5f, 0.75f, 1f)
+        private var fx = 0
+        private var fy = 0
         fun setFeather(x: Int, y: Int) {
-            if (featherX == x && featherY == y) return
-            featherX = x
-            featherY = y
-            updateMasks()
-            invalidate()
+            if (fx == x && fy == y) return
+            fx = x; fy = y
+            updateMasks(); invalidate()
         }
-
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
             super.onSizeChanged(w, h, oldw, oldh)
             updateMasks()
         }
-
         private fun updateMasks() {
-            val w = width
-            val h = height
-            if (w <= 0 || h <= 0 || featherX <= 0 || featherY <= 0) return
-            areas[0].set(0f, 0f, featherX.toFloat(), h.toFloat())
-            areas[1].set((w - featherX).toFloat(), 0f, w.toFloat(), h.toFloat())
-            areas[2].set(0f, 0f, w.toFloat(), featherY.toFloat())
-            areas[3].set(0f, (h - featherY).toFloat(), w.toFloat(), h.toFloat())
-            val colors = intArrayOf(Color.WHITE, Color.argb(215, 255, 255, 255),
-                Color.argb(128, 255, 255, 255), Color.argb(40, 255, 255, 255), Color.TRANSPARENT)
-            val stops = floatArrayOf(0f, 0.25f, 0.5f, 0.75f, 1f)
+            val w = width.toFloat()
+            val h = height.toFloat()
+            if (w <= 0 || h <= 0 || fx <= 0 || fy <= 0) return
+            areas[0].set(0f, 0f, fx.toFloat(), h)
+            areas[1].set(w - fx, 0f, w, h)
+            areas[2].set(0f, 0f, w, fy.toFloat())
+            areas[3].set(0f, h - fy, w, h)
             for (i in 0..3) {
-                val rect = areas[i]
+                val r = areas[i]
                 masks[i].shader = LinearGradient(
-                    if (i == 1) rect.right else rect.left,
-                    if (i == 3) rect.bottom else rect.top,
-                    if (i == 0) rect.right else rect.left,
-                    if (i == 2) rect.bottom else rect.top,
+                    if (i == 1) r.right else r.left, if (i == 3) r.bottom else r.top,
+                    if (i == 0) r.right else r.left, if (i == 2) r.bottom else r.top,
                     colors, stops, Shader.TileMode.CLAMP)
             }
         }
-
         override fun onDraw(canvas: Canvas) {
             val background = frame.background ?: return
-            if (width <= 0 || height <= 0 || featherX <= 0 || featherY <= 0) return
+            if (width <= 0 || height <= 0 || fx <= 0 || fy <= 0) return
             for (i in 0..3) {
                 val rect = areas[i]
                 val layer = canvas.saveLayer(rect, null)
-                val save = canvas.save()
+                val saved = canvas.save()
                 canvas.translate(-left.toFloat(), -top.toFloat())
                 background.draw(canvas)
-                canvas.restoreToCount(save)
+                canvas.restoreToCount(saved)
                 canvas.drawRect(rect, masks[i])
                 canvas.restoreToCount(layer)
             }
@@ -309,11 +295,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val orientation: Int, val smallestWidth: Int,
         val picture: Drawable?, val logo: Drawable?, val logoVisibility: Int,
         val logoWidth: Int, val logoHeight: Int, val titleVisibility: Int,
-        val expectedLogo: Boolean, val fallbackLogo: Boolean
+        val expectedLogo: Boolean, val fallbackLogo: Boolean,
+        val text: String?, val imageX: Int, val imageY: Int,
+        val imageWidth: Int, val imageHeight: Int
     )
     private var lastLayout: LayoutKey? = null
-    private var lastTitle: String? = null
-    private val lastImageBounds = IntArray(4)
 
     private fun layoutKey(container: FrameLayout, image: ImageView): LayoutKey {
         val logoView = logo
@@ -323,7 +309,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             image.drawable, logoView?.drawable, logoView?.visibility ?: View.GONE,
             logoView?.width ?: 0, logoView?.height ?: 0, title?.visibility ?: View.GONE,
             detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true,
-            detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true)
+            detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true,
+            title?.text?.toString(), image.left, image.top, image.width, image.height)
     }
     private val density = root.resources.displayMetrics.density
     private fun dp(v: Int) = (v * density).roundToInt()
@@ -346,7 +333,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             view.invalidate() // Moving a strip changes its holder-background sample coordinates.
         }
     }
-    private fun scaleLogo(doubleSize: Boolean, factor: Float = if (doubleSize) 2f else 1f) {
+    private fun scaleLogo(factor: Float = 1f) {
         val x = originalLogoScaleX * factor
         val y = originalLogoScaleY * factor
         if (logo?.scaleX != x) logo?.scaleX = x
@@ -414,7 +401,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         else originalMatrix?.let { picture?.imageMatrix = it }
         logo?.translationX = originalLogoX
         logo?.translationY = originalLogoY
-        scaleLogo(false)
+        scaleLogo()
         (tvColumn?.layoutParams as? ViewGroup.MarginLayoutParams)?.let { p ->
             originalTvMargin?.let { p.topMargin = it; tvColumn.layoutParams = p }
         }
@@ -425,7 +412,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         trackedArtwork = null
         trackedBitmap = null
         lastLayout = null
-        artworkColors = null
         useThemeBackground(false)
         if (!splitMode()) { visibility(true); return }
         splitFallback = true // Do not re-enter the split layout and cause a visible jump.
@@ -512,21 +498,18 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             overlay.visibility = View.GONE
             container.addView(overlay, FrameLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
-        // Overlay the image and parent backdrop to blend into CloudStream's actual
-        // toolbar surface; unlike fadeColor, this also matches light-theme toolbars.
+        // result_top_bar and result_top_holder are siblings; render above the entire hero.
         val barAttr = context.resources.getIdentifier("primaryGrayBackground", "attr", context.packageName)
         val barColors = context.theme.obtainStyledAttributes(
             intArrayOf(if (barAttr != 0) barAttr else android.R.attr.colorBackground))
         val barColor = try { barColors.getColor(0, fadeColor) } finally { barColors.recycle() }
         topScrim = View(context).also {
             it.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(barColor,
-                    Color.argb(150, Color.red(barColor), Color.green(barColor), Color.blue(barColor)),
-                    barColor and 0x00FFFFFF))
+                intArrayOf(barColor, barColor and 0x00FFFFFF))
             it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             it.visibility = if (splitMode()) View.VISIBLE else View.INVISIBLE
-            container.addView(it, FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(64), Gravity.TOP))
+            ((phoneHero as? FrameLayout) ?: container).addView(it,
+                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(96), Gravity.TOP))
         }
         root.viewTreeObserver.addOnPreDrawListener(preDraw)
         runCatching { update() }.onFailure {
@@ -550,8 +533,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val image = picture ?: return
         // A not-yet-measured tablet/TV is loading, not a failed layout.
         if (container.width <= 0 || root.width <= 0) return
-        // With trailers enabled we never enter this layout path (see start()).
-        // A GONE trailer holder means inactive, not an active player.
         val landscape = root.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val tablet = root.resources.configuration.smallestScreenWidthDp >= 600
         val split = tv || landscape || tablet
@@ -563,11 +544,9 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (split) {
             val logoView = logo
             val key = layoutKey(container, image)
-            if (key == lastLayout && TextUtils.equals(title?.text, lastTitle) &&
+            if (key == lastLayout &&
                 !root.isLayoutRequested && !container.isLayoutRequested &&
                 !image.isLayoutRequested && logoView?.isLayoutRequested != true &&
-                image.left == lastImageBounds[0] && image.top == lastImageBounds[1] &&
-                image.width == lastImageBounds[2] && image.height == lastImageBounds[3] &&
                 edgeView.width == image.width && edgeView.height == image.height &&
                 edgeView.left == image.left && edgeView.top == image.top &&
                 (image.drawable == null || image.alpha == originalPictureAlpha) &&
@@ -588,9 +567,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 paletteJob?.cancel()
                 trackedArtwork = null
                 trackedBitmap = null
-                lastLayout = null
-                artworkColors = null
-            }
+                    }
             useThemeBackground(false)
             image.scaleType = originalScale ?: ImageView.ScaleType.CENTER_CROP
             originalPicture?.let { place(image, it.width, it.height, it.marginStart, it.topMargin) }
@@ -600,7 +577,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             visibility(true)
             logo?.translationX = originalLogoX
             logo?.translationY = originalLogoY
-            scaleLogo(false)
+            scaleLogo()
             updatePortraitTitle()
             return
         }
@@ -626,9 +603,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         trackBackdrop(drawable)
         val iw = drawable?.intrinsicWidth ?: 0
         val ih = drawable?.intrinsicHeight ?: 0
-        // A missing logo is not a reason to hide a loaded backdrop forever.
-        // Without a decoded backdrop, position a 16:9 slot; keep its alpha at 0.
-        // The logo/title can still recover independently when their data arrives.
+        // Reserve 16:9 geometry while the image or logo is still decoding.
         val imageWidth = if (iw > 0 && ih > 0)
             min(maxWidth, (bannerHeight.toDouble() * iw / ih).roundToInt().coerceAtLeast(1))
             else min(maxWidth, (bannerHeight.toDouble() * 16 / 9).roundToInt().coerceAtLeast(1))
@@ -639,9 +614,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val imageLeft = groupLeft + labelWidth + gap
         val imageTop = (bannerHeight - imageHeight) / 2
         if (image.scaleType != ImageView.ScaleType.FIT_CENTER) image.scaleType = ImageView.ScaleType.FIT_CENTER
-        // Persist the target geometry, then commit it *in this pre-draw*.
-        // Comparing current bounds and re-staging on every frame caused the
-        // tablet/TV to alternate between visible and alpha=0 indefinitely.
+        // Commit geometry before reveal; never restage assets every frame.
         place(image, imageWidth, imageHeight, imageLeft, imageTop)
         if (image.width != imageWidth || image.height != imageHeight ||
             image.left != imageLeft || image.top != imageTop) {
@@ -680,7 +653,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             val availableHeight = (imageHeight - titleHeight - verticalGap).coerceAtLeast(0)
             logoFactor = min(logoFactor, availableHeight / baseLogoHeight)
         }
-        if (hasLogo) scaleLogo(true, logoFactor)
+        if (hasLogo) scaleLogo(logoFactor)
         val logoWidth = if (hasLogo) (logo!!.width * abs(logo.scaleX)).roundToInt() else 0
         val logoHeight = if (hasLogo) (logo!!.height * abs(logo.scaleY)).roundToInt() else 0
         val groupTop = ((bannerHeight - logoHeight - verticalGap - titleHeight) / 2f).coerceAtLeast(0f)
@@ -712,9 +685,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 overlay.gravity = if (foreignLogo) Gravity.CENTER else Gravity.START
             }
         }
-        // All geometry has been committed. Reveal only assets with decoded data.
-        // Later drawable arrivals/parent relayouts are repositioned in pre-draw,
-        // WITHOUT staging already visible assets back to alpha=0.
+        // Reveal only decoded assets after final layout.
         if (image.width == imageWidth && image.height == imageHeight &&
             image.left == imageLeft && image.top == imageTop) {
             showTitle(titleText.isNotEmpty() && !logoPending, hideOriginal = expectedLogo && !foreignLogo)
@@ -726,11 +697,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             if (iw > 0 && ih > 0 && !logoPending && !root.isLayoutRequested &&
                 !container.isLayoutRequested && !image.isLayoutRequested) {
                 lastLayout = layoutKey(container, image)
-                lastTitle = title?.text?.toString()
-                lastImageBounds[0] = image.left
-                lastImageBounds[1] = image.top
-                lastImageBounds[2] = image.width
-                lastImageBounds[3] = image.height
             }
         }
     }
@@ -742,7 +708,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         trackedArtwork = null
         trackedBitmap = null
         lastLayout = null
-        artworkColors = null
         useThemeBackground(false)
         if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(preDraw)
         if (forcedPortraitTitle && logo?.visibility == View.VISIBLE && logo.drawable != null)
@@ -753,7 +718,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         titleOverlay?.let { holder?.removeView(it) }; titleOverlay = null
         baseTitlePaint = null
         edge?.let { holder?.removeView(it) }; edge = null
-        topScrim?.let { holder?.removeView(it) }; topScrim = null
+        topScrim?.let { ((phoneHero as? FrameLayout) ?: holder)?.removeView(it) }; topScrim = null
         restoreOriginalGeometry()
         visibility(true)
     }
