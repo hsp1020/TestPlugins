@@ -194,12 +194,13 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 intArrayOf(colors.left, colors.center, colors.right))
             val bottom = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(Color.TRANSPARENT, fadeColor))
-            // Restrict just the bottom scrim to 30dp on every Android API (minSdk 21).
+            // Keep the bottom scrim at 7.5% of the current banner height (API 21+).
             replaceBackground(object : LayerDrawable(arrayOf(horizontal, bottom)) {
                 override fun onBoundsChange(bounds: Rect) {
                     super.onBoundsChange(bounds)
-                    getDrawable(1).setBounds(bounds.left, (bounds.bottom - dp(30)).coerceAtLeast(bounds.top),
-                        bounds.right, bounds.bottom)
+                    val fadeHeight = (bounds.height() * 0.075f).roundToInt()
+                    getDrawable(1).setBounds(bounds.left,
+                        (bounds.bottom - fadeHeight).coerceAtLeast(bounds.top), bounds.right, bounds.bottom)
                 }
             })
         }
@@ -515,7 +516,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             it.visibility = if (splitMode()) View.VISIBLE else View.INVISIBLE
             ((phoneHero as? FrameLayout) ?: container).addView(it,
-                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(30), Gravity.TOP))
+                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, Gravity.TOP))
         }
         root.viewTreeObserver.addOnPreDrawListener(preDraw)
         runCatching { update() }.onFailure {
@@ -548,6 +549,15 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             else -> dp(260)
         }
         if (split) {
+            // Only resize when the banner height changes; avoid per-frame relayout.
+            topScrim?.let { scrim ->
+                val targetHeight = (bannerHeight * 0.075f).roundToInt().coerceAtLeast(1)
+                val params = scrim.layoutParams
+                if (params.height != targetHeight) {
+                    params.height = targetHeight
+                    scrim.layoutParams = params
+                }
+            }
             val logoView = logo
             val key = layoutKey(container, image)
             if (key == lastLayout &&
