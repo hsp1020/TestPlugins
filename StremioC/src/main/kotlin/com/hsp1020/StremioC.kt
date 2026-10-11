@@ -1149,7 +1149,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
     }
     
-    override suspend fun load(url: String): LoadResponse = coroutineScope {
+    override suspend fun load(url: String): LoadResponse {
+        val loadStartedMs = android.os.SystemClock.elapsedRealtime()
+        val response = coroutineScope {
         suspend fun fetchSecondaryMeta(metaUrl: String, expectedId: String): CatalogEntry? =
             runSuspendCatching {
                 val text = customSession.get(metaUrl).text
@@ -3242,6 +3244,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 return@coroutineScope response.apply { attachMappedIds() }
             }           
         }
+        android.util.Log.d("StremioCPerf",
+            "metadata_ready requestKey=${url.hashCode()} detailKey=${response.url.hashCode()} " +
+                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - loadStartedMs}")
+        return response
     }
 
     private data class Video(
