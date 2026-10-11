@@ -1452,9 +1452,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         return@coroutineScope loadRes
         }
+        val metadataReadyMs = android.os.SystemClock.elapsedRealtime()
         android.util.Log.d("StremioCPerf",
             "metadata_ready requestKey=${url.hashCode()} detailKey=${response.url.hashCode()} " +
-                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - loadStartedMs}")
+                "atMs=$metadataReadyMs elapsedMs=${metadataReadyMs - loadStartedMs}")
         return response
     }
 
