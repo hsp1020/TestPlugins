@@ -192,9 +192,10 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         } else {
             val horizontal = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
                 intArrayOf(colors.left, colors.center, colors.right))
-            // The final third fades into the actual app theme, not a fixed black.
+            // Fade only over the final sixth of the backdrop, ending at the theme color.
             val bottom = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Color.TRANSPARENT, Color.TRANSPARENT, Color.TRANSPARENT, fadeColor))
+                intArrayOf(Color.TRANSPARENT, Color.TRANSPARENT, Color.TRANSPARENT,
+                    Color.TRANSPARENT, Color.TRANSPARENT, Color.TRANSPARENT, fadeColor))
             replaceBackground(LayerDrawable(arrayOf(horizontal, bottom)))
         }
     }
