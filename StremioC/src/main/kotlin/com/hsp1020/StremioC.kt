@@ -1150,6 +1150,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
     
     override suspend fun load(url: String): LoadResponse = coroutineScope {
+        suspend fun fetchSecondaryMeta(metaUrl: String, expectedId: String): CatalogEntry? =
+            runSuspendCatching {
+                val text = customSession.get(metaUrl).text
+                val response = if (text.isNotBlank()) parseJson<CatalogResponse>(text) else null
+                response?.meta ?: response?.metas?.firstOrNull { it.id == expectedId }
+                    ?: response?.metas?.firstOrNull()
+            }.onFailure { it.printStackTrace() }.getOrNull()
+
         val parsedUrlHint = parseDetailUrlHint(url)
         val requestedAnimeId = parsedUrlHint?.id?.takeIf { isKitsuOrMalId(it) }
         val rememberedHint = detailLoadHints[url]?.takeIf { cached ->
@@ -1158,6 +1166,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 canonicalDetailType(cached.type) == canonicalDetailType(parsedUrlHint.type)
         }
         val urlHint = rememberedHint ?: parsedUrlHint
+        // Start a distinct metadata addon's request alongside the primary meta HTTP
+        // request. Validate both the ID/type and resolved URL before using its result.
+        val hintedMetaUrl = urlHint?.let { getUnifiedMetaUrl(it.type, it.id) }
+            ?.takeUnless { it == url }
+        val hintedMetaDeferred = hintedMetaUrl?.let { metaUrl ->
+            async(Dispatchers.IO) { fetchSecondaryMeta(metaUrl, urlHint!!.id) }
+        }
         val hintedImdbId = (urlHint?.id ?: if (url.startsWith("{"))
             runCatching { parseJson<CatalogEntry>(url)?.id }.getOrNull() else null)
             ?.takeIf { IMDB_ID_REGEX.matches(it) }
@@ -1261,18 +1276,16 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val normalizedId = try { normalizeId(res.id ?: "") } catch (e: Exception) { e.printStackTrace(); res.id ?: "" }
         val encodedId = normalizedId.urlEncode()
 
-        val addonDeferred = async(Dispatchers.IO) {
-            val result = runSuspendCatching {
-                val syncMetaUrl = this@StremioC.getUnifiedMetaUrl(res.type ?: "movie", res.id ?: "")
-                if (syncMetaUrl == url && initialMetaFromResponse != null) {
-                    initialMetaFromResponse
-                } else {
-                    val text = customSession.get(syncMetaUrl).text
-                    val response = if (text.isNotBlank()) parseJson<CatalogResponse>(text) else null
-                    response?.meta ?: response?.metas?.firstOrNull { it.id == res.id } ?: response?.metas?.firstOrNull()
-                }
-            }.onFailure { it.printStackTrace() }.getOrNull()
-            result
+        val authoritativeMetaUrl = getUnifiedMetaUrl(res.type ?: "movie", res.id ?: "")
+        val reuseHintedMeta = hintMatchesAuthoritative && hintedMetaUrl == authoritativeMetaUrl
+        if (!reuseHintedMeta) hintedMetaDeferred?.cancel()
+        val addonDeferred: Deferred<CatalogEntry?> = when {
+            authoritativeMetaUrl == url && initialMetaFromResponse != null ->
+                async(Dispatchers.IO) { initialMetaFromResponse }
+            reuseHintedMeta && hintedMetaDeferred != null -> hintedMetaDeferred
+            else -> async(Dispatchers.IO) {
+                fetchSecondaryMeta(authoritativeMetaUrl, res.id ?: "")
+            }
         }
 
         val isKitsuOrMal = isKitsuOrMalId(res.id)
