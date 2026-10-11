@@ -192,11 +192,16 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         } else {
             val horizontal = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
                 intArrayOf(colors.left, colors.center, colors.right))
-            // Fade only over the final sixth of the backdrop, ending at the theme color.
             val bottom = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Color.TRANSPARENT, Color.TRANSPARENT, Color.TRANSPARENT,
-                    Color.TRANSPARENT, Color.TRANSPARENT, Color.TRANSPARENT, fadeColor))
-            replaceBackground(LayerDrawable(arrayOf(horizontal, bottom)))
+                intArrayOf(Color.TRANSPARENT, fadeColor))
+            // Restrict just the bottom scrim to 30dp on every Android API (minSdk 21).
+            replaceBackground(object : LayerDrawable(arrayOf(horizontal, bottom)) {
+                override fun onBoundsChange(bounds: Rect) {
+                    super.onBoundsChange(bounds)
+                    getDrawable(1).setBounds(bounds.left, (bounds.bottom - dp(30)).coerceAtLeast(bounds.top),
+                        bounds.right, bounds.bottom)
+                }
+            })
         }
     }
     private fun paletteBitmap(drawable: Drawable?): Bitmap? {
@@ -510,7 +515,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             it.visibility = if (splitMode()) View.VISIBLE else View.INVISIBLE
             ((phoneHero as? FrameLayout) ?: container).addView(it,
-                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48), Gravity.TOP))
+                FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(30), Gravity.TOP))
         }
         root.viewTreeObserver.addOnPreDrawListener(preDraw)
         runCatching { update() }.onFailure {
