@@ -1,15 +1,6 @@
 package com.hsp1020
 
-import android.app.Activity
-import android.content.ContextWrapper
 import android.content.res.Configuration
-import android.os.Build
-import android.os.Debug
-import android.os.Handler
-import android.os.Looper
-import android.os.SystemClock
-import android.view.FrameMetrics
-import android.view.Window
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -78,162 +69,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private var trackedBitmap: Bitmap? = null
     private val paletteScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var paletteJob: Job? = null
-    private var viewStartedMs = 0L
-    private var drawableReadyMs = 0L
-    private var firstRevealLogged = false
-    private var firstDrawableLogged = false
-    private val diagnosticsHandler = Handler(Looper.getMainLooper())
-    private var metricsWindow: Window? = null
-    private var metricsListener: Window.OnFrameMetricsAvailableListener? = null
-    private var lastSlowFrameMs = 0L
-    private var gcCount = -1L
-    private var gcTime = -1L
-    private var blockingGc = -1L
-    private var bytesAllocated = -1L
-    private var bytesFreed = -1L
-    private var mainProbeJob: Job? = null
-    private var updateCalls = 0
-    private var updateTotalNs = 0L
-    private var updateMaxNs = 0L
-    private var cachedUpdates = 0
-    private var parameterChanges = 0
-    private var directLayouts = 0
-    private var globalLayoutEvents = 0
-    private var geometryNs = 0L
-    private var titleNs = 0L
-    private var titleFits = 0
-    private var maxTitleFitNs = 0L
-    private val globalLayoutListener = ViewTreeObserver.OnGlobalLayoutListener {
-        if (started) globalLayoutEvents++
-    }
-    private var registeredLayoutObserver: ViewTreeObserver? = null
-    private fun flushLayoutProfile() {
-        if (updateCalls > 0 || globalLayoutEvents > 0) {
-            perf("layout_profile",
-                "split=${splitMode()} updates=$updateCalls avgUs=${updateTotalNs / updateCalls.coerceAtLeast(1).toLong() / 1000} " +
-                    "maxUs=${updateMaxNs / 1000} cached=$cachedUpdates geometryTotalUs=${geometryNs / 1000} " +
-                    "titleTotalUs=${titleNs / 1000} fitCalls=$titleFits fitMaxUs=${maxTitleFitNs / 1000} " +
-                    "paramsChanged=$parameterChanges directLayouts=$directLayouts globalLayoutEvents=$globalLayoutEvents")
-        }
-        updateCalls = 0; updateTotalNs = 0; updateMaxNs = 0
-        cachedUpdates = 0; parameterChanges = 0; directLayouts = 0
-        globalLayoutEvents = 0; geometryNs = 0; titleNs = 0
-        titleFits = 0; maxTitleFitNs = 0
-    }
-    private fun artStat(key: String): Long =
-        if (Build.VERSION.SDK_INT >= 23)
-            runCatching { Debug.getRuntimeStat(key)?.toLongOrNull() ?: -1L }.getOrDefault(-1L)
-        else -1L
-    private fun heapMb() = (Runtime.getRuntime().totalMemory() -
-        Runtime.getRuntime().freeMemory()) / 1048576
-    private val gcSampler = object : Runnable {
-        override fun run() {
-            if (!started) return
-            val count = artStat("art.gc.gc-count")
-            val time = artStat("art.gc.gc-time")
-            val blocking = artStat("art.gc.blocking-gc-count")
-            val allocated = artStat("art.gc.bytes-allocated")
-            val freed = artStat("art.gc.bytes-freed")
-            val gcDelta = if (gcCount >= 0 && count >= 0) count - gcCount else -1
-            val allocDelta = if (bytesAllocated >= 0 && allocated >= 0) allocated - bytesAllocated else -1
-            if (gcDelta > 0 || allocDelta >= 16L * 1048576) {
-                perf("gc_activity", "gcDelta=$gcDelta gcTimeDeltaMs=${time - gcTime} " +
-                    "blockingGcDelta=${blocking - blockingGc} allocatedMb=${allocDelta / 1048576} " +
-                    "freedMb=${(freed - bytesFreed) / 1048576} heapMb=${heapMb()}")
-            }
-            gcCount = count; gcTime = time; blockingGc = blocking
-            bytesAllocated = allocated; bytesFreed = freed
-            flushLayoutProfile()
-            diagnosticsHandler.postDelayed(this, 1000L)
-        }
-    }
-    private fun startDiagnostics() {
-        val observer = root.viewTreeObserver
-        if (observer.isAlive) {
-            observer.addOnGlobalLayoutListener(globalLayoutListener)
-            registeredLayoutObserver = observer
-        }
-        gcCount = artStat("art.gc.gc-count")
-        gcTime = artStat("art.gc.gc-time")
-        blockingGc = artStat("art.gc.blocking-gc-count")
-        bytesAllocated = artStat("art.gc.bytes-allocated")
-        bytesFreed = artStat("art.gc.bytes-freed")
-        diagnosticsHandler.postDelayed(gcSampler, 1000L)
-        mainProbeJob = paletteScope.launch {
-            while (isActive) {
-                val postedAt = SystemClock.uptimeMillis()
-                withContext(Dispatchers.Main) {
-                    val lag = SystemClock.uptimeMillis() - postedAt
-                    if (started && lag >= 100) perf("main_thread_lag",
-                        "queueMs=$lag heapMb=${heapMb()} gcCount=${artStat("art.gc.gc-count")}")
-                }
-                delay(250)
-            }
-        }
-        if (Build.VERSION.SDK_INT < 24) return
-        var context = root.context
-        while (context is ContextWrapper && context !is Activity) context = context.baseContext
-        val window = (context as? Activity)?.window ?: return
-        val listener = Window.OnFrameMetricsAvailableListener { _, frame, dropped ->
-            if (!started) return@OnFrameMetricsAvailableListener
-            val total = frame.getMetric(FrameMetrics.TOTAL_DURATION) / 1000000
-            if (total < 80 && dropped == 0) return@OnFrameMetricsAvailableListener
-            val now = SystemClock.elapsedRealtime()
-            if (now - lastSlowFrameMs < 750) return@OnFrameMetricsAvailableListener
-            lastSlowFrameMs = now
-            fun ms(id: Int) = frame.getMetric(id) / 1000000
-            perf("slow_frame", "totalMs=$total unknownMs=${ms(FrameMetrics.UNKNOWN_DELAY_DURATION)} " +
-                "inputMs=${ms(FrameMetrics.INPUT_HANDLING_DURATION)} " +
-                "animationMs=${ms(FrameMetrics.ANIMATION_DURATION)} " +
-                "layoutMs=${ms(FrameMetrics.LAYOUT_MEASURE_DURATION)} " +
-                "drawMs=${ms(FrameMetrics.DRAW_DURATION)} syncMs=${ms(FrameMetrics.SYNC_DURATION)} " +
-                "commandMs=${ms(FrameMetrics.COMMAND_ISSUE_DURATION)} " +
-                "swapMs=${ms(FrameMetrics.SWAP_BUFFERS_DURATION)} " +
-                "droppedCallbacks=$dropped gcCount=${artStat("art.gc.gc-count")} heapMb=${heapMb()}")
-        }
-        runCatching {
-            window.addOnFrameMetricsAvailableListener(listener, diagnosticsHandler)
-            metricsWindow = window; metricsListener = listener
-        }.onFailure { android.util.Log.w("StremioCPerf", "frame_metrics_unavailable", it) }
-    }
-    private fun stopDiagnostics() {
-        registeredLayoutObserver?.let {
-            if (it.isAlive) it.removeOnGlobalLayoutListener(globalLayoutListener)
-        }
-        registeredLayoutObserver = null
-        flushLayoutProfile()
-        diagnosticsHandler.removeCallbacks(gcSampler)
-        mainProbeJob?.cancel(); mainProbeJob = null
-        if (Build.VERSION.SDK_INT >= 24) metricsListener?.let { listener ->
-            runCatching { metricsWindow?.removeOnFrameMetricsAvailableListener(listener) }
-        }
-        metricsListener = null; metricsWindow = null
-    }
-    private fun perf(event: String, values: String) {
-        android.util.Log.d("StremioCPerf", "$event detailKey=${detailUrl?.hashCode() ?: 0} $values")
-    }
-    private fun noteDrawableReady(drawable: Drawable?) {
-        if (viewStartedMs == 0L) return
-        if (drawable != null && !firstDrawableLogged) {
-            firstDrawableLogged = true
-            perf("image_view_drawable", "fromViewMs=${SystemClock.elapsedRealtime() - viewStartedMs} " +
-                "type=${drawable.javaClass.simpleName} atMs=${SystemClock.elapsedRealtime()}")
-        }
-        if (drawableReadyMs != 0L) return
-        val bitmap = paletteBitmap(drawable) ?: return
-        drawableReadyMs = SystemClock.elapsedRealtime()
-        perf("drawable_ready", "fromViewMs=${drawableReadyMs - viewStartedMs} " +
-            "atMs=$drawableReadyMs type=${drawable?.javaClass?.simpleName} " +
-            "config=${bitmap.config} size=${bitmap.width}x${bitmap.height}")
-    }
-    private fun noteFirstReveal(image: ImageView) {
-        if (firstRevealLogged || drawableReadyMs == 0L ||
-            image.alpha <= 0f || image.visibility != View.VISIBLE) return
-        firstRevealLogged = true
-        val now = android.os.SystemClock.elapsedRealtime()
-        perf("reveal_ready",
-            "fromViewMs=${now - viewStartedMs} fromDrawableMs=${now - drawableReadyMs} split=${splitMode()}")
-    }
 
     private fun blend(a: Int, b: Int, fraction: Float): Int {
         val t = fraction.coerceIn(0f, 1f)
@@ -389,19 +224,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         showArtworkPalette(null) // Never retain colors from the previous image.
         if (bitmap == null) return
         paletteJob = paletteScope.launch {
-            val computeStartedMs = android.os.SystemClock.elapsedRealtime()
-            val colors = runCatching { sampleArtwork(bitmap) }.getOrNull()
-            val computeMs = android.os.SystemClock.elapsedRealtime() - computeStartedMs
+            val colors = runCatching { sampleArtwork(bitmap) }.getOrNull() ?: return@launch
             if (!isActive) return@launch
-            perf("palette_computed", "elapsedMs=$computeMs available=${colors != null}")
-            if (colors == null) return@launch
             withContext(Dispatchers.Main.immediate) {
                 if (started && !splitFallback && splitMode() && trackedBitmap === bitmap &&
-                    paletteBitmap(picture?.drawable) === bitmap) {
-                    showArtworkPalette(colors)
-                    perf("palette_applied",
-                        "fromDrawableMs=${android.os.SystemClock.elapsedRealtime() - drawableReadyMs} computeMs=$computeMs")
-                }
+                    paletteBitmap(picture?.drawable) === bitmap) showArtworkPalette(colors)
             }
         }
     }
@@ -478,7 +305,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         topScrim?.let { scrim ->
             val params = scrim.layoutParams
             val target = (height * 0.03f).roundToInt().coerceAtLeast(1)
-            if (params.height != target) { params.height = target; scrim.layoutParams = params; parameterChanges++ }
+            if (params.height != target) { params.height = target; scrim.layoutParams = params }
         }
     }
     private var titleOverlay: TextView? = null
@@ -518,7 +345,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private fun dp(v: Int) = (v * density).roundToInt()
     private fun height(view: View?, value: Int) {
         val p = view?.layoutParams ?: return
-        if (p.height != value) { p.height = value; view.layoutParams = p; parameterChanges++ }
+        if (p.height != value) { p.height = value; view.layoutParams = p }
     }
     private fun place(view: View?, width: Int, height: Int, left: Int, top: Int) {
         val p = view?.layoutParams as? FrameLayout.LayoutParams ?: return
@@ -526,14 +353,12 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             p.marginStart != left || p.topMargin != top) {
             p.width = width; p.height = height; p.gravity = Gravity.TOP or Gravity.START
             p.marginStart = left; p.topMargin = top; view.layoutParams = p
-            parameterChanges++
         }
     }
     private fun placeEdge(view: EdgeFadeView, width: Int, height: Int, left: Int, top: Int) {
         place(view, width, height, left, top)
         if (view.width != width || view.height != height || view.left != left || view.top != top) {
             view.layout(left, top, left + width, top + height)
-            directLayouts++
             view.invalidate() // Moving a strip changes its holder-background sample coordinates.
         }
     }
@@ -547,7 +372,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     // No minimum readable size or ellipsis: extremely long titles may become very small.
     private fun fitTitle(overlay: TextView, text: String, width: Int, maxHeight: Int) {
         if (text.isEmpty() || (text == lastFitText && width == lastFitWidth && maxHeight == lastFitHeight)) return
-        val fitStartNs = SystemClock.elapsedRealtimeNanos()
         val paint = TextPaint(baseTitlePaint ?: overlay.paint)
         fun fits(size: Float): Boolean {
             paint.textSize = size
@@ -574,9 +398,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         lastFitText = text
         lastFitWidth = width
         lastFitHeight = maxHeight
-        val fitElapsedNs = SystemClock.elapsedRealtimeNanos() - fitStartNs
-        titleFits++
-        if (fitElapsedNs > maxTitleFitNs) maxTitleFitNs = fitElapsedNs
     }
     private val preDraw = ViewTreeObserver.OnPreDrawListener {
         runCatching { update() }.onFailure {
@@ -672,9 +493,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (trailersEnabled && !portraitMode()) return
         if (portraitMode() && maskPortraitTitle()) title?.alpha = 0f
         started = true
-        viewStartedMs = android.os.SystemClock.elapsedRealtime()
-        perf("view_start", "split=${splitMode()} atMs=$viewStartedMs")
-        startDiagnostics()
         splitFallback = false
         nativeRecoveryFrames = 0
         if (trailersEnabled) {
@@ -723,18 +541,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (title?.alpha != alpha) title?.alpha = alpha
     }
     private fun update() {
-        if (!started) return
-        val beginNs = SystemClock.elapsedRealtimeNanos()
-        try {
-            updateBody()
-        } finally {
-            val elapsedNs = SystemClock.elapsedRealtimeNanos() - beginNs
-            updateCalls++
-            updateTotalNs += elapsedNs
-            if (elapsedNs > updateMaxNs) updateMaxNs = elapsedNs
-        }
-    }
-    private fun updateBody() {
         // An already-queued pre-draw can run after stop() removed the edge views.
         if (!started) return
         if (portraitTitleOnly) { updatePortraitTitle(); return }
@@ -742,7 +548,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val edgeView = edge ?: return
         val container = holder ?: return
         val image = picture ?: return
-        noteDrawableReady(image.drawable)
         // A not-yet-measured tablet/TV is loading, not a failed layout.
         if (container.width <= 0 || root.width <= 0) return
         val landscape = root.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
@@ -764,16 +569,13 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 edgeView.left == image.left && edgeView.top == image.top &&
                 (image.drawable == null || image.alpha == originalPictureAlpha) &&
                 (logoView?.drawable == null || logoView.alpha == originalLogoAlpha) &&
-                shadow?.visibility == View.INVISIBLE) {
-                cachedUpdates++
-                return
-            }
+                shadow?.visibility == View.INVISIBLE) return
             lastLayout = null
         }
         if (tv) {
             height(container, bannerHeight)
             (tvColumn?.layoutParams as? ViewGroup.MarginLayoutParams)?.let { p ->
-                if (p.topMargin != dp(350)) { p.topMargin = dp(350); tvColumn?.layoutParams = p; parameterChanges++ }
+                if (p.topMargin != dp(350)) { p.topMargin = dp(350); tvColumn?.layoutParams = p }
             }
         } else height(phoneHero, bannerHeight)
         if (!split) {
@@ -790,7 +592,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
             showTitle(false, hideOriginal = maskPortraitTitle())
             visibility(true)
-            noteFirstReveal(image)
             logo?.translationX = originalLogoX
             logo?.translationY = originalLogoY
             scaleLogo()
@@ -798,7 +599,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             return
         }
 
-        val geometryStartNs = SystemClock.elapsedRealtimeNanos()
         useThemeBackground(true)
         if (topScrim?.visibility != View.VISIBLE) topScrim?.visibility = View.VISIBLE
         // logo visibility becomes VISIBLE before Coil has finished decoding its drawable.
@@ -836,14 +636,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (image.width != imageWidth || image.height != imageHeight ||
             image.left != imageLeft || image.top != imageTop) {
             image.layout(imageLeft, imageTop, imageLeft + imageWidth, imageTop + imageHeight)
-            directLayouts++
         }
         val featherX = min(dp(112), imageWidth / 4)
         val featherY = min(dp(84), imageHeight / 4)
         edgeView.setFeather(featherX, featherY)
         placeEdge(edgeView, imageWidth, imageHeight, imageLeft, imageTop)
-        geometryNs += SystemClock.elapsedRealtimeNanos() - geometryStartNs
-        val titleStartNs = SystemClock.elapsedRealtimeNanos()
         // Avoid double-darkening the bottom: the built-in shadow covered the whole parent.
         shadow?.visibility = View.INVISIBLE
         // Enforce both the 36%-wide label and the actual FIT_CENTER image bounds.
@@ -900,7 +697,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 p.marginStart = groupLeft
                 p.topMargin = top
                 overlay.layoutParams = p
-                parameterChanges++
             }
             if (overlay.gravity != (if (foreignLogo) Gravity.CENTER else Gravity.START)) {
                 overlay.gravity = if (foreignLogo) Gravity.CENTER else Gravity.START
@@ -912,7 +708,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             showTitle(titleText.isNotEmpty() && !logoPending, hideOriginal = expectedLogo && !foreignLogo)
             if (iw > 0 && ih > 0 && image.alpha != originalPictureAlpha)
                 image.alpha = originalPictureAlpha
-            noteFirstReveal(image)
             if (hasLogo && logo?.alpha != originalLogoAlpha)
                 logo?.alpha = originalLogoAlpha
             // Cache only ready assets after their geometry has finished relayout.
@@ -921,12 +716,10 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 lastLayout = layoutKey(container, image)
             }
         }
-        titleNs += SystemClock.elapsedRealtimeNanos() - titleStartNs
     }
     fun stop() {
         if (!started) return
         started = false
-        stopDiagnostics()
         paletteJob?.cancel()
         paletteScope.cancel()
         trackedArtwork = null
