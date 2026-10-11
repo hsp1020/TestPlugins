@@ -898,6 +898,7 @@ class SettingsBottomFragment(
             dialogView.setPadding(dp(20), dp(20), dp(20), dp(20))
             
             val rv: RecyclerView = dialogView.findView("rvLinks")
+            rv.layoutManager = LinearLayoutManager(ctx)
             val tvNoLinks: TextView = dialogView.findView("tvNoLinks")
             // Measure the real row (including margins) so short lists have no empty viewport.
             val rowHeight by lazy {
@@ -927,7 +928,6 @@ class SettingsBottomFragment(
             } else {
                 tvNoLinks.visibility = View.GONE
                 rv.visibility = View.VISIBLE
-                rv.layoutManager = LinearLayoutManager(ctx)
 
                 val adapter = LinksAdapter(
                     items = list,
