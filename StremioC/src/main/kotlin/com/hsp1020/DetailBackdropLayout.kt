@@ -527,8 +527,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         splitFallback = false
         nativeRecoveryFrames = 0
         if (trailersEnabled) {
-            // Keep native artwork/trailer geometry; only overlay the narrow top scrim.
-            installTopScrim(context)
+            // Only correct the native title; do not touch trailer layout or overlays.
             portraitTitleOnly = true
             root.viewTreeObserver.addOnPreDrawListener(preDraw)
             updatePortraitTitle()
@@ -575,11 +574,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private fun update() {
         // An already-queued pre-draw can run after stop() removed the edge views.
         if (!started) return
-        if (portraitTitleOnly) {
-            resizeTopScrim(phoneHero?.height ?: 0)
-            updatePortraitTitle()
-            return
-        }
+        if (portraitTitleOnly) { updatePortraitTitle(); return }
         if (splitFallback) { revealRecoveredLayout(); return }
         val edgeView = edge ?: return
         val container = holder ?: return
