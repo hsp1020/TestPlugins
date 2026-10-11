@@ -1411,6 +1411,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             prefetchedAnimeMapping = speculativeImdbAnimeDeferred?.takeIf { hintedImdbId == res.id },
             prefetchedAnimeImdbId = hintedImdbId
         )
+        // The detail fragment keeps the originally requested URL (e.g. kitsu:...),
+        // while the returned metadata may use the mapped IMDb URL. Share the same
+        // logo visibility decisions under both exact keys without another request.
+        if (url != loadRes.url) {
+            fallbackLogoTitles[loadRes.url]?.let { fallbackLogoTitles[url] = it }
+            expectedLogoByUrl[loadRes.url]?.let { expectedLogoByUrl[url] = it }
+        }
         collectionDeferred?.cancel() // No remaining prefetch when the final media type differs.
 
         var actualMdbTarget = resolvedMdbTarget(res, resolvedTmdbId, resolvedImdbId)
@@ -3140,15 +3147,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val finalLogoFallback = if (tmdbData?.fetchedLogo.isNullOrBlank())
                 finalLogo != null else tmdbData?.fetchedLogoFallback == true
 
-            fun logLogoDecision(metaUrl: String) {
-                android.util.Log.d("StremioCLogoDiag",
-                    "phase=meta isAnime=$isAnimeMedia type=$finalType id=${this@CatalogEntry.id}" +
-                    " metaUrl=$metaUrl finalLogoFallback=$finalLogoFallback" +
-                    " logoPresent=${!finalLogo.isNullOrBlank()}" +
-                    " logoSource=${if (!tmdbData?.fetchedLogo.isNullOrBlank()) "tmdb" else "addon"}" +
-                    " title=${finalName.replace('\n', ' ').take(100)}")
-            }
-
             fun LoadResponse.attachMappedIds() {
                 finalAniId?.let { addAniListId(it) }
                 val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
@@ -3163,7 +3161,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
-                logLogoDecision(metaUrl)
                 val resolvedMovieId = if (finalType == "other" && finalVideos?.size == 1) {
                     finalVideos[0].id ?: movieId
                 } else {
@@ -3228,7 +3225,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
-                logLogoDecision(metaUrl)
                 val response = provider.newTvSeriesLoadResponse(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
                 ) {
