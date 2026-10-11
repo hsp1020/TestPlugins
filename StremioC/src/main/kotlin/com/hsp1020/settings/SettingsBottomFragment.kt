@@ -898,11 +898,29 @@ class SettingsBottomFragment(
             dialogView.setPadding(dp(20), dp(20), dp(20), dp(20))
             
             val rv: RecyclerView = dialogView.findView("rvLinks")
-            // Fit six compact rows on large screens without overflowing small displays.
-            rv.layoutParams.height = minOf(dp(450), (ctx.resources.displayMetrics.heightPixels * 0.62f).toInt()).coerceAtLeast(1)
             val tvNoLinks: TextView = dialogView.findView("tvNoLinks")
-            
+            // Measure the real row (including margins) so short lists have no empty viewport.
+            val rowHeight by lazy {
+                val row = inflater.inflate(res.getLayout(getCachedResId("item_saved_link", "layout")), rv, false)
+                row.measure(
+                    View.MeasureSpec.makeMeasureSpec(
+                        (ctx.resources.displayMetrics.widthPixels - dp(80)).coerceAtLeast(1),
+                        View.MeasureSpec.EXACTLY
+                    ),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+                )
+                val margins = row.layoutParams as? ViewGroup.MarginLayoutParams
+                (row.measuredHeight + (margins?.topMargin ?: 0) + (margins?.bottomMargin ?: 0)).coerceAtLeast(1)
+            }
+            fun resizeList(count: Int) {
+                val cap = minOf(dp(450), (ctx.resources.displayMetrics.heightPixels * 0.62f).toInt()).coerceAtLeast(1)
+                rv.layoutParams = rv.layoutParams.apply {
+                    height = if (count == 0) 0 else minOf(cap.toLong(), rowHeight.toLong() * count).toInt()
+                }
+            }
+
             val list = SettingsRepository.loadLinks(sharedPref)
+            resizeList(list.size)
             if (list.isEmpty()) {
                 tvNoLinks.visibility = View.VISIBLE
                 rv.visibility = View.GONE
@@ -920,6 +938,7 @@ class SettingsBottomFragment(
                         if (removed) {
                             SettingsRepository.saveLinks(sharedPref, updatedList)
                             (rv.adapter as? LinksAdapter)?.remove(itemToDelete)
+                            resizeList(updatedList.size)
                             showToast("Deleted")
                             if (updatedList.isEmpty()) {
                                 tvNoLinks.visibility = View.VISIBLE
