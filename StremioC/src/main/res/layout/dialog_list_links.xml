@@ -30,6 +30,8 @@
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rvLinks"
         android:layout_width="match_parent"
-        android:layout_height="400dp"
+        android:layout_height="450dp"
+        android:requiresFadingEdge="vertical"
+        android:fadingEdgeLength="40dp"
         android:scrollbars="vertical"/>
 </LinearLayout>

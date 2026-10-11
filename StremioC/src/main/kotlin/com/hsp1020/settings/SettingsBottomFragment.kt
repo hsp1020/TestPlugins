@@ -899,7 +899,7 @@ class SettingsBottomFragment(
             
             val rv: RecyclerView = dialogView.findView("rvLinks")
             // Fit six compact rows on large screens without overflowing small displays.
-            rv.layoutParams.height = minOf(dp(400), (ctx.resources.displayMetrics.heightPixels * 0.62f).toInt()).coerceAtLeast(1)
+            rv.layoutParams.height = minOf(dp(450), (ctx.resources.displayMetrics.heightPixels * 0.62f).toInt()).coerceAtLeast(1)
             val tvNoLinks: TextView = dialogView.findView("tvNoLinks")
             
             val list = SettingsRepository.loadLinks(sharedPref)
