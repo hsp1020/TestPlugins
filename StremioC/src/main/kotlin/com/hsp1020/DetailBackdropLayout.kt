@@ -6,6 +6,9 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Picture
+import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.Shader
@@ -78,21 +81,29 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     // Runs on Dispatchers.Default, not in the layout/pre-draw callback.
     private fun sampleArtwork(source: Bitmap): ArtworkColors? {
         if (source.isRecycled || source.width <= 0 || source.height <= 0) return null
+        val w = 72
+        val h = 40
         val hardware = android.os.Build.VERSION.SDK_INT >= 26 && source.config == Bitmap.Config.HARDWARE
-        if (hardware && source.byteCount > 12 * 1024 * 1024) return null
-        val software = if (hardware) source.copy(Bitmap.Config.ARGB_8888, false) ?: return null else source
-        try {
-            val w = 72
-            val h = 40
-            val thumb = Bitmap.createScaledBitmap(software, w, h, true)
+        // Hardware artwork is downsampled by the renderer before the small readback.
+        // Older devices / failing drivers retain the original bounded fallback.
+        val gpuThumb = if (hardware && android.os.Build.VERSION.SDK_INT >= 28) {
             try {
+                val recording = Picture()
+                val canvas = recording.beginRecording(w, h)
+                canvas.drawBitmap(source, null, Rect(0, 0, w, h), Paint(Paint.FILTER_BITMAP_FLAG))
+                recording.endRecording()
+                Bitmap.createBitmap(recording, w, h, Bitmap.Config.ARGB_8888)
+            } catch (_: Exception) { null }
+        } else null
+        if (hardware && gpuThumb == null && source.byteCount > 12 * 1024 * 1024) return null
+        val software = if (hardware && gpuThumb == null)
+            source.copy(Bitmap.Config.ARGB_8888, false) ?: return null else source
+        val thumb = gpuThumb ?: Bitmap.createScaledBitmap(software, w, h, true)
+        try {
                 val pixels = IntArray(w * h)
                 thumb.getPixels(pixels, 0, w, 0, 0, w, h)
-                val count = IntArray(4096)
-                val reds = IntArray(4096)
-                val greens = IntArray(4096)
-                val blues = IntArray(4096)
-                val side = Array(2) { LongArray(4) }
+                val bins = IntArray(4096 * 4)
+                val side = LongArray(8)
                 val total = LongArray(4)
                 for (i in pixels.indices) {
                     val pixel = pixels[i]
@@ -103,10 +114,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                     val x = i % w
                     val bucket = ((r shr 4) shl 8) or ((g shr 4) shl 4) or (b shr 4)
                     val weight = if (x >= w / 4 && x < 3 * w / 4) 2 else 1
-                    count[bucket] += weight
-                    reds[bucket] += r * weight
-                    greens[bucket] += g * weight
-                    blues[bucket] += b * weight
+                    val offset = bucket * 4
+                    bins[offset] += weight
+                    bins[offset + 1] += r * weight
+                    bins[offset + 2] += g * weight
+                    bins[offset + 3] += b * weight
                     total[0]++
                     total[1] += r.toLong()
                     total[2] += g.toLong()
@@ -115,36 +127,41 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                     if (region >= 0) {
                         val chroma = max(r, max(g, b)) - min(r, min(g, b))
                         val strength = 1L + chroma / 80
-                        side[region][0] += strength
-                        side[region][1] += strength * r
-                        side[region][2] += strength * g
-                        side[region][3] += strength * b
+                        val offset = region * 4
+                        side[offset] += strength
+                        side[offset + 1] += strength * r
+                        side[offset + 2] += strength * g
+                        side[offset + 3] += strength * b
                     }
                 }
                 if (total[0] == 0L) return null
-                fun average(a: LongArray, fallback: Int) = if (a[0] == 0L) fallback else
-                    Color.rgb((a[1] / a[0]).toInt(), (a[2] / a[0]).toInt(), (a[3] / a[0]).toInt())
-                val base = average(total, fadeColor)
+                fun average(a: LongArray, offset: Int, fallback: Int) =
+                    if (a[offset] == 0L) fallback else Color.rgb(
+                        (a[offset + 1] / a[offset]).toInt(),
+                        (a[offset + 2] / a[offset]).toInt(),
+                        (a[offset + 3] / a[offset]).toInt())
+                val base = average(total, 0, fadeColor)
                 var best = -1
                 var bestScore = -1L
-                for (i in count.indices) {
-                    if (count[i] == 0) continue
-                    val chroma = max(reds[i], max(greens[i], blues[i])) -
-                        min(reds[i], min(greens[i], blues[i]))
-                    val score = count[i].toLong() * (80 + chroma / count[i] / 2)
-                    if (score > bestScore) { bestScore = score; best = i }
+                for (i in 0 until 4096) {
+                    val offset = i * 4
+                    val count = bins[offset]
+                    if (count == 0) continue
+                    val chroma = max(bins[offset + 1], max(bins[offset + 2], bins[offset + 3])) -
+                        min(bins[offset + 1], min(bins[offset + 2], bins[offset + 3]))
+                    val score = count.toLong() * (80 + chroma / count / 2)
+                    if (score > bestScore) { bestScore = score; best = offset }
                 }
-                val prominent = if (best < 0) base else Color.rgb(reds[best] / count[best],
-                    greens[best] / count[best], blues[best] / count[best])
+                val prominent = if (best < 0) base else Color.rgb(
+                    bins[best + 1] / bins[best], bins[best + 2] / bins[best],
+                    bins[best + 3] / bins[best])
                 val center = blend(base, prominent, 0.45f)
-                val left = blend(average(side[0], center), center, 0.28f)
-                val right = blend(average(side[1], center), center, 0.28f)
+                val left = blend(average(side, 0, center), center, 0.28f)
+                val right = blend(average(side, 4, center), center, 0.28f)
                 return ArtworkColors(blend(left, fadeColor, 0.12f),
                     blend(center, fadeColor, 0.12f), blend(right, fadeColor, 0.12f))
-            } finally {
-                if (thumb !== software) thumb.recycle()
-            }
         } finally {
+            if (thumb !== software && thumb !== source) thumb.recycle()
             if (software !== source) software.recycle()
         }
     }
@@ -156,7 +173,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         else if (container.background !== appliedHolderBackground) return
         appliedHolderBackground = background
         container.background = background
-        edges.forEach { it.invalidate() }
+        edge?.invalidate()
     }
     private fun useThemeBackground(enabled: Boolean) {
         val container = holder ?: return
@@ -207,39 +224,68 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     }
     // Draw the holder's real background in its own coordinate space and smoothly
     // reveal it at the artwork's edges, without changing the Coil ImageView.
-    private class EdgeFadeView(private val frame: FrameLayout, private val side: Int) : View(frame.context) {
-        private val mask = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    // One view batches the original four edge strips. Each strip keeps its
+    // original narrow saveLayer and mask, avoiding a full-image GPU layer.
+    private class EdgeFadeView(private val frame: FrameLayout) : View(frame.context) {
+        private val masks = Array(4) { Paint(Paint.ANTI_ALIAS_FLAG).apply {
             xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+        } }
+        private val areas = Array(4) { RectF() }
+        private var featherX = 0
+        private var featherY = 0
+
+        fun setFeather(x: Int, y: Int) {
+            if (featherX == x && featherY == y) return
+            featherX = x
+            featherY = y
+            updateMasks()
+            invalidate()
         }
 
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
             super.onSizeChanged(w, h, oldw, oldh)
-            if (w <= 0 || h <= 0) { mask.shader = null; return }
+            updateMasks()
+        }
+
+        private fun updateMasks() {
+            val w = width
+            val h = height
+            if (w <= 0 || h <= 0 || featherX <= 0 || featherY <= 0) return
+            areas[0].set(0f, 0f, featherX.toFloat(), h.toFloat())
+            areas[1].set((w - featherX).toFloat(), 0f, w.toFloat(), h.toFloat())
+            areas[2].set(0f, 0f, w.toFloat(), featherY.toFloat())
+            areas[3].set(0f, (h - featherY).toFloat(), w.toFloat(), h.toFloat())
             val colors = intArrayOf(Color.WHITE, Color.argb(215, 255, 255, 255),
                 Color.argb(128, 255, 255, 255), Color.argb(40, 255, 255, 255), Color.TRANSPARENT)
             val stops = floatArrayOf(0f, 0.25f, 0.5f, 0.75f, 1f)
-            val x0 = if (side == 1) w.toFloat() else 0f
-            val y0 = if (side == 3) h.toFloat() else 0f
-            val x1 = if (side == 0) w.toFloat() else 0f
-            val y1 = if (side == 2) h.toFloat() else 0f
-            mask.shader = LinearGradient(x0, y0, x1, y1, colors, stops, Shader.TileMode.CLAMP)
+            for (i in 0..3) {
+                val rect = areas[i]
+                masks[i].shader = LinearGradient(
+                    if (i == 1) rect.right else rect.left,
+                    if (i == 3) rect.bottom else rect.top,
+                    if (i == 0) rect.right else rect.left,
+                    if (i == 2) rect.bottom else rect.top,
+                    colors, stops, Shader.TileMode.CLAMP)
+            }
         }
 
         override fun onDraw(canvas: Canvas) {
-            val backdrop = frame.background ?: return
-            if (width <= 0 || height <= 0 || mask.shader == null) return
-            // DST_IN is isolated to the edge strip; it cannot erase the image or logo.
-            val layer = canvas.saveLayer(0f, 0f, width.toFloat(), height.toFloat(), null)
-            val saved = canvas.save()
-            canvas.translate(-left.toFloat(), -top.toFloat())
-            backdrop.draw(canvas)
-            canvas.restoreToCount(saved)
-            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), mask)
-            canvas.restoreToCount(layer)
+            val background = frame.background ?: return
+            if (width <= 0 || height <= 0 || featherX <= 0 || featherY <= 0) return
+            for (i in 0..3) {
+                val rect = areas[i]
+                val layer = canvas.saveLayer(rect, null)
+                val save = canvas.save()
+                canvas.translate(-left.toFloat(), -top.toFloat())
+                background.draw(canvas)
+                canvas.restoreToCount(save)
+                canvas.drawRect(rect, masks[i])
+                canvas.restoreToCount(layer)
+            }
         }
     }
     private val originalShadowVisibility = shadow?.visibility
-    private val edges = mutableListOf<View>()
+    private var edge: EdgeFadeView? = null
     private var titleOverlay: TextView? = null
     private var baseTitlePaint: TextPaint? = null
     private var lastFitText = ""
@@ -265,7 +311,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             p.marginStart = left; p.topMargin = top; view.layoutParams = p
         }
     }
-    private fun placeEdge(view: View, width: Int, height: Int, left: Int, top: Int) {
+    private fun placeEdge(view: EdgeFadeView, width: Int, height: Int, left: Int, top: Int) {
         place(view, width, height, left, top)
         if (view.width != width || view.height != height || view.left != left || view.top != top) {
             view.layout(left, top, left + width, top + height)
@@ -354,7 +400,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (!splitMode()) { visibility(true); return }
         splitFallback = true // Do not re-enter the split layout and cause a visible jump.
         nativeRecoveryFrames = 0
-        edges.forEach { placeEdge(it, 0, 0, 0, 0) }
+        edge?.let { placeEdge(it, 0, 0, 0, 0) }
         restoreOriginalGeometry()
         // The restored native layoutParams must pass through measure/layout before
         // we reveal them; otherwise fallback itself can produce a visible jump.
@@ -418,10 +464,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         )
         fadeColor = try { colors.getColor(0, Color.BLACK) } finally { colors.recycle() }
         if (splitMode()) useThemeBackground(true)
-        repeat(4) { index ->
-            edges += EdgeFadeView(container, index).also {
-                container.addView(it, 1 + index, FrameLayout.LayoutParams(0, 0))
-            }
+        edge = EdgeFadeView(container).also {
+            container.addView(it, 1, FrameLayout.LayoutParams(0, 0))
         }
         titleOverlay = TextView(root.context).also { overlay ->
             title?.let {
@@ -454,7 +498,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (!started) return
         if (portraitTitleOnly) { updatePortraitTitle(); return }
         if (splitFallback) { revealRecoveredLayout(); return }
-        if (edges.size < 4) return
+        val edgeView = edge ?: return
         val container = holder ?: return
         val image = picture ?: return
         // A not-yet-measured tablet/TV is loading, not a failed layout.
@@ -484,7 +528,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             useThemeBackground(false)
             image.scaleType = originalScale ?: ImageView.ScaleType.CENTER_CROP
             originalPicture?.let { place(image, it.width, it.height, it.marginStart, it.topMargin) }
-            edges.forEach { placeEdge(it, 0, 0, 0, 0) }
+            edge?.let { placeEdge(it, 0, 0, 0, 0) }
             shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
             showTitle(false, hideOriginal = maskPortraitTitle())
             visibility(true)
@@ -538,10 +582,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         }
         val featherX = min(dp(112), imageWidth / 4)
         val featherY = min(dp(84), imageHeight / 4)
-        placeEdge(edges[0], featherX, imageHeight, imageLeft, imageTop)
-        placeEdge(edges[1], featherX, imageHeight, imageLeft + imageWidth - featherX, imageTop)
-        placeEdge(edges[2], imageWidth, featherY, imageLeft, imageTop)
-        placeEdge(edges[3], imageWidth, featherY, imageLeft, imageTop + imageHeight - featherY)
+        edgeView.setFeather(featherX, featherY)
+        placeEdge(edgeView, imageWidth, imageHeight, imageLeft, imageTop)
         // Avoid double-darkening the bottom: the built-in shadow covered the whole parent.
         shadow?.visibility = View.INVISIBLE
         // Enforce both the 36%-wide label and the actual FIT_CENTER image bounds.
@@ -626,7 +668,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         showTitle(false)
         titleOverlay?.let { holder?.removeView(it) }; titleOverlay = null
         baseTitlePaint = null
-        edges.forEach { holder?.removeView(it) }; edges.clear()
+        edge?.let { holder?.removeView(it) }; edge = null
         restoreOriginalGeometry()
         visibility(true)
     }
