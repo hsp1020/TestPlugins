@@ -204,6 +204,12 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             return
         }
         if (splitMode()) stage() // Hide both assets before their first native-layout draw.
+        // Use the host app's active theme color so the edge fade also matches light themes.
+        val colorAttr = context.resources.getIdentifier("primaryBlackBackground", "attr", context.packageName)
+        val colors = context.theme.obtainStyledAttributes(
+            intArrayOf(if (colorAttr != 0) colorAttr else android.R.attr.colorBackground)
+        )
+        val fadeColor = try { colors.getColor(0, Color.BLACK) } finally { colors.recycle() }
         val directions = listOf(
             GradientDrawable.Orientation.LEFT_RIGHT,
             GradientDrawable.Orientation.RIGHT_LEFT,
@@ -212,7 +218,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         )
         directions.forEachIndexed { index, direction ->
             edges += View(root.context).also {
-                it.background = GradientDrawable(direction, intArrayOf(Color.BLACK, Color.TRANSPARENT))
+                it.background = GradientDrawable(direction, intArrayOf(fadeColor, Color.TRANSPARENT))
                 container.addView(it, 1 + index, FrameLayout.LayoutParams(0, 0))
             }
         }
