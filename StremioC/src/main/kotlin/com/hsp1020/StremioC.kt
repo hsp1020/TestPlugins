@@ -1901,6 +1901,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 (if (season != null) "&season=$season" else "") +
                 (if (episode != null) "&episode=$episode" else "")
         }
+        val traceMal = (loadData.id?.startsWith("mal:") == true ||
+            loadData.originalKitsuId?.startsWith("mal:") == true) && season == null && episode == null
+        var mappingStatus = "no-result"
         val hosts = listOf(
             "aiostreams.elfhosted.com",
             "aiostreams.fortheweak.cloud",
@@ -1911,14 +1914,19 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         )
         for (host in hosts) {
             var noMapping = false
+            mappingStatus = "request-failed-or-invalid host=$host"
             val mapping = runSuspendCatching {
             val response = aioAnimeSession.get(
                 "https://$host/api/v1/anime?$query",
                 headers = mapOf("Cache-Control" to "no-cache, no-store", "Pragma" to "no-cache")
             ).text
             val root = parseJson<JsonNode>(response)
-            if (root.get("success")?.asBoolean() != true) return@runSuspendCatching null
+            if (root.get("success")?.asBoolean() != true) {
+                mappingStatus = "api-rejected host=$host"
+                return@runSuspendCatching null
+            }
             if (root.get("data")?.isNull == true) {
+                mappingStatus = "data-null host=$host"
                 noMapping = true
                 return@runSuspendCatching null
             }
@@ -1926,6 +1934,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val ids = data.get("mappings") ?: return@runSuspendCatching null
             val resolvedKitsu = ids.get("kitsuId").intOrNull()?.takeIf { it > 0 }?.toString()
             val resolvedImdb = ids.get("imdbId").textOrNull()
+            mappingStatus = "candidate-rejected host=$host mal=${ids.get("malId").intOrNull()} anilist=${ids.get("anilistId").intOrNull()} kitsu=$resolvedKitsu imdb=$resolvedImdb"
             if (byKitsu && resolvedKitsu != kitsuId) return@runSuspendCatching null
             if ((byMal || imdbId == null && kitsuId == null && malLookupId != null) &&
                 ids.get("malId").intOrNull() != malLookupId) return@runSuspendCatching null
@@ -1965,10 +1974,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 imdbSeason = data.get("imdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 },
                 traktSeason = data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
             )
-            }.getOrNull()
-            if (noMapping) return null
-            if (mapping != null) return mapping
+            }.onFailure { mappingStatus = "exception host=$host type=${it.javaClass.simpleName}" }.getOrNull()
+            if (noMapping) {
+                if (traceMal) com.lagradost.api.Log.d("StremioC", "animeId mappingQuery=$query mappingResult=$mappingStatus")
+                return null
+            }
+            if (mapping != null) {
+                if (traceMal) com.lagradost.api.Log.d("StremioC", "animeId mappingQuery=$query mappingResult=matched host=$host mal=${mapping.malId} anilist=${mapping.aniListId} kitsu=${mapping.kitsuId}")
+                return mapping
+            }
         }
+        if (traceMal) com.lagradost.api.Log.d("StremioC", "animeId mappingQuery=$query mappingResult=$mappingStatus")
         return null
     }
 
@@ -2666,6 +2682,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("_tmdbId") val tmdbIdExt: String? = null, 
         @JsonProperty("_malId") val malIdExt: String? = null,
         @JsonProperty("_kitsuId") val kitsuIdExt: String? = null,
+        @JsonProperty("_anilistId") val aniListIdExt: JsonNode? = null,
         @JsonProperty("poster") val poster: String? = null, 
         @JsonProperty("background") val background: String? = null, 
         @JsonProperty("logo") val logo: String? = null,
@@ -3178,6 +3195,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 ?: fetchedKitsuId?.toIntOrNull()?.takeIf { it > 0 }
                 ?: originalAnimeId?.takeIf { it.startsWith("kitsu:") }
                     ?.removePrefix("kitsu:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
+            if (originalAnimeId?.startsWith("mal:") == true) {
+                com.lagradost.api.Log.d("StremioC",
+                    "animeId requestedId=$originalAnimeId responseMetaId=${this@CatalogEntry.id} " +
+                    "secondaryMetaId=${detailedEntry.id} _anilistId=${(detailedEntry.aniListIdExt ?: this@CatalogEntry.aniListIdExt).textOrNull()} " +
+                    "mappingResult=mal=$finalMalId,anilist=$finalAniId,kitsu=$finalKitsuId imdbFallback=$useImdbSyncMapping")
+            }
 
             val cleanImdbId = finalImdbId?.let { idStr ->
                 val parts = idStr.split(":")
