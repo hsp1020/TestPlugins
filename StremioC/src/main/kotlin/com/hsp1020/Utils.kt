@@ -317,12 +317,14 @@ internal class RatingPlotImageHook(
                 .ifEmpty { fragment.arguments?.getString("name")?.trim().orEmpty() }
             if (query.isNotEmpty()) {
                 val id = root.resources.getIdentifier("navigation_search", "id", root.context.packageName)
+                val enter = root.resources.getIdentifier("enter_anim", "anim", root.context.packageName)
+                val exit = root.resources.getIdentifier("exit_anim", "anim", root.context.packageName)
                 if (id != 0) fragment.activity?.navigate(id, Bundle().apply {
                     putString("search_query", query)
                     putBoolean("stremioc_detail_search", true)
                 }, NavOptions.Builder()
-                    .setEnterAnim(0).setExitAnim(0)
-                    .setPopEnterAnim(android.R.anim.fade_in).setPopExitAnim(0)
+                    .setEnterAnim(enter).setExitAnim(exit)
+                    .setPopEnterAnim(enter).setPopExitAnim(exit)
                     .build())
             }
         }
