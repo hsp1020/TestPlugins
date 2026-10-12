@@ -154,7 +154,7 @@ internal class TrailerChooser(
                 gravity = Gravity.CENTER
                 setPadding(dp(14), 0, dp(14), 0)
                 background = GradientDrawable().apply {
-                    setColor(0x992B2C30.toInt())
+                    setColor(0x4D2B2C30.toInt())
                     cornerRadius = context.resources.getDimension(R.dimen.rounded_button_radius)
                 }
                 isClickable = true
