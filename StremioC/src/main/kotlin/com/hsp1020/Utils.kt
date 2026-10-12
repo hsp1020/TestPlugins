@@ -322,7 +322,7 @@ internal class RatingPlotImageHook(
                     putBoolean("stremioc_detail_search", true)
                 }, NavOptions.Builder()
                     .setEnterAnim(0).setExitAnim(0)
-                    .setPopEnterAnim(0).setPopExitAnim(0)
+                    .setPopEnterAnim(android.R.anim.fade_in).setPopExitAnim(0)
                     .build())
             }
         }
