@@ -1738,6 +1738,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
         runAllAsync(
             {
+                // Embedded streams add sources without suppressing regular /stream requests.
+                loadData.embeddedStreams?.let { json ->
+                    runSuspendCatching {
+                        parseJson<List<Stream>>(json).orEmpty().forEach { stream ->
+                            stream.runCallback(this@StremioC, name,
+                                stremioSubtitleCallback, subtitleCallback, wrappedCallback)
+                        }
+                    }.onFailure { it.printStackTrace() }
+                }
+            },
+            {
                 val request = streamRequest(targetType, primaryId, loadData.season, loadData.episode)
                 if (cleanBaseUrl.isNotBlank() && request != null) {
                     runSuspendCatching {
@@ -2519,7 +2530,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("malId") val malId: Int? = null,
         @JsonProperty("kitsuId") val kitsuId: String? = null,
         @JsonProperty("addonUrl") val addonUrl: String? = null,
-        @JsonProperty("originalKitsuId") val originalKitsuId: String? = null // Original kitsu: or mal: ID
+        @JsonProperty("originalKitsuId") val originalKitsuId: String? = null, // Original kitsu: or mal: ID
+        @JsonProperty("embeddedStreams") val embeddedStreams: String? = null
     )
     
     data class Manifest(val catalogs: List<Catalog>)
@@ -3234,7 +3246,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         originalTitle = tmdbData?.fetchedOriginalTitle,
                         englishTitle = tmdbData?.fetchedEnglishTitle,
                         addonUrl = provider.mainUrl,
-                        originalKitsuId = originalAnimeId
+                        originalKitsuId = originalAnimeId,
+                        embeddedStreams = finalVideos?.singleOrNull()?.embeddedStreamsJson()
                     )
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
@@ -3308,8 +3321,19 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("tvdb_id") val tvdb_id: Int? = null,
         @JsonProperty("imdbSeason") val imdbSeason: Int? = null,
         @JsonProperty("imdbEpisode") val imdbEpisode: Int? = null,
-        @JsonProperty("imdb_id") val imdb_id: String? = null
+        @JsonProperty("imdb_id") val imdb_id: String? = null,
+        @JsonProperty("streams") val streams: JsonNode? = null
     ) {
+        fun embeddedStreamsJson(): String? = streams?.takeIf { it.isArray && it.size() > 0 }?.let { node ->
+            runCatching {
+                parseJson<List<Stream>>(node.toString())?.map { stream ->
+                    if (stream.name == null && stream.title == null && stream.description == null)
+                        stream.copy(title = title ?: name)
+                    else stream
+                }?.toJson()
+            }.getOrNull()
+        }
+
         fun toEpisode(
             provider: StremioC, 
             type: String?, 
@@ -3361,7 +3385,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 malId = malId,
                 kitsuId = kitsuId,
                 addonUrl = addonUrl,
-                originalKitsuId = originalKitsuId
+                originalKitsuId = originalKitsuId,
+                embeddedStreams = embeddedStreamsJson()
             )) {
                 val rawTitle = this@Video.name ?: this@Video.title ?: "Episode $displayEpisode"
                 val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
