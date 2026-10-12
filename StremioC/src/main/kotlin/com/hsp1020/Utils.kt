@@ -24,12 +24,16 @@ import android.text.style.ImageSpan
 import android.view.View
 import android.view.ViewTreeObserver
 import android.widget.TextView
+import androidx.appcompat.widget.SearchView
+import androidx.navigation.NavOptions
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
+import com.lagradost.cloudstream3.ui.settings.Globals.PHONE
+import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import com.lagradost.cloudstream3.utils.UIHelper.navigate
 import kotlin.math.roundToInt
 private val QUALITY_REGEX = Regex("(\\d{3,4}[pP])")
@@ -228,7 +232,22 @@ internal class RatingPlotImageHook(
     private val fragmentCallback = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
             fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?
-        ) { runCatching { attach(f, v) } }
+        ) {
+            runCatching {
+                if (f.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment" &&
+                    f.arguments?.getBoolean("stremioc_detail_search") == true && isLayout(PHONE)) {
+                    val id = v.resources.getIdentifier("main_search", "id", v.context.packageName)
+                    if (id != 0) v.findViewById<SearchView>(id)?.let { search ->
+                        search.post {
+                            if (f.isAdded && f.view === v) {
+                                search.clearFocus()
+                                com.lagradost.cloudstream3.utils.UIHelper.hideKeyboard(search)
+                            }
+                        }
+                    }
+                } else attach(f, v)
+            }
+        }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
             watchers.remove(f)?.detach()
@@ -298,7 +317,13 @@ internal class RatingPlotImageHook(
                 .ifEmpty { fragment.arguments?.getString("name")?.trim().orEmpty() }
             if (query.isNotEmpty()) {
                 val id = root.resources.getIdentifier("navigation_search", "id", root.context.packageName)
-                if (id != 0) fragment.activity?.navigate(id, Bundle().apply { putString("search_query", query) })
+                if (id != 0) fragment.activity?.navigate(id, Bundle().apply {
+                    putString("search_query", query)
+                    putBoolean("stremioc_detail_search", true)
+                }, NavOptions.Builder()
+                    .setEnterAnim(0).setExitAnim(0)
+                    .setPopEnterAnim(0).setPopExitAnim(0)
+                    .build())
             }
         }
         private val searchPreDraw = ViewTreeObserver.OnPreDrawListener {
