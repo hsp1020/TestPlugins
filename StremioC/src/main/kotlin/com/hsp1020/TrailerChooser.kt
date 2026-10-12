@@ -45,6 +45,25 @@ import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.player.VideoGenerator
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.ui.result.VideoWatchState
+// Shared by the first trailer launch and subsequent playlist entries.
+private suspend fun extractTrailerMedia(youtubeId: String): Pair<List<ExtractorLink>, List<SubtitleData>> =
+    withContext(Dispatchers.IO) {
+        val links = Collections.synchronizedList(mutableListOf<ExtractorLink>())
+        val subtitles = Collections.synchronizedList(mutableListOf<SubtitleFile>())
+        com.hsp1020.youtube.YoutubeExtractor().getUrl(
+            "https://www.youtube.com/watch?v=$youtubeId",
+            null,
+            { subtitles.add(it) },
+            { links.add(it) }
+        )
+        synchronized(links) { links.toList() }
+            .filter { it.source == "YouTube" && it.type in setOf(
+                ExtractorLinkType.VIDEO, ExtractorLinkType.DASH, ExtractorLinkType.M3U8
+            ) }.distinctBy { it.url } to
+            synchronized(subtitles) { subtitles.toList() }
+                .distinctBy { it.url }.map { PlayerSubtitleHelper.getSubtitleData(it) }
+    }
+
 /** StremioC-only trailer picker: no fake episodes or modifications to player internals. */
 internal class TrailerChooser(
     private val fragment: Fragment,
@@ -274,28 +293,12 @@ internal class TrailerChooser(
         opening = true
         scope.launch {
             try {
-                val links = Collections.synchronizedList(mutableListOf<ExtractorLink>())
-                val subtitleFiles = Collections.synchronizedList(mutableListOf<SubtitleFile>())
-                withContext(Dispatchers.IO) {
-                    com.hsp1020.youtube.YoutubeExtractor().getUrl(
-                        "https://www.youtube.com/watch?v=" + entry.youtubeId,
-                        null,
-                        { subtitle -> subtitleFiles.add(subtitle) },
-                        { link -> links.add(link) }
-                    )
-                }
+                val (playable, subtitles) = extractTrailerMedia(entry.youtubeId)
                 if (!fragment.isAdded) return@launch
-                val playable = synchronized(links) { links.toList() }.filter {
-                    it.source == "YouTube" && it.type in setOf(
-                        ExtractorLinkType.VIDEO, ExtractorLinkType.DASH, ExtractorLinkType.M3U8
-                    )
-                }
                 if (playable.isEmpty()) {
                     toast(fragment.requireContext().getString(R.string.no_links_found_toast))
                     return@launch
                 }
-                val subtitles = synchronized(subtitleFiles) { subtitleFiles.toList() }
-                    .distinctBy { it.url }.map { PlayerSubtitleHelper.getSubtitleData(it) }
                 // Pass every MP4/HLS/DASH quality and track-bearing DASH MPD to the host player.
                 val selectedIndex = items.indexOf(entry).takeIf { it >= 0 } ?: return@launch
                 val heading = title?.text?.toString()?.trim().orEmpty()
@@ -305,7 +308,7 @@ internal class TrailerChooser(
                     GeneratorPlayer.newInstance(
                         TrailerPlaybackGenerator(
                             items.toList(), heading, selectedIndex,
-                            playable.distinctBy { it.url }, subtitles
+                            playable, subtitles
                         ), selectedIndex
                     )
                 )
@@ -392,22 +395,8 @@ internal class TrailerPlaybackGenerator(
     ): Boolean {
         val trailer = trailers.getOrNull(offset) ?: return false
         if (clearCache) cache.remove(offset)
-        val (links, subtitles) = cache[offset] ?: withContext(Dispatchers.IO) {
-            val extractedLinks = mutableListOf<ExtractorLink>()
-            val extractedSubs = mutableListOf<SubtitleFile>()
-            com.hsp1020.youtube.YoutubeExtractor().getUrl(
-                "https://www.youtube.com/watch?v=${trailer.youtubeId}",
-                null,
-                { extractedSubs.add(it) },
-                { extractedLinks.add(it) }
-            )
-            extractedLinks.filter {
-                it.source == "YouTube" && it.type in setOf(
-                    ExtractorLinkType.VIDEO, ExtractorLinkType.DASH, ExtractorLinkType.M3U8
-                )
-            }.distinctBy { it.url } to extractedSubs.distinctBy { it.url }
-                .map { PlayerSubtitleHelper.getSubtitleData(it) }
-        }.also { cache[offset] = it }
+        val (links, subtitles) = cache[offset] ?: extractTrailerMedia(trailer.youtubeId)
+            .also { cache[offset] = it }
 
         links.filter { it.type in sourceTypes }.forEach { callback(it to null) }
         subtitles.forEach(subtitleCallback)
