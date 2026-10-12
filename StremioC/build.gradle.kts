@@ -33,6 +33,7 @@ android {
 dependencies {
     implementation("com.google.android.material:material:1.13.0")
     compileOnly("androidx.navigation:navigation-common:2.9.8")
+    compileOnly("androidx.navigation:navigation-fragment:2.9.8")
 }
 
 cloudstream {
