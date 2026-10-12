@@ -685,7 +685,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     // The legacy anime-kitsu endpoint is removed. Reuse the single anime mapping
     // service for Kitsu/MAL identity resolution during detail loading, without caching.
-    private suspend fun resolveKitsuForLoad(id: String): AnimeSeasonMapping? {
+    private suspend fun resolveAnimeIdForLoad(id: String): AnimeSeasonMapping? {
         val kind = id.substringBefore(':')
         val value = id.substringAfter(':', "").substringBefore(':').toIntOrNull()
             ?.takeIf { it > 0 } ?: return null
@@ -1215,16 +1215,16 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val mdbEnabled = isIntegrationEnabled("mdblist_enabled", default = false)
         val directMdbHint = directMdbTarget(urlHint?.id, hintMediaType)
 
-        val hintedKitsuId = urlHint?.id?.takeIf { isKitsuOrMalId(it) }
-        val speculativeKitsuDeferred: Deferred<AnimeSeasonMapping?>? = hintedKitsuId?.let { id ->
-            async(Dispatchers.IO) { resolveKitsuForLoad(id) }
+        val hintedAnimeId = urlHint?.id?.takeIf { isKitsuOrMalId(it) }
+        val speculativeAnimeDeferred: Deferred<AnimeSeasonMapping?>? = hintedAnimeId?.let { id ->
+            async(Dispatchers.IO) { resolveAnimeIdForLoad(id) }
         }
 
         val speculativeMdbDeferred: Deferred<SpeculativeMdbResult?>? = when {
             !mdbEnabled || urlHint == null -> null
             directMdbHint != null -> launchMdbAttempt(directMdbHint)
-            speculativeKitsuDeferred != null -> async(Dispatchers.IO) {
-                val resolved = speculativeKitsuDeferred.await() ?: return@async null
+            speculativeAnimeDeferred != null -> async(Dispatchers.IO) {
+                val resolved = speculativeAnimeDeferred.await() ?: return@async null
                 val target = resolved.tmdbId?.toString()?.let { MdbTarget(it, true, hintMediaType) }
                     ?: resolved.imdbId?.let { MdbTarget(it, false, hintMediaType) }
                     ?: return@async null
@@ -1254,8 +1254,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     SpeculativeTmdbChain(null, tmdbId, hintMediaType, false, detail)
                 }
             }
-            speculativeKitsuDeferred != null -> async(Dispatchers.IO) {
-                val resolved = speculativeKitsuDeferred.await() ?: return@async null
+            speculativeAnimeDeferred != null -> async(Dispatchers.IO) {
+                val resolved = speculativeAnimeDeferred.await() ?: return@async null
                 val tmdbId = resolved.tmdbId?.toString()
                 if (!tmdbId.isNullOrBlank()) {
                     val detail = fetchTmdbDetailForLoad(tmdbId, hintMediaType)
@@ -1299,7 +1299,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             speculativeMdbDeferred?.cancel()
             speculativeTmdbDeferred?.cancel()
             // A rewritten IMDb meta ID does not invalidate the original anime ID lookup.
-            if (hintedKitsuId != requestedAnimeId) speculativeKitsuDeferred?.cancel()
+            if (hintedAnimeId != requestedAnimeId) speculativeAnimeDeferred?.cancel()
             // This lookup only depends on the IMDb ID, not movie/series type.
             if (hintedImdbId != res.id) speculativeImdbAnimeDeferred?.cancel()
         }
@@ -1328,10 +1328,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         var resolvedTmdbId: String? = null
 
         if (originalMappingId != null) {
-            val candidate = if (hintedKitsuId == originalMappingId && speculativeKitsuDeferred != null) {
-                speculativeKitsuDeferred.await()
+            val candidate = if (hintedAnimeId == originalMappingId && speculativeAnimeDeferred != null) {
+                speculativeAnimeDeferred.await()
             } else {
-                resolveKitsuForLoad(originalMappingId)
+                resolveAnimeIdForLoad(originalMappingId)
             }
             val resolved = candidate?.takeIf { mapping ->
                 when {
@@ -3179,14 +3179,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val imdbSyncMapping = detailSyncMapping?.await()
             val isAnimeMedia = isAnimeFromMetadata || imdbSyncMapping != null
 
+            val originalTrackerId = originalAnimeId?.substringAfter(':')?.substringBefore(':')
+                ?.toIntOrNull()?.takeIf { it > 0 }
             val finalMalId = imdbSyncMapping?.malId ?: fetchedMalId
-                ?: originalAnimeId?.takeIf { it.startsWith("mal:") }
-                    ?.removePrefix("mal:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
+                ?: originalTrackerId?.takeIf { originalAnimeId?.startsWith("mal:") == true }
             val finalAniId = imdbSyncMapping?.aniListId ?: fetchedAniListId
             val finalKitsuId = imdbSyncMapping?.kitsuId?.toIntOrNull()?.takeIf { it > 0 }
                 ?: fetchedKitsuId?.toIntOrNull()?.takeIf { it > 0 }
-                ?: originalAnimeId?.takeIf { it.startsWith("kitsu:") }
-                    ?.removePrefix("kitsu:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
+                ?: originalTrackerId?.takeIf { originalAnimeId?.startsWith("kitsu:") == true }
             val cleanImdbId = finalImdbId?.let { idStr ->
                 val parts = idStr.split(":")
                 if (idStr.startsWith("kitsu:") || idStr.startsWith("mal:") || idStr.startsWith("tmdb:")) {
