@@ -307,7 +307,7 @@ internal class RatingPlotImageHook(
 
     private fun holdDetailReveal(search: Fragment) {
         if (search.arguments?.getBoolean("stremioc_detail_search") != true) return
-        val activity = search.activity as? MainActivity ?: return
+        val activity = search.activity ?: return
         fun find(name: String): View? {
             val id = activity.resources.getIdentifier(name, "id", activity.packageName)
             return if (id == 0) null else activity.findViewById<View>(id)
