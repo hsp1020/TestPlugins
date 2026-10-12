@@ -15,7 +15,6 @@ import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.preference.PreferenceManager
 import com.google.android.material.bottomsheet.BottomSheetDialog
-import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.ui.player.ExtractorLinkGenerator
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
@@ -183,18 +182,11 @@ internal class TrailerChooser(
         opening = true
         scope.launch {
             try {
-                val provider = APIHolder.allProviders.firstOrNull {
-                    it.name == "YouTube" && it.javaClass.name == "com.hsp1020.youtube.YoutubeProvider"
-                }
-                if (provider == null) {
-                    toast("YouTube 플러그인을 먼저 설치·활성화해 주세요.")
-                    return@launch
-                }
                 val links = Collections.synchronizedList(mutableListOf<ExtractorLink>())
                 withContext(Dispatchers.IO) {
-                    provider.loadLinks(
+                    com.hsp1020.youtube.YoutubeExtractor().getUrl(
                         "https://www.youtube.com/watch?v=" + entry.youtubeId,
-                        false,
+                        null,
                         { _ -> },
                         { link -> links.add(link) }
                     )

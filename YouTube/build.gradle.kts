@@ -21,3 +21,8 @@ cloudstream {
 
     isCrossPlatform = false
 }
+
+// Compile the shared extractor into this plugin's own classes.dex.
+android {
+    sourceSets.getByName("main").java.srcDir(rootProject.file("SharedYouTube/src/main/kotlin"))
+}

@@ -516,9 +516,9 @@ open class YoutubeExtractor : ExtractorApi() {
     ): Triple<JSONObject?, Long, String> = withContext(Dispatchers.IO) {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         val context = CloudStreamApp.context
-        val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
-        val prefs = (provider as? YoutubeProvider)?.appPrefs 
-            ?: context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
+        // Shared extractor must work without the YouTube provider being installed.
+        // Preserve the existing YouTube plugin's named preferences when it is installed.
+        val prefs = context?.getSharedPreferences("YouTube", android.content.Context.MODE_PRIVATE)
         
         val langCode = prefs?.getString("youtube_language", "en") ?: "en"
         val countryCode = java.util.Locale.getDefault().country.ifEmpty { "US" }
