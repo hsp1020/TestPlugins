@@ -47,6 +47,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private val title = find("result_title") as? TextView
     private val tvColumn = if (tv)
         ((find("result_finish_loading") as? ViewGroup)?.getChildAt(0) as? ViewGroup)?.getChildAt(0) else null
+    private val tvScroll = if (tv) find("result_finish_loading") else null
     private val originalHeroHeight = phoneHero?.layoutParams?.height
     private val originalHolderHeight = holder?.layoutParams?.height
     private val originalPicture = (picture?.layoutParams as? FrameLayout.LayoutParams)?.let { FrameLayout.LayoutParams(it) }
@@ -343,6 +344,15 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     }
     private val density = root.resources.displayMetrics.density
     private fun dp(v: Int) = (v * density).roundToInt()
+    private fun syncTvScroll(container: FrameLayout) {
+        val offset = tvScroll?.scrollY?.toFloat() ?: return
+        val target = -offset
+        if (container.translationY != target) container.translationY = target
+    }
+    private fun restoreTvScroll() {
+        val offset = tvScroll?.scrollY?.toFloat() ?: return
+        holder?.let { if (it.translationY == -offset) it.translationY = -offset * 0.8f }
+    }
     private fun height(view: View?, value: Int) {
         val p = view?.layoutParams ?: return
         if (p.height != value) { p.height = value; view.layoutParams = p }
@@ -420,6 +430,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         titleOverlay?.visibility = View.GONE
     }
     private fun restoreOriginalGeometry() {
+        restoreTvScroll()
         shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
         originalHeroHeight?.let { height(phoneHero, it) }
         originalHolderHeight?.let { height(holder, it) }
@@ -550,6 +561,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val image = picture ?: return
         // A not-yet-measured tablet/TV is loading, not a failed layout.
         if (container.width <= 0 || root.width <= 0) return
+        if (tv) syncTvScroll(container)
         val landscape = root.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val tablet = root.resources.configuration.smallestScreenWidthDp >= 600
         val split = tv || landscape || tablet
