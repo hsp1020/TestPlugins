@@ -49,8 +49,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private val originalHeroHeight = phoneHero?.layoutParams?.height
     private val originalHolderHeight = holder?.layoutParams?.height
     private val originalHolderClip = holder?.clipBounds?.let { Rect(it) }
-    private val tvHolderPos = IntArray(2)
-    private val tvContentPos = IntArray(2)
     private val tvClip = Rect()
     private val originalPicture = (picture?.layoutParams as? FrameLayout.LayoutParams)?.let { FrameLayout.LayoutParams(it) }
     private val originalScale = picture?.scaleType
@@ -354,10 +352,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private fun clipTvBackdrop(container: FrameLayout) {
         val column = tvColumn ?: return
         if (column.height <= 0) return
-        container.getLocationOnScreen(tvHolderPos)
-        column.getLocationOnScreen(tvContentPos)
-        // One-pixel guard against independent screen-coordinate rounding.
-        val bottom = (tvContentPos[1] - tvHolderPos[1] - 1).coerceIn(0, container.height)
+        // The TV scroll view moves the content column in screen coordinates.
+        // Clip at its unscrolled top margin instead, so scrolling or dialog
+        // focus changes cannot cut off the fixed backdrop and logo.
+        val contentTop = (column.layoutParams as? ViewGroup.MarginLayoutParams)?.topMargin ?: return
+        val bottom = (contentTop - 1).coerceIn(0, container.height)
         tvClip.set(0, 0, container.width, bottom)
         originalHolderClip?.let { if (!tvClip.intersect(it)) tvClip.set(0, 0, 0, 0) }
         if (container.clipBounds != tvClip) container.clipBounds = Rect(tvClip)
