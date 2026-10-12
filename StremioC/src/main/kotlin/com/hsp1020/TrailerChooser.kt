@@ -1,7 +1,8 @@
 package com.hsp1020
 
+import android.content.res.ColorStateList
 import android.graphics.Color
-import android.graphics.drawable.GradientDrawable
+import android.graphics.Typeface
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
@@ -15,9 +16,12 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.content.res.ResourcesCompat
 import androidx.fragment.app.Fragment
 import androidx.preference.PreferenceManager
 import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.google.android.material.chip.Chip
+import com.google.android.material.chip.ChipDrawable
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.ui.player.PlayerSubtitleHelper
@@ -148,22 +152,21 @@ internal class TrailerChooser(
         val hero = if (id != 0) root.findViewById<FrameLayout>(id) else null
         if (hero == null) return
         if (button == null) {
-            button = TextView(context).apply {
+            button = Chip(context).apply {
+                // Use the exact genre-tag Chip style, preserving its font size, padding and shape.
+                setChipDrawable(ChipDrawable.createFromAttributes(context, null, 0, R.style.ChipFilled))
+                chipSurfaceColor = ColorStateList.valueOf(Color.TRANSPARENT)
+                chipBackgroundColor = ColorStateList.valueOf(0x4D2B2C30.toInt())
                 setTextColor(Color.WHITE)
-                textSize = 13f
-                gravity = Gravity.CENTER
-                setPadding(dp(14), 0, dp(14), 0)
-                background = GradientDrawable().apply {
-                    setColor(0x4D2B2C30.toInt())
-                    cornerRadius = context.resources.getDimension(R.dimen.rounded_button_radius)
-                }
+                typeface = Typeface.create(ResourcesCompat.getFont(context, R.font.google_sans), Typeface.BOLD)
+                isCheckable = false
                 isClickable = true
                 isFocusable = true
-                elevation = dp(4).toFloat()
                 setOnClickListener { showPicker() }
             }.also {
                 hero.addView(it, FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(40), Gravity.TOP or Gravity.END
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP or Gravity.END
                 ).apply { topMargin = dp(16); marginEnd = dp(16) })
             }
         }
@@ -172,7 +175,7 @@ internal class TrailerChooser(
 
     private fun updatePhoneLabel() {
         val label = root.context.getString(R.string.trailer)
-        button?.text = "▶  $label (${items.size})"
+        button?.text = "$label (${items.size})"
         button?.contentDescription = "${root.context.getString(R.string.play_trailer_button)} (${items.size})"
     }
 
