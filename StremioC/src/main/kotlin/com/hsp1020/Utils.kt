@@ -22,6 +22,7 @@ import android.text.Spanned
 import android.text.TextWatcher
 import android.text.style.ImageSpan
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.TextView
 import androidx.appcompat.widget.SearchView
@@ -229,24 +230,50 @@ internal class RatingPlotImageHook(
             watchers.values.toList().forEach { runCatching { it.render() } }
         }
     }
+    // Detail-initiated search stays full-screen so nav chrome does not resize the page on back.
+    private fun hideDetailSearchNavigation(f: Fragment) {
+        if (f.javaClass.name != "com.lagradost.cloudstream3.ui.search.SearchFragment" ||
+            f.arguments?.getBoolean("stremioc_detail_search") != true) return
+        val activity = f.activity as? MainActivity ?: return
+        fun find(name: String): View? {
+            val id = activity.resources.getIdentifier(name, "id", activity.packageName)
+            return if (id == 0) null else activity.findViewById(id)
+        }
+        find("nav_view")?.visibility = View.GONE
+        find("nav_rail_view")?.visibility = View.GONE
+        find("nav_host_fragment")?.let { hostView ->
+            val params = hostView.layoutParams as? ViewGroup.MarginLayoutParams ?: return@let
+            if (params.marginStart != 0) {
+                params.marginStart = 0
+                hostView.layoutParams = params
+            }
+        }
+    }
     private val fragmentCallback = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
             fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?
         ) {
             runCatching {
                 if (f.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment" &&
-                    f.arguments?.getBoolean("stremioc_detail_search") == true && isLayout(PHONE)) {
-                    val id = v.resources.getIdentifier("main_search", "id", v.context.packageName)
-                    if (id != 0) v.findViewById<SearchView>(id)?.let { search ->
-                        search.post {
-                            if (f.isAdded && f.view === v) {
-                                search.clearFocus()
-                                com.lagradost.cloudstream3.utils.UIHelper.hideKeyboard(search)
+                    f.arguments?.getBoolean("stremioc_detail_search") == true) {
+                    hideDetailSearchNavigation(f)
+                    if (isLayout(PHONE)) {
+                        val id = v.resources.getIdentifier("main_search", "id", v.context.packageName)
+                        if (id != 0) v.findViewById<SearchView>(id)?.let { search ->
+                            search.post {
+                                if (f.isAdded && f.view === v) {
+                                    search.clearFocus()
+                                    com.lagradost.cloudstream3.utils.UIHelper.hideKeyboard(search)
+                                }
                             }
                         }
                     }
                 } else attach(f, v)
             }
+        }
+
+        override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
+            runCatching { hideDetailSearchNavigation(f) }
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
