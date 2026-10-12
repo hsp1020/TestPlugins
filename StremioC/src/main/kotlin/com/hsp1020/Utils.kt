@@ -211,10 +211,9 @@ internal class RatingPlotImageHook(
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
 
-    // Keep the native Activity-scoped SearchViewModel's results visible when its Fragment is recreated.
+    // Retain the last result without re-querying when the host recreates SearchFragment.
     private var lastSearchQuery: String? = null
     private var stremioSearchSession = false
-    private var freshSearchPending = false
     private var homeMenuOwner: Fragment? = null
     private var homeMenuItems = emptyList<android.view.MenuItem>()
 
@@ -226,50 +225,36 @@ internal class RatingPlotImageHook(
     }
 
     private fun setupSearchNavigation(f: Fragment, root: View) {
-        val marked = f.arguments?.getBoolean("stremioc_detail_search") == true
-        if (!marked && !stremioSearchSession) return
-        stremioSearchSession = true
-        val fresh = marked && freshSearchPending
-        freshSearchPending = false
+        if (!stremioSearchSession) return
         val activity = f.activity ?: return
         fun id(name: String) = root.resources.getIdentifier(name, "id", root.context.packageName)
-        val searchView = id("main_search").takeIf { it != 0 }?.let { root.findViewById<SearchView>(it) }
-        if (!fresh && searchView?.query.isNullOrEmpty() &&
-            f.arguments?.getString("search_query").isNullOrBlank() &&
+        if (f.arguments?.getString("search_query").isNullOrBlank() &&
             MainActivity.nextSearchQuery.isNullOrBlank()) {
-            lastSearchQuery?.let { searchView?.setQuery(it, false) }
+            root.findViewById<SearchView>(id("main_search"))?.let { search ->
+                if (search.query.isNullOrBlank()) lastSearchQuery?.let { search.setQuery(it, false) }
+            }
         }
-
         val homeId = id("navigation_home")
         val searchId = id("navigation_search")
-        val hostId = id("nav_host_fragment")
-        if (homeId == 0 || searchId == 0 || hostId == 0) return
-        val navHost = activity.supportFragmentManager.findFragmentById(hostId)
+        if (homeId == 0 || searchId == 0) return
+        val navHost = activity.supportFragmentManager.findFragmentById(id("nav_host_fragment"))
             as? androidx.navigation.fragment.NavHostFragment ?: return
         releaseHomeMenu()
         homeMenuOwner = f
         homeMenuItems = listOf("nav_view", "nav_rail_view").mapNotNull { name ->
-            val barId = id(name)
-            val bar = if (barId == 0) null else activity.findViewById<NavigationBarView>(barId)
-            bar?.menu?.findItem(homeId)?.apply {
+            activity.findViewById<NavigationBarView>(id(name))?.menu?.findItem(homeId)?.apply {
                 setOnMenuItemClickListener {
                     if (!f.isAdded || f.view !== root ||
-                        navHost.navController.currentDestination?.id != searchId) {
+                        navHost.navController.currentDestination?.id != searchId) return@setOnMenuItemClickListener false
+                    runCatching {
+                        val nav = navHost.navController
+                        if (!nav.popBackStack(homeId, false, false))
+                            nav.navigate(homeId, null, NavOptions.Builder()
+                                .setLaunchSingleTop(true).setRestoreState(false).build())
+                        true
+                    }.getOrElse { error ->
+                        android.util.Log.e("StremioCNavMenu", "HOME navigation failed", error)
                         false
-                    } else {
-                        runCatching {
-                            val nav = navHost.navController
-                            if (!nav.popBackStack(homeId, false, false)) {
-                                nav.navigate(homeId, null, NavOptions.Builder()
-                                    .setLaunchSingleTop(true)
-                                    .setRestoreState(false)
-                                    .build())
-                            }
-                            true
-                        }.getOrElse { e ->
-                            android.util.Log.e("StremioCNavMenu", "HOME navigation failed", e)
-                            false
-                        }
                     }
                 }
             }
@@ -342,6 +327,12 @@ internal class RatingPlotImageHook(
     }
 
     private val fragmentCallback = object : FragmentManager.FragmentLifecycleCallbacks() {
+        override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
+            if (stremioSearchSession &&
+                f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
+                resetSearchState()
+        }
+
         override fun onFragmentViewCreated(
             fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?
         ) {
@@ -390,7 +381,6 @@ internal class RatingPlotImageHook(
     private fun resetSearchState() {
         releaseHomeMenu()
         stremioSearchSession = false
-        freshSearchPending = false
         lastSearchQuery = null
     }
 
@@ -462,7 +452,6 @@ internal class RatingPlotImageHook(
             if (id == 0) return
             val activity = fragment.activity ?: return
             stremioSearchSession = true
-            freshSearchPending = true
             lastSearchQuery = query
             activity.navigate(id, Bundle().apply {
                 putString("search_query", query)
