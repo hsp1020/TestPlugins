@@ -202,12 +202,12 @@ internal class TrailerChooser(
         })
         val scroll = ScrollView(activity)
         val rows = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
-        items.forEach { entry ->
+        items.forEachIndexed { index, entry ->
             val row = LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                minimumHeight = dp(78)
-                setPadding(dp(4), dp(6), dp(4), dp(6))
+                minimumHeight = dp(88)
+                setPadding(dp(4), dp(10), dp(4), dp(10))
                 isClickable = true
                 isFocusable = true
                 val focusBackground = TypedValue()
@@ -218,17 +218,31 @@ internal class TrailerChooser(
                     play(entry)
                 }
             }
-            row.addView(ImageView(activity).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
-                loadImage("https://i.ytimg.com/vi/" + entry.youtubeId + "/hqdefault.jpg")
-            }, LinearLayout.LayoutParams(dp(112), dp(63)))
+            val thumbnail = FrameLayout(activity).apply {
+                addView(ImageView(activity).apply {
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    loadImage("https://i.ytimg.com/vi/" + entry.youtubeId + "/hqdefault.jpg")
+                }, FrameLayout.LayoutParams(dp(112), dp(63)))
+                addView(TextView(activity).apply {
+                    text = "▶"
+                    textSize = 16f
+                    gravity = Gravity.CENTER
+                    setTextColor(foreground)
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        shape = android.graphics.drawable.GradientDrawable.OVAL
+                        setColor(0xB3000000.toInt())
+                    }
+                }, FrameLayout.LayoutParams(dp(36), dp(36), Gravity.CENTER))
+            }
+            row.addView(thumbnail, LinearLayout.LayoutParams(dp(112), dp(63)))
             val labels = LinearLayout(activity).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(12), 0, dp(6), 0)
             }
             labels.addView(TextView(activity).apply {
-                text = entry.title
+                text = "${index + 1}. ${entry.title}"
                 textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
                 maxLines = 2
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 setTextColor(foreground)
@@ -237,21 +251,15 @@ internal class TrailerChooser(
                 text = (if (entry.type.equals("Trailer", true)) activity.getString(R.string.trailer) else entry.type) +
                     (localizedLanguage(entry.language)?.let { " · " + it } ?: "")
                 textSize = 12f
-                setTextColor(themeColor("textColor", 0xFFAAAAAA.toInt()))
-                alpha = 0.7f
+                setTextColor(0xFFAAAAAA.toInt())
             })
             row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            row.addView(TextView(activity).apply {
-                text = "▶"
-                textSize = 18f
-                setTextColor(foreground)
-            })
             rows.addView(row)
         }
         scroll.addView(rows)
         list.addView(scroll, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            minOf(dp(78) * items.size + dp(1), (activity.resources.displayMetrics.heightPixels * 0.6f).toInt())
+            minOf(dp(88) * items.size + dp(1), (activity.resources.displayMetrics.heightPixels * 0.6f).toInt())
         ))
         dialog = BottomSheetDialog(activity).apply {
             setContentView(list)

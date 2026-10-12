@@ -107,6 +107,15 @@ private fun JsonNode?.intOrNull(): Int? {
 }
 
 // Query configured-language and English logos in the existing TMDB detail call.
+private fun tmdbTrailerLanguages(): List<String> {
+    val configured = CloudStreamApp.context
+        ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+        ?.getString("tmdb_language_code", "en-US")
+        ?.trim()?.replace('_', '-')?.takeIf { it.isNotEmpty() } ?: "en-US"
+    return listOf(configured, configured.substringBefore('-'), "en")
+        .distinctBy { it.lowercase() }
+}
+
 private fun tmdbLogoLanguages(): String {
     val preferred = CloudStreamApp.context
         ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
@@ -732,8 +741,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         } else {
             "content_ratings,credits,images,videos,external_ids,recommendations,translations"
         }
+        val videoLanguages = if (mediaType == "tv") arrayOf(
+            "include_video_language" to tmdbTrailerLanguages().joinToString(",")
+        ) else emptyArray()
         val detailUrl = buildTmdbUrl("/$mediaType/$tmdbId",
-            "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages())
+            "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages(),
+            *videoLanguages)
         val cached = tmdbDetailsCache[detailUrl]
         val result: TmdbDetailResponse? = if (cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL) {
             cached.first
@@ -2740,8 +2753,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             var fetchedRecommendations: List<SearchResponse>? = null
             
             val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
+            val videoLanguages = if (tmdbMediaType == "tv") arrayOf(
+                "include_video_language" to tmdbTrailerLanguages().joinToString(",")
+            ) else emptyArray()
             val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr",
-                "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages())
+                "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages(),
+                *videoLanguages)
             val cacheKey = detailUrl
             val cached = tmdbDetailsCache[cacheKey]
             val detailRes = preFetchedDetail ?: if (cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL) {
@@ -2874,15 +2891,27 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 ActorData(Actor(actorName, profileImg), roleString = cast.character)
             } ?: emptyList()
 
-            val fetchedTrailers = detailRes.videos?.results.orEmpty()
+            val trailerLanguages = tmdbTrailerLanguages()
+            val rankedTrailers = detailRes.videos?.results.orEmpty()
                 .filter { (it.type == "Trailer" || it.type == "Teaser") && it.site.equals("YouTube", true) }
+                .mapNotNull { item ->
+                    val rank = trailerLanguages.indexOfFirst { locale ->
+                        item.language.equals(locale.substringBefore('-'), true) &&
+                            (!locale.contains('-') || item.region.equals(locale.substringAfter('-'), true))
+                    }
+                    if (rank < 0 || parseTrailerYoutubeId(item.key) == null) null else rank to item
+                }
+            val bestLanguage = rankedTrailers.minOfOrNull { it.first }
+            val fetchedTrailers = rankedTrailers.asSequence()
+                .filter { it.first == bestLanguage }
+                .map { it.second }
                 .sortedWith(compareBy({ if (it.type == "Trailer") 0 else 1 }, { it.publishedAt ?: "9999-12-31" }))
                 .mapNotNull { item ->
                     parseTrailerYoutubeId(item.key)?.let { id ->
                         TrailerChoice(id, item.name?.takeIf { it.isNotBlank() } ?: (item.type ?: "Trailer"),
                             item.type ?: "Trailer", item.language)
                     }
-                }.distinctBy { it.youtubeId }.take(30)
+                }.distinctBy { it.youtubeId }.take(30).toList()
 
             val translationData = detailRes.translations?.translations?.firstOrNull { 
                 it.iso_3166_1 == "US" || it.iso_639_1 == "en" 
@@ -3638,7 +3667,8 @@ data class Trailers(
     @JsonProperty("published_at") val publishedAt: String? = null,
     @JsonProperty("site") val site: String? = null,
     @JsonProperty("name") val name: String? = null,
-    @JsonProperty("iso_639_1") val language: String? = null
+    @JsonProperty("iso_639_1") val language: String? = null,
+    @JsonProperty("iso_3166_1") val region: String? = null
 )
 data class ResultsTrailer(@JsonProperty("results") val results: ArrayList<Trailers>? = arrayListOf())
 data class ExternalIds(@JsonProperty("imdb_id") val imdb_id: String? = null, @JsonProperty("tvdb_id") val tvdb_id: String? = null)
