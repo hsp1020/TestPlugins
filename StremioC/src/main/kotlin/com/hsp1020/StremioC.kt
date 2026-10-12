@@ -369,7 +369,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         const val HOME_FOREGROUND_CONCURRENCY = 10
         const val HOME_FOREGROUND_PER_HOST_CONCURRENCY = 10
         private val homeForegroundSemaphore = Semaphore(HOME_FOREGROUND_CONCURRENCY)
-        private const val HOME_SLOW_REQUEST_LOG_MS = 1_500L
 
         private class CatalogHttpException(val statusCode: Int) :
             IllegalStateException("Catalog HTTP $statusCode")
@@ -452,7 +451,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 .url(url)
                 .apply { app.defaultHeaders.forEach { (name, value) -> header(name, value) } }
                 .build()
-            val startedAt = System.currentTimeMillis()
             return suspendCancellableCoroutine { continuation ->
                 val call = homeForegroundClient.newCall(request)
                 continuation.invokeOnCancellation { call.cancel() }
@@ -482,10 +480,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                                 if (!res.isSuccessful) throw CatalogHttpException(res.code)
                                 res.body?.string() ?: throw IllegalStateException("Empty catalog response body")
                             }
-                        }
-                        val elapsed = System.currentTimeMillis() - startedAt
-                        if (elapsed >= HOME_SLOW_REQUEST_LOG_MS) {
-                            com.lagradost.api.Log.d("StremioC", "home slow host=$host ms=$elapsed")
                         }
                         if (continuation.isActive) continuation.resumeWith(outcome)
                     }
