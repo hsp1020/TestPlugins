@@ -47,9 +47,12 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private val title = find("result_title") as? TextView
     private val tvColumn = if (tv)
         ((find("result_finish_loading") as? ViewGroup)?.getChildAt(0) as? ViewGroup)?.getChildAt(0) else null
-    private val tvScroll = if (tv) find("result_finish_loading") else null
     private val originalHeroHeight = phoneHero?.layoutParams?.height
     private val originalHolderHeight = holder?.layoutParams?.height
+    private val originalHolderClip = holder?.clipBounds?.let { Rect(it) }
+    private val tvHolderPos = IntArray(2)
+    private val tvContentPos = IntArray(2)
+    private val tvClip = Rect()
     private val originalPicture = (picture?.layoutParams as? FrameLayout.LayoutParams)?.let { FrameLayout.LayoutParams(it) }
     private val originalScale = picture?.scaleType
     private val originalMatrix = picture?.imageMatrix?.let(::Matrix)
@@ -193,17 +196,19 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         } else {
             val horizontal = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
                 intArrayOf(colors.left, colors.center, colors.right))
-            val bottom = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(Color.TRANSPARENT, fadeColor))
-            // Keep the bottom scrim at 3% of the current banner height (API 21+).
-            replaceBackground(object : LayerDrawable(arrayOf(horizontal, bottom)) {
-                override fun onBoundsChange(bounds: Rect) {
-                    super.onBoundsChange(bounds)
-                    val fadeHeight = (bounds.height() * 0.03f).roundToInt()
-                    getDrawable(1).setBounds(bounds.left,
-                        (bounds.bottom - fadeHeight).coerceAtLeast(bounds.top), bounds.right, bounds.bottom)
-                }
-            })
+            if (tv) replaceBackground(horizontal) else {
+                val bottom = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                    intArrayOf(Color.TRANSPARENT, fadeColor))
+                // Keep the original bottom scrim for phone/tablet.
+                replaceBackground(object : LayerDrawable(arrayOf(horizontal, bottom)) {
+                    override fun onBoundsChange(bounds: Rect) {
+                        super.onBoundsChange(bounds)
+                        val fadeHeight = (bounds.height() * 0.03f).roundToInt()
+                        getDrawable(1).setBounds(bounds.left,
+                            (bounds.bottom - fadeHeight).coerceAtLeast(bounds.top), bounds.right, bounds.bottom)
+                    }
+                })
+            }
         }
     }
     private fun paletteBitmap(drawable: Drawable?): Bitmap? {
@@ -285,6 +290,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         }
     }
     private val originalShadowVisibility = shadow?.visibility
+    private val originalShadowParams = (shadow?.layoutParams as? FrameLayout.LayoutParams)?.let { FrameLayout.LayoutParams(it) }
+    private val originalShadowY = shadow?.translationY ?: 0f
     private var edge: EdgeFadeView? = null
     private var topScrim: View? = null
     private fun installTopScrim(context: android.content.Context) {
@@ -293,13 +300,14 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val barColors = context.theme.obtainStyledAttributes(
             intArrayOf(if (barAttr != 0) barAttr else android.R.attr.colorBackground))
         val barColor = try { barColors.getColor(0, fadeColor) } finally { barColors.recycle() }
-        topScrim = View(context).also {
+        val parent = if (tv) holder else find("result_root") as? FrameLayout
+        topScrim = parent?.let { frame -> View(context).also {
             it.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(barColor, barColor and 0x00FFFFFF))
             it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            ((phoneHero as? FrameLayout) ?: holder)?.addView(it,
+            frame.addView(it,
                 FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, Gravity.TOP))
-        }
+        } }
     }
     private fun resizeTopScrim(height: Int) {
         if (height <= 0) return
@@ -344,14 +352,22 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     }
     private val density = root.resources.displayMetrics.density
     private fun dp(v: Int) = (v * density).roundToInt()
-    private fun syncTvScroll(container: FrameLayout) {
-        val offset = tvScroll?.scrollY?.toFloat() ?: return
-        val target = -offset
-        if (container.translationY != target) container.translationY = target
-    }
-    private fun restoreTvScroll() {
-        val offset = tvScroll?.scrollY?.toFloat() ?: return
-        holder?.let { if (it.translationY == -offset) it.translationY = -offset * 0.8f }
+    private fun clipTvBackdrop(container: FrameLayout) {
+        val column = tvColumn ?: return
+        if (column.height <= 0) return
+        container.getLocationOnScreen(tvHolderPos)
+        column.getLocationOnScreen(tvContentPos)
+        // One-pixel guard against independent screen-coordinate rounding.
+        val bottom = (tvContentPos[1] - tvHolderPos[1] - 1).coerceIn(0, container.height)
+        tvClip.set(0, 0, container.width, bottom)
+        originalHolderClip?.let { if (!tvClip.intersect(it)) tvClip.set(0, 0, 0, 0) }
+        if (container.clipBounds != tvClip) container.clipBounds = Rect(tvClip)
+        (shadow?.layoutParams as? FrameLayout.LayoutParams)?.let { p ->
+            val fadeHeight = (container.height * 0.03f).roundToInt().coerceAtLeast(1)
+            if (p.height != fadeHeight) { p.height = fadeHeight; shadow?.layoutParams = p }
+            val y = (bottom - container.height + p.bottomMargin).toFloat()
+            if (shadow?.translationY != y) shadow?.translationY = y
+        }
     }
     private fun height(view: View?, value: Int) {
         val p = view?.layoutParams ?: return
@@ -430,7 +446,9 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         titleOverlay?.visibility = View.GONE
     }
     private fun restoreOriginalGeometry() {
-        restoreTvScroll()
+        holder?.clipBounds = originalHolderClip?.let { Rect(it) }
+        originalShadowParams?.let { shadow?.layoutParams = FrameLayout.LayoutParams(it) }
+        shadow?.translationY = originalShadowY
         shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
         originalHeroHeight?.let { height(phoneHero, it) }
         originalHolderHeight?.let { height(holder, it) }
@@ -561,7 +579,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val image = picture ?: return
         // A not-yet-measured tablet/TV is loading, not a failed layout.
         if (container.width <= 0 || root.width <= 0) return
-        if (tv) syncTvScroll(container)
         val landscape = root.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val tablet = root.resources.configuration.smallestScreenWidthDp >= 600
         val split = tv || landscape || tablet
@@ -571,6 +588,13 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             else -> dp(260)
         }
         resizeTopScrim(bannerHeight)
+        if (tv) {
+            height(container, bannerHeight)
+            (tvColumn?.layoutParams as? ViewGroup.MarginLayoutParams)?.let { p ->
+                if (p.topMargin != bannerHeight) { p.topMargin = bannerHeight; tvColumn?.layoutParams = p }
+            }
+            clipTvBackdrop(container)
+        }
         if (split) {
             val logoView = logo
             val key = layoutKey(container, image)
@@ -581,15 +605,10 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 edgeView.left == image.left && edgeView.top == image.top &&
                 (image.drawable == null || image.alpha == originalPictureAlpha) &&
                 (logoView?.drawable == null || logoView.alpha == originalLogoAlpha) &&
-                shadow?.visibility == View.INVISIBLE) return
+                shadow?.visibility == (if (tv) View.VISIBLE else View.INVISIBLE)) return
             lastLayout = null
         }
-        if (tv) {
-            height(container, bannerHeight)
-            (tvColumn?.layoutParams as? ViewGroup.MarginLayoutParams)?.let { p ->
-                if (p.topMargin != bannerHeight) { p.topMargin = bannerHeight; tvColumn?.layoutParams = p }
-            }
-        } else height(phoneHero, bannerHeight)
+        if (!tv) height(phoneHero, bannerHeight)
         if (!split) {
             lastLayout = null
             if (trackedArtwork != null) {
@@ -654,7 +673,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         edgeView.setFeather(featherX, featherY)
         placeEdge(edgeView, imageWidth, imageHeight, imageLeft, imageTop)
         // Avoid double-darkening the bottom: the built-in shadow covered the whole parent.
-        shadow?.visibility = View.INVISIBLE
+        shadow?.visibility = if (tv) View.VISIBLE else View.INVISIBLE
         // Enforce both the 36%-wide label and the actual FIT_CENTER image bounds.
         val baseLogoWidth = if (hasLogo) logo!!.width * abs(originalLogoScaleX) else 0f
         val baseLogoHeight = if (hasLogo) logo!!.height * abs(originalLogoScaleY) else 0f
@@ -742,7 +761,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (forcedPortraitTitle && logo?.visibility == View.VISIBLE && logo.drawable != null)
             title?.visibility = View.GONE
         forcedPortraitTitle = false
-        topScrim?.let { ((phoneHero as? FrameLayout) ?: holder)?.removeView(it) }; topScrim = null
+        topScrim?.let { (it.parent as? ViewGroup)?.removeView(it) }; topScrim = null
         if (portraitTitleOnly) { portraitTitleOnly = false; title?.alpha = originalTitleAlpha; return }
         showTitle(false)
         titleOverlay?.let { holder?.removeView(it) }; titleOverlay = null
