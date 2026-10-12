@@ -1,23 +1,35 @@
 // 파일명: hsp1020/Utils.kt
 package com.hsp1020
 
-import com.fasterxml.jackson.annotation.JsonProperty
+import android.content.SharedPreferences
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.APIHolder.unixTimeMS
-import com.lagradost.cloudstream3.mvvm.logError
+import org.json.JSONArray
+import org.json.JSONObject
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import org.json.JSONObject
-import java.net.URLEncoder
-import java.time.LocalDate
-import java.time.ZoneId
 import java.util.Locale
 import kotlin.math.round
-
+import android.app.Activity
+import android.app.Application
+import android.content.Context
+import android.content.res.Resources
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.text.Editable
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.TextWatcher
+import android.text.style.ImageSpan
+import android.view.View
+import android.widget.TextView
+import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentActivity
+import androidx.fragment.app.FragmentManager
+import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.CommonActivity
+import com.lagradost.cloudstream3.MainActivity
+import kotlin.math.roundToInt
 private val QUALITY_REGEX = Regex("(\\d{3,4}[pP])")
 private val TT_REGEX = Regex("^tt\\d+$")
 
@@ -128,114 +140,9 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false, mediaType:
 
 fun String.fixSourceUrl(): String = this.replace("/manifest.json", "").replace("stremio://", "https://")
 
-fun fixSourceName(name: String?, title: String?): String {
-    return when {
-        name?.contains("[RD+]", ignoreCase = true) == true -> "[RD+] $title"
-        name?.contains("[RD download]", ignoreCase = true) == true -> "[RD download] $title"
-        !name.isNullOrEmpty() && !title.isNullOrEmpty() -> "$name $title"
-        else -> title ?: name ?: ""
-    }
-}
-
 fun getQuality(qualities: List<String?>): Int {
     val qualityStr = qualities.firstNotNullOfOrNull { it?.let { str -> QUALITY_REGEX.find(str)?.groupValues?.getOrNull(1) } }
     return getQualityFromName(qualityStr)
-}
-
-fun getEpisodeSlug(season: Int? = null, episode: Int? = null): Pair<String, String> {
-    if (season == null || episode == null) return "" to ""
-    return String.format(Locale.US, "%02d", season) to String.format(Locale.US, "%02d", episode)
-}
-
-fun isUpcoming(dateString: String?): Boolean {
-    if (dateString.isNullOrBlank()) return false
-    return try {
-        val localDate = LocalDate.parse(dateString)
-        val epochMilli = localDate.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        unixTimeMS < epochMilli
-    } catch (t: Throwable) {
-        logError(t)
-        false
-    }
-}
-
-fun fixUrl(url: String, domain: String): String {
-    if (url.isEmpty() || url.startsWith("http")) return url
-    return if (url.startsWith("//")) "https:$url" 
-           else if (url.startsWith("/")) "$domain$url" 
-           else "$domain/$url"
-}
-
-data class TorrentioResponse(
-    @JsonProperty("streams") val streams: List<TorrentioStream> = emptyList()
-)
-
-data class TorrentioStream(
-    @JsonProperty("name") val name: String? = null, 
-    @JsonProperty("title") val title: String? = null, 
-    @JsonProperty("infoHash") val infoHash: String? = null, 
-    @JsonProperty("fileIdx") val fileIdx: Int? = null
-)
-
-suspend fun fetchTmdbLogoUrl(
-    tmdbAPI: String, 
-    apiKey: String, 
-    type: TvType, 
-    tmdbId: Int?, 
-    appLangCode: String?
-): String? {
-    if (tmdbId == null) return null
-
-    val url = if (type == TvType.Movie) "$tmdbAPI/movie/$tmdbId/images?api_key=$apiKey" else "$tmdbAPI/tv/$tmdbId/images?api_key=$apiKey"
-
-    val json = runCatching { JSONObject(app.get(url).text) }.getOrNull() ?: return null
-    val logos = json.optJSONArray("logos") ?: return null
-    if (logos.length() == 0) return null
-
-    val lang = appLangCode?.trim()?.lowercase()?.substringBefore("-")
-
-    var bestLangSvg: JSONObject? = null
-    var bestLangPng: JSONObject? = null
-    var bestGlobalSvg: JSONObject? = null
-    var bestGlobalPng: JSONObject? = null
-
-    for (i in 0 until logos.length()) {
-        val logo = logos.optJSONObject(i) ?: continue
-        val path = logo.optString("file_path")
-        if (path.isBlank()) continue
-
-        val isSvg = path.endsWith(".svg", true)
-        val l = logo.optString("iso_639_1").trim().lowercase()
-        val votes = logo.optDouble("vote_average", 0.0)
-        val count = logo.optInt("vote_count", 0)
-        
-        val hasVotes = votes > 0 && count > 0
-
-        fun better(existing: JSONObject?): Boolean {
-            if (existing == null) return true
-            val eAvg = existing.optDouble("vote_average", 0.0)
-            val eCnt = existing.optInt("vote_count", 0)
-            return votes > eAvg || (votes == eAvg && count > eCnt)
-        }
-
-        if (l == lang) {
-            if (isSvg) {
-                if (better(bestLangSvg)) bestLangSvg = logo
-            } else {
-                if (better(bestLangPng)) bestLangPng = logo
-            }
-        } else if (hasVotes) {
-            if (isSvg) {
-                if (better(bestGlobalSvg)) bestGlobalSvg = logo
-            } else {
-                if (better(bestGlobalPng)) bestGlobalPng = logo
-            }
-        }
-    }
-
-    val finalLogo = bestLangSvg ?: bestLangPng ?: bestGlobalSvg ?: bestGlobalPng ?: logos.optJSONObject(0)
-    
-    return finalLogo?.optString("file_path")?.let { "https://image.tmdb.org/t/p/w500$it" }
 }
 
 fun normalizeId(id: String?): String {
@@ -245,4 +152,209 @@ fun normalizeId(id: String?): String {
         clean.isNotEmpty() && clean.all { it.isDigit() } -> "tmdb:$clean"
         else -> clean
     }
+}
+
+internal fun prefsToJson(prefs: SharedPreferences, filterBlock: ((String) -> Boolean)? = null): JSONObject {
+    val json = JSONObject()
+    prefs.all.forEach { (key, value) ->
+        if (value != null && (filterBlock == null || filterBlock(key))) {
+            if (value is Set<*>) {
+                val arr = JSONArray()
+                value.forEach { item -> if (item != null) arr.put(item) }
+                json.put(key, arr)
+            } else {
+                json.put(key, value)
+            }
+        }
+    }
+    return json
+}
+
+internal fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
+    val keys = json.keys()
+    while (keys.hasNext()) {
+        val key = keys.next()
+        when (val value = json.get(key)) {
+            is Boolean -> editor.putBoolean(key, value)
+            is String -> editor.putString(key, value)
+            is Int -> editor.putInt(key, value)
+            is Long -> editor.putLong(key, value)
+            is Double -> editor.putFloat(key, value.toFloat())
+            is JSONArray -> {
+                val set = mutableSetOf<String>()
+                for (i in 0 until value.length()) {
+                    val item = value.optString(i)
+                    if (item != null) set.add(item)
+                }
+                editor.putStringSet(key, set)
+            }
+        }
+    }
+}
+
+/** Only replaces known MDBList glyphs on rows marked by StremioC.kt. */
+internal class RatingPlotImageHook(
+    context: Context,
+    private val resources: Resources
+) : Application.ActivityLifecycleCallbacks {
+    private val app = context.applicationContext as Application
+    private val prefs = app.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+    private val main = Handler(Looper.getMainLooper())
+    private var host: FragmentActivity? = null
+    private val watchers = mutableMapOf<Fragment, Watcher>()
+    private val ids = mutableMapOf<String, Int>()
+    private val icons = linkedMapOf(
+        "Ⓜ️" to "rating_mal", "⭐" to "rating_imdb",
+        "🟢" to "rating_letterboxd", "Ⓣ" to "rating_trakt",
+        "🎬" to "rating_tmdb", "🎯" to "rating_metacritic",
+        "👍" to "rating_roger_ebert",
+        "🍅\u2060\u2060" to "rating_rotten_tomatoes_certified",
+        "🍅\u2060" to "rating_rotten_tomatoes_rotten",
+        "🍅" to "rating_rotten_tomatoes",
+        "🍿\u2060\u2060" to "rating_audience_verified_hot",
+        "🍿\u2060" to "rating_audience_stale",
+        "🍿" to "rating_audience_score"
+    )
+    private val number = Regex("^\\s+\\d+(?:\\.\\d+)?(?:\\s|$)")
+    private class LogoSpan(d: android.graphics.drawable.Drawable) : ImageSpan(d, ImageSpan.ALIGN_BOTTOM)
+
+    private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "mdblist_enabled") main.post {
+            watchers.values.toList().forEach { runCatching { it.render() } }
+        }
+    }
+    private val fragmentCallback = object : FragmentManager.FragmentLifecycleCallbacks() {
+        override fun onFragmentViewCreated(
+            fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?
+        ) { runCatching { attach(f, v) } }
+
+        override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
+            watchers.remove(f)?.detach()
+        }
+    }
+
+    fun start() {
+        prefs.registerOnSharedPreferenceChangeListener(prefListener)
+        app.registerActivityLifecycleCallbacks(this)
+        (CommonActivity.activity as? MainActivity)?.let(::use)
+    }
+
+    fun stop() {
+        prefs.unregisterOnSharedPreferenceChangeListener(prefListener)
+        app.unregisterActivityLifecycleCallbacks(this)
+        host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
+        watchers.values.toList().forEach { it.detach() }
+        watchers.clear()
+        host = null
+    }
+
+    private fun use(activity: FragmentActivity) {
+        if (host === activity) return
+        host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
+        watchers.values.toList().forEach { it.detach() }
+        watchers.clear()
+        host = activity
+        activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragmentCallback, true)
+        fun scan(fm: FragmentManager) {
+            fm.fragments.forEach { f ->
+                f.view?.let { attach(f, it) }
+                if (f.isAdded) scan(f.childFragmentManager)
+            }
+        }
+        scan(activity.supportFragmentManager)
+    }
+
+    private fun attach(f: Fragment, root: View) {
+        if (watchers.containsKey(f)) return
+        if (f.javaClass.name !in setOf(
+                "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer",
+                "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
+                "com.lagradost.cloudstream3.ui.result.ResultFragmentTv"
+            )) return
+        val apiName = f.arguments?.getString("apiName") ?: return
+        if (apiName != "StremioC" && !APIHolder.allProviders.any {
+                it is StremioC && it.name.equals(apiName, ignoreCase = true)
+            }) return
+        val resId = root.resources.getIdentifier("result_description", "id", root.context.packageName)
+        if (resId == 0) return
+        val view = root.findViewById<TextView>(resId) ?: return
+        watchers[f] = Watcher(view, root, f.arguments?.getString("url"), f).also { it.start() }
+    }
+
+    private inner class Watcher(private val view: TextView, root: View, detailUrl: String?, fragment: Fragment) : TextWatcher {
+        private val backdrop = DetailBackdropLayout(root, detailUrl)
+        private val trailers = TrailerChooser(fragment, root, detailUrl)
+        private var changing = false
+        fun start() { view.addTextChangedListener(this); runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() } }
+        fun detach() { view.removeTextChangedListener(this); runCatching { trailers.stop() }; runCatching { backdrop.stop() }; runCatching { restore() } }
+        private fun restore() {
+            val old = view.text as? Spanned ?: return
+            val spans = old.getSpans(0, old.length, LogoSpan::class.java)
+            if (spans.isEmpty()) return
+            val plain = SpannableStringBuilder(old)
+            spans.forEach(plain::removeSpan)
+            changing = true
+            try { view.setText(plain, TextView.BufferType.SPANNABLE) }
+            finally { changing = false }
+        }
+        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+        override fun afterTextChanged(s: Editable?) { if (!changing) { runCatching { trailers.refresh() }; runCatching { render() } } }
+
+        fun render() {
+            if (!prefs.getBoolean("mdblist_enabled", false)) { restore(); return }
+            val original = view.text ?: return
+            if (original is Spanned && original.getSpans(0, original.length, LogoSpan::class.java).isNotEmpty()) return
+            // Invisible separator U+2063 is inserted ONLY for actual MDBList rows.
+            if (!original.startsWith('\u2063')) return
+            val end = original.indexOf('\n').let { if (it < 0) original.length else it }
+            val line = original.subSequence(0, end).toString()
+            val replacements = mutableListOf<Triple<Int, Int, String>>()
+            for ((glyph, file) in icons) {
+                var from = 1
+                while (true) {
+                    val at = line.indexOf(glyph, from)
+                    if (at < 0) break
+                    if (number.containsMatchIn(line.substring(at + glyph.length))) {
+                        replacements.add(Triple(at, at + glyph.length, file))
+                    }
+                    from = at + glyph.length
+                }
+            }
+            if (replacements.isEmpty()) return
+            val result = SpannableStringBuilder(original)
+            var applied = 0
+            val height = (view.textSize * 0.92f).roundToInt().coerceAtLeast(12)
+            for ((start, endIndex, file) in replacements) {
+                val id = ids.getOrPut(file) {
+                    resources.getIdentifier(file, "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
+                }
+                if (id == 0) continue
+                val image = runCatching { resources.getDrawable(id, null).mutate() }.getOrNull() ?: continue
+                val width = (height.toFloat() * image.intrinsicWidth.coerceAtLeast(1) /
+                    image.intrinsicHeight.coerceAtLeast(1)).roundToInt().coerceIn(height / 2, height * 3)
+                image.setBounds(0, 0, width, height)
+                result.setSpan(LogoSpan(image), start, endIndex, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                applied++
+            }
+            if (applied == 0) return
+            changing = true
+            try { view.setText(result, TextView.BufferType.SPANNABLE) }
+            finally { changing = false }
+        }
+    }
+
+    override fun onActivityResumed(activity: Activity) {
+        if (activity is MainActivity) runCatching { use(activity) }
+    }
+    override fun onActivityDestroyed(activity: Activity) { if (host === activity) {
+        host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
+        watchers.values.toList().forEach { it.detach() }
+        watchers.clear(); host = null
+    } }
+    override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+    override fun onActivityStarted(activity: Activity) = Unit
+    override fun onActivityPaused(activity: Activity) = Unit
+    override fun onActivityStopped(activity: Activity) = Unit
+    override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
 }

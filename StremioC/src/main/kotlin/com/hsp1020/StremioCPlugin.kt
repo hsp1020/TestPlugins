@@ -4,7 +4,6 @@ package com.hsp1020
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import android.content.SharedPreferences
 import androidx.appcompat.app.AppCompatActivity
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.MainActivity
@@ -33,44 +32,6 @@ class StremioCPlugin : Plugin() {
     private val ratingUiHandler = Handler(Looper.getMainLooper())
     private var ratingPlotHook: RatingPlotImageHook? = null
     private var activeSettingsDialog: SettingsBottomFragment? = null
-
-    private fun prefsToJson(prefs: SharedPreferences): JSONObject {
-        val json = JSONObject()
-        prefs.all.forEach { (key, value) ->
-            if (value != null) {
-                if (value is Set<*>) {
-                    val arr = JSONArray()
-                    value.forEach { item -> if (item != null) arr.put(item) }
-                    json.put(key, arr)
-                } else {
-                    json.put(key, value)
-                }
-            }
-        }
-        return json
-    }
-
-    private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
-        val keys = json.keys()
-        while (keys.hasNext()) {
-            val key = keys.next()
-            when (val value = json.get(key)) {
-                is Boolean -> editor.putBoolean(key, value)
-                is String -> editor.putString(key, value)
-                is Int -> editor.putInt(key, value)
-                is Long -> editor.putLong(key, value)
-                is Double -> editor.putFloat(key, value.toFloat())
-                is JSONArray -> {
-                    val set = mutableSetOf<String>()
-                    for (i in 0 until value.length()) {
-                        val item = value.optString(i)
-                        if (item != null) set.add(item)
-                    }
-                    editor.putStringSet(key, set)
-                }
-            }
-        }
-    }
 
     override fun load(context: Context) {
         val appContext = context.applicationContext

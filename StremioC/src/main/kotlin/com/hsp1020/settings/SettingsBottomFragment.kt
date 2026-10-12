@@ -210,7 +210,6 @@ class SettingsBottomFragment(
     }
     private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.BLACK); cornerRadius = dp(12).toFloat() }
     private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#171717")); setStroke(dp(1), Color.parseColor("#303030")); cornerRadius = dp(8).toFloat() }
-    private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#292929")); setStroke(dp(1), Color.parseColor("#404040")); cornerRadius = dp(8).toFloat() }
 
     private fun getCineStreamClassLoader(): ClassLoader? {
         try {
@@ -282,22 +281,6 @@ class SettingsBottomFragment(
         return keys
     }
 
-    private fun prefsToJson(prefs: SharedPreferences, filterBlock: ((String) -> Boolean)? = null): JSONObject {
-        val json = JSONObject()
-        prefs.all.forEach { (key, value) ->
-            if (value != null && (filterBlock == null || filterBlock(key))) {
-                if (value is Set<*>) {
-                    val arr = JSONArray()
-                    value.forEach { item -> if (item != null) arr.put(item) }
-                    json.put(key, arr)
-                } else {
-                    json.put(key, value)
-                }
-            }
-        }
-        return json
-    }
-
     private fun recordBackupSnapshot(prefs: SharedPreferences, completeKey: String, hashKey: String, backupKey: String) {
         val json = prefsToJson(prefs).toString()
         val hash = json.hashCode().toString()
@@ -308,28 +291,6 @@ class SettingsBottomFragment(
         try {
             CloudStreamApp.setKey(backupKey, json)
         } catch (t: Throwable) { t.printStackTrace() }
-    }
-
-    private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
-        val keys = json.keys()
-        while (keys.hasNext()) {
-            val key = keys.next()
-            when (val value = json.get(key)) {
-                is Boolean -> editor.putBoolean(key, value)
-                is String -> editor.putString(key, value)
-                is Int -> editor.putInt(key, value)
-                is Long -> editor.putLong(key, value)
-                is Double -> editor.putFloat(key, value.toFloat())
-                is JSONArray -> {
-                    val set = mutableSetOf<String>()
-                    for (i in 0 until value.length()) {
-                        val item = value.optString(i)
-                        if (item != null) set.add(item)
-                    }
-                    editor.putStringSet(key, set)
-                }
-            }
-        }
     }
 
     private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {

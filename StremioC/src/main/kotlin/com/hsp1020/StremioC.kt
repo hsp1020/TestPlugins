@@ -2562,7 +2562,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             return list
         }
 
-        fun isSearchRequired(): Boolean = extra?.any { it.name == "search" && it.isRequired == true } == true
         fun supportsSearch(): Boolean = extra?.any { it.name == "search" } == true || extraSupported?.contains("search") == true
 
         private suspend fun fetchMetas(provider: StremioC, path: String): List<CatalogEntry> {
@@ -2586,19 +2585,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
         }
 
-        suspend fun toHomePageList(provider: StremioC, skip: Int): Pair<HomePageList, Int> {
-            val allMetas = coroutineScope {
-                activeTypes.map { type ->
-                    async(Dispatchers.IO) {
-                        val path = if (skip > 0) "/catalog/$type/$id/skip=$skip.json" else "/catalog/$type/$id.json"
-                        fetchMetas(provider, path)
-                    }
-                }.awaitAll().flatten()
-            }
-            val distinctEntries = allMetas.distinctBy { it.id }.map { it.toSearchResponse(provider) }
-            val displayType = type?.replaceFirstChar { it.uppercase() } ?: ""
-            return Pair(HomePageList("${name ?: id} - $displayType", distinctEntries), allMetas.size)
-        }
     }
 
     private data class HomeCatalogResponse(
