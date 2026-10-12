@@ -14,6 +14,7 @@ import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.TrailerData
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTMDbId
@@ -123,6 +124,16 @@ private fun tmdbLogoLanguages(): String {
         ?.substringBefore('-')?.trim()?.lowercase()
         ?.takeIf { it.isNotEmpty() } ?: "en"
     return listOf(preferred, "en").distinct().joinToString(",")
+}
+
+// The host adds sync metadata trailers after provider.load() and extracts them for
+// its inline preview. Discard only those additions; StremioC's own picker is separate.
+private class NoNativeTrailerPreview : AbstractMutableList<TrailerData>() {
+    override val size: Int get() = 0
+    override fun get(index: Int): TrailerData = throw IndexOutOfBoundsException()
+    override fun add(index: Int, element: TrailerData) = Unit
+    override fun set(index: Int, element: TrailerData): TrailerData = throw IndexOutOfBoundsException()
+    override fun removeAt(index: Int): TrailerData = throw IndexOutOfBoundsException()
 }
 
 internal data class TrailerChoice(
@@ -3257,6 +3268,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     finalKitsuId?.let { syncData["kitsu"] = it.toString() }
                 }
                 apiName = provider.getTargetApiName()
+                // Preserve all metadata/sync fields; block only host inline-preview extraction.
+                trailers = NoNativeTrailerPreview()
             }
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
