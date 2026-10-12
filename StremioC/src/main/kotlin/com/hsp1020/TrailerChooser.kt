@@ -155,7 +155,7 @@ internal class TrailerChooser(
                 setPadding(dp(14), 0, dp(14), 0)
                 background = GradientDrawable().apply {
                     setColor(0x992B2C30.toInt())
-                    cornerRadius = dp(20).toFloat()
+                    cornerRadius = context.resources.getDimension(R.dimen.rounded_button_radius)
                 }
                 isClickable = true
                 isFocusable = true
