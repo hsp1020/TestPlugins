@@ -301,6 +301,55 @@ internal class RatingPlotImageHook(
         }
     }
 
+    // A search-back transition can expose an intermediate NavHost size for several frames.
+    // Keep the last drawn search frame until the restored detail fills the host.
+    private var detailRevealEnd: (() -> Unit)? = null
+
+    private fun holdDetailReveal(search: Fragment) {
+        if (search.arguments?.getBoolean("stremioc_detail_search") != true) return
+        val activity = search.activity as? MainActivity ?: return
+        fun find(name: String): View? {
+            val id = activity.resources.getIdentifier(name, "id", activity.packageName)
+            return if (id == 0) null else activity.findViewById<View>(id)
+        }
+        // Do not affect navigation between ordinary search/home/library screens.
+        if (listOf("nav_view", "nav_rail_view").any { find(it)?.visibility == View.VISIBLE }) return
+        val content = find("nav_host_fragment") ?: return
+        val bounds = content.parent as? android.view.ViewGroup ?: return
+        val root = activity.window.decorView
+        val observer = root.viewTreeObserver
+        if (!observer.isAlive) return
+        detailRevealEnd?.invoke()
+        val started = android.os.SystemClock.uptimeMillis()
+        var stable = 0
+        var frames = 0
+        lateinit var listener: ViewTreeObserver.OnPreDrawListener
+        val release = {
+            if (observer.isAlive) observer.removeOnPreDrawListener(listener)
+            detailRevealEnd = null
+        }
+        listener = ViewTreeObserver.OnPreDrawListener {
+            frames++
+            val elapsed = android.os.SystemClock.uptimeMillis() - started
+            val full = content.visibility == View.VISIBLE &&
+                content.left <= bounds.paddingLeft &&
+                content.top <= bounds.paddingTop &&
+                content.right >= bounds.width - bounds.paddingRight &&
+                content.bottom >= bounds.height - bounds.paddingBottom &&
+                !content.isLayoutRequested
+            stable = if (full) stable + 1 else 0
+            if (stable >= 2 || elapsed >= 600L) {
+                android.util.Log.i("StremioCNavTrace",
+                    "detail reveal released after ${elapsed}ms / ${frames} frames, full=$full")
+                release()
+                true
+            } else false
+        }
+        detailRevealEnd = release
+        observer.addOnPreDrawListener(listener)
+        main.postDelayed({ if (detailRevealEnd === release) release() }, 650L)
+    }
+
     private val fragmentCallback = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
             fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?
@@ -328,6 +377,9 @@ internal class RatingPlotImageHook(
 
         override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
             traceFragment("paused", f)
+            if (f.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment")
+                runCatching { holdDetailReveal(f) }
+                    .onFailure { android.util.Log.e("StremioCNavTrace", "detail reveal error", it) }
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
@@ -343,6 +395,7 @@ internal class RatingPlotImageHook(
     }
 
     fun stop() {
+        detailRevealEnd?.invoke()
         navTraceEnd?.invoke()
         prefs.unregisterOnSharedPreferenceChangeListener(prefListener)
         app.unregisterActivityLifecycleCallbacks(this)
@@ -354,6 +407,7 @@ internal class RatingPlotImageHook(
 
     private fun use(activity: FragmentActivity) {
         if (host === activity) return
+        detailRevealEnd?.invoke()
         navTraceEnd?.invoke()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
@@ -497,6 +551,7 @@ internal class RatingPlotImageHook(
         if (activity is MainActivity) runCatching { use(activity) }
     }
     override fun onActivityDestroyed(activity: Activity) { if (host === activity) {
+        detailRevealEnd?.invoke()
         navTraceEnd?.invoke()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
