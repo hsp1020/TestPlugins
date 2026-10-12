@@ -300,7 +300,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val barColors = context.theme.obtainStyledAttributes(
             intArrayOf(if (barAttr != 0) barAttr else android.R.attr.colorBackground))
         val barColor = try { barColors.getColor(0, fadeColor) } finally { barColors.recycle() }
-        val parent = if (tv) holder else find("result_root") as? FrameLayout
+        val parent = if (tv) holder else find("fragment_result") as? FrameLayout
         topScrim = parent?.let { frame -> View(context).also {
             it.background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
                 intArrayOf(barColor, barColor and 0x00FFFFFF))
@@ -313,8 +313,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (height <= 0) return
         topScrim?.let { scrim ->
             val params = scrim.layoutParams
-            val target = if (tv) (height * 0.03f).roundToInt().coerceAtLeast(1)
-                else min(dp(64), (height * 0.20f).roundToInt()).coerceAtLeast(1)
+            val target = (height * 0.03f).roundToInt().coerceAtLeast(1)
             if (params.height != target) { params.height = target; scrim.layoutParams = params }
         }
     }
