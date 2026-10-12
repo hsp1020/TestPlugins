@@ -154,9 +154,7 @@ internal class TrailerChooser(
         if (button == null) {
             button = Chip(context).apply {
                 // Use the exact genre-tag Chip style, preserving its font size, padding and shape.
-                setChipDrawable(ChipDrawable.createFromAttributes(context, null, 0, R.style.ChipFilled).apply {
-                    chipSurfaceColor = ColorStateList.valueOf(Color.TRANSPARENT)
-                })
+                setChipDrawable(ChipDrawable.createFromAttributes(context, null, 0, com.hsp1020.R.style.StremioCTrailerChip))
                 chipBackgroundColor = ColorStateList.valueOf(0x4D2B2C30.toInt())
                 setTextColor(Color.WHITE)
                 typeface = Typeface.create(ResourcesCompat.getFont(context, R.font.google_sans), Typeface.BOLD)
