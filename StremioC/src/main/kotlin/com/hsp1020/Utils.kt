@@ -25,6 +25,7 @@ import android.view.View
 import android.view.ViewTreeObserver
 import android.widget.TextView
 import androidx.appcompat.widget.SearchView
+import androidx.recyclerview.widget.RecyclerView
 import androidx.navigation.NavOptions
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
@@ -450,43 +451,57 @@ internal class RatingPlotImageHook(
         }
         private val searchTitle = root.resources.getIdentifier("result_title", "id", root.context.packageName)
             .takeIf { it != 0 }?.let { root.findViewById<TextView>(it) }
+        private val castItems = root.resources.getIdentifier("result_cast_items", "id", root.context.packageName)
+            .takeIf { it != 0 }?.let { root.findViewById<RecyclerView>(it) }
+        private val actorNameId = root.resources.getIdentifier("actor_name", "id", root.context.packageName)
+
+        private fun openSearch(query: String) {
+            if (query.isBlank()) return
+            val id = root.resources.getIdentifier("navigation_search", "id", root.context.packageName)
+            val enter = root.resources.getIdentifier("enter_anim", "anim", root.context.packageName)
+            val exit = root.resources.getIdentifier("exit_anim", "anim", root.context.packageName)
+            if (id == 0) return
+            (fragment.activity as? MainActivity)?.let {
+                runCatching { startNavTrace(it, root) }
+                    .onFailure { e -> android.util.Log.e("StremioCNavTrace", "trace setup error", e) }
+            }
+            fragment.activity?.navigate(id, Bundle().apply {
+                putString("search_query", query)
+                putBoolean("stremioc_detail_search", true)
+            }, NavOptions.Builder()
+                .setEnterAnim(enter).setExitAnim(exit)
+                .setPopEnterAnim(enter).setPopExitAnim(exit)
+                .build())
+        }
+
         private val searchClick = View.OnClickListener {
-            val query = searchTitle?.text?.toString()?.trim().orEmpty()
-                .ifEmpty { fragment.arguments?.getString("name")?.trim().orEmpty() }
-            if (query.isNotEmpty()) {
-                val id = root.resources.getIdentifier("navigation_search", "id", root.context.packageName)
-                val enter = root.resources.getIdentifier("enter_anim", "anim", root.context.packageName)
-                val exit = root.resources.getIdentifier("exit_anim", "anim", root.context.packageName)
-                if (id != 0) {
-                    (fragment.activity as? MainActivity)?.let {
-                        runCatching { startNavTrace(it, root) }
-                            .onFailure { e -> android.util.Log.e("StremioCNavTrace", "trace setup error", e) }
-                    }
-                    fragment.activity?.navigate(id, Bundle().apply {
-                        putString("search_query", query)
-                        putBoolean("stremioc_detail_search", true)
-                    }, NavOptions.Builder()
-                        .setEnterAnim(enter).setExitAnim(exit)
-                        .setPopEnterAnim(enter).setPopExitAnim(exit)
-                        .build())
-                }
+            openSearch(searchTitle?.text?.toString()?.trim().orEmpty()
+                .ifEmpty { fragment.arguments?.getString("name")?.trim().orEmpty() })
+        }
+        private val castClick = View.OnClickListener { card ->
+            if (actorNameId != 0) {
+                openSearch(card.findViewById<TextView>(actorNameId)?.text?.toString()?.trim().orEmpty())
             }
         }
-        private val searchPreDraw = ViewTreeObserver.OnPreDrawListener {
-            if (fragment.isAdded && searchButton?.isShown == true) searchButton.setOnClickListener(searchClick)
+        private val detailPreDraw = ViewTreeObserver.OnPreDrawListener {
+            if (fragment.isAdded) {
+                if (searchButton?.isShown == true) searchButton.setOnClickListener(searchClick)
+                castItems?.takeIf { it.isShown }?.let { list ->
+                    for (i in 0 until list.childCount) list.getChildAt(i).setOnClickListener(castClick)
+                }
+            }
             true
         }
         fun start() {
             view.addTextChangedListener(this)
-            searchButton?.let {
-                it.setOnClickListener(searchClick)
-                root.viewTreeObserver.addOnPreDrawListener(searchPreDraw)
-            }
+            searchButton?.setOnClickListener(searchClick)
+            if (searchButton != null || castItems != null)
+                root.viewTreeObserver.addOnPreDrawListener(detailPreDraw)
             runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() }
         }
         fun detach() {
             view.removeTextChangedListener(this)
-            if (searchButton != null && root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(searchPreDraw)
+            if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(detailPreDraw)
             searchButton?.setOnClickListener(null)
             runCatching { trailers.stop() }; runCatching { backdrop.stop() }; runCatching { restore() }
         }
