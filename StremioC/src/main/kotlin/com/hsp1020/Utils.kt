@@ -26,6 +26,7 @@ import android.view.ViewTreeObserver
 import android.widget.TextView
 import androidx.appcompat.widget.SearchView
 import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.navigation.NavigationBarView
 import androidx.navigation.NavOptions
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
@@ -465,13 +466,24 @@ internal class RatingPlotImageHook(
                 runCatching { startNavTrace(it, root) }
                     .onFailure { e -> android.util.Log.e("StremioCNavTrace", "trace setup error", e) }
             }
-            fragment.activity?.navigate(id, Bundle().apply {
+            val activity = fragment.activity
+            activity?.navigate(id, Bundle().apply {
                 putString("search_query", query)
                 putBoolean("stremioc_detail_search", true)
             }, NavOptions.Builder()
                 .setEnterAnim(enter).setExitAnim(exit)
                 .setPopEnterAnim(enter).setPopExitAnim(exit)
                 .build())
+            // Direct detail -> search navigation must also select Search in both native bars.
+            // Changing MenuItem.isChecked does not dispatch another navigation event.
+            listOf("nav_view", "nav_rail_view").forEach { name ->
+                val barId = root.resources.getIdentifier(name, "id", root.context.packageName)
+                if (barId != 0) {
+                    activity?.findViewById<NavigationBarView>(barId)?.let { bar ->
+                        if (bar.selectedItemId != id) bar.menu.findItem(id)?.isChecked = true
+                    }
+                }
+            }
         }
 
         private val searchClick = View.OnClickListener {
