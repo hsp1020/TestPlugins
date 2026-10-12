@@ -313,7 +313,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (height <= 0) return
         topScrim?.let { scrim ->
             val params = scrim.layoutParams
-            val target = (height * 0.03f).roundToInt().coerceAtLeast(1)
+            val target = if (tv) (height * 0.03f).roundToInt().coerceAtLeast(1)
+                else min(dp(64), (height * 0.20f).roundToInt()).coerceAtLeast(1)
             if (params.height != target) { params.height = target; scrim.layoutParams = params }
         }
     }
