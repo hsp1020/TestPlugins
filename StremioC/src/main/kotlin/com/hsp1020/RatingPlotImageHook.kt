@@ -109,14 +109,15 @@ internal class RatingPlotImageHook(
         val resId = root.resources.getIdentifier("result_description", "id", root.context.packageName)
         if (resId == 0) return
         val view = root.findViewById<TextView>(resId) ?: return
-        watchers[f] = Watcher(view, root, f.arguments?.getString("url")).also { it.start() }
+        watchers[f] = Watcher(view, root, f.arguments?.getString("url"), f).also { it.start() }
     }
 
-    private inner class Watcher(private val view: TextView, root: View, detailUrl: String?) : TextWatcher {
+    private inner class Watcher(private val view: TextView, root: View, detailUrl: String?, fragment: Fragment) : TextWatcher {
         private val backdrop = DetailBackdropLayout(root, detailUrl)
+        private val trailers = TrailerChooser(fragment, root, detailUrl)
         private var changing = false
-        fun start() { view.addTextChangedListener(this); runCatching { backdrop.start() }; runCatching { render() } }
-        fun detach() { view.removeTextChangedListener(this); runCatching { backdrop.stop() }; runCatching { restore() } }
+        fun start() { view.addTextChangedListener(this); runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() } }
+        fun detach() { view.removeTextChangedListener(this); runCatching { trailers.stop() }; runCatching { backdrop.stop() }; runCatching { restore() } }
         private fun restore() {
             val old = view.text as? Spanned ?: return
             val spans = old.getSpans(0, old.length, LogoSpan::class.java)
@@ -129,7 +130,7 @@ internal class RatingPlotImageHook(
         }
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
         override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-        override fun afterTextChanged(s: Editable?) { if (!changing) runCatching { render() } }
+        override fun afterTextChanged(s: Editable?) { if (!changing) { runCatching { trailers.refresh() }; runCatching { render() } } }
 
         fun render() {
             if (!prefs.getBoolean("mdblist_enabled", false)) { restore(); return }

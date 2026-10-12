@@ -519,18 +519,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val keyId = context.resources.getIdentifier("show_trailers_key", "string", context.packageName)
         val trailersEnabled = keyId == 0 || PreferenceManager.getDefaultSharedPreferences(context)
             .getBoolean(context.getString(keyId), true)
-        if (trailersEnabled && !portraitMode()) return
+        if (trailersEnabled && tv) return
         if (portraitMode() && maskPortraitTitle()) title?.alpha = 0f
         started = true
         splitFallback = false
         nativeRecoveryFrames = 0
-        if (trailersEnabled) {
-            // Only correct the native title; do not touch trailer layout or overlays.
-            portraitTitleOnly = true
-            root.viewTreeObserver.addOnPreDrawListener(preDraw)
-            updatePortraitTitle()
-            return
-        }
         if (splitMode()) stage() // Hide both assets before their first native-layout draw.
         // Use the host app's active theme color so the edge fade also matches light themes.
         val colorAttr = context.resources.getIdentifier("primaryBlackBackground", "attr", context.packageName)

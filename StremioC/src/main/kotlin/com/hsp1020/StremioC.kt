@@ -28,6 +28,8 @@ import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.ShowStatus
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.ui.settings.Globals.TV
+import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import com.lagradost.cloudstream3.addDate
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.newEpisode
@@ -114,6 +116,36 @@ private fun tmdbLogoLanguages(): String {
         ?.substringBefore('-')?.trim()?.lowercase()
         ?.takeIf { it.isNotEmpty() } ?: "en"
     return listOf(preferred, "en").distinct().joinToString(",")
+}
+
+internal data class TrailerChoice(
+    val youtubeId: String,
+    val title: String,
+    val type: String,
+    val language: String? = null
+)
+
+private fun parseTrailerYoutubeId(raw: String?): String? {
+    val value = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    fun valid(id: String) = id.length == 11 && id.all {
+        (it.isLetterOrDigit() && it.code < 128) || it == '_' || it == '-'
+    }
+    if (valid(value)) return value
+    return runCatching {
+        val uri = android.net.Uri.parse(value)
+        val host = uri.host?.lowercase() ?: return@runCatching null
+        val segments = uri.pathSegments
+        val candidate = when {
+            host == "youtu.be" || host.endsWith(".youtu.be") -> segments.firstOrNull()
+            host == "youtube.com" || host.endsWith(".youtube.com") ||
+                host == "youtube-nocookie.com" || host.endsWith(".youtube-nocookie.com") ->
+                uri.getQueryParameter("v") ?: segments.takeIf {
+                    it.firstOrNull() in listOf("embed", "shorts", "live", "v")
+                }?.getOrNull(1)
+            else -> null
+        }
+        candidate?.takeIf(::valid)
+    }.getOrNull()
 }
 
 open class StremioC(override var mainUrl: String, override var name: String) : MainAPI() {
@@ -332,6 +364,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         internal val fallbackLogoTitles = lruCacheMap<String, Boolean>(200)
         internal val expectedLogoByUrl = lruCacheMap<String, Boolean>(200)
+        internal val trailerChoicesByUrl = lruCacheMap<String, List<TrailerChoice>>(200)
         private val tmdbDetailsCache = lruCacheMap<String, Pair<TmdbDetailResponse, Long>>(100)
         private val tmdbSeasonCache = lruCacheMap<String, Pair<TmdbSeasonDetail, Long>>(150)
         private val tmdbFindCache = lruCacheMap<String, Pair<Pair<String, String>?, Long>>(100)
@@ -1417,6 +1450,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         if (url != loadRes.url) {
             fallbackLogoTitles[loadRes.url]?.let { fallbackLogoTitles[url] = it }
             expectedLogoByUrl[loadRes.url]?.let { expectedLogoByUrl[url] = it }
+            trailerChoicesByUrl[loadRes.url]?.let { trailerChoicesByUrl[url] = it }
         }
         collectionDeferred?.cancel() // No remaining prefetch when the final media type differs.
 
@@ -2606,7 +2640,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private data class FetchedTmdbData(
         val fetchedTitle: String?, val fetchedOverview: String?, val fetchedLogo: String?,
-        val fetchedTrailers: List<String>, val fetchedRecommendations: List<SearchResponse>?,
+        val fetchedTrailers: List<TrailerChoice>, val fetchedRecommendations: List<SearchResponse>?,
         val fetchedRuntime: Int?, val fetchedAgeRating: String?, val fetchedActors: List<ActorData>?,
         val fetchedYear: Int?, val fetchedStatus: ShowStatus?, val episodeTmdbMeta: Map<String, TmdbEpisode>,
         val fetchedOriginCountry: List<String>?,
@@ -2829,7 +2863,15 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 ActorData(Actor(actorName, profileImg), roleString = cast.character)
             } ?: emptyList()
 
-            val fetchedTrailers = (detailRes.videos?.results ?: emptyList()).filter { it.type == "Trailer" || it.type == "Teaser" }.sortedWith(compareBy({ if (it.type == "Trailer") 0 else 1 }, { it.publishedAt ?: "9999-12-31" })).mapNotNull { it.key }.map { "https://m.youtube.com/watch?v=$it" }
+            val fetchedTrailers = detailRes.videos?.results.orEmpty()
+                .filter { (it.type == "Trailer" || it.type == "Teaser") && it.site.equals("YouTube", true) }
+                .sortedWith(compareBy({ if (it.type == "Trailer") 0 else 1 }, { it.publishedAt ?: "9999-12-31" }))
+                .mapNotNull { item ->
+                    parseTrailerYoutubeId(item.key)?.let { id ->
+                        TrailerChoice(id, item.name?.takeIf { it.isNotBlank() } ?: (item.type ?: "Trailer"),
+                            item.type ?: "Trailer", item.language)
+                    }
+                }.distinctBy { it.youtubeId }.take(30)
 
             val translationData = detailRes.translations?.translations?.firstOrNull { 
                 it.iso_3166_1 == "US" || it.iso_639_1 == "en" 
@@ -3099,8 +3141,19 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
             }
 
-            val fallbackTrailers = finalTrailerStreams?.mapNotNull { it.ytId }?.ifEmpty { finalTrailersSources?.mapNotNull { it.source } }?.distinct()?.map { if (it.startsWith("http")) it else "https://m.youtube.com/watch?v=$it" } ?: emptyList()
-            val finalTrailers = tmdbData?.fetchedTrailers?.ifEmpty { fallbackTrailers } ?: fallbackTrailers
+            val fallbackTrailers = finalTrailerStreams.orEmpty().mapNotNull { item ->
+                parseTrailerYoutubeId(item.ytId)?.let { id ->
+                    TrailerChoice(id, item.title?.takeIf { it.isNotBlank() } ?: "Trailer", "Trailer")
+                }
+            }.ifEmpty {
+                finalTrailersSources.orEmpty().mapNotNull { item ->
+                    parseTrailerYoutubeId(item.source)?.let { id ->
+                        TrailerChoice(id, item.type ?: "Trailer", item.type ?: "Trailer")
+                    }
+                }
+            }
+            val finalTrailers = tmdbData?.fetchedTrailers.orEmpty().ifEmpty { fallbackTrailers }
+                .distinctBy { it.youtubeId }.take(30)
 
             val countries = tmdbData?.fetchedOriginCountry ?: emptyList()
             val isBollywood = countries.any { it.contains("IN", true) || it.contains("India", true) }
@@ -3164,6 +3217,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
+                StremioC.trailerChoicesByUrl[metaUrl] = finalTrailers
                 val resolvedMovieId = if (finalType == "other" && finalVideos?.size == 1) {
                     finalVideos[0].id ?: movieId
                 } else {
@@ -3197,7 +3251,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations 
-                    addTrailer(finalTrailers); this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
+                    if (isLayout(TV)) addTrailer(finalTrailers.map { "https://m.youtube.com/watch?v=" + it.youtubeId }); this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
                     finalLogo?.let { this.logoUrl = it }
 
 
@@ -3228,6 +3282,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
+                StremioC.trailerChoicesByUrl[metaUrl] = finalTrailers
                 val response = provider.newTvSeriesLoadResponse(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
                 ) {
@@ -3237,7 +3292,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations
-                    addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
+                    if (isLayout(TV)) addTrailer(finalTrailers.firstOrNull()?.let { "https://m.youtube.com/watch?v=" + it.youtubeId }); this.contentRating = tmdbData?.fetchedAgeRating
                     finalLogo?.let { this.logoUrl = it }
                     
 
@@ -3552,7 +3607,14 @@ private data class TmdbCrew(@JsonProperty("name") val name: String?, @JsonProper
 private data class TmdbSeasonDetail(@JsonProperty("episodes") val episodes: List<TmdbEpisode>? = null)
 private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("episode_number") val episodeNumber: Int?, @JsonProperty("air_date") val airDate: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("runtime") val runtime: Int?)
 
-data class Trailers(@JsonProperty("key") val key: String? = null, @JsonProperty("type") val type: String? = null, @JsonProperty("published_at") val publishedAt: String? = null)
+data class Trailers(
+    @JsonProperty("key") val key: String? = null,
+    @JsonProperty("type") val type: String? = null,
+    @JsonProperty("published_at") val publishedAt: String? = null,
+    @JsonProperty("site") val site: String? = null,
+    @JsonProperty("name") val name: String? = null,
+    @JsonProperty("iso_639_1") val language: String? = null
+)
 data class ResultsTrailer(@JsonProperty("results") val results: ArrayList<Trailers>? = arrayListOf())
 data class ExternalIds(@JsonProperty("imdb_id") val imdb_id: String? = null, @JsonProperty("tvdb_id") val tvdb_id: String? = null)
 
