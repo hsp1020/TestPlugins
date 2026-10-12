@@ -2620,13 +2620,19 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     )
 
     private data class Trailer(
-        @JsonProperty("source") val source: String?, 
-        @JsonProperty("type") val type: String?
+        @JsonProperty("source") val source: String?,
+        @JsonProperty("type") val type: String?,
+        @JsonProperty("language") val language: String? = null,
+        @JsonProperty("lang") val lang: String? = null,
+        @JsonProperty("iso_639_1") val isoLanguage: String? = null
     )
     
     private data class TrailerStream(
-        @JsonProperty("ytId") val ytId: String?, 
-        @JsonProperty("title") val title: String? = null
+        @JsonProperty("ytId") val ytId: String?,
+        @JsonProperty("title") val title: String? = null,
+        @JsonProperty("language") val language: String? = null,
+        @JsonProperty("lang") val lang: String? = null,
+        @JsonProperty("iso_639_1") val isoLanguage: String? = null
     )
     
     private data class Link(
@@ -3140,12 +3146,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             val fallbackTrailers = finalTrailerStreams.orEmpty().mapNotNull { item ->
                 parseTrailerYoutubeId(item.ytId)?.let { id ->
-                    TrailerChoice(id, item.title?.takeIf { it.isNotBlank() } ?: "Trailer", "Trailer")
+                    TrailerChoice(id, item.title?.takeIf { it.isNotBlank() } ?: "Trailer", "Trailer",
+                        item.language ?: item.lang ?: item.isoLanguage)
                 }
             }.ifEmpty {
                 finalTrailersSources.orEmpty().mapNotNull { item ->
                     parseTrailerYoutubeId(item.source)?.let { id ->
-                        TrailerChoice(id, item.type ?: "Trailer", item.type ?: "Trailer")
+                        TrailerChoice(id, item.type ?: "Trailer", item.type ?: "Trailer",
+                            item.language ?: item.lang ?: item.isoLanguage)
                     }
                 }
             }

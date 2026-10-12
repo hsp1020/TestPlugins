@@ -21,11 +21,11 @@ import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.ui.player.PlayerSubtitleHelper
-import com.lagradost.cloudstream3.ui.player.ExtractorLinkGenerator
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
+import com.lagradost.cloudstream3.utils.SubtitleHelper
 import com.lagradost.cloudstream3.utils.UIHelper.navigate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -73,6 +73,12 @@ internal class TrailerChooser(
     }
 
     private fun dp(value: Int): Int = (value * root.resources.displayMetrics.density + 0.5f).toInt()
+
+    private fun localizedLanguage(raw: String?): String? {
+        val code = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val appLocale = root.resources.configuration.locales.get(0).toLanguageTag()
+        return SubtitleHelper.fromTagToLanguageName(code, appLocale) ?: code.uppercase(java.util.Locale.ROOT)
+    }
 
     private fun themeColor(attrName: String, fallback: Int): Int {
         val id = root.resources.getIdentifier(attrName, "attr", root.context.packageName)
@@ -148,7 +154,7 @@ internal class TrailerChooser(
                 gravity = Gravity.CENTER
                 setPadding(dp(14), 0, dp(14), 0)
                 background = GradientDrawable().apply {
-                    setColor(0xD02B2C30.toInt())
+                    setColor(0x992B2C30.toInt())
                     cornerRadius = dp(20).toFloat()
                 }
                 isClickable = true
@@ -219,7 +225,7 @@ internal class TrailerChooser(
             })
             labels.addView(TextView(activity).apply {
                 text = (if (entry.type.equals("Trailer", true)) activity.getString(R.string.trailer) else entry.type) +
-                    (entry.language?.takeIf { it.isNotBlank() }?.let { " · " + it.uppercase() } ?: "")
+                    (localizedLanguage(entry.language)?.let { " · " + it } ?: "")
                 textSize = 12f
                 setTextColor(themeColor("textColor", 0xFFAAAAAA.toInt()))
                 alpha = 0.7f
@@ -273,10 +279,16 @@ internal class TrailerChooser(
                 val subtitles = synchronized(subtitleFiles) { subtitleFiles.toList() }
                     .distinctBy { it.url }.map { PlayerSubtitleHelper.getSubtitleData(it) }
                 // Pass every MP4/HLS/DASH quality and track-bearing DASH MPD to the host player.
+                val selectedIndex = items.indexOf(entry).takeIf { it >= 0 } ?: return@launch
+                val heading = title?.text?.toString()?.trim().orEmpty()
+                    .ifBlank { root.context.getString(R.string.trailer) }
                 fragment.activity?.navigate(
                     R.id.global_to_navigation_player,
                     GeneratorPlayer.newInstance(
-                        ExtractorLinkGenerator(playable.distinctBy { it.url }, subtitles), 0
+                        TrailerPlaybackGenerator(
+                            items.toList(), heading, selectedIndex,
+                            playable.distinctBy { it.url }, subtitles
+                        ), selectedIndex
                     )
                 )
             } catch (cancelled: CancellationException) {
