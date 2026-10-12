@@ -29,7 +29,6 @@ import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
-import androidx.preference.PreferenceManager
 import kotlinx.coroutines.*
 import kotlin.math.*
 
@@ -514,12 +513,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     fun start() {
         val container = holder ?: return
         if (started || picture == null) return
-        // CloudStream uses this same preference for its built-in trailer UI.
+        // Keep identical artwork and logo geometry with trailers enabled or disabled.
         val context = root.context
-        val keyId = context.resources.getIdentifier("show_trailers_key", "string", context.packageName)
-        val trailersEnabled = keyId == 0 || PreferenceManager.getDefaultSharedPreferences(context)
-            .getBoolean(context.getString(keyId), true)
-        if (trailersEnabled && tv) return
         if (portraitMode() && maskPortraitTitle()) title?.alpha = 0f
         started = true
         splitFallback = false

@@ -4,6 +4,9 @@ import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.ViewTreeObserver
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -16,6 +19,8 @@ import androidx.fragment.app.Fragment
 import androidx.preference.PreferenceManager
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.ui.player.PlayerSubtitleHelper
 import com.lagradost.cloudstream3.ui.player.ExtractorLinkGenerator
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -42,6 +47,23 @@ internal class TrailerChooser(
     private var dialog: BottomSheetDialog? = null
     private var opening = false
     private var items: List<TrailerChoice> = emptyList()
+    private val tvButton = find("result_play_trailer_button")
+    private val tvContainer = find("result_play_trailer")
+    private val isTv = tvButton != null && tvContainer != null
+    private val pickerClick = View.OnClickListener { showPicker() }
+    private val tvPreDraw = ViewTreeObserver.OnPreDrawListener {
+        if (fragment.isAdded) {
+            // Host trailer LiveData may reset the native TV button after page metadata arrives.
+            refresh()
+            syncTvButton()
+        }
+        true
+    }
+
+    private fun find(name: String): View? {
+        val id = root.resources.getIdentifier(name, "id", root.context.packageName)
+        return if (id == 0) null else root.findViewById(id)
+    }
     private val title: TextView? = root.resources.getIdentifier("result_title", "id", root.context.packageName)
         .takeIf { it != 0 }?.let { root.findViewById(it) }
     private val titleWatcher = object : android.text.TextWatcher {
@@ -60,9 +82,37 @@ internal class TrailerChooser(
     }
 
     fun start() {
-        if (fragment.javaClass.name == "com.lagradost.cloudstream3.ui.result.ResultFragmentTv") return
         title?.addTextChangedListener(titleWatcher)
+        if (isTv) {
+            tvButton?.apply {
+                setOnClickListener(pickerClick)
+                setOnKeyListener { _, code, event ->
+                    if (code == KeyEvent.KEYCODE_DPAD_CENTER ||
+                        code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER
+                    ) {
+                        if (event.action == KeyEvent.ACTION_UP) showPicker()
+                        true
+                    } else false
+                }
+                setOnTouchListener { _, event ->
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> true
+                        MotionEvent.ACTION_UP -> { showPicker(); true }
+                        else -> false
+                    }
+                }
+            }
+            root.viewTreeObserver.addOnPreDrawListener(tvPreDraw)
+        }
         refresh()
+    }
+
+    private fun syncTvButton() {
+        if (!isTv) return
+        val desired = if (items.isEmpty()) View.GONE else View.VISIBLE
+        if (tvContainer?.visibility != desired) tvContainer?.visibility = desired
+        // The host can replace the click listener even while this button stays visible.
+        if (desired == View.VISIBLE) tvButton?.setOnClickListener(pickerClick)
     }
 
     fun refresh() {
@@ -72,8 +122,16 @@ internal class TrailerChooser(
         val enabled = settingId == 0 || PreferenceManager.getDefaultSharedPreferences(context)
             .getBoolean(context.getString(settingId), true)
         val next = if (enabled) StremioC.trailerChoicesByUrl[detailUrl].orEmpty() else emptyList()
-        if (next == items && (button != null || next.isEmpty())) return
+        if (next == items && (isTv || button != null || next.isEmpty())) {
+            if (!isTv && button != null) updatePhoneLabel()
+            return
+        }
         items = next
+        if (isTv) {
+            syncTvButton()
+            if (items.isEmpty()) dialog?.dismiss()
+            return
+        }
         if (items.isEmpty()) {
             (button?.parent as? ViewGroup)?.removeView(button)
             button = null
@@ -103,8 +161,13 @@ internal class TrailerChooser(
                 ).apply { topMargin = dp(16); marginEnd = dp(16) })
             }
         }
-        button?.text = "▶  예고편 " + items.size
-        button?.contentDescription = "예고편 " + items.size + "개 보기"
+        updatePhoneLabel()
+    }
+
+    private fun updatePhoneLabel() {
+        val label = root.context.getString(R.string.trailer)
+        button?.text = "▶  $label (${items.size})"
+        button?.contentDescription = "${root.context.getString(R.string.play_trailer_button)} (${items.size})"
     }
 
     private fun showPicker() {
@@ -116,7 +179,7 @@ internal class TrailerChooser(
             setPadding(dp(16), dp(12), dp(16), dp(12))
         }
         list.addView(TextView(activity).apply {
-            text = "예고편  ·  " + items.size + "개"
+            text = "${activity.getString(R.string.trailer)} (${items.size})"
             textSize = 20f
             setTextColor(foreground)
             setPadding(dp(4), dp(8), 0, dp(16))
@@ -131,6 +194,9 @@ internal class TrailerChooser(
                 setPadding(dp(4), dp(6), dp(4), dp(6))
                 isClickable = true
                 isFocusable = true
+                val focusBackground = TypedValue()
+                if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, focusBackground, true) &&
+                    focusBackground.resourceId != 0) setBackgroundResource(focusBackground.resourceId)
                 setOnClickListener {
                     dialog?.dismiss()
                     play(entry)
@@ -152,7 +218,8 @@ internal class TrailerChooser(
                 setTextColor(foreground)
             })
             labels.addView(TextView(activity).apply {
-                text = entry.type + (entry.language?.takeIf { it.isNotBlank() }?.let { " · " + it.uppercase() } ?: "")
+                text = (if (entry.type.equals("Trailer", true)) activity.getString(R.string.trailer) else entry.type) +
+                    (entry.language?.takeIf { it.isNotBlank() }?.let { " · " + it.uppercase() } ?: "")
                 textSize = 12f
                 setTextColor(themeColor("textColor", 0xFFAAAAAA.toInt()))
                 alpha = 0.7f
@@ -173,6 +240,7 @@ internal class TrailerChooser(
         dialog = BottomSheetDialog(activity).apply {
             setContentView(list)
             setOnDismissListener { dialog = null }
+            if (isTv) setOnShowListener { rows.getChildAt(0)?.requestFocus() }
             show()
         }
     }
@@ -183,11 +251,12 @@ internal class TrailerChooser(
         scope.launch {
             try {
                 val links = Collections.synchronizedList(mutableListOf<ExtractorLink>())
+                val subtitleFiles = Collections.synchronizedList(mutableListOf<SubtitleFile>())
                 withContext(Dispatchers.IO) {
                     com.hsp1020.youtube.YoutubeExtractor().getUrl(
                         "https://www.youtube.com/watch?v=" + entry.youtubeId,
                         null,
-                        { _ -> },
+                        { subtitle -> subtitleFiles.add(subtitle) },
                         { link -> links.add(link) }
                     )
                 }
@@ -197,31 +266,24 @@ internal class TrailerChooser(
                         ExtractorLinkType.VIDEO, ExtractorLinkType.DASH, ExtractorLinkType.M3U8
                     )
                 }
-                // Prefer muxed MP4; it avoids the host's separate audio-source merge.
-                val selected = playable.filter {
-                    it.type == ExtractorLinkType.VIDEO && it.name.contains("(MP4)", true)
-                }.maxByOrNull { it.quality }
-                    ?: playable.filter {
-                        it.type == ExtractorLinkType.DASH && it.name.contains(" (DASH)", true)
-                    }.maxByOrNull { it.quality }
-                    ?: playable.firstOrNull { it.type == ExtractorLinkType.M3U8 }
-                    ?: playable.firstOrNull { it.type == ExtractorLinkType.DASH }
-                    ?: playable.firstOrNull { it.type == ExtractorLinkType.VIDEO }
-                if (selected == null) {
-                    toast("재생 가능한 YouTube 예고편 소스를 찾지 못했습니다.")
+                if (playable.isEmpty()) {
+                    toast(fragment.requireContext().getString(R.string.no_links_found_toast))
                     return@launch
                 }
+                val subtitles = synchronized(subtitleFiles) { subtitleFiles.toList() }
+                    .distinctBy { it.url }.map { PlayerSubtitleHelper.getSubtitleData(it) }
+                // Pass every MP4/HLS/DASH quality and track-bearing DASH MPD to the host player.
                 fragment.activity?.navigate(
                     R.id.global_to_navigation_player,
                     GeneratorPlayer.newInstance(
-                        ExtractorLinkGenerator(listOf(selected), emptyList()), 0
+                        ExtractorLinkGenerator(playable.distinctBy { it.url }, subtitles), 0
                     )
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
                 android.util.Log.e("StremioCTrailers", "Trailer playback failed", error)
-                if (fragment.isAdded) toast("예고편 재생 준비에 실패했습니다.")
+                if (fragment.isAdded) toast(fragment.requireContext().getString(R.string.error))
             } finally {
                 opening = false
             }
@@ -234,6 +296,11 @@ internal class TrailerChooser(
 
     fun stop() {
         title?.removeTextChangedListener(titleWatcher)
+        if (isTv) {
+            if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(tvPreDraw)
+            tvButton?.setOnKeyListener(null)
+            tvButton?.setOnTouchListener(null)
+        }
         dialog?.dismiss()
         dialog = null
         (button?.parent as? ViewGroup)?.removeView(button)
