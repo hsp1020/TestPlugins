@@ -22,6 +22,7 @@ import android.text.Spanned
 import android.text.TextWatcher
 import android.text.style.ImageSpan
 import android.view.View
+import android.view.ViewTreeObserver
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
@@ -29,6 +30,7 @@ import androidx.fragment.app.FragmentManager
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
+import com.lagradost.cloudstream3.utils.UIHelper.navigate
 import kotlin.math.roundToInt
 private val QUALITY_REGEX = Regex("(\\d{3,4}[pP])")
 private val TT_REGEX = Regex("^tt\\d+$")
@@ -281,12 +283,42 @@ internal class RatingPlotImageHook(
         watchers[f] = Watcher(view, root, f.arguments?.getString("url"), f).also { it.start() }
     }
 
-    private inner class Watcher(private val view: TextView, root: View, detailUrl: String?, fragment: Fragment) : TextWatcher {
+    private inner class Watcher(private val view: TextView, private val root: View, detailUrl: String?, private val fragment: Fragment) : TextWatcher {
         private val backdrop = DetailBackdropLayout(root, detailUrl)
         private val trailers = TrailerChooser(fragment, root, detailUrl)
         private var changing = false
-        fun start() { view.addTextChangedListener(this); runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() } }
-        fun detach() { view.removeTextChangedListener(this); runCatching { trailers.stop() }; runCatching { backdrop.stop() }; runCatching { restore() } }
+        private val searchButton = listOf("result_search_Button", "result_search").firstNotNullOfOrNull {
+            val id = root.resources.getIdentifier(it, "id", root.context.packageName)
+            if (id == 0) null else root.findViewById<View>(id)
+        }
+        private val searchTitle = root.resources.getIdentifier("result_title", "id", root.context.packageName)
+            .takeIf { it != 0 }?.let { root.findViewById<TextView>(it) }
+        private val searchClick = View.OnClickListener {
+            val query = searchTitle?.text?.toString()?.trim().orEmpty()
+                .ifEmpty { fragment.arguments?.getString("name")?.trim().orEmpty() }
+            if (query.isNotEmpty()) {
+                val id = root.resources.getIdentifier("navigation_search", "id", root.context.packageName)
+                if (id != 0) fragment.activity?.navigate(id, Bundle().apply { putString("search_query", query) })
+            }
+        }
+        private val searchPreDraw = ViewTreeObserver.OnPreDrawListener {
+            if (fragment.isAdded && searchButton?.isShown == true) searchButton.setOnClickListener(searchClick)
+            true
+        }
+        fun start() {
+            view.addTextChangedListener(this)
+            searchButton?.let {
+                it.setOnClickListener(searchClick)
+                root.viewTreeObserver.addOnPreDrawListener(searchPreDraw)
+            }
+            runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() }
+        }
+        fun detach() {
+            view.removeTextChangedListener(this)
+            if (searchButton != null && root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(searchPreDraw)
+            searchButton?.setOnClickListener(null)
+            runCatching { trailers.stop() }; runCatching { backdrop.stop() }; runCatching { restore() }
+        }
         private fun restore() {
             val old = view.text as? Spanned ?: return
             val spans = old.getSpans(0, old.length, LogoSpan::class.java)
