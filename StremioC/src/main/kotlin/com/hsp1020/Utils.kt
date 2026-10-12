@@ -229,10 +229,83 @@ internal class RatingPlotImageHook(
             watchers.values.toList().forEach { runCatching { it.render() } }
         }
     }
+    // Temporary, read-only trace for detail -> regular search -> detail transitions.
+    private var navTraceLog: ((String, View?) -> Unit)? = null
+    private var navTraceEnd: (() -> Unit)? = null
+
+    private fun startNavTrace(activity: FragmentActivity, detail: View) {
+        navTraceEnd?.invoke()
+        val root = activity.window.decorView
+        fun find(name: String): View? {
+            val id = activity.resources.getIdentifier(name, "id", activity.packageName)
+            return if (id == 0) null else activity.findViewById<View>(id)
+        }
+        val bottom = find("nav_view")
+        val rail = find("nav_rail_view")
+        val hostView = find("nav_host_fragment")
+        val cast = find("cast_mini_controller_holder")
+        val hostFragment = hostView?.let { activity.supportFragmentManager.findFragmentById(it.id) }
+        val start = android.os.SystemClock.uptimeMillis()
+        var pageView: View? = detail
+        val log: (String, View?) -> Unit = { event, page ->
+            if (event.startsWith("destroyed")) pageView = null
+            else if (page != null) pageView = page
+            android.util.Log.i("StremioCNavTrace",
+                "${android.os.SystemClock.uptimeMillis() - start}ms $event")
+        }
+        navTraceLog = log
+        fun state(v: View?): String {
+            if (v == null) return "-"
+            val vis = when (v.visibility) {
+                View.VISIBLE -> "V"; View.INVISIBLE -> "I"; else -> "G"
+            }
+            val margin = (v.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.marginStart ?: 0
+            return "$vis:${v.left},${v.top}/${v.width}x${v.height}/m$margin/" +
+                "a${v.alpha}/s${v.scaleX},${v.scaleY}/t${v.translationX},${v.translationY}/" +
+                "anim${v.animation?.hasStarted() == true && v.animation?.hasEnded() == false}"
+        }
+        var previous = ""
+        var changes = 0
+        val tree = root.viewTreeObserver
+        val listener = ViewTreeObserver.OnPreDrawListener {
+            runCatching {
+                val current = hostFragment?.childFragmentManager?.primaryNavigationFragment?.javaClass?.simpleName
+                val snapshot = "current=$current bottom=${state(bottom)} rail=${state(rail)} " +
+                    "host=${state(hostView)} cast=${state(cast)} page=${state(pageView)}"
+                if (snapshot != previous) {
+                    previous = snapshot
+                    if (changes < 100) log("frame#$changes $snapshot", null)
+                    else if (changes == 100) log("frame logging capped at 100 changes", null)
+                    changes++
+                }
+            }.onFailure { android.util.Log.e("StremioCNavTrace", "trace sampling error", it) }
+            true
+        }
+        if (tree.isAlive) tree.addOnPreDrawListener(listener)
+        navTraceEnd = {
+            if (tree.isAlive) tree.removeOnPreDrawListener(listener)
+            navTraceLog = null
+            navTraceEnd = null
+        }
+        log("CLICK detail -> search", detail)
+        main.postDelayed({ if (navTraceLog === log) navTraceEnd?.invoke() }, 300000L)
+    }
+
+    private fun traceFragment(event: String, f: Fragment, view: View? = null) {
+        val type = f.javaClass.simpleName
+        if (type !in setOf("SearchFragment", "ResultFragmentPhone", "ResultFragmentTv")) return
+        val active = navTraceLog ?: return
+        active("$event $type fragment=${System.identityHashCode(f)}", view)
+        if (event == "resumed" && type.startsWith("ResultFragment")) {
+            main.postDelayed({ if (navTraceLog === active) navTraceEnd?.invoke() }, 1200L)
+        }
+    }
+
     private val fragmentCallback = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
             fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?
         ) {
+            traceFragment("created", f, v)
             runCatching {
                 if (f.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment" &&
                     f.arguments?.getBoolean("stremioc_detail_search") == true && isLayout(PHONE)) {
@@ -249,7 +322,16 @@ internal class RatingPlotImageHook(
             }
         }
 
+        override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
+            traceFragment("resumed", f, f.view)
+        }
+
+        override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
+            traceFragment("paused", f)
+        }
+
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
+            traceFragment("destroyed", f)
             watchers.remove(f)?.detach()
         }
     }
@@ -261,6 +343,7 @@ internal class RatingPlotImageHook(
     }
 
     fun stop() {
+        navTraceEnd?.invoke()
         prefs.unregisterOnSharedPreferenceChangeListener(prefListener)
         app.unregisterActivityLifecycleCallbacks(this)
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
@@ -271,6 +354,7 @@ internal class RatingPlotImageHook(
 
     private fun use(activity: FragmentActivity) {
         if (host === activity) return
+        navTraceEnd?.invoke()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
         watchers.clear()
@@ -319,13 +403,19 @@ internal class RatingPlotImageHook(
                 val id = root.resources.getIdentifier("navigation_search", "id", root.context.packageName)
                 val enter = root.resources.getIdentifier("enter_anim", "anim", root.context.packageName)
                 val exit = root.resources.getIdentifier("exit_anim", "anim", root.context.packageName)
-                if (id != 0) fragment.activity?.navigate(id, Bundle().apply {
-                    putString("search_query", query)
-                    putBoolean("stremioc_detail_search", true)
-                }, NavOptions.Builder()
-                    .setEnterAnim(enter).setExitAnim(exit)
-                    .setPopEnterAnim(enter).setPopExitAnim(exit)
-                    .build())
+                if (id != 0) {
+                    (fragment.activity as? MainActivity)?.let {
+                        runCatching { startNavTrace(it, root) }
+                            .onFailure { e -> android.util.Log.e("StremioCNavTrace", "trace setup error", e) }
+                    }
+                    fragment.activity?.navigate(id, Bundle().apply {
+                        putString("search_query", query)
+                        putBoolean("stremioc_detail_search", true)
+                    }, NavOptions.Builder()
+                        .setEnterAnim(enter).setExitAnim(exit)
+                        .setPopEnterAnim(enter).setPopExitAnim(exit)
+                        .build())
+                }
             }
         }
         private val searchPreDraw = ViewTreeObserver.OnPreDrawListener {
@@ -407,6 +497,7 @@ internal class RatingPlotImageHook(
         if (activity is MainActivity) runCatching { use(activity) }
     }
     override fun onActivityDestroyed(activity: Activity) { if (host === activity) {
+        navTraceEnd?.invoke()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
         watchers.clear(); host = null
