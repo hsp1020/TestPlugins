@@ -160,6 +160,7 @@ internal class TrailerChooser(
                 chipBackgroundColor = ColorStateList.valueOf(0xFF2B2C30.toInt())
                 setTextColor(Color.WHITE)
                 typeface = Typeface.create(ResourcesCompat.getFont(context, R.font.google_sans), Typeface.BOLD)
+                fontFeatureSettings = "'liga' 0, 'clig' 0, 'calt' 0, 'dlig' 0"
                 isCheckable = false
                 isClickable = true
                 isFocusable = true
