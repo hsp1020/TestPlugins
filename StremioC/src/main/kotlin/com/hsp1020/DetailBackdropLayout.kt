@@ -32,13 +32,14 @@ import android.widget.TextView
 import kotlinx.coroutines.*
 import kotlin.math.*
 
-/** StremioC detail backdrop only. Original CloudStream toolbar and player remain untouched. */
+/** StremioC detail backdrop and native preview suppression; standalone player is untouched. */
 internal class DetailBackdropLayout(private val root: View, private val detailUrl: String? = null) {
     private fun find(name: String): View? {
         val id = root.resources.getIdentifier(name, "id", root.context.packageName)
         return if (id == 0) null else root.findViewById(id)
     }
     private val phoneHero = find("result_top_holder")
+    private val nativePreview = find("result_smallscreen_holder")
     private val tv = phoneHero == null
     private val holder = find(if (tv) "background_poster_holder" else "result_poster_background_holder") as? FrameLayout
     private val picture = find(if (tv) "background_poster" else "result_poster_background") as? ImageView
@@ -423,8 +424,17 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         lastFitWidth = width
         lastFitHeight = maxHeight
     }
+    private fun suppressNativePreview() {
+        if (phoneHero == null || !started) return
+        if (nativePreview?.visibility != View.INVISIBLE) nativePreview?.visibility = View.INVISIBLE
+        holder?.let {
+            if (it.animation != null) it.clearAnimation()
+            if (it.visibility != View.VISIBLE) it.visibility = View.VISIBLE
+            if (it.alpha != 1f) it.alpha = 1f
+        }
+    }
     private val preDraw = ViewTreeObserver.OnPreDrawListener {
-        runCatching { update() }.onFailure {
+        runCatching { suppressNativePreview(); update() }.onFailure {
             android.util.Log.e("StremioCBackdrop", "Split layout update failed", it)
             recoverOriginalLayout()
         }; true
@@ -516,6 +526,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val context = root.context
         if (portraitMode() && maskPortraitTitle()) title?.alpha = 0f
         started = true
+        suppressNativePreview()
         splitFallback = false
         nativeRecoveryFrames = 0
         if (splitMode()) stage() // Hide both assets before their first native-layout draw.
