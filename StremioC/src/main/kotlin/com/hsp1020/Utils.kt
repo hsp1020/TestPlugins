@@ -22,7 +22,6 @@ import android.text.Spanned
 import android.text.TextWatcher
 import android.text.style.ImageSpan
 import android.view.View
-import android.view.MotionEvent
 import android.view.ViewTreeObserver
 import android.widget.TextView
 import androidx.appcompat.widget.SearchView
@@ -212,53 +211,69 @@ internal class RatingPlotImageHook(
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
 
-    private val navMenuDebugStops = mutableMapOf<Fragment, () -> Unit>()
+    // Keep the native Activity-scoped SearchViewModel's results visible when its Fragment is recreated.
+    private var lastSearchQuery: String? = null
+    private var stremioSearchSession = false
+    private var freshSearchPending = false
+    private var homeMenuOwner: Fragment? = null
+    private var homeMenuItems = emptyList<android.view.MenuItem>()
 
-    // Passive diagnostics: record HOME touches without consuming native events.
-    private fun traceSearchHomeTouch(search: Fragment) {
-        if (search.arguments?.getBoolean("stremioc_detail_search") != true ||
-            navMenuDebugStops.containsKey(search)) return
-        val activity = search.activity ?: return
-        val res = activity.resources
-        fun id(name: String) = res.getIdentifier(name, "id", activity.packageName)
+    private fun releaseHomeMenu(owner: Fragment? = null) {
+        if (owner != null && homeMenuOwner !== owner) return
+        homeMenuItems.forEach { it.setOnMenuItemClickListener(null) }
+        homeMenuItems = emptyList()
+        homeMenuOwner = null
+    }
+
+    private fun setupSearchNavigation(f: Fragment, root: View) {
+        val marked = f.arguments?.getBoolean("stremioc_detail_search") == true
+        if (!marked && !stremioSearchSession) return
+        stremioSearchSession = true
+        val fresh = marked && freshSearchPending
+        freshSearchPending = false
+        val activity = f.activity ?: return
+        fun id(name: String) = root.resources.getIdentifier(name, "id", root.context.packageName)
+        val searchView = id("main_search").takeIf { it != 0 }?.let { root.findViewById<SearchView>(it) }
+        if (!fresh && searchView?.query.isNullOrEmpty() &&
+            f.arguments?.getString("search_query").isNullOrBlank() &&
+            MainActivity.nextSearchQuery.isNullOrBlank()) {
+            lastSearchQuery?.let { searchView?.setQuery(it, false) }
+        }
+
         val homeId = id("navigation_home")
         val searchId = id("navigation_search")
         val hostId = id("nav_host_fragment")
-        if (homeId == 0 || searchId == 0) return
-        fun snapshot(label: String) {
-            val screen = activity.supportFragmentManager.findFragmentById(hostId)
-                ?.childFragmentManager?.primaryNavigationFragment?.javaClass?.simpleName
-            val nav = listOf("nav_view", "nav_rail_view").joinToString(" ") { name ->
-                val barId = id(name)
-                val bar = if (barId == 0) null else activity.findViewById<NavigationBarView>(barId)
-                val home = bar?.findViewById<View>(homeId)
-                val rect = android.graphics.Rect()
-                val visible = home?.getGlobalVisibleRect(rect) == true
-                "$name(selected=${bar?.selectedItemId},homeChecked=${bar?.menu?.findItem(homeId)?.isChecked}," +
-                    "searchChecked=${bar?.menu?.findItem(searchId)?.isChecked}," +
-                    "homeShown=${home?.isShown},enabled=${home?.isEnabled},clickable=${home?.isClickable}," +
-                    "bounds=${if (visible) rect.toShortString() else "-"},homeRef=${home?.hashCode()})"
-            }
-            android.util.Log.i("StremioCNavMenu", "$label screen=$screen $nav")
-        }
-        val homeViews = listOf("nav_view", "nav_rail_view").mapNotNull { name ->
+        if (homeId == 0 || searchId == 0 || hostId == 0) return
+        val navHost = activity.supportFragmentManager.findFragmentById(hostId)
+            as? androidx.navigation.fragment.NavHostFragment ?: return
+        releaseHomeMenu()
+        homeMenuOwner = f
+        homeMenuItems = listOf("nav_view", "nav_rail_view").mapNotNull { name ->
             val barId = id(name)
             val bar = if (barId == 0) null else activity.findViewById<NavigationBarView>(barId)
-            bar?.findViewById<View>(homeId)?.also { home ->
-                home.setOnTouchListener { _, event ->
-                    if (event.actionMasked == MotionEvent.ACTION_DOWN ||
-                        event.actionMasked == MotionEvent.ACTION_UP) {
-                        snapshot("$name HOME touch=${event.actionMasked} raw=${event.rawX},${event.rawY}")
-                        if (event.actionMasked == MotionEvent.ACTION_UP)
-                            home.post { snapshot("$name HOME after-up") }
+            bar?.menu?.findItem(homeId)?.apply {
+                setOnMenuItemClickListener {
+                    if (!f.isAdded || f.view !== root ||
+                        navHost.navController.currentDestination?.id != searchId) {
+                        false
+                    } else {
+                        runCatching {
+                            val nav = navHost.navController
+                            if (!nav.popBackStack(homeId, false, false)) {
+                                nav.navigate(homeId, null, NavOptions.Builder()
+                                    .setLaunchSingleTop(true)
+                                    .setRestoreState(false)
+                                    .build())
+                            }
+                            true
+                        }.getOrElse { e ->
+                            android.util.Log.e("StremioCNavMenu", "HOME navigation failed", e)
+                            false
+                        }
                     }
-                    false
                 }
             }
         }
-        navMenuDebugStops[search] = { homeViews.forEach { it.setOnTouchListener(null) } }
-        snapshot("search-created touchTargets=${homeViews.size}")
-        search.view?.post { if (search.isAdded) snapshot("search-visible") }
     }
     private val ids = mutableMapOf<String, Int>()
     private val icons = linkedMapOf(
@@ -409,7 +424,7 @@ internal class RatingPlotImageHook(
             traceFragment("created", f, v)
             runCatching {
                 if (f.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment")
-                    traceSearchHomeTouch(f)
+                    setupSearchNavigation(f, v)
                 if (f.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment" &&
                     f.arguments?.getBoolean("stremioc_detail_search") == true && isLayout(PHONE)) {
                     val id = v.resources.getIdentifier("main_search", "id", v.context.packageName)
@@ -431,14 +446,20 @@ internal class RatingPlotImageHook(
 
         override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
             traceFragment("paused", f)
-            if (f.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment")
+            if (f.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment") {
+                if (stremioSearchSession) {
+                    val id = f.view?.resources?.getIdentifier("main_search", "id", f.requireContext().packageName) ?: 0
+                    val query = if (id == 0) null else f.view?.findViewById<SearchView>(id)?.query?.toString()
+                    if (query != null) lastSearchQuery = query.takeIf { it.isNotBlank() }
+                }
                 runCatching { holdDetailReveal(f) }
                     .onFailure { android.util.Log.e("StremioCNavTrace", "detail reveal error", it) }
+            }
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
             traceFragment("destroyed", f)
-            navMenuDebugStops.remove(f)?.invoke()
+            releaseHomeMenu(f)
             watchers.remove(f)?.detach()
         }
     }
@@ -452,8 +473,10 @@ internal class RatingPlotImageHook(
     fun stop() {
         detailRevealEnd?.invoke()
         navTraceEnd?.invoke()
-        navMenuDebugStops.values.toList().forEach { it() }
-        navMenuDebugStops.clear()
+        releaseHomeMenu()
+        stremioSearchSession = false
+        freshSearchPending = false
+        lastSearchQuery = null
         prefs.unregisterOnSharedPreferenceChangeListener(prefListener)
         app.unregisterActivityLifecycleCallbacks(this)
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
@@ -466,8 +489,10 @@ internal class RatingPlotImageHook(
         if (host === activity) return
         detailRevealEnd?.invoke()
         navTraceEnd?.invoke()
-        navMenuDebugStops.values.toList().forEach { it() }
-        navMenuDebugStops.clear()
+        releaseHomeMenu()
+        stremioSearchSession = false
+        freshSearchPending = false
+        lastSearchQuery = null
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
         watchers.clear()
@@ -523,24 +548,17 @@ internal class RatingPlotImageHook(
                 runCatching { startNavTrace(it, root) }
                     .onFailure { e -> android.util.Log.e("StremioCNavTrace", "trace setup error", e) }
             }
-            val activity = fragment.activity
-            activity?.navigate(id, Bundle().apply {
+            val activity = fragment.activity ?: return
+            stremioSearchSession = true
+            freshSearchPending = true
+            lastSearchQuery = query
+            activity.navigate(id, Bundle().apply {
                 putString("search_query", query)
                 putBoolean("stremioc_detail_search", true)
             }, NavOptions.Builder()
                 .setEnterAnim(enter).setExitAnim(exit)
                 .setPopEnterAnim(enter).setPopExitAnim(exit)
                 .build())
-            // Direct detail -> search navigation must also select Search in both native bars.
-            // Changing MenuItem.isChecked does not dispatch another navigation event.
-            listOf("nav_view", "nav_rail_view").forEach { name ->
-                val barId = root.resources.getIdentifier(name, "id", root.context.packageName)
-                if (barId != 0) {
-                    activity?.findViewById<NavigationBarView>(barId)?.let { bar ->
-                        if (bar.selectedItemId != id) bar.menu.findItem(id)?.isChecked = true
-                    }
-                }
-            }
         }
 
         private val searchClick = View.OnClickListener {
