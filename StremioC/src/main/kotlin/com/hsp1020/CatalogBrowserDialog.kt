@@ -103,6 +103,15 @@ internal class CatalogBrowserDialog(
         }
     }
     private val retry = button("Retry").apply { visibility = View.GONE }
+    private val loadingIndicator = TextView(activity).apply {
+        text = "loading.."
+        typeface = selectorLabelStyle.typeface
+        setTextSize(TypedValue.COMPLEX_UNIT_PX, selectorLabelStyle.textSize)
+        setTextColor(activity.colorFromAttribute(R.attr.textColor))
+        gravity = Gravity.CENTER
+        setPadding(dp(8), dp(8), dp(8), dp(8))
+        visibility = View.GONE
+    }
     private val grid = AutofitRecyclerView(activity)
     private val adapter = SearchAdapter(grid, false) { click ->
         if (!closed) when (click.action) {
@@ -238,6 +247,7 @@ internal class CatalogBrowserDialog(
 
     private fun selectorArrow() = TextView(activity).apply {
         text = "▼"
+        setTextSize(TypedValue.COMPLEX_UNIT_PX, textSize * 0.7f)
         setTextColor(activity.colorFromAttribute(R.attr.textColor))
         gravity = Gravity.CENTER
         isClickable = false
@@ -321,23 +331,33 @@ internal class CatalogBrowserDialog(
             addView(selectorRow("Genre", genreSelector, genreArrow), ViewGroup.LayoutParams(-1, -2))
         }
         val header = AppBarLayout(activity).apply {
-            background = ColorDrawable(Color.TRANSPARENT)
+            setBackgroundColor(headerColor)
             stateListAnimator = null
             setLiftOnScroll(false)
-            addView(LinearLayout(activity).apply {
-                orientation = LinearLayout.VERTICAL
-                addView(controls, LinearLayout.LayoutParams(-1, -2))
-                addView(View(activity).apply {
-                    background = GradientDrawable(
-                        GradientDrawable.Orientation.TOP_BOTTOM,
-                        intArrayOf(headerColor, headerColor and 0x00FFFFFF)
-                    )
-                }, LinearLayout.LayoutParams(-1, dp(48)))
-            }, AppBarLayout.LayoutParams(-1, -2).apply {
+            addView(controls, AppBarLayout.LayoutParams(-1, -2).apply {
                 scrollFlags = AppBarLayout.LayoutParams.SCROLL_FLAG_SCROLL or
                     AppBarLayout.LayoutParams.SCROLL_FLAG_ENTER_ALWAYS
             })
         }
+        // The gradient must cover the first posters, not occupy space inside the header.
+        val edgeFade = View(activity).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(headerColor, headerColor and 0x00FFFFFF)
+            )
+            isClickable = false
+            isFocusable = false
+        }
+        val content = FrameLayout(activity).apply {
+            addView(grid, FrameLayout.LayoutParams(-1, -1))
+            addView(edgeFade, FrameLayout.LayoutParams(-1, dp(48), Gravity.TOP))
+        }
+        header.addOnOffsetChangedListener(AppBarLayout.OnOffsetChangedListener { bar, offset ->
+            val range = bar.totalScrollRange
+            edgeFade.alpha = if (range > 0)
+                (1f - kotlin.math.abs(offset).toFloat() / range).coerceIn(0f, 1f)
+            else 1f
+        })
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val statusTop = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
             val position = IntArray(2)
@@ -347,10 +367,14 @@ internal class CatalogBrowserDialog(
             insets
         }
         grid.spanCount = activity.getSpanCount(false)
-        root.addView(grid, CoordinatorLayout.LayoutParams(-1, -1).apply {
-            behavior = AppBarLayout.ScrollingViewBehavior().apply { overlayTop = dp(48) }
+        root.addView(content, CoordinatorLayout.LayoutParams(-1, -1).apply {
+            behavior = AppBarLayout.ScrollingViewBehavior()
         })
         root.addView(header, CoordinatorLayout.LayoutParams(-1, -2))
+        root.addView(loadingIndicator, CoordinatorLayout.LayoutParams(-2, -2).apply {
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            bottomMargin = dp(16)
+        })
         root.addView(retry, CoordinatorLayout.LayoutParams(-1, -2).apply {
             gravity = Gravity.BOTTOM
         })
@@ -420,6 +444,7 @@ internal class CatalogBrowserDialog(
         generation++
         job?.cancel()
         loading = false
+        loadingIndicator.visibility = View.GONE
         if (catalog == null || (chosen && hasNext)) {
             retry.text = "Retry"
             retry.visibility = View.VISIBLE
@@ -431,6 +456,7 @@ internal class CatalogBrowserDialog(
         fetchingCatalogs = false
         job?.cancel()
         loading = false
+        loadingIndicator.visibility = View.GONE
         offset = 0
         autoFillCount = 0
         items.clear()
@@ -583,6 +609,7 @@ internal class CatalogBrowserDialog(
         val selectedGenre = genre
         val requestedOffset = offset
         loading = true
+        loadingIndicator.visibility = View.VISIBLE
         retry.visibility = View.GONE
         job = scope.launch {
             try {
@@ -612,7 +639,10 @@ internal class CatalogBrowserDialog(
                     retry.visibility = View.VISIBLE
                 }
             } finally {
-                if (ticket == generation) loading = false
+                if (ticket == generation) {
+                    loading = false
+                    loadingIndicator.visibility = View.GONE
+                }
             }
         }
     }
