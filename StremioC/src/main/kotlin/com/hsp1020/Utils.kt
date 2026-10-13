@@ -43,6 +43,8 @@ import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.ui.settings.Globals.PHONE
+import com.lagradost.cloudstream3.ui.settings.Globals.TV
+import com.lagradost.cloudstream3.ui.settings.Globals.EMULATOR
 import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import com.lagradost.cloudstream3.utils.UIHelper.navigate
 import kotlin.math.roundToInt
@@ -219,7 +221,47 @@ internal class RatingPlotImageHook(
     private val main = Handler(Looper.getMainLooper())
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
-    private val homeEntries = CatalogHomeEntryHook(openCatalog)
+    private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview)
+    private var homePreviewText: TextView? = null
+    private var homePreviewChanging = false
+    private val homePreviewWatcher = object : TextWatcher {
+        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+        override fun afterTextChanged(s: Editable?) {
+            if (!homePreviewChanging) renderHomePreview()
+        }
+    }
+    private fun bindHomePreview(view: TextView?) {
+        val next = view.takeIf { isLayout(TV or EMULATOR) }
+        if (homePreviewText === next) return
+        homePreviewText?.let { previous ->
+            previous.removeTextChangedListener(homePreviewWatcher)
+            (previous.text as? Spanned)?.let { old ->
+                val spans = old.getSpans(0, old.length, LogoSpan::class.java)
+                if (spans.isNotEmpty()) previous.setText(SpannableStringBuilder(old).apply {
+                    spans.forEach { removeSpan(it) }
+                }, TextView.BufferType.SPANNABLE)
+            }
+        }
+        homePreviewText = next
+        next?.addTextChangedListener(homePreviewWatcher)
+        renderHomePreview()
+    }
+    private fun renderHomePreview() {
+        val view = homePreviewText ?: return
+        val original = view.text ?: return
+        val result = if (prefs.getBoolean("mdblist_enabled", false)) {
+            decoratedRatings(original, view.textSize)
+        } else {
+            val spans = (original as? Spanned)?.getSpans(0, original.length, LogoSpan::class.java)
+            if (spans.isNullOrEmpty()) null else SpannableStringBuilder(original).apply {
+                spans.forEach { removeSpan(it) }
+            }
+        } ?: return
+        homePreviewChanging = true
+        try { view.setText(result, TextView.BufferType.SPANNABLE) }
+        finally { homePreviewChanging = false }
+    }
     private var previewPageObserver: Observer<Resource<ResultData>?>? = null
     private var previewPageModel: ResultViewModel2? = null
 
@@ -387,6 +429,7 @@ internal class RatingPlotImageHook(
     private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "mdblist_enabled") main.post {
             watchers.values.toList().forEach { runCatching { it.render() } }
+            runCatching { renderHomePreview() }
         }
     }
     // A search-back transition can expose an intermediate NavHost size for several frames.

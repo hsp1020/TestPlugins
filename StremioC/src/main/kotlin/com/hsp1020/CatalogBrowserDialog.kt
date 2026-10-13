@@ -891,7 +891,8 @@ internal data class CatalogHomeSnapshot(
 
 /** Route StremioC home-row headings without modifying native poster data. */
 internal class CatalogHomeEntryHook(
-    private val open: (CatalogShortcutTarget, CatalogHomeSnapshot?) -> Unit
+    private val open: (CatalogShortcutTarget, CatalogHomeSnapshot?) -> Unit,
+    private val onPreviewView: (TextView?) -> Unit
 ) {
     private val rows = HashMap<RecyclerView, Row>()
     private var master: RecyclerView? = null
@@ -900,6 +901,7 @@ internal class CatalogHomeEntryHook(
     private fun scanRows() {
         val parent = master ?: return
         for (i in 0 until parent.childCount) bindRow(parent.getChildAt(i))
+        onPreviewView(parent.findViewById<TextView>(R.id.home_preview_description))
     }
 
     private val parentListener = object : RecyclerView.OnChildAttachStateChangeListener {
@@ -927,6 +929,7 @@ internal class CatalogHomeEntryHook(
             if (it.isAlive) it.removeOnGlobalLayoutListener(layoutListener)
         }
         master = null
+        onPreviewView(null)
         rows.values.toList().forEach { it.dispose() }
         rows.clear()
     }
