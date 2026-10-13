@@ -450,18 +450,15 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     }
     // Do not display the first decoded image alone while the paired artwork is pending.
     // Fail open after a bounded interval so a missing/failed remote image cannot blank the hero.
-    private fun revealArtworkTogether() {
-        val backgroundReady = picture?.drawable?.let {
-            it.intrinsicWidth > 0 && it.intrinsicHeight > 0
-        } == true
-        val logoReady = logo?.visibility == View.VISIBLE && logo?.drawable != null &&
-            logo.width > 0 && logo.height > 0
-        val expectedLogo = detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true
-        val timedOut = SystemClock.uptimeMillis() - artworkRevealStart >= 2000L
-        if ((backgroundReady && (!expectedLogo || logoReady)) || timedOut) {
-            picture?.alpha = if (backgroundReady) originalPictureAlpha else 0f
-            logo?.alpha = if (logoReady) originalLogoAlpha else 0f
-        }
+    private fun artworkReady(): Boolean {
+        val background = picture?.drawable
+        if (background == null || background.intrinsicWidth <= 0 || background.intrinsicHeight <= 0)
+            return false
+        if (detailUrl?.let { StremioC.expectedLogoByUrl[it] } != true) return true
+        val logoView = logo
+        return (logoView?.visibility == View.VISIBLE && logoView.drawable != null &&
+            logoView.width > 0 && logoView.height > 0) ||
+            SystemClock.uptimeMillis() - artworkRevealStart >= 6000L
     }
     private fun stage() {
         // Neither async drawable may paint at CloudStream's original geometry.
@@ -547,9 +544,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         suppressNativePreview()
         splitFallback = false
         nativeRecoveryFrames = 0
-        if (splitMode()) stage() // Hide both assets before their first native-layout draw.
-        else { picture?.alpha = 0f; logo?.alpha = 0f }
-        root.postDelayed({ if (started) root.invalidate() }, 2050L)
+        stage() // Hide native title, logo and backdrop until the entire hero is ready.
+        root.postDelayed({ if (started) root.invalidate() }, 6050L)
         // Use the host app's active theme color so the edge fade also matches light themes.
         val colorAttr = context.resources.getIdentifier("primaryBlackBackground", "attr", context.packageName)
         val colors = context.theme.obtainStyledAttributes(
@@ -644,7 +640,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             logo?.translationY = originalLogoY
             scaleLogo()
             updatePortraitTitle()
-            revealArtworkTogether()
+            val ready = artworkReady()
+            visibility(ready)
+            if (!ready) title?.alpha = 0f
+            else if (detailUrl?.let { StremioC.expectedLogoByUrl[it] } != true)
+                title?.alpha = originalTitleAlpha
             return
         }
 
@@ -754,8 +754,12 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         // Reveal only decoded assets after final layout.
         if (image.width == imageWidth && image.height == imageHeight &&
             image.left == imageLeft && image.top == imageTop) {
-            showTitle(titleText.isNotEmpty() && !logoPending, hideOriginal = expectedLogo && !foreignLogo)
-            revealArtworkTogether()
+            val ready = artworkReady()
+            showTitle(titleText.isNotEmpty() && ready &&
+                (!logoPending || SystemClock.uptimeMillis() - artworkRevealStart >= 6000L),
+                hideOriginal = expectedLogo && !foreignLogo)
+            if (!ready) title?.alpha = 0f
+            visibility(ready)
             // Cache only ready assets after their geometry has finished relayout.
             if (iw > 0 && ih > 0 && !logoPending && !root.isLayoutRequested &&
                 !container.isLayoutRequested && !image.isLayoutRequested) {

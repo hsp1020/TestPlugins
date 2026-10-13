@@ -11,6 +11,7 @@ import java.util.Locale
 import kotlin.math.round
 import android.app.Activity
 import android.app.Application
+import android.app.Dialog
 import android.content.Context
 import android.content.res.Resources
 import android.os.Bundle
@@ -31,6 +32,13 @@ import androidx.navigation.NavOptions
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
+import androidx.appcompat.app.AlertDialog
+import androidx.lifecycle.Observer
+import androidx.lifecycle.ViewModelProvider
+import com.lagradost.cloudstream3.mvvm.Resource
+import com.lagradost.cloudstream3.ui.result.ResultData
+import com.lagradost.cloudstream3.ui.result.ResultViewModel2
+import com.lagradost.cloudstream3.utils.AppContextUtils.html
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
@@ -212,6 +220,8 @@ internal class RatingPlotImageHook(
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
     private val homeEntries = CatalogHomeEntryHook(openCatalog)
+    private var previewPageObserver: Observer<Resource<ResultData>?>? = null
+    private var previewPageModel: ResultViewModel2? = null
 
     // Keep the native Activity-scoped SearchViewModel's results visible when its Fragment is recreated.
     private var lastSearchQuery: String? = null
@@ -292,6 +302,88 @@ internal class RatingPlotImageHook(
     )
     private val number = Regex("^\\s+\\d+(?:\\.\\d+)?(?:\\s|$)")
     private class LogoSpan(d: android.graphics.drawable.Drawable) : ImageSpan(d, ImageSpan.ALIGN_BOTTOM)
+
+    private fun decoratedRatings(original: CharSequence, textSize: Float): SpannableStringBuilder? {
+        if (!prefs.getBoolean("mdblist_enabled", false) ||
+            original is Spanned && original.getSpans(0, original.length, LogoSpan::class.java).isNotEmpty() ||
+            !original.startsWith('\u2063')) return null
+        val end = original.indexOf('\n').let { if (it < 0) original.length else it }
+        val line = original.subSequence(0, end).toString()
+        val result = SpannableStringBuilder(original)
+        val height = (textSize * 0.92f).roundToInt().coerceAtLeast(12)
+        var applied = false
+        for ((glyph, file) in icons) {
+            var from = 1
+            while (true) {
+                val at = line.indexOf(glyph, from)
+                if (at < 0) break
+                if (number.containsMatchIn(line.substring(at + glyph.length))) {
+                    val id = ids.getOrPut(file) {
+                        resources.getIdentifier(file, "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
+                    }
+                    if (id != 0) {
+                        val drawable = runCatching { resources.getDrawable(id, null).mutate() }.getOrNull()
+                        if (drawable != null) {
+                            val width = (height.toFloat() * drawable.intrinsicWidth.coerceAtLeast(1) /
+                                drawable.intrinsicHeight.coerceAtLeast(1)).roundToInt().coerceIn(height / 2, height * 3)
+                            drawable.setBounds(0, 0, width, height)
+                            result.setSpan(LogoSpan(drawable), at, at + glyph.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                            applied = true
+                        }
+                    }
+                }
+                from = at + glyph.length
+            }
+        }
+        return if (applied) result else null
+    }
+
+    private fun installPreviewHook(activity: MainActivity, data: ResultData) {
+        val source = activity.lastPopup?.apiName ?: return
+        if (source != "StremioC" && APIHolder.allProviders.none {
+                it is StremioC && it.name.equals(source, ignoreCase = true)
+            }) return
+        // The native preview is an independent Dialog window, not part of Activity.findViewById.
+        val dialog = runCatching {
+            activity.javaClass.getDeclaredField("bottomPreviewPopup").apply {
+                isAccessible = true
+            }.get(activity) as? Dialog
+        }.getOrNull()?.takeIf { it.isShowing } ?: return
+        val id = activity.resources.getIdentifier("resultview_preview_description", "id", activity.packageName)
+        val description = if (id == 0) null else dialog.findViewById<TextView>(id)
+        description ?: return
+        decoratedRatings(description.text ?: return, description.textSize)?.let {
+            description.setText(it, TextView.BufferType.SPANNABLE)
+        }
+        if (isLayout(PHONE)) description.setOnClickListener {
+            // The native secondary plot dialog is created from plain HTML and would lose our
+            // ImageSpans. Recreate only that click action with the identical data/title/style.
+            val raw = data.plotText.asString(activity).html()
+            AlertDialog.Builder(activity, com.lagradost.cloudstream3.R.style.AlertDialogCustom)
+                .setMessage(decoratedRatings(raw, description.textSize) ?: raw)
+                .setTitle(data.plotHeaderText.asString(activity))
+                .show()
+        }
+    }
+
+    private fun observePreview(activity: FragmentActivity) {
+        val mainActivity = activity as? MainActivity ?: return
+        val model = ViewModelProvider(activity)[ResultViewModel2::class.java]
+        val observer = Observer<Resource<ResultData>?> { value ->
+            if (value is Resource.Success) main.post {
+                if (host === activity) runCatching { installPreviewHook(mainActivity, value.value) }
+            }
+        }
+        model.page.observe(activity, observer)
+        previewPageModel = model
+        previewPageObserver = observer
+    }
+
+    private fun detachPreview() {
+        previewPageObserver?.let { observer -> previewPageModel?.page?.removeObserver(observer) }
+        previewPageObserver = null
+        previewPageModel = null
+    }
 
     private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "mdblist_enabled") main.post {
@@ -402,6 +494,7 @@ internal class RatingPlotImageHook(
 
     fun stop() {
         homeEntries.detach()
+        detachPreview()
         detailRevealEnd?.invoke()
         resetSearchState()
         prefs.unregisterOnSharedPreferenceChangeListener(prefListener)
@@ -415,6 +508,7 @@ internal class RatingPlotImageHook(
     private fun use(activity: FragmentActivity) {
         if (host === activity) return
         homeEntries.detach()
+        detachPreview()
         detailRevealEnd?.invoke()
         resetSearchState()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
@@ -422,6 +516,7 @@ internal class RatingPlotImageHook(
         watchers.clear()
         host = activity
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragmentCallback, true)
+        observePreview(activity)
         fun scan(fm: FragmentManager) {
             fm.fragments.forEach { f ->
                 f.view?.let {
@@ -532,41 +627,7 @@ internal class RatingPlotImageHook(
 
         fun render() {
             if (!prefs.getBoolean("mdblist_enabled", false)) { restore(); return }
-            val original = view.text ?: return
-            if (original is Spanned && original.getSpans(0, original.length, LogoSpan::class.java).isNotEmpty()) return
-            // Invisible separator U+2063 is inserted ONLY for actual MDBList rows.
-            if (!original.startsWith('\u2063')) return
-            val end = original.indexOf('\n').let { if (it < 0) original.length else it }
-            val line = original.subSequence(0, end).toString()
-            val replacements = mutableListOf<Triple<Int, Int, String>>()
-            for ((glyph, file) in icons) {
-                var from = 1
-                while (true) {
-                    val at = line.indexOf(glyph, from)
-                    if (at < 0) break
-                    if (number.containsMatchIn(line.substring(at + glyph.length))) {
-                        replacements.add(Triple(at, at + glyph.length, file))
-                    }
-                    from = at + glyph.length
-                }
-            }
-            if (replacements.isEmpty()) return
-            val result = SpannableStringBuilder(original)
-            var applied = 0
-            val height = (view.textSize * 0.92f).roundToInt().coerceAtLeast(12)
-            for ((start, endIndex, file) in replacements) {
-                val id = ids.getOrPut(file) {
-                    resources.getIdentifier(file, "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
-                }
-                if (id == 0) continue
-                val image = runCatching { resources.getDrawable(id, null).mutate() }.getOrNull() ?: continue
-                val width = (height.toFloat() * image.intrinsicWidth.coerceAtLeast(1) /
-                    image.intrinsicHeight.coerceAtLeast(1)).roundToInt().coerceIn(height / 2, height * 3)
-                image.setBounds(0, 0, width, height)
-                result.setSpan(LogoSpan(image), start, endIndex, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                applied++
-            }
-            if (applied == 0) return
+            val result = decoratedRatings(view.text ?: return, view.textSize) ?: return
             changing = true
             try { view.setText(result, TextView.BufferType.SPANNABLE) }
             finally { changing = false }
@@ -577,6 +638,7 @@ internal class RatingPlotImageHook(
         if (activity is MainActivity) runCatching { use(activity) }
     }
     override fun onActivityDestroyed(activity: Activity) { if (host === activity) {
+        detachPreview()
         detailRevealEnd?.invoke()
         resetSearchState()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
