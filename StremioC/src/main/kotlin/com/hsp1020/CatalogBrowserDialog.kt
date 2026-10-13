@@ -350,7 +350,7 @@ internal class CatalogBrowserDialog(
         }
         val content = FrameLayout(activity).apply {
             addView(grid, FrameLayout.LayoutParams(-1, -1))
-            addView(edgeFade, FrameLayout.LayoutParams(-1, dp(24), Gravity.TOP))
+            addView(edgeFade, FrameLayout.LayoutParams(-1, dp(15), Gravity.TOP))
         }
         header.addOnOffsetChangedListener(AppBarLayout.OnOffsetChangedListener { bar, offset ->
             val range = bar.totalScrollRange
