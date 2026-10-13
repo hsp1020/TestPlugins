@@ -68,6 +68,7 @@ internal class CatalogBrowserDialog(
     private val providerFor: (String) -> StremioC?,
     private val settingsIcon: Drawable?,
     private val onOpenSettings: () -> Unit,
+    initialCatalog: CatalogShortcutTarget? = null,
 ) {
     private val dialog = AppCompatDialog(activity, R.style.DialogFullscreen)
     private val scope = MainScope()
@@ -128,7 +129,8 @@ internal class CatalogBrowserDialog(
     private data class CatalogSource(val url: String, val provider: StremioC, val catalog: StremioC.Catalog)
     private var catalogs = emptyList<CatalogSource>()
     private var visibleCatalogs = emptyList<CatalogSource>()
-    private var selectedType = "movie"
+    private var selectedType = initialCatalog?.type ?: "movie"
+    private var pendingCatalog = initialCatalog
     private var fetchingCatalogs = false
     private var catalogSettingsChanged = false
     private var settingsVisible = false
@@ -566,7 +568,18 @@ internal class CatalogBrowserDialog(
             val entry = entries.getOrNull(it) ?: return@choices
             if (catalog !== entry.catalog || addonUrl != entry.url) selectCatalog(entry)
         }
-        if (visibleCatalogs.isNotEmpty()) selectCatalog(visibleCatalogs.first())
+        val requested = pendingCatalog?.takeIf { it.type == type }
+        val target = requested?.let { target ->
+            entries.firstOrNull { entry ->
+                entry.catalog.id == target.catalogId &&
+                    stremioManifestUrl(entry.url.fixSourceUrl()) ==
+                    stremioManifestUrl(target.addonUrl.fixSourceUrl())
+            }
+        }
+        pendingCatalog = null
+        if (requested != null && target == null)
+            Toast.makeText(activity, "Requested catalog is no longer available.", Toast.LENGTH_SHORT).show()
+        (target ?: entries.firstOrNull())?.let(::selectCatalog)
     }
 
     private fun selectCatalog(next: CatalogSource) {

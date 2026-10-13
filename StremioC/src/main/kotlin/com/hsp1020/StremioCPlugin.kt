@@ -179,50 +179,62 @@ class StremioCPlugin : Plugin() {
             runCatching { ratingPlotHook?.stop() }
             ratingPlotHook = resources?.let { pluginResources ->
                 runCatching {
-                    RatingPlotImageHook(appContext, pluginResources).also { it.start() }
+                    RatingPlotImageHook(appContext, pluginResources) { target ->
+                        (CommonActivity.activity as? AppCompatActivity)?.let { host ->
+                            openCatalogBrowser(host, target)
+                        }
+                    }.also { it.start() }
                 }.onFailure { Log.w("StremioCPlugin", "Rating image hook unavailable: ${it.message}") }.getOrNull()
             }
         }
         
         openSettings = { currentContext ->
-            (currentContext.getActivity() as? AppCompatActivity)?.let { host ->
-                if (host.isFinishing || host.isDestroyed) return@let
-                activeBrowser?.dismiss()
-                activeSettingsDialog?.dismiss()
-                dismissProviderPicker(host)
-                val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
-                val gearIcon = resources?.let { res ->
-                    runCatching {
-                        val id = res.getIdentifier("settings_icon", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
-                        if (id != 0) res.getDrawable(id, null) else null
-                    }.getOrNull()
-                }
-                lateinit var browser: CatalogBrowserDialog
-                browser = CatalogBrowserDialog(host, prefs, { url ->
-                    APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull {
-                        stremioManifestUrl(it.mainUrl.fixSourceUrl()) == stremioManifestUrl(url.fixSourceUrl())
-                    }
-                }, gearIcon) {
-                    if (activeBrowser === browser) {
-                        lateinit var settings: SettingsBottomFragment
-                        settings = SettingsBottomFragment(this, prefs, host)
-                        activeSettingsDialog = settings
-                        settings.show {
-                            if (activeSettingsDialog === settings) {
-                                activeSettingsDialog = null
-                                if (activeBrowser === browser) browser.restoreFromSettings()
-                            }
-                        }
-                    }
-                }
-                activeBrowser = browser
-                browser.show {
-                    if (activeBrowser === browser) {
-                        activeBrowser = null
-                        activeSettingsDialog?.dismiss()
+            (currentContext.getActivity() as? AppCompatActivity)?.let {
+                openCatalogBrowser(it, closeProviderPicker = true)
+            }
+        }
+    }
+
+    private fun openCatalogBrowser(
+        host: AppCompatActivity,
+        target: CatalogShortcutTarget? = null,
+        closeProviderPicker: Boolean = false
+    ) {
+        if (host.isFinishing || host.isDestroyed) return
+        activeBrowser?.dismiss()
+        activeSettingsDialog?.dismiss()
+        if (closeProviderPicker) dismissProviderPicker(host)
+        val prefs = host.applicationContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
+        val gearIcon = resources?.let { res ->
+            runCatching {
+                val id = res.getIdentifier("settings_icon", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
+                if (id != 0) res.getDrawable(id, null) else null
+            }.getOrNull()
+        }
+        lateinit var browser: CatalogBrowserDialog
+        browser = CatalogBrowserDialog(host, prefs, { url ->
+            APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull {
+                stremioManifestUrl(it.mainUrl.fixSourceUrl()) == stremioManifestUrl(url.fixSourceUrl())
+            }
+        }, gearIcon, {
+            if (activeBrowser === browser) {
+                lateinit var settings: SettingsBottomFragment
+                settings = SettingsBottomFragment(this, prefs, host)
+                activeSettingsDialog = settings
+                settings.show {
+                    if (activeSettingsDialog === settings) {
                         activeSettingsDialog = null
+                        if (activeBrowser === browser) browser.restoreFromSettings()
                     }
                 }
+            }
+        }, target)
+        activeBrowser = browser
+        browser.show {
+            if (activeBrowser === browser) {
+                activeBrowser = null
+                activeSettingsDialog?.dismiss()
+                activeSettingsDialog = null
             }
         }
     }

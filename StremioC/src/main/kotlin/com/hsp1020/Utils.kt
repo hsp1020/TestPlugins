@@ -203,13 +203,15 @@ internal fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
 /** Only replaces known MDBList glyphs on rows marked by StremioC.kt. */
 internal class RatingPlotImageHook(
     context: Context,
-    private val resources: Resources
+    private val resources: Resources,
+    openCatalog: (CatalogShortcutTarget) -> Unit
 ) : Application.ActivityLifecycleCallbacks {
     private val app = context.applicationContext as Application
     private val prefs = app.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
     private val main = Handler(Looper.getMainLooper())
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
+    private val homeEntries = CatalogHomeEntryHook(openCatalog)
 
     // Keep the native Activity-scoped SearchViewModel's results visible when its Fragment is recreated.
     private var lastSearchQuery: String? = null
@@ -346,6 +348,8 @@ internal class RatingPlotImageHook(
             fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?
         ) {
             runCatching {
+                if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
+                    homeEntries.attach(v)
                 if (f.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment")
                     setupSearchNavigation(f, v)
                 if (f.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment" &&
@@ -376,6 +380,8 @@ internal class RatingPlotImageHook(
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
+            if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
+                homeEntries.detach()
             releaseHomeMenu(f)
             watchers.remove(f)?.detach()
         }
@@ -395,6 +401,7 @@ internal class RatingPlotImageHook(
     }
 
     fun stop() {
+        homeEntries.detach()
         detailRevealEnd?.invoke()
         resetSearchState()
         prefs.unregisterOnSharedPreferenceChangeListener(prefListener)
@@ -407,6 +414,7 @@ internal class RatingPlotImageHook(
 
     private fun use(activity: FragmentActivity) {
         if (host === activity) return
+        homeEntries.detach()
         detailRevealEnd?.invoke()
         resetSearchState()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
@@ -416,7 +424,11 @@ internal class RatingPlotImageHook(
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragmentCallback, true)
         fun scan(fm: FragmentManager) {
             fm.fragments.forEach { f ->
-                f.view?.let { attach(f, it) }
+                f.view?.let {
+                    if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
+                        homeEntries.attach(it)
+                    attach(f, it)
+                }
                 if (f.isAdded) scan(f.childFragmentManager)
             }
         }
