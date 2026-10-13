@@ -13,6 +13,8 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.util.TypedValue
+import androidx.core.widget.TextViewCompat
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.text.InputType
@@ -410,6 +412,29 @@ class SettingsBottomFragment(
         val settingsBody = view.findView<View>("settingsBody")
         val settingsToggle = view.findView<TextView>("settingsToggle")
         val settingsActions = listOf("tvExport", "tvImport", "saveIcon").map { view.findView<View>(it) }
+        val header = view.findView<LinearLayout>("settingsHeader")
+        // The host can retain an older plugin layout: rebuild this row from the existing controls.
+        (settingsToggle.parent as? ViewGroup)?.removeView(settingsToggle)
+        settingsActions.forEach { (it.parent as? ViewGroup)?.removeView(it) }
+        header.removeAllViews()
+        header.orientation = LinearLayout.HORIZONTAL
+        header.gravity = android.view.Gravity.CENTER_VERTICAL
+        settingsToggle.apply {
+            setTextAppearance(HostR.style.NoCheckLabel)
+            setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
+            setPadding(0, 0, 0, 0)
+            setSingleLine(true)
+            TextViewCompat.setAutoSizeTextTypeUniformWithConfiguration(
+                this, 11, 16, 1, TypedValue.COMPLEX_UNIT_SP
+            )
+        }
+        header.addView(settingsToggle, LinearLayout.LayoutParams(0, dp(48), 1f))
+        settingsActions.forEachIndexed { index, action ->
+            if (action is TextView) action.setPadding(dp(4), 0, dp(4), 0)
+            header.addView(action, LinearLayout.LayoutParams(
+                if (index == 2) dp(36) else ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)
+            ))
+        }
         fun expandSettings(expand: Boolean) {
             val visibility = if (expand) View.VISIBLE else View.GONE
             settingsBody.visibility = visibility

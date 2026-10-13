@@ -144,7 +144,8 @@ internal class CatalogBrowserDialog(
         gravity = Gravity.CENTER_VERTICAL
         addView(TextView(activity).apply {
             text = title
-            setTextAppearance(android.R.style.TextAppearance_Material_Body1)
+            setTextAppearance(R.style.NoCheckLabel)
+            setPadding(0, 0, 0, 0)
             setTextColor(activity.colorFromAttribute(R.attr.textColor))
             typeface = Typeface.create(typeface, Typeface.BOLD)
             gravity = Gravity.CENTER_VERTICAL
@@ -169,6 +170,10 @@ internal class CatalogBrowserDialog(
             override fun isEnabled(position: Int) = position > 0
             private fun boldRow(row: View, selected: Boolean) = row.also {
                 ((it as? TextView) ?: it.findViewById<TextView>(android.R.id.text1))?.apply {
+                    if (selected) {
+                        setTextAppearance(R.style.NoCheckLabel) // Same Google Sans Bold as CloudStream provider picker.
+                        foreground = null // Keep ripple on the full Spinner, not the text alone.
+                    }
                     typeface = Typeface.create(typeface, Typeface.BOLD)
                     setSingleLine(true)
                     ellipsize = TextUtils.TruncateAt.END
