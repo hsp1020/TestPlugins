@@ -190,8 +190,18 @@ class StremioCPlugin : Plugin() {
         }
         
         openSettings = { currentContext ->
-            (currentContext.getActivity() as? AppCompatActivity)?.let {
-                openCatalogBrowser(it, closeProviderPicker = true)
+            (currentContext.getActivity() as? AppCompatActivity)?.let { host ->
+                if (host.isFinishing || host.isDestroyed) return@let
+                activeBrowser?.dismiss()
+                activeSettingsDialog?.dismiss()
+                dismissProviderPicker(host)
+                val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
+                lateinit var settings: SettingsBottomFragment
+                settings = SettingsBottomFragment(this, prefs, host)
+                activeSettingsDialog = settings
+                settings.show {
+                    if (activeSettingsDialog === settings) activeSettingsDialog = null
+                }
             }
         }
     }

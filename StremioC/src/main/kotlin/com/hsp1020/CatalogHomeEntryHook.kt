@@ -5,6 +5,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.ViewTreeObserver
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.R
@@ -24,6 +25,14 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
     private val targets = HashMap<String, CatalogShortcutTarget>()
     private val rows = HashMap<RecyclerView, Row>()
     private var master: RecyclerView? = null
+    // The initial parent may attach before HomeFragment assigns the child adapter.
+    // Rescan when the layout is first populated instead of waiting for user scrolling.
+    private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener { scanRows() }
+
+    private fun scanRows() {
+        val parent = master ?: return
+        for (i in 0 until parent.childCount) bindRow(parent.getChildAt(i))
+    }
 
     private val parentListener = object : RecyclerView.OnChildAttachStateChangeListener {
         override fun onChildViewAttachedToWindow(view: View) { bindRow(view) }
@@ -39,11 +48,14 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
         detach()
         master = next
         next.addOnChildAttachStateChangeListener(parentListener)
-        for (i in 0 until next.childCount) bindRow(next.getChildAt(i))
+        next.viewTreeObserver.addOnGlobalLayoutListener(layoutListener)
+        scanRows()
+        next.post { if (master === next) scanRows() }
     }
 
     fun detach() {
         master?.removeOnChildAttachStateChangeListener(parentListener)
+        master?.viewTreeObserver?.let { if (it.isAlive) it.removeOnGlobalLayoutListener(layoutListener) }
         master = null
         rows.values.toList().forEach { it.dispose(true) }
         rows.clear()
@@ -69,8 +81,8 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
         val title = adapter.getItemOrNull(position)?.list?.name ?: return null
         val apiName = cards.firstOrNull()?.apiName ?: return null
         val provider = APIHolder.allProviders.filterIsInstance<StremioC>()
-            .singleOrNull { it.name == apiName } ?: return null
-        val path = provider.mainPage.singleOrNull { it.name == title }?.data ?: return null
+            .firstOrNull { it.name == apiName } ?: return null
+        val path = provider.mainPage.firstOrNull { it.name == title }?.data ?: return null
         val route = path.substringAfter("/catalog/", "")
         val type = Uri.decode(route.substringBefore('/')).takeIf { it.isNotBlank() } ?: return null
         val id = Uri.decode(route.substringAfter('/', "").substringBefore('/').removeSuffix(".json"))
@@ -83,7 +95,8 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
         val url = prefix + UUID.nameUUIDFromBytes(value.toByteArray(Charsets.UTF_8))
         targets[url] = target
         return provider.newMovieSearchResponse("Browse Genres", url, TvType.Others, fix = false) {
-            posterUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/StremioC/stremio.png"
+            // Free-to-use Unsplash photograph of a red cinema auditorium.
+            posterUrl = "https://images.unsplash.com/photo-1604975701397-6365ccbd028a?w=360&h=540&fit=crop&auto=format&q=80"
         }
     }
 
@@ -138,7 +151,16 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
             val updated = if (target != null && provider != null) {
                 listOf(shortcut(target, provider)) + ordinary
             } else ordinary
-            if (current.map { it.url } != updated.map { it.url }) adapter.submitList(updated)
+            if (current.map { it.url } != updated.map { it.url }) {
+                val firstInsert = current.none { it.url.startsWith(prefix) } &&
+                    updated.firstOrNull()?.url?.startsWith(prefix) == true
+                adapter.submitList(updated) {
+                    // An insertion at position 0 can retain the old scroll anchor at 1.
+                    if (firstInsert && child.isAttachedToWindow &&
+                        (child.layoutManager as? androidx.recyclerview.widget.LinearLayoutManager)
+                            ?.findFirstVisibleItemPosition() in 0..1) child.scrollToPosition(0)
+                }
+            }
         }
 
         private fun targetAt(view: View): Pair<Boolean, CatalogShortcutTarget?> {

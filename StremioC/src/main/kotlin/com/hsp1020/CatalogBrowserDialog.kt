@@ -560,26 +560,27 @@ internal class CatalogBrowserDialog(
         genre = null
         visibleCatalogs = catalogs.filter { it.catalog.type == type }
         val entries = visibleCatalogs
+        val requested = pendingCatalog?.takeIf { it.type == type }
+        val target = requested?.let { request ->
+            entries.firstOrNull { entry ->
+                entry.catalog.id == request.catalogId &&
+                    stremioManifestUrl(entry.url.fixSourceUrl()) ==
+                    stremioManifestUrl(request.addonUrl.fixSourceUrl())
+            }
+        }
+        val initial = target ?: entries.firstOrNull()
         catalogSelector.isEnabled = entries.size > 1
         catalogSelector.choices("Catalog name", entries.map { entry ->
             "${entry.catalog.name ?: entry.catalog.id ?: "Untitled"} - " +
                 (links.firstOrNull { it.link == entry.url }?.name ?: entry.url)
-        }, if (entries.isEmpty()) -1 else 0) {
+        }, initial?.let { entries.indexOf(it) } ?: -1) {
             val entry = entries.getOrNull(it) ?: return@choices
             if (catalog !== entry.catalog || addonUrl != entry.url) selectCatalog(entry)
-        }
-        val requested = pendingCatalog?.takeIf { it.type == type }
-        val target = requested?.let { target ->
-            entries.firstOrNull { entry ->
-                entry.catalog.id == target.catalogId &&
-                    stremioManifestUrl(entry.url.fixSourceUrl()) ==
-                    stremioManifestUrl(target.addonUrl.fixSourceUrl())
-            }
         }
         pendingCatalog = null
         if (requested != null && target == null)
             Toast.makeText(activity, "Requested catalog is no longer available.", Toast.LENGTH_SHORT).show()
-        (target ?: entries.firstOrNull())?.let(::selectCatalog)
+        initial?.let(::selectCatalog)
     }
 
     private fun selectCatalog(next: CatalogSource) {
