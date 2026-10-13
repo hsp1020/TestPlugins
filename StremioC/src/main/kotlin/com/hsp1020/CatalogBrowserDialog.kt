@@ -4,7 +4,6 @@ import androidx.appcompat.app.AppCompatDialog
 import android.content.SharedPreferences
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
-import android.graphics.Color
 import android.graphics.Typeface
 import android.text.TextUtils
 import android.view.View
@@ -369,6 +368,7 @@ internal class CatalogBrowserDialog(
                 text = title
                 typeface = selectorLabelStyle.typeface
                 gravity = Gravity.CENTER_VERTICAL
+                setTextColor(activity.colorFromAttribute(R.attr.textColor))
                 setSingleLine(true)
             }, LinearLayout.LayoutParams(dp(82), dp(48)))
             addView(FrameLayout(activity).apply {
@@ -395,6 +395,7 @@ internal class CatalogBrowserDialog(
                     ((row as? TextView) ?: row.findViewById<TextView>(android.R.id.text1))?.apply {
                         typeface = selectorLabelStyle.typeface
                         setTextSize(TypedValue.COMPLEX_UNIT_PX, selectorLabelStyle.textSize)
+                        setTextColor(activity.colorFromAttribute(R.attr.textColor))
                         setSingleLine(true)
                         ellipsize = TextUtils.TruncateAt.END
                         setPadding(paddingLeft, paddingTop, dp(40), paddingBottom)
@@ -402,7 +403,7 @@ internal class CatalogBrowserDialog(
                 }
             override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
                 val checked = position == this@choices.selectedItemPosition
-                val color = if (checked) Color.rgb(229, 9, 20) else Color.WHITE
+                val color = activity.colorFromAttribute(if (checked) R.attr.colorPrimary else R.attr.textColor)
                 return LinearLayout(activity).apply {
                     gravity = Gravity.CENTER_VERTICAL
                     val rowColor = activity.colorFromAttribute(R.attr.primaryBlackBackground)
@@ -428,7 +429,7 @@ internal class CatalogBrowserDialog(
                     addView(TextView(activity).apply {
                         text = if (checked) "✓" else ""
                         typeface = Typeface.DEFAULT_BOLD
-                        setTextColor(Color.rgb(229, 9, 20))
+                        setTextColor(activity.colorFromAttribute(R.attr.colorPrimary))
                         gravity = Gravity.CENTER
                         textSize = 18f
                     }, LinearLayout.LayoutParams(dp(32), dp(48)))
@@ -892,7 +893,8 @@ internal data class CatalogHomeSnapshot(
 /** Route StremioC home-row headings without modifying native poster data. */
 internal class CatalogHomeEntryHook(
     private val open: (CatalogShortcutTarget, CatalogHomeSnapshot?) -> Unit,
-    private val onPreviewView: (TextView?) -> Unit
+    private val onPreviewView: (TextView?) -> Unit,
+    private val onPhoneHero: (RecyclerView?) -> Unit
 ) {
     private val rows = HashMap<RecyclerView, Row>()
     private var master: RecyclerView? = null
@@ -902,6 +904,7 @@ internal class CatalogHomeEntryHook(
         val parent = master ?: return
         for (i in 0 until parent.childCount) bindRow(parent.getChildAt(i))
         onPreviewView(parent.findViewById<TextView>(R.id.home_preview_description))
+        onPhoneHero(parent)
     }
 
     private val parentListener = object : RecyclerView.OnChildAttachStateChangeListener {
@@ -930,6 +933,7 @@ internal class CatalogHomeEntryHook(
         }
         master = null
         onPreviewView(null)
+        onPhoneHero(null)
         rows.values.toList().forEach { it.dispose() }
         rows.clear()
     }

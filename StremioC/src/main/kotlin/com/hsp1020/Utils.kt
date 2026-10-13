@@ -221,7 +221,18 @@ internal class RatingPlotImageHook(
     private val main = Handler(Looper.getMainLooper())
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
-    private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview)
+    private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview, ::bindPhoneHero)
+    private var phoneHero: PhoneHeroHook? = null
+    private fun bindPhoneHero(parent: RecyclerView?) {
+        if (parent == null || !isLayout(PHONE)) {
+            phoneHero?.detach()
+            phoneHero = null
+            return
+        }
+        val activity = host ?: return
+        val hero = phoneHero ?: PhoneHeroHook(activity, ::decoratedRatings).also { phoneHero = it }
+        hero.attach(parent)
+    }
     private var homePreviewText: TextView? = null
     private var homePreviewChanging = false
     private val homePreviewWatcher = object : TextWatcher {
