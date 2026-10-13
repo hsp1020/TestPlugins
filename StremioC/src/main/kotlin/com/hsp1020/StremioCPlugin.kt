@@ -180,9 +180,9 @@ class StremioCPlugin : Plugin() {
             runCatching { ratingPlotHook?.stop() }
             ratingPlotHook = resources?.let { pluginResources ->
                 runCatching {
-                    RatingPlotImageHook(appContext, pluginResources) { target ->
+                    RatingPlotImageHook(appContext, pluginResources) { target, snapshot ->
                         (CommonActivity.activity as? AppCompatActivity)?.let { host ->
-                            openCatalogBrowser(host, target)
+                            openCatalogBrowser(host, target, snapshot)
                         }
                     }.also { it.start() }
                 }.onFailure { Log.w("StremioCPlugin", "Rating image hook unavailable: ${it.message}") }.getOrNull()
@@ -209,6 +209,7 @@ class StremioCPlugin : Plugin() {
     private fun openCatalogBrowser(
         host: AppCompatActivity,
         target: CatalogShortcutTarget? = null,
+        snapshot: CatalogHomeSnapshot? = null,
         closeProviderPicker: Boolean = false
     ) {
         if (host.isFinishing || host.isDestroyed) return
@@ -221,7 +222,7 @@ class StremioCPlugin : Plugin() {
             APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull {
                 stremioManifestUrl(it.mainUrl.fixSourceUrl()) == stremioManifestUrl(url.fixSourceUrl())
             }
-        }, target)
+        }, target, snapshot)
         activeBrowser = browser
         browser.show {
             if (activeBrowser === browser) {

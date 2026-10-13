@@ -70,6 +70,7 @@ internal class CatalogBrowserDialog(
     private val prefs: SharedPreferences,
     private val providerFor: (String) -> StremioC?,
     initialCatalog: CatalogShortcutTarget? = null,
+    initialHome: CatalogHomeSnapshot? = null,
 ) {
     private val dialog = AppCompatDialog(activity, R.style.DialogFullscreen)
     private val scope = MainScope()
@@ -118,6 +119,7 @@ internal class CatalogBrowserDialog(
     private var visibleCatalogs = emptyList<CatalogSource>()
     private var selectedType = initialCatalog?.type ?: "movie"
     private var pendingCatalog = initialCatalog
+    private var pendingHome = initialHome?.takeIf { it.target == initialCatalog }
     private var fetchingCatalogs = false
     private var provider: StremioC? = null
     private var addonUrl: String? = null
@@ -703,7 +705,33 @@ internal class CatalogBrowserDialog(
         genre = genres.firstOrNull()
         chosen = true
         hasNext = true
-        requestPage()
+        val home = pendingHome?.takeIf { snapshot ->
+            !required && genre == null &&
+                snapshot.target.catalogId == next.catalog.id &&
+                snapshot.target.type == next.catalog.type &&
+                stremioManifestUrl(snapshot.target.addonUrl.fixSourceUrl()) ==
+                    stremioManifestUrl(next.url.fixSourceUrl()) &&
+                snapshot.items.isNotEmpty() && snapshot.nextSkip > 0
+        }
+        pendingHome = null
+        if (home != null) {
+            // Display the already-loaded home SearchResponses without a first-page request.
+            // The raw cursor belongs to this browser only; never mutate home paging state.
+            items.addAll(home.items)
+            seen.addAll(home.items.map { it.url })
+            offset = home.nextSkip
+            hasNext = home.hasNext && next.catalog.supportsExtra("skip")
+            adapter.submitList(items.toList())
+            val ticket = generation
+            grid.doOnNextLayout {
+                if (!closed && ticket == generation && !loading && hasNext &&
+                    autoFillCount < 1 && items.isNotEmpty() &&
+                    grid.height > 0 && !grid.canScrollVertically(1)) {
+                    autoFillCount++
+                    requestPage()
+                }
+            }
+        } else requestPage()
     }
 
     private fun requestPage() {

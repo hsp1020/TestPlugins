@@ -23,12 +23,18 @@ import java.util.UUID
 import kotlin.math.abs
 
 internal data class CatalogShortcutTarget(val addonUrl: String, val type: String, val catalogId: String)
+internal data class CatalogHomeSnapshot(
+    val target: CatalogShortcutTarget,
+    val items: List<SearchResponse>,
+    val nextSkip: Int,
+    val hasNext: Boolean
+)
 
 /** UI-only catalog entry cards. No homepage data, preview responses or native navigation are changed. */
 internal class CatalogHomeEntryHook(
     appContext: Context,
     pluginResources: Resources,
-    private val open: (CatalogShortcutTarget) -> Unit
+    private val open: (CatalogShortcutTarget, CatalogHomeSnapshot?) -> Unit
 ) {
     // Resolve the bundled drawable once. Coil loads file:// images directly,
     // without relying on raw.githubusercontent.com connectivity.
@@ -200,6 +206,18 @@ internal class CatalogHomeEntryHook(
             } else reveal()
         }
 
+        private fun openTarget(view: View) {
+            val target = targetAt(view).second ?: return
+            val cards = adapter.immutableCurrentList.filterNot { it.url.startsWith(prefix) }
+            val provider = APIHolder.allProviders.filterIsInstance<StremioC>()
+                .firstOrNull { it.mainUrl == target.addonUrl }
+            val cursor = provider?.homeCursorFor(target, cards)
+            val snapshot = if (cursor != null) {
+                CatalogHomeSnapshot(target, cards.toList(), cursor, adapter.hasNext)
+            } else null
+            open(target, snapshot)
+        }
+
         private fun targetAt(view: View): Pair<Boolean, CatalogShortcutTarget?> {
             val holder = child.findContainingViewHolder(view) ?: return false to null
             val item = adapter.getItemOrNull(holder.bindingAdapterPosition)
@@ -227,7 +245,7 @@ internal class CatalogHomeEntryHook(
                             }
                             MotionEvent.ACTION_UP -> {
                                 if (!moved && event.eventTime - downAt < ViewConfiguration.getLongPressTimeout())
-                                    targetAt(itemView).second?.let(open)
+                                    openTarget(itemView)
                             }
                             MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> moved = true
                         }
@@ -239,7 +257,7 @@ internal class CatalogHomeEntryHook(
                         ) return@setOnKeyListener false
                         if (!targetAt(itemView).first) return@setOnKeyListener false
                         if (event.action == KeyEvent.ACTION_UP && !event.isCanceled)
-                            targetAt(itemView).second?.let(open)
+                            openTarget(itemView)
                         true
                     }
                 }

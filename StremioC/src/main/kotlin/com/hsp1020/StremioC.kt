@@ -390,6 +390,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         val catalogSentIds = ConcurrentHashMap<String, MutableSet<String>>()
         val catalogSkipState = ConcurrentHashMap<String, Int>()
+        // Committed home-page URLs and the raw skip after each response. Used only
+        // to seed a browser snapshot; browser paging stays independent.
+        private val catalogHomeCursors = ConcurrentHashMap<String, ConcurrentHashMap<String, Int>>()
         private val catalogGenerations = ConcurrentHashMap<String, Long>()
 
         private val aioAnimeSession by lazy {
@@ -992,6 +995,22 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return "$mainUrl|${request.data}"
     }
 
+    internal fun homeCursorFor(target: CatalogShortcutTarget, visible: List<SearchResponse>): Int? {
+        if (visible.isEmpty()) return null
+        val path = "/catalog/${target.type.urlEncodeLocal()}/${target.catalogId.urlEncodeLocal()}"
+        val tab = mainPage.firstOrNull {
+            it.data.startsWith("$path/") || it.data.startsWith("$path.json")
+        } ?: return null
+        val offsets = catalogHomeCursors["$mainUrl|${tab.data}"] ?: return null
+        var last = -1
+        for (item in visible) {
+            val next = offsets[item.url] ?: return null
+            if (next < last) return null // Refreshed/reordered home data: use normal loading.
+            last = next
+        }
+        return last.takeIf { it > 0 }
+    }
+
     private fun getCatalogLogIdentity(request: MainPageRequest): Pair<String, String> {
         val parts = request.data.substringBefore('?').split('/').filter { it.isNotBlank() }
         val catalogIndex = parts.indexOf("catalog")
@@ -1035,6 +1054,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val generation = if (page <= 1) {
                     catalogSentIds.remove(stateKey)
                     catalogSkipState.remove(stateKey)
+                    catalogHomeCursors.remove(stateKey)
                     ((catalogGenerations[stateKey] ?: 0L) + 1L).also { catalogGenerations[stateKey] = it }
                 } else catalogGenerations[stateKey] ?: 0L
                 val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -1105,6 +1125,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val filteredItems = resultPair.first.filter { item ->
                 seenForThisCatalog!!.add(item.extractPureId())
             }
+            val cursors = catalogHomeCursors.getOrPut(stateKey) { ConcurrentHashMap() }
+            // Save raw response offsets, never filtered item counts.
+            val nextSkip = currentSkip + resultPair.second
+            filteredItems.forEach { cursors[it.url] = nextSkip }
 
             newHomePageResponse(
                 listOf(HomePageList(request.name, filteredItems)),

@@ -204,7 +204,7 @@ internal fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
 internal class RatingPlotImageHook(
     context: Context,
     private val resources: Resources,
-    openCatalog: (CatalogShortcutTarget) -> Unit
+    openCatalog: (CatalogShortcutTarget, CatalogHomeSnapshot?) -> Unit
 ) : Application.ActivityLifecycleCallbacks {
     private val app = context.applicationContext as Application
     private val prefs = app.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
