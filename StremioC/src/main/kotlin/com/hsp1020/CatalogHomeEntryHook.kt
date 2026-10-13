@@ -1,27 +1,19 @@
 package com.hsp1020
 
 import android.net.Uri
-import android.content.Context
-import android.content.res.Resources
-import java.io.File
-import java.util.zip.CRC32
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewTreeObserver
-import androidx.core.view.doOnPreDraw
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SearchResponse
-import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
 import com.lagradost.cloudstream3.ui.home.ParentItemAdapter
 import com.lagradost.cloudstream3.ui.settings.Globals.TV
 import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
-import java.util.UUID
 import kotlin.math.abs
 
 internal data class CatalogShortcutTarget(val addonUrl: String, val type: String, val catalogId: String)
@@ -32,32 +24,12 @@ internal data class CatalogHomeSnapshot(
     val hasNext: Boolean
 )
 
-/** UI-only catalog entry cards. No homepage data, preview responses or native navigation are changed. */
+/** Route StremioC home-row headings without modifying native poster data. */
 internal class CatalogHomeEntryHook(
-    appContext: Context,
-    pluginResources: Resources,
     private val open: (CatalogShortcutTarget, CatalogHomeSnapshot?) -> Unit
 ) {
-    // Resolve the bundled drawable once. Coil loads file:// images directly,
-    // without relying on raw.githubusercontent.com connectivity.
-    private val thumbnailUrl: String? = runCatching {
-        val id = pluginResources.getIdentifier("thumbnail", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
-        require(id != 0) { "Browse Genres thumbnail resource missing" }
-        val bytes = pluginResources.openRawResource(id).use { it.readBytes() }
-        val digest = CRC32().apply { update(bytes) }.value.toString(16)
-        val image = File(appContext.cacheDir, "stremioc_browse_$digest.webp")
-        if (!image.exists() || image.length() != bytes.size.toLong()) image.writeBytes(bytes)
-        Uri.fromFile(image).toString()
-    }.getOrElse {
-        android.util.Log.w("StremioC", "Unable to load bundled Browse Genres thumbnail", it)
-        null
-    }
-    private val prefix = "https://stremioc.invalid/browse/"
-    private val targets = HashMap<String, CatalogShortcutTarget>()
     private val rows = HashMap<RecyclerView, Row>()
     private var master: RecyclerView? = null
-    // The initial parent may attach before HomeFragment assigns the child adapter.
-    // Rescan when the layout is first populated instead of waiting for user scrolling.
     private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener { scanRows() }
 
     private fun scanRows() {
@@ -68,8 +40,8 @@ internal class CatalogHomeEntryHook(
     private val parentListener = object : RecyclerView.OnChildAttachStateChangeListener {
         override fun onChildViewAttachedToWindow(view: View) { bindRow(view) }
         override fun onChildViewDetachedFromWindow(view: View) {
-            val child = view.findViewById<RecyclerView>(R.id.home_child_recyclerview)
-            child?.let { rows.remove(it)?.dispose(false) }
+            view.findViewById<RecyclerView>(R.id.home_child_recyclerview)
+                ?.let { rows.remove(it)?.dispose() }
         }
     }
 
@@ -86,18 +58,19 @@ internal class CatalogHomeEntryHook(
 
     fun detach() {
         master?.removeOnChildAttachStateChangeListener(parentListener)
-        master?.viewTreeObserver?.let { if (it.isAlive) it.removeOnGlobalLayoutListener(layoutListener) }
+        master?.viewTreeObserver?.let {
+            if (it.isAlive) it.removeOnGlobalLayoutListener(layoutListener)
+        }
         master = null
-        rows.values.toList().forEach { it.dispose(true) }
+        rows.values.toList().forEach { it.dispose() }
         rows.clear()
-        targets.clear()
     }
 
     private fun bindRow(view: View) {
         val child = view.findViewById<RecyclerView>(R.id.home_child_recyclerview) ?: return
         val adapter = child.adapter as? HomeChildItemAdapter ?: return
         if (rows[child]?.adapter === adapter) return
-        rows.remove(child)?.dispose(true)
+        rows.remove(child)?.dispose()
         Row(view, child, adapter).also {
             rows[child] = it
             it.install()
@@ -121,27 +94,10 @@ internal class CatalogHomeEntryHook(
         return CatalogShortcutTarget(provider.mainUrl, type, id)
     }
 
-    private fun shortcut(target: CatalogShortcutTarget, provider: StremioC): SearchResponse {
-        val value = target.addonUrl + "\u0000" + target.type + "\u0000" + target.catalogId
-        val url = prefix + UUID.nameUUIDFromBytes(value.toByteArray(Charsets.UTF_8))
-        targets[url] = target
-        return provider.newMovieSearchResponse("Browse Genres", url, TvType.Others, fix = false) {
-            posterUrl = thumbnailUrl
-        }
-    }
-
-    private inner class Row(val view: View, val child: RecyclerView, val adapter: HomeChildItemAdapter) {
-        private val titleView = view.findViewById<View>(R.id.home_child_more_info)
-        private val titleWasFocusable = titleView?.isFocusable == true
+    private inner class Row(val view: View, private val child: RecyclerView, val adapter: HomeChildItemAdapter) {
+        private val title = view.findViewById<View>(R.id.home_child_more_info)
+        private val originalFocusable = title?.isFocusable == true
         private var queued = false
-        private var firstReveal = true
-        private fun reveal() {
-            if (firstReveal && rows[child] === this) {
-                firstReveal = false
-                // Commit the adapter change before the first exposed frame.
-                child.doOnPreDraw { if (rows[child] === this) child.alpha = 1f }
-            }
-        }
         private val observer = object : RecyclerView.AdapterDataObserver() {
             override fun onChanged() = schedule()
             override fun onItemRangeInserted(positionStart: Int, itemCount: Int) = schedule()
@@ -149,37 +105,12 @@ internal class CatalogHomeEntryHook(
             override fun onItemRangeChanged(positionStart: Int, itemCount: Int) = schedule()
             override fun onItemRangeMoved(fromPosition: Int, toPosition: Int, itemCount: Int) = schedule()
         }
-        private val attached = object : RecyclerView.OnChildAttachStateChangeListener {
-            override fun onChildViewAttachedToWindow(view: View) { installInput(view) }
-            override fun onChildViewDetachedFromWindow(view: View) { clearInput(view) }
-        }
 
-        fun install() {
-            // Insert the shortcut without RecyclerView's move/add animations:
-            // all initial posters and the shortcut appear in one completed frame.
-            child.alpha = 0f
-            adapter.registerAdapterDataObserver(observer)
-            child.addOnChildAttachStateChangeListener(attached)
-            installTitleInput()
-            for (i in 0 until child.childCount) installInput(child.getChildAt(i))
-            schedule()
-        }
+        private fun homeTarget(): CatalogShortcutTarget? =
+            adapter.immutableCurrentList.takeIf { it.isNotEmpty() }?.let { resolve(this, it) }
 
-        fun dispose(removeCards: Boolean) {
-            titleView?.apply {
-                setOnTouchListener(null)
-                setOnKeyListener(null)
-                isPressed = false
-                if (isLayout(TV)) isFocusable = titleWasFocusable
-            }
-            child.alpha = 1f
-            child.removeOnChildAttachStateChangeListener(attached)
-            adapter.unregisterAdapterDataObserver(observer)
-            for (i in 0 until child.childCount) clearInput(child.getChildAt(i))
-            if (removeCards) {
-                val original = adapter.immutableCurrentList.filterNot { it.url.startsWith(prefix) }
-                if (original.size != adapter.immutableCurrentList.size) adapter.submitList(original)
-            }
+        private fun refreshFocus() {
+            if (isLayout(TV)) title?.isFocusable = homeTarget() != null || originalFocusable
         }
 
         private fun schedule() {
@@ -187,72 +118,32 @@ internal class CatalogHomeEntryHook(
             queued = true
             child.post {
                 queued = false
-                if (rows[child] === this) refresh()
+                if (rows[child] === this) refreshFocus()
             }
         }
 
-        private fun refresh() {
-            val current = adapter.immutableCurrentList
-            val ordinary = current.filterNot { it.url.startsWith(prefix) }
-            val target = ordinary.takeIf { it.isNotEmpty() }?.let { resolve(this, it) }
-            if (isLayout(TV)) titleView?.isFocusable = target != null || titleWasFocusable
-            if (ordinary.isEmpty()) return // No poster to reveal until the first page arrives.
-            val provider = target?.let { wanted ->
-                APIHolder.allProviders.filterIsInstance<StremioC>()
-                    .firstOrNull { it.mainUrl == wanted.addonUrl }
-            }
-            val updated = if (target != null && provider != null) {
-                listOf(shortcut(target, provider)) + ordinary
-            } else ordinary
-            if (current.map { it.url } != updated.map { it.url }) {
-                val firstInsert = current.none { it.url.startsWith(prefix) } &&
-                    updated.firstOrNull()?.url?.startsWith(prefix) == true
-                if (firstInsert) child.itemAnimator = null
-                adapter.submitList(updated) {
-                    // An insertion at position 0 can retain the old scroll anchor at 1.
-                    if (firstInsert && child.isAttachedToWindow &&
-                        (child.layoutManager as? androidx.recyclerview.widget.LinearLayoutManager)
-                            ?.findFirstVisibleItemPosition() in 0..1) child.scrollToPosition(0)
-                    reveal()
-                }
-            } else reveal()
-        }
-
-        private fun openTarget(view: View) {
-            targetAt(view).second?.let(::openCatalog)
-        }
-
-        private fun homeTarget() = adapter.immutableCurrentList
-            .filterNot { it.url.startsWith(prefix) }
-            .takeIf { it.isNotEmpty() }?.let { resolve(this, it) }
-
-        private fun openCatalog(target: CatalogShortcutTarget) {
-            val cards = adapter.immutableCurrentList.filterNot { it.url.startsWith(prefix) }
+        private fun openTarget(target: CatalogShortcutTarget) {
+            val cards = adapter.immutableCurrentList
             val provider = APIHolder.allProviders.filterIsInstance<StremioC>()
                 .firstOrNull { it.mainUrl == target.addonUrl }
             val cursor = provider?.homeCursorFor(target, cards)
-            val snapshot = if (cursor != null) {
-                CatalogHomeSnapshot(target, cards.toList(), cursor, adapter.hasNext)
-            } else null
+            val snapshot = cursor?.let {
+                CatalogHomeSnapshot(target, cards.toList(), it, adapter.hasNext)
+            }
             open(target, snapshot)
         }
 
-        private fun targetAt(view: View): Pair<Boolean, CatalogShortcutTarget?> {
-            val holder = child.findContainingViewHolder(view) ?: return false to null
-            val item = adapter.getItemOrNull(holder.bindingAdapterPosition)
-            val url = item?.url ?: return false to null
-            return url.startsWith(prefix) to targets[url]
-        }
-
-        private fun installTitleInput() {
-            val title = titleView ?: return
-            val slop = ViewConfiguration.get(title.context).scaledTouchSlop
+        fun install() {
+            adapter.registerAdapterDataObserver(observer)
+            refreshFocus()
+            val control = title ?: return
+            val slop = ViewConfiguration.get(control.context).scaledTouchSlop
             var pressedTarget: CatalogShortcutTarget? = null
             var downX = 0f
             var downY = 0f
             var downAt = 0L
             var moved = false
-            title.setOnTouchListener { control, event ->
+            control.setOnTouchListener { v, event ->
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         pressedTarget = homeTarget()
@@ -261,85 +152,48 @@ internal class CatalogHomeEntryHook(
                         downY = event.y
                         downAt = event.eventTime
                         moved = false
-                        control.isPressed = true
+                        v.isPressed = true
                     }
                     MotionEvent.ACTION_MOVE -> {
                         if (pressedTarget == null) return@setOnTouchListener false
-                        if (abs(event.x - downX) > slop || abs(event.y - downY) > slop)
-                            moved = true
-                        if (moved) control.isPressed = false
+                        if (abs(event.x - downX) > slop || abs(event.y - downY) > slop) moved = true
+                        if (moved) v.isPressed = false
                     }
                     MotionEvent.ACTION_UP -> {
                         val target = pressedTarget ?: return@setOnTouchListener false
                         pressedTarget = null
-                        control.isPressed = false
+                        v.isPressed = false
                         if (!moved && event.eventTime - downAt < ViewConfiguration.getLongPressTimeout() &&
-                            homeTarget() == target) openCatalog(target)
+                            homeTarget() == target) openTarget(target)
                     }
-                    MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_DOWN -> {
+                    MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> {
                         if (pressedTarget == null) return@setOnTouchListener false
                         pressedTarget = null
-                        control.isPressed = false
                         moved = true
+                        v.isPressed = false
                     }
                     else -> return@setOnTouchListener pressedTarget != null
                 }
-                true // Consume only StremioC titles; all other headers retain their native click.
+                true
             }
-            title.setOnKeyListener { _, key, event ->
+            control.setOnKeyListener { _, key, event ->
                 if (key != KeyEvent.KEYCODE_DPAD_CENTER && key != KeyEvent.KEYCODE_ENTER &&
                     key != KeyEvent.KEYCODE_NUMPAD_ENTER && key != KeyEvent.KEYCODE_BUTTON_A
                 ) return@setOnKeyListener false
                 val target = homeTarget() ?: return@setOnKeyListener false
-                if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) openCatalog(target)
+                if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) openTarget(target)
                 true
             }
         }
 
-        private fun installInput(itemView: View) {
-            listOfNotNull(itemView, itemView.findViewById<View>(R.id.background_card))
-                .distinct().forEach { control ->
-                    val slop = ViewConfiguration.get(control.context).scaledTouchSlop
-                    var downX = 0f
-                    var downY = 0f
-                    var downAt = 0L
-                    var moved = false
-                    control.setOnTouchListener { _, event ->
-                        if (!targetAt(itemView).first) return@setOnTouchListener false
-                        when (event.actionMasked) {
-                            MotionEvent.ACTION_DOWN -> {
-                                downX = event.x; downY = event.y
-                                downAt = event.eventTime; moved = false
-                            }
-                            MotionEvent.ACTION_MOVE -> {
-                                if (abs(event.x - downX) > slop || abs(event.y - downY) > slop) moved = true
-                            }
-                            MotionEvent.ACTION_UP -> {
-                                if (!moved && event.eventTime - downAt < ViewConfiguration.getLongPressTimeout())
-                                    openTarget(itemView)
-                            }
-                            MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> moved = true
-                        }
-                        true
-                    }
-                    control.setOnKeyListener { _, key, event ->
-                        if (key != KeyEvent.KEYCODE_DPAD_CENTER && key != KeyEvent.KEYCODE_ENTER &&
-                            key != KeyEvent.KEYCODE_NUMPAD_ENTER && key != KeyEvent.KEYCODE_BUTTON_A
-                        ) return@setOnKeyListener false
-                        if (!targetAt(itemView).first) return@setOnKeyListener false
-                        if (event.action == KeyEvent.ACTION_UP && !event.isCanceled)
-                            openTarget(itemView)
-                        true
-                    }
-                }
-        }
-
-        private fun clearInput(itemView: View) {
-            listOfNotNull(itemView, itemView.findViewById<View>(R.id.background_card))
-                .distinct().forEach {
-                    it.setOnTouchListener(null)
-                    it.setOnKeyListener(null)
-                }
+        fun dispose() {
+            adapter.unregisterAdapterDataObserver(observer)
+            title?.apply {
+                setOnTouchListener(null)
+                setOnKeyListener(null)
+                isPressed = false
+                if (isLayout(TV)) isFocusable = originalFocusable
+            }
         }
     }
 }

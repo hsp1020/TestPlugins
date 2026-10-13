@@ -38,11 +38,16 @@ import androidx.navigation.NavController
 import androidx.navigation.fragment.NavHostFragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
 import androidx.coordinatorlayout.widget.CoordinatorLayout
 import com.google.android.material.appbar.AppBarLayout
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.mvvm.Resource
+import com.lagradost.cloudstream3.ui.home.HomeViewModel
+import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
+import com.lagradost.cloudstream3.ui.home.ParentItemAdapter
 import com.lagradost.cloudstream3.ui.AutofitRecyclerView
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_SHOW_METADATA
@@ -64,7 +69,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** One dialog, one selection and one in-flight page. No homepage cursors or global UI hooks. */
+/** One dialog, one in-flight page; only All pages are shared with Home. */
 internal class CatalogBrowserDialog(
     private val activity: FragmentActivity,
     private val prefs: SharedPreferences,
@@ -724,7 +729,7 @@ internal class CatalogBrowserDialog(
         pendingHome = null
         if (home != null) {
             // Display the already-loaded home SearchResponses without a first-page request.
-            // The raw cursor belongs to this browser only; never mutate home paging state.
+            // The browser starts at Home's raw cursor; subsequent All pages synchronize back.
             items.addAll(home.items)
             seen.addAll(home.items.map { it.url })
             offset = home.nextSkip
@@ -740,6 +745,61 @@ internal class CatalogBrowserDialog(
                 }
             }
         } else requestPage()
+    }
+
+    // The unfiltered catalog shares one raw cursor with Home, but filtered
+    // genre pages must never be inserted into the unfiltered Home list.
+    private suspend fun syncHomePage(
+        source: StremioC, catalog: StremioC.Catalog, requestedOffset: Int,
+        page: List<SearchResponse>, rawCount: Int, more: Boolean
+    ) {
+        val type = catalog.type ?: return
+        val id = catalog.id ?: return
+        val target = CatalogShortcutTarget(addonUrl ?: return, type, id)
+        val basePath = "/catalog/" + type.urlEncodeLocal() + "/" + id.urlEncodeLocal()
+        val tab = source.mainPage.firstOrNull {
+            it.data.startsWith("$basePath/") || it.data.startsWith("$basePath.json")
+        } ?: return
+
+        // CloudStream HomeViewModel owns another page counter and displayed list.
+        val model = ViewModelProvider(activity)[HomeViewModel::class.java]
+        if (model.apiName.value != source.name || tab.name in model.lock) return
+        val success = model.page.value as? Resource.Success<*> ?: return
+        val record = (success.value as? Map<*, *>)?.get(tab.name)
+            as? HomeViewModel.ExpandableHomepageList ?: return
+        val parent = activity.findViewById<RecyclerView>(R.id.home_master_recycler) ?: return
+        val parentAdapter = parent.adapter as? ParentItemAdapter ?: return
+        val displayed = parentAdapter.immutableCurrentList.firstOrNull { it.list.name == tab.name }
+            ?: return
+        if (record.currentPage != displayed.currentPage ||
+            record.list.list.map { it.url } != displayed.list.list.map { it.url } ||
+            source.homeCursorFor(target, record.list.list) != requestedOffset
+        ) return
+
+        // This checks the native page-flight and offset under the provider mutex.
+        val accepted = source.adoptBrowserPage(target, requestedOffset, page, rawCount) ?: return
+        val urls = record.list.list.mapTo(HashSet<String>()) { it.url }
+        val added = accepted.filter { urls.add(it.url) }
+        record.list = record.list.copy(list = record.list.list + added)
+        record.currentPage++
+        record.hasNext = more
+        displayed.list = displayed.list.copy(list = displayed.list.list + added)
+        displayed.currentPage = record.currentPage
+        displayed.hasNext = more
+
+        for (i in 0 until parent.childCount) {
+            val row = parent.getChildAt(i)
+            val holder = parent.findContainingViewHolder(row) ?: continue
+            if (parentAdapter.getItemOrNull(holder.bindingAdapterPosition - parentAdapter.headers)
+                !== displayed) continue
+            row.findViewById<RecyclerView>(R.id.home_child_recyclerview)?.let { child ->
+                (child.adapter as? HomeChildItemAdapter)?.apply {
+                    hasNext = more
+                    submitList(displayed.list.list)
+                }
+            }
+            break
+        }
     }
 
     private fun requestPage() {
@@ -764,6 +824,14 @@ internal class CatalogBrowserDialog(
                 offset += rawCount // Never advance by the deduplicated display count.
                 hasNext = selectedCatalog.supportsExtra("skip") && rawCount > 0 && !repeated && fresh.isNotEmpty()
                 adapter.submitList(items.toList())
+                if (selectedGenre == null) {
+                    try {
+                        syncHomePage(selectedProvider, selectedCatalog, requestedOffset, page, rawCount, hasNext)
+                    } catch (e: CancellationException) { throw e
+                    } catch (t: Throwable) {
+                        android.util.Log.w("StremioC", "Home catalog page sync skipped", t)
+                    }
+                }
                 retry.visibility = View.GONE
                 grid.doOnNextLayout {
                     if (!closed && ticket == generation && !loading && hasNext && autoFillCount < 1 &&

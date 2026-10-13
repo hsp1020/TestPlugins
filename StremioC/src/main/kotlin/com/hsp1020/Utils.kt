@@ -211,7 +211,7 @@ internal class RatingPlotImageHook(
     private val main = Handler(Looper.getMainLooper())
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
-    private val homeEntries = CatalogHomeEntryHook(app, resources, openCatalog)
+    private val homeEntries = CatalogHomeEntryHook(openCatalog)
 
     // Keep the native Activity-scoped SearchViewModel's results visible when its Fragment is recreated.
     private var lastSearchQuery: String? = null

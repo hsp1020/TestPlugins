@@ -1011,6 +1011,34 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return last.takeIf { it > 0 }
     }
 
+    // Adopt an unfiltered browser page only when Home is still at the same raw skip.
+    // Ignore concurrent native Home requests; never reset their generation or paging.
+    internal suspend fun adoptBrowserPage(
+        target: CatalogShortcutTarget, offset: Int,
+        page: List<SearchResponse>, rawCount: Int
+    ): List<SearchResponse>? {
+        if (rawCount < 0) return null
+        val path = "/catalog/" + target.type.urlEncodeLocal() + "/" +
+            target.catalogId.urlEncodeLocal()
+        val tab = mainPage.firstOrNull {
+            it.data.startsWith("$path/") || it.data.startsWith("$path.json")
+        } ?: return null
+        val stateKey = mainUrl + "|" + tab.data
+        return pageMutex.withLock {
+            if (catalogSkipState[stateKey] != offset ||
+                activePageRequests.keys.any { it.startsWith("$stateKey|page=") }
+            ) return@withLock null
+
+            val sent = catalogSentIds.getOrPut(stateKey) { lruSet(500) }
+            val accepted = page.filter { sent.add(it.extractPureId()) }
+            val nextSkip = offset + rawCount
+            catalogSkipState[stateKey] = nextSkip
+            val cursors = catalogHomeCursors.getOrPut(stateKey) { ConcurrentHashMap() }
+            accepted.forEach { cursors[it.url] = nextSkip }
+            accepted
+        }
+    }
+
     private fun getCatalogLogIdentity(request: MainPageRequest): Pair<String, String> {
         val parts = request.data.substringBefore('?').split('/').filter { it.isNotBlank() }
         val catalogIndex = parts.indexOf("catalog")
