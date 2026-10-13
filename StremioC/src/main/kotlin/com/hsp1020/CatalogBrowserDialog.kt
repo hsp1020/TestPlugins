@@ -274,7 +274,16 @@ internal class CatalogBrowserDialog(
         private var downAt = 0L
         private var moved = false
 
+        override fun performClick(): Boolean {
+            if (!isEnabled || (adapter?.count ?: 0) <= 1) return false
+            return super.performClick()
+        }
+
         override fun onTouchEvent(event: MotionEvent): Boolean {
+            if (!isEnabled || (adapter?.count ?: 0) <= 1) {
+                isPressed = false
+                return true
+            }
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.x
@@ -304,6 +313,7 @@ internal class CatalogBrowserDialog(
         id = View.generateViewId()
         minimumHeight = dp(48)
         isFocusable = true
+        setPopupBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryBlackBackground)))
         val ripple = TypedValue()
         if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) && ripple.resourceId != 0) {
             setBackgroundResource(ripple.resourceId)
@@ -338,6 +348,9 @@ internal class CatalogBrowserDialog(
     private fun AppCompatSpinner.choices(title: String, labels: List<String>, selected: Int, choose: (Int) -> Unit) {
         onItemSelectedListener = null
         contentDescription = title
+        isEnabled = labels.size > 1
+        isClickable = labels.size > 1
+        isFocusable = labels.size > 1
         when (this) {
             typeSelector -> typeArrow
             catalogSelector -> catalogArrow
@@ -361,6 +374,7 @@ internal class CatalogBrowserDialog(
                 val color = if (checked) Color.rgb(229, 9, 20) else Color.WHITE
                 return LinearLayout(activity).apply {
                     gravity = Gravity.CENTER_VERTICAL
+                    setBackgroundColor(activity.colorFromAttribute(R.attr.primaryBlackBackground))
                     minimumHeight = dp(48)
                     setPadding(dp(16), 0, dp(12), 0)
                     addView(TextView(activity).apply {

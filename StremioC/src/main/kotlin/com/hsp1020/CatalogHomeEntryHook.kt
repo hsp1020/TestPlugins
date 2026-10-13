@@ -96,8 +96,8 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
         val url = prefix + UUID.nameUUIDFromBytes(value.toByteArray(Charsets.UTF_8))
         targets[url] = target
         return provider.newMovieSearchResponse("Browse Genres", url, TvType.Others, fix = false) {
-            // Free-to-use Unsplash photograph of a red cinema auditorium.
-            posterUrl = "https://images.unsplash.com/photo-1604975701397-6365ccbd028a?w=360&h=540&fit=crop&auto=format&q=80"
+            // User-supplied, licensed image stored in this repository.
+            posterUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/StremioC/browse_genres.webp"
         }
     }
 
