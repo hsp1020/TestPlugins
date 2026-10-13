@@ -12,6 +12,7 @@ import android.view.View
 import android.view.MotionEvent
 import android.view.ViewGroup
 import android.view.Window
+import android.view.ViewConfiguration
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Spinner
@@ -37,6 +38,7 @@ import androidx.recyclerview.widget.RecyclerView
 import androidx.coordinatorlayout.widget.CoordinatorLayout
 import com.google.android.material.appbar.AppBarLayout
 import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.ui.AutofitRecyclerView
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
@@ -73,6 +75,9 @@ internal class CatalogBrowserDialog(
     private val typeSelector = selector()
     private val catalogSelector = selector()
     private val genreSelector = selector()
+    private val selectorLabelStyle = TextView(activity).apply {
+        typeface = Typeface.create(typeface, Typeface.BOLD)
+    }
     private val settingsButton = ImageView(activity).apply {
         contentDescription = "Stremio Settings"
         setImageDrawable(settingsIcon)
@@ -96,11 +101,14 @@ internal class CatalogBrowserDialog(
     private val retry = button("Retry").apply { visibility = View.GONE }
     private val grid = AutofitRecyclerView(activity)
     private val adapter = SearchAdapter(grid, false) { click ->
-        if (!closed && (click.action == SEARCH_ACTION_LOAD || click.action == SEARCH_ACTION_SHOW_METADATA)) {
-            val origin = navigation?.currentBackStackEntry?.id
-            if (origin != null) returnEntryId = origin
-            activity.loadSearchResult(click.card)
-            if (origin == null) dismiss() // Navigate before removing the overlay.
+        if (!closed) when (click.action) {
+            SEARCH_ACTION_SHOW_METADATA -> (activity as? MainActivity)?.loadPopup(click.card)
+            SEARCH_ACTION_LOAD -> {
+                val origin = navigation?.currentBackStackEntry?.id
+                if (origin != null) returnEntryId = origin
+                activity.loadSearchResult(click.card)
+                if (origin == null) dismiss() // Navigate before removing the overlay.
+            }
         }
     }
     private var links = emptyList<LinkItem>()
@@ -179,7 +187,42 @@ internal class CatalogBrowserDialog(
         minHeight = dp(48)
     }
 
-    private fun selector() = AppCompatSpinner(activity, null, androidx.appcompat.R.attr.spinnerStyle, Spinner.MODE_DROPDOWN).apply {
+    private fun selector() = object : AppCompatSpinner(
+        activity, null, androidx.appcompat.R.attr.spinnerStyle, Spinner.MODE_DROPDOWN
+    ) {
+        private val touchSlop = ViewConfiguration.get(activity).scaledTouchSlop
+        private var downX = 0f
+        private var downY = 0f
+        private var downAt = 0L
+        private var moved = false
+
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.x
+                    downY = event.y
+                    downAt = event.eventTime
+                    moved = false
+                    isPressed = true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (kotlin.math.abs(event.x - downX) > touchSlop ||
+                        kotlin.math.abs(event.y - downY) > touchSlop) moved = true
+                    if (moved) isPressed = false
+                }
+                MotionEvent.ACTION_UP -> {
+                    isPressed = false
+                    if (!moved && event.eventTime - downAt < ViewConfiguration.getLongPressTimeout())
+                        performClick()
+                }
+                MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_DOWN -> {
+                    moved = true
+                    isPressed = false
+                }
+            }
+            return true // Never forward a long press or a drag into the popup list.
+        }
+    }.apply {
         id = View.generateViewId()
         minimumHeight = dp(48)
         isFocusable = true
@@ -194,7 +237,7 @@ internal class CatalogBrowserDialog(
             gravity = Gravity.CENTER_VERTICAL
             addView(TextView(activity).apply {
                 text = title
-                typeface = Typeface.create(typeface, Typeface.BOLD)
+                typeface = selectorLabelStyle.typeface
                 gravity = Gravity.CENTER_VERTICAL
                 setSingleLine(true)
             }, LinearLayout.LayoutParams(dp(82), dp(48)))
@@ -218,7 +261,8 @@ internal class CatalogBrowserDialog(
         adapter = object : ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, labels) {
             private fun boldRow(row: View, selectedItem: Boolean) = row.also {
                 ((it as? TextView) ?: it.findViewById<TextView>(android.R.id.text1))?.apply {
-                    typeface = Typeface.create(typeface, Typeface.BOLD)
+                    typeface = selectorLabelStyle.typeface
+                    setTextSize(TypedValue.COMPLEX_UNIT_PX, selectorLabelStyle.textSize)
                     setSingleLine(true)
                     ellipsize = TextUtils.TruncateAt.END
                     if (selectedItem) setPadding(paddingLeft, paddingTop, dp(40), paddingBottom)
@@ -264,7 +308,7 @@ internal class CatalogBrowserDialog(
                         GradientDrawable.Orientation.TOP_BOTTOM,
                         intArrayOf(headerColor, headerColor and 0x00FFFFFF)
                     )
-                }, LinearLayout.LayoutParams(-1, dp(16)))
+                }, LinearLayout.LayoutParams(-1, dp(48)))
             }, AppBarLayout.LayoutParams(-1, -2).apply {
                 scrollFlags = AppBarLayout.LayoutParams.SCROLL_FLAG_SCROLL or
                     AppBarLayout.LayoutParams.SCROLL_FLAG_ENTER_ALWAYS
@@ -280,7 +324,7 @@ internal class CatalogBrowserDialog(
         }
         grid.spanCount = activity.getSpanCount(false)
         root.addView(grid, CoordinatorLayout.LayoutParams(-1, -1).apply {
-            behavior = AppBarLayout.ScrollingViewBehavior().apply { overlayTop = dp(16) }
+            behavior = AppBarLayout.ScrollingViewBehavior().apply { overlayTop = dp(48) }
         })
         root.addView(header, CoordinatorLayout.LayoutParams(-1, -2))
         root.addView(retry, CoordinatorLayout.LayoutParams(-1, -2).apply {
