@@ -26,6 +26,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
+import android.os.SystemClock
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
@@ -321,6 +322,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private var lastFitWidth = -1
     private var lastFitHeight = -1
     private var started = false
+    private var artworkRevealStart = 0L
     private var portraitTitleOnly = false
     private var forcedPortraitTitle = false
     // Asset alphas are staged once during start(); no re-staging on pre-draw.
@@ -446,6 +448,21 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         picture?.alpha = if (show) originalPictureAlpha else 0f
         logo?.alpha = if (show) originalLogoAlpha else 0f
     }
+    // Do not display the first decoded image alone while the paired artwork is pending.
+    // Fail open after a bounded interval so a missing/failed remote image cannot blank the hero.
+    private fun revealArtworkTogether() {
+        val backgroundReady = picture?.drawable?.let {
+            it.intrinsicWidth > 0 && it.intrinsicHeight > 0
+        } == true
+        val logoReady = logo?.visibility == View.VISIBLE && logo?.drawable != null &&
+            logo.width > 0 && logo.height > 0
+        val expectedLogo = detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true
+        val timedOut = SystemClock.uptimeMillis() - artworkRevealStart >= 2000L
+        if ((backgroundReady && (!expectedLogo || logoReady)) || timedOut) {
+            picture?.alpha = if (backgroundReady) originalPictureAlpha else 0f
+            logo?.alpha = if (logoReady) originalLogoAlpha else 0f
+        }
+    }
     private fun stage() {
         // Neither async drawable may paint at CloudStream's original geometry.
         picture?.alpha = 0f
@@ -526,10 +543,13 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val context = root.context
         if (portraitMode() && maskPortraitTitle()) title?.alpha = 0f
         started = true
+        artworkRevealStart = SystemClock.uptimeMillis()
         suppressNativePreview()
         splitFallback = false
         nativeRecoveryFrames = 0
         if (splitMode()) stage() // Hide both assets before their first native-layout draw.
+        else { picture?.alpha = 0f; logo?.alpha = 0f }
+        root.postDelayed({ if (started) root.invalidate() }, 2050L)
         // Use the host app's active theme color so the edge fade also matches light themes.
         val colorAttr = context.resources.getIdentifier("primaryBlackBackground", "attr", context.packageName)
         val colors = context.theme.obtainStyledAttributes(
@@ -620,11 +640,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             edge?.let { placeEdge(it, 0, 0, 0, 0) }
             shadow?.visibility = originalShadowVisibility ?: View.VISIBLE
             showTitle(false, hideOriginal = maskPortraitTitle())
-            visibility(true)
             logo?.translationX = originalLogoX
             logo?.translationY = originalLogoY
             scaleLogo()
             updatePortraitTitle()
+            revealArtworkTogether()
             return
         }
 
@@ -735,10 +755,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (image.width == imageWidth && image.height == imageHeight &&
             image.left == imageLeft && image.top == imageTop) {
             showTitle(titleText.isNotEmpty() && !logoPending, hideOriginal = expectedLogo && !foreignLogo)
-            if (iw > 0 && ih > 0 && image.alpha != originalPictureAlpha)
-                image.alpha = originalPictureAlpha
-            if (hasLogo && logo?.alpha != originalLogoAlpha)
-                logo?.alpha = originalLogoAlpha
+            revealArtworkTogether()
             // Cache only ready assets after their geometry has finished relayout.
             if (iw > 0 && ih > 0 && !logoPending && !root.isLayoutRequested &&
                 !container.isLayoutRequested && !image.isLayoutRequested) {

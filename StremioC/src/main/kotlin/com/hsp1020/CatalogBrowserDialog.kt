@@ -29,6 +29,7 @@ import androidx.fragment.app.FragmentManager
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.ViewTreeObserver
+import android.widget.ImageView
 import androidx.core.view.ViewCompat
 import androidx.core.view.doOnNextLayout
 import androidx.core.view.doOnPreDraw
@@ -141,6 +142,26 @@ internal class CatalogBrowserDialog(
     private var loading = false
     private var hasNext = false
     private var autoFillCount = 0
+    // Stop pathological one-item pages without leaving normal short TV catalogs stranded.
+    private val maxAutoFillPages = 12
+    private var initialRevealFinished = false
+    private val homeTitleFocus = if (initialCatalog != null)
+        activity.currentFocus?.takeIf { it.id == R.id.home_child_more_info } else null
+    private val initialRevealListener = ViewTreeObserver.OnPreDrawListener {
+        if (!initialRevealFinished && chosen && items.isNotEmpty() &&
+            grid.childCount > 0 && (0 until grid.childCount).all { index ->
+                val image = grid.getChildAt(index).findViewById<ImageView>(R.id.imageView)
+                image != null && image.width > 0 && image.drawable != null
+            }) finishInitialReveal()
+        true
+    }
+    private fun finishInitialReveal() {
+        if (initialRevealFinished || closed) return
+        initialRevealFinished = true
+        if (root.viewTreeObserver.isAlive)
+            root.viewTreeObserver.removeOnPreDrawListener(initialRevealListener)
+        root.alpha = 1f
+    }
     private var touchStartY = 0f
     private var closed = false
     private val navigation by lazy {
@@ -424,6 +445,9 @@ internal class CatalogBrowserDialog(
     }
 
     fun show(onDismiss: () -> Unit) {
+        root.alpha = 0f // Release title, selectors and loaded poster cards in one frame.
+        root.viewTreeObserver.addOnPreDrawListener(initialRevealListener)
+        root.postDelayed({ finishInitialReveal() }, 3000L) // Broken images/network must not trap an invisible UI.
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         root.setBackgroundColor(activity.colorFromAttribute(R.attr.primaryBlackBackground))
         val headerColor = activity.colorFromAttribute(R.attr.primaryBlackBackground)
@@ -513,6 +537,8 @@ internal class CatalogBrowserDialog(
         }
         dialog.setContentView(root)
         dialog.setOnDismissListener {
+            if (root.viewTreeObserver.isAlive)
+                root.viewTreeObserver.removeOnPreDrawListener(initialRevealListener)
             closed = true
             generation++
             scope.cancel()
@@ -524,6 +550,12 @@ internal class CatalogBrowserDialog(
             detailRevealEnd?.invoke()
             grid.adapter = null
             onDismiss()
+            homeTitleFocus?.takeIf { it.isAttachedToWindow }?.let { focus ->
+                focus.post {
+                    if (navigation?.currentDestination?.id == R.id.navigation_home)
+                        focus.requestFocus()
+                }
+            }
         }
         dialog.show()
         dialog.window?.let { WindowCompat.setDecorFitsSystemWindows(it, true) }
@@ -788,9 +820,13 @@ internal class CatalogBrowserDialog(
     }
 
     private fun autoFillIfShort(ticket: Int) {
-        grid.doOnNextLayout {
-            if (!closed && ticket == generation && !loading && hasNext && autoFillCount < 1 &&
-                items.isNotEmpty() && grid.height > 0 && !grid.canScrollVertically(1)) {
+        grid.post {
+            if (closed || ticket != generation || loading || !hasNext ||
+                autoFillCount >= maxAutoFillPages || items.isEmpty() ||
+                retry.visibility == View.VISIBLE || grid.height <= 0) return@post
+            if (grid.isLayoutRequested || grid.childCount == 0) {
+                grid.doOnNextLayout { autoFillIfShort(ticket) }
+            } else if (!grid.canScrollVertically(1)) {
                 autoFillCount++
                 requestPage()
             }
