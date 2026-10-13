@@ -1,6 +1,10 @@
 package com.hsp1020
 
 import android.net.Uri
+import android.content.Context
+import android.content.res.Resources
+import java.io.File
+import java.util.zip.CRC32
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -21,7 +25,25 @@ import kotlin.math.abs
 internal data class CatalogShortcutTarget(val addonUrl: String, val type: String, val catalogId: String)
 
 /** UI-only catalog entry cards. No homepage data, preview responses or native navigation are changed. */
-internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) -> Unit) {
+internal class CatalogHomeEntryHook(
+    appContext: Context,
+    pluginResources: Resources,
+    private val open: (CatalogShortcutTarget) -> Unit
+) {
+    // Resolve the bundled drawable once. Coil loads file:// images directly,
+    // without relying on raw.githubusercontent.com connectivity.
+    private val thumbnailUrl: String? = runCatching {
+        val id = pluginResources.getIdentifier("thumbnail", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
+        require(id != 0) { "Browse Genres thumbnail resource missing" }
+        val bytes = pluginResources.openRawResource(id).use { it.readBytes() }
+        val digest = CRC32().apply { update(bytes) }.value.toString(16)
+        val image = File(appContext.cacheDir, "stremioc_browse_$digest.webp")
+        if (!image.exists() || image.length() != bytes.size.toLong()) image.writeBytes(bytes)
+        Uri.fromFile(image).toString()
+    }.getOrElse {
+        android.util.Log.w("StremioC", "Unable to load bundled Browse Genres thumbnail", it)
+        null
+    }
     private val prefix = "https://stremioc.invalid/browse/"
     private val targets = HashMap<String, CatalogShortcutTarget>()
     private val rows = HashMap<RecyclerView, Row>()
@@ -96,7 +118,7 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
         val url = prefix + UUID.nameUUIDFromBytes(value.toByteArray(Charsets.UTF_8))
         targets[url] = target
         return provider.newMovieSearchResponse("Browse Genres", url, TvType.Others, fix = false) {
-            posterUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/StremioC/src/main/res/drawable-nodpi/thumbnail.webp"
+            posterUrl = thumbnailUrl
         }
     }
 
