@@ -420,20 +420,9 @@ class SettingsBottomFragment(
                 if (index == 2) dp(36) else ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)
             ))
         }
-        fun expandSettings(expand: Boolean) {
-            val visibility = if (expand) View.VISIBLE else View.GONE
-            settingsBody.visibility = visibility
-            settingsActions.forEach { it.visibility = visibility }
-            settingsToggle.text = if (expand) "Stremio Settings  ▲" else "Stremio Settings  ▼"
-            settingsToggle.contentDescription = if (expand) "Collapse Stremio Settings" else "Expand Stremio Settings"
-            if (settingsDialog.isShowing) settingsDialog.window?.let { window ->
-                window.setLayout(window.attributes.width, if (expand)
-                    (hostContext.resources.displayMetrics.heightPixels * 0.88f).toInt() else ViewGroup.LayoutParams.WRAP_CONTENT)
-            }
-        }
-        expandSettings(false)
-        settingsToggle.setOnClickListener { expandSettings(settingsBody.visibility != View.VISIBLE) }
-        view.findView<View>("settingsHeader").setOnClickListener { settingsToggle.performClick() }
+        settingsBody.visibility = View.VISIBLE
+        settingsActions.forEach { it.visibility = View.VISIBLE }
+        settingsToggle.text = "Stremio Settings"
         // Plugin drawable IDs cannot be resolved safely by the host XML inflater.
         // Apply theme backgrounds after inflation using the plugin-independent drawable.
         listOf("etTmdbApiKey", "etMdbListApiKey", "etCustomPosterUrl", "etHistorySyncUrl").forEach { id ->
@@ -961,7 +950,7 @@ class SettingsBottomFragment(
 
                         val optEdit = dialogButton(ctx, "Edit Link Info", LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 15) })
                         
-                        val optCatalog = dialogButton(ctx, "Configure Catalog", LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                        val optCatalog = dialogButton(ctx, "Configure Catalogs", LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                         
                         choiceContainer.addView(optEdit)
                         choiceContainer.addView(optCatalog)

@@ -4,6 +4,8 @@ import androidx.appcompat.app.AppCompatDialog
 import android.content.SharedPreferences
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.Color
 import android.graphics.Typeface
 import android.text.TextUtils
 import android.view.View
@@ -24,6 +26,7 @@ import android.widget.Toast
 import androidx.fragment.app.FragmentActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.doOnNextLayout
+import androidx.core.view.doOnPreDraw
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.navigation.NavController
@@ -31,6 +34,8 @@ import androidx.navigation.fragment.NavHostFragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.recyclerview.widget.RecyclerView
+import androidx.coordinatorlayout.widget.CoordinatorLayout
+import com.google.android.material.appbar.AppBarLayout
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.ui.AutofitRecyclerView
@@ -64,7 +69,7 @@ internal class CatalogBrowserDialog(
     private val dialog = AppCompatDialog(activity, R.style.DialogFullscreen)
     private val scope = MainScope()
     private val manifestPrefs = activity.getSharedPreferences("StremioC_Manifest", 0)
-    private val root = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+    private val root = CoordinatorLayout(activity)
     private val typeSelector = selector()
     private val catalogSelector = selector()
     private val genreSelector = selector()
@@ -93,13 +98,9 @@ internal class CatalogBrowserDialog(
     private val adapter = SearchAdapter(grid, false) { click ->
         if (!closed && (click.action == SEARCH_ACTION_LOAD || click.action == SEARCH_ACTION_SHOW_METADATA)) {
             val origin = navigation?.currentBackStackEntry?.id
-            if (origin != null) {
-                returnEntryId = origin
-                dialog.hide() // Preserve this dialog's list, cursor and scroll position.
-            } else {
-                dismiss() // Keep existing navigation if this host has no NavController.
-            }
+            if (origin != null) returnEntryId = origin
             activity.loadSearchResult(click.card)
+            if (origin == null) dismiss() // Navigate before removing the overlay.
         }
     }
     private var links = emptyList<LinkItem>()
@@ -127,10 +128,24 @@ internal class CatalogBrowserDialog(
         (activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)?.navController
     }
     private var returnEntryId: String? = null
+    private var detailHidePending = false
     private val destinationListener = NavController.OnDestinationChangedListener { controller, _, _ ->
-        if (!closed && returnEntryId != null && controller.currentBackStackEntry?.id == returnEntryId) {
-            returnEntryId = null
-            dialog.show()
+        if (!closed && returnEntryId != null) {
+            if (controller.currentBackStackEntry?.id == returnEntryId) {
+                returnEntryId = null
+                detailHidePending = false
+                dialog.show()
+            } else if (!detailHidePending) {
+                detailHidePending = true
+                val hostView = activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)?.view
+                if (hostView != null) hostView.doOnPreDraw {
+                    detailHidePending = false
+                    if (!closed && returnEntryId != null) dialog.hide()
+                } else {
+                    detailHidePending = false
+                    dialog.hide()
+                }
+            }
         }
     }
     private val items = ArrayList<SearchResponse>()
@@ -228,14 +243,33 @@ internal class CatalogBrowserDialog(
     fun show(onDismiss: () -> Unit) {
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         root.setBackgroundColor(activity.colorFromAttribute(R.attr.primaryBlackBackground))
+        val headerColor = activity.colorFromAttribute(R.attr.primaryBlackBackground)
         val controls = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(8), dp(12), 0)
+            setBackgroundColor(headerColor)
             addView(selectorRow("Type", typeSelector, settingsButton), ViewGroup.LayoutParams(-1, -2))
             addView(selectorRow("Catalog", catalogSelector), ViewGroup.LayoutParams(-1, -2))
             addView(selectorRow("Genre", genreSelector), ViewGroup.LayoutParams(-1, -2))
         }
-        root.addView(controls)
+        val header = AppBarLayout(activity).apply {
+            background = ColorDrawable(Color.TRANSPARENT)
+            stateListAnimator = null
+            setLiftOnScroll(false)
+            addView(LinearLayout(activity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(controls, LinearLayout.LayoutParams(-1, -2))
+                addView(View(activity).apply {
+                    background = GradientDrawable(
+                        GradientDrawable.Orientation.TOP_BOTTOM,
+                        intArrayOf(headerColor, headerColor and 0x00FFFFFF)
+                    )
+                }, LinearLayout.LayoutParams(-1, dp(16)))
+            }, AppBarLayout.LayoutParams(-1, -2).apply {
+                scrollFlags = AppBarLayout.LayoutParams.SCROLL_FLAG_SCROLL or
+                    AppBarLayout.LayoutParams.SCROLL_FLAG_ENTER_ALWAYS
+            })
+        }
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val statusTop = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
             val position = IntArray(2)
@@ -245,8 +279,13 @@ internal class CatalogBrowserDialog(
             insets
         }
         grid.spanCount = activity.getSpanCount(false)
-        root.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
-        root.addView(retry, ViewGroup.LayoutParams(-1, -2))
+        root.addView(grid, CoordinatorLayout.LayoutParams(-1, -1).apply {
+            behavior = AppBarLayout.ScrollingViewBehavior().apply { overlayTop = dp(16) }
+        })
+        root.addView(header, CoordinatorLayout.LayoutParams(-1, -2))
+        root.addView(retry, CoordinatorLayout.LayoutParams(-1, -2).apply {
+            gravity = Gravity.BOTTOM
+        })
         grid.adapter = adapter
         grid.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
             if (right - left != oldRight - oldLeft) {
@@ -425,14 +464,11 @@ internal class CatalogBrowserDialog(
         genre = null
         visibleCatalogs = catalogs.filter { it.catalog.type == type }
         val entries = visibleCatalogs
-        val labels = entries.map { it.catalog.name ?: it.catalog.id ?: "Untitled" }
-        val duplicates = labels.groupingBy { it }.eachCount()
         catalogSelector.isEnabled = entries.size > 1
-        catalogSelector.choices("Catalog name", labels.mapIndexed { index, name ->
-            if ((duplicates[name] ?: 0) > 1) {
-                "${name} · ${links.firstOrNull { it.link == entries[index].url }?.name ?: entries[index].url}"
-            } else name
-        }, if (labels.isEmpty()) -1 else 0) {
+        catalogSelector.choices("Catalog name", entries.map { entry ->
+            "${entry.catalog.name ?: entry.catalog.id ?: "Untitled"} - " +
+                (links.firstOrNull { it.link == entry.url }?.name ?: entry.url)
+        }, if (entries.isEmpty()) -1 else 0) {
             val entry = entries.getOrNull(it) ?: return@choices
             if (catalog !== entry.catalog || addonUrl != entry.url) selectCatalog(entry)
         }
