@@ -15,10 +15,9 @@ import android.widget.Spinner
 import androidx.appcompat.widget.AppCompatSpinner
 import com.google.android.material.button.MaterialButton
 import android.widget.LinearLayout
-import android.widget.FrameLayout
-import android.view.Gravity
 import android.util.TypedValue
 import android.widget.TextView
+import android.widget.Toast
 import androidx.fragment.app.FragmentActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.doOnNextLayout
@@ -40,6 +39,11 @@ import com.lagradost.cloudstream3.utils.UIHelper.getSpanCount
 import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
@@ -56,13 +60,9 @@ internal class CatalogBrowserDialog(
     private val scope = MainScope()
     private val manifestPrefs = activity.getSharedPreferences("StremioC_Manifest", 0)
     private val root = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
-    private val addonSelector = selector()
+    private val typeSelector = selector()
     private val catalogSelector = selector()
     private val genreSelector = selector()
-    private val status = TextView(activity).apply {
-        setPadding(dp(12), dp(6), dp(12), dp(6))
-        accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
-    }
     private val retry = button("Retry").apply { visibility = View.GONE }
     private val grid = AutofitRecyclerView(activity)
     private val adapter = SearchAdapter(grid, false) { click ->
@@ -78,7 +78,11 @@ internal class CatalogBrowserDialog(
         }
     }
     private var links = emptyList<LinkItem>()
-    private var catalogs = emptyList<StremioC.Catalog>()
+    private data class CatalogSource(val url: String, val provider: StremioC, val catalog: StremioC.Catalog)
+    private var catalogs = emptyList<CatalogSource>()
+    private var visibleCatalogs = emptyList<CatalogSource>()
+    private var selectedType = "movie"
+    private var fetchingCatalogs = false
     private var provider: StremioC? = null
     private var addonUrl: String? = null
     private var catalog: StremioC.Catalog? = null
@@ -116,9 +120,7 @@ internal class CatalogBrowserDialog(
         if (key == "stremio_saved_links") scope.launch { reloadLinks() }
     }
     private val manifestListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key == addonUrl?.let(::stremioCatalogKey)) scope.launch {
-            addonUrl?.let { selectAddon(it) }
-        }
+        if (!fetchingCatalogs && links.any { key == stremioCatalogKey(it.link) }) scope.launch { reloadLinks() }
     }
 
     private fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
@@ -140,44 +142,16 @@ internal class CatalogBrowserDialog(
         }
     }
 
-    private fun selectorRow(title: String, spinner: AppCompatSpinner) = LinearLayout(activity).apply {
-        gravity = Gravity.CENTER_VERTICAL
-        addView(TextView(activity).apply {
-            text = title
-            setTextAppearance(R.style.NoCheckLabel)
-            setPadding(0, 0, 0, 0)
-            setTextColor(activity.colorFromAttribute(R.attr.textColor))
-            typeface = Typeface.create(typeface, Typeface.BOLD)
-            gravity = Gravity.CENTER_VERTICAL
-        }, LinearLayout.LayoutParams(dp(82), dp(48)))
-        addView(FrameLayout(activity).apply {
-            addView(spinner, FrameLayout.LayoutParams(-1, -1))
-            addView(TextView(activity).apply {
-                text = "▼"
-                gravity = Gravity.CENTER
-                setTextColor(activity.colorFromAttribute(R.attr.textColor))
-                isClickable = false
-                isFocusable = false
-            }, FrameLayout.LayoutParams(dp(36), -1, Gravity.END))
-        }, LinearLayout.LayoutParams(0, dp(48), 1f))
-    }
-
     private fun AppCompatSpinner.choices(title: String, labels: List<String>, selected: Int, choose: (Int) -> Unit) {
         onItemSelectedListener = null
         contentDescription = title
-        adapter = object : ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, listOf("Select…") + labels) {
-            override fun areAllItemsEnabled() = false
-            override fun isEnabled(position: Int) = position > 0
-            private fun boldRow(row: View, selected: Boolean) = row.also {
+        adapter = object : ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, labels) {
+            private fun boldRow(row: View, selectedItem: Boolean) = row.also {
                 ((it as? TextView) ?: it.findViewById<TextView>(android.R.id.text1))?.apply {
-                    if (selected) {
-                        setTextAppearance(R.style.NoCheckLabel) // Same Google Sans Bold as CloudStream provider picker.
-                        foreground = null // Keep ripple on the full Spinner, not the text alone.
-                    }
                     typeface = Typeface.create(typeface, Typeface.BOLD)
                     setSingleLine(true)
                     ellipsize = TextUtils.TruncateAt.END
-                    if (selected) setPadding(paddingLeft, paddingTop, dp(40), paddingBottom)
+                    if (selectedItem) setPadding(paddingLeft, paddingTop, dp(40), paddingBottom)
                 }
             }
             override fun getView(position: Int, convertView: View?, parent: ViewGroup) =
@@ -187,11 +161,11 @@ internal class CatalogBrowserDialog(
         }.apply {
             setDropDownViewResource(R.layout.sort_bottom_single_choice)
         }
-        setSelection(selected + 1)
+        if (selected in labels.indices) setSelection(selected)
         onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (!closed && position > 0) choose(position - 1)
+                if (!closed && position in labels.indices) choose(position)
             }
         }
     }
@@ -202,10 +176,9 @@ internal class CatalogBrowserDialog(
         val controls = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(8), dp(12), 0)
-            addView(selectorRow("Addon", addonSelector), ViewGroup.LayoutParams(-1, -2))
-            addView(selectorRow("Catalog", catalogSelector), ViewGroup.LayoutParams(-1, -2))
-            addView(selectorRow("Genre", genreSelector), ViewGroup.LayoutParams(-1, -2))
-            addView(status, ViewGroup.LayoutParams(-1, -2))
+            addView(typeSelector, ViewGroup.LayoutParams(-1, -2))
+            addView(catalogSelector, ViewGroup.LayoutParams(-1, -2))
+            addView(genreSelector, ViewGroup.LayoutParams(-1, -2))
         }
         root.addView(controls)
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
@@ -245,7 +218,7 @@ internal class CatalogBrowserDialog(
             false
         }
         retry.setOnClickListener {
-            if (catalog == null) addonUrl?.let(::selectAddon) else requestPage()
+            if (catalog == null) reloadLinks() else requestPage()
         }
         dialog.setContentView(root)
         dialog.setOnDismissListener {
@@ -285,19 +258,15 @@ internal class CatalogBrowserDialog(
         generation++
         job?.cancel()
         loading = false
-        if (catalog == null) {
-            retry.visibility = if (provider != null) View.VISIBLE else View.GONE
-            retry.text = "Retry"
-            status.text = "Select Catalog to resume."
-        } else if (chosen && hasNext) {
+        if (catalog == null || (chosen && hasNext)) {
             retry.text = "Retry"
             retry.visibility = View.VISIBLE
-            status.text = "${items.size} items · ${genre ?: "All"}"
         }
     }
 
     private fun reset() {
         generation++
+        fetchingCatalogs = false
         job?.cancel()
         loading = false
         offset = 0
@@ -312,105 +281,118 @@ internal class CatalogBrowserDialog(
     }
 
     private fun reloadLinks() {
-        links = SettingsRepository.loadLinks(prefs).filter { it.link.isNotBlank() }
-        addonSelector.isEnabled = links.size > 1
-        val retainedUrl = addonUrl ?: prefs.getString("catalog_browser_addon_url", null)
-        val link = links.firstOrNull { it.link == retainedUrl } ?: links.firstOrNull()
-        if (link == null) {
-            reset()
-            provider = null
-            addonUrl = null
-            catalogs = emptyList()
-            catalog = null
-            addonSelector.choices("Addon", emptyList(), -1) {}
-            catalogSelector.choices("Catalog", emptyList(), -1) {}
-            catalogSelector.isEnabled = false
-            genreSelector.isEnabled = false
-            genreSelector.choices("Genre", emptyList(), -1) {}
-            status.text = "Add a Stremio addon in settings first."
-        } else selectAddon(link.link)
-    }
-
-    private fun selectAddon(url: String) {
         reset()
+        links = SettingsRepository.loadLinks(prefs).filter { it.link.isNotBlank() }
+        provider = null
+        addonUrl = null
         catalog = null
         catalogs = emptyList()
-        addonUrl = url
-        provider = providerFor(url)
-        addonSelector.choices("Addon", links.map { it.name }, links.indexOfFirst { it.link == url }) {
-            if (addonUrl != links[it].link) {
-                prefs.edit().putString("catalog_browser_addon_url", links[it].link).apply()
-                selectAddon(links[it].link)
-            }
-        }
-        catalogSelector.choices("Catalog", emptyList(), -1) {}
+        visibleCatalogs = emptyList()
+        typeSelector.isEnabled = false
         catalogSelector.isEnabled = false
         genreSelector.isEnabled = false
+        typeSelector.choices("Catalog type", emptyList(), -1) {}
+        catalogSelector.choices("Catalog name", emptyList(), -1) {}
         genreSelector.choices("Genre", emptyList(), -1) {}
-        status.text = "Loading catalog choices…"
-        val selectedProvider = provider
-        if (selectedProvider == null) {
-            status.text = "Save addon settings and restart CloudStream to register this provider."
+        val sources = links.asReversed().distinctBy { it.link }.mapNotNull { link ->
+            providerFor(link.link)?.let { link.link to it }
+        }
+        if (sources.isEmpty()) {
+            Toast.makeText(activity, "No registered Stremio catalogs.", Toast.LENGTH_SHORT).show()
             return
         }
         val ticket = generation
+        fetchingCatalogs = true
         job = scope.launch {
-            try {
-                val result = withContext(Dispatchers.IO) { selectedProvider.browseCatalogs() }
-                if (ticket != generation) return@launch
-                catalogs = result
-                catalogSelector.isEnabled = result.isNotEmpty()
-                catalogSelector.choices("Catalog", result.map { "${it.name ?: it.id} - ${it.type.orEmpty().replaceFirstChar { c -> c.uppercase() }}" }, -1) {
-                    if (catalog !== result[it]) selectCatalog(result[it])
-                }
-                status.text = if (result.isEmpty()) "No catalogs in this manifest." else "Choose a catalog."
-                if (result.isNotEmpty()) selectCatalog(result.first())
-            } catch (e: CancellationException) { throw e
-            } catch (_: Exception) {
-                if (ticket == generation) {
-                    status.text = "Unable to load manifest. Please retry."
-                    retry.text = "Retry"
-                    retry.visibility = View.VISIBLE
-                }
+            val limit = Semaphore(4)
+            val result = try { coroutineScope {
+                sources.map { (url, source) ->
+                    async(Dispatchers.IO) {
+                        try {
+                            limit.withPermit {
+                                source.browseCatalogs().map { CatalogSource(url, source, it) }
+                            }
+                        } catch (e: CancellationException) { throw e
+                        } catch (_: Exception) { emptyList() }
+                    }
+                }.awaitAll().flatten()
+            } } finally {
+                if (ticket == generation) fetchingCatalogs = false
             }
+            if (ticket != generation || closed) return@launch
+            catalogs = result
+            if (result.isEmpty()) {
+                Toast.makeText(activity, "Unable to load any catalog manifests.", Toast.LENGTH_SHORT).show()
+                retry.visibility = View.VISIBLE
+                return@launch
+            }
+            val types = result.mapNotNull { it.catalog.type }.distinct().sortedWith(
+                compareBy<String> {
+                    when (it.lowercase()) { "movie" -> 0; "series" -> 1; "anime" -> 2; else -> 3 }
+                }.thenBy { it.lowercase() }
+            )
+            selectedType = selectedType.takeIf { it in types } ?: types.first()
+            typeSelector.isEnabled = types.size > 1
+            typeSelector.choices("Catalog type", types, types.indexOf(selectedType)) {
+                if (selectedType != types[it]) selectType(types[it])
+            }
+            selectType(selectedType)
         }
     }
 
-    private fun selectCatalog(next: StremioC.Catalog) {
+    private fun selectType(type: String) {
         reset()
-        catalog = next
+        selectedType = type
+        provider = null
+        addonUrl = null
+        catalog = null
         genre = null
-        catalogSelector.setSelection(catalogs.indexOf(next) + 1)
-        val blocked = next.browseBlockReason()
-        genreSelector.isEnabled = blocked == null && next.browseGenres().isNotEmpty()
+        visibleCatalogs = catalogs.filter { it.catalog.type == type }
+        val entries = visibleCatalogs
+        val labels = entries.map { it.catalog.name ?: it.catalog.id ?: "Untitled" }
+        val duplicates = labels.groupingBy { it }.eachCount()
+        catalogSelector.isEnabled = entries.size > 1
+        catalogSelector.choices("Catalog name", labels.mapIndexed { index, name ->
+            if ((duplicates[name] ?: 0) > 1) {
+                "${name} · ${links.firstOrNull { it.link == entries[index].url }?.name ?: entries[index].url}"
+            } else name
+        }, if (labels.isEmpty()) -1 else 0) {
+            val entry = entries.getOrNull(it) ?: return@choices
+            if (catalog !== entry.catalog || addonUrl != entry.url) selectCatalog(entry)
+        }
+        if (visibleCatalogs.isNotEmpty()) selectCatalog(visibleCatalogs.first())
+    }
+
+    private fun selectCatalog(next: CatalogSource) {
+        if (catalog === next.catalog && addonUrl == next.url) return
+        reset()
+        provider = next.provider
+        addonUrl = next.url
+        catalog = next.catalog
+        genre = null
+        val blocked = next.catalog.browseBlockReason()
         if (blocked != null) {
+            genreSelector.isEnabled = false
             genreSelector.choices("Genre", emptyList(), -1) {}
-            status.text = blocked
+            Toast.makeText(activity, blocked, Toast.LENGTH_LONG).show()
             return
         }
-        configureGenres(next)
-        if (next.requiresExtra("genre")) {
-            status.text = "Choose a genre."
-            if (genreSelector.isEnabled) genreSelector.requestFocus()
-        } else {
-            chosen = true
-            hasNext = true
-            genreSelector.setSelection(1) // Optional genre defaults to All.
-            requestPage()
-        }
-    }
-
-    private fun configureGenres(selectedCatalog: StremioC.Catalog) {
-        val values: List<String?> = (if (selectedCatalog.requiresExtra("genre")) emptyList() else listOf(null)) +
-            selectedCatalog.browseGenres()
-        genreSelector.choices("Genre", values.map { it ?: "All" }, if (chosen) values.indexOf(genre) else -1) {
-            if (chosen && genre == values[it]) return@choices
+        val required = next.catalog.requiresExtra("genre")
+        val genres: List<String?> = (if (required) emptyList() else listOf(null)) +
+            next.catalog.browseGenres().filter { required || !it.equals("All", ignoreCase = true) }
+        genreSelector.isEnabled = genres.size > 1
+        genreSelector.choices("Genre", genres.map { it ?: "All" }, 0) {
+            if (chosen && genre == genres[it]) return@choices
             reset()
-            genre = values[it]
+            genre = genres[it]
             chosen = true
             hasNext = true
             requestPage()
         }
+        genre = genres.firstOrNull()
+        chosen = true
+        hasNext = true
+        requestPage()
     }
 
     private fun requestPage() {
@@ -422,7 +404,6 @@ internal class CatalogBrowserDialog(
         val requestedOffset = offset
         loading = true
         retry.visibility = View.GONE
-        status.text = "Loading…"
         job = scope.launch {
             try {
                 val (page, rawCount) = withContext(Dispatchers.IO) {
@@ -435,11 +416,6 @@ internal class CatalogBrowserDialog(
                 offset += rawCount // Never advance by the deduplicated display count.
                 hasNext = selectedCatalog.supportsExtra("skip") && rawCount > 0 && !repeated && fresh.isNotEmpty()
                 adapter.submitList(items.toList())
-                status.text = when {
-                    items.isEmpty() -> "No results."
-                    repeated || (rawCount > 0 && fresh.isEmpty()) -> "No new items. Pagination stopped."
-                    else -> "${items.size} items · ${selectedGenre ?: "All"}"
-                }
                 retry.visibility = View.GONE
                 grid.doOnNextLayout {
                     if (!closed && ticket == generation && !loading && hasNext && autoFillCount < 1 &&
@@ -451,7 +427,7 @@ internal class CatalogBrowserDialog(
             } catch (e: CancellationException) { throw e
             } catch (_: Exception) {
                 if (ticket == generation) {
-                    status.text = "Unable to load catalog. Please retry; the server may be rate limited."
+                    Toast.makeText(activity, "Unable to load catalog. Please retry.", Toast.LENGTH_SHORT).show()
                     retry.text = "Retry"
                     retry.visibility = View.VISIBLE
                 }

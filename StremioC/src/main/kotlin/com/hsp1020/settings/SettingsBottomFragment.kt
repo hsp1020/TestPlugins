@@ -13,8 +13,6 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.util.TypedValue
-import androidx.core.widget.TextViewCompat
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.text.InputType
@@ -420,13 +418,8 @@ class SettingsBottomFragment(
         header.orientation = LinearLayout.HORIZONTAL
         header.gravity = android.view.Gravity.CENTER_VERTICAL
         settingsToggle.apply {
-            setTextAppearance(HostR.style.NoCheckLabel)
-            setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
             setPadding(0, 0, 0, 0)
             setSingleLine(true)
-            TextViewCompat.setAutoSizeTextTypeUniformWithConfiguration(
-                this, 11, 16, 1, TypedValue.COMPLEX_UNIT_SP
-            )
         }
         header.addView(settingsToggle, LinearLayout.LayoutParams(0, dp(48), 1f))
         settingsActions.forEachIndexed { index, action ->
