@@ -145,8 +145,7 @@ object SettingsRepository {
 class SettingsBottomFragment(
     private val plugin: StremioCPlugin,
     private val sharedPref: SharedPreferences,
-    private val hostContext: Context,
-    private val openBrowser: () -> Unit
+    private val hostContext: Context
 ) {
     // The sheet is not restored by FragmentManager during Activity recreation.
     private val settingsDialog = AppCompatDialog(hostContext)
@@ -156,12 +155,6 @@ class SettingsBottomFragment(
         if (event == Lifecycle.Event.ON_DESTROY) dismiss()
     }
     fun dismiss() = settingsDialog.dismiss()
-    fun hideForBrowser() = settingsDialog.hide()
-    fun restoreFromBrowser() {
-        if (hostOwner?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.STARTED) == true) {
-            settingsDialog.show() // Reuse the same view, input values and expanded state.
-        }
-    }
 
     companion object {
         val LANGUAGES = listOf(
@@ -406,7 +399,6 @@ class SettingsBottomFragment(
         val appContext = ctx.applicationContext
         val view = getLayout("bottom_sheet_layout", LayoutInflater.from(ctx), null)
         view.background = getDarkThemeBg()
-        view.findView<View>("browseAddon").setOnClickListener { openBrowser() }
         val settingsBody = view.findView<View>("settingsBody")
         val settingsToggle = view.findView<TextView>("settingsToggle")
         val settingsActions = listOf("tvExport", "tvImport", "saveIcon").map { view.findView<View>(it) }
@@ -969,7 +961,7 @@ class SettingsBottomFragment(
 
                         val optEdit = dialogButton(ctx, "Edit Link Info", LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 15) })
                         
-                        val optCatalog = dialogButton(ctx, "Configure Catalogs & Genres", LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                        val optCatalog = dialogButton(ctx, "Configure Catalog", LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
                         
                         choiceContainer.addView(optEdit)
                         choiceContainer.addView(optCatalog)

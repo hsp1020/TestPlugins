@@ -191,25 +191,38 @@ class StremioCPlugin : Plugin() {
                 activeSettingsDialog?.dismiss()
                 dismissProviderPicker(host)
                 val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
-                lateinit var settings: SettingsBottomFragment
-                settings = SettingsBottomFragment(this, prefs, host) {
-                    activeBrowser?.dismiss()
-                    settings.hideForBrowser()
-                    val browser = CatalogBrowserDialog(host, prefs) { url ->
-                        APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull {
-                            stremioManifestUrl(it.mainUrl.fixSourceUrl()) == stremioManifestUrl(url.fixSourceUrl())
-                        }
+                val gearIcon = resources?.let { res ->
+                    runCatching {
+                        val id = res.getIdentifier("settings_icon", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
+                        if (id != 0) res.getDrawable(id, null) else null
+                    }.getOrNull()
+                }
+                lateinit var browser: CatalogBrowserDialog
+                browser = CatalogBrowserDialog(host, prefs, { url ->
+                    APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull {
+                        stremioManifestUrl(it.mainUrl.fixSourceUrl()) == stremioManifestUrl(url.fixSourceUrl())
                     }
-                    activeBrowser = browser
-                    browser.show {
-                        if (activeBrowser === browser) {
-                            activeBrowser = null
-                            if (activeSettingsDialog === settings) settings.restoreFromBrowser()
+                }, gearIcon) {
+                    if (activeBrowser === browser) {
+                        lateinit var settings: SettingsBottomFragment
+                        settings = SettingsBottomFragment(this, prefs, host)
+                        activeSettingsDialog = settings
+                        settings.show {
+                            if (activeSettingsDialog === settings) {
+                                activeSettingsDialog = null
+                                if (activeBrowser === browser) browser.restoreFromSettings()
+                            }
                         }
                     }
                 }
-                activeSettingsDialog = settings
-                settings.show { if (activeSettingsDialog === settings) activeSettingsDialog = null }
+                activeBrowser = browser
+                browser.show {
+                    if (activeBrowser === browser) {
+                        activeBrowser = null
+                        activeSettingsDialog?.dismiss()
+                        activeSettingsDialog = null
+                    }
+                }
             }
         }
     }

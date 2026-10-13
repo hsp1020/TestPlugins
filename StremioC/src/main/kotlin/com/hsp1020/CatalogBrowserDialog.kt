@@ -3,6 +3,7 @@ package com.hsp1020
 import androidx.appcompat.app.AppCompatDialog
 import android.content.SharedPreferences
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.Typeface
 import android.text.TextUtils
 import android.view.View
@@ -15,8 +16,10 @@ import android.widget.Spinner
 import androidx.appcompat.widget.AppCompatSpinner
 import com.google.android.material.button.MaterialButton
 import android.widget.LinearLayout
+import android.view.Gravity
 import android.util.TypedValue
 import android.widget.TextView
+import android.widget.ImageView
 import android.widget.Toast
 import androidx.fragment.app.FragmentActivity
 import androidx.core.view.ViewCompat
@@ -55,6 +58,8 @@ internal class CatalogBrowserDialog(
     private val activity: FragmentActivity,
     private val prefs: SharedPreferences,
     private val providerFor: (String) -> StremioC?,
+    private val settingsIcon: Drawable?,
+    private val onOpenSettings: () -> Unit,
 ) {
     private val dialog = AppCompatDialog(activity, R.style.DialogFullscreen)
     private val scope = MainScope()
@@ -63,6 +68,26 @@ internal class CatalogBrowserDialog(
     private val typeSelector = selector()
     private val catalogSelector = selector()
     private val genreSelector = selector()
+    private val settingsButton = ImageView(activity).apply {
+        contentDescription = "Stremio Settings"
+        setImageDrawable(settingsIcon)
+        setPadding(dp(8), dp(8), dp(8), dp(8))
+        isClickable = true
+        isFocusable = true
+        val attr = TypedValue()
+        if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, attr, true) && attr.resourceId != 0)
+            setBackgroundResource(attr.resourceId)
+        setOnClickListener {
+            if (!closed) {
+                settingsVisible = true
+                dialog.hide()
+                try { onOpenSettings() } catch (_: Exception) {
+                    restoreFromSettings()
+                    Toast.makeText(activity, "Unable to open settings.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
     private val retry = button("Retry").apply { visibility = View.GONE }
     private val grid = AutofitRecyclerView(activity)
     private val adapter = SearchAdapter(grid, false) { click ->
@@ -83,6 +108,8 @@ internal class CatalogBrowserDialog(
     private var visibleCatalogs = emptyList<CatalogSource>()
     private var selectedType = "movie"
     private var fetchingCatalogs = false
+    private var catalogSettingsChanged = false
+    private var settingsVisible = false
     private var provider: StremioC? = null
     private var addonUrl: String? = null
     private var catalog: StremioC.Catalog? = null
@@ -117,10 +144,15 @@ internal class CatalogBrowserDialog(
         }
     }
     private val settingsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key == "stremio_saved_links") scope.launch { reloadLinks() }
+        if (key == "stremio_saved_links") {
+            if (settingsVisible) catalogSettingsChanged = true else scope.launch { reloadLinks() }
+        } else if (key?.startsWith("tab_enabled_") == true || key?.startsWith("catalog_order_") == true)
+            if (!fetchingCatalogs) catalogSettingsChanged = true
     }
     private val manifestListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (!fetchingCatalogs && links.any { key == stremioCatalogKey(it.link) }) scope.launch { reloadLinks() }
+        if (!fetchingCatalogs && links.any { key == stremioCatalogKey(it.link) }) {
+            if (settingsVisible) catalogSettingsChanged = true else scope.launch { reloadLinks() }
+        }
     }
 
     private fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
@@ -139,6 +171,29 @@ internal class CatalogBrowserDialog(
         val ripple = TypedValue()
         if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) && ripple.resourceId != 0) {
             setBackgroundResource(ripple.resourceId)
+        }
+    }
+
+    private fun selectorRow(title: String, spinner: AppCompatSpinner, button: View? = null) =
+        LinearLayout(activity).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(activity).apply {
+                text = title
+                typeface = Typeface.create(typeface, Typeface.BOLD)
+                gravity = Gravity.CENTER_VERTICAL
+                setSingleLine(true)
+            }, LinearLayout.LayoutParams(dp(82), dp(48)))
+            addView(spinner, LinearLayout.LayoutParams(0, dp(48), 1f))
+            button?.let { addView(it, LinearLayout.LayoutParams(dp(48), dp(48))) }
+        }
+
+    fun restoreFromSettings() {
+        if (closed || activity.isFinishing || activity.isDestroyed) return
+        settingsVisible = false
+        dialog.show()
+        if (catalogSettingsChanged) {
+            catalogSettingsChanged = false
+            reloadLinks()
         }
     }
 
@@ -176,9 +231,9 @@ internal class CatalogBrowserDialog(
         val controls = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(8), dp(12), 0)
-            addView(typeSelector, ViewGroup.LayoutParams(-1, -2))
-            addView(catalogSelector, ViewGroup.LayoutParams(-1, -2))
-            addView(genreSelector, ViewGroup.LayoutParams(-1, -2))
+            addView(selectorRow("Type", typeSelector, settingsButton), ViewGroup.LayoutParams(-1, -2))
+            addView(selectorRow("Catalog", catalogSelector), ViewGroup.LayoutParams(-1, -2))
+            addView(selectorRow("Genre", genreSelector), ViewGroup.LayoutParams(-1, -2))
         }
         root.addView(controls)
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
@@ -310,7 +365,21 @@ internal class CatalogBrowserDialog(
                     async(Dispatchers.IO) {
                         try {
                             limit.withPermit {
-                                source.browseCatalogs().map { CatalogSource(url, source, it) }
+                                migrateStremioCatalogSettings(prefs, url)
+                                val key = stremioCatalogKey(url)
+                                val rank = prefs.getString("catalog_order_$key", null)?.let { raw ->
+                                    runCatching {
+                                        val array = org.json.JSONArray(raw)
+                                        (0 until array.length()).associate { array.getString(it) to it }
+                                    }.getOrNull()
+                                }.orEmpty()
+                                source.browseCatalogs().filter { catalog ->
+                                    val tab = "${catalog.id}_${catalog.type}_default"
+                                    catalog.browseBlockReason() == null &&
+                                        prefs.getBoolean("tab_enabled_${key}_$tab", true)
+                                }.sortedBy { catalog ->
+                                    rank["${catalog.id}_${catalog.type}_default"] ?: Int.MAX_VALUE
+                                }.map { CatalogSource(url, source, it) }
                             }
                         } catch (e: CancellationException) { throw e
                         } catch (_: Exception) { emptyList() }
@@ -333,7 +402,14 @@ internal class CatalogBrowserDialog(
             )
             selectedType = selectedType.takeIf { it in types } ?: types.first()
             typeSelector.isEnabled = types.size > 1
-            typeSelector.choices("Catalog type", types, types.indexOf(selectedType)) {
+            typeSelector.choices("Catalog type", types.map { type ->
+                when (type.lowercase()) {
+                    "movie" -> "Movies"
+                    "series" -> "Series"
+                    "anime" -> "Anime"
+                    else -> type.replaceFirstChar { it.uppercase() }
+                }
+            }, types.indexOf(selectedType)) {
                 if (selectedType != types[it]) selectType(types[it])
             }
             selectType(selectedType)
