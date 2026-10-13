@@ -3752,7 +3752,7 @@ private fun String.toLegacyUniqueKey(): String {
     return this.lowercase().filter { it.isLetter() }
 }
 
-private fun String.urlEncodeLocal(): String = try {
+internal fun String.urlEncodeLocal(): String = try {
     java.net.URLEncoder.encode(this, "UTF-8").replace("+", "%20")
 } catch (e: Exception) {
     this
