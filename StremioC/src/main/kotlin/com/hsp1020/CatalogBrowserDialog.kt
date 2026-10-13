@@ -6,6 +6,7 @@ import android.graphics.drawable.ColorDrawable
 import android.graphics.Typeface
 import android.text.TextUtils
 import android.view.View
+import android.view.MotionEvent
 import android.view.ViewGroup
 import android.view.Window
 import android.widget.AdapterView
@@ -85,6 +86,8 @@ internal class CatalogBrowserDialog(
     private var offset = 0
     private var loading = false
     private var hasNext = false
+    private var autoFillCount = 0
+    private var touchStartY = 0f
     private var closed = false
     private val navigation by lazy {
         (activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)?.navController
@@ -139,7 +142,7 @@ internal class CatalogBrowserDialog(
             private fun boldRow(row: View) = row.also {
                 (it as? TextView)?.apply {
                     typeface = Typeface.create(typeface, Typeface.BOLD)
-                    isSingleLine = true
+                    setSingleLine(true)
                     ellipsize = TextUtils.TruncateAt.END
                 }
             }
@@ -198,6 +201,15 @@ internal class CatalogBrowserDialog(
                 if (dy > 0 && !view.canScrollVertically(1)) requestPage()
             }
         })
+        grid.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> touchStartY = event.y
+                MotionEvent.ACTION_UP -> {
+                    if (touchStartY - event.y > dp(32) && !grid.canScrollVertically(1)) requestPage()
+                }
+            }
+            false
+        }
         retry.setOnClickListener {
             if (catalog == null) addonUrl?.let(::selectAddon) else requestPage()
         }
@@ -255,6 +267,7 @@ internal class CatalogBrowserDialog(
         job?.cancel()
         loading = false
         offset = 0
+        autoFillCount = 0
         items.clear()
         seen.clear()
         pageSignatures.clear()
@@ -317,9 +330,7 @@ internal class CatalogBrowserDialog(
                     if (catalog !== result[it]) selectCatalog(result[it])
                 }
                 status.text = if (result.isEmpty()) "No catalogs in this manifest." else "Choose a catalog."
-                if (result.size == 1) selectCatalog(result.first()) else {
-                    catalogSelector.requestFocus()
-                }
+                if (result.isNotEmpty()) selectCatalog(result.first())
             } catch (e: CancellationException) { throw e
             } catch (_: Exception) {
                 if (ticket == generation) {
@@ -397,9 +408,10 @@ internal class CatalogBrowserDialog(
                 }
                 retry.visibility = View.GONE
                 grid.doOnNextLayout {
-                    if (!closed && ticket == generation && !loading && hasNext &&
+                    if (!closed && ticket == generation && !loading && hasNext && autoFillCount < 1 &&
                         items.isNotEmpty() && grid.height > 0 && !grid.canScrollVertically(1)) {
-                        requestPage() // Fetch only after layout proves the page cannot scroll.
+                        autoFillCount++ // At most one page without an explicit scroll.
+                        requestPage()
                     }
                 }
             } catch (e: CancellationException) { throw e
