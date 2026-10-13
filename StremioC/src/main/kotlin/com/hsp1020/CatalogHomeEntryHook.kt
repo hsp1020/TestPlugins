@@ -19,6 +19,8 @@ import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
 import com.lagradost.cloudstream3.ui.home.ParentItemAdapter
+import com.lagradost.cloudstream3.ui.settings.Globals.TV
+import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import java.util.UUID
 import kotlin.math.abs
 
@@ -129,6 +131,8 @@ internal class CatalogHomeEntryHook(
     }
 
     private inner class Row(val view: View, val child: RecyclerView, val adapter: HomeChildItemAdapter) {
+        private val titleView = view.findViewById<View>(R.id.home_child_more_info)
+        private val titleWasFocusable = titleView?.isFocusable == true
         private var queued = false
         private var firstReveal = true
         private fun reveal() {
@@ -156,11 +160,18 @@ internal class CatalogHomeEntryHook(
             child.alpha = 0f
             adapter.registerAdapterDataObserver(observer)
             child.addOnChildAttachStateChangeListener(attached)
+            installTitleInput()
             for (i in 0 until child.childCount) installInput(child.getChildAt(i))
             schedule()
         }
 
         fun dispose(removeCards: Boolean) {
+            titleView?.apply {
+                setOnTouchListener(null)
+                setOnKeyListener(null)
+                isPressed = false
+                if (isLayout(TV)) isFocusable = titleWasFocusable
+            }
             child.alpha = 1f
             child.removeOnChildAttachStateChangeListener(attached)
             adapter.unregisterAdapterDataObserver(observer)
@@ -183,8 +194,9 @@ internal class CatalogHomeEntryHook(
         private fun refresh() {
             val current = adapter.immutableCurrentList
             val ordinary = current.filterNot { it.url.startsWith(prefix) }
+            val target = ordinary.takeIf { it.isNotEmpty() }?.let { resolve(this, it) }
+            if (isLayout(TV)) titleView?.isFocusable = target != null || titleWasFocusable
             if (ordinary.isEmpty()) return // No poster to reveal until the first page arrives.
-            val target = resolve(this, ordinary)
             val provider = target?.let { wanted ->
                 APIHolder.allProviders.filterIsInstance<StremioC>()
                     .firstOrNull { it.mainUrl == wanted.addonUrl }
@@ -207,7 +219,14 @@ internal class CatalogHomeEntryHook(
         }
 
         private fun openTarget(view: View) {
-            val target = targetAt(view).second ?: return
+            targetAt(view).second?.let(::openCatalog)
+        }
+
+        private fun homeTarget() = adapter.immutableCurrentList
+            .filterNot { it.url.startsWith(prefix) }
+            .takeIf { it.isNotEmpty() }?.let { resolve(this, it) }
+
+        private fun openCatalog(target: CatalogShortcutTarget) {
             val cards = adapter.immutableCurrentList.filterNot { it.url.startsWith(prefix) }
             val provider = APIHolder.allProviders.filterIsInstance<StremioC>()
                 .firstOrNull { it.mainUrl == target.addonUrl }
@@ -223,6 +242,58 @@ internal class CatalogHomeEntryHook(
             val item = adapter.getItemOrNull(holder.bindingAdapterPosition)
             val url = item?.url ?: return false to null
             return url.startsWith(prefix) to targets[url]
+        }
+
+        private fun installTitleInput() {
+            val title = titleView ?: return
+            val slop = ViewConfiguration.get(title.context).scaledTouchSlop
+            var pressedTarget: CatalogShortcutTarget? = null
+            var downX = 0f
+            var downY = 0f
+            var downAt = 0L
+            var moved = false
+            title.setOnTouchListener { control, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        pressedTarget = homeTarget()
+                        if (pressedTarget == null) return@setOnTouchListener false
+                        downX = event.x
+                        downY = event.y
+                        downAt = event.eventTime
+                        moved = false
+                        control.isPressed = true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        if (pressedTarget == null) return@setOnTouchListener false
+                        if (abs(event.x - downX) > slop || abs(event.y - downY) > slop)
+                            moved = true
+                        if (moved) control.isPressed = false
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        val target = pressedTarget ?: return@setOnTouchListener false
+                        pressedTarget = null
+                        control.isPressed = false
+                        if (!moved && event.eventTime - downAt < ViewConfiguration.getLongPressTimeout() &&
+                            homeTarget() == target) openCatalog(target)
+                    }
+                    MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_DOWN -> {
+                        if (pressedTarget == null) return@setOnTouchListener false
+                        pressedTarget = null
+                        control.isPressed = false
+                        moved = true
+                    }
+                    else -> return@setOnTouchListener pressedTarget != null
+                }
+                true // Consume only StremioC titles; all other headers retain their native click.
+            }
+            title.setOnKeyListener { _, key, event ->
+                if (key != KeyEvent.KEYCODE_DPAD_CENTER && key != KeyEvent.KEYCODE_ENTER &&
+                    key != KeyEvent.KEYCODE_NUMPAD_ENTER && key != KeyEvent.KEYCODE_BUTTON_A
+                ) return@setOnKeyListener false
+                val target = homeTarget() ?: return@setOnKeyListener false
+                if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) openCatalog(target)
+                true
+            }
         }
 
         private fun installInput(itemView: View) {
