@@ -28,8 +28,10 @@ import android.widget.LinearLayout
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.util.Base64
-import android.app.AlertDialog
-import android.app.Dialog
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatDialog
+import com.lagradost.cloudstream3.R as HostR
+import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -144,10 +146,10 @@ class SettingsBottomFragment(
     private val plugin: StremioCPlugin,
     private val sharedPref: SharedPreferences,
     private val hostContext: Context,
-    private val openBrowser: (String) -> Unit
+    private val openBrowser: () -> Unit
 ) {
     // The sheet is not restored by FragmentManager during Activity recreation.
-    private val settingsDialog = Dialog(hostContext)
+    private val settingsDialog = AppCompatDialog(hostContext)
     private val uiScope = MainScope()
     private val hostOwner = hostContext as? LifecycleOwner
     private val closeOnDestroy = LifecycleEventObserver { _, event ->
@@ -198,16 +200,17 @@ class SettingsBottomFragment(
     private var searchJob: Job? = null 
 
     private fun dp(value: Int) = (value * hostContext.resources.displayMetrics.density + 0.5f).toInt()
-    // Use one font family in the main sheet, nested dialogs, and list rows.
+    // Inherit the host font while retaining each existing field's emphasis.
+    private val hostTypeface by lazy { TextView(hostContext).typeface }
     private fun normalizeTypeface(view: View) {
         if (view is TextView) {
             val weight = if (view.typeface?.isBold == true) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL
-            view.typeface = android.graphics.Typeface.create("sans-serif", weight)
+            view.typeface = android.graphics.Typeface.create(hostTypeface, weight)
         }
         if (view is ViewGroup) for (i in 0 until view.childCount) normalizeTypeface(view.getChildAt(i))
     }
-    private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.BLACK); cornerRadius = dp(12).toFloat() }
-    private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#171717")); setStroke(dp(1), Color.parseColor("#303030")); cornerRadius = dp(8).toFloat() }
+    private fun getDarkThemeBg() = hostContext.getDrawable(HostR.drawable.dialog__window_background)!!.mutate()
+    private fun getCardBg() = hostContext.getDrawable(HostR.drawable.bg_color_both)!!.mutate()
 
     private fun getCineStreamClassLoader(): ClassLoader? {
         try {
@@ -339,7 +342,7 @@ class SettingsBottomFragment(
         text = label
         textSize = 14f
         typeface = android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.BOLD)
-        setTextColor(Color.WHITE)
+        setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
         gravity = android.view.Gravity.CENTER
         setPadding(dp(10), dp(10), dp(10), dp(10))
         minHeight = dp(40)
@@ -359,14 +362,14 @@ class SettingsBottomFragment(
             addView(TextView(ctx).apply {
                 text = title
                 textSize = 18f
-                setTextColor(Color.WHITE)
+                setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
                 setPadding(0, 0, 0, 20)
                 gravity = android.view.Gravity.CENTER
             })
             addView(TextView(ctx).apply {
                 text = message
-                setTextColor(Color.LTGRAY)
+                setTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
                 textSize = 14f
                 setPadding(0, 0, 0, 30)
             })
@@ -396,9 +399,25 @@ class SettingsBottomFragment(
         val ctx = hostContext
         val appContext = ctx.applicationContext
         val view = getLayout("bottom_sheet_layout", LayoutInflater.from(ctx), null)
-        listOf("browseAddon" to "Addon", "browseCatalog" to "Catalog", "browseGenre" to "Genre").forEach { (id, selector) ->
-            view.findView<View>(id).setOnClickListener { openBrowser(selector) }
+        view.background = getDarkThemeBg()
+        view.findView<View>("browseAddon").setOnClickListener { openBrowser() }
+        val settingsBody = view.findView<View>("settingsBody")
+        val settingsToggle = view.findView<TextView>("settingsToggle")
+        val settingsActions = listOf("tvExport", "tvImport", "saveIcon").map { view.findView<View>(it) }
+        fun expandSettings(expand: Boolean) {
+            val visibility = if (expand) View.VISIBLE else View.GONE
+            settingsBody.visibility = visibility
+            settingsActions.forEach { it.visibility = visibility }
+            settingsToggle.text = if (expand) "▲" else "▼"
+            settingsToggle.contentDescription = if (expand) "Collapse Stremio Settings" else "Expand Stremio Settings"
+            if (settingsDialog.isShowing) settingsDialog.window?.let { window ->
+                window.setLayout(window.attributes.width, if (expand)
+                    (hostContext.resources.displayMetrics.heightPixels * 0.88f).toInt() else ViewGroup.LayoutParams.WRAP_CONTENT)
+            }
         }
+        expandSettings(false)
+        settingsToggle.setOnClickListener { expandSettings(settingsBody.visibility != View.VISIBLE) }
+        view.findView<View>("settingsHeader").setOnClickListener { settingsToggle.performClick() }
         // Plugin drawable IDs cannot be resolved safely by the host XML inflater.
         // Apply theme backgrounds after inflation using the plugin-independent drawable.
         listOf("etTmdbApiKey", "etMdbListApiKey", "etCustomPosterUrl", "etHistorySyncUrl").forEach { id ->
@@ -504,7 +523,7 @@ class SettingsBottomFragment(
                         addView(TextView(ctx).apply {
                             text = "Export Successful"
                             textSize = 18f
-                            setTextColor(Color.WHITE)
+                            setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                             typeface = android.graphics.Typeface.DEFAULT_BOLD
                             setPadding(0, 0, 0, 20)
                             gravity = android.view.Gravity.CENTER
@@ -516,7 +535,7 @@ class SettingsBottomFragment(
 
                         addView(TextView(ctx).apply {
                             text = descBuilder.toString()
-                            setTextColor(Color.LTGRAY)
+                            setTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
                             textSize = 14f
                             setPadding(0, 0, 0, 30)
                         })
@@ -581,7 +600,7 @@ class SettingsBottomFragment(
                         addView(TextView(ctx).apply {
                             text = "Backup Data Detected"
                             textSize = 18f
-                            setTextColor(Color.WHITE)
+                            setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                             typeface = android.graphics.Typeface.DEFAULT_BOLD
                             setPadding(0, 0, 0, 20)
                             gravity = android.view.Gravity.CENTER
@@ -600,7 +619,7 @@ class SettingsBottomFragment(
 
                         addView(TextView(ctx).apply {
                             text = msgBuilder.toString()
-                            setTextColor(Color.LTGRAY)
+                            setTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
                             textSize = 14f
                             setPadding(0, 0, 0, 30)
                         })
@@ -626,14 +645,14 @@ class SettingsBottomFragment(
                             addView(TextView(ctx).apply {
                                 text = "Restoring Data"
                                 textSize = 18f
-                                setTextColor(Color.WHITE)
+                                setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                                 typeface = android.graphics.Typeface.DEFAULT_BOLD
                                 setPadding(0, 0, 0, 20)
                                 gravity = android.view.Gravity.CENTER
                             })
                             addView(TextView(ctx).apply {
                                 text = "Please wait while settings are being applied...\nApp will restart automatically."
-                                setTextColor(Color.LTGRAY)
+                                setTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
                                 textSize = 14f
                                 gravity = android.view.Gravity.CENTER
                                 setPadding(0, 0, 0, 10)
@@ -736,7 +755,7 @@ class SettingsBottomFragment(
                     (if (isUrl) InputType.TYPE_TEXT_VARIATION_URI else InputType.TYPE_TEXT_FLAG_CAP_SENTENCES)
                 setText(value)
                 textSize = 14f
-                setTextColor(Color.WHITE)
+                setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                 setHintTextColor(Color.parseColor("#777777"))
                 setPadding(urlFieldPadding, 0, urlFieldPadding, 0)
                 gravity = android.view.Gravity.CENTER_VERTICAL
@@ -752,7 +771,7 @@ class SettingsBottomFragment(
             row.addView(TextView(ctx).apply {
                 text = "−"
                 textSize = 20f
-                setTextColor(Color.WHITE)
+                setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                 gravity = android.view.Gravity.CENTER
                 contentDescription = "Remove addon URL"
                 isClickable = true
@@ -768,7 +787,7 @@ class SettingsBottomFragment(
             row.addView(TextView(ctx).apply {
                 text = "+"
                 textSize = 20f
-                setTextColor(Color.WHITE)
+                setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                 gravity = android.view.Gravity.CENTER
                 contentDescription = "Add addon URL"
                 isClickable = true
@@ -919,7 +938,7 @@ class SettingsBottomFragment(
                             text = itemToEdit.name
                             textSize = 18f
                             typeface = android.graphics.Typeface.DEFAULT_BOLD
-                            setTextColor(Color.WHITE)
+                            setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                             setPadding(0, 0, 0, 30)
                             gravity = android.view.Gravity.CENTER
                         })
@@ -1023,14 +1042,14 @@ class SettingsBottomFragment(
                 addView(TextView(context).apply {
                     text = "Save & Reload"
                     textSize = 18f
-                    setTextColor(Color.WHITE)
+                    setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                     typeface = android.graphics.Typeface.DEFAULT_BOLD
                     setPadding(0, 0, 0, 20)
                     gravity = android.view.Gravity.CENTER
                 })
                 addView(TextView(context).apply {
                     text = "Changes have been saved. Do you want to restart the app to apply them?"
-                    setTextColor(Color.LTGRAY)
+                    setTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
                     textSize = 14f
                     setPadding(0, 0, 0, 30)
                 })
@@ -1056,7 +1075,8 @@ class SettingsBottomFragment(
         settingsDialog.window?.apply {
             val metrics = hostContext.resources.displayMetrics
             val width = minOf((1000 * metrics.density).toInt(), (metrics.widthPixels * 0.9f).toInt()).coerceAtLeast(1)
-            val height = (metrics.heightPixels * 0.88f).toInt().coerceAtLeast(1)
+            val height = if (settingsBody.visibility == View.VISIBLE)
+                (metrics.heightPixels * 0.88f).toInt().coerceAtLeast(1) else ViewGroup.LayoutParams.WRAP_CONTENT
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setGravity(android.view.Gravity.CENTER)
             setLayout(width, height)
@@ -1075,7 +1095,7 @@ class SettingsBottomFragment(
         val titleTv = dialogView.getChildAt(0) as? TextView
         if (titleTv != null) {
             titleTv.text = if (isEdit) "Edit Catalog" else "Add Catalogs"
-            titleTv.setTextColor(Color.WHITE)
+            titleTv.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
             titleTv.textSize = 18f
             titleTv.typeface = android.graphics.Typeface.DEFAULT_BOLD
             titleTv.gravity = android.view.Gravity.START
@@ -1088,13 +1108,13 @@ class SettingsBottomFragment(
         val switchHistorySync = try { dialogView.findView<Switch>("switchHistorySync") } catch (t: Throwable) { null }
         
         etName?.background = getCardBg()
-        etName?.setTextColor(Color.WHITE)
+        etName?.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
         etName?.setHintTextColor(Color.parseColor("#777777"))
         etName?.setPadding(dp(12), 0, dp(12), 0) 
         if (isEdit) etName?.setText(itemToEdit?.name)
         
         etLink?.background = getCardBg()
-        etLink?.setTextColor(Color.WHITE)
+        etLink?.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
         etLink?.setHintTextColor(Color.parseColor("#777777"))
         etLink?.setPadding(dp(12), 0, dp(12), 0) 
         if (isEdit) etLink?.setText(itemToEdit?.link)
@@ -1171,7 +1191,7 @@ private fun showLanguageSelectDialog() {
             text = "TMDB Language"
             textSize = 18f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
+            setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
             setPadding(0, 0, 0, dp(20))
             gravity = android.view.Gravity.START
         })
@@ -1179,7 +1199,7 @@ private fun showLanguageSelectDialog() {
         val searchBar = EditText(context).apply {
             hint = "Search language..."
             setHintTextColor(Color.parseColor("#777777"))
-            setTextColor(Color.WHITE)
+            setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
             textSize = 14f
             setPadding(dp(12), 0, dp(12), 0)
             gravity = android.view.Gravity.CENTER_VERTICAL
@@ -1240,7 +1260,7 @@ private fun showLanguageSelectDialog() {
                 val isSelected = code == selectedCode
                 holder.tvName.text = langName
                 
-                holder.tvName.setTextColor(Color.WHITE)
+                holder.tvName.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                 holder.view.background = if (isSelected) getCardBg() else ColorDrawable(Color.TRANSPARENT) 
                 holder.tvCheck.visibility = if (isSelected) View.VISIBLE else View.GONE
                 
@@ -1324,7 +1344,7 @@ private fun showLanguageSelectDialog() {
             background = getDarkThemeBg()
             addView(TextView(context).apply {
                 text = "Loading Stremio Addon Manifest..."
-                setTextColor(Color.WHITE)
+                setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                 textSize = 16f
                 gravity = android.view.Gravity.CENTER
             })
@@ -1420,7 +1440,7 @@ private fun showLanguageSelectDialog() {
             text = "$addonName - Catalog Settings"
             textSize = 18f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
+            setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
             setPadding(0, 0, 0, 30)
             gravity = android.view.Gravity.START
         }
@@ -1469,7 +1489,7 @@ private fun showLanguageSelectDialog() {
                 val etOrder = EditText(context).apply {
                     inputType = InputType.TYPE_CLASS_NUMBER
                     imeOptions = EditorInfo.IME_ACTION_DONE
-                    setTextColor(Color.WHITE)
+                    setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                     textSize = 14f
                     setPadding(dp(8), 0, dp(8), 0)
                     background = getCardBg()
@@ -1487,7 +1507,7 @@ private fun showLanguageSelectDialog() {
                 
                 val checkbox = CheckBox(context).apply {
                     textSize = 14f
-                    setTextColor(Color.WHITE)
+                    setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 }
                 layout.addView(dragHandle)

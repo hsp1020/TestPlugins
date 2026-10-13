@@ -1,19 +1,21 @@
 package com.hsp1020
 
-import android.app.Dialog
+import androidx.appcompat.app.AppCompatDialog
 import android.content.SharedPreferences
-import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
-import android.widget.Button
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
+import android.widget.Spinner
+import androidx.appcompat.widget.AppCompatSpinner
+import com.google.android.material.button.MaterialButton
 import android.widget.LinearLayout
 import android.widget.TextView
-import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.navigation.fragment.NavHostFragment
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SearchResponse
@@ -22,6 +24,8 @@ import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_SHOW_METADATA
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
 import com.lagradost.cloudstream3.utils.AppContextUtils.loadSearchResult
+import com.lagradost.cloudstream3.utils.UIHelper.getSpanCount
+import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -36,39 +40,25 @@ internal class CatalogBrowserDialog(
     private val prefs: SharedPreferences,
     private val providerFor: (String) -> StremioC?,
 ) {
-    private val dialog = Dialog(activity)
+    private val dialog = AppCompatDialog(activity, R.style.DialogFullscreen)
     private val scope = MainScope()
     private val manifestPrefs = activity.getSharedPreferences("StremioC_Manifest", 0)
-    private val source = (activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)
-        as? NavHostFragment)?.navController?.currentBackStackEntry
     private val root = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
-    private val addonButton = button("Addon: select")
-    private val catalogButton = button("Catalog: select")
-    private val genreButton = button("Genre: select")
+    private val addonSelector = selector()
+    private val catalogSelector = selector()
+    private val genreSelector = selector()
     private val status = TextView(activity).apply {
-        typeface = Typeface.DEFAULT
         setPadding(dp(12), dp(6), dp(12), dp(6))
         accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
     }
     private val retry = button("Load catalog")
     private val grid = AutofitRecyclerView(activity)
     private val adapter = SearchAdapter(grid, false) { click ->
-        if (click.action == SEARCH_ACTION_LOAD || click.action == SEARCH_ACTION_SHOW_METADATA) {
-            // Keep this exact adapter/list/layout manager alive while the source entry is stopped.
-            if (source == null) {
-                status.text = "Open the browser from the main CloudStream window."
-            } else {
-                pauseRequest()
-                waitingForDetail = true
-                dialog.hide()
-                activity.loadSearchResult(click.card)
-                root.post {
-                    if (!closed && source.lifecycle.currentState == Lifecycle.State.RESUMED) {
-                        waitingForDetail = false
-                        dialog.show() // Navigation was unavailable; don't strand a hidden dialog.
-                    }
-                }
-            }
+        if (!closed && (click.action == SEARCH_ACTION_LOAD || click.action == SEARCH_ACTION_SHOW_METADATA)) {
+            // Dismiss, don't hide: the host destination may be a dialog, so ON_STOP
+            // is not a reliable signal and a resume observer can cover the result page.
+            dismiss()
+            activity.loadSearchResult(click.card)
         }
     }
     private var links = emptyList<LinkItem>()
@@ -80,35 +70,16 @@ internal class CatalogBrowserDialog(
     private var chosen = false
     private var generation = 0
     private var job: Job? = null
-    private var picker: AlertDialog? = null
     private var offset = 0
     private var loading = false
     private var hasNext = false
-    private var waitingForDetail = false
     private var closed = false
-    private var initialSelector = ""
     private val items = ArrayList<SearchResponse>()
     private val seen = HashSet<String>()
     private val pageSignatures = HashSet<List<String>>()
-    private val sourceObserver = LifecycleEventObserver { _, event ->
-        when (event) {
-            Lifecycle.Event.ON_STOP -> {
-                pauseRequest()
-                waitingForDetail = true
-                dialog.hide()
-            }
-            Lifecycle.Event.ON_RESUME -> if (waitingForDetail && !closed) {
-                waitingForDetail = false
-                dialog.show()
-            }
-            Lifecycle.Event.ON_DESTROY -> dismiss()
-            else -> Unit
-        }
-    }
     private val hostObserver = LifecycleEventObserver { _, event ->
         when (event) {
-            Lifecycle.Event.ON_STOP -> { pauseRequest(); dialog.hide() }
-            Lifecycle.Event.ON_RESUME -> if (!closed && !waitingForDetail) dialog.show()
+            Lifecycle.Event.ON_STOP -> pauseRequest()
             Lifecycle.Event.ON_DESTROY -> dismiss()
             else -> Unit
         }
@@ -123,22 +94,53 @@ internal class CatalogBrowserDialog(
     }
 
     private fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
-    private fun button(label: String) = Button(activity).apply {
+    private fun button(label: String) = MaterialButton(activity).apply {
         id = View.generateViewId()
         text = label
         isAllCaps = false
-        typeface = Typeface.DEFAULT
         isFocusable = true
         minHeight = dp(48)
     }
 
-    fun show(firstSelector: String, onDismiss: () -> Unit) {
-        initialSelector = firstSelector
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-        root.setPadding(dp(12), dp(8), dp(12), dp(8))
-        listOf(addonButton, catalogButton, genreButton, status).forEach {
-            root.addView(it, ViewGroup.LayoutParams(-1, -2))
+    private fun selector() = AppCompatSpinner(activity, null, androidx.appcompat.R.attr.spinnerStyle, Spinner.MODE_DROPDOWN).apply {
+        id = View.generateViewId()
+        minimumHeight = dp(48)
+        isFocusable = true
+    }
+
+    private fun AppCompatSpinner.choices(title: String, labels: List<String>, selected: Int, choose: (Int) -> Unit) {
+        onItemSelectedListener = null
+        contentDescription = title
+        adapter = object : ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, listOf(title) + labels) {
+            override fun areAllItemsEnabled() = false
+            override fun isEnabled(position: Int) = position > 0
+        }.apply {
+            setDropDownViewResource(R.layout.sort_bottom_single_choice)
         }
+        setSelection(selected + 1)
+        onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (!closed && position > 0) choose(position - 1)
+            }
+        }
+    }
+
+    fun show(onDismiss: () -> Unit) {
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        root.setBackgroundColor(activity.colorFromAttribute(R.attr.primaryBlackBackground))
+        val controls = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(8), dp(12), 0)
+            addView(addonSelector, ViewGroup.LayoutParams(-1, -2))
+            addView(LinearLayout(activity).apply {
+                addView(catalogSelector, LinearLayout.LayoutParams(0, -2, 1f))
+                addView(genreSelector, LinearLayout.LayoutParams(0, -2, 1f))
+            }, ViewGroup.LayoutParams(-1, -2))
+            addView(status, ViewGroup.LayoutParams(-1, -2))
+        }
+        root.addView(controls)
+        grid.spanCount = activity.getSpanCount(false)
         root.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(retry, ViewGroup.LayoutParams(-1, -2))
         grid.adapter = adapter
@@ -146,7 +148,7 @@ internal class CatalogBrowserDialog(
             if (right - left != oldRight - oldLeft) {
                 grid.post {
                     if (!closed) {
-                        grid.spanCount = (grid.width / dp(125)).coerceIn(2, 8)
+                        grid.spanCount = activity.getSpanCount(false)
                         adapter.notifyDataSetChanged()
                     }
                 }
@@ -157,33 +159,36 @@ internal class CatalogBrowserDialog(
                 if (dy > 0 && !view.canScrollVertically(1)) requestPage()
             }
         })
-        addonButton.setOnClickListener { pickAddon() }
-        catalogButton.setOnClickListener { pickCatalog() }
-        genreButton.setOnClickListener { pickGenre() }
-        retry.setOnClickListener { requestPage() }
+        retry.setOnClickListener {
+            if (catalog == null) addonUrl?.let(::selectAddon) else requestPage()
+        }
         dialog.setContentView(root)
         dialog.setOnDismissListener {
             closed = true
-            picker?.dismiss()
+            generation++
             scope.cancel()
             prefs.unregisterOnSharedPreferenceChangeListener(settingsListener)
             manifestPrefs.unregisterOnSharedPreferenceChangeListener(manifestListener)
-            source?.lifecycle?.removeObserver(sourceObserver)
             activity.lifecycle.removeObserver(hostObserver)
             grid.adapter = null
             onDismiss()
         }
         dialog.show()
+        dialog.window?.setBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryBlackBackground)))
         dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        source?.lifecycle?.addObserver(sourceObserver)
         activity.lifecycle.addObserver(hostObserver)
         prefs.registerOnSharedPreferenceChangeListener(settingsListener)
         manifestPrefs.registerOnSharedPreferenceChangeListener(manifestListener)
         reloadLinks()
-        if (firstSelector == "Addon" && links.size > 1) pickAddon()
     }
 
-    fun dismiss() = dialog.dismiss()
+    fun dismiss() {
+        if (closed) return
+        closed = true
+        generation++
+        scope.cancel()
+        dialog.dismiss() // Detaches Spinner popups along with their anchor views.
+    }
 
     private fun pauseRequest() {
         if (job?.isActive != true) return
@@ -191,7 +196,8 @@ internal class CatalogBrowserDialog(
         job?.cancel()
         loading = false
         if (catalog == null) {
-            catalogButton.isEnabled = provider != null
+            retry.visibility = if (provider != null) View.VISIBLE else View.GONE
+            retry.text = "Retry"
             status.text = "Select Catalog to resume."
         } else if (chosen && hasNext) {
             retry.text = if (offset == 0) "Load catalog" else "Load more"
@@ -215,9 +221,8 @@ internal class CatalogBrowserDialog(
     }
 
     private fun reloadLinks() {
-        picker?.dismiss()
         links = SettingsRepository.loadLinks(prefs).filter { it.link.isNotBlank() }
-        addonButton.visibility = if (links.size > 1) View.VISIBLE else View.GONE
+        addonSelector.isEnabled = links.size > 1
         val link = links.firstOrNull { it.link == addonUrl } ?: links.firstOrNull()
         if (link == null) {
             reset()
@@ -225,39 +230,28 @@ internal class CatalogBrowserDialog(
             addonUrl = null
             catalogs = emptyList()
             catalog = null
-            catalogButton.isEnabled = false
-            genreButton.visibility = View.GONE
+            addonSelector.choices("Addon", emptyList(), -1) {}
+            catalogSelector.choices("Catalog", emptyList(), -1) {}
+            catalogSelector.isEnabled = false
+            genreSelector.isEnabled = false
+            genreSelector.choices("Genre", emptyList(), -1) {}
             status.text = "Add a Stremio addon in settings first."
         } else selectAddon(link.link)
     }
 
-    private fun pick(title: String, labels: List<String>, selected: Int, choose: (Int) -> Unit) {
-        if (labels.isEmpty()) return
-        picker?.dismiss()
-        picker = AlertDialog.Builder(activity).setTitle(title)
-            .setSingleChoiceItems(labels.toTypedArray(), selected) { whichDialog, index ->
-                whichDialog.dismiss()
-                choose(index)
-            }.setNegativeButton(android.R.string.cancel, null).create()
-        picker?.show()
-        picker?.listView?.requestFocus()
-    }
-
-    private fun pickAddon() = pick("Addon", links.map { it.name }, links.indexOfFirst { it.link == addonUrl }) {
-        selectAddon(links[it].link)
-    }
-
     private fun selectAddon(url: String) {
         reset()
-        picker?.dismiss()
         catalog = null
         catalogs = emptyList()
         addonUrl = url
         provider = providerFor(url)
-        addonButton.text = "Addon: ${links.firstOrNull { it.link == url }?.name.orEmpty()}"
-        catalogButton.text = "Catalog: select"
-        catalogButton.isEnabled = false
-        genreButton.visibility = View.GONE
+        addonSelector.choices("Addon", links.map { it.name }, links.indexOfFirst { it.link == url }) {
+            if (addonUrl != links[it].link) selectAddon(links[it].link)
+        }
+        catalogSelector.choices("Catalog", emptyList(), -1) {}
+        catalogSelector.isEnabled = false
+        genreSelector.isEnabled = false
+        genreSelector.choices("Genre", emptyList(), -1) {}
         status.text = "Loading catalog choices…"
         val selectedProvider = provider
         if (selectedProvider == null) {
@@ -270,27 +264,22 @@ internal class CatalogBrowserDialog(
                 val result = withContext(Dispatchers.IO) { selectedProvider.browseCatalogs() }
                 if (ticket != generation) return@launch
                 catalogs = result
-                catalogButton.isEnabled = result.isNotEmpty()
+                catalogSelector.isEnabled = result.isNotEmpty()
+                catalogSelector.choices("Catalog", result.map { "${it.name ?: it.id} - ${it.type.orEmpty().replaceFirstChar { c -> c.uppercase() }}" }, -1) {
+                    if (catalog !== result[it]) selectCatalog(result[it])
+                }
                 status.text = if (result.isEmpty()) "No catalogs in this manifest." else "Choose a catalog."
                 if (result.size == 1) selectCatalog(result.first()) else {
-                    catalogButton.requestFocus()
-                    if (initialSelector == "Catalog" || initialSelector == "Genre") pickCatalog()
-                    if (initialSelector == "Catalog") initialSelector = ""
+                    catalogSelector.requestFocus()
                 }
             } catch (e: CancellationException) { throw e
             } catch (_: Exception) {
                 if (ticket == generation) {
-                    status.text = "Unable to load manifest. Select Catalog to retry."
-                    catalogButton.isEnabled = true
+                    status.text = "Unable to load manifest. Please retry."
+                    retry.text = "Retry"
+                    retry.visibility = View.VISIBLE
                 }
             }
-        }
-    }
-
-    private fun pickCatalog() {
-        if (catalogs.isEmpty()) { addonUrl?.let { selectAddon(it) }; return }
-        pick("Catalog", catalogs.map { "${it.name ?: it.id} · ${it.type} (${it.id})" }, catalogs.indexOf(catalog)) {
-            selectCatalog(catalogs[it])
         }
     }
 
@@ -298,41 +287,37 @@ internal class CatalogBrowserDialog(
         reset()
         catalog = next
         genre = null
-        catalogButton.text = "Catalog: ${next.name ?: next.id} · ${next.type}"
-        genreButton.text = "Genre: select"
-        genreButton.visibility = if (next.supportsExtra("genre")) View.VISIBLE else View.GONE
+        catalogSelector.setSelection(catalogs.indexOf(next) + 1)
+        genreSelector.choices("Genre", emptyList(), -1) {}
         val blocked = next.browseBlockReason()
-        genreButton.isEnabled = blocked == null && next.browseGenres().isNotEmpty()
+        genreSelector.isEnabled = blocked == null && next.browseGenres().isNotEmpty()
         status.text = blocked ?: when {
             next.requiresExtra("genre") -> "Choose a genre."
-            genreButton.isEnabled -> "Choose a genre or All."
+            genreSelector.isEnabled -> "Choose a genre or All."
             else -> "Choose Load catalog."
         }
-        if (blocked == null && !genreButton.isEnabled) genreButton.text = "Genre: All (no options provided)"
-        if (blocked == null && !genreButton.isEnabled) {
+
+        if (blocked == null && !genreSelector.isEnabled) {
             chosen = true // A genre-less feed still waits for the user's Load action.
             hasNext = true
             retry.text = "Load catalog"
             retry.visibility = View.VISIBLE
             retry.requestFocus()
-        } else if (genreButton.isEnabled) {
-            genreButton.requestFocus()
-            if (initialSelector == "Genre") pickGenre()
+        } else if (genreSelector.isEnabled) {
+            genreSelector.requestFocus()
+            configureGenres(next)
         }
-        initialSelector = ""
     }
 
-    private fun pickGenre() {
-        val selectedCatalog = catalog ?: return
+    private fun configureGenres(selectedCatalog: StremioC.Catalog) {
         val values: List<String?> = (if (selectedCatalog.requiresExtra("genre")) emptyList() else listOf(null)) +
             selectedCatalog.browseGenres()
-        pick("Genre", values.map { it ?: "All" }, if (chosen) values.indexOf(genre) else -1) {
-            if (chosen && genre == values[it] && items.isNotEmpty()) return@pick
+        genreSelector.choices("Genre", values.map { it ?: "All" }, if (chosen) values.indexOf(genre) else -1) {
+            if (chosen && genre == values[it]) return@choices
             reset()
             genre = values[it]
             chosen = true
             hasNext = true
-            genreButton.text = "Genre: ${genre ?: "All"}"
             requestPage()
         }
     }
@@ -340,7 +325,7 @@ internal class CatalogBrowserDialog(
     private fun requestPage() {
         val selectedProvider = provider ?: return
         val selectedCatalog = catalog ?: return
-        if (!chosen || loading || !hasNext || waitingForDetail) return
+        if (!chosen || loading || !hasNext || closed) return
         val ticket = generation
         val selectedGenre = genre
         val requestedOffset = offset

@@ -4,6 +4,10 @@ package com.hsp1020
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.Build
+import android.view.View
+import android.view.inspector.WindowInspector
+import com.lagradost.cloudstream3.R
 import androidx.appcompat.app.AppCompatActivity
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.MainActivity
@@ -35,6 +39,27 @@ class StremioCPlugin : Plugin() {
     private var ratingPlotHook: RatingPlotImageHook? = null
     private var activeSettingsDialog: SettingsBottomFragment? = null
     private var activeBrowser: CatalogBrowserDialog? = null
+
+    private fun dismissProviderPicker(host: AppCompatActivity) {
+        // selectHomepage keeps its BottomSheetDialog local and passes only the Activity
+        // to openSettings. Invoke that specific sheet's existing Cancel action once.
+        // This installs no window/lifecycle/navigation hooks and never applies a provider.
+        runCatching {
+            val roots = if (Build.VERSION.SDK_INT >= 29) WindowInspector.getGlobalWindowViews() else {
+                // WindowInspector's equivalent on Android 23-28 (no public API there).
+                val manager = Class.forName("android.view.WindowManagerGlobal")
+                val instance = manager.getMethod("getInstance").invoke(null)
+                @Suppress("UNCHECKED_CAST")
+                (manager.getDeclaredField("mViews").apply { isAccessible = true }
+                    .get(instance) as List<View>).toList()
+            }
+            roots.firstOrNull { root ->
+                root.context.getActivity() === host &&
+                    root.findViewById<View>(R.id.listview1) != null &&
+                    root.findViewById<View>(R.id.tvtypes_chips_scroll) != null
+            }?.findViewById<View>(R.id.cancel_btt)?.performClick()
+        }.onFailure { Log.w("StremioCPlugin", "Provider picker dismissal failed: ${it.message}") }
+    }
 
     override fun load(context: Context) {
         val appContext = context.applicationContext
@@ -164,8 +189,9 @@ class StremioCPlugin : Plugin() {
                 if (host.isFinishing || host.isDestroyed) return@let
                 activeBrowser?.dismiss()
                 activeSettingsDialog?.dismiss()
+                dismissProviderPicker(host)
                 val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
-                val settings = SettingsBottomFragment(this, prefs, host) { selector ->
+                val settings = SettingsBottomFragment(this, prefs, host) {
                     activeSettingsDialog?.dismiss()
                     activeBrowser?.dismiss()
                     val browser = CatalogBrowserDialog(host, prefs) { url ->
@@ -174,7 +200,7 @@ class StremioCPlugin : Plugin() {
                         }
                     }
                     activeBrowser = browser
-                    browser.show(selector) { if (activeBrowser === browser) activeBrowser = null }
+                    browser.show { if (activeBrowser === browser) activeBrowser = null }
                 }
                 activeSettingsDialog = settings
                 settings.show { if (activeSettingsDialog === settings) activeSettingsDialog = null }

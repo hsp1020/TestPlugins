@@ -3,7 +3,7 @@
 import java.util.Properties
 
 // use an integer for version numbers
-version = 15
+version = 16
 
 android {
     namespace = "com.hsp1020" // Gradle 8.0+ 필수 추가 (이 코드가 없으면 BuildConfig가 생성되지 않음)
