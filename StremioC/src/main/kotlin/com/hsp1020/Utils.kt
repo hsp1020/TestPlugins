@@ -338,8 +338,8 @@ internal class RatingPlotImageHook(
         return if (applied) result else null
     }
 
-    private fun installPreviewHook(activity: MainActivity, data: ResultData) {
-        val source = activity.lastPopup?.apiName ?: return
+    private fun installPreviewHook(activity: FragmentActivity, data: ResultData) {
+        val source = data.apiName.asString(activity)
         if (source != "StremioC" && APIHolder.allProviders.none {
                 it is StremioC && it.name.equals(source, ignoreCase = true)
             }) return
@@ -367,11 +367,10 @@ internal class RatingPlotImageHook(
     }
 
     private fun observePreview(activity: FragmentActivity) {
-        val mainActivity = activity as? MainActivity ?: return
         val model = ViewModelProvider(activity)[ResultViewModel2::class.java]
         val observer = Observer<Resource<ResultData>?> { value ->
             if (value is Resource.Success) main.post {
-                if (host === activity) runCatching { installPreviewHook(mainActivity, value.value) }
+                if (host === activity) runCatching { installPreviewHook(activity, value.value) }
             }
         }
         model.page.observe(activity, observer)
