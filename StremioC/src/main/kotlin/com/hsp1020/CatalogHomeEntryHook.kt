@@ -96,8 +96,7 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
         val url = prefix + UUID.nameUUIDFromBytes(value.toByteArray(Charsets.UTF_8))
         targets[url] = target
         return provider.newMovieSearchResponse("Browse Genres", url, TvType.Others, fix = false) {
-            // User-supplied, licensed image stored in this repository.
-            posterUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/StremioC/browse_genres.webp"
+            posterUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/StremioC/src/main/res/drawable-nodpi/thumbnail.webp"
         }
     }
 
