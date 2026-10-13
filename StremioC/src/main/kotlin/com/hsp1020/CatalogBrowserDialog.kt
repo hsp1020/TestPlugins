@@ -16,6 +16,7 @@ import android.view.ViewConfiguration
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Spinner
+import android.widget.FrameLayout
 import androidx.appcompat.widget.AppCompatSpinner
 import com.google.android.material.button.MaterialButton
 import android.widget.LinearLayout
@@ -38,12 +39,12 @@ import androidx.recyclerview.widget.RecyclerView
 import androidx.coordinatorlayout.widget.CoordinatorLayout
 import com.google.android.material.appbar.AppBarLayout
 import com.lagradost.cloudstream3.R
-import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.ui.AutofitRecyclerView
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_SHOW_METADATA
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
+import com.lagradost.cloudstream3.ui.search.SearchHelper
 import com.lagradost.cloudstream3.utils.AppContextUtils.loadSearchResult
 import com.lagradost.cloudstream3.utils.UIHelper.getSpanCount
 import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
@@ -75,6 +76,9 @@ internal class CatalogBrowserDialog(
     private val typeSelector = selector()
     private val catalogSelector = selector()
     private val genreSelector = selector()
+    private val typeArrow = selectorArrow()
+    private val catalogArrow = selectorArrow()
+    private val genreArrow = selectorArrow()
     private val selectorLabelStyle = TextView(activity).apply {
         typeface = Typeface.create(typeface, Typeface.BOLD)
     }
@@ -102,7 +106,7 @@ internal class CatalogBrowserDialog(
     private val grid = AutofitRecyclerView(activity)
     private val adapter = SearchAdapter(grid, false) { click ->
         if (!closed) when (click.action) {
-            SEARCH_ACTION_SHOW_METADATA -> (activity as? MainActivity)?.loadPopup(click.card)
+            SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
             SEARCH_ACTION_LOAD -> {
                 val origin = navigation?.currentBackStackEntry?.id
                 if (origin != null) returnEntryId = origin
@@ -232,18 +236,32 @@ internal class CatalogBrowserDialog(
         }
     }
 
-    private fun selectorRow(title: String, spinner: AppCompatSpinner, button: View? = null) =
-        LinearLayout(activity).apply {
+    private fun selectorArrow() = TextView(activity).apply {
+        text = "▼"
+        setTextColor(activity.colorFromAttribute(R.attr.textColor))
+        gravity = Gravity.CENTER
+        isClickable = false
+        isFocusable = false
+        visibility = View.GONE
+    }
+
+    private fun selectorRow(
+        title: String, spinner: AppCompatSpinner, arrow: TextView, button: View? = null
+    ) = LinearLayout(activity).apply {
+        gravity = Gravity.CENTER_VERTICAL
+        addView(TextView(activity).apply {
+            text = title
+            typeface = selectorLabelStyle.typeface
             gravity = Gravity.CENTER_VERTICAL
-            addView(TextView(activity).apply {
-                text = title
-                typeface = selectorLabelStyle.typeface
-                gravity = Gravity.CENTER_VERTICAL
-                setSingleLine(true)
-            }, LinearLayout.LayoutParams(dp(82), dp(48)))
-            addView(spinner, LinearLayout.LayoutParams(0, dp(48), 1f))
-            button?.let { addView(it, LinearLayout.LayoutParams(dp(48), dp(48))) }
-        }
+            setSingleLine(true)
+        }, LinearLayout.LayoutParams(dp(82), dp(48)))
+        addView(FrameLayout(activity).apply {
+            addView(spinner, FrameLayout.LayoutParams(-1, -1))
+            addView(arrow, FrameLayout.LayoutParams(dp(40), -1, Gravity.END))
+        }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        if (button != null) addView(button, LinearLayout.LayoutParams(dp(48), dp(48)))
+        else addView(View(activity), LinearLayout.LayoutParams(dp(48), dp(48)))
+    }
 
     fun restoreFromSettings() {
         if (closed || activity.isFinishing || activity.isDestroyed) return
@@ -258,6 +276,12 @@ internal class CatalogBrowserDialog(
     private fun AppCompatSpinner.choices(title: String, labels: List<String>, selected: Int, choose: (Int) -> Unit) {
         onItemSelectedListener = null
         contentDescription = title
+        when (this) {
+            typeSelector -> typeArrow
+            catalogSelector -> catalogArrow
+            genreSelector -> genreArrow
+            else -> null
+        }?.visibility = if (labels.size > 1) View.VISIBLE else View.GONE
         adapter = object : ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, labels) {
             private fun boldRow(row: View, selectedItem: Boolean) = row.also {
                 ((it as? TextView) ?: it.findViewById<TextView>(android.R.id.text1))?.apply {
@@ -292,9 +316,9 @@ internal class CatalogBrowserDialog(
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(8), dp(12), 0)
             setBackgroundColor(headerColor)
-            addView(selectorRow("Type", typeSelector, settingsButton), ViewGroup.LayoutParams(-1, -2))
-            addView(selectorRow("Catalog", catalogSelector), ViewGroup.LayoutParams(-1, -2))
-            addView(selectorRow("Genre", genreSelector), ViewGroup.LayoutParams(-1, -2))
+            addView(selectorRow("Type", typeSelector, typeArrow, settingsButton), ViewGroup.LayoutParams(-1, -2))
+            addView(selectorRow("Catalog", catalogSelector, catalogArrow), ViewGroup.LayoutParams(-1, -2))
+            addView(selectorRow("Genre", genreSelector, genreArrow), ViewGroup.LayoutParams(-1, -2))
         }
         val header = AppBarLayout(activity).apply {
             background = ColorDrawable(Color.TRANSPARENT)
