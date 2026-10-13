@@ -3,6 +3,8 @@ package com.hsp1020
 import androidx.appcompat.app.AppCompatDialog
 import android.content.SharedPreferences
 import android.graphics.drawable.ColorDrawable
+import android.graphics.Typeface
+import android.text.TextUtils
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
@@ -14,6 +16,12 @@ import com.google.android.material.button.MaterialButton
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.fragment.app.FragmentActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.doOnNextLayout
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.navigation.NavController
+import androidx.navigation.fragment.NavHostFragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.recyclerview.widget.RecyclerView
@@ -51,13 +59,17 @@ internal class CatalogBrowserDialog(
         setPadding(dp(12), dp(6), dp(12), dp(6))
         accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
     }
-    private val retry = button("Load catalog")
+    private val retry = button("Retry").apply { visibility = View.GONE }
     private val grid = AutofitRecyclerView(activity)
     private val adapter = SearchAdapter(grid, false) { click ->
         if (!closed && (click.action == SEARCH_ACTION_LOAD || click.action == SEARCH_ACTION_SHOW_METADATA)) {
-            // Dismiss, don't hide: the host destination may be a dialog, so ON_STOP
-            // is not a reliable signal and a resume observer can cover the result page.
-            dismiss()
+            val origin = navigation?.currentBackStackEntry?.id
+            if (origin != null) {
+                returnEntryId = origin
+                dialog.hide() // Preserve this dialog's list, cursor and scroll position.
+            } else {
+                dismiss() // Keep existing navigation if this host has no NavController.
+            }
             activity.loadSearchResult(click.card)
         }
     }
@@ -74,6 +86,16 @@ internal class CatalogBrowserDialog(
     private var loading = false
     private var hasNext = false
     private var closed = false
+    private val navigation by lazy {
+        (activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)?.navController
+    }
+    private var returnEntryId: String? = null
+    private val destinationListener = NavController.OnDestinationChangedListener { controller, _, _ ->
+        if (!closed && returnEntryId != null && controller.currentBackStackEntry?.id == returnEntryId) {
+            returnEntryId = null
+            dialog.show()
+        }
+    }
     private val items = ArrayList<SearchResponse>()
     private val seen = HashSet<String>()
     private val pageSignatures = HashSet<List<String>>()
@@ -114,6 +136,17 @@ internal class CatalogBrowserDialog(
         adapter = object : ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, listOf(title) + labels) {
             override fun areAllItemsEnabled() = false
             override fun isEnabled(position: Int) = position > 0
+            private fun boldRow(row: View) = row.also {
+                (it as? TextView)?.apply {
+                    typeface = Typeface.create(typeface, Typeface.BOLD)
+                    isSingleLine = true
+                    ellipsize = TextUtils.TruncateAt.END
+                }
+            }
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup) =
+                boldRow(super.getView(position, convertView, parent))
+            override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup) =
+                boldRow(super.getDropDownView(position, convertView, parent))
         }.apply {
             setDropDownViewResource(R.layout.sort_bottom_single_choice)
         }
@@ -133,13 +166,19 @@ internal class CatalogBrowserDialog(
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(8), dp(12), 0)
             addView(addonSelector, ViewGroup.LayoutParams(-1, -2))
-            addView(LinearLayout(activity).apply {
-                addView(catalogSelector, LinearLayout.LayoutParams(0, -2, 1f))
-                addView(genreSelector, LinearLayout.LayoutParams(0, -2, 1f))
-            }, ViewGroup.LayoutParams(-1, -2))
+            addView(catalogSelector, ViewGroup.LayoutParams(-1, -2))
+            addView(genreSelector, ViewGroup.LayoutParams(-1, -2))
             addView(status, ViewGroup.LayoutParams(-1, -2))
         }
         root.addView(controls)
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+            val statusTop = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
+            val position = IntArray(2)
+            view.getLocationOnScreen(position)
+            val safeTop = dp(8) + (statusTop - position[1]).coerceAtLeast(0)
+            if (view.paddingTop != safeTop) view.setPadding(0, safeTop, 0, 0)
+            insets
+        }
         grid.spanCount = activity.getSpanCount(false)
         root.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(retry, ViewGroup.LayoutParams(-1, -2))
@@ -170,10 +209,14 @@ internal class CatalogBrowserDialog(
             prefs.unregisterOnSharedPreferenceChangeListener(settingsListener)
             manifestPrefs.unregisterOnSharedPreferenceChangeListener(manifestListener)
             activity.lifecycle.removeObserver(hostObserver)
+            navigation?.removeOnDestinationChangedListener(destinationListener)
             grid.adapter = null
             onDismiss()
         }
         dialog.show()
+        dialog.window?.let { WindowCompat.setDecorFitsSystemWindows(it, true) }
+        ViewCompat.requestApplyInsets(root)
+        navigation?.addOnDestinationChangedListener(destinationListener)
         dialog.window?.setBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryBlackBackground)))
         dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         activity.lifecycle.addObserver(hostObserver)
@@ -185,6 +228,7 @@ internal class CatalogBrowserDialog(
     fun dismiss() {
         if (closed) return
         closed = true
+        returnEntryId = null
         generation++
         scope.cancel()
         dialog.dismiss() // Detaches Spinner popups along with their anchor views.
@@ -200,7 +244,7 @@ internal class CatalogBrowserDialog(
             retry.text = "Retry"
             status.text = "Select Catalog to resume."
         } else if (chosen && hasNext) {
-            retry.text = if (offset == 0) "Load catalog" else "Load more"
+            retry.text = "Retry"
             retry.visibility = View.VISIBLE
             status.text = "${items.size} items · ${genre ?: "All"}"
         }
@@ -223,7 +267,8 @@ internal class CatalogBrowserDialog(
     private fun reloadLinks() {
         links = SettingsRepository.loadLinks(prefs).filter { it.link.isNotBlank() }
         addonSelector.isEnabled = links.size > 1
-        val link = links.firstOrNull { it.link == addonUrl } ?: links.firstOrNull()
+        val retainedUrl = addonUrl ?: prefs.getString("catalog_browser_addon_url", null)
+        val link = links.firstOrNull { it.link == retainedUrl } ?: links.firstOrNull()
         if (link == null) {
             reset()
             provider = null
@@ -246,7 +291,10 @@ internal class CatalogBrowserDialog(
         addonUrl = url
         provider = providerFor(url)
         addonSelector.choices("Addon", links.map { it.name }, links.indexOfFirst { it.link == url }) {
-            if (addonUrl != links[it].link) selectAddon(links[it].link)
+            if (addonUrl != links[it].link) {
+                prefs.edit().putString("catalog_browser_addon_url", links[it].link).apply()
+                selectAddon(links[it].link)
+            }
         }
         catalogSelector.choices("Catalog", emptyList(), -1) {}
         catalogSelector.isEnabled = false
@@ -288,24 +336,22 @@ internal class CatalogBrowserDialog(
         catalog = next
         genre = null
         catalogSelector.setSelection(catalogs.indexOf(next) + 1)
-        genreSelector.choices("Genre", emptyList(), -1) {}
         val blocked = next.browseBlockReason()
         genreSelector.isEnabled = blocked == null && next.browseGenres().isNotEmpty()
-        status.text = blocked ?: when {
-            next.requiresExtra("genre") -> "Choose a genre."
-            genreSelector.isEnabled -> "Choose a genre or All."
-            else -> "Choose Load catalog."
+        if (blocked != null) {
+            genreSelector.choices("Genre", emptyList(), -1) {}
+            status.text = blocked
+            return
         }
-
-        if (blocked == null && !genreSelector.isEnabled) {
-            chosen = true // A genre-less feed still waits for the user's Load action.
+        configureGenres(next)
+        if (next.requiresExtra("genre")) {
+            status.text = "Choose a genre."
+            if (genreSelector.isEnabled) genreSelector.requestFocus()
+        } else {
+            chosen = true
             hasNext = true
-            retry.text = "Load catalog"
-            retry.visibility = View.VISIBLE
-            retry.requestFocus()
-        } else if (genreSelector.isEnabled) {
-            genreSelector.requestFocus()
-            configureGenres(next)
+            genreSelector.setSelection(1) // Optional genre defaults to All.
+            requestPage()
         }
     }
 
@@ -349,8 +395,13 @@ internal class CatalogBrowserDialog(
                     repeated || (rawCount > 0 && fresh.isEmpty()) -> "No new items. Pagination stopped."
                     else -> "${items.size} items · ${selectedGenre ?: "All"}"
                 }
-                retry.text = "Load more"
-                retry.visibility = if (hasNext) View.VISIBLE else View.GONE
+                retry.visibility = View.GONE
+                grid.doOnNextLayout {
+                    if (!closed && ticket == generation && !loading && hasNext &&
+                        items.isNotEmpty() && grid.height > 0 && !grid.canScrollVertically(1)) {
+                        requestPage() // Fetch only after layout proves the page cannot scroll.
+                    }
+                }
             } catch (e: CancellationException) { throw e
             } catch (_: Exception) {
                 if (ticket == generation) {

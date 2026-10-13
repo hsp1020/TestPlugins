@@ -23,79 +23,89 @@
             android:gravity="center_vertical"
             android:text="Catalog browser  ›"
             android:textAppearance="?android:attr/textAppearanceListItem"
+            android:textStyle="bold"
             android:background="?android:attr/selectableItemBackground"
             android:clickable="true"
             android:focusable="true" />
 
-        <!-- Stremio Settings Header -->
+        <!-- Title and actions use separate rows to avoid clipping on narrow screens. -->
         <LinearLayout
             android:id="@+id/settingsHeader"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical">
+            android:orientation="vertical">
 
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:layout_marginBottom="5dp"
-                android:text="Stremio Settings"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textSize="20sp"
-                android:textStyle="bold" />
+                android:minHeight="48dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
 
-            <TextView
-                android:id="@+id/tvExport"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:layout_marginBottom="5dp"
-                android:text="Export"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textSize="14sp"
-                android:textStyle="bold"
-                android:padding="10dp"
-                android:focusable="true"
-                android:background="?android:attr/selectableItemBackground"
-                android:clickable="true" />
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:paddingTop="8dp"
+                    android:paddingBottom="8dp"
+                    android:text="Stremio Settings"
+                    android:textColor="?android:attr/textColorPrimary"
+                    android:textAppearance="?android:attr/textAppearanceListItem"
+                    android:singleLine="true"
+                    android:textStyle="bold" />
 
-            <TextView
-                android:id="@+id/tvImport"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:layout_marginBottom="5dp"
-                android:text="Import"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textSize="14sp"
-                android:textStyle="bold"
-                android:padding="10dp"
-                android:focusable="true"
-                android:background="?android:attr/selectableItemBackground"
-                android:clickable="true" />
+                <TextView
+                    android:id="@+id/settingsToggle"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:gravity="center"
+                    android:text="▼"
+                    android:contentDescription="Expand Stremio Settings"
+                    android:background="?android:attr/selectableItemBackground"
+                    android:clickable="true"
+                    android:focusable="true" />
+            </LinearLayout>
 
-            <ImageView
-                android:id="@+id/saveIcon"
-                android:layout_width="wrap_content"
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:layout_marginBottom="5dp"
-                android:padding="5dp"
-                android:focusable="true"
-                android:background="?android:attr/selectableItemBackground"
-                android:clickable="true" />
-            <TextView
-                android:id="@+id/settingsToggle"
-                android:layout_width="48dp"
-                android:layout_height="48dp"
-                android:gravity="center"
-                android:text="▼"
-                android:contentDescription="Expand Stremio Settings"
-                android:background="?android:attr/selectableItemBackground"
-                android:clickable="true"
-                android:focusable="true" />
+                android:orientation="horizontal"
+                android:gravity="end|center_vertical">
+                <TextView
+                    android:id="@+id/tvExport"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Export"
+                    android:textColor="?android:attr/textColorPrimary"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:padding="10dp"
+                    android:focusable="true"
+                    android:background="?android:attr/selectableItemBackground"
+                    android:clickable="true" />
+
+                <TextView
+                    android:id="@+id/tvImport"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Import"
+                    android:textColor="?android:attr/textColorPrimary"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:padding="10dp"
+                    android:focusable="true"
+                    android:background="?android:attr/selectableItemBackground"
+                    android:clickable="true" />
+
+                <ImageView
+                    android:id="@+id/saveIcon"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:padding="5dp"
+                    android:focusable="true"
+                    android:background="?android:attr/selectableItemBackground"
+                    android:clickable="true" />
+            </LinearLayout>
         </LinearLayout>
 
         <LinearLayout
