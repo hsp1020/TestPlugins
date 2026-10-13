@@ -12,6 +12,8 @@ import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.plugins.PluginData
 import com.lagradost.cloudstream3.plugins.PluginManager
 import com.lagradost.cloudstream3.CloudStreamApp
+import com.lagradost.cloudstream3.CloudStreamApp.Companion.getActivity
+import com.lagradost.cloudstream3.APIHolder
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
@@ -32,6 +34,7 @@ class StremioCPlugin : Plugin() {
     private val ratingUiHandler = Handler(Looper.getMainLooper())
     private var ratingPlotHook: RatingPlotImageHook? = null
     private var activeSettingsDialog: SettingsBottomFragment? = null
+    private var activeBrowser: CatalogBrowserDialog? = null
 
     override fun load(context: Context) {
         val appContext = context.applicationContext
@@ -156,11 +159,23 @@ class StremioCPlugin : Plugin() {
             }
         }
         
-        val activity = context as? AppCompatActivity
-        openSettings = {
-            activity?.let { host ->
+        openSettings = { currentContext ->
+            (currentContext.getActivity() as? AppCompatActivity)?.let { host ->
+                if (host.isFinishing || host.isDestroyed) return@let
+                activeBrowser?.dismiss()
                 activeSettingsDialog?.dismiss()
-                val settings = SettingsBottomFragment(this, appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE), host)
+                val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
+                val settings = SettingsBottomFragment(this, prefs, host) { selector ->
+                    activeSettingsDialog?.dismiss()
+                    activeBrowser?.dismiss()
+                    val browser = CatalogBrowserDialog(host, prefs) { url ->
+                        APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull {
+                            stremioManifestUrl(it.mainUrl.fixSourceUrl()) == stremioManifestUrl(url.fixSourceUrl())
+                        }
+                    }
+                    activeBrowser = browser
+                    browser.show(selector) { if (activeBrowser === browser) activeBrowser = null }
+                }
                 activeSettingsDialog = settings
                 settings.show { if (activeSettingsDialog === settings) activeSettingsDialog = null }
             }
@@ -169,6 +184,8 @@ class StremioCPlugin : Plugin() {
 
     override fun beforeUnload() {
         ratingUiHandler.post {
+            activeBrowser?.dismiss()
+            activeBrowser = null
             activeSettingsDialog?.dismiss()
             activeSettingsDialog = null
             runCatching { ratingPlotHook?.stop() }

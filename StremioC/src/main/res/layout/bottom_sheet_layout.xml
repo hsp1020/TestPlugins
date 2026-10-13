@@ -15,6 +15,51 @@
         android:paddingEnd="?android:attr/listPreferredItemPaddingEnd"
         android:paddingBottom="20dp">
 
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Catalog browser"
+            android:fontFamily="sans-serif"
+            android:textColor="?android:attr/textColorPrimary"
+            android:textSize="18sp"
+            android:paddingTop="12dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+            <Button
+                android:id="@+id/browseAddon"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:fontFamily="sans-serif"
+                android:textAllCaps="false"
+                android:text="Addon"
+                android:focusable="true" />
+            <Button
+                android:id="@+id/browseCatalog"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:fontFamily="sans-serif"
+                android:textAllCaps="false"
+                android:text="Catalog"
+                android:focusable="true" />
+            <Button
+                android:id="@+id/browseGenre"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:fontFamily="sans-serif"
+                android:textAllCaps="false"
+                android:text="Genre"
+                android:focusable="true" />
+        </LinearLayout>
+
         <!-- Stremio Settings Header -->
         <LinearLayout
             android:layout_width="match_parent"

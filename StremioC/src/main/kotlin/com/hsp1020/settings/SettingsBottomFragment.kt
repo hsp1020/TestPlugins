@@ -143,7 +143,8 @@ object SettingsRepository {
 class SettingsBottomFragment(
     private val plugin: StremioCPlugin,
     private val sharedPref: SharedPreferences,
-    private val hostContext: Context
+    private val hostContext: Context,
+    private val openBrowser: (String) -> Unit
 ) {
     // The sheet is not restored by FragmentManager during Activity recreation.
     private val settingsDialog = Dialog(hostContext)
@@ -191,10 +192,7 @@ class SettingsBottomFragment(
     private data class ConfigFlatTab(
         val key: String, 
         val displayName: String, 
-        val isGenre: Boolean, 
-        val catalogKey: String,
-        var isChecked: Boolean = true,
-        var isGenresEnabled: Boolean = true
+        var isChecked: Boolean = true
     )
 
     private var searchJob: Job? = null 
@@ -398,6 +396,9 @@ class SettingsBottomFragment(
         val ctx = hostContext
         val appContext = ctx.applicationContext
         val view = getLayout("bottom_sheet_layout", LayoutInflater.from(ctx), null)
+        listOf("browseAddon" to "Addon", "browseCatalog" to "Catalog", "browseGenre" to "Genre").forEach { (id, selector) ->
+            view.findView<View>(id).setOnClickListener { openBrowser(selector) }
+        }
         // Plugin drawable IDs cannot be resolved safely by the host XML inflater.
         // Apply theme backgrounds after inflation using the plugin-independent drawable.
         listOf("etTmdbApiKey", "etMdbListApiKey", "etCustomPosterUrl", "etHistorySyncUrl").forEach { id ->
@@ -1367,29 +1368,11 @@ private fun showLanguageSelectDialog() {
                         val name = cat.name ?: id
                         val displayType = type.replaceFirstChar { it.uppercase() }
                         
-                        val requiresGenre = cat.requiresExtra("genre")
-
                         flatTabs.add(ConfigFlatTab(
                             key = "${id}_${type}_default", 
                             displayName = "$name - $displayType", 
-                            isGenre = false, 
-                            catalogKey = "${id}_${type}",
-                            isChecked = sharedPref.getBoolean("tab_enabled_${uniqueId}_${id}_${type}_default", true),
-                            isGenresEnabled = sharedPref.getBoolean("genres_enabled_${uniqueId}_${id}_${type}", true)
+                            isChecked = sharedPref.getBoolean("tab_enabled_${uniqueId}_${id}_${type}_default", true)
                         ))
-
-                        val genres = cat.getGenresList()
-
-                        genres.forEach { genre ->
-                            val capitalizedGenre = genre.capitalizeFirstLocal()
-                            flatTabs.add(ConfigFlatTab(
-                                key = "${id}_${type}_genre_$genre", 
-                                displayName = "$name : $capitalizedGenre  - $displayType", 
-                                isGenre = true, 
-                                catalogKey = "${id}_${type}",
-                                isChecked = sharedPref.getBoolean("tab_enabled_${uniqueId}_${id}_${type}_genre_$genre", true)
-                            ))
-                        }
                     }
                 }
             } catch (e: Exception) { e.printStackTrace() }
@@ -1457,12 +1440,7 @@ private fun showLanguageSelectDialog() {
             var visibleTabs = mutableListOf<ConfigFlatTab>()
             
             fun updateVisibleTabs() {
-                visibleTabs = masterTabs.filter { tab ->
-                    if (tab.isGenre) {
-                        val parentTab = masterTabs.find { !it.isGenre && it.catalogKey == tab.catalogKey }
-                        parentTab?.isGenresEnabled ?: true
-                    } else true
-                }.toMutableList()
+                visibleTabs = masterTabs.toMutableList()
                 
                 if (rv.isComputingLayout) {
                     rv.post { notifyDataSetChanged() }
@@ -1471,7 +1449,7 @@ private fun showLanguageSelectDialog() {
                 }
             }
 
-            inner class VH(val view: LinearLayout, val checkbox: CheckBox, val etOrder: EditText, val genreSwitch: Switch, val dragHandle: ImageView) : RecyclerView.ViewHolder(view)
+            inner class VH(val view: LinearLayout, val checkbox: CheckBox, val etOrder: EditText, val dragHandle: ImageView) : RecyclerView.ViewHolder(view)
 
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
                 val layout = LinearLayout(context).apply {
@@ -1512,18 +1490,11 @@ private fun showLanguageSelectDialog() {
                     setTextColor(Color.WHITE)
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 }
-                val genreSwitch = Switch(context).apply {
-                    text = "Genre"
-                    setTextColor(Color.WHITE)
-                    textSize = 12f
-                    setPadding(20, 0, 20, 0)
-                }
                 layout.addView(dragHandle)
                 layout.addView(etOrder)
                 layout.addView(checkbox)
-                layout.addView(genreSwitch)
                 normalizeTypeface(layout)
-                return VH(layout, checkbox, etOrder, genreSwitch, dragHandle)
+                return VH(layout, checkbox, etOrder, dragHandle)
             }
 
             override fun onBindViewHolder(holder: VH, position: Int) {
@@ -1543,18 +1514,6 @@ private fun showLanguageSelectDialog() {
                     updateVisibleTabs()
                 }
 
-                if (!tab.isGenre && masterTabs.any { it.isGenre && it.catalogKey == tab.catalogKey }) {
-                    holder.genreSwitch.visibility = View.VISIBLE
-                    holder.genreSwitch.setOnCheckedChangeListener(null)
-                    holder.genreSwitch.isChecked = tab.isGenresEnabled 
-                    holder.genreSwitch.setOnCheckedChangeListener { _, isChecked ->
-                        tab.isGenresEnabled = isChecked 
-                        updateVisibleTabs()
-                    }
-                } else {
-                    holder.genreSwitch.visibility = View.GONE
-                }
-                
                 holder.etOrder.setOnFocusChangeListener(null)
                 holder.etOrder.setText((position + 1).toString())
                 
@@ -1690,10 +1649,10 @@ private fun showLanguageSelectDialog() {
             masterTabs.forEach { 
                 keysToSave.put(it.key) 
                 editor.putBoolean("tab_enabled_${uniqueId}_${it.key}", it.isChecked)
-                if (!it.isGenre) {
-                    editor.putBoolean("genres_enabled_${uniqueId}_${it.catalogKey}", it.isGenresEnabled)
-                }
             }
+            // Preserve dormant genre/removed-catalog order keys for compatibility; never clear their settings.
+            val currentKeys = masterTabs.map { it.key }.toSet()
+            orderedKeys.filterNot { it in currentKeys }.forEach { keysToSave.put(it) }
             editor.putString(orderKey, keysToSave.toString())
             editor.commit() 
             
@@ -1707,8 +1666,6 @@ private fun showLanguageSelectDialog() {
 
         dialog.show()
     }
-
-    private fun String.capitalizeFirstLocal(): String = if (this.isNotEmpty()) this.substring(0, 1).uppercase() + this.substring(1) else this
 
     private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
         try {

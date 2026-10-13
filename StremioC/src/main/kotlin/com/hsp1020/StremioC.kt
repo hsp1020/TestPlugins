@@ -920,33 +920,19 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         val flatTabs = mutableListOf<FlatTab>()
         rawCatalogs.forEach { catalog ->
-            if (!catalog.supportsHome()) return@forEach
+            if (!catalog.supportsHome() || catalog.requiresExtra("genre") ||
+                (catalog.requiresExtra("skip") && !catalog.supportsExtra("skip"))) return@forEach
             val catalogId = catalog.id ?: ""
             val catalogType = catalog.type ?: "movie"
             val catalogName = catalog.name ?: catalogId
             val displayType = catalogType.replaceFirstChar { it.uppercase() }
 
-            val requiresGenre = catalog.requiresExtra("genre")
-            if (!requiresGenre) {
-                flatTabs.add(FlatTab(
-                    key = "${catalogId}_${catalogType}_default",
-                    displayName = "$catalogName - $displayType",
-                    urlPath = "/catalog/$catalogType/$catalogId/skip=###.json"
-                ))
-            }
-
-            val genresEnabled = prefs.getBoolean(
-                "genres_enabled_${uniqueKey}_${catalogId}_${catalogType}", true
-            )
-            val genres = if (genresEnabled) catalog.getGenresList() else emptyList()
-            genres.forEach { genre ->
-                val capitalizedGenre = genre.replaceFirstChar { it.uppercase() }
-                flatTabs.add(FlatTab(
-                    key = "${catalogId}_${catalogType}_genre_$genre",
-                    displayName = "$catalogName : $capitalizedGenre  - $displayType",
-                    urlPath = "/catalog/$catalogType/$catalogId/genre=${genre.urlEncodeLocal()}&skip=###.json"
-                ))
-            }
+            flatTabs.add(FlatTab(
+                key = "${catalogId}_${catalogType}_default",
+                displayName = "$catalogName - $displayType",
+                urlPath = "/catalog/${catalogType.urlEncodeLocal()}/${catalogId.urlEncodeLocal()}" +
+                    (if (catalog.supportsExtra("skip")) "/skip=###" else "") + ".json"
+            ))
         }
 
         val orderKey = "catalog_order_$uniqueKey"
@@ -965,20 +951,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val sortedTabs = flatTabs.sortedBy { rank[it.key] ?: Int.MAX_VALUE }
         val enabledTabs = buildList<Pair<String, String>> {
             sortedTabs.forEach { tab ->
-                val isEnabled = if (tab.key.contains("_genre_")) {
-                    val catalogKey = tab.key.substringBefore("_genre_")
-                    val masterKey = "genres_enabled_${uniqueKey}_$catalogKey"
-                    val tabKey = "tab_enabled_${uniqueKey}_${tab.key}"
-                    val isGenresMasterEnabled = if (prefs.contains(masterKey)) prefs.getBoolean(masterKey, true)
-                        else prefs.getBoolean("genres_enabled_${legacyKey}_$catalogKey", true)
-                    val isIndividualGenreEnabled = if (prefs.contains(tabKey)) prefs.getBoolean(tabKey, true)
-                        else prefs.getBoolean("tab_enabled_${legacyKey}_${tab.key}", true)
-                    isGenresMasterEnabled && isIndividualGenreEnabled
-                } else {
-                    val tabKey = "tab_enabled_${uniqueKey}_${tab.key}"
-                    if (prefs.contains(tabKey)) prefs.getBoolean(tabKey, true)
-                        else prefs.getBoolean("tab_enabled_${legacyKey}_${tab.key}", true)
-                }
+                val tabKey = "tab_enabled_${uniqueKey}_${tab.key}"
+                val isEnabled = if (prefs.contains(tabKey)) prefs.getBoolean(tabKey, true)
+                    else prefs.getBoolean("tab_enabled_${legacyKey}_${tab.key}", true)
 
                 if (isEnabled) add(tab.urlPath to tab.displayName)
             }
@@ -993,7 +968,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val currentUrl = stremioManifestUrl(mainUrl)
             val raw = stremioReadManifest(manifestPrefs, mainUrl)
             if (!raw.isNullOrBlank()) {
-                val signature = raw.toUniqueKey()
+                val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+                val addonKey = stremioCatalogKey(mainUrl)
+                val homeSettings = prefs.all.filterKeys {
+                    it == "catalog_order_$addonKey" || it.startsWith("tab_enabled_${addonKey}_")
+                }.toSortedMap()
+                val signature = (raw + homeSettings.toString()).toUniqueKey()
                 preparedMainPageData?.let { prepared ->
                     if (prepared.manifestUrl == currentUrl && prepared.rawSignature == signature) {
                         return prepared.data
@@ -1102,35 +1082,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         val currentSkip = catalogSkipState[stateKey] ?: 0
         val targetPath = request.data.replace("###", currentSkip.toString())
-        val targetUrl = buildUrl(targetPath)
-
-        val jsonText = homeForegroundSemaphore.withPermit {
-            fetchHomeJson(targetUrl)
-        }
-
-        val metas = try {
-            parseJson<HomeCatalogResponse>(jsonText).metas
-                ?: throw IllegalStateException("Catalog response is missing metas")
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            throw IllegalStateException("Invalid catalog response", e)
-        }
+        val resultPair = fetchCatalogItems(targetPath)
 
         if ((catalogGenerations[stateKey] ?: 0L) != generation) {
             return newHomePageResponse(emptyList(), hasNext = false)
         }
-
-        val mappedItems = metas.mapNotNull { meta ->
-            val type = meta.type ?: "movie"
-            val id = meta.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            val title = meta.name?.takeIf { it.isNotBlank() }
-                ?: "[${type.replaceFirstChar { it.uppercase() }}] $id"
-            val metaUrl = getUnifiedMetaUrl(type, id)
-            rememberDetailLoadHint(metaUrl, type, id, meta.moviedb_id?.toString() ?: meta.tmdbIdExt)
-            newMovieSearchResponse(title, metaUrl, TvType.Others) { posterUrl = meta.poster }
-        }
-        val resultPair = Pair(mappedItems, metas.size)
 
         return pageMutex.withLock {
             if ((catalogGenerations[stateKey] ?: 0L) != generation) {
@@ -1152,10 +1108,41 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             newHomePageResponse(
                 listOf(HomePageList(request.name, filteredItems)),
-                hasNext = resultPair.second > 0
+                hasNext = request.data.contains("###") && resultPair.second > 0
             )
         }
     }
+
+    // Both callers share transport/parsing, never pagination state. Browser requests do not
+    // reset catalogSkipState/catalogSentIds or join the homepage's stateful PageFlight.
+    private suspend fun fetchCatalogItems(path: String, fallbackType: String = "movie"): Pair<List<SearchResponse>, Int> {
+        val json = homeForegroundSemaphore.withPermit { fetchHomeJson(buildUrl(path)) }
+        val metas = parseJson<HomeCatalogResponse>(json).metas
+            ?: throw IllegalStateException("Catalog response is missing metas")
+        val items = metas.mapNotNull { meta ->
+            val type = meta.type ?: fallbackType
+            val id = meta.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val title = meta.name?.takeIf { it.isNotBlank() }
+                ?: "[${type.replaceFirstChar { it.uppercase() }}] $id"
+            val metaUrl = getUnifiedMetaUrl(type, id)
+            rememberDetailLoadHint(metaUrl, type, id, meta.moviedb_id?.toString() ?: meta.tmdbIdExt)
+            newMovieSearchResponse(title, metaUrl, TvType.Others) { posterUrl = meta.poster }
+        }
+        return items to metas.size
+    }
+
+    internal suspend fun browseCatalogs(): List<Catalog> {
+        val prefs = CloudStreamApp.context?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
+        val raw = prefs?.let { stremioReadManifest(it, mainUrl) }
+        val manifest = if (!raw.isNullOrBlank()) {
+            parseMainPageManifestSingleFlight(raw, stremioManifestUrl(mainUrl), raw.toUniqueKey())
+        } else getManifest()
+        return manifest?.catalogs?.filter { !it.id.isNullOrBlank() && !it.type.isNullOrBlank() }
+            ?: throw IllegalStateException("No cached or available manifest")
+    }
+
+    internal suspend fun browsePage(catalog: Catalog, genre: String?, offset: Int): Pair<List<SearchResponse>, Int> =
+        fetchCatalogItems(catalog.browsePath(genre, offset), requireNotNull(catalog.type))
 
     override suspend fun search(query: String): List<SearchResponse> {
         mainUrl = mainUrl.fixSourceUrl()
@@ -2569,6 +2556,41 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("genres") val genres: List<String>? = null,
         @JsonProperty("extraRequired") val extraRequired: List<String>? = null
     ) {
+        fun supportsExtra(name: String): Boolean = if (extra != null) {
+            extra.any { it.name == name }
+        } else extraSupported?.contains(name) == true || extraRequired?.contains(name) == true ||
+            (name == "genre" && !genres.isNullOrEmpty())
+
+        fun browseGenres(): List<String> = if (!supportsExtra("genre")) emptyList() else
+            (extra?.find { it.name == "genre" }?.options?.takeIf { it.isNotEmpty() }
+                ?: genres.orEmpty()).filter { it.isNotBlank() }.distinct()
+
+        fun browseBlockReason(): String? {
+            val required = extra.orEmpty().filter { it.isRequired == true }.mapNotNull { it.name } + extraRequired.orEmpty()
+            val unsupported = required.filter { it != "genre" && it != "skip" }
+            return when {
+                "search" in unsupported -> "This catalog requires a search. Use the regular search screen."
+                unsupported.isNotEmpty() -> "Required filters are not supported: ${unsupported.joinToString()}"
+                requiresExtra("genre") && browseGenres().isEmpty() -> "This catalog requires a genre but provides no genre options."
+                required.any { !supportsExtra(it) } -> "Inconsistent required filters in the manifest."
+                else -> null
+            }
+        }
+
+        internal fun browsePath(genre: String?, offset: Int): String {
+            require(!id.isNullOrBlank() && !type.isNullOrBlank()) { "Invalid catalog" }
+            require(offset >= 0 && (offset == 0 || supportsExtra("skip"))) { "Pagination is not supported" }
+            require(browseBlockReason() == null) { browseBlockReason().orEmpty() }
+            require(!requiresExtra("genre") || genre != null) { "Choose a genre" }
+            require(genre == null || (supportsExtra("genre") && genre in browseGenres())) { "Invalid genre" }
+            val extras = buildList {
+                genre?.let { add("genre=${it.urlEncodeLocal()}") }
+                if (supportsExtra("skip") && (offset > 0 || requiresExtra("skip"))) add("skip=$offset")
+            }.joinToString("&")
+            return "/catalog/${type.urlEncodeLocal()}/${id.urlEncodeLocal()}" +
+                (if (extras.isEmpty()) "" else "/$extras") + ".json"
+        }
+
         fun requiresExtra(name: String): Boolean =
             extra?.any { it.name == name && it.isRequired == true } == true ||
                 extraRequired?.contains(name) == true
