@@ -1080,12 +1080,24 @@ class SettingsBottomFragment(
         settingsDialog.window?.apply {
             val metrics = hostContext.resources.displayMetrics
             val width = minOf((1000 * metrics.density).toInt(), (metrics.widthPixels * 0.9f).toInt()).coerceAtLeast(1)
-            val height = if (settingsBody.visibility == View.VISIBLE)
-                (metrics.heightPixels * 0.88f).toInt().coerceAtLeast(1) else ViewGroup.LayoutParams.WRAP_CONTENT
+            val maxHeight = (metrics.heightPixels * 0.88f).toInt().coerceAtLeast(1)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setGravity(android.view.Gravity.CENTER)
-            setLayout(width, height)
+            setLayout(width, maxHeight)
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            // The scroll content changes height when Stream / Subtitle URLs expand.
+            // Size the centered dialog to its content, capped at 88% of the screen.
+            val body = (view as? ViewGroup)?.getChildAt(0)
+            var lastHeight = maxHeight
+            val resize = {
+                val wanted = (body?.height ?: 0).coerceAtMost(maxHeight)
+                if (wanted > 0 && wanted != lastHeight && settingsDialog.isShowing) {
+                    lastHeight = wanted
+                    setLayout(width, wanted)
+                }
+            }
+            body?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> view.post { resize() } }
+            view.post { resize() }
         }
     }
 

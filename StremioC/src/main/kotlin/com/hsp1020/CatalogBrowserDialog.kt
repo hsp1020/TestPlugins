@@ -26,6 +26,9 @@ import android.widget.TextView
 import android.widget.ImageView
 import android.widget.Toast
 import androidx.fragment.app.FragmentActivity
+import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentManager
+import android.os.Bundle
 import androidx.core.view.ViewCompat
 import androidx.core.view.doOnNextLayout
 import androidx.core.view.doOnPreDraw
@@ -119,9 +122,15 @@ internal class CatalogBrowserDialog(
             SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
             SEARCH_ACTION_LOAD -> {
                 val origin = navigation?.currentBackStackEntry?.id
-                if (origin != null) returnEntryId = origin
-                activity.loadSearchResult(click.card)
-                if (origin == null) dismiss() // Navigate before removing the overlay.
+                if (origin != null) {
+                    returnEntryId = origin
+                    pendingDetailDraw = true
+                    detailEntryId = null
+                }
+                // Use CloudStream's own SEARCH_ACTION_LOAD handler; keep the dialog
+                // on top until the destination's detail view can actually draw.
+                SearchHelper.handleSearchClickCallback(click)
+                if (origin == null) dismiss()
             }
         }
     }
@@ -151,22 +160,57 @@ internal class CatalogBrowserDialog(
         (activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)?.navController
     }
     private var returnEntryId: String? = null
-    private var detailHidePending = false
-    private val destinationListener = NavController.OnDestinationChangedListener { controller, _, _ ->
-        if (!closed && returnEntryId != null) {
-            if (controller.currentBackStackEntry?.id == returnEntryId) {
-                returnEntryId = null
-                detailHidePending = false
-                dialog.show()
-            } else if (!detailHidePending) {
-                detailHidePending = true
-                val hostView = activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)?.view
-                if (hostView != null) hostView.doOnPreDraw {
-                    detailHidePending = false
-                    if (!closed && returnEntryId != null) dialog.hide()
-                } else {
-                    detailHidePending = false
+    private var detailEntryId: String? = null
+    private var pendingDetailDraw = false
+    private val detailViewListener = object : FragmentManager.FragmentLifecycleCallbacks() {
+        override fun onFragmentViewCreated(
+            fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
+        ) {
+            if (returnEntryId != null &&
+                fragment.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment") {
+                dismiss() // Search breaks the browser -> detail -> back chain.
+                return
+            }
+            if (!pendingDetailDraw || closed) return
+            if (fragment.javaClass.name !in setOf(
+                    "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
+                    "com.lagradost.cloudstream3.ui.result.ResultFragmentTv",
+                    "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer"
+                )) return
+            view.doOnPreDraw {
+                if (!closed && pendingDetailDraw && returnEntryId != null &&
+                    detailEntryId == navigation?.currentBackStackEntry?.id) {
+                    pendingDetailDraw = false
                     dialog.hide()
+                }
+            }
+        }
+    }
+    private val destinationListener = NavController.OnDestinationChangedListener { controller, _, _ ->
+        val origin = returnEntryId
+        if (!closed && origin != null) {
+            val current = controller.currentBackStackEntry?.id
+            when {
+                current == origin -> {
+                    // Navigation through Home on the way to Search must not resurrect
+                    // the browser. Check again immediately before Home is drawn.
+                    val hostView = activity.supportFragmentManager
+                        .findFragmentById(R.id.nav_host_fragment)?.view
+                    hostView?.doOnPreDraw {
+                        if (!closed && returnEntryId == origin && detailEntryId != null &&
+                            navigation?.currentBackStackEntry?.id == origin) {
+                            returnEntryId = null
+                            detailEntryId = null
+                            pendingDetailDraw = false
+                            dialog.show()
+                        }
+                    }
+                }
+                detailEntryId == null -> detailEntryId = current
+                current != detailEntryId -> {
+                    // Detail -> quick search / cast search / another page:
+                    // discard the browser, so navigation Home stays Home.
+                    dismiss()
                 }
             }
         }
@@ -417,6 +461,7 @@ internal class CatalogBrowserDialog(
             manifestPrefs.unregisterOnSharedPreferenceChangeListener(manifestListener)
             activity.lifecycle.removeObserver(hostObserver)
             navigation?.removeOnDestinationChangedListener(destinationListener)
+            activity.supportFragmentManager.unregisterFragmentLifecycleCallbacks(detailViewListener)
             grid.adapter = null
             onDismiss()
         }
@@ -424,6 +469,7 @@ internal class CatalogBrowserDialog(
         dialog.window?.let { WindowCompat.setDecorFitsSystemWindows(it, true) }
         ViewCompat.requestApplyInsets(root)
         navigation?.addOnDestinationChangedListener(destinationListener)
+        activity.supportFragmentManager.registerFragmentLifecycleCallbacks(detailViewListener, true)
         dialog.window?.setBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryBlackBackground)))
         dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         activity.lifecycle.addObserver(hostObserver)
@@ -436,6 +482,8 @@ internal class CatalogBrowserDialog(
         if (closed) return
         closed = true
         returnEntryId = null
+        detailEntryId = null
+        pendingDetailDraw = false
         generation++
         scope.cancel()
         dialog.dismiss() // Detaches Spinner popups along with their anchor views.

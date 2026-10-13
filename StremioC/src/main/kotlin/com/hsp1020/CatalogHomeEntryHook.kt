@@ -102,6 +102,13 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
 
     private inner class Row(val view: View, val child: RecyclerView, val adapter: HomeChildItemAdapter) {
         private var queued = false
+        private var firstReveal = true
+        private fun reveal() {
+            if (firstReveal && rows[child] === this) {
+                firstReveal = false
+                child.alpha = 1f
+            }
+        }
         private val observer = object : RecyclerView.AdapterDataObserver() {
             override fun onChanged() = schedule()
             override fun onItemRangeInserted(positionStart: Int, itemCount: Int) = schedule()
@@ -115,6 +122,9 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
         }
 
         fun install() {
+            // Conceal the original row until the shortcut and the posters are bound
+            // together. Avoid a visible DiffUtil insertion shifting the posters.
+            child.alpha = 0f
             adapter.registerAdapterDataObserver(observer)
             child.addOnChildAttachStateChangeListener(attached)
             for (i in 0 until child.childCount) installInput(child.getChildAt(i))
@@ -122,6 +132,7 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
         }
 
         fun dispose(removeCards: Boolean) {
+            child.alpha = 1f
             child.removeOnChildAttachStateChangeListener(attached)
             adapter.unregisterAdapterDataObserver(observer)
             for (i in 0 until child.childCount) clearInput(child.getChildAt(i))
@@ -143,6 +154,7 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
         private fun refresh() {
             val current = adapter.immutableCurrentList
             val ordinary = current.filterNot { it.url.startsWith(prefix) }
+            if (ordinary.isEmpty()) return // No poster to reveal until the first page arrives.
             val target = resolve(this, ordinary)
             val provider = target?.let { wanted ->
                 APIHolder.allProviders.filterIsInstance<StremioC>()
@@ -159,8 +171,9 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
                     if (firstInsert && child.isAttachedToWindow &&
                         (child.layoutManager as? androidx.recyclerview.widget.LinearLayoutManager)
                             ?.findFirstVisibleItemPosition() in 0..1) child.scrollToPosition(0)
+                    reveal()
                 }
-            }
+            } else reveal()
         }
 
         private fun targetAt(view: View): Pair<Boolean, CatalogShortcutTarget?> {
