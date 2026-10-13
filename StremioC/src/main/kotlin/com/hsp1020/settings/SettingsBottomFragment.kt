@@ -156,6 +156,12 @@ class SettingsBottomFragment(
         if (event == Lifecycle.Event.ON_DESTROY) dismiss()
     }
     fun dismiss() = settingsDialog.dismiss()
+    fun hideForBrowser() = settingsDialog.hide()
+    fun restoreFromBrowser() {
+        if (hostOwner?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.STARTED) == true) {
+            settingsDialog.show() // Reuse the same view, input values and expanded state.
+        }
+    }
 
     companion object {
         val LANGUAGES = listOf(
@@ -408,7 +414,7 @@ class SettingsBottomFragment(
             val visibility = if (expand) View.VISIBLE else View.GONE
             settingsBody.visibility = visibility
             settingsActions.forEach { it.visibility = visibility }
-            settingsToggle.text = if (expand) "▲" else "▼"
+            settingsToggle.text = if (expand) "Stremio Settings  ▲" else "Stremio Settings  ▼"
             settingsToggle.contentDescription = if (expand) "Collapse Stremio Settings" else "Expand Stremio Settings"
             if (settingsDialog.isShowing) settingsDialog.window?.let { window ->
                 window.setLayout(window.attributes.width, if (expand)

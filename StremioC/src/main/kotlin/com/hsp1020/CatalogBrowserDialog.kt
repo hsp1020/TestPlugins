@@ -15,6 +15,9 @@ import android.widget.Spinner
 import androidx.appcompat.widget.AppCompatSpinner
 import com.google.android.material.button.MaterialButton
 import android.widget.LinearLayout
+import android.widget.FrameLayout
+import android.view.Gravity
+import android.util.TypedValue
 import android.widget.TextView
 import androidx.fragment.app.FragmentActivity
 import androidx.core.view.ViewCompat
@@ -131,25 +134,51 @@ internal class CatalogBrowserDialog(
         id = View.generateViewId()
         minimumHeight = dp(48)
         isFocusable = true
+        val ripple = TypedValue()
+        if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) && ripple.resourceId != 0) {
+            setBackgroundResource(ripple.resourceId)
+        }
+    }
+
+    private fun selectorRow(title: String, spinner: AppCompatSpinner) = LinearLayout(activity).apply {
+        gravity = Gravity.CENTER_VERTICAL
+        addView(TextView(activity).apply {
+            text = title
+            setTextAppearance(android.R.style.TextAppearance_Material_Body1)
+            setTextColor(activity.colorFromAttribute(R.attr.textColor))
+            typeface = Typeface.create(typeface, Typeface.BOLD)
+            gravity = Gravity.CENTER_VERTICAL
+        }, LinearLayout.LayoutParams(dp(82), dp(48)))
+        addView(FrameLayout(activity).apply {
+            addView(spinner, FrameLayout.LayoutParams(-1, -1))
+            addView(TextView(activity).apply {
+                text = "▼"
+                gravity = Gravity.CENTER
+                setTextColor(activity.colorFromAttribute(R.attr.textColor))
+                isClickable = false
+                isFocusable = false
+            }, FrameLayout.LayoutParams(dp(36), -1, Gravity.END))
+        }, LinearLayout.LayoutParams(0, dp(48), 1f))
     }
 
     private fun AppCompatSpinner.choices(title: String, labels: List<String>, selected: Int, choose: (Int) -> Unit) {
         onItemSelectedListener = null
         contentDescription = title
-        adapter = object : ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, listOf(title) + labels) {
+        adapter = object : ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, listOf("Select…") + labels) {
             override fun areAllItemsEnabled() = false
             override fun isEnabled(position: Int) = position > 0
-            private fun boldRow(row: View) = row.also {
-                (it as? TextView)?.apply {
+            private fun boldRow(row: View, selected: Boolean) = row.also {
+                ((it as? TextView) ?: it.findViewById<TextView>(android.R.id.text1))?.apply {
                     typeface = Typeface.create(typeface, Typeface.BOLD)
                     setSingleLine(true)
                     ellipsize = TextUtils.TruncateAt.END
+                    if (selected) setPadding(paddingLeft, paddingTop, dp(40), paddingBottom)
                 }
             }
             override fun getView(position: Int, convertView: View?, parent: ViewGroup) =
-                boldRow(super.getView(position, convertView, parent))
+                boldRow(super.getView(position, convertView, parent), true)
             override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup) =
-                boldRow(super.getDropDownView(position, convertView, parent))
+                boldRow(super.getDropDownView(position, convertView, parent), false)
         }.apply {
             setDropDownViewResource(R.layout.sort_bottom_single_choice)
         }
@@ -168,9 +197,9 @@ internal class CatalogBrowserDialog(
         val controls = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(8), dp(12), 0)
-            addView(addonSelector, ViewGroup.LayoutParams(-1, -2))
-            addView(catalogSelector, ViewGroup.LayoutParams(-1, -2))
-            addView(genreSelector, ViewGroup.LayoutParams(-1, -2))
+            addView(selectorRow("Addon", addonSelector), ViewGroup.LayoutParams(-1, -2))
+            addView(selectorRow("Catalog", catalogSelector), ViewGroup.LayoutParams(-1, -2))
+            addView(selectorRow("Genre", genreSelector), ViewGroup.LayoutParams(-1, -2))
             addView(status, ViewGroup.LayoutParams(-1, -2))
         }
         root.addView(controls)

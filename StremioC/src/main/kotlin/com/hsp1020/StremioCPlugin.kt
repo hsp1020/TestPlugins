@@ -191,16 +191,22 @@ class StremioCPlugin : Plugin() {
                 activeSettingsDialog?.dismiss()
                 dismissProviderPicker(host)
                 val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
-                val settings = SettingsBottomFragment(this, prefs, host) {
-                    activeSettingsDialog?.dismiss()
+                lateinit var settings: SettingsBottomFragment
+                settings = SettingsBottomFragment(this, prefs, host) {
                     activeBrowser?.dismiss()
+                    settings.hideForBrowser()
                     val browser = CatalogBrowserDialog(host, prefs) { url ->
                         APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull {
                             stremioManifestUrl(it.mainUrl.fixSourceUrl()) == stremioManifestUrl(url.fixSourceUrl())
                         }
                     }
                     activeBrowser = browser
-                    browser.show { if (activeBrowser === browser) activeBrowser = null }
+                    browser.show {
+                        if (activeBrowser === browser) {
+                            activeBrowser = null
+                            if (activeSettingsDialog === settings) settings.restoreFromBrowser()
+                        }
+                    }
                 }
                 activeSettingsDialog = settings
                 settings.show { if (activeSettingsDialog === settings) activeSettingsDialog = null }
