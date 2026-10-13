@@ -3,7 +3,6 @@ package com.hsp1020
 import androidx.appcompat.app.AppCompatDialog
 import android.content.SharedPreferences
 import android.graphics.drawable.ColorDrawable
-import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.Color
 import android.graphics.Typeface
@@ -23,12 +22,13 @@ import android.widget.LinearLayout
 import android.view.Gravity
 import android.util.TypedValue
 import android.widget.TextView
-import android.widget.ImageView
 import android.widget.Toast
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
 import android.os.Bundle
+import android.os.SystemClock
+import android.view.ViewTreeObserver
 import androidx.core.view.ViewCompat
 import androidx.core.view.doOnNextLayout
 import androidx.core.view.doOnPreDraw
@@ -69,8 +69,6 @@ internal class CatalogBrowserDialog(
     private val activity: FragmentActivity,
     private val prefs: SharedPreferences,
     private val providerFor: (String) -> StremioC?,
-    private val settingsIcon: Drawable?,
-    private val onOpenSettings: () -> Unit,
     initialCatalog: CatalogShortcutTarget? = null,
 ) {
     private val dialog = AppCompatDialog(activity, R.style.DialogFullscreen)
@@ -85,26 +83,6 @@ internal class CatalogBrowserDialog(
     private val genreArrow = selectorArrow()
     private val selectorLabelStyle = TextView(activity).apply {
         typeface = Typeface.create(typeface, Typeface.BOLD)
-    }
-    private val settingsButton = ImageView(activity).apply {
-        contentDescription = "Stremio Settings"
-        setImageDrawable(settingsIcon)
-        setPadding(dp(8), dp(8), dp(8), dp(8))
-        isClickable = true
-        isFocusable = true
-        val attr = TypedValue()
-        if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, attr, true) && attr.resourceId != 0)
-            setBackgroundResource(attr.resourceId)
-        setOnClickListener {
-            if (!closed) {
-                settingsVisible = true
-                dialog.hide()
-                try { onOpenSettings() } catch (_: Exception) {
-                    restoreFromSettings()
-                    Toast.makeText(activity, "Unable to open settings.", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
     }
     private val retry = button("Retry").apply { visibility = View.GONE }
     private val loadingIndicator = TextView(activity).apply {
@@ -141,8 +119,6 @@ internal class CatalogBrowserDialog(
     private var selectedType = initialCatalog?.type ?: "movie"
     private var pendingCatalog = initialCatalog
     private var fetchingCatalogs = false
-    private var catalogSettingsChanged = false
-    private var settingsVisible = false
     private var provider: StremioC? = null
     private var addonUrl: String? = null
     private var catalog: StremioC.Catalog? = null
@@ -162,6 +138,59 @@ internal class CatalogBrowserDialog(
     private var returnEntryId: String? = null
     private var detailEntryId: String? = null
     private var pendingDetailDraw = false
+    private var detailRevealEnd: (() -> Unit)? = null
+
+    // Match the stable-frame guard used for quick-search -> detail return.
+    // Hiding a fullscreen Dialog in the very first pre-draw exposes the Home
+    // destination while the ResultFragment is still entering.
+    private fun revealDetailWhenReady(detail: View) {
+        detailRevealEnd?.invoke()
+        detail.doOnPreDraw {
+            if (closed || !pendingDetailDraw) return@doOnPreDraw
+            val observer = detail.viewTreeObserver
+            val started = SystemClock.uptimeMillis()
+            var stable = 0
+            lateinit var listener: ViewTreeObserver.OnPreDrawListener
+            val release = {
+                if (observer.isAlive) observer.removeOnPreDrawListener(listener)
+                detailRevealEnd = null
+            }
+            listener = ViewTreeObserver.OnPreDrawListener {
+                if (closed || !pendingDetailDraw || returnEntryId == null ||
+                    detailEntryId != navigation?.currentBackStackEntry?.id) {
+                    release()
+                } else {
+                    val hostView = activity.supportFragmentManager
+                        .findFragmentById(R.id.nav_host_fragment)?.view
+                    val bounds = hostView?.parent as? ViewGroup
+                    val ready = hostView != null && bounds != null &&
+                        hostView.visibility == View.VISIBLE &&
+                        hostView.left <= bounds.paddingLeft &&
+                        hostView.top <= bounds.paddingTop &&
+                        hostView.right >= bounds.width - bounds.paddingRight &&
+                        hostView.bottom >= bounds.height - bounds.paddingBottom &&
+                        !hostView.isLayoutRequested && detail.width > 0 && detail.height > 0 &&
+                        !detail.isLayoutRequested && detail.animation?.hasEnded() != false
+                    stable = if (ready) stable + 1 else 0
+                    if (stable >= 3 || (SystemClock.uptimeMillis() - started >= 800L &&
+                        detail.isShown && detail.width > 0 && detail.height > 0)) {
+                        release()
+                        detail.postOnAnimation {
+                            if (!closed && pendingDetailDraw && returnEntryId != null &&
+                                detailEntryId == navigation?.currentBackStackEntry?.id) {
+                                pendingDetailDraw = false
+                                dialog.hide()
+                            }
+                        }
+                    } else detail.postInvalidateOnAnimation()
+                }
+                true
+            }
+            detailRevealEnd = release
+            observer.addOnPreDrawListener(listener)
+            detail.postInvalidateOnAnimation()
+        }
+    }
     private val detailViewListener = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
             fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
@@ -177,13 +206,7 @@ internal class CatalogBrowserDialog(
                     "com.lagradost.cloudstream3.ui.result.ResultFragmentTv",
                     "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer"
                 )) return
-            view.doOnPreDraw {
-                if (!closed && pendingDetailDraw && returnEntryId != null &&
-                    detailEntryId == navigation?.currentBackStackEntry?.id) {
-                    pendingDetailDraw = false
-                    dialog.hide()
-                }
-            }
+            revealDetailWhenReady(view)
         }
     }
     private val destinationListener = NavController.OnDestinationChangedListener { controller, _, _ ->
@@ -226,15 +249,11 @@ internal class CatalogBrowserDialog(
         }
     }
     private val settingsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key == "stremio_saved_links") {
-            if (settingsVisible) catalogSettingsChanged = true else scope.launch { reloadLinks() }
-        } else if (key?.startsWith("tab_enabled_") == true || key?.startsWith("catalog_order_") == true)
-            if (!fetchingCatalogs) catalogSettingsChanged = true
+        if (key == "stremio_saved_links") scope.launch { reloadLinks() }
     }
     private val manifestListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (!fetchingCatalogs && links.any { key == stremioCatalogKey(it.link) }) {
-            if (settingsVisible) catalogSettingsChanged = true else scope.launch { reloadLinks() }
-        }
+        if (!fetchingCatalogs && links.any { key == stremioCatalogKey(it.link) })
+            scope.launch { reloadLinks() }
     }
 
     private fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
@@ -301,33 +320,20 @@ internal class CatalogBrowserDialog(
         visibility = View.GONE
     }
 
-    private fun selectorRow(
-        title: String, spinner: AppCompatSpinner, arrow: TextView, button: View? = null
-    ) = LinearLayout(activity).apply {
-        gravity = Gravity.CENTER_VERTICAL
-        addView(TextView(activity).apply {
-            text = title
-            typeface = selectorLabelStyle.typeface
+    private fun selectorRow(title: String, spinner: AppCompatSpinner, arrow: TextView) =
+        LinearLayout(activity).apply {
             gravity = Gravity.CENTER_VERTICAL
-            setSingleLine(true)
-        }, LinearLayout.LayoutParams(dp(82), dp(48)))
-        addView(FrameLayout(activity).apply {
-            addView(spinner, FrameLayout.LayoutParams(-1, -1))
-            addView(arrow, FrameLayout.LayoutParams(dp(40), -1, Gravity.END))
-        }, LinearLayout.LayoutParams(0, dp(48), 1f))
-        if (button != null) addView(button, LinearLayout.LayoutParams(dp(48), dp(48)))
-        else addView(View(activity), LinearLayout.LayoutParams(dp(48), dp(48)))
-    }
-
-    fun restoreFromSettings() {
-        if (closed || activity.isFinishing || activity.isDestroyed) return
-        settingsVisible = false
-        dialog.show()
-        if (catalogSettingsChanged) {
-            catalogSettingsChanged = false
-            reloadLinks()
+            addView(TextView(activity).apply {
+                text = title
+                typeface = selectorLabelStyle.typeface
+                gravity = Gravity.CENTER_VERTICAL
+                setSingleLine(true)
+            }, LinearLayout.LayoutParams(dp(82), dp(48)))
+            addView(FrameLayout(activity).apply {
+                addView(spinner, FrameLayout.LayoutParams(-1, -1))
+                addView(arrow, FrameLayout.LayoutParams(dp(40), -1, Gravity.END))
+            }, LinearLayout.LayoutParams(0, dp(48), 1f))
         }
-    }
 
     private fun AppCompatSpinner.choices(title: String, labels: List<String>, selected: Int, choose: (Int) -> Unit) {
         onItemSelectedListener = null
@@ -350,10 +356,31 @@ internal class CatalogBrowserDialog(
             }
             override fun getView(position: Int, convertView: View?, parent: ViewGroup) =
                 boldRow(super.getView(position, convertView, parent), true)
-            override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup) =
-                boldRow(super.getDropDownView(position, convertView, parent), false)
-        }.apply {
-            setDropDownViewResource(R.layout.sort_bottom_single_choice)
+            override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val checked = position == this@choices.selectedItemPosition
+                val color = if (checked) Color.rgb(229, 9, 20) else Color.WHITE
+                return LinearLayout(activity).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    minimumHeight = dp(48)
+                    setPadding(dp(16), 0, dp(12), 0)
+                    addView(TextView(activity).apply {
+                        text = labels[position]
+                        typeface = selectorLabelStyle.typeface
+                        setTextSize(TypedValue.COMPLEX_UNIT_PX, selectorLabelStyle.textSize)
+                        setTextColor(color)
+                        gravity = Gravity.CENTER_VERTICAL
+                        setSingleLine(true)
+                        ellipsize = TextUtils.TruncateAt.END
+                    }, LinearLayout.LayoutParams(0, dp(48), 1f))
+                    addView(TextView(activity).apply {
+                        text = if (checked) "✓" else ""
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextColor(Color.rgb(229, 9, 20))
+                        gravity = Gravity.CENTER
+                        textSize = 18f
+                    }, LinearLayout.LayoutParams(dp(32), dp(48)))
+                }
+            }
         }
         if (selected in labels.indices) setSelection(selected)
         onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
@@ -372,7 +399,7 @@ internal class CatalogBrowserDialog(
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(8), dp(12), 0)
             setBackgroundColor(headerColor)
-            addView(selectorRow("Type", typeSelector, typeArrow, settingsButton), ViewGroup.LayoutParams(-1, -2))
+            addView(selectorRow("Type", typeSelector, typeArrow), ViewGroup.LayoutParams(-1, -2))
             addView(selectorRow("Catalog", catalogSelector, catalogArrow), ViewGroup.LayoutParams(-1, -2))
             addView(selectorRow("Genre", genreSelector, genreArrow), ViewGroup.LayoutParams(-1, -2))
         }
@@ -462,6 +489,7 @@ internal class CatalogBrowserDialog(
             activity.lifecycle.removeObserver(hostObserver)
             navigation?.removeOnDestinationChangedListener(destinationListener)
             activity.supportFragmentManager.unregisterFragmentLifecycleCallbacks(detailViewListener)
+            detailRevealEnd?.invoke()
             grid.adapter = null
             onDismiss()
         }
@@ -484,6 +512,7 @@ internal class CatalogBrowserDialog(
         returnEntryId = null
         detailEntryId = null
         pendingDetailDraw = false
+        detailRevealEnd?.invoke()
         generation++
         scope.cancel()
         dialog.dismiss() // Detaches Spinner popups along with their anchor views.

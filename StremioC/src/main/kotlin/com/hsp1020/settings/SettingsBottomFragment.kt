@@ -415,7 +415,8 @@ class SettingsBottomFragment(
         }
         header.addView(settingsToggle, LinearLayout.LayoutParams(0, dp(48), 1f))
         settingsActions.forEachIndexed { index, action ->
-            if (action is TextView) action.setPadding(dp(4), 0, dp(4), 0)
+            if (index > 0) header.addView(View(ctx), LinearLayout.LayoutParams(dp(16), dp(48)))
+            if (action is TextView) action.setPadding(0, 0, 0, 0)
             header.addView(action, LinearLayout.LayoutParams(
                 if (index == 2) dp(36) else ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)
             ))
@@ -1076,28 +1077,30 @@ class SettingsBottomFragment(
 
         settingsDialog.setContentView(view)
         hostOwner?.lifecycle?.addObserver(closeOnDestroy)
+        val metrics = hostContext.resources.displayMetrics
+        val width = minOf((1000 * metrics.density).toInt(), (metrics.widthPixels * 0.9f).toInt()).coerceAtLeast(1)
+        val maxHeight = (metrics.heightPixels * 0.88f).toInt().coerceAtLeast(1)
+        val body = (view as? ViewGroup)?.getChildAt(0)
+        // Measure BEFORE showing the dialog, so the initial frame is centered.
+        body?.measure(
+            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        val initialHeight = (body?.measuredHeight ?: maxHeight).coerceIn(1, maxHeight)
         settingsDialog.show()
         settingsDialog.window?.apply {
-            val metrics = hostContext.resources.displayMetrics
-            val width = minOf((1000 * metrics.density).toInt(), (metrics.widthPixels * 0.9f).toInt()).coerceAtLeast(1)
-            val maxHeight = (metrics.heightPixels * 0.88f).toInt().coerceAtLeast(1)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setGravity(android.view.Gravity.CENTER)
-            setLayout(width, maxHeight)
+            setLayout(width, initialHeight)
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-            // The scroll content changes height when Stream / Subtitle URLs expand.
-            // Size the centered dialog to its content, capped at 88% of the screen.
-            val body = (view as? ViewGroup)?.getChildAt(0)
-            var lastHeight = maxHeight
-            val resize = {
-                val wanted = (body?.height ?: 0).coerceAtMost(maxHeight)
-                if (wanted > 0 && wanted != lastHeight && settingsDialog.isShowing) {
-                    lastHeight = wanted
-                    setLayout(width, wanted)
-                }
+        }
+        // When the URL section expands, resize on the layout pass rather than a posted
+        // frame later (the latter caused a visible center jump).
+        body?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            val wanted = body.height.coerceIn(1, maxHeight)
+            if (settingsDialog.isShowing && settingsDialog.window?.attributes?.height != wanted) {
+                settingsDialog.window?.setLayout(width, wanted)
             }
-            body?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> view.post { resize() } }
-            view.post { resize() }
         }
     }
 

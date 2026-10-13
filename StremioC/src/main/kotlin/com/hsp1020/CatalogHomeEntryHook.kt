@@ -6,6 +6,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewTreeObserver
+import androidx.core.view.doOnPreDraw
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.R
@@ -106,7 +107,8 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
         private fun reveal() {
             if (firstReveal && rows[child] === this) {
                 firstReveal = false
-                child.alpha = 1f
+                // Commit the adapter change before the first exposed frame.
+                child.doOnPreDraw { if (rows[child] === this) child.alpha = 1f }
             }
         }
         private val observer = object : RecyclerView.AdapterDataObserver() {
@@ -122,8 +124,8 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
         }
 
         fun install() {
-            // Conceal the original row until the shortcut and the posters are bound
-            // together. Avoid a visible DiffUtil insertion shifting the posters.
+            // Insert the shortcut without RecyclerView's move/add animations:
+            // all initial posters and the shortcut appear in one completed frame.
             child.alpha = 0f
             adapter.registerAdapterDataObserver(observer)
             child.addOnChildAttachStateChangeListener(attached)
@@ -166,6 +168,7 @@ internal class CatalogHomeEntryHook(private val open: (CatalogShortcutTarget) ->
             if (current.map { it.url } != updated.map { it.url }) {
                 val firstInsert = current.none { it.url.startsWith(prefix) } &&
                     updated.firstOrNull()?.url?.startsWith(prefix) == true
+                if (firstInsert) child.itemAnimator = null
                 adapter.submitList(updated) {
                     // An insertion at position 0 can retain the old scroll anchor at 1.
                     if (firstInsert && child.isAttachedToWindow &&
