@@ -1,6 +1,9 @@
 package com.hsp1020
 
 import android.content.res.ColorStateList
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.graphics.Color
 import android.graphics.Typeface
 import android.util.TypedValue
@@ -18,9 +21,12 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.cardview.widget.CardView
 import androidx.core.content.res.ResourcesCompat
+import androidx.core.view.doOnPreDraw
 import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.navigation.NavController
 import androidx.navigation.fragment.findNavController
 import androidx.preference.PreferenceManager
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -78,6 +84,7 @@ internal class TrailerChooser(
     private var button: TextView? = null
     private var dialog: BottomSheetDialog? = null
     private var opening = false
+    private var finishPlayerHandoff: (() -> Unit)? = null
     private var reopenAfterPlayback = false
     private var reopenScrollY = 0
     private var reopenFocusedRow = -1
@@ -226,7 +233,7 @@ internal class TrailerChooser(
                     alpha = 0x80
                 })
                 chipBackgroundColor = ColorStateList.valueOf(0xFF2B2C30.toInt())
-                setTextColor(context.colorFromAttribute(R.attr.textColor))
+                setTextColor(Color.WHITE)
                 typeface = Typeface.create(ResourcesCompat.getFont(context, R.font.google_sans), Typeface.BOLD)
                 fontFeatureSettings = "'liga' 0, 'clig' 0, 'calt' 0, 'dlig' 0"
                 isCheckable = false
@@ -353,6 +360,43 @@ internal class TrailerChooser(
         return true
     }
 
+    // Keep the picker above the previous detail until the player can draw.
+    // This also avoids dismissing a dialog from a stale detail view during navigation.
+    private fun dismissPickerOnPlayerFrame(picker: BottomSheetDialog, controller: NavController) {
+        finishPlayerHandoff?.invoke()
+        val manager = fragment.parentFragmentManager
+        val handler = Handler(Looper.getMainLooper())
+        var active = true
+        lateinit var callback: FragmentManager.FragmentLifecycleCallbacks
+        lateinit var timeout: Runnable
+        lateinit var release: () -> Unit
+        release = {
+            if (active) {
+                active = false
+                manager.unregisterFragmentLifecycleCallbacks(callback)
+                handler.removeCallbacks(timeout)
+                if (finishPlayerHandoff === release) finishPlayerHandoff = null
+            }
+        }
+        val dismiss = {
+            release()
+            if (picker.isShowing) picker.dismiss()
+        }
+        callback = object : FragmentManager.FragmentLifecycleCallbacks() {
+            override fun onFragmentViewCreated(
+                fm: FragmentManager, f: Fragment, view: View, savedInstanceState: Bundle?
+            ) {
+                if (f.javaClass.name == "com.lagradost.cloudstream3.ui.player.GeneratorPlayer") {
+                    view.doOnPreDraw { view.postOnAnimation { dismiss() } }
+                }
+            }
+        }
+        timeout = Runnable { dismiss() } // Never retain the old dialog if the player fails to draw.
+        finishPlayerHandoff = release
+        manager.registerFragmentLifecycleCallbacks(callback, false)
+        handler.postDelayed(timeout, 1200L)
+    }
+
     private fun play(entry: TrailerChoice, scrollY: Int, focusedRow: Int) {
         if (opening) return
         val picker = dialog?.takeIf { it.isShowing } ?: return
@@ -381,16 +425,15 @@ internal class TrailerChooser(
                 saved.set(returnKey, detailUrl)
                 saved.set(returnScrollKey, scrollY)
                 saved.set(returnFocusKey, focusedRow)
-                picker.dismiss()
                 try {
+                    dismissPickerOnPlayerFrame(picker, controller)
                     controller.navigate(R.id.global_to_navigation_player, playerArgs)
                 } catch (error: Exception) {
+                    finishPlayerHandoff?.invoke()
                     saved.remove<String>(returnKey)
                     saved.remove<Int>(returnScrollKey)
                     saved.remove<Int>(returnFocusKey)
-                    opening = false
-                    if (fragment.isResumed && fragment.view === root) showPicker(scrollY, focusedRow)
-                    throw error
+                    throw error // The original picker is still visible.
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -415,7 +458,9 @@ internal class TrailerChooser(
             tvButton?.setOnKeyListener(null)
             tvButton?.setOnTouchListener(null)
         }
-        dialog?.dismiss()
+        // Navigation is transferring visibility to the player; its one-shot
+        // callback owns dialog dismissal until the next drawable frame.
+        if (finishPlayerHandoff == null) dialog?.dismiss()
         dialog = null
         (button?.parent as? ViewGroup)?.removeView(button)
         button = null
