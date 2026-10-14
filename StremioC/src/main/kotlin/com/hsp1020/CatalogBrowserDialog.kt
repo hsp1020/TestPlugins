@@ -357,9 +357,12 @@ internal class CatalogBrowserDialog(
             ripple.resourceId != 0) {
             androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, ripple.resourceId)
         } else null
-        background = if (cardBg != null && overlay != null)
+        val selectorBackground = if (cardBg != null && overlay != null)
             android.graphics.drawable.LayerDrawable(arrayOf(cardBg, overlay))
         else cardBg ?: overlay
+        background = selectorBackground?.let {
+            android.graphics.drawable.InsetDrawable(it, 0, dp(4), 0, dp(4))
+        }
     }
 
     private fun selectorArrow() = TextView(activity).apply {
