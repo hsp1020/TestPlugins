@@ -735,8 +735,9 @@ internal class CatalogBrowserDialog(
         }
         val initial = if (requested?.genre != null) target else target ?: entries.firstOrNull()
         catalogSelector.choices("Catalog name", entries.map { entry ->
-            "${entry.catalog.name ?: entry.catalog.id ?: "Untitled"} - " +
-                (links.firstOrNull { it.link == entry.url }?.name ?: entry.url)
+            val name = entry.catalog.name ?: entry.catalog.id ?: "Untitled"
+            if (directTarget != null) name else
+                "$name - " + (links.firstOrNull { it.link == entry.url }?.name ?: entry.url)
         }, initial?.let { entries.indexOf(it) } ?: -1) {
             val entry = entries.getOrNull(it) ?: return@choices
             if (catalog !== entry.catalog || addonUrl != entry.url) selectCatalog(entry)
@@ -763,8 +764,12 @@ internal class CatalogBrowserDialog(
             return
         }
         val required = next.catalog.requiresExtra("genre")
-        val genres: List<String?> = (if (required) emptyList() else listOf(null)) +
-            next.catalog.browseGenres().filter { required || !it.equals("All", ignoreCase = true) }
+        val genres: List<String?> = if (directTarget != null) {
+            listOfNotNull(directTarget.genre)
+        } else {
+            (if (required) emptyList() else listOf(null)) +
+                next.catalog.browseGenres().filter { required || !it.equals("All", ignoreCase = true) }
+        }
         val initialGenre = pendingGenre
         pendingGenre = null
         val genreIndex = if (initialGenre == null) 0 else genres.indexOf(initialGenre)
