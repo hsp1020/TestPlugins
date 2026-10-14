@@ -451,7 +451,6 @@ class SettingsBottomFragment(
         addlinks.setImageDrawable(getDrawable("settings_icon"))
         showlinks.setImageDrawable(getDrawable("settings_icon"))
         saveIcon.setImageDrawable(getDrawable("save_icon"))
-        val iconTint = ColorStateList.valueOf(hostContext.colorFromAttribute(HostR.attr.colorPrimary))
         val actionIconTint = ColorStateList.valueOf(hostContext.colorFromAttribute(HostR.attr.textColor))
         listOf(addlinks, showlinks, saveIcon).forEach { it.imageTintList = actionIconTint }
 
@@ -837,7 +836,7 @@ class SettingsBottomFragment(
         fun setExtraUrlExpanded(expanded: Boolean) {
             extraUrlContainer.visibility = if (expanded) View.VISIBLE else View.GONE
             extraUrlToggle.setImageDrawable(getDrawable(if (expanded) "addon_collapse_icon" else "addon_expand_icon"))
-            extraUrlToggle.imageTintList = iconTint
+            extraUrlToggle.imageTintList = actionIconTint
             extraUrlToggle.contentDescription = if (expanded) "Collapse addon URLs" else "Expand addon URLs"
             sharedPref.edit().putBoolean(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_EXPANDED, expanded).apply()
         }

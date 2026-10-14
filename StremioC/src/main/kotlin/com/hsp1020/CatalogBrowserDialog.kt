@@ -619,7 +619,7 @@ internal class CatalogBrowserDialog(
 
     private fun reloadLinks() {
         reset()
-        links = SettingsRepository.loadLinks(prefs).filter { it.link.isNotBlank() }
+        links = if (directTarget == null) SettingsRepository.loadLinks(prefs).filter { it.link.isNotBlank() } else emptyList()
         provider = null
         addonUrl = null
         catalog = null
@@ -653,8 +653,18 @@ internal class CatalogBrowserDialog(
                         try {
                             limit.withPermit {
                                 if (directTarget != null) {
-                                    source.browseCatalogs().filter { it.browseBlockReason() == null }
-                                        .map { CatalogSource(url, source, it) }
+                                    // Discover links already specify the exact catalog and genre.
+                                    // They may refer to catalogs absent from the addon's manifest.
+                                    val linked = directTarget
+                                    listOf(CatalogSource(url, source, StremioC.Catalog(
+                                        name = linked.catalogId,
+                                        id = linked.catalogId,
+                                        type = linked.type,
+                                        extra = listOf(
+                                            StremioC.Extra("genre", options = listOfNotNull(linked.genre)),
+                                            StremioC.Extra("skip")
+                                        )
+                                    )))
                                 } else {
                                     migrateStremioCatalogSettings(prefs, url)
                                     val key = stremioCatalogKey(url)
