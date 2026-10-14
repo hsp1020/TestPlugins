@@ -19,6 +19,9 @@ import android.widget.Toast
 import androidx.cardview.widget.CardView
 import androidx.core.content.res.ResourcesCompat
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.navigation.fragment.findNavController
 import androidx.preference.PreferenceManager
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.chip.Chip
@@ -76,6 +79,19 @@ internal class TrailerChooser(
     private var button: TextView? = null
     private var dialog: BottomSheetDialog? = null
     private var opening = false
+    private var reopenAfterPlayback = false
+    private val returnKey = "stremioc_trailer_picker_return"
+    private val resumeObserver = LifecycleEventObserver { _, event ->
+        if (event == Lifecycle.Event.ON_RESUME) {
+            val navEntry = runCatching { fragment.findNavController().currentBackStackEntry }.getOrNull()
+            if (detailUrl != null && navEntry?.savedStateHandle?.get<String>(returnKey) == detailUrl) {
+                navEntry.savedStateHandle.remove<String>(returnKey)
+                reopenAfterPlayback = true
+            }
+            refresh()
+            reopenPickerIfReady()
+        }
+    }
     private var items: List<TrailerChoice> = emptyList()
     private val tvButton = find("result_play_trailer_button")
     private val tvContainer = find("result_play_trailer")
@@ -118,6 +134,7 @@ internal class TrailerChooser(
     }
 
     fun start() {
+        fragment.lifecycle.addObserver(resumeObserver)
         title?.addTextChangedListener(titleWatcher)
         if (isTv) {
             tvButton?.apply {
@@ -151,6 +168,16 @@ internal class TrailerChooser(
         if (desired == View.VISIBLE) tvButton?.setOnClickListener(pickerClick)
     }
 
+    private fun reopenPickerIfReady() {
+        if (!reopenAfterPlayback || !fragment.isResumed || items.isEmpty()) return
+        root.post {
+            if (reopenAfterPlayback && fragment.isResumed && fragment.view === root && items.isNotEmpty()) {
+                reopenAfterPlayback = false
+                showPicker()
+            }
+        }
+    }
+
     fun refresh() {
         if (!fragment.isAdded || detailUrl.isNullOrBlank()) return
         val context = root.context
@@ -160,12 +187,14 @@ internal class TrailerChooser(
         val next = if (enabled) StremioC.trailerChoicesByUrl[detailUrl].orEmpty() else emptyList()
         if (next == items && (isTv || button != null || next.isEmpty())) {
             if (!isTv && button != null) updatePhoneLabel()
+            reopenPickerIfReady()
             return
         }
         items = next
         if (isTv) {
             syncTvButton()
             if (items.isEmpty()) dialog?.dismiss()
+            reopenPickerIfReady()
             return
         }
         if (items.isEmpty()) {
@@ -199,6 +228,7 @@ internal class TrailerChooser(
             }
         }
         updatePhoneLabel()
+        reopenPickerIfReady()
     }
 
     private fun updatePhoneLabel() {
@@ -241,12 +271,10 @@ internal class TrailerChooser(
                 val focusBackground = TypedValue()
                 if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, focusBackground, true) &&
                     focusBackground.resourceId != 0) setBackgroundResource(focusBackground.resourceId)
-                setOnClickListener {
-                    dialog?.dismiss()
-                    play(entry)
-                }
+                setOnClickListener { play(entry) }
             }
             val thumbnail = CardView(activity).apply {
+                cardElevation = 0f
                 addView(ImageView(activity).apply {
                     scaleType = ImageView.ScaleType.CENTER_CROP
                     loadImage("https://i.ytimg.com/vi/" + entry.youtubeId + "/hqdefault.jpg")
@@ -255,7 +283,7 @@ internal class TrailerChooser(
                     text = "▶"
                     textSize = 16f
                     gravity = Gravity.CENTER
-                    setTextColor(foreground)
+                    setTextColor(Color.WHITE)
                     background = android.graphics.drawable.GradientDrawable().apply {
                         shape = android.graphics.drawable.GradientDrawable.OVAL
                         setColor(0xB3000000.toInt())
@@ -312,15 +340,25 @@ internal class TrailerChooser(
                 val selectedIndex = items.indexOf(entry).takeIf { it >= 0 } ?: return@launch
                 val heading = title?.text?.toString()?.trim().orEmpty()
                     .ifBlank { root.context.getString(R.string.trailer) }
-                fragment.activity?.navigate(
-                    R.id.global_to_navigation_player,
-                    GeneratorPlayer.newInstance(
-                        TrailerPlaybackGenerator(
-                            items.toList(), heading, selectedIndex,
-                            playable, subtitles
-                        ), selectedIndex
+                val activity = fragment.activity ?: return@launch
+                val returnEntry = runCatching { fragment.findNavController().currentBackStackEntry }.getOrNull()
+                returnEntry?.savedStateHandle?.set(returnKey, detailUrl)
+                dialog?.dismiss()
+                try {
+                    activity.navigate(
+                        R.id.global_to_navigation_player,
+                        GeneratorPlayer.newInstance(
+                            TrailerPlaybackGenerator(
+                                items.toList(), heading, selectedIndex,
+                                playable, subtitles
+                            ), selectedIndex
+                        )
                     )
-                )
+                } catch (error: Exception) {
+                    returnEntry?.savedStateHandle?.remove<String>(returnKey)
+                    if (fragment.isAdded) showPicker()
+                    throw error
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
@@ -337,6 +375,7 @@ internal class TrailerChooser(
     }
 
     fun stop() {
+        fragment.lifecycle.removeObserver(resumeObserver)
         title?.removeTextChangedListener(titleWatcher)
         if (isTv) {
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(tvPreDraw)

@@ -219,11 +219,15 @@ class StremioCPlugin : Plugin() {
         if (closeProviderPicker) dismissProviderPicker(host)
         val prefs = host.applicationContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
         lateinit var browser: CatalogBrowserDialog
+        // Cinemeta's built-in "top" catalog is not an AIOMetadata catalog.
+        val catalogTarget = if (target?.catalogId == "top" && !target.genre.isNullOrBlank())
+            target.copy(addonUrl = "https://v3-cinemeta.strem.io/manifest.json")
+        else target
         browser = CatalogBrowserDialog(host, pluginResources, prefs, { url ->
             APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull {
                 stremioManifestUrl(it.mainUrl.fixSourceUrl()) == stremioManifestUrl(url.fixSourceUrl())
             }
-        }, target, snapshot)
+        }, catalogTarget, snapshot)
         activeBrowser = browser
         browser.show {
             if (activeBrowser === browser) {
