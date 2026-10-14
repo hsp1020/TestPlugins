@@ -16,6 +16,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.cardview.widget.CardView
 import androidx.core.content.res.ResourcesCompat
 import androidx.fragment.app.Fragment
 import androidx.preference.PreferenceManager
@@ -214,11 +215,18 @@ internal class TrailerChooser(
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(12), dp(16), dp(12))
         }
+        val episodeHeading = find("result_episodes_text") as? TextView
         list.addView(TextView(activity).apply {
             text = "${activity.getString(R.string.trailer)} (${items.size})"
-            textSize = 20f
+            if (episodeHeading != null) {
+                setTextSize(TypedValue.COMPLEX_UNIT_PX, episodeHeading.textSize)
+                typeface = episodeHeading.typeface
+            } else {
+                textSize = 17f
+                typeface = Typeface.create(typeface, Typeface.NORMAL)
+            }
             setTextColor(foreground)
-            setPadding(dp(4), dp(8), 0, dp(16))
+            setPadding(dp(4), dp(8), 0, dp(4))
         })
         val scroll = ScrollView(activity)
         val rows = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
@@ -238,7 +246,7 @@ internal class TrailerChooser(
                     play(entry)
                 }
             }
-            val thumbnail = FrameLayout(activity).apply {
+            val thumbnail = CardView(activity).apply {
                 addView(ImageView(activity).apply {
                     scaleType = ImageView.ScaleType.CENTER_CROP
                     loadImage("https://i.ytimg.com/vi/" + entry.youtubeId + "/hqdefault.jpg")
