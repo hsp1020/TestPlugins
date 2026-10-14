@@ -3,6 +3,7 @@ package com.hsp1020
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.drawable.GradientDrawable
+import android.content.res.Configuration
 import android.text.SpannableStringBuilder
 import android.util.TypedValue
 import android.view.Gravity
@@ -215,7 +216,8 @@ internal class PhoneHeroHook(
         }
 
         fun bind(item: LoadResponse) {
-            val key = listOf(item.url, item.plot, item.year, item.duration, item.tags, item.score).hashCode()
+            val portrait = activity.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+            val key = listOf(item.url, item.plot, item.year, item.duration, item.tags, item.score, portrait).hashCode()
             if (key == lastKey) return
             lastKey = key
             val parsed = item.plot.html()
@@ -235,9 +237,10 @@ internal class PhoneHeroHook(
             }
             rating.text = ratingImages(line, rating.textSize) ?: line
             rating.visibility = if (line.isEmpty()) View.GONE else View.VISIBLE
+            plot.maxLines = if (portrait) 5 else 3
             plot.text = if (separator >= 0) parsed.subSequence(separator + 1, parsed.length).trimStart() else if (isMdb) "" else parsed
             plot.visibility = if (plot.text.isNullOrBlank()) View.GONE else View.VISIBLE
-            populateChips(genres, item.tags?.take(6) ?: emptyList(), R.style.ChipFilledSemiTransparent, null)
+            populateChips(genres, item.tags?.take(if (portrait) 2 else 6) ?: emptyList(), R.style.ChipFilledSemiTransparent, null)
             for (i in 0 until genres.childCount) {
                 (genres.getChildAt(i) as? TextView)?.setShadowLayer(4f, 0f, 2f, 0xB0000000.toInt())
             }

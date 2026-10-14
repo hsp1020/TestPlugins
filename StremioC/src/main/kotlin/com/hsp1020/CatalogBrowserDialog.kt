@@ -131,7 +131,9 @@ internal class CatalogBrowserDialog(
     private data class CatalogSource(val url: String, val provider: StremioC, val catalog: StremioC.Catalog)
     private var catalogs = emptyList<CatalogSource>()
     private var selectedType = initialCatalog?.type ?: "movie"
+    private val directTarget = initialCatalog?.takeIf { !it.genre.isNullOrBlank() }
     private var pendingCatalog = initialCatalog
+    private var pendingGenre = initialCatalog?.genre
     private var pendingHome = initialHome?.takeIf { it.target == initialCatalog }
     private var fetchingCatalogs = false
     private var provider: StremioC? = null
@@ -622,14 +624,23 @@ internal class CatalogBrowserDialog(
         addonUrl = null
         catalog = null
         catalogs = emptyList()
+        if (directTarget != null) {
+            pendingCatalog = directTarget
+            pendingGenre = directTarget.genre
+            selectedType = directTarget.type
+        }
         typeSelector.choices("Catalog type", emptyList(), -1) {}
         catalogSelector.choices("Catalog name", emptyList(), -1) {}
         genreSelector.choices("Genre", emptyList(), -1) {}
-        val sources = links.asReversed().distinctBy { it.link }.mapNotNull { link ->
-            providerFor(link.link)?.let { link.link to it }
+        val sources = if (directTarget != null) {
+            listOf(directTarget.addonUrl to StremioC(directTarget.addonUrl, "StremioC"))
+        } else {
+            links.asReversed().distinctBy { it.link }.mapNotNull { link ->
+                providerFor(link.link)?.let { link.link to it }
+            }
         }
         if (sources.isEmpty()) {
-            Toast.makeText(activity, "No registered Stremio catalogs.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(activity, "No Stremio catalogs available.", Toast.LENGTH_SHORT).show()
             return
         }
         val ticket = generation
@@ -641,21 +652,26 @@ internal class CatalogBrowserDialog(
                     async(Dispatchers.IO) {
                         try {
                             limit.withPermit {
-                                migrateStremioCatalogSettings(prefs, url)
-                                val key = stremioCatalogKey(url)
-                                val rank = prefs.getString("catalog_order_$key", null)?.let { raw ->
-                                    runCatching {
-                                        val array = org.json.JSONArray(raw)
-                                        (0 until array.length()).associate { array.getString(it) to it }
-                                    }.getOrNull()
-                                }.orEmpty()
-                                source.browseCatalogs().filter { catalog ->
-                                    val tab = "${catalog.id}_${catalog.type}_default"
-                                    catalog.browseBlockReason() == null &&
-                                        prefs.getBoolean("tab_enabled_${key}_$tab", true)
-                                }.sortedBy { catalog ->
-                                    rank["${catalog.id}_${catalog.type}_default"] ?: Int.MAX_VALUE
-                                }.map { CatalogSource(url, source, it) }
+                                if (directTarget != null) {
+                                    source.browseCatalogs().filter { it.browseBlockReason() == null }
+                                        .map { CatalogSource(url, source, it) }
+                                } else {
+                                    migrateStremioCatalogSettings(prefs, url)
+                                    val key = stremioCatalogKey(url)
+                                    val rank = prefs.getString("catalog_order_$key", null)?.let { raw ->
+                                        runCatching {
+                                            val array = org.json.JSONArray(raw)
+                                            (0 until array.length()).associate { array.getString(it) to it }
+                                        }.getOrNull()
+                                    }.orEmpty()
+                                    source.browseCatalogs().filter { catalog ->
+                                        val tab = "${catalog.id}_${catalog.type}_default"
+                                        catalog.browseBlockReason() == null &&
+                                            prefs.getBoolean("tab_enabled_${key}_$tab", true)
+                                    }.sortedBy { catalog ->
+                                        rank["${catalog.id}_${catalog.type}_default"] ?: Int.MAX_VALUE
+                                    }.map { CatalogSource(url, source, it) }
+                                }
                             }
                         } catch (e: CancellationException) { throw e
                         } catch (_: Exception) { emptyList() }
@@ -707,7 +723,7 @@ internal class CatalogBrowserDialog(
                     stremioManifestUrl(request.addonUrl.fixSourceUrl())
             }
         }
-        val initial = target ?: entries.firstOrNull()
+        val initial = if (requested?.genre != null) target else target ?: entries.firstOrNull()
         catalogSelector.choices("Catalog name", entries.map { entry ->
             "${entry.catalog.name ?: entry.catalog.id ?: "Untitled"} - " +
                 (links.firstOrNull { it.link == entry.url }?.name ?: entry.url)
@@ -716,8 +732,10 @@ internal class CatalogBrowserDialog(
             if (catalog !== entry.catalog || addonUrl != entry.url) selectCatalog(entry)
         }
         pendingCatalog = null
-        if (requested != null && target == null)
-            Toast.makeText(activity, "Requested catalog is no longer available.", Toast.LENGTH_SHORT).show()
+        if (requested != null && target == null) {
+            pendingGenre = null
+            Toast.makeText(activity, "Requested catalog is not available.", Toast.LENGTH_SHORT).show()
+        }
         initial?.let(::selectCatalog)
     }
 
@@ -737,7 +755,10 @@ internal class CatalogBrowserDialog(
         val required = next.catalog.requiresExtra("genre")
         val genres: List<String?> = (if (required) emptyList() else listOf(null)) +
             next.catalog.browseGenres().filter { required || !it.equals("All", ignoreCase = true) }
-        genreSelector.choices("Genre", genres.map { it ?: "All" }, 0) {
+        val initialGenre = pendingGenre
+        pendingGenre = null
+        val genreIndex = if (initialGenre == null) 0 else genres.indexOf(initialGenre)
+        genreSelector.choices("Genre", genres.map { it ?: "All" }, genreIndex.coerceAtLeast(0)) {
             if (chosen && genre == genres[it]) return@choices
             reset()
             genre = genres[it]
@@ -745,7 +766,11 @@ internal class CatalogBrowserDialog(
             hasNext = true
             requestPage()
         }
-        genre = genres.firstOrNull()
+        if (initialGenre != null && genreIndex < 0) {
+            Toast.makeText(activity, "Requested genre is not available.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        genre = genres.getOrNull(genreIndex)
         chosen = true
         hasNext = true
         val home = pendingHome?.takeIf { snapshot ->
@@ -886,7 +911,7 @@ internal class CatalogBrowserDialog(
     }
 }
 
-internal data class CatalogShortcutTarget(val addonUrl: String, val type: String, val catalogId: String)
+internal data class CatalogShortcutTarget(val addonUrl: String, val type: String, val catalogId: String, val genre: String? = null)
 internal data class CatalogHomeSnapshot(
     val target: CatalogShortcutTarget,
     val items: List<SearchResponse>,

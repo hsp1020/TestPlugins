@@ -382,6 +382,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         internal val fallbackLogoTitles = lruCacheMap<String, Boolean>(200)
         internal val expectedLogoByUrl = lruCacheMap<String, Boolean>(200)
         internal val trailerChoicesByUrl = lruCacheMap<String, List<TrailerChoice>>(200)
+        internal val genreCatalogsByUrl = lruCacheMap<String, Map<String, CatalogShortcutTarget>>(200)
         private val tmdbDetailsCache = lruCacheMap<String, Pair<TmdbDetailResponse, Long>>(100)
         private val tmdbSeasonCache = lruCacheMap<String, Pair<TmdbSeasonDetail, Long>>(150)
         private val tmdbFindCache = lruCacheMap<String, Pair<Pair<String, String>?, Long>>(100)
@@ -1237,6 +1238,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
     
     override suspend fun load(url: String): LoadResponse = coroutineScope {
+        // Catalogs opened from a metadata Discover link do not require addon registration.
+        if (mainUrl.isBlank() && (url.startsWith("https://") || url.startsWith("http://"))) {
+            val origin = url.substringBefore("/meta/", "").takeIf { it.isNotBlank() }
+            if (origin != null) return@coroutineScope StremioC(origin, name).load(url)
+        }
         suspend fun fetchSecondaryMeta(metaUrl: String, expectedId: String): CatalogEntry? =
             runSuspendCatching {
                 val text = customSession.get(metaUrl).text
@@ -1512,6 +1518,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             fallbackLogoTitles[loadRes.url]?.let { fallbackLogoTitles[url] = it }
             expectedLogoByUrl[loadRes.url]?.let { expectedLogoByUrl[url] = it }
             trailerChoicesByUrl[loadRes.url]?.let { trailerChoicesByUrl[url] = it }
+            genreCatalogsByUrl[loadRes.url]?.let { genreCatalogsByUrl[url] = it }
         }
         collectionDeferred?.cancel() // No remaining prefetch when the final media type differs.
 
@@ -3167,6 +3174,28 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val finalTrailerStreams = detailedEntry.trailerStreams ?: this@CatalogEntry.trailerStreams
             val originalName = detailedEntry.name ?: this@CatalogEntry.name
             val finalGenre = detailedEntry.genre ?: detailedEntry.genres ?: this@CatalogEntry.genre ?: this@CatalogEntry.genres
+            val genreTargets = (detailedEntry.links.orEmpty() + this@CatalogEntry.links.orEmpty())
+                .mapNotNull { link ->
+                    val name = link.name?.takeIf { it in finalGenre.orEmpty() }
+                        ?: return@mapNotNull null
+                    if (!link.category.equals("Genres", ignoreCase = true)) return@mapNotNull null
+                    val target = runCatching {
+                        val uri = android.net.Uri.parse(link.url)
+                        val parts = uri.pathSegments
+                        if (uri.scheme != "stremio" || parts.size != 4 ||
+                            parts[0] != "discover" || uri.getQueryParameter("genre") != name) null
+                        else {
+                            val manifest = android.net.Uri.parse(parts[1])
+                            if (manifest.scheme !in listOf("http", "https") ||
+                                manifest.host.isNullOrBlank() ||
+                                manifest.authority.orEmpty().contains("@") ||
+                                !manifest.path.orEmpty().endsWith("/manifest.json") ||
+                                parts[2].isBlank() || parts[3].isBlank()) null
+                            else CatalogShortcutTarget(parts[1], parts[2], parts[3], name)
+                        }
+                    }.getOrNull()
+                    target?.let { name to it }
+                }.toMap()
             val finalPoster = detailedEntry.poster ?: this@CatalogEntry.poster
             val finalBackground = detailedEntry.background ?: this@CatalogEntry.background
             val finalImdbRating = detailedEntry.imdbRating ?: this@CatalogEntry.imdbRating
@@ -3334,6 +3363,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
                 StremioC.trailerChoicesByUrl[metaUrl] = finalTrailers
+                StremioC.genreCatalogsByUrl[metaUrl] = genreTargets
                 val resolvedMovieId = if (finalType == "other" && finalVideos?.size == 1) {
                     finalVideos[0].id ?: movieId
                 } else {
@@ -3401,6 +3431,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
                 StremioC.trailerChoicesByUrl[metaUrl] = finalTrailers
+                StremioC.genreCatalogsByUrl[metaUrl] = genreTargets
                 val response = provider.newTvSeriesLoadResponse(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
                 ) {

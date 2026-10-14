@@ -28,6 +28,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.TextView
+import com.google.android.material.chip.ChipGroup
 import androidx.core.content.ContextCompat
 import androidx.appcompat.widget.SearchView
 import androidx.recyclerview.widget.RecyclerView
@@ -219,7 +220,7 @@ internal fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
 internal class RatingPlotImageHook(
     context: Context,
     private val resources: Resources,
-    openCatalog: (CatalogShortcutTarget, CatalogHomeSnapshot?) -> Unit
+    private val openCatalog: (CatalogShortcutTarget, CatalogHomeSnapshot?) -> Unit
 ) : Application.ActivityLifecycleCallbacks {
     private val app = context.applicationContext as Application
     private val prefs = app.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
@@ -647,7 +648,7 @@ internal class RatingPlotImageHook(
         watchers[f] = Watcher(view, root, f.arguments?.getString("url"), f).also { it.start() }
     }
 
-    private inner class Watcher(private val view: TextView, private val root: View, detailUrl: String?, private val fragment: Fragment) : TextWatcher {
+    private inner class Watcher(private val view: TextView, private val root: View, private val detailUrl: String?, private val fragment: Fragment) : TextWatcher {
         private val backdrop = DetailBackdropLayout(root, detailUrl)
         private val trailers = TrailerChooser(fragment, root, detailUrl)
         private var changing = false
@@ -660,6 +661,30 @@ internal class RatingPlotImageHook(
         private val castItems = root.resources.getIdentifier("result_cast_items", "id", root.context.packageName)
             .takeIf { it != 0 }?.let { root.findViewById<RecyclerView>(it) }
         private val actorNameId = root.resources.getIdentifier("actor_name", "id", root.context.packageName)
+        private val genreGroup = root.findViewById<ChipGroup>(R.id.result_tag)
+        private val boundGenreChips = mutableMapOf<View, CatalogShortcutTarget>()
+
+        private fun bindGenreClicks() {
+            val group = genreGroup ?: return
+            val targets = detailUrl?.let { StremioC.genreCatalogsByUrl[it] }.orEmpty()
+            val children = (0 until group.childCount).map(group::getChildAt)
+            boundGenreChips.keys.retainAll(children)
+            children.forEach { chip ->
+                val target = targets[(chip as? TextView)?.text?.toString()]
+                if (boundGenreChips[chip] == target) return@forEach
+                if (target == null) {
+                    if (boundGenreChips.remove(chip) != null) {
+                        chip.setOnClickListener(null)
+                        chip.isClickable = false
+                        chip.isFocusable = false
+                    }
+                } else {
+                    chip.setOnClickListener { openCatalog(target, null) }
+                    chip.isFocusable = true
+                    boundGenreChips[chip] = target
+                }
+            }
+        }
 
         private fun openSearch(query: String) {
             if (query.isBlank()) return
@@ -695,13 +720,14 @@ internal class RatingPlotImageHook(
                 castItems?.takeIf { it.isShown }?.let { list ->
                     for (i in 0 until list.childCount) list.getChildAt(i).setOnClickListener(castClick)
                 }
+                bindGenreClicks()
             }
             true
         }
         fun start() {
             view.addTextChangedListener(this)
             searchButton?.setOnClickListener(searchClick)
-            if (searchButton != null || castItems != null)
+            if (searchButton != null || castItems != null || genreGroup != null)
                 root.viewTreeObserver.addOnPreDrawListener(detailPreDraw)
             runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() }
         }
@@ -709,6 +735,12 @@ internal class RatingPlotImageHook(
             view.removeTextChangedListener(this)
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(detailPreDraw)
             searchButton?.setOnClickListener(null)
+            boundGenreChips.keys.forEach { chip ->
+                chip.setOnClickListener(null)
+                chip.isClickable = false
+                chip.isFocusable = false
+            }
+            boundGenreChips.clear()
             runCatching { trailers.stop() }; runCatching { backdrop.stop() }; runCatching { restore() }
         }
         private fun restore() {
