@@ -322,10 +322,23 @@ class SettingsBottomFragment(
         this.background = res.getDrawable(outlineId, null)
     }
 
+    // Plugin XML cannot reference the host app's custom attrs at AAPT2 link time.
+    private fun themeLayoutText(view: View) {
+        if (view is TextView && view.tag != "stremioc_keep_color") {
+            val attr = if (view.tag == "stremioc_secondary") HostR.attr.grayTextColor else HostR.attr.textColor
+            view.setTextColor(hostContext.colorFromAttribute(attr))
+            if (view is EditText) view.setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
+        }
+        if (view is ViewGroup) for (i in 0 until view.childCount) themeLayoutText(view.getChildAt(i))
+    }
+
     private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
         val id = getCachedResId(name, "layout")
         val layout = res.getLayout(id)
-        return inflater.inflate(layout, container, false).also(::normalizeTypeface)
+        return inflater.inflate(layout, container, false).also {
+            normalizeTypeface(it)
+            themeLayoutText(it)
+        }
     }
 
     private fun isCineStreamInstalled(): Boolean {
@@ -1765,6 +1778,7 @@ private fun showLanguageSelectDialog() {
             val v = LayoutInflater.from(parent.context).inflate(res.getLayout(layoutId), parent, false)
             v.background = getCardBg()
             normalizeTypeface(v)
+            themeLayoutText(v)
             return VH(v).also {
                 it.btnDelete.setImageDrawable(getDrawable("delete_icon"))
                 it.btnDelete.imageTintList = ColorStateList.valueOf(Color.rgb(229, 9, 20))
