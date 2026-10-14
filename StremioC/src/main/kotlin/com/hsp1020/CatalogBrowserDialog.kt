@@ -16,7 +16,6 @@ import android.view.ViewConfiguration
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Spinner
-import android.widget.AbsListView
 import android.widget.FrameLayout
 import androidx.appcompat.widget.AppCompatSpinner
 import com.google.android.material.button.MaterialButton
@@ -30,7 +29,6 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
 import android.os.Bundle
 import android.os.SystemClock
-import android.graphics.Canvas
 import android.view.ViewTreeObserver
 import android.widget.ImageView
 import androidx.core.view.ViewCompat
@@ -295,11 +293,6 @@ internal class CatalogBrowserDialog(
             scope.launch { reloadLinks() }
     }
 
-    // Temporary passive diagnostics for short vs. long dropdown taps.
-    private fun traceDropdown(message: String) {
-        android.util.Log.d("StremioCDropdown", "${SystemClock.uptimeMillis()} $message")
-    }
-
     private fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
     private fun button(label: String) = MaterialButton(activity).apply {
         id = View.generateViewId()
@@ -320,9 +313,7 @@ internal class CatalogBrowserDialog(
 
         override fun performClick(): Boolean {
             if (!isEnabled || (adapter?.count ?: 0) <= 1) return false
-            val handled = super.performClick()
-            traceDropdown("OPEN selector=${contentDescription} handled=$handled count=${adapter?.count} width=$width")
-            return handled
+            return super.performClick()
         }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -428,57 +419,17 @@ internal class CatalogBrowserDialog(
                 val checked = position == this@choices.selectedItemPosition
                 val color = activity.colorFromAttribute(if (checked) R.attr.colorPrimary else R.attr.textColor)
                 return object : LinearLayout(activity) {
-                    private var downAt = 0L
-                    private var pressedAt = 0L
-                    private var firstPressedFrame = false
-
                     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-                        val action = event.actionMasked
-                        if (action == MotionEvent.ACTION_DOWN) downAt = event.eventTime
-                        val handled = super.dispatchTouchEvent(event)
-                        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_UP ||
-                            action == MotionEvent.ACTION_CANCEL) {
-                            traceDropdown("ROW_TOUCH selector=$title pos=$position action=$action handled=$handled " +
-                                "duration=${if (downAt == 0L) -1 else event.eventTime - downAt}ms " +
-                                "x=${event.x.toInt()} width=$width pressed=$isPressed")
+                        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                            background?.setHotspot(event.x, event.y)
+                            isPressed = true
                         }
-                        return handled
-                    }
-
-                    override fun setPressed(pressed: Boolean) {
-                        val changed = isPressed != pressed
-                        super.setPressed(pressed)
-                        if (changed) {
-                            val now = SystemClock.uptimeMillis()
-                            if (pressed) { pressedAt = now; firstPressedFrame = false }
-                            val list = parent as? AbsListView
-                            traceDropdown("ROW_PRESS selector=$title pos=$position pressed=$pressed " +
-                                "held=${if (pressedAt == 0L) -1 else now - pressedAt}ms " +
-                                "width=$width listPressed=${list?.isPressed} selectorBounds=${list?.selector?.bounds} " +
-                                "background=${background?.javaClass?.simpleName}")
-                        }
-                    }
-
-                    override fun dispatchDraw(canvas: Canvas) {
-                        if (isPressed && !firstPressedFrame) {
-                            firstPressedFrame = true
-                            val list = parent as? AbsListView
-                            traceDropdown("ROW_DRAW selector=$title pos=$position " +
-                                "afterPress=${SystemClock.uptimeMillis() - pressedAt}ms " +
-                                "width=$width textWidth=${getChildAt(0)?.width} iconWidth=${getChildAt(1)?.width} " +
-                                "listSelector=${list?.selector?.bounds}")
-                        }
-                        super.dispatchDraw(canvas)
-                    }
-
-                    override fun onAttachedToWindow() {
-                        super.onAttachedToWindow()
-                        traceDropdown("ROW_ATTACH selector=$title pos=$position parent=${parent?.javaClass?.simpleName}")
+                        // Keep ListView in control of selection, scrolling and dismissal.
+                        return super.dispatchTouchEvent(event)
                     }
 
                     override fun onDetachedFromWindow() {
-                        traceDropdown("ROW_DETACH selector=$title pos=$position pressed=$isPressed " +
-                            "held=${if (pressedAt == 0L) -1 else SystemClock.uptimeMillis() - pressedAt}ms")
+                        isPressed = false
                         super.onDetachedFromWindow()
                     }
                 }.apply {
@@ -517,8 +468,6 @@ internal class CatalogBrowserDialog(
         onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                traceDropdown("SELECT selector=$title pos=$position id=$id " +
-                    "viewPressed=${view?.isPressed} viewWidth=${view?.width} closed=$closed")
                 if (!closed && position in labels.indices) choose(position)
             }
         }
