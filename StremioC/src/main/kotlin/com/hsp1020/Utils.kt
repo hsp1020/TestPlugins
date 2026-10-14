@@ -16,6 +16,12 @@ import android.app.Dialog
 import android.content.Context
 import android.content.res.Resources
 import android.content.res.ColorStateList
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
+import android.view.MotionEvent
+import android.widget.ImageView
+import com.google.android.material.chip.Chip
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -54,6 +60,7 @@ import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import com.lagradost.cloudstream3.utils.UIHelper.navigate
 import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import kotlin.math.roundToInt
+internal const val STREMIOC_DETAIL_RIPPLE_COLOR = 0x55FFFFFF
 private val QUALITY_REGEX = Regex("(\\d{3,4}[pP])")
 private val TT_REGEX = Regex("^tt\\d+$")
 
@@ -663,6 +670,31 @@ internal class RatingPlotImageHook(
         private val actorNameId = root.resources.getIdentifier("actor_name", "id", root.context.packageName)
         private val genreGroup = root.findViewById<ChipGroup>(R.id.result_tag)
         private val boundGenreChips = mutableMapOf<View, CatalogShortcutTarget>()
+        private val actorPhotoForegrounds = mutableMapOf<View, Pair<ImageView, Drawable?>>()
+
+        private fun bindActorPhotoRipple(card: View) {
+            if (actorPhotoForegrounds.containsKey(card)) return
+            val photo = card.findViewById<ImageView>(R.id.actor_image) ?: return
+            val original = photo.foreground
+            val mask = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(android.graphics.Color.WHITE)
+            }
+            photo.foreground = RippleDrawable(
+                ColorStateList.valueOf(STREMIOC_DETAIL_RIPPLE_COLOR), original, mask
+            )
+            card.setOnTouchListener { _, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        photo.foreground?.setHotspot(photo.width / 2f, photo.height / 2f)
+                        photo.isPressed = true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> photo.isPressed = false
+                }
+                false // Preserve existing actor-name search click and long-press behavior.
+            }
+            actorPhotoForegrounds[card] = photo to original
+        }
 
         private fun bindGenreClicks() {
             val group = genreGroup ?: return
@@ -675,10 +707,19 @@ internal class RatingPlotImageHook(
                 if (target == null) {
                     if (boundGenreChips.remove(chip) != null) {
                         chip.setOnClickListener(null)
+                        chip.setOnTouchListener(null)
                         chip.isClickable = false
                         chip.isFocusable = false
                     }
                 } else {
+                    (chip as? Chip)?.rippleColor = ColorStateList.valueOf(STREMIOC_DETAIL_RIPPLE_COLOR)
+                    chip.setOnTouchListener { view, event ->
+                        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                            view.background?.setHotspot(event.x, event.y)
+                            view.isPressed = true
+                        }
+                        false
+                    }
                     chip.setOnClickListener { openCatalog(target, null) }
                     chip.isFocusable = true
                     boundGenreChips[chip] = target
@@ -718,7 +759,11 @@ internal class RatingPlotImageHook(
             if (fragment.isAdded) {
                 if (searchButton?.isShown == true) searchButton.setOnClickListener(searchClick)
                 castItems?.takeIf { it.isShown }?.let { list ->
-                    for (i in 0 until list.childCount) list.getChildAt(i).setOnClickListener(castClick)
+                    for (i in 0 until list.childCount) {
+                        val card = list.getChildAt(i)
+                        card.setOnClickListener(castClick)
+                        bindActorPhotoRipple(card)
+                    }
                 }
                 bindGenreClicks()
             }
@@ -737,10 +782,17 @@ internal class RatingPlotImageHook(
             searchButton?.setOnClickListener(null)
             boundGenreChips.keys.forEach { chip ->
                 chip.setOnClickListener(null)
+                chip.setOnTouchListener(null)
                 chip.isClickable = false
                 chip.isFocusable = false
             }
             boundGenreChips.clear()
+            actorPhotoForegrounds.forEach { (card, pair) ->
+                card.setOnTouchListener(null)
+                pair.first.isPressed = false
+                pair.first.foreground = pair.second
+            }
+            actorPhotoForegrounds.clear()
             runCatching { trailers.stop() }; runCatching { backdrop.stop() }; runCatching { restore() }
         }
         private fun restore() {

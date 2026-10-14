@@ -152,18 +152,24 @@ internal class TrailerChooser(
         if (isTv) {
             tvButton?.apply {
                 setOnClickListener(pickerClick)
-                setOnKeyListener { _, code, event ->
+                setOnKeyListener { view, code, event ->
                     if (code == KeyEvent.KEYCODE_DPAD_CENTER ||
                         code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER
                     ) {
+                        view.isPressed = event.action == KeyEvent.ACTION_DOWN
                         if (event.action == KeyEvent.ACTION_UP) showPicker()
                         true
                     } else false
                 }
-                setOnTouchListener { _, event ->
+                setOnTouchListener { view, event ->
                     when (event.actionMasked) {
-                        MotionEvent.ACTION_DOWN -> true
-                        MotionEvent.ACTION_UP -> { showPicker(); true }
+                        MotionEvent.ACTION_DOWN -> {
+                            view.background?.setHotspot(event.x, event.y)
+                            view.isPressed = true
+                            true
+                        }
+                        MotionEvent.ACTION_UP -> { view.isPressed = false; showPicker(); true }
+                        MotionEvent.ACTION_CANCEL -> { view.isPressed = false; true }
                         else -> false
                     }
                 }
@@ -235,12 +241,20 @@ internal class TrailerChooser(
                     alpha = 0x80
                 })
                 chipBackgroundColor = ColorStateList.valueOf(0xFF2B2C30.toInt())
+                rippleColor = ColorStateList.valueOf(STREMIOC_DETAIL_RIPPLE_COLOR)
                 setTextColor(Color.WHITE)
                 typeface = Typeface.create(ResourcesCompat.getFont(context, R.font.google_sans), Typeface.BOLD)
                 fontFeatureSettings = "'liga' 0, 'clig' 0, 'calt' 0, 'dlig' 0"
                 isCheckable = false
                 isClickable = true
                 isFocusable = true
+                setOnTouchListener { view, event ->
+                    if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                        view.background?.setHotspot(event.x, event.y)
+                        view.isPressed = true
+                    }
+                    false
+                }
                 setOnClickListener { showPicker() }
             }.also {
                 hero.addView(it, FrameLayout.LayoutParams(
