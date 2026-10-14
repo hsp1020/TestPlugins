@@ -269,6 +269,8 @@ internal class TrailerChooser(
                 textSize = 17f
                 typeface = Typeface.create(typeface, Typeface.NORMAL)
             }
+            // The font can render "(2)" as ② through ligatures.
+            fontFeatureSettings = "'liga' 0, 'clig' 0, 'calt' 0, 'dlig' 0"
             setTextColor(foreground)
             setPadding(dp(4), dp(8), 0, dp(4))
         })
