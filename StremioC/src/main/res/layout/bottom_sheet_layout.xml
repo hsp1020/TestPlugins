@@ -1,513 +1,753 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools"
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/settingsRoot"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:background="@android:color/transparent"
-    android:layoutDirection="ltr">
-
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:layoutDirection="ltr"
+    android:paddingStart="16dp"
+    android:paddingEnd="16dp"
+    android:paddingBottom="12dp">
     <LinearLayout
+        android:id="@+id/settingsHeader"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:paddingStart="16dp"
-        android:paddingEnd="16dp"
-        android:paddingBottom="20dp">
-
-        <!-- A single row; the title includes the adjacent expand/collapse indicator. -->
-        <LinearLayout
-            android:id="@+id/settingsHeader"
+        android:minHeight="48dp"
+        android:orientation="vertical">
+        <androidx.appcompat.widget.AppCompatTextView
+            android:id="@+id/settingsToggle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:minHeight="48dp"
-            android:orientation="horizontal"
-            android:gravity="center_vertical">
-
-            <androidx.appcompat.widget.AppCompatTextView
-                android:id="@+id/settingsToggle"
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="48dp"
-                android:gravity="center_vertical"
-                android:text="Stremio Settings"
-                android:textColor="?android:attr/textColorPrimary"
-                android:singleLine="true"
-                android:textAppearance="?android:attr/textAppearanceListItem"
-                android:textStyle="bold"
-                android:includeFontPadding="true"
-                android:autoSizeTextType="uniform"
-                android:autoSizeMinTextSize="11sp"
-                android:autoSizeMaxTextSize="16sp"
-                android:autoSizeStepGranularity="1sp" />
-
-            <TextView
-                android:id="@+id/tvExport"
-                android:layout_width="wrap_content"
-                android:layout_height="48dp"
-                android:gravity="center_vertical"
-                android:text="Export"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textSize="14sp"
-                android:textStyle="bold"
-                android:paddingHorizontal="6dp"
-                android:focusable="true"
-                android:background="?android:attr/selectableItemBackground"
-                android:clickable="true" />
-
-            <TextView
-                android:id="@+id/tvImport"
-                android:layout_width="wrap_content"
-                android:layout_height="48dp"
-                android:gravity="center_vertical"
-                android:text="Import"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textSize="14sp"
-                android:textStyle="bold"
-                android:paddingHorizontal="6dp"
-                android:focusable="true"
-                android:background="?android:attr/selectableItemBackground"
-                android:clickable="true" />
-
-            <ImageView
-                android:id="@+id/saveIcon"
-                android:layout_width="36dp"
-                android:layout_height="48dp"
-                android:scaleType="centerInside"
-                android:paddingStart="12dp"
-                android:paddingEnd="0dp"
-                android:paddingTop="5dp"
-                android:paddingBottom="5dp"
-                android:focusable="true"
-                android:background="?android:attr/selectableItemBackground"
-                android:clickable="true" />
-        </LinearLayout>
-
+            android:gravity="center_vertical"
+            android:text="Stremio Settings"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:maxLines="2"
+            android:ellipsize="end" />
+    </LinearLayout>
+    <androidx.core.widget.NestedScrollView
+        android:id="@+id/settingsViewport"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:fillViewport="false">
         <LinearLayout
             android:id="@+id/settingsBody"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:visibility="gone">
-
-
-        <!-- Add Link: align text-center spacing with the subsequent 34dp rows. -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="3dp"
-            android:gravity="center_vertical">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="Add Catalogs"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textAppearance="?android:attr/textAppearanceListItem"
-                android:textStyle="bold" />
-
-            <ImageView
-                android:id="@+id/addlinks"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:focusable="true"
-                android:paddingStart="10dp"
-                android:paddingEnd="0dp"
-                android:paddingTop="5dp"
-                android:paddingBottom="5dp"
-                android:background="?android:attr/selectableItemBackground"
-                android:clickable="true" />
-        </LinearLayout>
-
-        <!-- List Link -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="10dp"
-            android:gravity="center_vertical">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="List Catalogs"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textAppearance="?android:attr/textAppearanceListItem"
-                android:textStyle="bold" />
-
-            <ImageView
-                android:id="@+id/showlinks"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:paddingStart="10dp"
-                android:paddingEnd="0dp"
-                android:paddingTop="5dp"
-                android:paddingBottom="5dp"
-                android:focusable="true"
-                android:nextFocusUp="@id/addlinks"
-                android:background="?android:attr/selectableItemBackground"
-                android:clickable="true" />
-        </LinearLayout>
-
-        <!-- TMDb Language Selection (TMDB API Key 위로 이동 완료) -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="10dp"
-            android:gravity="center_vertical">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="TMDB Language"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textAppearance="?android:attr/textAppearanceListItem"
-                android:textStyle="bold" />
-
-            <ImageView
-                android:id="@+id/btnSelectLanguage"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:paddingStart="10dp"
-                android:paddingEnd="0dp"
-                android:paddingTop="5dp"
-                android:paddingBottom="5dp"
-                android:focusable="true"
-                android:background="?android:attr/selectableItemBackground"
-                android:clickable="true" />
-        </LinearLayout>
-
-        <!-- TMDb API Key Input -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:layout_marginTop="10dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="TMDB API Key (Required)"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textAppearance="?android:attr/textAppearanceListItem"
-                android:textStyle="bold" />
-
-            <EditText
-                android:id="@+id/etTmdbApiKey"
-                android:layout_width="match_parent"
-                android:layout_height="35dp"
-                android:hint="Enter TMDb API Key"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textColorHint="?android:attr/textColorSecondary"
-                android:textSize="14sp"
-                android:paddingHorizontal="12dp"
-                android:paddingVertical="0dp"
-                android:gravity="center_vertical"
-                android:fontFamily="sans-serif"
-                android:layout_marginTop="5dp"
-                android:background="@android:color/transparent"
-                android:singleLine="true" />
-        </LinearLayout>
-
-        <!-- Additional stream/subtitle addon URLs (shared by Add Links) -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:layout_marginTop="10dp">
+            android:orientation="vertical">
             <LinearLayout
+                android:id="@+id/pageHub"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical">
-                <TextView
-                    android:layout_width="0dp"
-                    android:layout_weight="1"
+                android:orientation="vertical">
+                <LinearLayout
+                    android:id="@+id/rowCatalogs"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Stream / Subtitle Addon URL"
-                    android:textColor="?android:attr/textColorPrimary"
-                    android:textAppearance="?android:attr/textAppearanceListItem"
-                    android:textStyle="bold" />
-                <ImageView
-                    android:id="@+id/toggleStreamSubtitleUrls"
-                    android:layout_width="40dp"
-                    android:layout_height="24dp"
-                    android:paddingStart="16dp"
-                    android:paddingEnd="0dp"
-                    android:contentDescription="Collapse addon URLs"
-                    android:background="?android:attr/selectableItemBackground"
+                    android:minHeight="48dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp"
+                    android:focusable="true"
                     android:clickable="true"
-                    android:focusable="true" />
+                    android:background="?android:attr/selectableItemBackground">
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Catalogs"
+                            android:textSize="16sp"
+                            android:textStyle="bold" />
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Add, edit and configure catalogs."
+                            android:textSize="12sp"
+                            android:tag="stremioc_secondary"
+                            android:singleLine="true"
+                            android:ellipsize="end" />
+                    </LinearLayout>
+                    <TextView
+                        android:layout_width="24dp"
+                        android:layout_height="wrap_content"
+                        android:gravity="center"
+                        android:text="›"
+                        android:textSize="24sp"
+                        android:importantForAccessibility="no" />
+                    <ImageView
+                        android:id="@+id/showlinks"
+                        android:layout_width="0dp"
+                        android:layout_height="0dp"
+                        android:visibility="gone"
+                        android:importantForAccessibility="no" />
+                </LinearLayout>
+                <ImageView
+                    android:id="@+id/addlinks"
+                    android:layout_width="0dp"
+                    android:layout_height="0dp"
+                    android:visibility="gone"
+                    android:importantForAccessibility="no" />
+                <LinearLayout
+                    android:id="@+id/rowSources"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp"
+                    android:focusable="true"
+                    android:clickable="true"
+                    android:background="?android:attr/selectableItemBackground">
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Sources &amp; Integrations"
+                            android:textSize="16sp"
+                            android:textStyle="bold" />
+                        <TextView
+                            android:id="@+id/summarySources"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="No URL entries"
+                            android:textSize="12sp"
+                            android:tag="stremioc_secondary"
+                            android:singleLine="true"
+                            android:ellipsize="end" />
+                    </LinearLayout>
+                    <TextView
+                        android:layout_width="24dp"
+                        android:layout_height="wrap_content"
+                        android:gravity="center"
+                        android:text="›"
+                        android:textSize="24sp"
+                        android:importantForAccessibility="no" />
+                </LinearLayout>
+                <LinearLayout
+                    android:id="@+id/rowMetadata"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp"
+                    android:focusable="true"
+                    android:clickable="true"
+                    android:background="?android:attr/selectableItemBackground">
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Metadata &amp; Sync"
+                            android:textSize="16sp"
+                            android:textStyle="bold" />
+                        <TextView
+                            android:id="@+id/summaryMetadata"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="API key required"
+                            android:textSize="12sp"
+                            android:tag="stremioc_secondary"
+                            android:singleLine="true"
+                            android:ellipsize="end" />
+                    </LinearLayout>
+                    <TextView
+                        android:layout_width="24dp"
+                        android:layout_height="wrap_content"
+                        android:gravity="center"
+                        android:text="›"
+                        android:textSize="24sp"
+                        android:importantForAccessibility="no" />
+                </LinearLayout>
+                <LinearLayout
+                    android:id="@+id/rowDisplay"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp"
+                    android:focusable="true"
+                    android:clickable="true"
+                    android:background="?android:attr/selectableItemBackground">
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Display &amp; Ratings"
+                            android:textSize="16sp"
+                            android:textStyle="bold" />
+                        <TextView
+                            android:id="@+id/summaryDisplay"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="MDBList: Off · XRDB: Off"
+                            android:textSize="12sp"
+                            android:tag="stremioc_secondary"
+                            android:singleLine="true"
+                            android:ellipsize="end" />
+                    </LinearLayout>
+                    <TextView
+                        android:layout_width="24dp"
+                        android:layout_height="wrap_content"
+                        android:gravity="center"
+                        android:text="›"
+                        android:textSize="24sp"
+                        android:importantForAccessibility="no" />
+                </LinearLayout>
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Backup"
+                    android:layout_marginTop="8dp"
+                    android:layout_marginBottom="4dp"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+                    <TextView
+                        android:id="@+id/tvExport"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:minHeight="48dp"
+                        android:gravity="center"
+                        android:text="Export"
+                        android:textSize="14sp"
+                        android:textStyle="bold"
+                        android:focusable="true"
+                        android:clickable="true"
+                        android:background="?android:attr/selectableItemBackground" />
+                    <TextView
+                        android:id="@+id/tvImport"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:minHeight="48dp"
+                        android:layout_marginStart="8dp"
+                        android:gravity="center"
+                        android:text="Import"
+                        android:textSize="14sp"
+                        android:textStyle="bold"
+                        android:focusable="true"
+                        android:clickable="true"
+                        android:background="?android:attr/selectableItemBackground" />
+                </LinearLayout>
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Export uses saved values."
+                    android:textSize="12sp"
+                    android:tag="stremioc_secondary" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Catalogs and language are saved separately."
+                    android:textSize="12sp"
+                    android:tag="stremioc_secondary" />
             </LinearLayout>
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Stremio Stream &amp; Subtitle Sources"
-                android:tag="stremioc_secondary"
-                android:textColor="?android:attr/textColorSecondary"
-                android:textSize="12sp"
-                android:layout_marginTop="2dp" />
             <LinearLayout
-                android:id="@+id/containerStreamSubtitleUrls"
+                android:id="@+id/pageSources"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical" />
+                android:orientation="vertical"
+                android:visibility="gone">
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Integrations"
+                    android:layout_marginBottom="4dp"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="CineStream"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+                    <Switch
+                        android:id="@+id/switchCineStream"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minHeight="48dp"
+                        android:focusable="true"
+                        android:contentDescription="CineStream" />
+                </LinearLayout>
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="StreamPlay"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+                    <Switch
+                        android:id="@+id/switchStreamPlay"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minHeight="48dp"
+                        android:focusable="true"
+                        android:contentDescription="StreamPlay" />
+                </LinearLayout>
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="VixSrc"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+                    <Switch
+                        android:id="@+id/switchVixSrc"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minHeight="48dp"
+                        android:focusable="true"
+                        android:contentDescription="VixSrc" />
+                </LinearLayout>
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Stream / Subtitle Addons"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+                    <ImageView
+                        android:id="@+id/toggleStreamSubtitleUrls"
+                        android:layout_width="48dp"
+                        android:layout_height="48dp"
+                        android:padding="12dp"
+                        android:scaleType="centerInside"
+                        android:focusable="true"
+                        android:clickable="true"
+                        android:background="?android:attr/selectableItemBackground"
+                        android:contentDescription="Collapse addon URLs" />
+                </LinearLayout>
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Used when Stream / Subtitle Sync is enabled for a catalog."
+                    android:textSize="12sp"
+                    android:tag="stremioc_secondary" />
+                <LinearLayout
+                    android:id="@+id/containerStreamSubtitleUrls"
+                    android:layout_marginTop="4dp"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+                </LinearLayout>
+                <TextView
+                    android:id="@+id/btnAddStreamSubtitleUrl"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:gravity="center_vertical"
+                    android:text="Add"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:focusable="true"
+                    android:clickable="true"
+                    android:paddingStart="10dp"
+                    android:paddingEnd="10dp"
+                    android:background="?android:attr/selectableItemBackground" />
+                <TextView
+                    android:id="@+id/sourceSaveHint"
+                    android:layout_marginTop="2dp"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="URL changes are saved with Save all."
+                    android:textSize="12sp"
+                    android:tag="stremioc_secondary" />
+            </LinearLayout>
+            <LinearLayout
+                android:id="@+id/pageMetadata"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="TMDB API Key (Required)"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+                <FrameLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="2dp">
+                    <EditText
+                        android:id="@+id/etTmdbApiKey"
+                        android:layout_width="match_parent"
+                        android:layout_height="35dp"
+                        android:layout_gravity="center_vertical"
+                        android:hint="Enter TMDb API Key"
+                        android:inputType="text"
+                        android:singleLine="true"
+                        android:textSize="14sp"
+                        android:fontFamily="sans-serif"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp"
+                        android:paddingTop="0dp"
+                        android:paddingBottom="0dp"
+                        android:background="@android:color/transparent" />
+                </FrameLayout>
+                <LinearLayout
+                    android:id="@+id/rowLanguage"
+                    android:layout_marginTop="8dp"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp"
+                    android:focusable="true"
+                    android:clickable="true"
+                    android:background="?android:attr/selectableItemBackground">
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="TMDB Language"
+                            android:textSize="16sp"
+                            android:textStyle="bold" />
+                        <TextView
+                            android:id="@+id/summaryLanguage"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="en-US"
+                            android:textSize="12sp"
+                            android:tag="stremioc_secondary"
+                            android:singleLine="true"
+                            android:ellipsize="end" />
+                    </LinearLayout>
+                    <TextView
+                        android:layout_width="24dp"
+                        android:layout_height="wrap_content"
+                        android:gravity="center"
+                        android:text="›"
+                        android:textSize="24sp"
+                        android:importantForAccessibility="no" />
+                    <ImageView
+                        android:id="@+id/btnSelectLanguage"
+                        android:layout_width="0dp"
+                        android:layout_height="0dp"
+                        android:visibility="gone"
+                        android:importantForAccessibility="no" />
+                </LinearLayout>
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Saved separately with Apply."
+                    android:textSize="12sp"
+                    android:tag="stremioc_secondary" />
+                <LinearLayout
+                    android:id="@+id/layoutHistorySyncUrl"
+                    android:layout_marginTop="8dp"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:minHeight="48dp"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="Meta / History Addon"
+                            android:textSize="16sp"
+                            android:textStyle="bold" />
+                        <ImageButton
+                            android:id="@+id/btnConfigureHistoryAddon"
+                            android:layout_width="48dp"
+                            android:layout_height="48dp"
+                            android:layout_marginStart="4dp"
+                            android:padding="12dp"
+                            android:scaleType="centerInside"
+                            android:contentDescription="Addon settings for Meta / History"
+                            android:focusable="true"
+                            android:background="?android:attr/selectableItemBackgroundBorderless" />
+                        <ImageButton
+                            android:id="@+id/btnDeleteHistoryAddon"
+                            android:layout_width="48dp"
+                            android:layout_height="48dp"
+                            android:layout_marginStart="4dp"
+                            android:padding="12dp"
+                            android:scaleType="centerInside"
+                            android:contentDescription="Delete Meta / History addon URL"
+                            android:focusable="true"
+                            android:background="?android:attr/selectableItemBackgroundBorderless" />
+                    </LinearLayout>
+                    <FrameLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="2dp">
+                        <EditText
+                            android:id="@+id/etHistorySyncUrl"
+                            android:layout_width="match_parent"
+                            android:layout_height="35dp"
+                            android:layout_gravity="center_vertical"
+                            android:hint="Addon URL (http/https)"
+                            android:inputType="textUri"
+                            android:singleLine="true"
+                            android:textSize="14sp"
+                            android:fontFamily="sans-serif"
+                            android:paddingStart="12dp"
+                            android:paddingEnd="12dp"
+                            android:paddingTop="0dp"
+                            android:paddingBottom="0dp"
+                            android:background="@android:color/transparent" />
+                    </FrameLayout>
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="AIOMetadata addon URL. Configure sync per catalog in Edit Link Info."
+                        android:textSize="12sp"
+                        android:tag="stremioc_secondary" />
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="URL changes are saved with Save all."
+                        android:textSize="12sp"
+                        android:tag="stremioc_secondary" />
+                </LinearLayout>
+            </LinearLayout>
+            <LinearLayout
+                android:id="@+id/pageDisplay"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="MDBList Ratings"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+                    <Switch
+                        android:id="@+id/switchMdbList"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minHeight="48dp"
+                        android:focusable="true"
+                        android:contentDescription="MDBList Ratings" />
+                </LinearLayout>
+                <LinearLayout
+                    android:id="@+id/layoutMdbList"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="MDBList API Key"
+                        android:textSize="12sp"
+                        android:tag="stremioc_secondary" />
+                    <FrameLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="2dp">
+                        <EditText
+                            android:id="@+id/etMdbListApiKey"
+                            android:layout_width="match_parent"
+                            android:layout_height="35dp"
+                            android:layout_gravity="center_vertical"
+                            android:hint="Enter MdbList API Key"
+                            android:inputType="text"
+                            android:singleLine="true"
+                            android:textSize="14sp"
+                            android:fontFamily="sans-serif"
+                            android:paddingStart="12dp"
+                            android:paddingEnd="12dp"
+                            android:paddingTop="0dp"
+                            android:paddingBottom="0dp"
+                            android:background="@android:color/transparent" />
+                    </FrameLayout>
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Used when MDBList Ratings is on."
+                        android:textSize="12sp"
+                        android:tag="stremioc_secondary" />
+                </LinearLayout>
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="XRDB Poster"
+                        android:textSize="16sp"
+                        android:textStyle="bold" />
+                    <Switch
+                        android:id="@+id/switchCustomPoster"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minHeight="48dp"
+                        android:focusable="true"
+                        android:contentDescription="XRDB Poster" />
+                </LinearLayout>
+                <LinearLayout
+                    android:id="@+id/layoutCustomPosterUrl"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Poster URL template"
+                        android:textSize="12sp"
+                        android:tag="stremioc_secondary" />
+                    <FrameLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="2dp">
+                        <EditText
+                            android:id="@+id/etCustomPosterUrl"
+                            android:layout_width="match_parent"
+                            android:layout_height="35dp"
+                            android:layout_gravity="center_vertical"
+                            android:hint="https://extendedratings.com/poster/..."
+                            android:inputType="textUri"
+                            android:singleLine="true"
+                            android:textSize="14sp"
+                            android:fontFamily="sans-serif"
+                            android:paddingStart="12dp"
+                            android:paddingEnd="12dp"
+                            android:paddingTop="0dp"
+                            android:paddingBottom="0dp"
+                            android:background="@android:color/transparent" />
+                    </FrameLayout>
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Used for TMDB recommendations only."
+                        android:textSize="12sp"
+                        android:tag="stremioc_secondary" />
+                </LinearLayout>
+            </LinearLayout>
         </LinearLayout>
-
-        <!-- History & Library Sync URL Input (MDBList Ratings 위로 이동 완료) -->
-        <LinearLayout
-            android:id="@+id/layoutHistorySyncUrl"
-            android:layout_width="match_parent"
+    </androidx.core.widget.NestedScrollView>
+    <LinearLayout
+        android:id="@+id/settingsFooter"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:minHeight="48dp"
+        android:orientation="horizontal">
+        <TextView
+            android:id="@+id/settingsBack"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:layout_marginTop="10dp">
-
+            android:layout_weight="1"
+            android:minHeight="48dp"
+            android:gravity="center"
+            android:text="Close"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="?android:attr/selectableItemBackground" />
+        <LinearLayout
+            android:id="@+id/saveAction"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:minHeight="48dp"
+            android:orientation="horizontal"
+            android:gravity="center"
+            android:focusable="true"
+            android:clickable="true"
+            android:background="?android:attr/selectableItemBackground">
+            <ImageView
+                android:id="@+id/saveIcon"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:importantForAccessibility="no" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Meta / History Addon URL"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textAppearance="?android:attr/textAppearanceListItem"
-                android:textStyle="bold" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Aiometadata addon URL"
-                android:tag="stremioc_secondary"
-                android:textColor="?android:attr/textColorSecondary"
-                android:textSize="12sp"
-                android:layout_marginTop="2dp" />
-
-            <EditText
-                android:id="@+id/etHistorySyncUrl"
-                android:layout_width="match_parent"
-                android:layout_height="35dp"
-                android:hint="https://aiometadata.elfhosted.com/stremio/..."
-                android:textColor="?android:attr/textColorPrimary"
-                android:textColorHint="?android:attr/textColorSecondary"
+                android:layout_marginStart="8dp"
+                android:text="Save all"
                 android:textSize="14sp"
-                android:paddingHorizontal="12dp"
-                android:paddingVertical="0dp"
-                android:gravity="center_vertical"
-                android:fontFamily="sans-serif"
-                android:layout_marginTop="5dp"
-                android:background="@android:color/transparent"
-                android:singleLine="true" />
-        </LinearLayout>
-
-        <!-- MdbList Ratings Toggle -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="10dp"
-            android:gravity="center_vertical">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="MDBList Ratings"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textAppearance="?android:attr/textAppearanceListItem"
                 android:textStyle="bold" />
-
-            <Switch
-                android:id="@+id/switchMdbList"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:focusable="true"
-                android:paddingStart="10dp"
-                android:paddingEnd="0dp"
-                android:paddingTop="5dp"
-                android:paddingBottom="5dp" />
-        </LinearLayout>
-
-        <!-- MdbList API Key Input -->
-        <LinearLayout
-            android:id="@+id/layoutMdbList"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:layout_marginTop="5dp"
-            android:visibility="gone">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="MDBList API Key (Required)"
-                android:tag="stremioc_secondary"
-                android:textColor="?android:attr/textColorSecondary"
-                android:textSize="12sp" />
-
-            <EditText
-                android:id="@+id/etMdbListApiKey"
-                android:layout_width="match_parent"
-                android:layout_height="35dp"
-                android:hint="Enter MdbList API Key"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textColorHint="?android:attr/textColorSecondary"
-                android:textSize="14sp"
-                android:paddingHorizontal="12dp"
-                android:paddingVertical="0dp"
-                android:gravity="center_vertical"
-                android:fontFamily="sans-serif"
-                android:layout_marginTop="5dp"
-                android:background="@android:color/transparent"
-                android:singleLine="true" />
-        </LinearLayout>
-
-        <!-- XRDB Poster Toggle -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="10dp"
-            android:gravity="center_vertical">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="XRDB Poster"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textAppearance="?android:attr/textAppearanceListItem"
-                android:textStyle="bold" />
-
-            <Switch
-                android:id="@+id/switchCustomPoster"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:focusable="true"
-                android:paddingStart="10dp"
-                android:paddingEnd="0dp"
-                android:paddingTop="5dp"
-                android:paddingBottom="5dp" />
-        </LinearLayout>
-
-        <!-- Custom Poster URL Input -->
-        <LinearLayout
-            android:id="@+id/layoutCustomPosterUrl"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:layout_marginTop="5dp"
-            android:visibility="gone">
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="XRDB Addon URL (TMDB recommendations only)"
-                android:tag="stremioc_secondary"
-                android:textColor="?android:attr/textColorSecondary"
-                android:textSize="12sp" />
-
-            <EditText
-                android:id="@+id/etCustomPosterUrl"
-                android:layout_width="match_parent"
-                android:layout_height="35dp"
-                android:hint="https://extendedratings.com/poster/..."
-                android:textColor="?android:attr/textColorPrimary"
-                android:textColorHint="?android:attr/textColorSecondary"
-                android:textSize="14sp"
-                android:paddingHorizontal="12dp"
-                android:paddingVertical="0dp"
-                android:gravity="center_vertical"
-                android:fontFamily="sans-serif"
-                android:layout_marginTop="5dp"
-                android:background="@android:color/transparent"
-                android:singleLine="true" />
-        </LinearLayout>
-
-        <!-- CineStream Toggle -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="10dp"
-            android:gravity="center_vertical">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="CineStream"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textAppearance="?android:attr/textAppearanceListItem"
-                android:textStyle="bold" />
-
-            <Switch
-                android:id="@+id/switchCineStream"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:focusable="true"
-                android:paddingStart="10dp"
-                android:paddingEnd="0dp"
-                android:paddingTop="5dp"
-                android:paddingBottom="5dp" />
-        </LinearLayout>
-
-        <!-- StreamPlay Toggle -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="10dp"
-            android:gravity="center_vertical">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="StreamPlay"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textAppearance="?android:attr/textAppearanceListItem"
-                android:textStyle="bold" />
-
-            <Switch
-                android:id="@+id/switchStreamPlay"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:focusable="true"
-                android:paddingStart="10dp"
-                android:paddingEnd="0dp"
-                android:paddingTop="5dp"
-                android:paddingBottom="5dp" />
-        </LinearLayout>
-
-        <!-- VixSrc Toggle -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="10dp"
-            android:gravity="center_vertical">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="VixSrc"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textAppearance="?android:attr/textAppearanceListItem"
-                android:textStyle="bold" />
-
-            <Switch
-                android:id="@+id/switchVixSrc"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:focusable="true"
-                android:paddingStart="10dp"
-                android:paddingEnd="0dp"
-                android:paddingTop="5dp"
-                android:paddingBottom="5dp" />
-        </LinearLayout>
-
         </LinearLayout>
     </LinearLayout>
-</androidx.core.widget.NestedScrollView>
+</LinearLayout>

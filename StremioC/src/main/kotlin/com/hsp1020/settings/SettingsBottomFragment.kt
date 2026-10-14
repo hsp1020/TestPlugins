@@ -2,6 +2,27 @@
 package com.hsp1020
 
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.app.Dialog
+import android.content.ActivityNotFoundException
+import android.graphics.Rect
+import android.graphics.drawable.LayerDrawable
+import android.graphics.drawable.RippleDrawable
+import android.net.Uri
+import android.text.Editable
+import android.text.TextWatcher
+import android.view.Gravity
+import android.view.KeyEvent
+import android.view.TouchDelegate
+import android.view.ViewTreeObserver
+import android.widget.FrameLayout
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.doOnNextLayout
+import androidx.core.widget.NestedScrollView
+import com.lagradost.cloudstream3.ui.settings.Globals.TV
+import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
+import kotlinx.coroutines.CancellationException
 import android.content.Context
 import android.content.res.ColorStateList
 import android.content.Intent
@@ -149,7 +170,11 @@ class SettingsBottomFragment(
     private val hostContext: Context
 ) {
     // The sheet is not restored by FragmentManager during Activity recreation.
-    private val settingsDialog = AppCompatDialog(hostContext)
+    private val settingsDialog = object : AppCompatDialog(hostContext) {
+        override fun cancel() {
+            if (backHandler?.invoke() != true) super.cancel()
+        }
+    }
     private val uiScope = MainScope()
     private val hostOwner = hostContext as? LifecycleOwner
     private val closeOnDestroy = LifecycleEventObserver { _, event ->
@@ -294,14 +319,535 @@ class SettingsBottomFragment(
         } catch (t: Throwable) { t.printStackTrace() }
     }
 
-    private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {
+
+    private enum class SettingsPage { HUB, SOURCES, METADATA, DISPLAY }
+    private var backHandler: (() -> Boolean)? = null
+    private var refreshSummaries: (() -> Unit)? = null
+    private var closing = false
+    private val childDialogs = linkedSetOf<AlertDialog>()
+    private val dialogOwners = mutableMapOf<Dialog, Dialog>()
+    private val dialogCleanup = mutableMapOf<Dialog, MutableList<() -> Unit>>()
+    private val focusPlans = mutableMapOf<Dialog, () -> Unit>()
+
+    private fun topDialog(): Dialog = childDialogs.lastOrNull { it.isShowing } ?: settingsDialog
+    private fun alive(owner: Dialog) = !closing && owner.isShowing && settingsDialog.isShowing &&
+        (hostContext !is Activity || (!hostContext.isFinishing && !hostContext.isDestroyed))
+    private fun onClose(owner: Dialog, cleanup: () -> Unit) {
+        dialogCleanup.getOrPut(owner) { mutableListOf() }.add(cleanup)
+    }
+    private fun cleanupDialog(owner: Dialog) {
+        dialogCleanup.remove(owner)?.toList()?.forEach { it() }
+        focusPlans.remove(owner)
+    }
+    private fun View.optional(name: String): View? =
+        getCachedResId(name, "id").takeIf { it != 0 }?.let { findViewById<View>(it) }
+
+    private fun hasViews(root: View, groups: Map<Class<*>, List<String>>) =
+        groups.all { (type, ids) -> ids.all { type.isInstance(root.optional(it)) } }
+
+    private fun usable(view: View?) = view != null && view.isAttachedToWindow &&
+        view.isShown && view.isEnabled && view.isFocusable
+
+    private fun hideKeyboard(view: View) {
+        (hostContext.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+            .hideSoftInputFromWindow(view.windowToken, 0)
+    }
+    private fun imeVisible(view: View): Boolean {
+        ViewCompat.getRootWindowInsets(view)?.let { return it.isVisible(WindowInsetsCompat.Type.ime()) }
+        val frame = Rect()
+        view.getWindowVisibleDisplayFrame(frame)
+        return hostContext.resources.displayMetrics.heightPixels - frame.bottom > dp(120)
+    }
+
+    private fun EditText.activateTvInput(key: Int, event: KeyEvent): Boolean {
+        if (key != KeyEvent.KEYCODE_DPAD_CENTER || imeVisible(this)) return false
+        if (event.action == KeyEvent.ACTION_UP && !performClick()) {
+            (hostContext.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                .showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+        }
+        return true
+    }
+
+    private fun prepareInput(field: EditText) {
+        field.background = getCardBg()
+        field.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
+        field.setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
+        field.textSize = 14f
+        field.minHeight = 0
+        field.isSingleLine = true
+        field.makeTvCompatible()
+        if (isLayout(TV)) {
+            field.showSoftInputOnFocus = false
+            field.setOnKeyListener { _, key, event -> field.activateTvInput(key, event) }
+        }
+        val slot = field.parent as? FrameLayout ?: return
+        val tagKey = getCachedResId("outline", "drawable")
+        if (slot.getTag(tagKey) == true) return
+        slot.setTag(tagKey, true)
+        fun update() {
+            val visual = maxOf(dp(35), kotlin.math.ceil(
+                (field.paint.fontMetrics.bottom - field.paint.fontMetrics.top).toDouble()
+            ).toInt() + field.compoundPaddingTop + field.compoundPaddingBottom + dp(4))
+            if (field.layoutParams.height != visual) field.layoutParams = field.layoutParams.apply { height = visual }
+            slot.minimumHeight = maxOf(dp(48), visual)
+            if (slot.layoutParams.height in 1 until slot.minimumHeight)
+                slot.layoutParams = slot.layoutParams.apply { height = slot.minimumHeight }
+            slot.touchDelegate = TouchDelegate(Rect(0, 0, slot.width, slot.height), field)
+        }
+        val listener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> update() }
+        if (slot.isAttachedToWindow) {
+            slot.addOnLayoutChangeListener(listener)
+            slot.post { if (slot.isAttachedToWindow) update() }
+        }
+        slot.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {
+                slot.addOnLayoutChangeListener(listener)
+                slot.post { if (slot.isAttachedToWindow) update() }
+            }
+            override fun onViewDetachedFromWindow(v: View) {
+                slot.removeOnLayoutChangeListener(listener)
+                slot.touchDelegate = null
+            }
+        })
+    }
+
+    private fun prepareControls(view: View) {
+        if (view is EditText) prepareInput(view)
+        else if (view is CompoundButton) {
+            view.textSize = 14f
+            view.minimumHeight = dp(48)
+            view.makeTvCompatible()
+            val row = view.parent as? LinearLayout
+            if (view is Switch && row != null && row.orientation == LinearLayout.HORIZONTAL) {
+                row.setOnClickListener { if (view.isEnabled) view.performClick() }
+                row.isFocusable = false
+                row.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                for (i in 0 until row.childCount) if (row.getChildAt(i) !== view)
+                    row.getChildAt(i).importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                row.setAddStatesFromChildren(true)
+                row.makeTvCompatible()
+            }
+        } else if (view.isFocusable && view.isClickable) view.makeTvCompatible()
+        if (view is ViewGroup) for (i in 0 until view.childCount) prepareControls(view.getChildAt(i))
+    }
+
+    private fun horizontalFocus(vararg controls: View) {
+        if (!isLayout(TV)) return
+        controls.forEachIndexed { index, control ->
+            control.setOnKeyListener { _, key, event ->
+                if (control is EditText && imeVisible(control)) false
+                else if (key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    val step = if (key == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
+                    val target = generateSequence(index + step) { it + step }
+                        .takeWhile { it in controls.indices }.map { controls[it] }.firstOrNull { usable(it) }
+                    if (target == null) false else {
+                        if (event.action == KeyEvent.ACTION_DOWN) target.requestFocus()
+                        true
+                    }
+                } else (control as? EditText)?.activateTvInput(key, event) ?: false
+            }
+        }
+    }
+
+    private fun restoreRow(rv: RecyclerView, position: Int, target: (View) -> View = { it }) {
+        if (position !in 0 until (rv.adapter?.itemCount ?: 0) || !rv.isAttachedToWindow ||
+            !rv.isShown || topDialog().window?.decorView !== rv.rootView) return
+        fun focus() {
+            if (!rv.isAttachedToWindow || !rv.isShown || topDialog().window?.decorView !== rv.rootView) return
+            rv.findViewHolderForAdapterPosition(position)?.itemView?.let { target(it).requestFocus() }
+        }
+        rv.findViewHolderForAdapterPosition(position)?.itemView?.let {
+            target(it).requestFocus()
+        } ?: run {
+            rv.doOnNextLayout { focus() }
+            rv.scrollToPosition(position)
+        }
+    }
+
+    private fun fitDialog(dialog: Dialog, root: LinearLayout, body: View?, capDp: Int) {
+        val metrics = hostContext.resources.displayMetrics
+        val base = Rect()
+        (hostContext as? Activity)?.window?.decorView?.getWindowVisibleDisplayFrame(base)
+        val baseHeight = if (base.height() > 0 && !imeVisible(root)) base.height() else metrics.heightPixels
+        val heightCap = (baseHeight * 0.88f).toInt().coerceAtLeast(1)
+        val initialPadding = intArrayOf(root.paddingLeft, root.paddingTop, root.paddingRight, root.paddingBottom)
+        val title = root.getChildAt(0)?.takeIf { it !== body }
+        val footer = root.getChildAt(root.childCount - 1)?.takeIf { it !== body && it is LinearLayout }
+        var sizing = false
+        fun resize() {
+            if (sizing || !dialog.isShowing || closing) return
+            sizing = true
+            try {
+                val frame = Rect()
+                root.getWindowVisibleDisplayFrame(frame)
+                val availableWidth = frame.width().takeIf { it > 0 } ?: metrics.widthPixels
+                val width = minOf(dp(capDp), (availableWidth * 0.9f).toInt()).coerceAtLeast(1)
+                val bodyWidth = (width - root.paddingLeft - root.paddingRight).coerceAtLeast(1)
+                val keyboard = imeVisible(root)
+                val cap = if (keyboard) minOf(heightCap, frame.height().takeIf { it > 0 } ?: heightCap) else heightCap
+                var showTitle = true
+                var showFooter = true
+                var paddingTop = initialPadding[1]
+                var paddingBottom = initialPadding[3]
+                fun adaptPairs(node: View) {
+                    if (node !is ViewGroup) return
+                    if (node is LinearLayout && node.childCount == 2 &&
+                        node.getChildAt(0).isClickable && node.getChildAt(1).isClickable &&
+                        node.getChildAt(0) !is EditText) {
+                        val need = maxOf(dp((264 * metrics.scaledDensity / metrics.density).toInt()),
+                            (0 until 2).sumOf { i ->
+                                val button = node.getChildAt(i)
+                                if (button is TextView) kotlin.math.ceil(button.paint.measureText(button.text.toString()).toDouble()).toInt() + dp(20)
+                                else dp(128)
+                            } + dp(8))
+                        val narrow = bodyWidth < need
+                        val orientation = if (narrow) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+                        if (node.orientation != orientation) {
+                            node.orientation = orientation
+                            for (j in 0 until 2) node.getChildAt(j).layoutParams = LinearLayout.LayoutParams(
+                                if (narrow) ViewGroup.LayoutParams.MATCH_PARENT else 0,
+                                ViewGroup.LayoutParams.WRAP_CONTENT, if (narrow) 0f else 1f
+                            ).apply { if (j == 1) setMargins(if (narrow) 0 else dp(8), if (narrow) dp(4) else 0, 0, 0) }
+                        }
+                    }
+                    for (i in 0 until node.childCount) adaptPairs(node.getChildAt(i))
+                }
+                adaptPairs(root)
+                fun chrome(): Int {
+                    var total = paddingTop + paddingBottom
+                    for (i in 0 until root.childCount) {
+                        val child = root.getChildAt(i)
+                        if (child === body || (child === title && !showTitle) ||
+                            (child === footer && !showFooter) ||
+                            (child !== title && child !== footer && child.visibility == View.GONE)) continue
+                        child.measure(View.MeasureSpec.makeMeasureSpec(bodyWidth, View.MeasureSpec.EXACTLY),
+                            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+                        val margins = child.layoutParams as? ViewGroup.MarginLayoutParams
+                        total += child.measuredHeight + (margins?.topMargin ?: 0) + (margins?.bottomMargin ?: 0)
+                    }
+                    return total
+                }
+                var chromeHeight = chrome()
+                if (keyboard && body != null && cap < chromeHeight + dp(48)) {
+                    showTitle = false; paddingTop = dp(4); paddingBottom = dp(4)
+                    chromeHeight = chrome()
+                    if (cap < chromeHeight + dp(48)) { showFooter = false; chromeHeight = chrome() }
+                }
+                title?.visibility = if (showTitle) View.VISIBLE else View.GONE
+                footer?.visibility = if (showFooter) View.VISIBLE else View.GONE
+                if (root.paddingTop != paddingTop || root.paddingBottom != paddingBottom)
+                    root.setPadding(initialPadding[0], paddingTop, initialPadding[2], paddingBottom)
+                body?.measure(View.MeasureSpec.makeMeasureSpec(bodyWidth, View.MeasureSpec.EXACTLY),
+                    if (body is RecyclerView) View.MeasureSpec.makeMeasureSpec(
+                        body.layoutParams.height.coerceAtLeast(dp(48)), View.MeasureSpec.EXACTLY)
+                    else View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+                val natural = body?.measuredHeight ?: 0
+                val height = (chromeHeight + natural).coerceIn(1, cap.coerceAtLeast(1))
+                body?.let {
+                    val wanted = (height - chromeHeight).coerceAtLeast(0)
+                    if (it.layoutParams.height != wanted) it.layoutParams = it.layoutParams.apply { this.height = wanted }
+                }
+                dialog.window?.let {
+                    if (it.attributes.width != width || it.attributes.height != height) it.setLayout(width, height)
+                }
+            } finally { sizing = false }
+        }
+        val listener = ViewTreeObserver.OnGlobalLayoutListener { resize() }
+        root.viewTreeObserver.addOnGlobalLayoutListener(listener)
+        onClose(dialog) {
+            if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnGlobalLayoutListener(listener)
+        }
+        resize()
+    }
+
+    private fun addonIcon(name: String, description: String) = ImageButton(hostContext).apply {
+        layoutParams = LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginStart = dp(4) }
+        setPadding(dp(12), dp(12), dp(12), dp(12))
+        scaleType = ImageView.ScaleType.CENTER_INSIDE
+        contentDescription = description
+        isFocusable = true
+        val value = android.util.TypedValue()
+        hostContext.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, value, true)
+        setBackgroundResource(value.resourceId)
+        styleAddonIcon(this, name)
+    }
+    private fun styleAddonIcon(button: ImageButton, name: String) {
+        button.setImageDrawable(getDrawable(name))
+        button.imageTintList = ColorStateList.valueOf(if (name == "delete_icon") Color.rgb(229, 9, 20)
+            else hostContext.colorFromAttribute(HostR.attr.textColor))
+        button.makeTvCompatible()
+    }
+    private fun inputSlot(field: EditText, weight: Float = 0f) = FrameLayout(hostContext).apply {
+        layoutParams = LinearLayout.LayoutParams(if (weight > 0) 0 else ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(48), weight)
+        addView(field, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(35), Gravity.CENTER_VERTICAL))
+    }
+    private fun bindAddonActions(owner: Dialog, url: EditText, gear: ImageButton, trash: ImageButton,
+        name: EditText? = null, canDelete: () -> Boolean, onDelete: () -> Unit): () -> Unit {
+        styleAddonIcon(gear, "settings_icon")
+        styleAddonIcon(trash, "delete_icon")
+        fun update() {
+            listOf(gear to url.text.isNotBlank(), trash to canDelete()).forEach { (button, enabled) ->
+                button.isEnabled = enabled
+                button.isFocusable = enabled
+                button.alpha = if (enabled) 1f else 0.5f
+            }
+        }
+        val watcher = object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { update() }
+            override fun afterTextChanged(s: Editable?) { if (s === url.text) url.error = null }
+        }
+        url.addTextChangedListener(watcher)
+        name?.addTextChangedListener(watcher)
+        gear.setOnClickListener {
+            showAddonSettings(owner, { url.text.toString() }) {
+                url.error = "Enter a valid addon URL to open settings."
+                url.requestFocus()
+            }
+        }
+        trash.setOnClickListener { if (canDelete()) onDelete() }
+        update()
+        name?.let { horizontalFocus(it, gear, trash) } ?: horizontalFocus(gear, trash)
+        val cleanup: () -> Unit = { url.removeTextChangedListener(watcher); name?.removeTextChangedListener(watcher) }
+        onClose(owner, cleanup)
+        return { cleanup(); dialogCleanup[owner]?.remove(cleanup) }
+    }
+
+    private fun popupContent(title: String) = LinearLayout(hostContext).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(20), dp(20), dp(20), dp(20))
+        background = getDarkThemeBg()
+        addView(TextView(hostContext).apply {
+            text = title; textSize = 18f; typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
+            gravity = Gravity.CENTER; setPadding(0, 0, 0, dp(12))
+        })
+    }
+    private fun popupMessage(message: String) = TextView(hostContext).apply {
+        text = message; textSize = 14f
+        setTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
+    }
+    private fun popupButtons(vararg buttons: View) = LinearLayout(hostContext).apply {
+        orientation = LinearLayout.HORIZONTAL
+        setPadding(0, dp(8), 0, 0)
+        buttons.forEachIndexed { i, button -> addView(button, LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+        ).apply { if (i > 0) marginStart = dp(8) }) }
+    }
+    private fun simpleButton(label: String) = dialogButton(hostContext, label,
+        LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+    private fun showDeleteConfirmation(owner: Dialog, label: String, message: String, confirm: () -> Unit) {
+        if (!alive(owner) || topDialog() !== owner) return
+        val content = popupContent("Delete addon?")
+        val safeLabel = label.takeUnless { it.startsWith("http://", true) || it.startsWith("https://", true) } ?: "Catalog addon"
+        val body = popupMessage("$safeLabel\n\n$message")
+        content.addView(body)
+        val cancel = simpleButton("Cancel")
+        val delete = simpleButton("Delete").apply { setTextColor(Color.rgb(229, 9, 20)) }
+        content.addView(popupButtons(cancel, delete))
+        val dialog = AlertDialog.Builder(hostContext).setView(content).create()
+        setupCustomDialog(dialog, content, owner = owner, initialFocus = { cancel })
+        cancel.setOnClickListener { dialog.dismiss() }
+        delete.setOnClickListener {
+            if (!alive(owner) || !dialog.isShowing || !delete.isEnabled) return@setOnClickListener
+            delete.isEnabled = false
+            try { confirm(); dialog.dismiss() }
+            catch (_: Exception) { body.text = "Unable to remove the addon. Try again."; delete.isEnabled = true }
+        }
+        dialog.show()
+    }
+    private fun deleteCatalogById(id: Long): Boolean {
+        val links = SettingsRepository.loadLinks(sharedPref)
+        if (!links.removeAll { it.id == id }) {
+            showToast("This addon is no longer available.")
+            return false
+        }
+        SettingsRepository.saveLinks(sharedPref, links)
+        return true
+    }
+
+    private fun addonManifestUri(raw: String): Uri {
+        val uri = raw.trim().toUri()
+        require(uri.scheme?.lowercase() in setOf("http", "https") && !uri.host.isNullOrBlank() && uri.userInfo == null)
+        return stremioManifestUrl(uri.buildUpon().fragment(null).build().toString()).toUri()
+    }
+    private fun addonConfigureUri(manifest: Uri): Uri {
+        val path = manifest.encodedPath ?: error("Missing manifest path")
+        require(path.endsWith("/manifest.json"))
+        return manifest.buildUpon().encodedPath(path.removeSuffix("/manifest.json") + "/configure")
+            .fragment(null).build()
+    }
+
+    private fun showAddonSettings(owner: Dialog, url: () -> String, onUrlError: () -> Unit = {}) {
+        if (!alive(owner) || topDialog() !== owner) return
+        val captured = url()
+        val manifest = runCatching { addonManifestUri(captured) }.getOrElse {
+            onUrlError(); showToast("Enter a valid addon URL to open settings."); return
+        }
+        val content = popupContent("Addon Settings")
+        val body = LinearLayout(hostContext).apply { orientation = LinearLayout.VERTICAL }
+        val message = popupMessage("Checking addon configuration...")
+        val copy = simpleButton("Copy URL").apply { visibility = View.GONE }
+        body.addView(message); body.addView(copy)
+        val scroll = NestedScrollView(hostContext).apply { addView(body) }
+        content.addView(scroll)
+        val cancel = simpleButton("Cancel")
+        val action = simpleButton("Open in browser").apply { visibility = View.GONE }
+        content.addView(popupButtons(cancel, action))
+        val dialog = AlertDialog.Builder(hostContext).setView(content).create()
+        var request: Job? = null
+        var configure: Uri? = null
+        fun current() = alive(owner) && dialog.isShowing && url() == captured
+        fun sameUrl(): Boolean {
+            if (current()) return true
+            if (alive(owner) && dialog.isShowing) {
+                message.text = "Addon URL changed. Open settings again."
+                copy.visibility = View.GONE; action.visibility = View.GONE; cancel.text = "Close"
+                showToast("Addon URL changed. Open settings again.")
+            }
+            return false
+        }
+        fun check() {
+            val previous = request
+            previous?.cancel()
+            configure = null
+            message.text = "Checking addon configuration..."
+            copy.visibility = View.GONE; action.visibility = View.GONE
+            cancel.text = "Cancel"
+            request = uiScope.launch {
+                try {
+                    previous?.join()
+                    if (!sameUrl()) return@launch
+                    val declared = withContext(Dispatchers.IO) {
+                        val response = com.lagradost.cloudstream3.app.get(manifest.toString(), timeout = 10L)
+                        check(response.isSuccessful) { "Unable to fetch addon manifest" }
+                        val hints = JSONObject(response.text).optJSONObject("behaviorHints")
+                        hints?.optBoolean("configurable", false) == true ||
+                            hints?.optBoolean("configurationRequired", false) == true
+                    }
+                    if (!sameUrl()) return@launch
+                    if (declared) {
+                        configure = addonConfigureUri(manifest)
+                        message.text = "Configuration opens in an external browser.\nAfter configuring, paste the new addon URL into this field and save it.\n\nProvider: ${manifest.host}"
+                        copy.visibility = View.VISIBLE
+                        action.text = "Open in browser"; action.visibility = View.VISIBLE
+                        action.setOnClickListener {
+                            if (!sameUrl()) return@setOnClickListener
+                            try {
+                                hostContext.startActivity(Intent(Intent.ACTION_VIEW, configure).apply {
+                                    if (hostContext !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                })
+                            } catch (_: ActivityNotFoundException) {
+                                message.text = "No app is available to open this link.\nCopy the URL and open it on another device."
+                                action.visibility = View.GONE; cancel.text = "Close"; cancel.requestFocus()
+                            } catch (_: SecurityException) {
+                                message.text = "No app is available to open this link.\nCopy the URL and open it on another device."
+                                action.visibility = View.GONE; cancel.text = "Close"; cancel.requestFocus()
+                            }
+                        }
+                    } else {
+                        message.text = "This addon does not declare a configuration page."
+                        cancel.text = "Close"
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled
+                } catch (_: Exception) {
+                    if (!current()) return@launch
+                    message.text = "Unable to check addon settings. Check the URL and try again."
+                    action.text = "Retry"; action.visibility = View.VISIBLE
+                    action.setOnClickListener { if (sameUrl()) check() }
+                }
+            }
+        }
+        copy.setOnClickListener {
+            if (sameUrl()) configure?.let {
+                try {
+                    val clipboard = hostContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Addon configuration URL", it.toString()))
+                    showToast("Configuration URL copied.")
+                } catch (_: SecurityException) { showToast("Unable to copy the configuration URL.") }
+            }
+        }
+        cancel.setOnClickListener { request?.cancel(); dialog.dismiss() }
+        setupCustomDialog(dialog, content, scroll, owner = owner, initialFocus = { cancel })
+        onClose(dialog) { request?.cancel() }
+        dialog.show()
+        check()
+    }
+
+    private fun setupCustomDialog(
+        dialog: AlertDialog, contentView: View, bodyView: View? = null, capDp: Int = 480,
+        owner: Dialog = topDialog(), initialFocus: (() -> View?)? = null
+    ) {
+        val parents = generateSequence(owner) { dialogOwners[it] }.toList()
+        val origin = owner.currentFocus
+        contentView.layoutDirection = View.LAYOUT_DIRECTION_LTR
+        val root = contentView as? LinearLayout
+        var body = bodyView
+        if (root != null) {
+            root.setPadding(dp(20), dp(20), dp(20), dp(20))
+            if (body == null && root.childCount > 1) {
+                body = (0 until root.childCount).map { root.getChildAt(it) }
+                    .firstOrNull { it is RecyclerView || it is NestedScrollView }
+                if (body == null) {
+                    val end = if (root.getChildAt(root.childCount - 1).isClickable ||
+                        root.getChildAt(root.childCount - 1) is LinearLayout) root.childCount - 1 else root.childCount
+                    if (end > 1) {
+                        val messages = LinearLayout(hostContext).apply { orientation = LinearLayout.VERTICAL }
+                        repeat(end - 1) {
+                            val message = root.getChildAt(1)
+                            root.removeViewAt(1)
+                            message.setPadding(0, 0, 0, 0)
+                            messages.addView(message)
+                        }
+                        body = NestedScrollView(hostContext).apply { addView(messages) }
+                        root.addView(body, 1, LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    }
+                }
+            }
+            (root.getChildAt(0) as? TextView)?.let {
+                if (((it.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin ?: 0) == 0 &&
+                    root.childCount > 1) it.setPadding(0, 0, 0, dp(12))
+            }
+        }
         normalizeTypeface(contentView)
+        prepareControls(contentView)
+        dialogOwners[dialog] = owner
+        childDialogs.add(dialog)
         dialog.setCanceledOnTouchOutside(false)
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.setOnShowListener {
-            dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-            dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            dialog.window?.apply {
+                setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+                clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+                setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                setGravity(Gravity.CENTER)
+            }
+            if (root != null) fitDialog(dialog, root, body, capDp)
+            if (isLayout(TV) || initialFocus != null) {
+                val focus = initialFocus?.invoke() ?: body?.getFocusables(View.FOCUS_FORWARD)?.firstOrNull { usable(it) }
+                    ?: contentView.getFocusables(View.FOCUS_FORWARD).firstOrNull { usable(it) }
+                focus?.requestFocus()
+            }
+        }
+        dialog.setOnDismissListener {
+            childDialogs.remove(dialog)
+            val children = childDialogs.filter { dialogOwners[it] === dialog }
+            dialogOwners.remove(dialog)
+            cleanupDialog(dialog)
+            children.forEach { it.dismiss() }
+            if (!closing && children.isEmpty()) {
+                val parent = parents.firstOrNull { it.isShowing }
+                if (parent != null) parent.window?.decorView?.post {
+                    if (alive(parent) && topDialog() === parent) {
+                        focusPlans.remove(parent)?.invoke()
+                            ?: if (usable(origin)) origin?.requestFocus() else parent.window?.decorView
+                                ?.getFocusables(View.FOCUS_FORWARD)?.firstOrNull { usable(it) }?.requestFocus()
+                        refreshSummaries?.invoke()
+                    }
+                }
+            }
         }
     }
 
@@ -319,7 +865,18 @@ class SettingsBottomFragment(
     @SuppressLint("UseCompatLoadingForDrawables")
     private fun View.makeTvCompatible() {
         val outlineId = getCachedResId("outline", "drawable")
-        this.background = res.getDrawable(outlineId, null)
+        if (background === getTag(outlineId)) return
+        val base = background ?: ColorDrawable(Color.TRANSPARENT)
+        val outline = getDrawable("outline").apply { setTint(hostContext.colorFromAttribute(HostR.attr.textColor)) }
+        val layers = mutableListOf(base)
+        if (isClickable && this !is EditText && base !is RippleDrawable) {
+            val value = android.util.TypedValue()
+            hostContext.theme.resolveAttribute(android.R.attr.selectableItemBackground, value, true)
+            if (value.resourceId != 0) hostContext.getDrawable(value.resourceId)?.mutate()?.let { layers.add(it) }
+        }
+        layers.add(outline)
+        background = LayerDrawable(layers.toTypedArray())
+        setTag(outlineId, background)
     }
 
     // Plugin XML cannot reference the host app's custom attrs at AAPT2 link time.
@@ -358,13 +915,15 @@ class SettingsBottomFragment(
         setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
         gravity = android.view.Gravity.CENTER
         setPadding(dp(10), dp(10), dp(10), dp(10))
-        minHeight = dp(40)
+        minHeight = dp(48)
         isClickable = true
         isFocusable = true
         val ripple = android.util.TypedValue()
         ctx.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)
         setBackgroundResource(ripple.resourceId)
         layoutParams = params
+        normalizeTypeface(this)
+        makeTvCompatible()
     }
 
     private fun showSavedPopup(ctx: Context, title: String, message: String, onConfirm: () -> Unit = {}) {
@@ -403,40 +962,84 @@ class SettingsBottomFragment(
     fun show(onDismiss: () -> Unit = {}) {
         settingsDialog.setCancelable(true)
         settingsDialog.setCanceledOnTouchOutside(false)
-        settingsDialog.setOnDismissListener {
+        var finished = false
+        val finish: () -> Unit = {
+            if (!finished) {
+            finished = true
+            closing = true
+            childDialogs.toList().forEach { it.dismiss() }
+            cleanupDialog(settingsDialog)
+            dialogOwners.clear()
+            focusPlans.clear()
+            backHandler = null
+            refreshSummaries = null
             hostOwner?.lifecycle?.removeObserver(closeOnDestroy)
             searchJob?.cancel()
             uiScope.cancel()
             onDismiss()
+            }
         }
+        settingsDialog.setOnDismissListener { finish() }
+        if (hostOwner?.lifecycle?.currentState == Lifecycle.State.DESTROYED) { finish(); return }
         val ctx = hostContext
         val appContext = ctx.applicationContext
-        val view = getLayout("bottom_sheet_layout", LayoutInflater.from(ctx), null)
+        val view = try { getLayout("bottom_sheet_layout", LayoutInflater.from(ctx), null) }
+        catch (_: Exception) {
+            showToast("Settings resources are unavailable. Reload the plugin and try again.")
+            finish(); return
+        }
+        val newSchema = listOf("settingsRoot", "pageHub", "pageSources", "pageMetadata",
+            "pageDisplay", "settingsFooter", "settingsViewport").any { view.optional(it) != null }
+        if ((!newSchema && view !is NestedScrollView) || !hasViews(view, mapOf(
+            LinearLayout::class.java to listOf("settingsHeader", "settingsBody", "containerStreamSubtitleUrls",
+                "layoutHistorySyncUrl", "layoutMdbList", "layoutCustomPosterUrl"),
+            androidx.appcompat.widget.AppCompatTextView::class.java to listOf("settingsToggle"),
+            TextView::class.java to listOf("tvExport", "tvImport"),
+            ImageView::class.java to listOf("saveIcon", "addlinks", "showlinks", "btnSelectLanguage", "toggleStreamSubtitleUrls"),
+            EditText::class.java to listOf("etTmdbApiKey", "etMdbListApiKey", "etCustomPosterUrl", "etHistorySyncUrl"),
+            Switch::class.java to listOf("switchMdbList", "switchCustomPoster", "switchCineStream", "switchStreamPlay", "switchVixSrc")
+        )) || (newSchema && !hasViews(view, mapOf(
+            LinearLayout::class.java to listOf("settingsRoot", "pageHub", "pageSources", "pageMetadata", "pageDisplay",
+                "settingsFooter", "saveAction", "rowCatalogs", "rowLanguage", "rowSources", "rowMetadata", "rowDisplay"),
+            NestedScrollView::class.java to listOf("settingsViewport"),
+            TextView::class.java to listOf("settingsBack", "btnAddStreamSubtitleUrl"),
+            ImageButton::class.java to listOf("btnConfigureHistoryAddon", "btnDeleteHistoryAddon")
+        )))) {
+            showToast("Settings resources are unavailable. Reload the plugin and try again.")
+            finish(); return
+        }
         view.background = getDarkThemeBg()
         val settingsBody = view.findView<View>("settingsBody")
         val settingsToggle = view.findView<TextView>("settingsToggle")
         val settingsActions = listOf("tvExport", "tvImport", "saveIcon").map { view.findView<View>(it) }
         val header = view.findView<LinearLayout>("settingsHeader")
-        // The host can retain an older plugin layout: rebuild this row from the existing controls.
-        (settingsToggle.parent as? ViewGroup)?.removeView(settingsToggle)
-        settingsActions.forEach { (it.parent as? ViewGroup)?.removeView(it) }
-        header.removeAllViews()
-        header.orientation = LinearLayout.HORIZONTAL
-        header.gravity = android.view.Gravity.CENTER_VERTICAL
-        settingsToggle.apply {
-            setPadding(0, 0, 0, 0)
-            setSingleLine(true)
-        }
-        header.addView(settingsToggle, LinearLayout.LayoutParams(0, dp(48), 1f))
-        settingsActions.forEachIndexed { index, action ->
-            if (index > 0) header.addView(View(ctx), LinearLayout.LayoutParams(dp(16), dp(48)))
-            if (action is TextView) action.setPadding(0, 0, 0, 0)
-            header.addView(action, LinearLayout.LayoutParams(
-                if (index == 2) dp(36) else ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)
-            ))
+        val hub = view.optional("pageHub")
+        val viewport = view.optional("settingsViewport") as? NestedScrollView
+        if (hub == null) {
+            // The host can retain an older plugin layout: rebuild this row from the existing controls.
+            (settingsToggle.parent as? ViewGroup)?.removeView(settingsToggle)
+            settingsActions.forEach { (it.parent as? ViewGroup)?.removeView(it) }
+            header.removeAllViews()
+            header.orientation = LinearLayout.HORIZONTAL
+            header.gravity = android.view.Gravity.CENTER_VERTICAL
+            settingsToggle.apply {
+                setPadding(0, 0, 0, 0)
+                setSingleLine(true)
+            }
+            header.addView(settingsToggle, LinearLayout.LayoutParams(0, dp(48), 1f))
+            settingsActions.forEachIndexed { index, action ->
+                if (index > 0) header.addView(View(ctx), LinearLayout.LayoutParams(dp(16), dp(48)))
+                if (action is TextView) action.setPadding(0, 0, 0, 0)
+                header.addView(action, LinearLayout.LayoutParams(
+                    if (index == 2) dp(36) else ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)
+                ))
+            }
+            settingsBody.visibility = View.VISIBLE
+            settingsActions.forEach { it.visibility = View.VISIBLE }
+
+            showToast("The new settings layout is unavailable. Reload the plugin.")
         }
         settingsBody.visibility = View.VISIBLE
-        settingsActions.forEach { it.visibility = View.VISIBLE }
         settingsToggle.text = "Stremio Settings"
         // Plugin drawable IDs cannot be resolved safely by the host XML inflater.
         // Apply theme backgrounds after inflation using the plugin-independent drawable.
@@ -637,7 +1240,7 @@ class SettingsBottomFragment(
                             if (isSPAvailable) msgBuilder.append("\n• StreamPlay: Ready")
                             if (isCSAvailable) msgBuilder.append("\n• CineStream: Ready")
                         }
-                        msgBuilder.append("\n\nAre you sure you want to proceed?")
+                        msgBuilder.append("\n\nRestoring will replace the included settings.\nContinue?")
 
                         addView(TextView(ctx).apply {
                             text = msgBuilder.toString()
@@ -767,60 +1370,65 @@ class SettingsBottomFragment(
 
         val extraUrlContainer = view.findView<LinearLayout>("containerStreamSubtitleUrls")
         val extraUrlToggle = view.findView<ImageView>("toggleStreamSubtitleUrls")
-        val urlControlSize = (40 * ctx.resources.displayMetrics.density + 0.5f).toInt()
-        val urlFieldPadding = dp(12)
+        val addonFields = linkedMapOf<View, Pair<EditText, EditText>>()
+        val rowDisposers = mutableMapOf<View, () -> Unit>()
+        val addUrl = (view.optional("btnAddStreamSubtitleUrl") as? TextView) ?: simpleButton("Add").also {
+            (extraUrlContainer.parent as ViewGroup).addView(it)
+        }
+        fun refreshUrlButtons() {
+            for (row in addonFields.keys) {
+                val delete = (row as LinearLayout).getChildAt(0).let { it as LinearLayout }.getChildAt(2)
+                val fields = addonFields.getValue(row)
+                val enabled = addonFields.size > 1 || fields.first.text.isNotBlank() || fields.second.text.isNotBlank()
+                delete.isEnabled = enabled; delete.isFocusable = enabled
+                delete.alpha = if (enabled) 1f else 0.5f
+            }
+        }
         fun addExtraUrlField(initialName: String = "", initialUrl: String = "") {
-            val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL }
             fun newField(hintText: String, value: String, isUrl: Boolean) = EditText(ctx).apply {
                 hint = hintText
                 inputType = InputType.TYPE_CLASS_TEXT or
                     (if (isUrl) InputType.TYPE_TEXT_VARIATION_URI else InputType.TYPE_TEXT_FLAG_CAP_SENTENCES)
                 setText(value)
-                textSize = 14f
-                setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-                setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
-                setPadding(urlFieldPadding, 0, urlFieldPadding, 0)
-                gravity = android.view.Gravity.CENTER_VERTICAL
-                background = getCardBg()
-                isSingleLine = true
+                setPadding(dp(12), 0, dp(12), 0)
+                gravity = Gravity.CENTER_VERTICAL
             }
-            val nameField = newField("Name", initialName, false)
-            val urlField = newField("Addon URL", initialUrl, true)
-            row.addView(nameField, LinearLayout.LayoutParams(0, dp(35), 0.85f))
-            row.addView(View(ctx).apply { setBackgroundColor(Color.parseColor("#444444")) },
-                LinearLayout.LayoutParams((ctx.resources.displayMetrics.density + 0.5f).toInt(), urlFieldPadding * 2))
-            row.addView(urlField, LinearLayout.LayoutParams(0, dp(35), 2f))
-            row.addView(TextView(ctx).apply {
-                text = "−"
-                textSize = 20f
-                setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-                gravity = android.view.Gravity.CENTER
-                contentDescription = "Remove addon URL"
-                isClickable = true
-                isFocusable = true
-                val ripple = android.util.TypedValue()
-                ctx.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)
-                setBackgroundResource(ripple.resourceId)
-                setOnClickListener {
-                    if (extraUrlContainer.childCount > 1) extraUrlContainer.removeView(row)
-                    else { nameField.setText(""); urlField.setText("") }
-                }
-            }, LinearLayout.LayoutParams(urlControlSize, urlControlSize))
-            row.addView(TextView(ctx).apply {
-                text = "+"
-                textSize = 20f
-                setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-                gravity = android.view.Gravity.CENTER
-                contentDescription = "Add addon URL"
-                isClickable = true
-                isFocusable = true
-                val ripple = android.util.TypedValue()
-                ctx.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)
-                setBackgroundResource(ripple.resourceId)
-                setOnClickListener { addExtraUrlField() }
-            }, LinearLayout.LayoutParams(urlControlSize, urlControlSize))
-            normalizeTypeface(row)
+            val row = LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+            }
+            val nameField = newField("Name (Optional)", initialName, false)
+            val urlField = newField("Addon URL (http/https)", initialUrl, true)
+            val gear = addonIcon("settings_icon", "Addon settings for stream / subtitle")
+            val trash = addonIcon("delete_icon", "Delete stream / subtitle addon URL")
+            val top = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            top.addView(inputSlot(nameField, 1f)); top.addView(gear); top.addView(trash)
+            row.addView(top)
+            row.addView(inputSlot(urlField).apply { (layoutParams as LinearLayout.LayoutParams).topMargin = dp(2) })
             extraUrlContainer.addView(row)
+            addonFields[row] = nameField to urlField
+            rowDisposers[row] = bindAddonActions(settingsDialog, urlField, gear, trash, nameField,
+                canDelete = { addonFields.size > 1 || nameField.text.isNotBlank() || urlField.text.isNotBlank() }) {
+                showDeleteConfirmation(settingsDialog, nameField.text.toString().ifBlank { "Stream / Subtitle addon" },
+                    "Remove this addon URL? Changes are not saved until Save all.") {
+                    if (!addonFields.containsKey(row)) return@showDeleteConfirmation
+                    val index = addonFields.keys.indexOf(row)
+                    if (addonFields.size > 1) {
+                        rowDisposers.remove(row)?.invoke()
+                        addonFields.remove(row); extraUrlContainer.removeView(row)
+                    } else { nameField.setText(""); urlField.setText("") }
+                    refreshUrlButtons()
+                    val target = addonFields.values.toList().getOrNull(index)?.first
+                        ?: addonFields.values.lastOrNull()?.first
+                    focusPlans[settingsDialog] = { target?.requestFocus() }
+                }
+            }
+            normalizeTypeface(row); prepareControls(row); refreshUrlButtons()
+        }
+        addUrl.setOnClickListener {
+            addExtraUrlField()
+            addonFields.values.last().first.apply { requestFocus(); post { if (isShown) requestRectangleOnScreen(Rect(0, 0, width, height)) } }
         }
         val extraUrls = runCatching {
             JSONArray(sharedPref.getString(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_URLS, "[]"))
@@ -833,12 +1441,15 @@ class SettingsBottomFragment(
                 else -> addExtraUrlField()
             }
         }
-        fun setExtraUrlExpanded(expanded: Boolean) {
+        fun setExtraUrlExpanded(expanded: Boolean, persist: Boolean = true) {
+            if (!expanded && extraUrlContainer.hasFocus()) extraUrlToggle.requestFocus()
             extraUrlContainer.visibility = if (expanded) View.VISIBLE else View.GONE
+            addUrl.visibility = if (expanded) View.VISIBLE else View.GONE
+            view.optional("sourceSaveHint")?.visibility = if (expanded) View.VISIBLE else View.GONE
             extraUrlToggle.setImageDrawable(getDrawable(if (expanded) "addon_collapse_icon" else "addon_expand_icon"))
             extraUrlToggle.imageTintList = actionIconTint
             extraUrlToggle.contentDescription = if (expanded) "Collapse addon URLs" else "Expand addon URLs"
-            sharedPref.edit().putBoolean(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_EXPANDED, expanded).apply()
+            if (persist) sharedPref.edit().putBoolean(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_EXPANDED, expanded).apply()
         }
         setExtraUrlExpanded(sharedPref.getBoolean(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_EXPANDED, true))
         extraUrlToggle.setOnClickListener { setExtraUrlExpanded(extraUrlContainer.visibility != View.VISIBLE) }
@@ -848,6 +1459,16 @@ class SettingsBottomFragment(
 
         layoutHistorySyncUrl.visibility = View.VISIBLE
         etHistorySyncUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, ""))
+        val historyGear = view.optional("btnConfigureHistoryAddon") as? ImageButton
+        val historyDelete = view.optional("btnDeleteHistoryAddon") as? ImageButton
+        if (historyGear != null && historyDelete != null) bindAddonActions(settingsDialog,
+            etHistorySyncUrl, historyGear, historyDelete, canDelete = { etHistorySyncUrl.text.isNotBlank() }) {
+            showDeleteConfirmation(settingsDialog, "Meta / History addon",
+                "Clear the Meta / History addon URL? Changes are not saved until Save all.") {
+                etHistorySyncUrl.setText("")
+                focusPlans[settingsDialog] = { etHistorySyncUrl.requestFocus() }
+            }
+        }
 
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
@@ -868,6 +1489,7 @@ class SettingsBottomFragment(
         etCustomPosterUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, ""))
 
         switchCustomPoster.setOnCheckedChangeListener { _, isChecked ->
+            if (!isChecked && layoutCustomPosterUrl.hasFocus()) switchCustomPoster.requestFocus()
             layoutCustomPosterUrl.visibility = if (isChecked) View.VISIBLE else View.GONE
         }
 
@@ -888,6 +1510,7 @@ class SettingsBottomFragment(
         etMdbListApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, ""))
 
         switchMdbList.setOnCheckedChangeListener { _, isChecked ->
+            if (!isChecked && layoutMdbList.hasFocus()) switchMdbList.requestFocus()
             layoutMdbList.visibility = if (isChecked) View.VISIBLE else View.GONE
         }
 
@@ -895,120 +1518,88 @@ class SettingsBottomFragment(
             showLinkEditorDialog(false, null, -1, null)
         }
 
-        showlinks.setOnClickListener {
-            val inflater = LayoutInflater.from(ctx)
-            val dialogView = getLayout("dialog_list_links", inflater, null) as LinearLayout
-            
-            dialogView.background = getDarkThemeBg()
-            dialogView.setPadding(dp(20), dp(20), dp(20), dp(20))
-            
-            val rv: RecyclerView = dialogView.findView("rvLinks")
-            rv.layoutManager = LinearLayoutManager(ctx)
-            val tvNoLinks: TextView = dialogView.findView("tvNoLinks")
-            // Measure the real row (including margins) so short lists have no empty viewport.
-            val rowHeight by lazy {
-                val row = inflater.inflate(res.getLayout(getCachedResId("item_saved_link", "layout")), rv, false)
-                row.measure(
-                    View.MeasureSpec.makeMeasureSpec(
-                        (ctx.resources.displayMetrics.widthPixels - dp(80)).coerceAtLeast(1),
-                        View.MeasureSpec.EXACTLY
-                    ),
-                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
-                )
-                val margins = row.layoutParams as? ViewGroup.MarginLayoutParams
-                (row.measuredHeight + (margins?.topMargin ?: 0) + (margins?.bottomMargin ?: 0)).coerceAtLeast(1)
-            }
-            fun resizeList(count: Int) {
-                val cap = minOf(dp(450), (ctx.resources.displayMetrics.heightPixels * 0.62f).toInt()).coerceAtLeast(1)
-                rv.layoutParams = rv.layoutParams.apply {
-                    height = if (count == 0) 0 else minOf(cap.toLong(), rowHeight.toLong() * count).toInt()
+        showlinks.setOnClickListener { showSavedLinksDialog() }
+
+        var currentPage = SettingsPage.HUB
+        val pageScroll = IntArray(4)
+        val pageFocus = arrayOfNulls<View>(4)
+        val pages = listOf("pageHub", "pageSources", "pageMetadata", "pageDisplay").map { view.optional(it) }
+        val titles = listOf("Stremio Settings", "Sources & Integrations", "Metadata & Sync", "Display & Ratings")
+        val back = view.optional("settingsBack") as? TextView
+        fun updateSummaries() {
+            val count = addonFields.values.count { it.second.text.isNotBlank() }
+            val integrations = listOf("switchCineStream", "switchStreamPlay", "switchVixSrc")
+                .count { view.findView<Switch>(it).isChecked }
+            (view.optional("summarySources") as? TextView)?.text =
+                "${if (count == 0) "No URL entries" else if (count == 1) "1 URL entry" else "$count URL entries"} · $integrations integrations on"
+            val code = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "en-US") ?: "en-US"
+            val names = LANGUAGES.filter { it.second == code }
+            (view.optional("summaryLanguage") as? TextView)?.text = names.singleOrNull()?.first ?: code
+            (view.optional("summaryMetadata") as? TextView)?.text =
+                "$code · ${if (etTmdbApiKey.text.isNotBlank()) "API key set" else "API key required"}"
+            (view.optional("summaryDisplay") as? TextView)?.text =
+                "MDBList: ${if (switchMdbList.isChecked) "On" else "Off"} · XRDB: ${if (switchCustomPoster.isChecked) "On" else "Off"}"
+            listOf("rowCatalogs", "rowSources", "rowMetadata", "rowDisplay", "rowLanguage").forEach { id ->
+                (view.optional(id) as? ViewGroup)?.let { row ->
+                    val texts = mutableListOf<String>()
+                    fun labels(node: View) {
+                        if (node is TextView && node.text.toString() != "›") {
+                            texts.add(node.text.toString())
+                            node.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                        }
+                        if (node is ViewGroup) for (i in 0 until node.childCount) labels(node.getChildAt(i))
+                    }
+                    labels(row)
+                    row.contentDescription = texts.joinToString(". ")
                 }
             }
-
-            val list = SettingsRepository.loadLinks(sharedPref)
-            resizeList(list.size)
-            if (list.isEmpty()) {
-                tvNoLinks.visibility = View.VISIBLE
-                rv.visibility = View.GONE
-            } else {
-                tvNoLinks.visibility = View.GONE
-                rv.visibility = View.VISIBLE
-
-                val adapter = LinksAdapter(
-                    items = list,
-                    onDelete = { itemToDelete ->
-                        val updatedList = SettingsRepository.loadLinks(sharedPref)
-                        val removed = updatedList.removeAll { it.id == itemToDelete.id }
-
-                        if (removed) {
-                            SettingsRepository.saveLinks(sharedPref, updatedList)
-                            (rv.adapter as? LinksAdapter)?.remove(itemToDelete)
-                            resizeList(updatedList.size)
-                            showToast("Deleted")
-                            if (updatedList.isEmpty()) {
-                                tvNoLinks.visibility = View.VISIBLE
-                                rv.visibility = View.GONE
-                            }
-                        }
-                    },
-                    onEdit = { itemToEdit, position ->
-                        val choiceContainer = LinearLayout(ctx).apply {
-                            orientation = LinearLayout.VERTICAL
-                            setPadding(40, 40, 40, 40)
-                            background = getDarkThemeBg()
-                        }
-                        
-                        choiceContainer.addView(TextView(ctx).apply {
-                            text = itemToEdit.name
-                            textSize = 18f
-                            typeface = android.graphics.Typeface.DEFAULT_BOLD
-                            setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-                            setPadding(0, 0, 0, 30)
-                            gravity = android.view.Gravity.CENTER
-                        })
-
-                        val optEdit = dialogButton(ctx, "Edit Link Info", LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 15) })
-                        
-                        val optCatalog = dialogButton(ctx, "Configure Catalogs", LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-                        
-                        choiceContainer.addView(optEdit)
-                        choiceContainer.addView(optCatalog)
-
-                        val choiceDlg = AlertDialog.Builder(ctx).setView(choiceContainer).create()
-                        setupCustomDialog(choiceDlg, choiceContainer)
-                        
-                        optEdit.setOnClickListener {
-                            choiceDlg.dismiss()
-                            showLinkEditorDialog(true, itemToEdit, position, rv)
-                        }
-                        optCatalog.setOnClickListener {
-                            choiceDlg.dismiss()
-                            showCatalogConfigDialog(itemToEdit)
-                        }
-                        choiceDlg.show()
-                    }
-                )
-                rv.adapter = adapter
-            }
-
-            val footer = LinearLayout(ctx).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(0, 20, 0, 0)
-            }
-            val closeBtn = dialogButton(ctx, "Close", LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-            footer.addView(closeBtn)
-            dialogView.addView(footer)
-
-            val dlg = AlertDialog.Builder(ctx).setView(dialogView).create()
-            setupCustomDialog(dlg, dialogView)
-            closeBtn.setOnClickListener { dlg.dismiss() }
-            dlg.show()
         }
-
+        fun showPage(next: SettingsPage, errorField: EditText? = null) {
+            if (hub == null) { errorField?.requestFocus(); return }
+            if (next != currentPage) {
+                pageScroll[currentPage.ordinal] = viewport?.scrollY ?: 0
+                pages[currentPage.ordinal]?.findFocus()?.let { pageFocus[currentPage.ordinal] = it }
+            }
+            currentPage = next
+            pages.forEachIndexed { i, page -> page?.visibility = if (i == next.ordinal) View.VISIBLE else View.GONE }
+            settingsToggle.text = titles[next.ordinal]
+            back?.text = if (next == SettingsPage.HUB) "Close" else "Back"
+            updateSummaries()
+            viewport?.post {
+                if (!settingsDialog.isShowing || currentPage != next) return@post
+                viewport.scrollTo(0, pageScroll[next.ordinal])
+                val focus = errorField ?: pageFocus[next.ordinal]?.takeIf { usable(it) }
+                    ?: pages[next.ordinal]?.getFocusables(View.FOCUS_FORWARD)?.firstOrNull { usable(it) }
+                if (errorField != null || isLayout(TV)) focus?.requestFocus()
+                errorField?.requestRectangleOnScreen(Rect(0, 0, errorField.width, errorField.height))
+            }
+        }
+        refreshSummaries = { updateSummaries() }
+        if (hub != null) {
+            view.findView<View>("rowCatalogs").setOnClickListener { showlinks.performClick() }
+            listOf("rowSources" to SettingsPage.SOURCES, "rowMetadata" to SettingsPage.METADATA,
+                "rowDisplay" to SettingsPage.DISPLAY).forEach { (id, page) ->
+                view.findView<View>(id).setOnClickListener { showPage(page) }
+            }
+            view.findView<View>("rowLanguage").setOnClickListener { btnSelectLanguage.performClick() }
+            view.findView<View>("saveAction").setOnClickListener { saveIcon.performClick() }
+            back?.setOnClickListener {
+                hideKeyboard(view)
+                if (currentPage == SettingsPage.HUB) dismiss() else showPage(SettingsPage.HUB)
+            }
+            backHandler = {
+                if (imeVisible(view)) { hideKeyboard(view); true }
+                else if (currentPage != SettingsPage.HUB) { showPage(SettingsPage.HUB); true } else false
+            }
+        }
         saveIcon.setOnClickListener {
+            etTmdbApiKey.error = null
+            addonFields.values.forEach { it.second.error = null }
             val context = hostContext
             val tmdbApiKeyVal = etTmdbApiKey.text.toString().trim()
             if (tmdbApiKeyVal.isEmpty()) {
+                showPage(SettingsPage.METADATA, etTmdbApiKey)
+                etTmdbApiKey.error = "TMDB API key is a required field"
                 showToast("TMDB API key is a required field")
                 return@setOnClickListener
             }
@@ -1017,20 +1608,21 @@ class SettingsBottomFragment(
             val switchStreamPlay = view.findView<Switch>("switchStreamPlay")
             val switchVixSrc = view.findView<Switch>("switchVixSrc")
 
-            val extraUrlList = (0 until extraUrlContainer.childCount).mapNotNull { i ->
-                val row = extraUrlContainer.getChildAt(i) as LinearLayout
-                val addonName = (row.getChildAt(0) as EditText).text.toString().trim()
-                val addonUrl = (row.getChildAt(2) as EditText).text.toString().trim()
-                addonUrl.takeIf { it.isNotBlank() }?.let { addonName to it }
-            }.distinctBy { stremioManifestUrl(it.second) }
-            if (extraUrlList.any { (_, url) ->
-                    runCatching { val uri = url.toUri();
-                        (uri.scheme?.lowercase() !in setOf("http", "https")) || uri.host.isNullOrBlank()
-                    }.getOrDefault(true)
-                }) {
+            val nonblankFields = addonFields.values.filter { it.second.text.isNotBlank() }
+                .distinctBy { stremioManifestUrl(it.second.text.toString().trim()) }
+            val invalid = nonblankFields.firstOrNull { (_, field) ->
+                runCatching { val uri = field.text.toString().trim().toUri()
+                    uri.scheme?.lowercase() !in setOf("http", "https") || uri.host.isNullOrBlank()
+                }.getOrDefault(true)
+            }
+            if (invalid != null) {
+                setExtraUrlExpanded(true, persist = false)
+                showPage(SettingsPage.SOURCES, invalid.second)
+                invalid.second.error = "Invalid stream/subtitle addon URL"
                 showToast("Invalid stream/subtitle addon URL")
                 return@setOnClickListener
             }
+            val extraUrlList = nonblankFields.map { it.first.text.toString().trim() to it.second.text.toString().trim() }
             val editor = sharedPref.edit()
             editor.putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, tmdbApiKeyVal)
             editor.putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim())
@@ -1072,7 +1664,7 @@ class SettingsBottomFragment(
                     gravity = android.view.Gravity.CENTER
                 })
                 addView(TextView(context).apply {
-                    text = "Changes have been saved. Do you want to restart the app to apply them?"
+                    text = "Changes have been saved. Restart the app to apply them?"
                     setTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
                     textSize = 14f
                     setPadding(0, 0, 0, 30)
@@ -1093,39 +1685,132 @@ class SettingsBottomFragment(
             dlg.show()
         }
 
+        prepareControls(view)
+        if (hub != null) listOf(addlinks, showlinks, saveIcon, btnSelectLanguage).forEach {
+            it.isFocusable = false; it.isClickable = false; it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
         settingsDialog.setContentView(view)
         hostOwner?.lifecycle?.addObserver(closeOnDestroy)
-        val metrics = hostContext.resources.displayMetrics
-        val width = minOf((1000 * metrics.density).toInt(), (metrics.widthPixels * 0.9f).toInt()).coerceAtLeast(1)
-        val maxHeight = (metrics.heightPixels * 0.88f).toInt().coerceAtLeast(1)
-        val body = (view as? ViewGroup)?.getChildAt(0)
-        // Measure BEFORE showing the dialog, so the initial frame is centered.
-        body?.measure(
-            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
-            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
-        )
-        val initialHeight = (body?.measuredHeight ?: maxHeight).coerceIn(1, maxHeight)
-        settingsDialog.show()
         settingsDialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setGravity(android.view.Gravity.CENTER)
-            setLayout(width, initialHeight)
+            setGravity(Gravity.CENTER)
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
-        // When the URL section expands, resize on the layout pass rather than a posted
-        // frame later (the latter caused a visible center jump).
-        body?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            val wanted = body.height.coerceIn(1, maxHeight)
-            if (settingsDialog.isShowing && settingsDialog.window?.attributes?.height != wanted) {
-                settingsDialog.window?.setLayout(width, wanted)
-            }
+        showPage(SettingsPage.HUB)
+        settingsDialog.show()
+        if (view is LinearLayout) fitDialog(settingsDialog, view, viewport, 800)
+        else {
+            val metrics = ctx.resources.displayMetrics
+            settingsDialog.window?.setLayout(minOf(dp(800), (metrics.widthPixels * 0.9f).toInt()),
+                (metrics.heightPixels * 0.88f).toInt())
         }
+        if (isLayout(TV)) (view.optional("rowCatalogs") ?: showlinks).requestFocus()
     }
 
-    private fun showLinkEditorDialog(isEdit: Boolean, itemToEdit: LinkItem?, position: Int, rv: RecyclerView?) {
+
+    private fun showSavedLinksDialog() {
+        if (!alive(settingsDialog)) return
         val ctx = hostContext
         val inflater = LayoutInflater.from(ctx)
-        val dialogView = getLayout("addlinks", inflater, null) as LinearLayout
+        val content = runCatching { getLayout("dialog_list_links", inflater, null) as? LinearLayout }.getOrNull()
+            ?: run { showToast("Settings resources are unavailable. Reload the plugin and try again."); return }
+        content.background = getDarkThemeBg()
+        val modern = settingsDialog.findViewById<View>(getCachedResId("settingsRoot", "id")) != null
+        val sampleRow = runCatching { getLayout("item_saved_link", inflater, null) }.getOrNull()
+            ?: run { showToast("Settings resources are unavailable. Reload the plugin and try again."); return }
+        if (!hasViews(content, mapOf(RecyclerView::class.java to listOf("rvLinks"), TextView::class.java to listOf("tvNoLinks"))) ||
+            !hasViews(sampleRow, mapOf(TextView::class.java to listOf("tvName", "tvLink", "tvType", "tvSyncBadge"),
+                ImageButton::class.java to listOf("btnDelete"))) ||
+            (modern && (!hasViews(content, mapOf(FrameLayout::class.java to listOf("catalogListBody"))) ||
+                !hasViews(sampleRow, mapOf(ImageButton::class.java to listOf("btnConfigureAddon")))))) {
+            showToast("Settings resources are unavailable. Reload the plugin and try again.")
+            return
+        }
+        val rv = content.findView<RecyclerView>("rvLinks")
+        rv.layoutManager = LinearLayoutManager(ctx)
+        val empty = content.findView<TextView>("tvNoLinks")
+        val add = simpleButton("Add")
+        val close = simpleButton("Close")
+        content.addView(popupButtons(add, close))
+        val dialog = AlertDialog.Builder(ctx).setView(content).create()
+        lateinit var adapter: LinksAdapter
+        fun resizeList() {
+            val count = adapter.itemCount
+            empty.visibility = if (count == 0) View.VISIBLE else View.GONE
+            rv.visibility = if (count == 0) View.GONE else View.VISIBLE
+            val width = rv.width.takeIf { it > 0 } ?: (minOf(dp(600),
+                (ctx.resources.displayMetrics.widthPixels * 0.9f).toInt()) - dp(40)).coerceAtLeast(1)
+            val sample = getLayout("item_saved_link", inflater, rv)
+            val margins = sample.layoutParams as? ViewGroup.MarginLayoutParams
+            sample.measure(View.MeasureSpec.makeMeasureSpec((width -
+                (margins?.leftMargin ?: 0) - (margins?.rightMargin ?: 0)).coerceAtLeast(1), View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+            val rowHeight = sample.measuredHeight + (margins?.topMargin ?: 0) + (margins?.bottomMargin ?: 0)
+            val cap = minOf(dp(450), (ctx.resources.displayMetrics.heightPixels * 0.62f).toInt())
+            rv.layoutParams = rv.layoutParams.apply { height = minOf(cap.toLong(), rowHeight.toLong() * count).toInt() }
+        }
+        fun refreshList(focusId: Long?, fallback: Int) {
+            if (rv.isComputingLayout) {
+                rv.post { if (alive(dialog)) refreshList(focusId, fallback) }
+                return
+            }
+            adapter.replaceAll(SettingsRepository.loadLinks(sharedPref))
+            resizeList()
+            focusPlans[dialog] = {
+                if (adapter.itemCount == 0) add.requestFocus()
+                else restoreRow(rv, adapter.positionOf(focusId).takeIf { it >= 0 }
+                    ?: fallback.coerceIn(0, adapter.itemCount - 1))
+            }
+        }
+        adapter = LinksAdapter(SettingsRepository.loadLinks(sharedPref),
+            onDelete = { item ->
+                val position = adapter.positionOf(item.id).coerceAtLeast(0)
+                showDeleteConfirmation(dialog, item.name,
+                    "Delete this saved catalog addon? This change is saved immediately.") {
+                    if (deleteCatalogById(item.id)) showToast("Deleted")
+                    refreshList(null, position)
+                }
+            },
+            onEdit = { item, position ->
+                val menu = popupContent(item.name)
+                val edit = simpleButton("Edit Link Info")
+                val catalogs = simpleButton("Configure Catalogs")
+                menu.addView(edit); menu.addView(catalogs)
+                val choice = AlertDialog.Builder(ctx).setView(menu).create()
+                setupCustomDialog(choice, menu, owner = dialog, initialFocus = { edit })
+                edit.setOnClickListener {
+                    choice.dismiss()
+                    showLinkEditorDialog(true, item, position, rv) { changed ->
+                        refreshList(changed, position)
+                    }
+                }
+                catalogs.setOnClickListener { choice.dismiss(); showCatalogConfigDialog(item) }
+                choice.show()
+            },
+            onConfigure = { item -> showAddonSettings(dialog, { adapter.linkFor(item.id) ?: "" }) }
+        )
+        rv.adapter = adapter
+        resizeList()
+        var measuredWidth = 0
+        val listener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            if (rv.width > 0 && measuredWidth != rv.width) { measuredWidth = rv.width; resizeList() }
+        }
+        rv.addOnLayoutChangeListener(listener)
+        onClose(dialog) { rv.removeOnLayoutChangeListener(listener) }
+        val body = content.optional("catalogListBody")
+        setupCustomDialog(dialog, content, body ?: rv, 600, initialFocus = { if (adapter.itemCount == 0) add else rv })
+        add.setOnClickListener { showLinkEditorDialog(false, null, -1, rv) { id -> refreshList(id, 0) } }
+        close.setOnClickListener { dialog.dismiss() }
+        dialog.show()
+        if (isLayout(TV) && adapter.itemCount > 0) restoreRow(rv, 0)
+    }
+
+    private fun showLinkEditorDialog(isEdit: Boolean, itemToEdit: LinkItem?, position: Int, rv: RecyclerView?,
+        onLinksChanged: ((Long?) -> Unit)? = null) {
+        val ctx = hostContext
+        val inflater = LayoutInflater.from(ctx)
+        val dialogView = runCatching { getLayout("addlinks", inflater, null) as? LinearLayout }.getOrNull()
+            ?: run { showToast("Settings resources are unavailable. Reload the plugin and try again."); return }
         
         dialogView.background = getDarkThemeBg()
         dialogView.setPadding(dp(20), dp(20), dp(20), dp(20))
@@ -1139,6 +1824,17 @@ class SettingsBottomFragment(
             titleTv.gravity = android.view.Gravity.START
         }
         
+        val modern = settingsDialog.findViewById<View>(getCachedResId("settingsRoot", "id")) != null
+        if (!hasViews(dialogView, mapOf(
+            EditText::class.java to listOf("etName", "etLink"),
+            Switch::class.java to listOf("switchStreamSubtitleSync", "switchLinkSync", "switchHistorySync")
+        )) || (modern && !hasViews(dialogView, mapOf(
+            NestedScrollView::class.java to listOf("catalogEditorScroll"),
+            ImageButton::class.java to listOf("btnConfigureAddon", "btnDeleteAddon")
+        )))) {
+            showToast("Settings resources are unavailable. Reload the plugin and try again.")
+            return
+        }
         val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
         val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
         val switchStreamSubtitleSync = try { dialogView.findView<Switch>("switchStreamSubtitleSync") } catch (_: Throwable) { null }
@@ -1172,7 +1868,32 @@ class SettingsBottomFragment(
         dialogView.addView(footer)
 
         val dlg = AlertDialog.Builder(ctx).setView(dialogView).create()
-        setupCustomDialog(dlg, dialogView)
+        val editorBody = dialogView.optional("catalogEditorScroll")
+        if (editorBody == null && (dialogView.optional("btnConfigureAddon") != null)) {
+            showToast("Settings resources are unavailable. Reload the plugin and try again.")
+            return
+        }
+        setupCustomDialog(dlg, dialogView, editorBody, 600, initialFocus = { etName })
+        val gear = dialogView.optional("btnConfigureAddon") as? ImageButton
+        val trash = dialogView.optional("btnDeleteAddon") as? ImageButton
+        if (etName != null && etLink != null && gear != null && trash != null) {
+            bindAddonActions(dlg, etLink, gear, trash, etName,
+                canDelete = { if (isEdit) itemToEdit != null else etName.text.isNotBlank() || etLink.text.isNotBlank() }) {
+                val original = itemToEdit?.let { saved -> SettingsRepository.loadLinks(sharedPref).firstOrNull { it.id == saved.id } }
+                showDeleteConfirmation(dlg, original?.name ?: "Catalog addon",
+                    if (isEdit) "Delete this saved catalog addon? This change is saved immediately and also discards changes in this editor."
+                    else "Clear this addon entry from the form? No saved catalog will be deleted.") {
+                    if (isEdit && itemToEdit != null) {
+                        deleteCatalogById(itemToEdit.id)
+                        onLinksChanged?.invoke(null)
+                        dlg.dismiss()
+                    } else {
+                        etName.setText(""); etLink.setText("")
+                        focusPlans[dlg] = { etName.requestFocus() }
+                    }
+                }
+            }
+        }
 
         saveBtn.setOnClickListener {
             if (etName == null || etLink == null) return@setOnClickListener
@@ -1183,9 +1904,9 @@ class SettingsBottomFragment(
             val isSync = switchLinkSync?.isChecked ?: true
             val isHistorySync = switchHistorySync?.isChecked ?: true
 
-            if (link.isEmpty()) { showToast("Please enter a link"); return@setOnClickListener }
+            if (link.isEmpty()) { etLink.error = "Please enter a link"; etLink.requestFocus(); showToast("Please enter a link"); return@setOnClickListener }
             val valid = try { val uri = link.toUri(); val scheme = uri.scheme?.lowercase(); scheme == "http" || scheme == "https" } catch (_: Exception) { false }
-            if (!valid) { showToast("Enter a valid URL (http/https)"); return@setOnClickListener }
+            if (!valid) { etLink.error = "Enter a valid URL (http/https)"; etLink.requestFocus(); showToast("Enter a valid URL (http/https)"); return@setOnClickListener }
 
             if (isEdit && itemToEdit != null) {
                 val updatedList = SettingsRepository.loadLinks(sharedPref)
@@ -1194,7 +1915,8 @@ class SettingsBottomFragment(
                     val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type, isSyncEnabled = isSync, isHistorySyncEnabled = isHistorySync, isStreamSubtitleSyncEnabled = isExtraSync)
                     updatedList[indexInDb] = newItem
                     SettingsRepository.saveLinks(sharedPref, updatedList)
-                    (rv?.adapter as? LinksAdapter)?.updateItem(newItem, position)
+                    if (onLinksChanged != null) onLinksChanged(newItem.id)
+                    else (rv?.adapter as? LinksAdapter)?.updateItem(newItem, position)
                     showToast("Link Updated Successfully")
                 }
             } else {
@@ -1203,6 +1925,7 @@ class SettingsBottomFragment(
                     val list = SettingsRepository.loadLinks(sharedPref)
                     list.add(0, item)
                     SettingsRepository.saveLinks(sharedPref, list)
+                    onLinksChanged?.invoke(item.id)
                     Toast.makeText(ctx, "Link saved", Toast.LENGTH_SHORT).show()
                 } catch (e: Throwable) { e.printStackTrace(); showToast("Failed to save link") }
             }
@@ -1247,14 +1970,18 @@ private fun showLanguageSelectDialog() {
                 setMargins(0, 0, 0, 20)
             }
         }
-        container.addView(searchBar)
+        container.addView(inputSlot(searchBar))
 
         val rv = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 minOf(dp(380), (context.resources.displayMetrics.heightPixels * 0.50f).toInt()))
         }
-        container.addView(rv)
+        val languageBody = FrameLayout(context)
+        val noMatches = popupMessage("No matching languages").apply { gravity = Gravity.CENTER; visibility = View.GONE }
+        languageBody.addView(rv); languageBody.addView(noMatches,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)))
+        container.addView(languageBody)
 
         // 언어 목록 어댑터
         class LangAdapter(
@@ -1271,14 +1998,16 @@ private fun showLanguageSelectDialog() {
                 val rowLayout = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                    setPadding(dp(12), dp(8), dp(12), dp(8))
                     isClickable = true
-                    focusable = View.FOCUSABLE
+                    isFocusable = true
+                    minimumHeight = dp(48)
                     layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 }
                 // 가로 전체를 차지하여 체크 아이콘을 우측 끝으로 밀어냅니다.
                 val tvName = TextView(context).apply {
                     textSize = 14f
+                    maxLines = 2
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 }
                 val tvCheck = ImageView(context).apply {
@@ -1301,6 +2030,11 @@ private fun showLanguageSelectDialog() {
                 
                 holder.tvName.setTextColor(hostContext.colorFromAttribute(if (isSelected) HostR.attr.colorPrimary else HostR.attr.textColor))
                 holder.view.background = if (isSelected) getCardBg() else ColorDrawable(Color.TRANSPARENT) 
+                holder.view.makeTvCompatible()
+                holder.view.isSelected = isSelected
+                holder.view.contentDescription = langName
+                holder.tvName.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                holder.tvCheck.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 holder.tvCheck.visibility = if (isSelected) View.VISIBLE else View.GONE
                 
                 holder.view.setOnClickListener {
@@ -1327,21 +2061,31 @@ private fun showLanguageSelectDialog() {
             selectedLangName = langName
             adapter.selectedCode = code
             adapter.notifyDataSetChanged() // 화면 갱신
+            val selectedIndex = LANGUAGES.indexOfFirst { it.first == langName && it.second == code }
+            if (isLayout(TV)) {
+                rv.doOnNextLayout {
+                    if (!closing && rv.isShown && searchBar.text.isEmpty()) restoreRow(rv, selectedIndex)
+                }
+            }
         }
         rv.adapter = adapter
 
-        searchBar.addTextChangedListener(object : android.text.TextWatcher {
+        val searchWatcher = object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 searchJob?.cancel()
                 searchJob = uiScope.launch {
                     delay(150) 
                     val query = s.toString().trim().lowercase()
+                    if (!rv.isAttachedToWindow) return@launch
                     adapter.filter(query)
+                    noMatches.visibility = if (adapter.itemCount == 0) View.VISIBLE else View.GONE
+                    rv.visibility = if (adapter.itemCount == 0) View.GONE else View.VISIBLE
                 }
             }
             override fun afterTextChanged(s: android.text.Editable?) {}
-        })
+        }
+        searchBar.addTextChangedListener(searchWatcher)
 
         val footer = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1354,7 +2098,11 @@ private fun showLanguageSelectDialog() {
         container.addView(footer)
 
         val langDialog = AlertDialog.Builder(context).setView(container).create()
-        setupCustomDialog(langDialog, container)
+        val selectedIndex = LANGUAGES.indexOfFirst { it.second == selectedCode }
+        setupCustomDialog(langDialog, container, languageBody, 600, initialFocus = {
+            if (selectedIndex >= 0) rv else searchBar
+        })
+        onClose(langDialog) { searchBar.removeTextChangedListener(searchWatcher); searchJob?.cancel(); searchJob = null }
 
         // Apply 버튼 클릭 시에만 SharedPreferences에 값을 저장하고 토스트 메시지를 표시한 후 창을 닫습니다.
         applyBtn.setOnClickListener {
@@ -1370,10 +2118,12 @@ private fun showLanguageSelectDialog() {
         }
         cancelBtn.setOnClickListener { langDialog.dismiss() }
         langDialog.show()
+        if (isLayout(TV) && selectedIndex >= 0) restoreRow(rv, selectedIndex)
     }
 
     private fun showCatalogConfigDialog(item: LinkItem) {
         val context = hostContext
+        val owner = topDialog()
         migrateStremioCatalogSettings(sharedPref, item.link)
         val uniqueId = stremioCatalogKey(item.link) 
         
@@ -1392,18 +2142,21 @@ private fun showLanguageSelectDialog() {
         setupCustomDialog(progressDialog, progressContainer)
         progressDialog.show()
 
-        uiScope.launch {
+        var delivered = false
+        var request: Job? = null
+        onClose(progressDialog) { if (!delivered) request?.cancel() }
+        request = uiScope.launch {
             val currentUrl = stremioManifestUrl(item.link)
 
             val manifestText = withContext(Dispatchers.IO) {
                 try { 
                     // 실제 manifest URL로 요청
                     com.lagradost.cloudstream3.app.get(currentUrl, timeout = 10L).text 
-                } catch (e: Exception) { 
-                    e.printStackTrace(); 
-                    null 
-                }
+                } catch (cancelled: CancellationException) { throw cancelled
+                } catch (_: Exception) { null }
             }
+            if (!isActive || !alive(owner) || !progressDialog.isShowing) return@launch
+            delivered = true
             progressDialog.dismiss()
 
             if (manifestText.isNullOrBlank()) {
@@ -1448,6 +2201,7 @@ private fun showLanguageSelectDialog() {
     private fun displayCatalogListDialog(addonName: String, flatTabs: List<ConfigFlatTab>, linkUrl: String) {
         val context = hostContext
         val prefs = sharedPref
+        var activeDialog: AlertDialog? = null
         migrateStremioCatalogSettings(prefs, linkUrl)
         val uniqueId = stremioCatalogKey(linkUrl)
         val orderKey = "catalog_order_$uniqueId"
@@ -1471,7 +2225,7 @@ private fun showLanguageSelectDialog() {
 
         val dialogContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(25, 40, 25, 30)
+            setPadding(dp(20), dp(20), dp(20), dp(20))
             background = getDarkThemeBg()
         }
 
@@ -1483,13 +2237,15 @@ private fun showLanguageSelectDialog() {
             setPadding(0, 0, 0, 30)
             gravity = android.view.Gravity.START
         }
+        titleView.maxLines = 2
+        titleView.ellipsize = android.text.TextUtils.TruncateAt.END
         dialogContainer.addView(titleView)
+        dialogContainer.addView(popupMessage("Order controls the catalog display sequence.").apply { textSize = 12f })
 
         val rv = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
-                setMargins(0, 0, 0, 20)
-            }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                minOf(dp(450), (context.resources.displayMetrics.heightPixels * 0.62f).toInt(), dp(56) * masterTabs.size))
             isVerticalFadingEdgeEnabled = true
             setFadingEdgeLength(120)
         }
@@ -1508,21 +2264,24 @@ private fun showLanguageSelectDialog() {
                 }
             }
 
-            inner class VH(val view: LinearLayout, val checkbox: CheckBox, val etOrder: EditText, val dragHandle: ImageView) : RecyclerView.ViewHolder(view)
+            inner class VH(val view: LinearLayout, val checkbox: CheckBox, val etOrder: EditText, val dragHandle: ImageView) : RecyclerView.ViewHolder(view) {
+                var displayedOrder = 0
+            }
 
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
                 val layout = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(10, 8, 10, 8)
+                    setPadding(dp(8), dp(4), dp(8), dp(4))
                     background = getCardBg()
                     layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                        setMargins(0, 5, 0, 5)
+                        setMargins(0, dp(4), 0, dp(4))
                     }
                 }
                 val dragHandle = ImageView(context).apply {
                     setImageResource(android.R.drawable.ic_menu_sort_by_size)
-                    setPadding(10, 0, 20, 0)
+                    isFocusable = false
+                    layoutParams = LinearLayout.LayoutParams(dp(24), dp(24))
                 }
                 
                 val etOrder = EditText(context).apply {
@@ -1534,9 +2293,7 @@ private fun showLanguageSelectDialog() {
                     background = getCardBg()
                     gravity = android.view.Gravity.CENTER
                     isSingleLine = true
-                    layoutParams = LinearLayout.LayoutParams(90, dp(35)).apply {
-                        setMargins(0, 0, 15, 0)
-                    }
+
                     setOnClickListener {
                         requestFocus()
                         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
@@ -1550,9 +2307,14 @@ private fun showLanguageSelectDialog() {
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 }
                 layout.addView(dragHandle)
-                layout.addView(etOrder)
+                layout.addView(inputSlot(etOrder).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(56), dp(48)).apply { marginEnd = dp(8) }
+                })
                 layout.addView(checkbox)
+                checkbox.maxLines = 2
                 normalizeTypeface(layout)
+                prepareControls(layout)
+                horizontalFocus(etOrder, checkbox)
                 return VH(layout, checkbox, etOrder, dragHandle)
             }
 
@@ -1566,6 +2328,7 @@ private fun showLanguageSelectDialog() {
                 holder.checkbox.setTextColor(itemColor)
                 holder.checkbox.buttonTintList = ColorStateList.valueOf(itemColor)
                 holder.checkbox.setOnCheckedChangeListener { _, isChecked ->
+                    (rv.findFocus() as? EditText)?.clearFocus()
                     tab.isChecked = isChecked 
                     
                     val checkedTabs = masterTabs.filter { it.isChecked }
@@ -1574,25 +2337,33 @@ private fun showLanguageSelectDialog() {
                     masterTabs.addAll(checkedTabs)
                     masterTabs.addAll(uncheckedTabs)
                     updateVisibleTabs()
+                    rv.doOnNextLayout {
+                        if (activeDialog?.isShowing == true && rv.hasFocus()) restoreRow(rv,
+                            visibleTabs.indexOfFirst { it.key == tab.key }) { (it as ViewGroup).getChildAt(2) }
+                    }
                 }
 
+                if (holder.etOrder.hasFocus() && holder.etOrder.text.toString().toIntOrNull() != holder.displayedOrder)
+                    holder.etOrder.clearFocus()
                 holder.etOrder.setOnFocusChangeListener(null)
-                holder.etOrder.setText((position + 1).toString())
+                holder.displayedOrder = position + 1
+                holder.etOrder.setText(holder.displayedOrder.toString())
                 
                 holder.etOrder.setOnFocusChangeListener { _, hasFocus ->
-                    val curPos = holder.adapterPosition 
-                    if (curPos == RecyclerView.NO_POSITION) return@setOnFocusChangeListener
-
                     if (hasFocus) {
                         rv.postDelayed({
-                            rv.smoothScrollToPosition(curPos)
+                            if (activeDialog?.isShowing == true && !closing) {
+                                val index = visibleTabs.indexOfFirst { it.key == tab.key }
+                                if (index >= 0) rv.smoothScrollToPosition(index)
+                            }
                         }, 150)
                     } else {
                         val inputVal = holder.etOrder.text.toString().toIntOrNull()
-                        if (inputVal != null) {
-                            shiftItemInRecyclerView(curPos, inputVal) 
-                        } else {
-                            holder.etOrder.setText((curPos + 1).toString()) 
+                        if (inputVal != null && inputVal != holder.displayedOrder) {
+                            shiftItemInRecyclerView(tab.key, inputVal)
+                        } else if (inputVal == null) {
+                            val current = visibleTabs.indexOfFirst { it.key == tab.key }
+                            if (current >= 0) holder.etOrder.setText((current + 1).toString())
                         }
                     }
                 }
@@ -1609,9 +2380,15 @@ private fun showLanguageSelectDialog() {
 
             override fun getItemCount() = visibleTabs.size
             
-            fun shiftItemInRecyclerView(oldPos: Int, newOrder: Int) {
+            fun shiftItemInRecyclerView(tabKey: String, newOrder: Int) {
                 rv.post {
+                    if (activeDialog?.isShowing != true || closing) return@post
+                    val oldPos = visibleTabs.indexOfFirst { it.key == tabKey }
                     if (oldPos !in visibleTabs.indices) return@post
+                    val focused = rv.findFocus()
+                    val focusedIndex = focused?.let { rv.findContainingViewHolder(it)?.adapterPosition }
+                    val focusedKey = focusedIndex?.let { visibleTabs.getOrNull(it)?.key }
+                    val orderFocused = focused is EditText
                     val item = visibleTabs[oldPos]
                     
                     val isEnabled = item.isChecked 
@@ -1645,9 +2422,16 @@ private fun showLanguageSelectDialog() {
                         }
                         
                         notifyItemMoved(oldPos, newPos)
-                        notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
+                        notifyItemRangeChanged(minOf(oldPos, newPos), kotlin.math.abs(newPos - oldPos) + 1)
                     } else {
                         notifyItemChanged(oldPos)
+                    }
+                    if (focusedKey != null) rv.doOnNextLayout {
+                        if (activeDialog?.isShowing == true && rv.hasFocus()) restoreRow(rv,
+                            visibleTabs.indexOfFirst { it.key == focusedKey }) { row ->
+                                val parent = row as ViewGroup
+                                if (orderFocused) (parent.getChildAt(1) as FrameLayout).getChildAt(0) else parent.getChildAt(2)
+                            }
                     }
                 }
             }
@@ -1702,9 +2486,18 @@ private fun showLanguageSelectDialog() {
         dialogContainer.addView(footer)
 
         val dialog = AlertDialog.Builder(context).setView(dialogContainer).create()
-        setupCustomDialog(dialog, dialogContainer)
+        activeDialog = dialog
+        setupCustomDialog(dialog, dialogContainer, rv, 800, initialFocus = { rv })
 
+        saveBtn.isFocusableInTouchMode = true
         saveBtn.setOnClickListener {
+            if (!saveBtn.isEnabled) return@setOnClickListener
+            rv.findFocus()?.clearFocus()
+            saveBtn.requestFocus()
+            hideKeyboard(saveBtn)
+            saveBtn.isEnabled = false
+            rv.post {
+            if (!dialog.isShowing || closing) return@post
             val editor = prefs.edit()
             val keysToSave = JSONArray()
             
@@ -1720,6 +2513,7 @@ private fun showLanguageSelectDialog() {
             
             dialog.dismiss()
             showSavedPopup(context, "Catalog Settings", "Catalog settings saved. Reload to apply.")
+            }
         }
 
         cancelBtn.setOnClickListener {
@@ -1727,6 +2521,7 @@ private fun showLanguageSelectDialog() {
         }
 
         dialog.show()
+        if (isLayout(TV)) restoreRow(rv, 0) { (it as ViewGroup).getChildAt(2) }
     }
 
     private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
@@ -1762,54 +2557,97 @@ private fun showLanguageSelectDialog() {
     inner class LinksAdapter(
         private val items: MutableList<LinkItem>,
         private val onDelete: (LinkItem) -> Unit,
-        private val onEdit: (LinkItem, Int) -> Unit
+        private val onEdit: (LinkItem, Int) -> Unit,
+        private val onConfigure: (LinkItem) -> Unit
     ) : RecyclerView.Adapter<LinksAdapter.VH>() {
-
         inner class VH(val view: View) : RecyclerView.ViewHolder(view) {
             val tvName: TextView = view.findView("tvName")
             val tvLink: TextView = view.findView("tvLink")
             val tvType: TextView = view.findView("tvType")
             val tvSyncBadge: TextView = view.findView("tvSyncBadge")
             val btnDelete: ImageButton = view.findView("btnDelete")
+            val btnConfigure: ImageButton? = view.optional("btnConfigureAddon") as? ImageButton
         }
-
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-            val layoutId = getCachedResId("item_saved_link", "layout")
-            val v = LayoutInflater.from(parent.context).inflate(res.getLayout(layoutId), parent, false)
-            v.background = getCardBg()
-            normalizeTypeface(v)
-            themeLayoutText(v)
-            return VH(v).also {
-                it.btnDelete.setImageDrawable(getDrawable("delete_icon"))
-                it.btnDelete.imageTintList = ColorStateList.valueOf(Color.rgb(229, 9, 20))
+            val view = getLayout("item_saved_link", LayoutInflater.from(parent.context), parent)
+            view.background = getCardBg()
+            view.isFocusable = true; view.isClickable = true
+            view.makeTvCompatible()
+            return VH(view).also {
+                styleAddonIcon(it.btnDelete, "delete_icon")
+                it.btnConfigure?.let { gear -> styleAddonIcon(gear, "settings_icon") }
+
             }
         }
-
         override fun onBindViewHolder(holder: VH, position: Int) {
             val item = items[position]
-            holder.tvName.text = item.name
-            holder.tvLink.text = item.link
-            holder.tvType.text = item.type
-            holder.tvSyncBadge.visibility = if (item.isSyncEnabled || item.isHistorySyncEnabled || item.isStreamSubtitleSyncEnabled) View.VISIBLE else View.GONE
-            holder.btnDelete.setOnClickListener { onDelete(item) }
-            holder.itemView.setOnClickListener { onEdit(item, position) }
-        }
-
-        override fun getItemCount(): Int = items.size
-
-        fun remove(item: LinkItem) {
-            val idx = items.indexOfFirst { it.id == item.id }
-            if (idx >= 0) {
-                items.removeAt(idx)
-                notifyItemRemoved(idx)
+            holder.tvName.text = item.name; holder.tvLink.text = item.link; holder.tvType.text = item.type
+            listOf(holder.tvName, holder.tvLink, holder.tvType, holder.tvSyncBadge).forEach {
+                it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }
+            holder.tvSyncBadge.visibility = if (item.isSyncEnabled || item.isHistorySyncEnabled ||
+                item.isStreamSubtitleSyncEnabled) View.VISIBLE else View.GONE
+            val label = item.name.takeUnless { it == item.link } ?: "Catalog addon"
+            holder.view.contentDescription = "$label. Stream / Subtitle Sync: ${item.isStreamSubtitleSyncEnabled}. Metadata Sync: ${item.isSyncEnabled}. History Sync: ${item.isHistorySyncEnabled}."
+            holder.btnDelete.contentDescription = "Delete addon $label"
+            holder.btnConfigure?.apply {
+                contentDescription = "Addon settings for $label"
+                isEnabled = item.link.isNotBlank(); isFocusable = isEnabled
+                alpha = if (isEnabled) 1f else 0.5f
+                setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onConfigure) }
+            }
+            holder.btnDelete.setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onDelete) }
+            holder.view.setOnClickListener {
+                val index = holder.adapterPosition
+                items.getOrNull(index)?.let { onEdit(it, index) }
+            }
+            if (isLayout(TV)) {
+                val peers = listOfNotNull(holder.view, holder.btnConfigure, holder.btnDelete)
+                peers.forEachIndexed { column, control ->
+                    control.setOnKeyListener { _, key, event ->
+                        if (holder.adapterPosition == RecyclerView.NO_POSITION) return@setOnKeyListener false
+                        val direction = when (key) {
+                            KeyEvent.KEYCODE_DPAD_UP -> -1
+                            KeyEvent.KEYCODE_DPAD_DOWN -> 1
+                            else -> 0
+                        }
+                        if (direction != 0) {
+                            val target = holder.adapterPosition + direction
+                            val recycler = holder.itemView.parent as? RecyclerView
+                            if (recycler == null || target !in items.indices) false else {
+                                if (event.action == KeyEvent.ACTION_DOWN) restoreRow(recycler, target) { row ->
+                                    when {
+                                        control === holder.btnConfigure -> row.optional("btnConfigureAddon")?.takeIf { it.isEnabled } ?: row
+                                        control === holder.btnDelete -> row.findView<ImageButton>("btnDelete")
+                                        else -> row
+                                    }
+                                }
+                                true
+                            }
+                        } else if (key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                            val step = if (key == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
+                            val target = generateSequence(column + step) { it + step }.takeWhile { it in peers.indices }
+                                .map { peers[it] }.firstOrNull { usable(it) }
+                            if (target == null) false else {
+                                if (event.action == KeyEvent.ACTION_DOWN) target.requestFocus()
+                                true
+                            }
+                        } else false
+                    }
+                }
             }
         }
-
+        override fun getItemCount() = items.size
+        fun positionOf(id: Long?) = items.indexOfFirst { it.id == id }
+        fun linkFor(id: Long) = items.firstOrNull { it.id == id }?.link
+        @SuppressLint("NotifyDataSetChanged")
+        fun replaceAll(links: List<LinkItem>) {
+            items.clear(); items.addAll(links)
+            notifyDataSetChanged()
+        }
         fun updateItem(newItem: LinkItem, position: Int) {
-            if (position in items.indices) {
-                items[position] = newItem
-                notifyItemChanged(position)
-            }
+            val index = positionOf(newItem.id)
+            if (index >= 0) { items[index] = newItem; notifyItemChanged(index) }
         }
     }
 }
