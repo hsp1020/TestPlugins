@@ -3,6 +3,7 @@ package com.hsp1020
 
 import android.content.SharedPreferences
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.R
 import org.json.JSONArray
 import org.json.JSONObject
 import com.lagradost.cloudstream3.utils.getQualityFromName
