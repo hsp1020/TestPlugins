@@ -1,7 +1,6 @@
 package com.hsp1020
 
 import android.graphics.Color
-import android.content.res.Configuration
 import android.graphics.Matrix
 import android.graphics.drawable.GradientDrawable
 import android.text.SpannableStringBuilder
@@ -114,7 +113,10 @@ internal class PhoneHeroHook(
         private val originalTagsAlpha = originalTags?.alpha
         private val originalScale = image?.scaleType
         private val originalLogoScale = logo?.scaleType
-        private var portraitLayout: Boolean? = null
+        private val pagePosition = IntArray(2)
+        private val controlPosition = IntArray(2)
+        private val buttonIds = intArrayOf(R.id.home_preview_play, R.id.home_preview_bookmark, R.id.home_preview_info)
+        private var buttonHolder: View? = null
         private var lastKey: Int? = null
         private var previousDrawable: android.graphics.drawable.Drawable? = null
         private var previousWidth = -1
@@ -136,12 +138,26 @@ internal class PhoneHeroHook(
             true
         }
         private fun updateSpacing() {
-            val portrait = root.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
-            if (portraitLayout == portrait) return
-            portraitLayout = portrait
-            (holder?.layoutParams as? FrameLayout.LayoutParams)?.let { params ->
-                params.bottomMargin = dp(if (portrait) 72 else 104)
-                holder?.layoutParams = params
+            val buttons = buttonHolder ?: root.rootView.findViewById<View>(R.id.home_preview_title_holder)?.also { buttonHolder = it } ?: return
+            val panel = holder ?: return
+            if (root.height <= 0 || panel.height <= 0) return
+            root.getLocationInWindow(pagePosition)
+            val pageTop = pagePosition[1]
+            val pageBottom = pageTop + root.height
+            var buttonTop = Int.MAX_VALUE
+            for (id in buttonIds) {
+                val button = buttons.findViewById<View>(id) ?: continue
+                if (!button.isShown || button.height <= 0) continue
+                button.getLocationInWindow(controlPosition)
+                buttonTop = minOf(buttonTop, controlPosition[1])
+            }
+            if (buttonTop <= pageTop || buttonTop >= pageBottom) return
+            val margin = pageBottom - buttonTop + dp(4)
+            (panel.layoutParams as? FrameLayout.LayoutParams)?.let { params ->
+                if (params.bottomMargin != margin) {
+                    params.bottomMargin = margin
+                    panel.layoutParams = params
+                }
             }
         }
 
@@ -152,7 +168,6 @@ internal class PhoneHeroHook(
                     gravity = Gravity.START or Gravity.BOTTOM
                     marginStart = dp(20)
                     marginEnd = dp(20)
-                    bottomMargin = dp(104)
                 }
             }
             logoParams?.let { old ->
