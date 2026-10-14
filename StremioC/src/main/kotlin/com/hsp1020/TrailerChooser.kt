@@ -26,7 +26,6 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.navigation.NavController
 import androidx.navigation.fragment.findNavController
 import androidx.preference.PreferenceManager
 import com.google.android.material.bottomsheet.BottomSheetDialog
@@ -178,8 +177,11 @@ internal class TrailerChooser(
         if (!isTv) return
         val desired = if (items.isEmpty()) View.GONE else View.VISIBLE
         if (tvContainer?.visibility != desired) tvContainer?.visibility = desired
-        // The host can replace the click listener even while this button stays visible.
-        if (desired == View.VISIBLE) tvButton?.setOnClickListener(pickerClick)
+        // The host can replace the click listener or button style after metadata arrives.
+        if (desired == View.VISIBLE) {
+            (tvButton as? TextView)?.let { if (it.currentTextColor != Color.WHITE) it.setTextColor(Color.WHITE) }
+            tvButton?.setOnClickListener(pickerClick)
+        }
     }
 
     private fun reopenPickerIfReady() {
@@ -362,7 +364,7 @@ internal class TrailerChooser(
 
     // Keep the picker above the previous detail until the player can draw.
     // This also avoids dismissing a dialog from a stale detail view during navigation.
-    private fun dismissPickerOnPlayerFrame(picker: BottomSheetDialog, controller: NavController) {
+    private fun dismissPickerOnPlayerFrame(picker: BottomSheetDialog) {
         finishPlayerHandoff?.invoke()
         val manager = fragment.parentFragmentManager
         val handler = Handler(Looper.getMainLooper())
@@ -426,7 +428,7 @@ internal class TrailerChooser(
                 saved.set(returnScrollKey, scrollY)
                 saved.set(returnFocusKey, focusedRow)
                 try {
-                    dismissPickerOnPlayerFrame(picker, controller)
+                    dismissPickerOnPlayerFrame(picker)
                     controller.navigate(R.id.global_to_navigation_player, playerArgs)
                 } catch (error: Exception) {
                     finishPlayerHandoff?.invoke()
