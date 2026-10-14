@@ -350,11 +350,16 @@ internal class CatalogBrowserDialog(
         id = View.generateViewId()
         minimumHeight = dp(48)
         isFocusable = true
-        setPopupBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryBlackBackground)))
+        setPopupBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryGrayBackground)))
+        val cardBg = androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, R.drawable.bg_color_both)?.mutate()
         val ripple = TypedValue()
-        if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) && ripple.resourceId != 0) {
-            setBackgroundResource(ripple.resourceId)
-        }
+        val overlay = if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) &&
+            ripple.resourceId != 0) {
+            androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, ripple.resourceId)
+        } else null
+        background = if (cardBg != null && overlay != null)
+            android.graphics.drawable.LayerDrawable(arrayOf(cardBg, overlay))
+        else cardBg ?: overlay
     }
 
     private fun selectorArrow() = TextView(activity).apply {
@@ -412,7 +417,7 @@ internal class CatalogBrowserDialog(
                 val color = activity.colorFromAttribute(if (checked) R.attr.colorPrimary else R.attr.textColor)
                 return LinearLayout(activity).apply {
                     gravity = Gravity.CENTER_VERTICAL
-                    val rowColor = activity.colorFromAttribute(R.attr.primaryBlackBackground)
+                    val rowColor = activity.colorFromAttribute(R.attr.primaryGrayBackground)
                     setBackgroundColor(rowColor)
                     val ripple = TypedValue()
                     if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) &&
