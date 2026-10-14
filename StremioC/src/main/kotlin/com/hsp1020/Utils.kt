@@ -14,6 +14,7 @@ import android.app.Application
 import android.app.Dialog
 import android.content.Context
 import android.content.res.Resources
+import android.content.res.ColorStateList
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -23,6 +24,7 @@ import android.text.Spanned
 import android.text.TextWatcher
 import android.text.style.ImageSpan
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.TextView
 import androidx.appcompat.widget.SearchView
@@ -47,6 +49,7 @@ import com.lagradost.cloudstream3.ui.settings.Globals.TV
 import com.lagradost.cloudstream3.ui.settings.Globals.EMULATOR
 import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import com.lagradost.cloudstream3.utils.UIHelper.navigate
+import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import kotlin.math.roundToInt
 private val QUALITY_REGEX = Regex("(\\d{3,4}[pP])")
 private val TT_REGEX = Regex("^tt\\d+$")
@@ -234,6 +237,29 @@ internal class RatingPlotImageHook(
         hero.attach(parent)
     }
     private var homePreviewText: TextView? = null
+    private val tvHeroColors = mutableMapOf<TextView, ColorStateList>()
+    private fun colorTvHero(preview: TextView?) {
+        if (preview == null) {
+            tvHeroColors.forEach { (text, original) -> text.setTextColor(original) }
+            tvHeroColors.clear()
+            return
+        }
+        val panel = preview.parent as? ViewGroup ?: return
+        tvHeroColors.keys.removeAll { it.parent == null }
+        val color = preview.context.colorFromAttribute(R.attr.textColor)
+        fun apply(text: TextView?) {
+            if (text != null && text.currentTextColor != color) {
+                tvHeroColors.putIfAbsent(text, text.textColors)
+                text.setTextColor(color)
+            }
+        }
+        for (id in intArrayOf(R.id.home_preview_text, R.id.home_preview_score,
+            R.id.home_preview_year, R.id.home_preview_duration, R.id.home_preview_description,
+            R.id.home_preview_cast)) apply(panel.findViewById<TextView>(id))
+        panel.findViewById<ViewGroup>(R.id.home_preview_tags)?.let { tags ->
+            for (i in 0 until tags.childCount) apply(tags.getChildAt(i) as? TextView)
+        }
+    }
     private var homePreviewChanging = false
     private val homePreviewWatcher = object : TextWatcher {
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
@@ -244,6 +270,8 @@ internal class RatingPlotImageHook(
     }
     private fun bindHomePreview(view: TextView?) {
         val next = view.takeIf { isLayout(TV or EMULATOR) }
+        if (homePreviewText !== next) colorTvHero(null)
+        colorTvHero(next)
         if (homePreviewText === next) return
         homePreviewText?.let { previous ->
             previous.removeTextChangedListener(homePreviewWatcher)

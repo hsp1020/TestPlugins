@@ -30,6 +30,7 @@
                 android:layout_height="48dp"
                 android:gravity="center_vertical"
                 android:text="Stremio Settings"
+                android:textColor="?attr/textColor"
                 android:singleLine="true"
                 android:textAppearance="?android:attr/textAppearanceListItem"
                 android:textStyle="bold"
@@ -45,7 +46,7 @@
                 android:layout_height="48dp"
                 android:gravity="center_vertical"
                 android:text="Export"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="?attr/textColor"
                 android:textSize="14sp"
                 android:textStyle="bold"
                 android:paddingHorizontal="6dp"
@@ -59,7 +60,7 @@
                 android:layout_height="48dp"
                 android:gravity="center_vertical"
                 android:text="Import"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="?attr/textColor"
                 android:textSize="14sp"
                 android:textStyle="bold"
                 android:paddingHorizontal="6dp"
@@ -109,7 +110,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="Add Catalogs"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="?attr/textColor"
                 android:textAppearance="?android:attr/textAppearanceListItem"
                 android:textStyle="bold" />
 
@@ -136,7 +137,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="List Catalogs"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="?attr/textColor"
                 android:textAppearance="?android:attr/textAppearanceListItem"
                 android:textStyle="bold" />
 
@@ -164,7 +165,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="TMDB Language"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="?attr/textColor"
                 android:textAppearance="?android:attr/textAppearanceListItem"
                 android:textStyle="bold" />
 
@@ -189,7 +190,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="TMDB API Key (Required)"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="?attr/textColor"
                 android:textAppearance="?android:attr/textAppearanceListItem"
                 android:textStyle="bold" />
 
@@ -198,8 +199,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="35dp"
                 android:hint="Enter TMDb API Key"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textColorHint="#777777"
+                android:textColor="?attr/textColor"
+                android:textColorHint="?attr/grayTextColor"
                 android:textSize="14sp"
                 android:paddingHorizontal="12dp"
                 android:paddingVertical="0dp"
@@ -226,7 +227,7 @@
                     android:layout_weight="1"
                     android:layout_height="wrap_content"
                     android:text="Stream / Subtitle Addon URL"
-                    android:textColor="?android:attr/textColorPrimary"
+                    android:textColor="?attr/textColor"
                     android:textAppearance="?android:attr/textAppearanceListItem"
                     android:textStyle="bold" />
                 <ImageView
@@ -243,7 +244,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="Stremio Stream &amp; Subtitle Sources"
-                android:textColor="?android:attr/textColorSecondary"
+                android:textColor="?attr/grayTextColor"
                 android:textSize="12sp"
                 android:layout_marginTop="2dp" />
             <LinearLayout
@@ -265,7 +266,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Meta / History Addon URL"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="?attr/textColor"
                 android:textAppearance="?android:attr/textAppearanceListItem"
                 android:textStyle="bold" />
 
@@ -273,7 +274,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Aiometadata addon URL"
-                android:textColor="?android:attr/textColorSecondary"
+                android:textColor="?attr/grayTextColor"
                 android:textSize="12sp"
                 android:layout_marginTop="2dp" />
 
@@ -282,8 +283,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="35dp"
                 android:hint="https://aiometadata.elfhosted.com/stremio/..."
-                android:textColor="?android:attr/textColorPrimary"
-                android:textColorHint="#777777"
+                android:textColor="?attr/textColor"
+                android:textColorHint="?attr/grayTextColor"
                 android:textSize="14sp"
                 android:paddingHorizontal="12dp"
                 android:paddingVertical="0dp"
@@ -307,7 +308,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="MDBList Ratings"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="?attr/textColor"
                 android:textAppearance="?android:attr/textAppearanceListItem"
                 android:textStyle="bold" />
 
@@ -332,7 +333,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="MDBList API Key (Required)"
-                android:textColor="?android:attr/textColorSecondary"
+                android:textColor="?attr/grayTextColor"
                 android:textSize="12sp" />
 
             <EditText
@@ -340,8 +341,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="35dp"
                 android:hint="Enter MdbList API Key"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textColorHint="#777777"
+                android:textColor="?attr/textColor"
+                android:textColorHint="?attr/grayTextColor"
                 android:textSize="14sp"
                 android:paddingHorizontal="12dp"
                 android:paddingVertical="0dp"
@@ -365,7 +366,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="XRDB Poster"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="?attr/textColor"
                 android:textAppearance="?android:attr/textAppearanceListItem"
                 android:textStyle="bold" />
 
@@ -390,7 +391,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="XRDB Addon URL (TMDB recommendations only)"
-                android:textColor="?android:attr/textColorSecondary"
+                android:textColor="?attr/grayTextColor"
                 android:textSize="12sp" />
 
             <EditText
@@ -398,8 +399,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="35dp"
                 android:hint="https://extendedratings.com/poster/..."
-                android:textColor="?android:attr/textColorPrimary"
-                android:textColorHint="#777777"
+                android:textColor="?attr/textColor"
+                android:textColorHint="?attr/grayTextColor"
                 android:textSize="14sp"
                 android:paddingHorizontal="12dp"
                 android:paddingVertical="0dp"
@@ -423,7 +424,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="CineStream"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="?attr/textColor"
                 android:textAppearance="?android:attr/textAppearanceListItem"
                 android:textStyle="bold" />
 
@@ -448,7 +449,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="StreamPlay"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="?attr/textColor"
                 android:textAppearance="?android:attr/textAppearanceListItem"
                 android:textStyle="bold" />
 
@@ -473,7 +474,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="VixSrc"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="?attr/textColor"
                 android:textAppearance="?android:attr/textAppearanceListItem"
                 android:textStyle="bold" />
 

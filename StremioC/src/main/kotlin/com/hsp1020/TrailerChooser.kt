@@ -31,6 +31,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
 import com.lagradost.cloudstream3.utils.SubtitleHelper
 import com.lagradost.cloudstream3.utils.UIHelper.navigate
+import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -182,7 +183,7 @@ internal class TrailerChooser(
                     alpha = 0x80
                 })
                 chipBackgroundColor = ColorStateList.valueOf(0xFF2B2C30.toInt())
-                setTextColor(Color.WHITE)
+                setTextColor(context.colorFromAttribute(R.attr.textColor))
                 typeface = Typeface.create(ResourcesCompat.getFont(context, R.font.google_sans), Typeface.BOLD)
                 fontFeatureSettings = "'liga' 0, 'clig' 0, 'calt' 0, 'dlig' 0"
                 isCheckable = false

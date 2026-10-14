@@ -3,6 +3,7 @@ package com.hsp1020
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.res.ColorStateList
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Color
@@ -762,7 +763,7 @@ class SettingsBottomFragment(
                 setText(value)
                 textSize = 14f
                 setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-                setHintTextColor(Color.parseColor("#777777"))
+                setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
                 setPadding(urlFieldPadding, 0, urlFieldPadding, 0)
                 gravity = android.view.Gravity.CENTER_VERTICAL
                 background = getCardBg()
@@ -820,6 +821,7 @@ class SettingsBottomFragment(
         fun setExtraUrlExpanded(expanded: Boolean) {
             extraUrlContainer.visibility = if (expanded) View.VISIBLE else View.GONE
             extraUrlToggle.setImageDrawable(getDrawable(if (expanded) "addon_collapse_icon" else "addon_expand_icon"))
+            extraUrlToggle.imageTintList = ColorStateList.valueOf(hostContext.colorFromAttribute(HostR.attr.textColor))
             extraUrlToggle.contentDescription = if (expanded) "Collapse addon URLs" else "Expand addon URLs"
             sharedPref.edit().putBoolean(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_EXPANDED, expanded).apply()
         }
@@ -1129,13 +1131,13 @@ class SettingsBottomFragment(
         
         etName?.background = getCardBg()
         etName?.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-        etName?.setHintTextColor(Color.parseColor("#777777"))
+        etName?.setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
         etName?.setPadding(dp(12), 0, dp(12), 0) 
         if (isEdit) etName?.setText(itemToEdit?.name)
         
         etLink?.background = getCardBg()
         etLink?.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-        etLink?.setHintTextColor(Color.parseColor("#777777"))
+        etLink?.setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
         etLink?.setPadding(dp(12), 0, dp(12), 0) 
         if (isEdit) etLink?.setText(itemToEdit?.link)
 
@@ -1218,7 +1220,7 @@ private fun showLanguageSelectDialog() {
 
         val searchBar = EditText(context).apply {
             hint = "Search language..."
-            setHintTextColor(Color.parseColor("#777777"))
+            setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
             setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
             textSize = 14f
             setPadding(dp(12), 0, dp(12), 0)
@@ -1265,6 +1267,7 @@ private fun showLanguageSelectDialog() {
                 }
                 val tvCheck = ImageView(context).apply {
                     setImageDrawable(getDrawable("addon_check_icon"))
+                    imageTintList = ColorStateList.valueOf(hostContext.colorFromAttribute(HostR.attr.colorPrimary))
                     contentDescription = "Selected language"
                     setPadding(dp(10), 0, dp(10), 0)
                     layoutParams = LinearLayout.LayoutParams(dp(40), dp(24))
@@ -1280,7 +1283,7 @@ private fun showLanguageSelectDialog() {
                 val isSelected = code == selectedCode
                 holder.tvName.text = langName
                 
-                holder.tvName.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
+                holder.tvName.setTextColor(hostContext.colorFromAttribute(if (isSelected) HostR.attr.colorPrimary else HostR.attr.textColor))
                 holder.view.background = if (isSelected) getCardBg() else ColorDrawable(Color.TRANSPARENT) 
                 holder.tvCheck.visibility = if (isSelected) View.VISIBLE else View.GONE
                 
@@ -1541,8 +1544,11 @@ private fun showLanguageSelectDialog() {
                 val tab = visibleTabs[position]
                 
                 holder.checkbox.setOnCheckedChangeListener(null)
-                holder.checkbox.isChecked = tab.isChecked 
+                holder.checkbox.isChecked = tab.isChecked
                 holder.checkbox.text = tab.displayName
+                val itemColor = hostContext.colorFromAttribute(if (tab.isChecked) HostR.attr.colorPrimary else HostR.attr.textColor)
+                holder.checkbox.setTextColor(itemColor)
+                holder.checkbox.buttonTintList = ColorStateList.valueOf(itemColor)
                 holder.checkbox.setOnCheckedChangeListener { _, isChecked ->
                     tab.isChecked = isChecked 
                     
