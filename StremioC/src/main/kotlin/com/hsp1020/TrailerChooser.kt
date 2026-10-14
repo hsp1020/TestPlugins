@@ -34,7 +34,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
 import com.lagradost.cloudstream3.utils.SubtitleHelper
-import com.lagradost.cloudstream3.utils.UIHelper.navigate
 import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -80,12 +79,20 @@ internal class TrailerChooser(
     private var dialog: BottomSheetDialog? = null
     private var opening = false
     private var reopenAfterPlayback = false
+    private var reopenScrollY = 0
+    private var reopenFocusedRow = -1
+    private var restorePosted = false
     private val returnKey = "stremioc_trailer_picker_return"
+    private val returnScrollKey = "${returnKey}_scroll"
+    private val returnFocusKey = "${returnKey}_focus"
     private val resumeObserver = LifecycleEventObserver { _, event ->
         if (event == Lifecycle.Event.ON_RESUME) {
             val navEntry = runCatching { fragment.findNavController().currentBackStackEntry }.getOrNull()
             if (detailUrl != null && navEntry?.savedStateHandle?.get<String>(returnKey) == detailUrl) {
-                navEntry.savedStateHandle.remove<String>(returnKey)
+                val saved = navEntry.savedStateHandle
+                saved.remove<String>(returnKey)
+                reopenScrollY = saved.remove<Int>(returnScrollKey) ?: 0
+                reopenFocusedRow = saved.remove<Int>(returnFocusKey) ?: -1
                 reopenAfterPlayback = true
             }
             refresh()
@@ -169,11 +176,17 @@ internal class TrailerChooser(
     }
 
     private fun reopenPickerIfReady() {
-        if (!reopenAfterPlayback || !fragment.isResumed || items.isEmpty()) return
+        if (!reopenAfterPlayback || !fragment.isResumed || items.isEmpty() || restorePosted) return
+        if (dialog?.isShowing == true) {
+            reopenAfterPlayback = false
+            return
+        }
+        restorePosted = true
         root.post {
-            if (reopenAfterPlayback && fragment.isResumed && fragment.view === root && items.isNotEmpty()) {
+            restorePosted = false
+            if (reopenAfterPlayback && fragment.isResumed && fragment.view === root && items.isNotEmpty() &&
+                showPicker(reopenScrollY, reopenFocusedRow)) {
                 reopenAfterPlayback = false
-                showPicker()
             }
         }
     }
@@ -237,9 +250,9 @@ internal class TrailerChooser(
         button?.contentDescription = "${root.context.getString(R.string.play_trailer_button)} (${items.size})"
     }
 
-    private fun showPicker() {
-        val activity = fragment.activity ?: return
-        if (dialog?.isShowing == true || opening || items.isEmpty()) return
+    private fun showPicker(restoreScrollY: Int? = null, restoreFocus: Int = -1): Boolean {
+        val activity = fragment.activity ?: return false
+        if (dialog?.isShowing == true || opening || items.isEmpty()) return false
         val foreground = themeColor("textColor", Color.WHITE)
         val list = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -271,7 +284,11 @@ internal class TrailerChooser(
                 val focusBackground = TypedValue()
                 if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, focusBackground, true) &&
                     focusBackground.resourceId != 0) setBackgroundResource(focusBackground.resourceId)
-                setOnClickListener { play(entry) }
+                setOnClickListener {
+                    val focused = (0 until rows.childCount)
+                        .firstOrNull { rows.getChildAt(it).hasFocus() } ?: if (isTv) index else -1
+                    play(entry, scroll.scrollY, focused)
+                }
             }
             val thumbnail = CardView(activity).apply {
                 cardElevation = 0f
@@ -317,21 +334,34 @@ internal class TrailerChooser(
             ViewGroup.LayoutParams.MATCH_PARENT,
             minOf(dp(88) * items.size + dp(1), (activity.resources.displayMetrics.heightPixels * 0.6f).toInt())
         ))
-        dialog = BottomSheetDialog(activity).apply {
+        val picker = BottomSheetDialog(activity).apply {
             setContentView(list)
-            setOnDismissListener { dialog = null }
-            if (isTv) setOnShowListener { rows.getChildAt(0)?.requestFocus() }
-            show()
+            setOnDismissListener { if (dialog === this) dialog = null }
+            if (isTv) setOnShowListener {
+                rows.getChildAt(restoreFocus.takeIf { it in 0 until rows.childCount } ?: 0)?.requestFocus()
+            }
         }
+        dialog = picker
+        picker.show()
+        if (restoreScrollY != null) scroll.post {
+            if (dialog === picker && picker.isShowing) {
+                scroll.scrollTo(0, restoreScrollY.coerceAtLeast(0))
+                if (isTv && restoreFocus in 0 until rows.childCount)
+                    rows.getChildAt(restoreFocus).requestFocus()
+            }
+        }
+        return true
     }
 
-    private fun play(entry: TrailerChoice) {
+    private fun play(entry: TrailerChoice, scrollY: Int, focusedRow: Int) {
         if (opening) return
+        val picker = dialog?.takeIf { it.isShowing } ?: return
         opening = true
         scope.launch {
             try {
                 val (playable, subtitles) = extractTrailerMedia(entry.youtubeId)
-                if (!fragment.isAdded) return@launch
+                if (!fragment.isResumed || fragment.view !== root || dialog !== picker || !picker.isShowing)
+                    return@launch
                 if (playable.isEmpty()) {
                     toast(fragment.requireContext().getString(R.string.no_links_found_toast))
                     return@launch
@@ -340,23 +370,26 @@ internal class TrailerChooser(
                 val selectedIndex = items.indexOf(entry).takeIf { it >= 0 } ?: return@launch
                 val heading = title?.text?.toString()?.trim().orEmpty()
                     .ifBlank { root.context.getString(R.string.trailer) }
-                val activity = fragment.activity ?: return@launch
-                val returnEntry = runCatching { fragment.findNavController().currentBackStackEntry }.getOrNull()
-                returnEntry?.savedStateHandle?.set(returnKey, detailUrl)
-                dialog?.dismiss()
+                val controller = runCatching { fragment.findNavController() }.getOrNull()
+                    ?: return@launch
+                val returnEntry = controller.currentBackStackEntry ?: return@launch
+                val playerArgs = GeneratorPlayer.newInstance(
+                    TrailerPlaybackGenerator(items.toList(), heading, selectedIndex, playable, subtitles),
+                    selectedIndex
+                )
+                val saved = returnEntry.savedStateHandle
+                saved.set(returnKey, detailUrl)
+                saved.set(returnScrollKey, scrollY)
+                saved.set(returnFocusKey, focusedRow)
+                picker.dismiss()
                 try {
-                    activity.navigate(
-                        R.id.global_to_navigation_player,
-                        GeneratorPlayer.newInstance(
-                            TrailerPlaybackGenerator(
-                                items.toList(), heading, selectedIndex,
-                                playable, subtitles
-                            ), selectedIndex
-                        )
-                    )
+                    controller.navigate(R.id.global_to_navigation_player, playerArgs)
                 } catch (error: Exception) {
-                    returnEntry?.savedStateHandle?.remove<String>(returnKey)
-                    if (fragment.isAdded) showPicker()
+                    saved.remove<String>(returnKey)
+                    saved.remove<Int>(returnScrollKey)
+                    saved.remove<Int>(returnFocusKey)
+                    opening = false
+                    if (fragment.isResumed && fragment.view === root) showPicker(scrollY, focusedRow)
                     throw error
                 }
             } catch (cancelled: CancellationException) {
