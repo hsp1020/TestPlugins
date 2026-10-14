@@ -438,6 +438,8 @@ class SettingsBottomFragment(
         addlinks.setImageDrawable(getDrawable("settings_icon"))
         showlinks.setImageDrawable(getDrawable("settings_icon"))
         saveIcon.setImageDrawable(getDrawable("save_icon"))
+        val iconTint = ColorStateList.valueOf(hostContext.colorFromAttribute(HostR.attr.colorPrimary))
+        listOf(addlinks, showlinks, saveIcon).forEach { it.imageTintList = iconTint }
 
         addlinks.makeTvCompatible()
         showlinks.makeTvCompatible()
@@ -821,7 +823,7 @@ class SettingsBottomFragment(
         fun setExtraUrlExpanded(expanded: Boolean) {
             extraUrlContainer.visibility = if (expanded) View.VISIBLE else View.GONE
             extraUrlToggle.setImageDrawable(getDrawable(if (expanded) "addon_collapse_icon" else "addon_expand_icon"))
-            extraUrlToggle.imageTintList = ColorStateList.valueOf(hostContext.colorFromAttribute(HostR.attr.textColor))
+            extraUrlToggle.imageTintList = iconTint
             extraUrlToggle.contentDescription = if (expanded) "Collapse addon URLs" else "Expand addon URLs"
             sharedPref.edit().putBoolean(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_EXPANDED, expanded).apply()
         }
@@ -844,6 +846,7 @@ class SettingsBottomFragment(
         val etCustomPosterUrl: EditText = try { view.findView("etCustomPosterUrl") } catch (e: Throwable) { throw Exception("etCustomPosterUrl EditText not found", e) }
 
         btnSelectLanguage.setImageDrawable(getDrawable("settings_icon"))
+        btnSelectLanguage.imageTintList = iconTint
         btnSelectLanguage.makeTvCompatible()
 
         val isPosterEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_CUSTOM_POSTER_ENABLED, false)
@@ -1762,7 +1765,10 @@ private fun showLanguageSelectDialog() {
             val v = LayoutInflater.from(parent.context).inflate(res.getLayout(layoutId), parent, false)
             v.background = getCardBg()
             normalizeTypeface(v)
-            return VH(v).also { it.btnDelete.setImageDrawable(getDrawable("delete_icon")) }
+            return VH(v).also {
+                it.btnDelete.setImageDrawable(getDrawable("delete_icon"))
+                it.btnDelete.imageTintList = ColorStateList.valueOf(Color.rgb(229, 9, 20))
+            }
         }
 
         override fun onBindViewHolder(holder: VH, position: Int) {

@@ -77,9 +77,10 @@
         android:layout_width="40dp"
         android:layout_height="40dp"
         android:layout_marginStart="8dp"
-        android:layout_gravity="center_vertical"
+        android:layout_gravity="bottom"
+        android:paddingTop="18dp"
         android:background="?android:attr/selectableItemBackgroundBorderless"
         android:contentDescription="Delete"
         android:src="@android:drawable/ic_menu_delete"
-        android:tint="#FF5555" />
+        android:tint="#E50914" />
 </LinearLayout>

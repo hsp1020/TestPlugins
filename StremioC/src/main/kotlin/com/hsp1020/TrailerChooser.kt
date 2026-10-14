@@ -271,7 +271,7 @@ internal class TrailerChooser(
                 text = (if (entry.type.equals("Trailer", true)) activity.getString(R.string.trailer) else entry.type) +
                     (localizedLanguage(entry.language)?.let { " · " + it } ?: "")
                 textSize = 12f
-                setTextColor(0xFFAAAAAA.toInt())
+                setTextColor(foreground)
             })
             row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             rows.addView(row)

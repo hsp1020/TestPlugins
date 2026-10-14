@@ -27,6 +27,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.TextView
+import androidx.core.content.ContextCompat
 import androidx.appcompat.widget.SearchView
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.navigation.NavigationBarView
@@ -237,27 +238,44 @@ internal class RatingPlotImageHook(
         hero.attach(parent)
     }
     private var homePreviewText: TextView? = null
-    private val tvHeroColors = mutableMapOf<TextView, ColorStateList>()
-    private fun colorTvHero(preview: TextView?) {
+    private data class HeroTextStyle(
+        val color: ColorStateList, val radius: Float, val dx: Float, val dy: Float, val shadow: Int
+    )
+    private val tvHeroStyles = mutableMapOf<TextView, HeroTextStyle>()
+    private fun styleTvHero(preview: TextView?) {
         if (preview == null) {
-            tvHeroColors.forEach { (text, original) -> text.setTextColor(original) }
-            tvHeroColors.clear()
+            tvHeroStyles.forEach { (text, original) ->
+                text.setTextColor(original.color)
+                text.setShadowLayer(original.radius, original.dx, original.dy, original.shadow)
+            }
+            tvHeroStyles.clear()
             return
         }
         val panel = preview.parent as? ViewGroup ?: return
-        tvHeroColors.keys.removeAll { it.parent == null }
-        val color = preview.context.colorFromAttribute(R.attr.textColor)
-        fun apply(text: TextView?) {
-            if (text != null && text.currentTextColor != color) {
-                tvHeroColors.putIfAbsent(text, text.textColors)
-                text.setTextColor(color)
-            }
+        tvHeroStyles.keys.removeAll { it.parent == null }
+        fun apply(text: TextView?, color: Int) {
+            if (text == null) return
+            if (text.currentTextColor == color && text.shadowRadius == 4f &&
+                text.shadowDx == 0f && text.shadowDy == 2f &&
+                text.shadowColor == 0xB0000000.toInt()) return
+            tvHeroStyles.putIfAbsent(text, HeroTextStyle(
+                text.textColors, text.shadowRadius, text.shadowDx, text.shadowDy, text.shadowColor
+            ))
+            if (text.currentTextColor != color) text.setTextColor(color)
+            text.setShadowLayer(4f, 0f, 2f, 0xB0000000.toInt())
         }
-        for (id in intArrayOf(R.id.home_preview_text, R.id.home_preview_score,
-            R.id.home_preview_year, R.id.home_preview_duration, R.id.home_preview_description,
-            R.id.home_preview_cast)) apply(panel.findViewById<TextView>(id))
+        val context = preview.context
+        val white = ContextCompat.getColor(context, R.color.white)
+        val normal = ContextCompat.getColor(context, R.color.textColor)
+        val muted = ContextCompat.getColor(context, R.color.gray_200)
+        apply(panel.findViewById(R.id.home_preview_text), normal)
+        apply(panel.findViewById(R.id.home_preview_score), white)
+        apply(panel.findViewById(R.id.home_preview_year), muted)
+        apply(panel.findViewById(R.id.home_preview_duration), muted)
+        apply(panel.findViewById(R.id.home_preview_description), normal)
+        apply(panel.findViewById(R.id.home_preview_cast), ContextCompat.getColor(context, R.color.gray_400))
         panel.findViewById<ViewGroup>(R.id.home_preview_tags)?.let { tags ->
-            for (i in 0 until tags.childCount) apply(tags.getChildAt(i) as? TextView)
+            for (i in 0 until tags.childCount) apply(tags.getChildAt(i) as? TextView, normal)
         }
     }
     private var homePreviewChanging = false
@@ -270,8 +288,8 @@ internal class RatingPlotImageHook(
     }
     private fun bindHomePreview(view: TextView?) {
         val next = view.takeIf { isLayout(TV or EMULATOR) }
-        if (homePreviewText !== next) colorTvHero(null)
-        colorTvHero(next)
+        if (homePreviewText !== next) styleTvHero(null)
+        styleTvHero(next)
         if (homePreviewText === next) return
         homePreviewText?.let { previous ->
             previous.removeTextChangedListener(homePreviewWatcher)

@@ -13,6 +13,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
@@ -25,7 +26,6 @@ import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.utils.AppContextUtils.html
 import com.lagradost.cloudstream3.utils.UIHelper.populateChips
-import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import kotlin.math.max
 
 /** Retain CloudStream's phone pager, image requests and action buttons; restyle only its pages. */
@@ -110,6 +110,10 @@ internal class PhoneHeroHook(
         private val originalTitleParams = (title?.layoutParams as? LinearLayout.LayoutParams)?.let { LinearLayout.LayoutParams(it) }
         private val originalTitleSize = title?.textSize
         private val originalTitleColors = title?.textColors
+        private val titleShadow = title?.let {
+            floatArrayOf(it.shadowRadius, it.shadowDx, it.shadowDy)
+        }
+        private val titleShadowColor = title?.shadowColor
         private val originalTitlePadding = title?.let { intArrayOf(it.paddingLeft, it.paddingTop, it.paddingRight, it.paddingBottom) }
         private val originalTagsParams = (originalTags?.layoutParams as? LinearLayout.LayoutParams)?.let { LinearLayout.LayoutParams(it) }
         private val originalTagsAlpha = originalTags?.alpha
@@ -124,9 +128,19 @@ internal class PhoneHeroHook(
         private var previousWidth = -1
         private var previousHeight = -1
 
-        private val details = TextView(activity).apply { setTextColor(activity.colorFromAttribute(R.attr.textColor)); textSize = 14f }
-        private val rating = TextView(activity).apply { setTextColor(activity.colorFromAttribute(R.attr.textColor)); textSize = 14f; maxLines = 2 }
-        private val plot = TextView(activity).apply { setTextColor(activity.colorFromAttribute(R.attr.textColor)); textSize = 15f; maxLines = 3; ellipsize = android.text.TextUtils.TruncateAt.END }
+        private val details = TextView(activity).apply {
+            setTextColor(ContextCompat.getColor(activity, R.color.gray_200)); textSize = 14f
+            setShadowLayer(4f, 0f, 2f, 0xB0000000.toInt())
+        }
+        private val rating = TextView(activity).apply {
+            setTextColor(ContextCompat.getColor(activity, R.color.white)); textSize = 14f; maxLines = 2
+            setShadowLayer(4f, 0f, 2f, 0xB0000000.toInt())
+        }
+        private val plot = TextView(activity).apply {
+            setTextColor(ContextCompat.getColor(activity, R.color.textColor)); textSize = 15f; maxLines = 3
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setShadowLayer(4f, 0f, 2f, 0xB0000000.toInt())
+        }
         private val genres = ChipGroup(activity).apply { isFocusable = false; isClickable = false }
         private val gradient = View(activity).apply {
             background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
@@ -181,7 +195,8 @@ internal class PhoneHeroHook(
             }
             logo?.scaleType = ImageView.ScaleType.FIT_START
             title?.gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            title?.setTextColor(activity.colorFromAttribute(R.attr.textColor))
+            title?.setTextColor(ContextCompat.getColor(activity, R.color.textColor))
+            title?.setShadowLayer(4f, 0f, 2f, 0xB0000000.toInt())
             originalTitleParams?.let { old ->
                 title?.layoutParams = LinearLayout.LayoutParams(old).apply { gravity = Gravity.START }
             }
@@ -222,7 +237,10 @@ internal class PhoneHeroHook(
             rating.visibility = if (line.isEmpty()) View.GONE else View.VISIBLE
             plot.text = if (separator >= 0) parsed.subSequence(separator + 1, parsed.length).trimStart() else if (isMdb) "" else parsed
             plot.visibility = if (plot.text.isNullOrBlank()) View.GONE else View.VISIBLE
-            populateChips(genres, item.tags?.take(6) ?: emptyList(), R.style.ChipFilledSemiTransparent, R.attr.textColor)
+            populateChips(genres, item.tags?.take(6) ?: emptyList(), R.style.ChipFilledSemiTransparent, null)
+            for (i in 0 until genres.childCount) {
+                (genres.getChildAt(i) as? TextView)?.setShadowLayer(4f, 0f, 2f, 0xB0000000.toInt())
+            }
             genres.visibility = if (item.tags.isNullOrEmpty()) View.GONE else View.VISIBLE
         }
 
@@ -262,6 +280,7 @@ internal class PhoneHeroHook(
             originalTitleParams?.let { title?.layoutParams = it }
             originalTitleSize?.let { title?.setTextSize(TypedValue.COMPLEX_UNIT_PX, it) }
             originalTitleColors?.let { title?.setTextColor(it) }
+            titleShadow?.let { title?.setShadowLayer(it[0], it[1], it[2], titleShadowColor ?: 0) }
             originalTitlePadding?.let { title?.setPadding(it[0], it[1], it[2], it[3]) }
             originalTagsParams?.let { originalTags?.layoutParams = it }
             originalTagsAlpha?.let { originalTags?.alpha = it }
