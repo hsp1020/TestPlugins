@@ -19,11 +19,13 @@ import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
+import com.google.android.material.chip.ChipGroup
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.utils.AppContextUtils.html
+import com.lagradost.cloudstream3.utils.UIHelper.populateChips
 import kotlin.math.max
 
 /** Retain CloudStream's phone pager, image requests and action buttons; restyle only its pages. */
@@ -111,18 +113,17 @@ internal class PhoneHeroHook(
         private val originalTagsParams = (originalTags?.layoutParams as? LinearLayout.LayoutParams)?.let { LinearLayout.LayoutParams(it) }
         private val originalTagsAlpha = originalTags?.alpha
         private val originalScale = image?.scaleType
+        private val originalLogoScale = logo?.scaleType
+        private var portraitLayout: Boolean? = null
         private var lastKey: Int? = null
         private var previousDrawable: android.graphics.drawable.Drawable? = null
         private var previousWidth = -1
         private var previousHeight = -1
 
+        private val details = TextView(activity).apply { setTextColor(Color.WHITE); textSize = 14f }
         private val rating = TextView(activity).apply { setTextColor(Color.WHITE); textSize = 14f; maxLines = 2 }
-        private val plot = TextView(activity).apply {
-            setTextColor(Color.WHITE)
-            textSize = 15f
-            maxLines = if (resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT) 5 else 3
-            ellipsize = android.text.TextUtils.TruncateAt.END
-        }
+        private val plot = TextView(activity).apply { setTextColor(Color.WHITE); textSize = 15f; maxLines = 3; ellipsize = android.text.TextUtils.TruncateAt.END }
+        private val genres = ChipGroup(activity).apply { isFocusable = false; isClickable = false }
         private val gradient = View(activity).apply {
             background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
                 intArrayOf(0xBB000000.toInt(), 0x77000000, Color.TRANSPARENT))
@@ -130,10 +131,18 @@ internal class PhoneHeroHook(
             isFocusable = false
         }
         private val preDraw = ViewTreeObserver.OnPreDrawListener {
-            val lines = if (root.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT) 5 else 3
-            if (plot.maxLines != lines) plot.maxLines = lines
+            updateSpacing()
             applyCropIfNeeded()
             true
+        }
+        private fun updateSpacing() {
+            val portrait = root.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+            if (portraitLayout == portrait) return
+            portraitLayout = portrait
+            (holder?.layoutParams as? FrameLayout.LayoutParams)?.let { params ->
+                params.bottomMargin = dp(if (portrait) 72 else 104)
+                holder?.layoutParams = params
+            }
         }
 
         init {
@@ -153,6 +162,7 @@ internal class PhoneHeroHook(
                     height = dp(72)
                 }
             }
+            logo?.scaleType = ImageView.ScaleType.FIT_START
             title?.gravity = Gravity.START or Gravity.CENTER_VERTICAL
             originalTitleParams?.let { old ->
                 title?.layoutParams = LinearLayout.LayoutParams(old).apply { gravity = Gravity.START }
@@ -163,34 +173,39 @@ internal class PhoneHeroHook(
             originalTagsParams?.let { old ->
                 originalTags?.layoutParams = LinearLayout.LayoutParams(old).apply { height = 0 }
             }
-            holder?.addView(rating, LinearLayout.LayoutParams(-1, -2))
+            holder?.addView(details, LinearLayout.LayoutParams(-1, -2))
+            holder?.addView(rating, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
             holder?.addView(plot, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+            holder?.addView(genres, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
             image?.scaleType = ImageView.ScaleType.MATRIX
             image?.viewTreeObserver?.addOnPreDrawListener(preDraw)
         }
 
         fun bind(item: LoadResponse) {
-            val key = listOf(item.url, item.plot, item.year, item.duration, item.score).hashCode()
+            val key = listOf(item.url, item.plot, item.year, item.duration, item.tags, item.score).hashCode()
             if (key == lastKey) return
             lastKey = key
             val parsed = item.plot.html()
             val isMdb = parsed.firstOrNull() == '\u2063'
             val separator = if (isMdb) parsed.indexOf('\n') else -1
             val line = SpannableStringBuilder()
+            val detailText = listOfNotNull(
+                item.year?.toString(),
+                item.duration?.takeIf { it > 0 }?.let { activity.getString(R.string.duration_format, it) }
+            ).joinToString("   ")
+            details.text = detailText
+            details.visibility = if (detailText.isEmpty()) View.GONE else View.VISIBLE
             if (isMdb) {
                 line.append(parsed, 0, if (separator >= 0) separator else parsed.length)
             } else {
                 item.score?.toStringNull(0.1, 10, 1, false)?.let { line.append("★ ").append(it) }
             }
-            item.year?.let { if (line.isNotEmpty()) line.append("    "); line.append(it.toString()) }
-            item.duration?.takeIf { it > 0 }?.let {
-                if (line.isNotEmpty()) line.append("    ")
-                line.append(it.toString()).append("m")
-            }
             rating.text = ratingImages(line, rating.textSize) ?: line
             rating.visibility = if (line.isEmpty()) View.GONE else View.VISIBLE
             plot.text = if (separator >= 0) parsed.subSequence(separator + 1, parsed.length).trimStart() else if (isMdb) "" else parsed
             plot.visibility = if (plot.text.isNullOrBlank()) View.GONE else View.VISIBLE
+            populateChips(genres, item.tags?.take(6) ?: emptyList(), R.style.ChipFilledSemiTransparent, null)
+            genres.visibility = if (item.tags.isNullOrEmpty()) View.GONE else View.VISIBLE
         }
 
         private fun applyCropIfNeeded() {
@@ -218,10 +233,13 @@ internal class PhoneHeroHook(
             image?.viewTreeObserver?.let { if (it.isAlive) it.removeOnPreDrawListener(preDraw) }
             image?.scaleType = originalScale ?: ImageView.ScaleType.CENTER_CROP
             (gradient.parent as? ViewGroup)?.removeView(gradient)
+            (details.parent as? ViewGroup)?.removeView(details)
             (rating.parent as? ViewGroup)?.removeView(rating)
             (plot.parent as? ViewGroup)?.removeView(plot)
+            (genres.parent as? ViewGroup)?.removeView(genres)
             holderParams?.let { holder?.layoutParams = it }
             logoParams?.let { logo?.layoutParams = it }
+            originalLogoScale?.let { logo?.scaleType = it }
             originalTitleGravity?.let { title?.gravity = it }
             originalTitleParams?.let { title?.layoutParams = it }
             originalTitleSize?.let { title?.setTextSize(TypedValue.COMPLEX_UNIT_PX, it) }
