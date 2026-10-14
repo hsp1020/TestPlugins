@@ -1,6 +1,7 @@
 package com.hsp1020
 
 import android.graphics.Color
+import android.content.res.Configuration
 import android.graphics.Matrix
 import android.graphics.drawable.GradientDrawable
 import android.text.SpannableStringBuilder
@@ -18,13 +19,11 @@ import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
-import com.google.android.material.chip.ChipGroup
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.utils.AppContextUtils.html
-import com.lagradost.cloudstream3.utils.UIHelper.populateChips
 import kotlin.math.max
 
 /** Retain CloudStream's phone pager, image requests and action buttons; restyle only its pages. */
@@ -118,8 +117,12 @@ internal class PhoneHeroHook(
         private var previousHeight = -1
 
         private val rating = TextView(activity).apply { setTextColor(Color.WHITE); textSize = 14f; maxLines = 2 }
-        private val plot = TextView(activity).apply { setTextColor(Color.WHITE); textSize = 15f; maxLines = 3; ellipsize = android.text.TextUtils.TruncateAt.END }
-        private val genres = ChipGroup(activity).apply { isFocusable = false; isClickable = false }
+        private val plot = TextView(activity).apply {
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            maxLines = if (resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT) 5 else 3
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
         private val gradient = View(activity).apply {
             background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
                 intArrayOf(0xBB000000.toInt(), 0x77000000, Color.TRANSPARENT))
@@ -127,6 +130,8 @@ internal class PhoneHeroHook(
             isFocusable = false
         }
         private val preDraw = ViewTreeObserver.OnPreDrawListener {
+            val lines = if (root.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT) 5 else 3
+            if (plot.maxLines != lines) plot.maxLines = lines
             applyCropIfNeeded()
             true
         }
@@ -160,13 +165,12 @@ internal class PhoneHeroHook(
             }
             holder?.addView(rating, LinearLayout.LayoutParams(-1, -2))
             holder?.addView(plot, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
-            holder?.addView(genres, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
             image?.scaleType = ImageView.ScaleType.MATRIX
             image?.viewTreeObserver?.addOnPreDrawListener(preDraw)
         }
 
         fun bind(item: LoadResponse) {
-            val key = listOf(item.url, item.plot, item.year, item.duration, item.tags, item.score).hashCode()
+            val key = listOf(item.url, item.plot, item.year, item.duration, item.score).hashCode()
             if (key == lastKey) return
             lastKey = key
             val parsed = item.plot.html()
@@ -187,8 +191,6 @@ internal class PhoneHeroHook(
             rating.visibility = if (line.isEmpty()) View.GONE else View.VISIBLE
             plot.text = if (separator >= 0) parsed.subSequence(separator + 1, parsed.length).trimStart() else if (isMdb) "" else parsed
             plot.visibility = if (plot.text.isNullOrBlank()) View.GONE else View.VISIBLE
-            populateChips(genres, item.tags?.take(6) ?: emptyList(), R.style.ChipFilledSemiTransparent, null)
-            genres.visibility = if (item.tags.isNullOrEmpty()) View.GONE else View.VISIBLE
         }
 
         private fun applyCropIfNeeded() {
@@ -218,7 +220,6 @@ internal class PhoneHeroHook(
             (gradient.parent as? ViewGroup)?.removeView(gradient)
             (rating.parent as? ViewGroup)?.removeView(rating)
             (plot.parent as? ViewGroup)?.removeView(plot)
-            (genres.parent as? ViewGroup)?.removeView(genres)
             holderParams?.let { holder?.layoutParams = it }
             logoParams?.let { logo?.layoutParams = it }
             originalTitleGravity?.let { title?.gravity = it }
