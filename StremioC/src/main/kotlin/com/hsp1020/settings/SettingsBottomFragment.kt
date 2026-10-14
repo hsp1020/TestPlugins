@@ -452,7 +452,8 @@ class SettingsBottomFragment(
         showlinks.setImageDrawable(getDrawable("settings_icon"))
         saveIcon.setImageDrawable(getDrawable("save_icon"))
         val iconTint = ColorStateList.valueOf(hostContext.colorFromAttribute(HostR.attr.colorPrimary))
-        listOf(addlinks, showlinks, saveIcon).forEach { it.imageTintList = iconTint }
+        val actionIconTint = ColorStateList.valueOf(hostContext.colorFromAttribute(HostR.attr.textColor))
+        listOf(addlinks, showlinks, saveIcon).forEach { it.imageTintList = actionIconTint }
 
         addlinks.makeTvCompatible()
         showlinks.makeTvCompatible()
@@ -859,7 +860,7 @@ class SettingsBottomFragment(
         val etCustomPosterUrl: EditText = try { view.findView("etCustomPosterUrl") } catch (e: Throwable) { throw Exception("etCustomPosterUrl EditText not found", e) }
 
         btnSelectLanguage.setImageDrawable(getDrawable("settings_icon"))
-        btnSelectLanguage.imageTintList = iconTint
+        btnSelectLanguage.imageTintList = actionIconTint
         btnSelectLanguage.makeTvCompatible()
 
         val isPosterEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_CUSTOM_POSTER_ENABLED, false)
