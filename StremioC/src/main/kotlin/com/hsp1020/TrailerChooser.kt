@@ -8,7 +8,6 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.util.TypedValue
 import android.view.Gravity
-import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ViewTreeObserver
 import android.view.View
@@ -150,30 +149,9 @@ internal class TrailerChooser(
         fragment.lifecycle.addObserver(resumeObserver)
         title?.addTextChangedListener(titleWatcher)
         if (isTv) {
-            tvButton?.apply {
-                setOnClickListener(pickerClick)
-                setOnKeyListener { view, code, event ->
-                    if (code == KeyEvent.KEYCODE_DPAD_CENTER ||
-                        code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER
-                    ) {
-                        view.isPressed = event.action == KeyEvent.ACTION_DOWN
-                        if (event.action == KeyEvent.ACTION_UP) showPicker()
-                        true
-                    } else false
-                }
-                setOnTouchListener { view, event ->
-                    when (event.actionMasked) {
-                        MotionEvent.ACTION_DOWN -> {
-                            view.background?.setHotspot(event.x, event.y)
-                            view.isPressed = true
-                            true
-                        }
-                        MotionEvent.ACTION_UP -> { view.isPressed = false; showPicker(); true }
-                        MotionEvent.ACTION_CANCEL -> { view.isPressed = false; true }
-                        else -> false
-                    }
-                }
-            }
+            // This is CloudStream's native ResultSmallButtonTV: keep its
+            // built-in ripple, focus and DPAD click handling untouched.
+            tvButton?.setOnClickListener(pickerClick)
             root.viewTreeObserver.addOnPreDrawListener(tvPreDraw)
         }
         refresh()
@@ -471,8 +449,6 @@ internal class TrailerChooser(
         title?.removeTextChangedListener(titleWatcher)
         if (isTv) {
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(tvPreDraw)
-            tvButton?.setOnKeyListener(null)
-            tvButton?.setOnTouchListener(null)
         }
         // Navigation is transferring visibility to the player; its one-shot
         // callback owns dialog dismissal until the next drawable frame.
