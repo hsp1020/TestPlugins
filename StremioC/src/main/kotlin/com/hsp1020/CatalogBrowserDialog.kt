@@ -421,14 +421,10 @@ internal class CatalogBrowserDialog(
                 return LinearLayout(activity).apply {
                     gravity = Gravity.CENTER_VERTICAL
                     val rowColor = activity.colorFromAttribute(R.attr.primaryGrayBackground)
-                    setBackgroundColor(rowColor)
-                    val ripple = TypedValue()
-                    if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) &&
-                        ripple.resourceId != 0) {
-                        androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, ripple.resourceId)?.let { overlay ->
-                            background = android.graphics.drawable.LayerDrawable(arrayOf(ColorDrawable(rowColor), overlay))
-                        }
-                    }
+                    val highlight = (activity.colorFromAttribute(R.attr.colorPrimary) and 0x00FFFFFF) or 0x33000000
+                    background = android.graphics.drawable.RippleDrawable(
+                        ColorStateList.valueOf(highlight), ColorDrawable(rowColor), null
+                    )
                     minimumHeight = dp(48)
                     setPadding(dp(16), 0, dp(12), 0)
                     addView(TextView(activity).apply {
