@@ -128,6 +128,7 @@ class StremioCPlugin : Plugin() {
                 val links = mutableListOf<String>()
                 for (i in 0 until arr.length()) {
                     val obj = arr.optJSONObject(i) ?: continue
+                    if (!obj.optBoolean("enabled", true)) continue
                     val link = obj.optString("link", "")
                     if (link.isNotBlank()) {
                         links.add(link)
@@ -262,6 +263,7 @@ class StremioCPlugin : Plugin() {
                 val links = mutableListOf<LinkEntry>()
                 for (i in 0 until arr.length()) {
                     val obj = arr.optJSONObject(i) ?: continue
+                    if (!obj.optBoolean("enabled", true)) continue
                     links.add(
                         LinkEntry(
                             id = obj.optLong("id", System.currentTimeMillis()),
@@ -296,16 +298,16 @@ class StremioCPlugin : Plugin() {
                         when (item.type) {
                             "StremioC" -> {
                                 try {
-                                    val provider = StremioC(item.link, item.name)
+                                    val provider = StremioC(item.link, item.name, item.id)
                                     registerMainAPI(provider)
                                 } catch (e: Throwable) {
                                     e.printStackTrace()
-                                    try { registerMainAPI(StremioC("", item.name)) } catch (e2: Throwable) { e2.printStackTrace() }
+                                    try { registerMainAPI(StremioC("", item.name, item.id)) } catch (e2: Throwable) { e2.printStackTrace() }
                                 }
                             }
                             else -> {
                                 try {
-                                    val provider = StremioC(item.link, item.name)
+                                    val provider = StremioC(item.link, item.name, item.id)
                                     registerMainAPI(provider)
                                 } catch (e: Throwable) {
                                     e.printStackTrace()

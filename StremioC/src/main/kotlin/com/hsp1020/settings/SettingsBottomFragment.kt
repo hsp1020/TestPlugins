@@ -30,7 +30,6 @@ import android.content.SharedPreferences
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
-import android.graphics.drawable.GradientDrawable
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -62,14 +61,11 @@ import kotlinx.coroutines.cancel
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.ItemTouchHelper
-import com.lagradost.api.Log
-import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CommonActivity.showToast
 import org.json.JSONArray
 import org.json.JSONObject
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
-import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -78,7 +74,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.withContext
 import java.util.Collections
-import com.lagradost.cloudstream3.MainAPI
 
 data class LinkItem(
     val id: Long = System.currentTimeMillis(),
@@ -87,7 +82,8 @@ data class LinkItem(
     val type: String,
     val isSyncEnabled: Boolean = true,
     val isHistorySyncEnabled: Boolean = true,
-    val isStreamSubtitleSyncEnabled: Boolean = false
+    val isStreamSubtitleSyncEnabled: Boolean = false,
+    val enabled: Boolean = true
 )
 
 object SettingsRepository {
@@ -122,7 +118,8 @@ object SettingsRepository {
                         type = obj.optString("type", "StremioC"),
                         isSyncEnabled = obj.optBoolean("isSyncEnabled", true),
                         isHistorySyncEnabled = obj.optBoolean("isHistorySyncEnabled", obj.optBoolean("isSyncEnabled", true)),
-                        isStreamSubtitleSyncEnabled = obj.optBoolean("isStreamSubtitleSyncEnabled", false)
+                        isStreamSubtitleSyncEnabled = obj.optBoolean("isStreamSubtitleSyncEnabled", false),
+                        enabled = obj.optBoolean("enabled", true)
                     )
                 )
             }
@@ -144,6 +141,7 @@ object SettingsRepository {
                 put("isSyncEnabled", item.isSyncEnabled)
                 put("isHistorySyncEnabled", item.isHistorySyncEnabled)
                 put("isStreamSubtitleSyncEnabled", item.isStreamSubtitleSyncEnabled)
+                put("enabled", item.enabled)
             }
             arr.put(obj)
         }
@@ -320,7 +318,7 @@ class SettingsBottomFragment(
     }
 
 
-    private enum class SettingsPage { HUB, SOURCES, METADATA, DISPLAY }
+    private enum class SettingsPage { HUB, SOURCES, METADATA, DISPLAY, BACKUP }
     private var backHandler: (() -> Boolean)? = null
     private var refreshSummaries: (() -> Unit)? = null
     private var closing = false
@@ -328,6 +326,29 @@ class SettingsBottomFragment(
     private val dialogOwners = mutableMapOf<Dialog, Dialog>()
     private val dialogCleanup = mutableMapOf<Dialog, MutableList<() -> Unit>>()
     private val focusPlans = mutableMapOf<Dialog, () -> Unit>()
+    private val legacyLinkIds = mutableMapOf<String, Long>()
+
+    private fun catalogLinks(): MutableList<LinkItem> {
+        val links = SettingsRepository.loadLinks(sharedPref)
+        val json = runCatching { JSONArray(sharedPref.getString("stremio_saved_links", "[]")) }.getOrNull()
+            ?: return links
+        if (json.length() != links.size) return links
+        val occurrences = mutableMapOf<String, Int>()
+        for (i in links.indices) {
+            val obj = json.optJSONObject(i) ?: continue
+            if (runCatching { obj.getLong("id") }.isSuccess) continue
+            val signature = obj.toString()
+            val occurrence = occurrences[signature] ?: 0
+            occurrences[signature] = occurrence + 1
+            val id = legacyLinkIds.getOrPut("$signature\n$occurrence") {
+                var candidate = links[i].id
+                while (links.any { it.id == candidate } || candidate in legacyLinkIds.values) candidate++
+                candidate
+            }
+            links[i] = links[i].copy(id = id)
+        }
+        return links
+    }
 
     private fun topDialog(): Dialog = childDialogs.lastOrNull { it.isShowing } ?: settingsDialog
     private fun alive(owner: Dialog) = !closing && owner.isShowing && settingsDialog.isShowing &&
@@ -369,6 +390,7 @@ class SettingsBottomFragment(
     }
 
     private fun prepareInput(field: EditText) {
+        field.backgroundTintList = null
         field.background = getCardBg()
         field.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
         field.setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
@@ -418,7 +440,8 @@ class SettingsBottomFragment(
             view.minimumHeight = dp(48)
             view.makeTvCompatible()
             val row = view.parent as? LinearLayout
-            if (view is Switch && row != null && row.orientation == LinearLayout.HORIZONTAL) {
+            if (view is Switch && row != null && row.orientation == LinearLayout.HORIZONTAL &&
+                row.childCount == 2 && row.getChildAt(0) is TextView) {
                 row.setOnClickListener { if (view.isEnabled) view.performClick() }
                 row.isFocusable = false
                 row.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
@@ -449,7 +472,7 @@ class SettingsBottomFragment(
         }
     }
 
-    private fun restoreRow(rv: RecyclerView, position: Int, target: (View) -> View = { it }) {
+    private fun restoreRow(rv: RecyclerView, position: Int, target: (View) -> View = { it.optional("addonRowBody") ?: it }) {
         if (position !in 0 until (rv.adapter?.itemCount ?: 0) || !rv.isAttachedToWindow ||
             !rv.isShown || topDialog().window?.decorView !== rv.rootView) return
         fun focus() {
@@ -560,30 +583,18 @@ class SettingsBottomFragment(
         resize()
     }
 
-    private fun addonIcon(name: String, description: String) = ImageButton(hostContext).apply {
-        layoutParams = LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginStart = dp(4) }
-        setPadding(dp(12), dp(12), dp(12), dp(12))
-        scaleType = ImageView.ScaleType.CENTER_INSIDE
-        contentDescription = description
-        isFocusable = true
-        val value = android.util.TypedValue()
-        hostContext.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, value, true)
-        setBackgroundResource(value.resourceId)
-        styleAddonIcon(this, name)
-    }
     private fun styleAddonIcon(button: ImageButton, name: String) {
         button.setImageDrawable(getDrawable(name))
         button.imageTintList = ColorStateList.valueOf(if (name == "delete_icon") Color.rgb(229, 9, 20)
             else hostContext.colorFromAttribute(HostR.attr.textColor))
         button.makeTvCompatible()
     }
-    private fun inputSlot(field: EditText, weight: Float = 0f) = FrameLayout(hostContext).apply {
-        layoutParams = LinearLayout.LayoutParams(if (weight > 0) 0 else ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(48), weight)
+    private fun inputSlot(field: EditText) = FrameLayout(hostContext).apply {
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48))
         addView(field, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(35), Gravity.CENTER_VERTICAL))
     }
     private fun bindAddonActions(owner: Dialog, url: EditText, gear: ImageButton, trash: ImageButton,
-        name: EditText? = null, canDelete: () -> Boolean, onDelete: () -> Unit): () -> Unit {
+        name: EditText? = null, canDelete: () -> Boolean, onDelete: () -> Unit) {
         styleAddonIcon(gear, "settings_icon")
         styleAddonIcon(trash, "delete_icon")
         fun update() {
@@ -608,10 +619,9 @@ class SettingsBottomFragment(
         }
         trash.setOnClickListener { if (canDelete()) onDelete() }
         update()
-        name?.let { horizontalFocus(it, gear, trash) } ?: horizontalFocus(gear, trash)
+        horizontalFocus(url, gear, trash)
         val cleanup: () -> Unit = { url.removeTextChangedListener(watcher); name?.removeTextChangedListener(watcher) }
         onClose(owner, cleanup)
-        return { cleanup(); dialogCleanup[owner]?.remove(cleanup) }
     }
 
     private fun popupContent(title: String) = LinearLayout(hostContext).apply {
@@ -659,7 +669,7 @@ class SettingsBottomFragment(
         dialog.show()
     }
     private fun deleteCatalogById(id: Long): Boolean {
-        val links = SettingsRepository.loadLinks(sharedPref)
+        val links = catalogLinks()
         if (!links.removeAll { it.id == id }) {
             showToast("This addon is no longer available.")
             return false
@@ -682,98 +692,20 @@ class SettingsBottomFragment(
 
     private fun showAddonSettings(owner: Dialog, url: () -> String, onUrlError: () -> Unit = {}) {
         if (!alive(owner) || topDialog() !== owner) return
-        val captured = url()
-        val manifest = runCatching { addonManifestUri(captured) }.getOrElse {
-            onUrlError(); showToast("Enter a valid addon URL to open settings."); return
+        val configure = runCatching { addonConfigureUri(addonManifestUri(url())) }.getOrElse {
+            onUrlError()
+            showToast("Enter a valid addon URL to open settings.")
+            return
         }
-        val content = popupContent("Addon Settings")
-        val body = LinearLayout(hostContext).apply { orientation = LinearLayout.VERTICAL }
-        val message = popupMessage("Checking addon configuration...")
-        val copy = simpleButton("Copy URL").apply { visibility = View.GONE }
-        body.addView(message); body.addView(copy)
-        val scroll = NestedScrollView(hostContext).apply { addView(body) }
-        content.addView(scroll)
-        val cancel = simpleButton("Cancel")
-        val action = simpleButton("Open in browser").apply { visibility = View.GONE }
-        content.addView(popupButtons(cancel, action))
-        val dialog = AlertDialog.Builder(hostContext).setView(content).create()
-        var request: Job? = null
-        var configure: Uri? = null
-        fun current() = alive(owner) && dialog.isShowing && url() == captured
-        fun sameUrl(): Boolean {
-            if (current()) return true
-            if (alive(owner) && dialog.isShowing) {
-                message.text = "Addon URL changed. Open settings again."
-                copy.visibility = View.GONE; action.visibility = View.GONE; cancel.text = "Close"
-                showToast("Addon URL changed. Open settings again.")
-            }
-            return false
+        try {
+            hostContext.startActivity(Intent(Intent.ACTION_VIEW, configure).apply {
+                if (hostContext !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+        } catch (_: ActivityNotFoundException) {
+            showToast("No browser is available to open addon settings.")
+        } catch (_: SecurityException) {
+            showToast("Unable to open addon settings in a browser.")
         }
-        fun check() {
-            val previous = request
-            previous?.cancel()
-            configure = null
-            message.text = "Checking addon configuration..."
-            copy.visibility = View.GONE; action.visibility = View.GONE
-            cancel.text = "Cancel"
-            request = uiScope.launch {
-                try {
-                    previous?.join()
-                    if (!sameUrl()) return@launch
-                    val declared = withContext(Dispatchers.IO) {
-                        val response = com.lagradost.cloudstream3.app.get(manifest.toString(), timeout = 10L)
-                        check(response.isSuccessful) { "Unable to fetch addon manifest" }
-                        val hints = JSONObject(response.text).optJSONObject("behaviorHints")
-                        hints?.optBoolean("configurable", false) == true ||
-                            hints?.optBoolean("configurationRequired", false) == true
-                    }
-                    if (!sameUrl()) return@launch
-                    if (declared) {
-                        configure = addonConfigureUri(manifest)
-                        message.text = "Configuration opens in an external browser.\nAfter configuring, paste the new addon URL into this field and save it.\n\nProvider: ${manifest.host}"
-                        copy.visibility = View.VISIBLE
-                        action.text = "Open in browser"; action.visibility = View.VISIBLE
-                        action.setOnClickListener {
-                            if (!sameUrl()) return@setOnClickListener
-                            try {
-                                hostContext.startActivity(Intent(Intent.ACTION_VIEW, configure).apply {
-                                    if (hostContext !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                })
-                            } catch (_: ActivityNotFoundException) {
-                                message.text = "No app is available to open this link.\nCopy the URL and open it on another device."
-                                action.visibility = View.GONE; cancel.text = "Close"; cancel.requestFocus()
-                            } catch (_: SecurityException) {
-                                message.text = "No app is available to open this link.\nCopy the URL and open it on another device."
-                                action.visibility = View.GONE; cancel.text = "Close"; cancel.requestFocus()
-                            }
-                        }
-                    } else {
-                        message.text = "This addon does not declare a configuration page."
-                        cancel.text = "Close"
-                    }
-                } catch (cancelled: CancellationException) { throw cancelled
-                } catch (_: Exception) {
-                    if (!current()) return@launch
-                    message.text = "Unable to check addon settings. Check the URL and try again."
-                    action.text = "Retry"; action.visibility = View.VISIBLE
-                    action.setOnClickListener { if (sameUrl()) check() }
-                }
-            }
-        }
-        copy.setOnClickListener {
-            if (sameUrl()) configure?.let {
-                try {
-                    val clipboard = hostContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("Addon configuration URL", it.toString()))
-                    showToast("Configuration URL copied.")
-                } catch (_: SecurityException) { showToast("Unable to copy the configuration URL.") }
-            }
-        }
-        cancel.setOnClickListener { request?.cancel(); dialog.dismiss() }
-        setupCustomDialog(dialog, content, scroll, owner = owner, initialFocus = { cancel })
-        onClose(dialog) { request?.cancel() }
-        dialog.show()
-        check()
     }
 
     private fun setupCustomDialog(
@@ -971,6 +903,7 @@ class SettingsBottomFragment(
             cleanupDialog(settingsDialog)
             dialogOwners.clear()
             focusPlans.clear()
+            legacyLinkIds.clear()
             backHandler = null
             refreshSummaries = null
             hostOwner?.lifecycle?.removeObserver(closeOnDestroy)
@@ -989,7 +922,7 @@ class SettingsBottomFragment(
             finish(); return
         }
         val newSchema = listOf("settingsRoot", "pageHub", "pageSources", "pageMetadata",
-            "pageDisplay", "settingsFooter", "settingsViewport").any { view.optional(it) != null }
+            "pageDisplay", "pageBackup", "settingsFooter", "settingsViewport").any { view.optional(it) != null }
         if ((!newSchema && view !is NestedScrollView) || !hasViews(view, mapOf(
             LinearLayout::class.java to listOf("settingsHeader", "settingsBody", "containerStreamSubtitleUrls",
                 "layoutHistorySyncUrl", "layoutMdbList", "layoutCustomPosterUrl"),
@@ -999,8 +932,8 @@ class SettingsBottomFragment(
             EditText::class.java to listOf("etTmdbApiKey", "etMdbListApiKey", "etCustomPosterUrl", "etHistorySyncUrl"),
             Switch::class.java to listOf("switchMdbList", "switchCustomPoster", "switchCineStream", "switchStreamPlay", "switchVixSrc")
         )) || (newSchema && !hasViews(view, mapOf(
-            LinearLayout::class.java to listOf("settingsRoot", "pageHub", "pageSources", "pageMetadata", "pageDisplay",
-                "settingsFooter", "saveAction", "rowCatalogs", "rowLanguage", "rowSources", "rowMetadata", "rowDisplay"),
+            LinearLayout::class.java to listOf("settingsRoot", "pageHub", "pageSources", "pageMetadata", "pageDisplay", "pageBackup",
+                "settingsFooter", "saveAction", "rowCatalogs", "rowLanguage", "rowSources", "rowMetadata", "rowDisplay", "rowBackup", "rowStreamSubtitleAddons"),
             NestedScrollView::class.java to listOf("settingsViewport"),
             TextView::class.java to listOf("settingsBack", "btnAddStreamSubtitleUrl"),
             ImageButton::class.java to listOf("btnConfigureHistoryAddon", "btnDeleteHistoryAddon")
@@ -1368,91 +1301,26 @@ class SettingsBottomFragment(
             }
         }
 
-        val extraUrlContainer = view.findView<LinearLayout>("containerStreamSubtitleUrls")
-        val extraUrlToggle = view.findView<ImageView>("toggleStreamSubtitleUrls")
-        val addonFields = linkedMapOf<View, Pair<EditText, EditText>>()
-        val rowDisposers = mutableMapOf<View, () -> Unit>()
-        val addUrl = (view.optional("btnAddStreamSubtitleUrl") as? TextView) ?: simpleButton("Add").also {
-            (extraUrlContainer.parent as ViewGroup).addView(it)
-        }
-        fun refreshUrlButtons() {
-            for (row in addonFields.keys) {
-                val delete = (row as LinearLayout).getChildAt(0).let { it as LinearLayout }.getChildAt(2)
-                val fields = addonFields.getValue(row)
-                val enabled = addonFields.size > 1 || fields.first.text.isNotBlank() || fields.second.text.isNotBlank()
-                delete.isEnabled = enabled; delete.isFocusable = enabled
-                delete.alpha = if (enabled) 1f else 0.5f
-            }
-        }
-        fun addExtraUrlField(initialName: String = "", initialUrl: String = "") {
-            fun newField(hintText: String, value: String, isUrl: Boolean) = EditText(ctx).apply {
-                hint = hintText
-                inputType = InputType.TYPE_CLASS_TEXT or
-                    (if (isUrl) InputType.TYPE_TEXT_VARIATION_URI else InputType.TYPE_TEXT_FLAG_CAP_SENTENCES)
-                setText(value)
-                setPadding(dp(12), 0, dp(12), 0)
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val row = LinearLayout(ctx).apply {
-                orientation = LinearLayout.VERTICAL
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
-            }
-            val nameField = newField("Name (Optional)", initialName, false)
-            val urlField = newField("Addon URL (http/https)", initialUrl, true)
-            val gear = addonIcon("settings_icon", "Addon settings for stream / subtitle")
-            val trash = addonIcon("delete_icon", "Delete stream / subtitle addon URL")
-            val top = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-            top.addView(inputSlot(nameField, 1f)); top.addView(gear); top.addView(trash)
-            row.addView(top)
-            row.addView(inputSlot(urlField).apply { (layoutParams as LinearLayout.LayoutParams).topMargin = dp(2) })
-            extraUrlContainer.addView(row)
-            addonFields[row] = nameField to urlField
-            rowDisposers[row] = bindAddonActions(settingsDialog, urlField, gear, trash, nameField,
-                canDelete = { addonFields.size > 1 || nameField.text.isNotBlank() || urlField.text.isNotBlank() }) {
-                showDeleteConfirmation(settingsDialog, nameField.text.toString().ifBlank { "Stream / Subtitle addon" },
-                    "Remove this addon URL? Changes are not saved until Save all.") {
-                    if (!addonFields.containsKey(row)) return@showDeleteConfirmation
-                    val index = addonFields.keys.indexOf(row)
-                    if (addonFields.size > 1) {
-                        rowDisposers.remove(row)?.invoke()
-                        addonFields.remove(row); extraUrlContainer.removeView(row)
-                    } else { nameField.setText(""); urlField.setText("") }
-                    refreshUrlButtons()
-                    val target = addonFields.values.toList().getOrNull(index)?.first
-                        ?: addonFields.values.lastOrNull()?.first
-                    focusPlans[settingsDialog] = { target?.requestFocus() }
-                }
-            }
-            normalizeTypeface(row); prepareControls(row); refreshUrlButtons()
-        }
-        addUrl.setOnClickListener {
-            addExtraUrlField()
-            addonFields.values.last().first.apply { requestFocus(); post { if (isShown) requestRectangleOnScreen(Rect(0, 0, width, height)) } }
-        }
+        val sourceDraft = mutableListOf<LinkItem>()
         val extraUrls = runCatching {
             JSONArray(sharedPref.getString(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_URLS, "[]"))
         }.getOrNull()
-        if (extraUrls == null || extraUrls.length() == 0) addExtraUrlField()
-        else (0 until extraUrls.length()).forEach { i ->
-            when (val entry = extraUrls.opt(i)) {
-                is JSONObject -> addExtraUrlField(entry.optString("name"), entry.optString("url"))
-                is String -> addExtraUrlField(initialUrl = entry) // Legacy URL-only settings
-                else -> addExtraUrlField()
-            }
+        if (extraUrls != null) for (i in 0 until extraUrls.length()) {
+            val entry = extraUrls.opt(i)
+            val name = (entry as? JSONObject)?.optString("name").orEmpty()
+            val url = if (entry is String) entry else (entry as? JSONObject)?.optString("url").orEmpty()
+            if (url.isNotBlank()) sourceDraft.add(LinkItem(id = i.toLong(), name = name, link = url,
+                type = "StremioC", enabled = (entry as? JSONObject)?.optBoolean("enabled", true) ?: true))
         }
-        fun setExtraUrlExpanded(expanded: Boolean, persist: Boolean = true) {
-            if (!expanded && extraUrlContainer.hasFocus()) extraUrlToggle.requestFocus()
-            extraUrlContainer.visibility = if (expanded) View.VISIBLE else View.GONE
-            addUrl.visibility = if (expanded) View.VISIBLE else View.GONE
-            view.optional("sourceSaveHint")?.visibility = if (expanded) View.VISIBLE else View.GONE
-            extraUrlToggle.setImageDrawable(getDrawable(if (expanded) "addon_collapse_icon" else "addon_expand_icon"))
-            extraUrlToggle.imageTintList = actionIconTint
-            extraUrlToggle.contentDescription = if (expanded) "Collapse addon URLs" else "Expand addon URLs"
-            if (persist) sharedPref.edit().putBoolean(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_EXPANDED, expanded).apply()
+        view.findView<LinearLayout>("containerStreamSubtitleUrls").visibility = View.GONE
+        view.findView<ImageView>("toggleStreamSubtitleUrls").apply {
+            visibility = View.GONE; isFocusable = false; isClickable = false
         }
-        setExtraUrlExpanded(sharedPref.getBoolean(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_EXPANDED, true))
-        extraUrlToggle.setOnClickListener { setExtraUrlExpanded(extraUrlContainer.visibility != View.VISIBLE) }
+        val sourceEntry = view.optional("rowStreamSubtitleAddons") ?: simpleButton("Stream / Subtitle Addons ›").also {
+            (view.findView<LinearLayout>("containerStreamSubtitleUrls").parent as ViewGroup).addView(it)
+        }
+        view.optional("btnAddStreamSubtitleUrl")?.visibility = View.GONE
+        sourceEntry.setOnClickListener { showAddonListDialog(sourceDraft, onDraftChanged = { refreshSummaries?.invoke() }) }
 
         val layoutHistorySyncUrl: View = try { view.findView("layoutHistorySyncUrl") } catch (e: Throwable) { throw Exception("layoutHistorySyncUrl View not found", e) }
         val etHistorySyncUrl: EditText = try { view.findView("etHistorySyncUrl") } catch (e: Throwable) { throw Exception("etHistorySyncUrl EditText not found", e) }
@@ -1464,7 +1332,7 @@ class SettingsBottomFragment(
         if (historyGear != null && historyDelete != null) bindAddonActions(settingsDialog,
             etHistorySyncUrl, historyGear, historyDelete, canDelete = { etHistorySyncUrl.text.isNotBlank() }) {
             showDeleteConfirmation(settingsDialog, "Meta / History addon",
-                "Clear the Meta / History addon URL? Changes are not saved until Save all.") {
+                "Clear the Meta / History addon URL?") {
                 etHistorySyncUrl.setText("")
                 focusPlans[settingsDialog] = { etHistorySyncUrl.requestFocus() }
             }
@@ -1521,13 +1389,13 @@ class SettingsBottomFragment(
         showlinks.setOnClickListener { showSavedLinksDialog() }
 
         var currentPage = SettingsPage.HUB
-        val pageScroll = IntArray(4)
-        val pageFocus = arrayOfNulls<View>(4)
-        val pages = listOf("pageHub", "pageSources", "pageMetadata", "pageDisplay").map { view.optional(it) }
-        val titles = listOf("Stremio Settings", "Sources & Integrations", "Metadata & Sync", "Display & Ratings")
+        val pageScroll = IntArray(SettingsPage.entries.size)
+        val pageFocus = arrayOfNulls<View>(SettingsPage.entries.size)
+        val pages = listOf("pageHub", "pageSources", "pageMetadata", "pageDisplay", "pageBackup").map { view.optional(it) }
+        val titles = listOf("Stremio Settings", "Sources & Integrations", "Metadata & Sync", "Display & Ratings", "Backup")
         val back = view.optional("settingsBack") as? TextView
         fun updateSummaries() {
-            val count = addonFields.values.count { it.second.text.isNotBlank() }
+            val count = sourceDraft.count { it.link.isNotBlank() }
             val integrations = listOf("switchCineStream", "switchStreamPlay", "switchVixSrc")
                 .count { view.findView<Switch>(it).isChecked }
             (view.optional("summarySources") as? TextView)?.text =
@@ -1539,7 +1407,7 @@ class SettingsBottomFragment(
                 "$code · ${if (etTmdbApiKey.text.isNotBlank()) "API key set" else "API key required"}"
             (view.optional("summaryDisplay") as? TextView)?.text =
                 "MDBList: ${if (switchMdbList.isChecked) "On" else "Off"} · XRDB: ${if (switchCustomPoster.isChecked) "On" else "Off"}"
-            listOf("rowCatalogs", "rowSources", "rowMetadata", "rowDisplay", "rowLanguage").forEach { id ->
+            listOf("rowCatalogs", "rowSources", "rowMetadata", "rowDisplay", "rowLanguage", "rowBackup", "rowStreamSubtitleAddons").forEach { id ->
                 (view.optional(id) as? ViewGroup)?.let { row ->
                     val texts = mutableListOf<String>()
                     fun labels(node: View) {
@@ -1563,7 +1431,8 @@ class SettingsBottomFragment(
             currentPage = next
             pages.forEachIndexed { i, page -> page?.visibility = if (i == next.ordinal) View.VISIBLE else View.GONE }
             settingsToggle.text = titles[next.ordinal]
-            back?.text = if (next == SettingsPage.HUB) "Close" else "Back"
+            back?.text = "Close"
+            view.optional("saveAction")?.visibility = if (next == SettingsPage.BACKUP) View.GONE else View.VISIBLE
             updateSummaries()
             viewport?.post {
                 if (!settingsDialog.isShowing || currentPage != next) return@post
@@ -1578,7 +1447,7 @@ class SettingsBottomFragment(
         if (hub != null) {
             view.findView<View>("rowCatalogs").setOnClickListener { showlinks.performClick() }
             listOf("rowSources" to SettingsPage.SOURCES, "rowMetadata" to SettingsPage.METADATA,
-                "rowDisplay" to SettingsPage.DISPLAY).forEach { (id, page) ->
+                "rowDisplay" to SettingsPage.DISPLAY, "rowBackup" to SettingsPage.BACKUP).forEach { (id, page) ->
                 view.findView<View>(id).setOnClickListener { showPage(page) }
             }
             view.findView<View>("rowLanguage").setOnClickListener { btnSelectLanguage.performClick() }
@@ -1594,7 +1463,6 @@ class SettingsBottomFragment(
         }
         saveIcon.setOnClickListener {
             etTmdbApiKey.error = null
-            addonFields.values.forEach { it.second.error = null }
             val context = hostContext
             val tmdbApiKeyVal = etTmdbApiKey.text.toString().trim()
             if (tmdbApiKeyVal.isEmpty()) {
@@ -1608,27 +1476,26 @@ class SettingsBottomFragment(
             val switchStreamPlay = view.findView<Switch>("switchStreamPlay")
             val switchVixSrc = view.findView<Switch>("switchVixSrc")
 
-            val nonblankFields = addonFields.values.filter { it.second.text.isNotBlank() }
-                .distinctBy { stremioManifestUrl(it.second.text.toString().trim()) }
-            val invalid = nonblankFields.firstOrNull { (_, field) ->
-                runCatching { val uri = field.text.toString().trim().toUri()
+            val extraUrlList = sourceDraft.filter { it.link.isNotBlank() }
+                .distinctBy { stremioManifestUrl(it.link.trim()) }
+            val invalid = extraUrlList.firstOrNull {
+                runCatching { val uri = it.link.trim().toUri()
                     uri.scheme?.lowercase() !in setOf("http", "https") || uri.host.isNullOrBlank()
                 }.getOrDefault(true)
             }
             if (invalid != null) {
-                setExtraUrlExpanded(true, persist = false)
-                showPage(SettingsPage.SOURCES, invalid.second)
-                invalid.second.error = "Invalid stream/subtitle addon URL"
+                showPage(SettingsPage.SOURCES)
                 showToast("Invalid stream/subtitle addon URL")
+                showAddonListDialog(sourceDraft, { refreshSummaries?.invoke() }, invalid.id)
                 return@setOnClickListener
             }
-            val extraUrlList = nonblankFields.map { it.first.text.toString().trim() to it.second.text.toString().trim() }
             val editor = sharedPref.edit()
             editor.putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, tmdbApiKeyVal)
             editor.putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim())
             editor.putString(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_URLS, JSONArray().apply {
-                extraUrlList.forEach { (addonName, addonUrl) ->
-                    put(JSONObject().put("name", addonName).put("url", addonUrl))
+                extraUrlList.forEach { addon ->
+                    put(JSONObject().put("name", addon.name.trim()).put("url", addon.link.trim())
+                        .put("enabled", addon.enabled))
                 }
             }.toString())
             editor.putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
@@ -1708,32 +1575,39 @@ class SettingsBottomFragment(
     }
 
 
-    private fun showSavedLinksDialog() {
-        if (!alive(settingsDialog)) return
+    private fun showSavedLinksDialog() = showAddonListDialog()
+
+    private fun showAddonListDialog(sourceDraft: MutableList<LinkItem>? = null,
+        onDraftChanged: () -> Unit = {}, invalidId: Long? = null) {
+        if (!alive(settingsDialog) || topDialog() !== settingsDialog) return
         val ctx = hostContext
         val inflater = LayoutInflater.from(ctx)
         val content = runCatching { getLayout("dialog_list_links", inflater, null) as? LinearLayout }.getOrNull()
             ?: run { showToast("Settings resources are unavailable. Reload the plugin and try again."); return }
-        content.background = getDarkThemeBg()
-        val modern = settingsDialog.findViewById<View>(getCachedResId("settingsRoot", "id")) != null
         val sampleRow = runCatching { getLayout("item_saved_link", inflater, null) }.getOrNull()
             ?: run { showToast("Settings resources are unavailable. Reload the plugin and try again."); return }
-        if (!hasViews(content, mapOf(RecyclerView::class.java to listOf("rvLinks"), TextView::class.java to listOf("tvNoLinks"))) ||
+        if (!hasViews(content, mapOf(RecyclerView::class.java to listOf("rvLinks"),
+                TextView::class.java to listOf("tvNoLinks"))) ||
             !hasViews(sampleRow, mapOf(TextView::class.java to listOf("tvName", "tvLink", "tvType", "tvSyncBadge"),
-                ImageButton::class.java to listOf("btnDelete"))) ||
-            (modern && (!hasViews(content, mapOf(FrameLayout::class.java to listOf("catalogListBody"))) ||
-                !hasViews(sampleRow, mapOf(ImageButton::class.java to listOf("btnConfigureAddon")))))) {
+                ImageButton::class.java to listOf("btnDelete", "btnConfigureAddon", "btnEditAddon", "btnCatalogs"),
+                Switch::class.java to listOf("switchAddonEnabled")))) {
             showToast("Settings resources are unavailable. Reload the plugin and try again.")
             return
         }
+        val sources = sourceDraft != null
+        (content.getChildAt(0) as? TextView)?.text = if (sources) "Stream / Subtitle Addons" else "Catalogs"
+        content.background = getDarkThemeBg()
         val rv = content.findView<RecyclerView>("rvLinks")
         rv.layoutManager = LinearLayoutManager(ctx)
-        val empty = content.findView<TextView>("tvNoLinks")
-        val add = simpleButton("Add")
+        val empty = content.findView<TextView>("tvNoLinks").apply {
+            text = if (sources) "No stream / subtitle addons" else "No saved catalogs"
+        }
         val close = simpleButton("Close")
-        content.addView(popupButtons(add, close))
+        val add = simpleButton("Add")
+        content.addView(popupButtons(close, add))
         val dialog = AlertDialog.Builder(ctx).setView(content).create()
         lateinit var adapter: LinksAdapter
+        fun records() = sourceDraft?.toMutableList() ?: catalogLinks()
         fun resizeList() {
             val count = adapter.itemCount
             empty.visibility = if (count == 0) View.VISIBLE else View.GONE
@@ -1749,45 +1623,57 @@ class SettingsBottomFragment(
             val cap = minOf(dp(450), (ctx.resources.displayMetrics.heightPixels * 0.62f).toInt())
             rv.layoutParams = rv.layoutParams.apply { height = minOf(cap.toLong(), rowHeight.toLong() * count).toInt() }
         }
-        fun refreshList(focusId: Long?, fallback: Int) {
+        fun refreshList(focusId: Long?, fallback: Int, controlId: String? = null) {
             if (rv.isComputingLayout) {
-                rv.post { if (alive(dialog)) refreshList(focusId, fallback) }
+                rv.post { if (alive(dialog)) refreshList(focusId, fallback, controlId) }
                 return
             }
-            adapter.replaceAll(SettingsRepository.loadLinks(sharedPref))
+            adapter.replaceAll(records())
             resizeList()
+            onDraftChanged()
             focusPlans[dialog] = {
                 if (adapter.itemCount == 0) add.requestFocus()
                 else restoreRow(rv, adapter.positionOf(focusId).takeIf { it >= 0 }
-                    ?: fallback.coerceIn(0, adapter.itemCount - 1))
+                    ?: fallback.coerceIn(0, adapter.itemCount - 1)) {
+                    controlId?.let { id -> it.optional(id) } ?: it.optional("addonRowBody") ?: it
+                }
+            }
+            if (topDialog() === dialog) rv.post {
+                if (alive(dialog) && topDialog() === dialog) focusPlans.remove(dialog)?.invoke()
             }
         }
-        adapter = LinksAdapter(SettingsRepository.loadLinks(sharedPref),
+        fun edit(item: LinkItem?, position: Int, urlError: String? = null) {
+            if (!alive(dialog) || topDialog() !== dialog) return
+            showLinkEditorDialog(item != null, item, position, rv, sourceDraft, urlError) { changed ->
+                refreshList(changed, position.coerceAtLeast(0))
+            }
+        }
+        adapter = LinksAdapter(records(), showSyncBadge = !sources,
             onDelete = { item ->
                 val position = adapter.positionOf(item.id).coerceAtLeast(0)
                 showDeleteConfirmation(dialog, item.name,
-                    "Delete this saved catalog addon? This change is saved immediately.") {
-                    if (deleteCatalogById(item.id)) showToast("Deleted")
+                    if (sources) "Remove this stream / subtitle addon?"
+                    else "Delete this saved catalog addon? This change is saved immediately.") {
+                    if (sourceDraft != null) sourceDraft.removeAll { it.id == item.id }
+                    else if (deleteCatalogById(item.id)) showToast("Deleted")
                     refreshList(null, position)
                 }
             },
-            onEdit = { item, position ->
-                val menu = popupContent(item.name)
-                val edit = simpleButton("Edit Link Info")
-                val catalogs = simpleButton("Configure Catalogs")
-                menu.addView(edit); menu.addView(catalogs)
-                val choice = AlertDialog.Builder(ctx).setView(menu).create()
-                setupCustomDialog(choice, menu, owner = dialog, initialFocus = { edit })
-                edit.setOnClickListener {
-                    choice.dismiss()
-                    showLinkEditorDialog(true, item, position, rv) { changed ->
-                        refreshList(changed, position)
+            onEdit = { item, position -> edit(item, position) },
+            onCatalogs = { item -> if (alive(dialog) && topDialog() === dialog) showCatalogConfigDialog(item) },
+            onConfigure = { item -> showAddonSettings(dialog, { adapter.linkFor(item.id) ?: "" }) },
+            onToggle = { item, enabled ->
+                if (alive(dialog) && topDialog() === dialog) {
+                    val values = records()
+                    val index = values.indexOfFirst { it.id == item.id }
+                    if (index >= 0) {
+                        values[index] = values[index].copy(enabled = enabled)
+                        if (sourceDraft != null) { sourceDraft.clear(); sourceDraft.addAll(values) }
+                        else SettingsRepository.saveLinks(sharedPref, values)
+                        refreshList(item.id, index, "switchAddonEnabled")
                     }
                 }
-                catalogs.setOnClickListener { choice.dismiss(); showCatalogConfigDialog(item) }
-                choice.show()
-            },
-            onConfigure = { item -> showAddonSettings(dialog, { adapter.linkFor(item.id) ?: "" }) }
+            }
         )
         rv.adapter = adapter
         resizeList()
@@ -1797,142 +1683,114 @@ class SettingsBottomFragment(
         }
         rv.addOnLayoutChangeListener(listener)
         onClose(dialog) { rv.removeOnLayoutChangeListener(listener) }
-        val body = content.optional("catalogListBody")
-        setupCustomDialog(dialog, content, body ?: rv, 600, initialFocus = { if (adapter.itemCount == 0) add else rv })
-        add.setOnClickListener { showLinkEditorDialog(false, null, -1, rv) { id -> refreshList(id, 0) } }
+        setupCustomDialog(dialog, content, content.optional("catalogListBody") ?: rv, 600,
+            initialFocus = { if (adapter.itemCount == 0) add else rv })
+        add.setOnClickListener { edit(null, 0) }
         close.setOnClickListener { dialog.dismiss() }
         dialog.show()
-        if (isLayout(TV) && adapter.itemCount > 0) restoreRow(rv, 0)
+        if (invalidId != null) {
+            val index = adapter.positionOf(invalidId)
+            records().getOrNull(index)?.let { edit(it, index, "Invalid stream/subtitle addon URL") }
+        } else if (isLayout(TV) && adapter.itemCount > 0) restoreRow(rv, 0)
     }
 
     private fun showLinkEditorDialog(isEdit: Boolean, itemToEdit: LinkItem?, position: Int, rv: RecyclerView?,
+        sourceDraft: MutableList<LinkItem>? = null, urlError: String? = null,
         onLinksChanged: ((Long?) -> Unit)? = null) {
+        val owner = topDialog()
+        if (!alive(owner)) return
+        val sources = sourceDraft != null
         val ctx = hostContext
-        val inflater = LayoutInflater.from(ctx)
-        val dialogView = runCatching { getLayout("addlinks", inflater, null) as? LinearLayout }.getOrNull()
+        val dialogView = runCatching { getLayout("addlinks", LayoutInflater.from(ctx), null) as? LinearLayout }.getOrNull()
             ?: run { showToast("Settings resources are unavailable. Reload the plugin and try again."); return }
-        
-        dialogView.background = getDarkThemeBg()
-        dialogView.setPadding(dp(20), dp(20), dp(20), dp(20))
-        
-        val titleTv = dialogView.getChildAt(0) as? TextView
-        if (titleTv != null) {
-            titleTv.text = if (isEdit) "Edit Catalog" else "Add Catalogs"
-            titleTv.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-            titleTv.textSize = 18f
-            titleTv.typeface = android.graphics.Typeface.DEFAULT_BOLD
-            titleTv.gravity = android.view.Gravity.START
-        }
-        
-        val modern = settingsDialog.findViewById<View>(getCachedResId("settingsRoot", "id")) != null
         if (!hasViews(dialogView, mapOf(
             EditText::class.java to listOf("etName", "etLink"),
-            Switch::class.java to listOf("switchStreamSubtitleSync", "switchLinkSync", "switchHistorySync")
-        )) || (modern && !hasViews(dialogView, mapOf(
-            NestedScrollView::class.java to listOf("catalogEditorScroll"),
-            ImageButton::class.java to listOf("btnConfigureAddon", "btnDeleteAddon")
-        )))) {
+            Switch::class.java to listOf("switchStreamSubtitleSync", "switchLinkSync", "switchHistorySync"),
+            ImageButton::class.java to listOf("btnConfigureAddon", "btnDeleteAddon"),
+            NestedScrollView::class.java to listOf("catalogEditorScroll")
+        ))) {
             showToast("Settings resources are unavailable. Reload the plugin and try again.")
             return
         }
-        val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
-        val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
-        val switchStreamSubtitleSync = try { dialogView.findView<Switch>("switchStreamSubtitleSync") } catch (_: Throwable) { null }
-        val switchLinkSync = try { dialogView.findView<Switch>("switchLinkSync") } catch (t: Throwable) { null }
-        val switchHistorySync = try { dialogView.findView<Switch>("switchHistorySync") } catch (t: Throwable) { null }
-        
-        etName?.background = getCardBg()
-        etName?.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-        etName?.setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
-        etName?.setPadding(dp(12), 0, dp(12), 0) 
-        if (isEdit) etName?.setText(itemToEdit?.name)
-        
-        etLink?.background = getCardBg()
-        etLink?.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-        etLink?.setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
-        etLink?.setPadding(dp(12), 0, dp(12), 0) 
-        if (isEdit) etLink?.setText(itemToEdit?.link)
-
-        switchStreamSubtitleSync?.isChecked = itemToEdit?.isStreamSubtitleSyncEnabled ?: false
-        switchLinkSync?.isChecked = itemToEdit?.isSyncEnabled ?: true
-        switchHistorySync?.isChecked = itemToEdit?.isHistorySyncEnabled ?: true
-
-        val footer = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 30, 0, 0)
+        dialogView.background = getDarkThemeBg()
+        (dialogView.getChildAt(0) as? TextView)?.text = when {
+            sources && isEdit -> "Edit Stream / Subtitle Addon"
+            sources -> "Add Stream / Subtitle Addon"
+            isEdit -> "Edit Catalog"
+            else -> "Add Catalog"
         }
-        val saveBtn = dialogButton(ctx, if (isEdit) "Update" else "Save", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) })
-        val cancelBtn = dialogButton(ctx, "Cancel", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) })
-        footer.addView(cancelBtn)
-        footer.addView(saveBtn)
-        dialogView.addView(footer)
-
+        val name = dialogView.findView<EditText>("etName")
+        val url = dialogView.findView<EditText>("etLink")
+        name.setText(itemToEdit?.name.orEmpty())
+        url.setText(itemToEdit?.link.orEmpty())
+        val streamSync = dialogView.findView<Switch>("switchStreamSubtitleSync")
+        val metaSync = dialogView.findView<Switch>("switchLinkSync")
+        val historySync = dialogView.findView<Switch>("switchHistorySync")
+        streamSync.isChecked = itemToEdit?.isStreamSubtitleSyncEnabled ?: false
+        metaSync.isChecked = itemToEdit?.isSyncEnabled ?: true
+        historySync.isChecked = itemToEdit?.isHistorySyncEnabled ?: true
+        dialogView.optional("catalogSyncSection")?.visibility = if (sources) View.GONE else View.VISIBLE
+        val close = simpleButton("Close")
+        val save = simpleButton("Save")
+        dialogView.addView(popupButtons(close, save))
         val dlg = AlertDialog.Builder(ctx).setView(dialogView).create()
-        val editorBody = dialogView.optional("catalogEditorScroll")
-        if (editorBody == null && (dialogView.optional("btnConfigureAddon") != null)) {
-            showToast("Settings resources are unavailable. Reload the plugin and try again.")
-            return
-        }
-        setupCustomDialog(dlg, dialogView, editorBody, 600, initialFocus = { etName })
-        val gear = dialogView.optional("btnConfigureAddon") as? ImageButton
-        val trash = dialogView.optional("btnDeleteAddon") as? ImageButton
-        if (etName != null && etLink != null && gear != null && trash != null) {
-            bindAddonActions(dlg, etLink, gear, trash, etName,
-                canDelete = { if (isEdit) itemToEdit != null else etName.text.isNotBlank() || etLink.text.isNotBlank() }) {
-                val original = itemToEdit?.let { saved -> SettingsRepository.loadLinks(sharedPref).firstOrNull { it.id == saved.id } }
-                showDeleteConfirmation(dlg, original?.name ?: "Catalog addon",
-                    if (isEdit) "Delete this saved catalog addon? This change is saved immediately and also discards changes in this editor."
-                    else "Clear this addon entry from the form? No saved catalog will be deleted.") {
-                    if (isEdit && itemToEdit != null) {
-                        deleteCatalogById(itemToEdit.id)
-                        onLinksChanged?.invoke(null)
-                        dlg.dismiss()
-                    } else {
-                        etName.setText(""); etLink.setText("")
-                        focusPlans[dlg] = { etName.requestFocus() }
-                    }
+        setupCustomDialog(dlg, dialogView, dialogView.optional("catalogEditorScroll"), 600, owner,
+            initialFocus = { if (urlError != null) url else name })
+        bindAddonActions(dlg, url, dialogView.findView("btnConfigureAddon"), dialogView.findView("btnDeleteAddon"), name,
+            canDelete = { isEdit || name.text.isNotBlank() || url.text.isNotBlank() }) {
+            showDeleteConfirmation(dlg, itemToEdit?.name ?: "Addon",
+                when {
+                    sources && isEdit -> "Remove this stream / subtitle addon and discard changes in this editor?"
+                    isEdit -> "Delete this saved catalog addon? This change is saved immediately and discards changes in this editor."
+                    else -> "Clear this addon entry from the form?"
+                }) {
+                if (isEdit && itemToEdit != null) {
+                    if (sourceDraft != null) sourceDraft.removeAll { it.id == itemToEdit.id }
+                    else deleteCatalogById(itemToEdit.id)
+                    onLinksChanged?.invoke(null)
+                    dlg.dismiss()
+                } else {
+                    name.setText(""); url.setText("")
+                    focusPlans[dlg] = { name.requestFocus() }
                 }
             }
         }
-
-        saveBtn.setOnClickListener {
-            if (etName == null || etLink == null) return@setOnClickListener
-            val name = etName.text.toString().trim()
-            val link = etLink.text.toString().trim()
-            val type = "StremioC"
-            val isExtraSync = switchStreamSubtitleSync?.isChecked ?: false
-            val isSync = switchLinkSync?.isChecked ?: true
-            val isHistorySync = switchHistorySync?.isChecked ?: true
-
-            if (link.isEmpty()) { etLink.error = "Please enter a link"; etLink.requestFocus(); showToast("Please enter a link"); return@setOnClickListener }
-            val valid = try { val uri = link.toUri(); val scheme = uri.scheme?.lowercase(); scheme == "http" || scheme == "https" } catch (_: Exception) { false }
-            if (!valid) { etLink.error = "Enter a valid URL (http/https)"; etLink.requestFocus(); showToast("Enter a valid URL (http/https)"); return@setOnClickListener }
-
-            if (isEdit && itemToEdit != null) {
-                val updatedList = SettingsRepository.loadLinks(sharedPref)
-                val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
-                if (indexInDb != -1) {
-                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type, isSyncEnabled = isSync, isHistorySyncEnabled = isHistorySync, isStreamSubtitleSyncEnabled = isExtraSync)
-                    updatedList[indexInDb] = newItem
-                    SettingsRepository.saveLinks(sharedPref, updatedList)
-                    if (onLinksChanged != null) onLinksChanged(newItem.id)
-                    else (rv?.adapter as? LinksAdapter)?.updateItem(newItem, position)
-                    showToast("Link Updated Successfully")
-                }
-            } else {
-                val item = LinkItem(name = name.ifBlank { link }, link = link, type = type, isSyncEnabled = isSync, isHistorySyncEnabled = isHistorySync, isStreamSubtitleSyncEnabled = isExtraSync)
-                try {
-                    val list = SettingsRepository.loadLinks(sharedPref)
-                    list.add(0, item)
-                    SettingsRepository.saveLinks(sharedPref, list)
-                    onLinksChanged?.invoke(item.id)
-                    Toast.makeText(ctx, "Link saved", Toast.LENGTH_SHORT).show()
-                } catch (e: Throwable) { e.printStackTrace(); showToast("Failed to save link") }
+        save.setOnClickListener {
+            if (!alive(dlg) || !save.isEnabled) return@setOnClickListener
+            val raw = url.text.toString().trim()
+            val valid = runCatching {
+                val uri = raw.toUri()
+                uri.scheme?.lowercase() in setOf("http", "https") && (!sources || !uri.host.isNullOrBlank())
+            }.getOrDefault(false)
+            if (!valid) {
+                url.error = "Enter a valid URL (http/https)"
+                url.requestFocus()
+                showToast("Enter a valid URL (http/https)")
+                return@setOnClickListener
             }
+            val changed = (itemToEdit ?: LinkItem(
+                id = maxOf(System.currentTimeMillis(), (sourceDraft?.maxOfOrNull { it.id } ?: 0L) + 1L),
+                name = "", link = "", type = "StremioC"
+            )).copy(name = name.text.toString().trim().ifBlank { if (sources) "" else raw },
+                link = raw, type = "StremioC", isSyncEnabled = metaSync.isChecked,
+                isHistorySyncEnabled = historySync.isChecked, isStreamSubtitleSyncEnabled = streamSync.isChecked)
+            val values = sourceDraft ?: catalogLinks()
+            val index = values.indexOfFirst { it.id == changed.id }
+            if (isEdit && index < 0) {
+                showToast("This addon is no longer available.")
+                return@setOnClickListener
+            }
+            save.isEnabled = false
+            if (isEdit) values[index] = changed else values.add(0, changed)
+            if (sourceDraft == null) SettingsRepository.saveLinks(sharedPref, values)
+            if (onLinksChanged != null) onLinksChanged(changed.id)
+            else (rv?.adapter as? LinksAdapter)?.updateItem(changed, position)
+            showToast(if (isEdit) "Addon updated" else "Addon added")
             dlg.dismiss()
         }
-        cancelBtn.setOnClickListener { dlg.dismiss() }
+        close.setOnClickListener { dlg.dismiss() }
         dlg.show()
+        if (urlError != null) url.error = urlError
     }
 
 private fun showLanguageSelectDialog() {
@@ -2556,53 +2414,72 @@ private fun showLanguageSelectDialog() {
 
     inner class LinksAdapter(
         private val items: MutableList<LinkItem>,
+        private val showSyncBadge: Boolean = true,
         private val onDelete: (LinkItem) -> Unit,
         private val onEdit: (LinkItem, Int) -> Unit,
-        private val onConfigure: (LinkItem) -> Unit
+        private val onCatalogs: (LinkItem) -> Unit,
+        private val onConfigure: (LinkItem) -> Unit,
+        private val onToggle: (LinkItem, Boolean) -> Unit
     ) : RecyclerView.Adapter<LinksAdapter.VH>() {
         inner class VH(val view: View) : RecyclerView.ViewHolder(view) {
+            val body: View = view.optional("addonRowBody") ?: view
             val tvName: TextView = view.findView("tvName")
             val tvLink: TextView = view.findView("tvLink")
             val tvType: TextView = view.findView("tvType")
             val tvSyncBadge: TextView = view.findView("tvSyncBadge")
-            val btnDelete: ImageButton = view.findView("btnDelete")
-            val btnConfigure: ImageButton? = view.optional("btnConfigureAddon") as? ImageButton
+            val edit: ImageButton = view.findView("btnEditAddon")
+            val catalogs: ImageButton = view.findView("btnCatalogs")
+            val gear: ImageButton = view.findView("btnConfigureAddon")
+            val trash: ImageButton = view.findView("btnDelete")
+            val enabled: Switch = view.findView("switchAddonEnabled")
         }
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
             val view = getLayout("item_saved_link", LayoutInflater.from(parent.context), parent)
             view.background = getCardBg()
-            view.isFocusable = true; view.isClickable = true
-            view.makeTvCompatible()
+            prepareControls(view)
             return VH(view).also {
-                styleAddonIcon(it.btnDelete, "delete_icon")
-                it.btnConfigure?.let { gear -> styleAddonIcon(gear, "settings_icon") }
-
+                styleAddonIcon(it.edit, "addon_edit_icon")
+                styleAddonIcon(it.catalogs, "addon_catalog_icon")
+                styleAddonIcon(it.gear, "settings_icon")
+                styleAddonIcon(it.trash, "delete_icon")
             }
         }
         override fun onBindViewHolder(holder: VH, position: Int) {
             val item = items[position]
-            holder.tvName.text = item.name; holder.tvLink.text = item.link; holder.tvType.text = item.type
+            holder.tvName.text = item.name.ifBlank { "Addon" }
+            holder.tvLink.text = item.link
+            holder.tvType.text = item.type
             listOf(holder.tvName, holder.tvLink, holder.tvType, holder.tvSyncBadge).forEach {
                 it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             }
-            holder.tvSyncBadge.visibility = if (item.isSyncEnabled || item.isHistorySyncEnabled ||
-                item.isStreamSubtitleSyncEnabled) View.VISIBLE else View.GONE
-            val label = item.name.takeUnless { it == item.link } ?: "Catalog addon"
-            holder.view.contentDescription = "$label. Stream / Subtitle Sync: ${item.isStreamSubtitleSyncEnabled}. Metadata Sync: ${item.isSyncEnabled}. History Sync: ${item.isHistorySyncEnabled}."
-            holder.btnDelete.contentDescription = "Delete addon $label"
-            holder.btnConfigure?.apply {
-                contentDescription = "Addon settings for $label"
-                isEnabled = item.link.isNotBlank(); isFocusable = isEnabled
-                alpha = if (isEnabled) 1f else 0.5f
-                setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onConfigure) }
+            holder.tvSyncBadge.visibility = if (showSyncBadge && (item.isSyncEnabled || item.isHistorySyncEnabled ||
+                item.isStreamSubtitleSyncEnabled)) View.VISIBLE else View.GONE
+            val label = item.name.takeUnless { it == item.link }?.ifBlank { "Addon" } ?: "Addon"
+            holder.body.contentDescription = "$label. ${if (item.enabled) "Enabled" else "Disabled"}. Edit addon."
+            holder.body.alpha = if (item.enabled) 1f else 0.6f
+            holder.edit.contentDescription = "Edit addon $label"
+            holder.catalogs.contentDescription = "Configure catalogs for $label"
+            holder.gear.contentDescription = "Addon settings for $label"
+            holder.trash.contentDescription = "Delete addon $label"
+            holder.enabled.contentDescription = "Enable addon $label"
+            holder.enabled.setOnCheckedChangeListener(null)
+            holder.enabled.isChecked = item.enabled
+            holder.enabled.setOnCheckedChangeListener { _, checked ->
+                items.getOrNull(holder.adapterPosition)?.takeIf { it.enabled != checked }?.let { onToggle(it, checked) }
             }
-            holder.btnDelete.setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onDelete) }
-            holder.view.setOnClickListener {
+            holder.gear.isEnabled = item.link.isNotBlank()
+            holder.gear.isFocusable = holder.gear.isEnabled
+            holder.gear.alpha = if (holder.gear.isEnabled) 1f else 0.5f
+            holder.edit.setOnClickListener {
                 val index = holder.adapterPosition
                 items.getOrNull(index)?.let { onEdit(it, index) }
             }
+            holder.body.setOnClickListener { holder.edit.performClick() }
+            holder.catalogs.setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onCatalogs) }
+            holder.gear.setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onConfigure) }
+            holder.trash.setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onDelete) }
             if (isLayout(TV)) {
-                val peers = listOfNotNull(holder.view, holder.btnConfigure, holder.btnDelete)
+                val peers = listOf(holder.body, holder.edit, holder.catalogs, holder.gear, holder.trash, holder.enabled)
                 peers.forEachIndexed { column, control ->
                     control.setOnKeyListener { _, key, event ->
                         if (holder.adapterPosition == RecyclerView.NO_POSITION) return@setOnKeyListener false
@@ -2616,11 +2493,9 @@ private fun showLanguageSelectDialog() {
                             val recycler = holder.itemView.parent as? RecyclerView
                             if (recycler == null || target !in items.indices) false else {
                                 if (event.action == KeyEvent.ACTION_DOWN) restoreRow(recycler, target) { row ->
-                                    when {
-                                        control === holder.btnConfigure -> row.optional("btnConfigureAddon")?.takeIf { it.isEnabled } ?: row
-                                        control === holder.btnDelete -> row.findView<ImageButton>("btnDelete")
-                                        else -> row
-                                    }
+                                    row.optional(listOf("addonRowBody", "btnEditAddon", "btnCatalogs",
+                                        "btnConfigureAddon", "btnDelete", "switchAddonEnabled")[column])
+                                        ?.takeIf { it.isEnabled } ?: row.findView<View>("addonRowBody")
                                 }
                                 true
                             }

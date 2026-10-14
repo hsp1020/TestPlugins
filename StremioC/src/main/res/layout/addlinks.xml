@@ -9,10 +9,10 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Add Catalogs"
+        android:text="Add Catalog"
         android:textSize="18sp"
         android:textStyle="bold"
-        android:layout_marginBottom="12dp" />
+        android:layout_marginBottom="8dp" />
     <androidx.core.widget.NestedScrollView
         android:id="@+id/catalogEditorScroll"
         android:layout_width="match_parent"
@@ -22,25 +22,44 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical">
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="48dp">
+                <EditText
+                    android:id="@+id/etName"
+                    android:autofillHints=""
+                    android:layout_width="match_parent"
+                    android:layout_height="35dp"
+                    android:layout_gravity="center_vertical"
+                    android:hint="Name (Optional)"
+                    android:inputType="text"
+                    android:singleLine="true"
+                    android:textSize="14sp"
+                    android:fontFamily="sans-serif"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:paddingTop="0dp"
+                    android:paddingBottom="0dp"
+                    android:background="@android:color/transparent" />
+            </FrameLayout>
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:minHeight="48dp"
+                android:layout_marginTop="2dp"
                 android:orientation="horizontal"
                 android:gravity="center_vertical">
                 <FrameLayout
                     android:layout_width="0dp"
                     android:layout_height="48dp"
-                    android:layout_weight="1"
-                    android:layout_marginTop="0dp">
+                    android:layout_weight="1">
                     <EditText
-                        android:id="@+id/etName"
-                        android:autofillHints=""
+                        android:id="@+id/etLink"
+                        android:autofillHints="Manifest URL"
                         android:layout_width="match_parent"
                         android:layout_height="35dp"
                         android:layout_gravity="center_vertical"
-                        android:hint="Name (Optional)"
-                        android:inputType="text"
+                        android:hint="Addon URL (http/https)"
+                        android:inputType="textUri"
                         android:singleLine="true"
                         android:textSize="14sp"
                         android:fontFamily="sans-serif"
@@ -54,94 +73,64 @@
                     android:id="@+id/btnConfigureAddon"
                     android:layout_width="48dp"
                     android:layout_height="48dp"
-                    android:layout_marginStart="4dp"
                     android:padding="12dp"
                     android:scaleType="centerInside"
-                    android:contentDescription="Addon settings for catalog"
+                    android:contentDescription="Addon settings"
                     android:focusable="true"
                     android:background="?android:attr/selectableItemBackgroundBorderless" />
                 <ImageButton
                     android:id="@+id/btnDeleteAddon"
                     android:layout_width="48dp"
                     android:layout_height="48dp"
-                    android:layout_marginStart="4dp"
                     android:padding="12dp"
                     android:scaleType="centerInside"
-                    android:contentDescription="Delete catalog addon"
+                    android:contentDescription="Delete addon"
                     android:focusable="true"
                     android:background="?android:attr/selectableItemBackgroundBorderless" />
             </LinearLayout>
-            <FrameLayout
+            <LinearLayout
+                android:id="@+id/catalogSyncSection"
                 android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:layout_marginTop="2dp">
-                <EditText
-                    android:id="@+id/etLink"
-                    android:autofillHints="Manifest URL"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:orientation="vertical">
+                <TextView
                     android:layout_width="match_parent"
-                    android:layout_height="35dp"
-                    android:layout_gravity="center_vertical"
-                    android:hint="Addon URL (http/https)"
-                    android:inputType="textUri"
-                    android:singleLine="true"
+                    android:layout_height="wrap_content"
+                    android:text="Catalog sync"
                     android:textSize="14sp"
-                    android:fontFamily="sans-serif"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:paddingTop="0dp"
-                    android:paddingBottom="0dp"
-                    android:background="@android:color/transparent" />
-            </FrameLayout>
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:layout_marginBottom="4dp"
-                android:text="Catalog sync"
-                android:textSize="14sp"
-                android:textStyle="bold" />
-            <Switch
-                android:id="@+id/switchStreamSubtitleSync"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:minHeight="48dp"
-                android:text="Stream / Subtitle Sync"
-                android:textSize="14sp"
-                android:focusable="true"
-                android:padding="5dp"
-                android:background="?android:attr/selectableItemBackground" />
-            <Switch
-                android:id="@+id/switchLinkSync"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:minHeight="48dp"
-                android:text="Metadata Sync"
-                android:textSize="14sp"
-                android:focusable="true"
-                android:padding="5dp"
-                android:background="?android:attr/selectableItemBackground" />
-            <Switch
-                android:id="@+id/switchHistorySync"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:minHeight="48dp"
-                android:text="History Sync"
-                android:textSize="14sp"
-                android:focusable="true"
-                android:padding="5dp"
-                android:background="?android:attr/selectableItemBackground" />
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Shared addon URLs are set in Sources &amp; Integrations and Metadata &amp; Sync."
-                android:textSize="12sp"
-                android:tag="stremioc_secondary" />
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Catalog changes are saved separately."
-                android:textSize="12sp"
-                android:tag="stremioc_secondary" />
+                    android:textStyle="bold" />
+                <Switch
+                    android:id="@+id/switchStreamSubtitleSync"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:text="Stream / Subtitle Sync"
+                    android:textSize="14sp"
+                    android:focusable="true"
+                    android:padding="4dp"
+                    android:background="?android:attr/selectableItemBackground" />
+                <Switch
+                    android:id="@+id/switchLinkSync"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:text="Metadata Sync"
+                    android:textSize="14sp"
+                    android:focusable="true"
+                    android:padding="4dp"
+                    android:background="?android:attr/selectableItemBackground" />
+                <Switch
+                    android:id="@+id/switchHistorySync"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:text="History Sync"
+                    android:textSize="14sp"
+                    android:focusable="true"
+                    android:padding="4dp"
+                    android:background="?android:attr/selectableItemBackground" />
+            </LinearLayout>
         </LinearLayout>
     </androidx.core.widget.NestedScrollView>
 </LinearLayout>

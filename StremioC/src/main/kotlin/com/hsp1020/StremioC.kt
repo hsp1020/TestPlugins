@@ -166,15 +166,17 @@ private fun parseTrailerYoutubeId(raw: String?): String? {
     }.getOrNull()
 }
 
-open class StremioC(override var mainUrl: String, override var name: String) : MainAPI() {
-    override val supportedTypes = if (mainUrl.isNotBlank()) {
+open class StremioC(override var mainUrl: String, override var name: String, private val addonId: Long? = null) : MainAPI() {
+    override val supportedTypes get() = if (mainUrl.isNotBlank() && isAddonEnabled()) {
         setOf(TvType.Movie, TvType.TvSeries, TvType.Others)
     } else {
         emptySet()
     }
     
     // 주소가 있는 실제 애드온만 홈 화면 탭 목록에 표시되도록 설정
-    override val hasMainPage = mainUrl.isNotBlank()
+    override val hasMainPage get() = mainUrl.isNotBlank() && isAddonEnabled()
+
+    private fun isAddonEnabled() = isCatalogAddonEnabled(mainUrl, addonId)
      
     private var cachedManifest: Manifest? = null
     private var lastManifestUrl: String = ""
@@ -301,7 +303,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val syncMap: Map<String, Boolean>,
             val historySyncMap: Map<String, Boolean>,
             val streamSubtitleMap: Map<String, Boolean>,
-            val streamSubtitleUrls: List<StreamSubtitleAddon>
+            val streamSubtitleUrls: List<StreamSubtitleAddon>,
+            val disabledCatalogUrls: Set<String> = emptySet(),
+            val catalogEnabledIds: Map<Long, Boolean> = emptyMap()
         )
         @Volatile private var cachedSyncSettings: SyncSettings? = null
         @Volatile private var cachedSyncSettingsTime: Long = 0
@@ -310,6 +314,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         fun invalidateSyncSettingsCache() = synchronized(StremioC::class.java) {
             cachedSyncSettings = null
             cachedSyncSettingsTime = 0L
+        }
+
+        internal fun isCatalogAddonEnabled(url: String, id: Long? = null): Boolean {
+            val settings = getSyncSettings()
+            return id?.let { settings.catalogEnabledIds[it] }
+                ?: (url.isBlank() || stremioManifestUrl(url) !in settings.disabledCatalogUrls)
         }
 
         private fun getSyncSettings(): SyncSettings {
@@ -330,11 +340,21 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val map = mutableMapOf<String, Boolean>()
                 val historyMap = mutableMapOf<String, Boolean>()
                 val extraMap = mutableMapOf<String, Boolean>()
+                val catalogEnabled = mutableMapOf<String, Boolean>()
+                val catalogEnabledIds = mutableMapOf<Long, Boolean>()
                 if (json != null) {
                     try {
                         val arr = org.json.JSONArray(json)
                         for (i in 0 until arr.length()) {
                             val obj = arr.getJSONObject(i)
+                            val rawLink = obj.optString("link", "")
+                            val enabled = obj.optBoolean("enabled", true)
+                            if (obj.has("id")) catalogEnabledIds[obj.optLong("id")] = enabled
+                            if (rawLink.isNotBlank()) {
+                                val key = stremioManifestUrl(rawLink)
+                                catalogEnabled[key] = catalogEnabled[key] == true || enabled
+                            }
+                            if (!enabled) continue
                             val link = obj.optString("link", "").cleanBaseUrl().lowercase()
                             if (link.isNotBlank()) {
                                 map[link] = obj.optBoolean("isSyncEnabled", true)
@@ -350,13 +370,15 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val arr = org.json.JSONArray(prefs.getString("stream_subtitle_addon_urls", "[]"))
                     (0 until arr.length()).mapNotNull { i ->
                         when (val entry = arr.opt(i)) {
-                            is org.json.JSONObject -> StreamSubtitleAddon(entry.optString("name").trim(), entry.optString("url").trim())
+                            is org.json.JSONObject -> if (entry.optBoolean("enabled", true))
+                                StreamSubtitleAddon(entry.optString("name").trim(), entry.optString("url").trim()) else null
                             is String -> StreamSubtitleAddon("", entry.trim()) // Legacy URL-only settings
                             else -> null
                         }?.takeIf { it.url.isNotBlank() }
                     }
                 }.getOrDefault(emptyList()).distinctBy { stremioManifestUrl(it.url) }
-                val result = SyncSettings(syncUrl, map, historyMap, extraMap, extraUrls)
+                val result = SyncSettings(syncUrl, map, historyMap, extraMap, extraUrls,
+                    catalogEnabled.filterValues { !it }.keys.toSet(), catalogEnabledIds)
                 cachedSyncSettings = result
                 cachedSyncSettingsTime = System.currentTimeMillis()
                 return result
@@ -831,6 +853,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 
     private suspend fun getManifest(): Manifest? = manifestMutex.withLock {
+        if (!isAddonEnabled()) return@withLock null
         fetchManifestLocked()
     }
 
@@ -967,6 +990,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     override val mainPage: List<MainPageData>
         get() {
+            if (!isAddonEnabled()) return emptyList()
             val context = CloudStreamApp.context ?: return emptyList()
             val manifestPrefs = context.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
             val currentUrl = stremioManifestUrl(mainUrl)
@@ -1049,6 +1073,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        if (!isAddonEnabled()) return newHomePageResponse(
+            listOf(HomePageList(request.name, emptyList<SearchResponse>())), hasNext = false)
         return try {
             executeMainPage(page, request)
         } catch (e: CancellationException) {
@@ -1185,6 +1211,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 
     internal suspend fun browseCatalogs(): List<Catalog> {
+        if (!isAddonEnabled()) return emptyList()
         val prefs = CloudStreamApp.context?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
         val raw = prefs?.let { stremioReadManifest(it, mainUrl) }
         val manifest = if (!raw.isNullOrBlank()) {
@@ -1195,9 +1222,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 
     internal suspend fun browsePage(catalog: Catalog, genre: String?, offset: Int): Pair<List<SearchResponse>, Int> =
-        fetchCatalogItems(catalog.browsePath(genre, offset), requireNotNull(catalog.type))
+        if (!isAddonEnabled()) emptyList<SearchResponse>() to 0
+        else fetchCatalogItems(catalog.browsePath(genre, offset), requireNotNull(catalog.type))
 
     override suspend fun search(query: String): List<SearchResponse> {
+        if (!isAddonEnabled()) return emptyList()
         mainUrl = mainUrl.fixSourceUrl()
         val manifest = getManifest()
 
@@ -1238,6 +1267,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
     
     override suspend fun load(url: String): LoadResponse = coroutineScope {
+        if (!isAddonEnabled()) throw IllegalStateException("This addon is disabled.")
         // Catalogs opened from a metadata Discover link do not require addon registration.
         if (mainUrl.isBlank() && (url.startsWith("https://") || url.startsWith("http://"))) {
             val origin = url.substringBefore("/meta/", "").takeIf { it.isNotBlank() }
@@ -1554,6 +1584,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
+        if (!isAddonEnabled()) return false
         val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { e.printStackTrace(); null } ?: return false
         
         val legacyPrimaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
@@ -2275,7 +2306,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }.onFailure { it.printStackTrace() }
         }
 
-        return addons.values.toList()
+        return addons.values.filter { isCatalogAddonEnabled(it.url) }
     }
 
     private suspend fun invokeTmdbStremioIntegrationFallback(

@@ -641,7 +641,7 @@ internal class CatalogBrowserDialog(
 
     private fun reloadLinks() {
         reset()
-        links = if (directTarget == null) SettingsRepository.loadLinks(prefs).filter { it.link.isNotBlank() } else emptyList()
+        links = if (directTarget == null) SettingsRepository.loadLinks(prefs).filter { it.enabled && it.link.isNotBlank() } else emptyList()
         provider = null
         addonUrl = null
         catalog = null
@@ -658,10 +658,13 @@ internal class CatalogBrowserDialog(
             listOf(directTarget.addonUrl to StremioC(directTarget.addonUrl, "StremioC"))
         } else {
             links.asReversed().distinctBy { it.link }.mapNotNull { link ->
-                providerFor(link.link)?.let { link.link to it }
+                providerFor(link.link)?.let { source ->
+                    link.link to if (source.hasMainPage) source else StremioC(link.link, link.name, link.id)
+                }
             }
         }
-        if (sources.isEmpty()) {
+        val activeSources = sources.filter { StremioC.isCatalogAddonEnabled(it.first) }
+        if (activeSources.isEmpty()) {
             Toast.makeText(activity, "No Stremio catalogs available.", Toast.LENGTH_SHORT).show()
             return
         }
@@ -670,7 +673,7 @@ internal class CatalogBrowserDialog(
         job = scope.launch {
             val limit = Semaphore(4)
             val result = try { coroutineScope {
-                sources.map { (url, source) ->
+                activeSources.map { (url, source) ->
                     async(Dispatchers.IO) {
                         try {
                             limit.withPermit {
