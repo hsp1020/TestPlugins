@@ -438,7 +438,7 @@ internal class CatalogBrowserDialog(
                         val handled = super.dispatchTouchEvent(event)
                         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_UP ||
                             action == MotionEvent.ACTION_CANCEL) {
-                            traceDropdown("ROW_TOUCH selector=$title pos=$position action=\$action handled=\$handled " +
+                            traceDropdown("ROW_TOUCH selector=$title pos=$position action=$action handled=$handled " +
                                 "duration=${if (downAt == 0L) -1 else event.eventTime - downAt}ms " +
                                 "x=${event.x.toInt()} width=$width pressed=$isPressed")
                         }
