@@ -213,12 +213,13 @@ class StremioCPlugin : Plugin() {
         closeProviderPicker: Boolean = false
     ) {
         if (host.isFinishing || host.isDestroyed) return
+        val pluginResources = resources ?: return
         activeBrowser?.dismiss()
         activeSettingsDialog?.dismiss()
         if (closeProviderPicker) dismissProviderPicker(host)
         val prefs = host.applicationContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
         lateinit var browser: CatalogBrowserDialog
-        browser = CatalogBrowserDialog(host, prefs, { url ->
+        browser = CatalogBrowserDialog(host, pluginResources, prefs, { url ->
             APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull {
                 stremioManifestUrl(it.mainUrl.fixSourceUrl()) == stremioManifestUrl(url.fixSourceUrl())
             }

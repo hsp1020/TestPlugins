@@ -2,6 +2,8 @@ package com.hsp1020
 
 import androidx.appcompat.app.AppCompatDialog
 import android.content.SharedPreferences
+import android.content.res.ColorStateList
+import android.content.res.Resources
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.Typeface
@@ -77,6 +79,7 @@ import kotlinx.coroutines.withContext
 /** One dialog, one in-flight page; only All pages are shared with Home. */
 internal class CatalogBrowserDialog(
     private val activity: FragmentActivity,
+    private val pluginResources: Resources,
     private val prefs: SharedPreferences,
     private val providerFor: (String) -> StremioC?,
     initialCatalog: CatalogShortcutTarget? = null,
@@ -92,6 +95,7 @@ internal class CatalogBrowserDialog(
     private val typeArrow = selectorArrow()
     private val catalogArrow = selectorArrow()
     private val genreArrow = selectorArrow()
+    private val checkIconId = pluginResources.getIdentifier("addon_check_icon", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
     private val selectorLabelStyle = TextView(activity).apply {
         typeface = Typeface.create(typeface, Typeface.BOLD)
     }
@@ -426,13 +430,13 @@ internal class CatalogBrowserDialog(
                         setSingleLine(true)
                         ellipsize = TextUtils.TruncateAt.END
                     }, LinearLayout.LayoutParams(0, dp(48), 1f))
-                    addView(TextView(activity).apply {
-                        text = if (checked) "✓" else ""
-                        typeface = Typeface.DEFAULT_BOLD
-                        setTextColor(activity.colorFromAttribute(R.attr.colorPrimary))
-                        gravity = Gravity.CENTER
-                        textSize = 18f
-                    }, LinearLayout.LayoutParams(dp(32), dp(48)))
+                    addView(ImageView(activity).apply {
+                        if (checked) setImageDrawable(pluginResources.getDrawable(checkIconId, null))
+                        imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.colorPrimary))
+                        contentDescription = "Selected item"
+                        setPadding(dp(10), 0, dp(10), 0)
+                        visibility = if (checked) View.VISIBLE else View.INVISIBLE
+                    }, LinearLayout.LayoutParams(dp(40), dp(24)))
                 }
             }
         }
