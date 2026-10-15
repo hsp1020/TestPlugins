@@ -132,7 +132,9 @@ internal class StremioDetailHandoff(
     private val activity: FragmentActivity,
     private val dialog: AppCompatDialog,
     private val navigation: NavController?,
-    private val onLeave: () -> Unit
+    private val onLeave: () -> Unit,
+    private val onReturn: () -> Unit = { dialog.show() },
+    private val onReady: () -> Unit = {}
 ) {
     val isActive get() = returnEntryId != null
 
@@ -202,6 +204,7 @@ internal class StremioDetailHandoff(
                                 detailEntryId == navigation?.currentBackStackEntry?.id) {
                                 pendingDetailDraw = false
                                 dialog.hide()
+                                onReady()
                             }
                         }
                     } else detail.postInvalidateOnAnimation()
@@ -245,11 +248,8 @@ internal class StremioDetailHandoff(
                     hostView?.doOnPreDraw {
                         if (isActive && returnEntryId == origin && detailEntryId != null &&
                             navigation?.currentBackStackEntry?.id == origin) {
-                            returnEntryId = null
-                            detailEntryId = null
-                            pendingDetailDraw = false
                             close()
-                            dialog.show()
+                            onReturn()
                         }
                     }
                 }

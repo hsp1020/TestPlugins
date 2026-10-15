@@ -225,6 +225,7 @@ internal object ActorInformation {
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
         private var dialog: AppCompatDialog? = null
         private var detailHandoff: StremioDetailHandoff? = null
+        private var originState: androidx.lifecycle.SavedStateHandle? = null
         private var requestJob: kotlinx.coroutines.Job? = null
         private var preserve = false
         private var currentPerson: ActorPersonRef? = null
@@ -257,7 +258,9 @@ internal object ActorInformation {
         }
 
         private fun state(): androidx.lifecycle.SavedStateHandle? =
-            runCatching { fragment.findNavController().currentBackStackEntry?.savedStateHandle }.getOrNull()
+            originState ?: runCatching {
+                fragment.findNavController().currentBackStackEntry?.savedStateHandle
+            }.getOrNull()
 
         private fun save() {
             val actor = currentPerson ?: return
@@ -318,6 +321,9 @@ internal object ActorInformation {
         private fun show(originProvider: String?, actor: ActorPersonRef, origin: String, resumeY: Int = 0) {
             if (!fragment.isAdded || closed) return
             if (dialog?.isShowing == true && currentPerson == actor && currentSource == originProvider) return
+            originState = runCatching {
+                fragment.findNavController().currentBackStackEntry?.savedStateHandle
+            }.getOrNull()
             requestJob?.cancel()
             detailHandoff?.close()
             detailHandoff = null
@@ -332,12 +338,29 @@ internal object ActorInformation {
             val windowDialog = AppCompatDialog(activity, R.style.DialogFullscreen)
             val navigation = (activity.supportFragmentManager
                 .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)?.navController
-            val handoff = StremioDetailHandoff(activity, windowDialog, navigation) {
-                if (dialog === windowDialog) {
-                    preserve = false
-                    windowDialog.dismiss()
+            val handoff = StremioDetailHandoff(
+                activity, windowDialog, navigation,
+                onLeave = {
+                    if (dialog === windowDialog) {
+                        preserve = false
+                        windowDialog.dismiss()
+                    }
+                },
+                onReturn = {
+                    if (closed) {
+                        preserve = true
+                        windowDialog.dismiss()
+                    } else windowDialog.show()
+                },
+                onReady = {
+                    // A destroyed source Fragment no longer owns a usable dialog.
+                    // Keep it visible until the new detail is ready, then release it.
+                    if (closed && dialog === windowDialog) {
+                        preserve = true
+                        windowDialog.dismiss()
+                    }
                 }
-            }
+            )
             detailHandoff = handoff
             val root = column().apply {
                 setBackgroundColor(activity.colorFromAttribute(R.attr.primaryBlackBackground))
@@ -706,8 +729,12 @@ internal object ActorInformation {
             closed = true
             preserve = true
             requestJob?.cancel()
-            detailHandoff?.close()
-            dialog?.dismiss()
+            // Source view destruction precedes destination readiness on navigation.
+            // Leave handoff alive so the old detail cannot flash through.
+            if (detailHandoff?.isActive != true) {
+                detailHandoff?.close()
+                dialog?.dismiss()
+            }
             scope.cancel()
             runCatching { fragment.viewLifecycleOwner.lifecycle.removeObserver(resumeObserver) }
             model.page.removeObserver(pageObserver)
