@@ -382,9 +382,11 @@ internal class TrailerChooser(
         var homeRecovery = false
         var recoveryAttempts = 0
         var recoveryStarted = 0L
+        var visitedPlayer = false
         var watchedView: View? = null
         var releaseWatcher: (() -> Unit)? = null
         lateinit var callback: FragmentManager.FragmentLifecycleCallbacks
+        lateinit var destinationListener: androidx.navigation.NavController.OnDestinationChangedListener
         lateinit var timeout: Runnable
         lateinit var returnTimeout: Runnable
         lateinit var release: () -> Unit
@@ -405,6 +407,7 @@ internal class TrailerChooser(
                 releaseWatcher?.invoke()
                 releaseWatcher = null
                 manager.unregisterFragmentLifecycleCallbacks(callback)
+                controller.removeOnDestinationChangedListener(destinationListener)
                 handler.removeCallbacks(timeout)
                 handler.removeCallbacks(returnTimeout)
                 owner?.lifecycle?.removeObserver(ownerObserver)
@@ -506,8 +509,23 @@ internal class TrailerChooser(
                 handler.postDelayed(returnTimeout, 1000L)
             }
         }
+        destinationListener = androidx.navigation.NavController.OnDestinationChangedListener { _, destination, _ ->
+            if (active) {
+                if (destination.id == R.id.navigation_player) {
+                    visitedPlayer = true
+                } else if (visitedPlayer && !rollingBack) {
+                    // Explicit Back/Home before the 6s watchdog: wait only for its first stable frame.
+                    rollingBack = true
+                    recoveryStarted = android.os.SystemClock.uptimeMillis()
+                    handler.removeCallbacks(timeout)
+                    currentView()?.let(::watch)
+                    handler.postDelayed(returnTimeout, 1000L)
+                }
+            }
+        }
         finishPlayerHandoff = release
         manager.registerFragmentLifecycleCallbacks(callback, false)
+        controller.addOnDestinationChangedListener(destinationListener)
         owner?.lifecycle?.addObserver(ownerObserver)
         handler.postDelayed(timeout, 6000L)
     }
