@@ -172,7 +172,8 @@ open class StremioC(
     private val addonId: Long? = null,
     private val searchCatalogId: String? = null,
     private val searchCatalogType: String? = null,
-    private val showHome: Boolean = true
+    private val showHome: Boolean = true,
+    private val disableSearch: Boolean = false
 ) : MainAPI() {
     override val supportedTypes get() = if (mainUrl.isNotBlank() && isAddonEnabled()) {
         setOf(TvType.Movie, TvType.TvSeries, TvType.Others)
@@ -1395,7 +1396,9 @@ open class StremioC(
         if (!isAddonEnabled()) emptyList<SearchResponse>() to 0
         else fetchCatalogItems(catalog.browsePath(genre, offset), requireNotNull(catalog.type))
 
-    override suspend fun search(query: String): List<SearchResponse> {
+    override suspend fun search(query: String): List<SearchResponse>? {
+        // Keep the original addon available for Home/metadata without duplicating search results.
+        if (disableSearch) return null
         if (!isAddonEnabled()) return emptyList()
         mainUrl = mainUrl.fixSourceUrl()
         val manifest = getManifest()

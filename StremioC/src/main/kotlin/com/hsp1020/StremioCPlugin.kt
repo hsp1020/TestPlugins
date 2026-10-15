@@ -326,32 +326,30 @@ class StremioCPlugin : Plugin() {
                             .filter { it.supportsSearch() && !it.id.isNullOrBlank() && !it.type.isNullOrBlank() }
                             .distinctBy { it.id to it.type }
 
-                        if (searchCatalogs.isEmpty()) {
-                            // Retain the original home provider if the manifest has no usable search catalogs.
-                            val provider = StremioC(item.link, item.name, item.id)
-                            manifest?.let { provider.primeManifest(it) }
+                        // The original addon owns Home and metadata only; it never contributes search results.
+                        val homeProvider = StremioC(item.link, item.name, item.id, disableSearch = true)
+                        manifest?.let { homeProvider.primeManifest(it) }
+                        registerMainAPI(homeProvider)
+                        registeredProviders.add(homeProvider)
+
+                        searchCatalogs.forEach { catalog ->
+                            val catalogName = catalog.name?.trim().orEmpty()
+                                .ifBlank { catalog.id.orEmpty() }
+                            val typeName = catalog.type.orEmpty().replaceFirstChar { it.uppercase() }
+                            val label = "${catalogName} - ${typeName}"
+                            val occupied = APIHolder.allProviders.mapTo(HashSet()) { it.name }
+                            var uniqueLabel = label
+                            var suffix = 2
+                            while (uniqueLabel in occupied) {
+                                uniqueLabel = "${label} (${suffix++})"
+                            }
+                            val provider = StremioC(
+                                item.link, uniqueLabel, item.id, catalog.id, catalog.type,
+                                showHome = false
+                            )
+                            provider.primeManifest(requireNotNull(manifest))
                             registerMainAPI(provider)
                             registeredProviders.add(provider)
-                        } else {
-                            searchCatalogs.forEachIndexed { index, catalog ->
-                                val catalogName = catalog.name?.trim().orEmpty()
-                                    .ifBlank { catalog.id.orEmpty() }
-                                val typeName = catalog.type.orEmpty().replaceFirstChar { it.uppercase() }
-                                val label = "$"+"{catalogName} - $"+"{typeName}"
-                                val occupied = APIHolder.allProviders.mapTo(HashSet()) { it.name }
-                                var uniqueLabel = label
-                                var suffix = 2
-                                while (uniqueLabel in occupied) {
-                                    uniqueLabel = "${label} (${suffix++})"
-                                }
-                                val provider = StremioC(
-                                    item.link, uniqueLabel, item.id, catalog.id, catalog.type,
-                                    showHome = index == 0
-                                )
-                                provider.primeManifest(manifest!!)
-                                registerMainAPI(provider)
-                                registeredProviders.add(provider)
-                            }
                         }
                     } catch (e: Throwable) {
                         Log.e("StremioCPlugin", "register failed ${e.message}")
