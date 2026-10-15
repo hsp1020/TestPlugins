@@ -47,8 +47,8 @@ import kotlinx.coroutines.sync.withPermit
 class StremioCPlugin : Plugin() {
     private val PREF_FILE = "StremioC"
     private val PREF_KEY_LINKS = "stremio_saved_links"
-    private val pluginIoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val reloadScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var pluginIoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var reloadScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val reloadMutex = Mutex()
     private var reloadGeneration = 0
     private var isUnloaded = false
@@ -130,6 +130,10 @@ class StremioCPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
+        if (isUnloaded) {
+            pluginIoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            reloadScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+        }
         isUnloaded = false
         val appContext = context.applicationContext
 
