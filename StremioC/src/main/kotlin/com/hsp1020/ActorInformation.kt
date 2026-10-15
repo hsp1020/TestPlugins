@@ -50,7 +50,6 @@ import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.roundToInt
 
 /** All actor-detail models, lookup, view and navigation live in this one file. */
 internal data class ActorPersonRef(
@@ -569,15 +568,18 @@ internal object ActorInformation {
                                             else loadImage(R.drawable.default_cover)
                                         }, ViewGroup.LayoutParams(-1, -1))
                                     }
-                                    // Match CloudStream HomeChildItemAdapter's 114:180 poster aspect.
-                                    card.addView(posterHolder, LinearLayout.LayoutParams(
-                                        dp(112), (dp(112) * 180f / 114f).roundToInt()))
+                                    // Use the same 114 x 180dp portrait size as the native Home card.
+                                    val posterWidth = dp(114)
+                                    card.addView(posterHolder, LinearLayout.LayoutParams(posterWidth, dp(180)))
                                     card.addView(label(credit.title, 13f).apply {
                                         maxLines = 2
-                                    }, LinearLayout.LayoutParams(dp(112), -2))
+                                        setPadding(0, dp(6), 0, 0)
+                                    }, LinearLayout.LayoutParams(posterWidth, -2))
                                     card.addView(label((credit.date?.take(4) ?: "") +
-                                        (if (credit.media == "movie") " · Movie" else " · Series"), 11f))
-                                    row.addView(card, LinearLayout.LayoutParams(dp(122), -2))
+                                        (if (credit.media == "movie") " · Movie" else " · Series"), 11f).apply {
+                                        setPadding(0, dp(6), 0, 0)
+                                    }, LinearLayout.LayoutParams(posterWidth, -2))
+                                    row.addView(card, LinearLayout.LayoutParams(dp(124), -2))
                                 }
                                 strip.addView(row)
                                 strip.post { if (dialog === windowDialog) strip.scrollTo(creditScroll[title] ?: 0, 0) }
