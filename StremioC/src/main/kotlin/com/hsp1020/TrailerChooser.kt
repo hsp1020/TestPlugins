@@ -418,15 +418,16 @@ internal class TrailerChooser(
         fun watch(view: View) {
             if (!active || watchedView === view) return
             releaseWatcher?.invoke()
-            watchedView = view
             val observer = view.viewTreeObserver
             if (!observer.isAlive) return
+            watchedView = view
             var stable = 0
             lateinit var listener: ViewTreeObserver.OnPreDrawListener
             lateinit var unwatch: () -> Unit
             unwatch = {
                 if (observer.isAlive) observer.removeOnPreDrawListener(listener)
                 if (releaseWatcher === unwatch) releaseWatcher = null
+                if (watchedView === view) watchedView = null
             }
             listener = ViewTreeObserver.OnPreDrawListener {
                 if (!active || currentView() !== view) {
