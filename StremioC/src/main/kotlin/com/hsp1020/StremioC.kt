@@ -166,7 +166,14 @@ private fun parseTrailerYoutubeId(raw: String?): String? {
     }.getOrNull()
 }
 
-open class StremioC(override var mainUrl: String, override var name: String, private val addonId: Long? = null) : MainAPI() {
+open class StremioC(
+    override var mainUrl: String,
+    override var name: String,
+    private val addonId: Long? = null,
+    private val searchCatalogId: String? = null,
+    private val searchCatalogType: String? = null,
+    private val showHome: Boolean = true
+) : MainAPI() {
     override val supportedTypes get() = if (mainUrl.isNotBlank() && isAddonEnabled()) {
         setOf(TvType.Movie, TvType.TvSeries, TvType.Others)
     } else {
@@ -174,9 +181,15 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
     }
     
     // 주소가 있는 실제 애드온만 홈 화면 탭 목록에 표시되도록 설정
-    override val hasMainPage get() = mainUrl.isNotBlank() && isAddonEnabled()
+    override val hasMainPage get() = showHome && mainUrl.isNotBlank() && isAddonEnabled()
 
     private fun isAddonEnabled() = isCatalogAddonEnabled(mainUrl, addonId)
+
+    internal fun primeManifest(manifest: Manifest) {
+        cachedManifest = manifest
+        lastManifestUrl = stremioManifestUrl(mainUrl)
+        lastCacheTime = System.currentTimeMillis()
+    }
      
     private var cachedManifest: Manifest? = null
     private var lastManifestUrl: String = ""
@@ -1092,7 +1105,7 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
 
     override val mainPage: List<MainPageData>
         get() {
-            if (!isAddonEnabled()) return emptyList()
+            if (!showHome || !isAddonEnabled()) return emptyList()
             val context = CloudStreamApp.context ?: return emptyList()
             val manifestPrefs = context.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
             val currentUrl = stremioManifestUrl(mainUrl)
@@ -1396,6 +1409,8 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
 
         val supportedCatalogs = manifest?.catalogs?.filter { catalog ->
             if (!catalog.supportsSearch()) return@filter false
+            if (searchCatalogId != null &&
+                (catalog.id != searchCatalogId || catalog.type != searchCatalogType)) return@filter false
             if (prefs == null) return@filter true
 
             val catalogId = catalog.id ?: return@filter false
@@ -2880,7 +2895,7 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
                 }.awaitAll().flatten()
             }
             return allMetasWithType.distinctBy { it.first.id }.map { (meta, type) ->
-                meta.toSearchResponse(provider, catalogName = name ?: id ?: "", typeName = type)
+                meta.toSearchResponse(provider, typeName = type)
             }
         }
 
@@ -2969,8 +2984,7 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
     ) {
 
         fun toSearchResponse(
-            provider: StremioC, 
-            catalogName: String? = null, 
+            provider: StremioC,
             typeName: String? = null
         ): SearchResponse {
             val targetType = this.type ?: typeName ?: "movie"
@@ -2988,17 +3002,7 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
                 id ?: ""
             }
 
-            val finalName = if (!catalogName.isNullOrBlank() && !typeName.isNullOrBlank()) {
-                val capType = typeName.replaceFirstChar { it.uppercase() }
-                "[$catalogName-$capType] $baseName"
-            } else {
-                if (!name.isNullOrBlank()) {
-                    name
-                } else {
-                    val capitalizedType = targetType.replaceFirstChar { it.uppercase() }
-                    "[$capitalizedType] $id"
-                }
-            }
+            val finalName = baseName
 
             return provider.newMovieSearchResponse(finalName, metaUrl, TvType.Others) { 
                 posterUrl = poster 

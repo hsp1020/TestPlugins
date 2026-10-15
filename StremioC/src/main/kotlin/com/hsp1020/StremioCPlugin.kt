@@ -28,6 +28,8 @@ import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
@@ -40,6 +42,7 @@ class StremioCPlugin : Plugin() {
     private var ratingPlotHook: RatingPlotImageHook? = null
     private var activeSettingsDialog: SettingsBottomFragment? = null
     private var activeBrowser: CatalogBrowserDialog? = null
+    private val registeredProviders = mutableListOf<StremioC>()
 
     private fun dismissProviderPicker(host: AppCompatActivity) {
         // selectHomepage keeps its BottomSheetDialog local and passes only the Activity
@@ -277,6 +280,13 @@ class StremioCPlugin : Plugin() {
                         )
                     )
                 }
+                // Replace only providers registered by this instance, preserving the static StremioC router.
+                registeredProviders.forEach { provider ->
+                    APIHolder.allProviders.remove(provider)
+                    APIHolder.removePluginMapping(provider)
+                }
+                registeredProviders.clear()
+                val manifestPrefs = appContext.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
                 val pluginsOnline: Array<PluginData> = PluginManager.getPluginsOnline()
                 val unloadedPluginPaths = mutableSetOf<String>()
                 
@@ -299,27 +309,51 @@ class StremioCPlugin : Plugin() {
                     } 
                     
                     try {
-                        when (item.type) {
-                            "StremioC" -> {
-                                try {
-                                    val provider = StremioC(item.link, item.name, item.id)
-                                    registerMainAPI(provider)
-                                } catch (e: Throwable) {
-                                    e.printStackTrace()
-                                    try { registerMainAPI(StremioC("", item.name, item.id)) } catch (e2: Throwable) { e2.printStackTrace() }
+                        val rawManifest = withContext(Dispatchers.IO) {
+                            stremioReadManifest(manifestPrefs, item.link)
+                                ?: runCatching {
+                                    StremioC.customSession.get(stremioManifestUrl(item.link), timeout = 15L).text
+                                }.getOrNull()?.takeIf { it.isNotBlank() }?.also { raw ->
+                                    if (runCatching { JSONObject(raw).has("catalogs") }.getOrDefault(false)) {
+                                        manifestPrefs.edit().putString(stremioCatalogKey(item.link), raw).apply()
+                                    }
                                 }
-                            }
-                            else -> {
-                                try {
-                                    val provider = StremioC(item.link, item.name, item.id)
-                                    registerMainAPI(provider)
-                                } catch (e: Throwable) {
-                                    e.printStackTrace()
+                        }
+                        val manifest = rawManifest?.let {
+                            runCatching { parseJson<StremioC.Manifest>(it) }.getOrNull()
+                        }
+                        val searchCatalogs = manifest?.catalogs.orEmpty()
+                            .filter { it.supportsSearch() && !it.id.isNullOrBlank() && !it.type.isNullOrBlank() }
+                            .distinctBy { it.id to it.type }
+
+                        if (searchCatalogs.isEmpty()) {
+                            // Retain the original home provider if the manifest has no usable search catalogs.
+                            val provider = StremioC(item.link, item.name, item.id)
+                            manifest?.let { provider.primeManifest(it) }
+                            registerMainAPI(provider)
+                            registeredProviders.add(provider)
+                        } else {
+                            searchCatalogs.forEachIndexed { index, catalog ->
+                                val rawLabel = catalog.name?.trim().orEmpty()
+                                val label = rawLabel.substringAfter(" - ", rawLabel)
+                                    .ifBlank { catalog.id.orEmpty() }
+                                val occupied = APIHolder.allProviders.mapTo(HashSet()) { it.name }
+                                var uniqueLabel = label
+                                var suffix = 2
+                                while (uniqueLabel in occupied) {
+                                    uniqueLabel = "$" + "{label} ($" + "{suffix++})"
                                 }
+                                val provider = StremioC(
+                                    item.link, uniqueLabel, item.id, catalog.id, catalog.type,
+                                    showHome = index == 0
+                                )
+                                provider.primeManifest(manifest!!)
+                                registerMainAPI(provider)
+                                registeredProviders.add(provider)
                             }
                         }
                     } catch (e: Throwable) {
-                        Log.e("StremioCPlugin", "register failed ${e.message}")
+                        Log.e("StremioCPlugin", "register failed $" + "{e.message}")
                         e.printStackTrace()
                     }
                 }

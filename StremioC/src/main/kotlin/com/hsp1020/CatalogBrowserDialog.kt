@@ -302,7 +302,7 @@ internal class CatalogBrowserDialog(
         while (pageSkeletonSlots.childCount < count) {
             pageSkeletonSlots.addView(CardView(activity).apply {
                 // Use CloudStream's loading_poster resources, not the normal poster style.
-                radius = activity.resources.getDimension(R.dimen.loading_radius)
+                radius = activity.resources.getDimension(R.dimen.rounded_image_radius)
                 cardElevation = 0f
                 setCardBackgroundColor(
                     androidx.core.content.ContextCompat.getColor(activity, R.color.grayShimmer))
