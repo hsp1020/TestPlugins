@@ -143,6 +143,26 @@ internal fun stremioDestinationReady(activity: FragmentActivity, destination: Vi
         !destination.isLayoutRequested && destination.animation?.hasEnded() != false
 }
 
+/** Finds the actual current destination, not a stale Fragment left in the NavHost. */
+internal fun stremioCurrentDestinationView(
+    activity: FragmentActivity, navigation: NavController?
+): View? {
+    val navHost = activity.supportFragmentManager
+        .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment ?: return null
+    val primary = navHost.childFragmentManager.primaryNavigationFragment ?: return null
+    val id = navigation?.currentDestination?.id
+    val type = primary.javaClass.name
+    if (id == R.id.navigation_home &&
+        type != "com.lagradost.cloudstream3.ui.home.HomeFragment") return null
+    if (id == R.id.navigation_results_phone &&
+        type != "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone") return null
+    if (id == R.id.navigation_results_tv &&
+        type != "com.lagradost.cloudstream3.ui.result.ResultFragmentTv") return null
+    if (id == R.id.navigation_player &&
+        type != "com.lagradost.cloudstream3.ui.player.GeneratorPlayer") return null
+    return primary.view
+}
+
 /** Keeps the source dialog covering navigation until the actual destination is drawable. */
 internal class StremioDetailHandoff(
     private val activity: FragmentActivity,
@@ -169,20 +189,8 @@ internal class StremioDetailHandoff(
     private var pendingDetailDraw = false
     private var detailRevealEnd: (() -> Unit)? = null
 
-    private fun currentDestinationView(): View? {
-        val navHost = activity.supportFragmentManager
-            .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment ?: return null
-        val primary = navHost.childFragmentManager.primaryNavigationFragment ?: return null
-        val id = navigation?.currentDestination?.id
-        val type = primary.javaClass.name
-        if (id == R.id.navigation_home &&
-            type != "com.lagradost.cloudstream3.ui.home.HomeFragment") return null
-        if (id == R.id.navigation_results_phone &&
-            type != "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone") return null
-        if (id == R.id.navigation_results_tv &&
-            type != "com.lagradost.cloudstream3.ui.result.ResultFragmentTv") return null
-        return primary.view
-    }
+    private fun currentDestinationView(): View? =
+        stremioCurrentDestinationView(activity, navigation)
 
     private fun finishReturn(ticket: Int) {
         if (ticket != generation || !isActive || !returning ||
@@ -403,8 +411,8 @@ internal class StremioDetailHandoff(
             fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
         ) {
             if (returning) {
-                if (navigation?.currentBackStackEntry?.id == returnTargetId)
-                    watchReturnFrame(view)
+                if (navigation?.currentBackStackEntry?.id == returnTargetId &&
+                    currentDestinationView() === view) watchReturnFrame(view)
                 return
             }
             if (returnEntryId != null &&
