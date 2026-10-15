@@ -129,7 +129,21 @@ internal class StremioLoading(context: Context, rows: Int = 1) : FrameLayout(con
     }
 }
 
-/** Shared browser/actor transition: keep the old screen covered until detail is drawable. */
+/** Shared drawable-screen check for actor, catalog and trailer transitions. */
+internal fun stremioDestinationReady(activity: FragmentActivity, destination: View): Boolean {
+    val host = activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)?.view
+        ?: return false
+    val bounds = host.parent as? ViewGroup ?: return false
+    return host.visibility == View.VISIBLE &&
+        host.left <= bounds.paddingLeft && host.top <= bounds.paddingTop &&
+        host.right >= bounds.width - bounds.paddingRight &&
+        host.bottom >= bounds.height - bounds.paddingBottom &&
+        !host.isLayoutRequested && destination.isShown &&
+        destination.width > 0 && destination.height > 0 &&
+        !destination.isLayoutRequested && destination.animation?.hasEnded() != false
+}
+
+/** Keeps the source dialog covering navigation until the actual destination is drawable. */
 internal class StremioDetailHandoff(
     private val activity: FragmentActivity,
     private val dialog: AppCompatDialog,
@@ -144,60 +158,160 @@ internal class StremioDetailHandoff(
     private var generation = 0
     private var observing = false
     private var returning = false
+    private var recovering = false
+    private var recoveringHome = false
+    private var recoveryAttempts = 0
+    private var returnStarted = 0L
+    private var returnTargetId: String? = null
+    private var returnToOrigin = true
     private var returnEntryId: String? = null
     private var detailEntryId: String? = null
     private var pendingDetailDraw = false
     private var detailRevealEnd: (() -> Unit)? = null
 
-    // Covers navigation failures even when ResultFragment never exists.
-    private val navigationTimeout = Runnable {
-        if (isActive && pendingDetailDraw) {
-            val origin = returnEntryId
-            val current = navigation?.currentBackStackEntry?.id
-            val restored = if (current == origin) true
-                else if (detailEntryId != null && current == detailEntryId) {
-                    runCatching {
-                        navigation?.popBackStack() == true &&
-                            navigation?.currentBackStackEntry?.id == origin
-                    }.getOrDefault(false)
-                } else false
-            if (restored && origin != null) scheduleReturn(origin)
-            else {
+    private fun currentDestinationView(): View? {
+        val navHost = activity.supportFragmentManager
+            .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment ?: return null
+        val primary = navHost.childFragmentManager.primaryNavigationFragment ?: return null
+        val id = navigation?.currentDestination?.id
+        val type = primary.javaClass.name
+        if (id == R.id.navigation_home &&
+            type != "com.lagradost.cloudstream3.ui.home.HomeFragment") return null
+        if (id == R.id.navigation_results_phone &&
+            type != "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone") return null
+        if (id == R.id.navigation_results_tv &&
+            type != "com.lagradost.cloudstream3.ui.result.ResultFragmentTv") return null
+        return primary.view
+    }
+
+    private fun finishReturn(ticket: Int) {
+        if (ticket != generation || !isActive || !returning ||
+            navigation?.currentBackStackEntry?.id != returnTargetId) return
+        val view = currentDestinationView() ?: return
+        if (!stremioDestinationReady(activity, view)) return
+        val toOrigin = returnToOrigin
+        close()
+        if (toOrigin) onReturn() else onLeave()
+    }
+
+    private fun watchReturnFrame(view: View) {
+        if (!returning || !isActive || detailRevealEnd != null) return
+        val observer = view.viewTreeObserver
+        if (!observer.isAlive) return
+        val ticket = generation
+        var stable = 0
+        lateinit var listener: ViewTreeObserver.OnPreDrawListener
+        lateinit var release: () -> Unit
+        release = {
+            if (observer.isAlive) observer.removeOnPreDrawListener(listener)
+            if (detailRevealEnd === release) detailRevealEnd = null
+        }
+        listener = ViewTreeObserver.OnPreDrawListener {
+            if (ticket != generation || !returning || !isActive ||
+                navigation?.currentBackStackEntry?.id != returnTargetId) {
+                release()
+            } else {
+                stable = if (currentDestinationView() === view &&
+                    stremioDestinationReady(activity, view)) stable + 1 else 0
+                if (stable >= 2) {
+                    release()
+                    view.postOnAnimation { finishReturn(ticket) }
+                } else view.postInvalidateOnAnimation()
+            }
+            true
+        }
+        detailRevealEnd = release
+        observer.addOnPreDrawListener(listener)
+        view.postInvalidateOnAnimation()
+    }
+
+    private fun scheduleReturn(target: String, toOrigin: Boolean = true) {
+        if (!isActive || (returning && returnTargetId == target)) return
+        detailRevealEnd?.invoke()
+        returning = true
+        pendingDetailDraw = false
+        returnTargetId = target
+        returnToOrigin = toOrigin
+        returnStarted = SystemClock.uptimeMillis()
+        handler.removeCallbacks(navigationTimeout)
+        handler.removeCallbacks(returnTimeout)
+        currentDestinationView()?.let(::watchReturnFrame)
+        handler.postDelayed(returnTimeout, 1000L)
+    }
+
+    private fun recoverHome(): Boolean {
+        if (!isActive || activity.isFinishing || activity.isDestroyed) return false
+        val nav = navigation ?: return false
+        recoveringHome = true
+        val moved = runCatching {
+            nav.navigate(R.id.global_to_navigation_home)
+            nav.currentDestination?.id == R.id.navigation_home
+        }.getOrDefault(false)
+        val homeEntry = nav.currentBackStackEntry?.id
+        if (moved && homeEntry != null) {
+            scheduleReturn(homeEntry, false)
+            return true
+        }
+        recoveringHome = false
+        return false
+    }
+
+    private val navigationTimeout = object : Runnable {
+        override fun run() {
+            if (!isActive || !pendingDetailDraw) return
+            if (activity.isFinishing || activity.isDestroyed) {
                 close()
                 onLeave()
+                return
             }
+            if (!activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                handler.postDelayed(this, 1000L)
+                return
+            }
+            val nav = navigation
+            val origin = returnEntryId
+            if (origin != null && nav?.currentBackStackEntry?.id == origin) {
+                scheduleReturn(origin)
+                return
+            }
+            if (origin != null && detailEntryId == nav?.currentBackStackEntry?.id) {
+                recovering = true
+                val popped = runCatching { nav?.popBackStack() == true }.getOrDefault(false)
+                recovering = false
+                if (popped && nav?.currentBackStackEntry?.id == origin) {
+                    scheduleReturn(origin)
+                    return
+                }
+            }
+            recoveryAttempts++
+            // A failed pop must not expose an unready ResultFragment.
+            // First retry the return, then recover to a drawable Home destination.
+            if (recoveryAttempts >= 2 && recoverHome()) return
+            handler.postDelayed(this, 1000L)
         }
     }
-    private val returnTimeout = Runnable {
-        if (isActive && returning) {
-            val restored = navigation?.currentBackStackEntry?.id == returnEntryId
-            close()
-            if (restored && !activity.isFinishing && !activity.isDestroyed) onReturn()
-            else onLeave()
+    private val returnTimeout = object : Runnable {
+        override fun run() {
+            if (!isActive || !returning) return
+            if (activity.isFinishing || activity.isDestroyed) {
+                close()
+                onLeave()
+                return
+            }
+            if (navigation?.currentBackStackEntry?.id == returnTargetId &&
+                detailRevealEnd == null) currentDestinationView()?.let(::watchReturnFrame)
+            if (returnToOrigin && SystemClock.uptimeMillis() - returnStarted >= 6000L) {
+                if (recoverHome()) return
+            }
+            // No unconditional dismiss: retain the covering dialog while the
+            // destination has no drawable frame, including after popBackStack fails.
+            handler.postDelayed(this, 1000L)
         }
     }
     private val activityObserver = LifecycleEventObserver { _, event ->
         if (event == Lifecycle.Event.ON_DESTROY && isActive) {
             close()
             onLeave()
-        }
-    }
-
-    private fun scheduleReturn(origin: String) {
-        if (!isActive || returning) return
-        returning = true
-        pendingDetailDraw = false
-        handler.removeCallbacks(navigationTimeout)
-        handler.postDelayed(returnTimeout, 1500L)
-        val ticket = generation
-        val hostView = activity.supportFragmentManager
-            .findFragmentById(R.id.nav_host_fragment)?.view
-        hostView?.doOnPreDraw {
-            if (ticket == generation && isActive && returning &&
-                returnEntryId == origin && navigation?.currentBackStackEntry?.id == origin) {
-                close()
-                onReturn()
-            }
         }
     }
 
@@ -209,8 +323,11 @@ internal class StremioDetailHandoff(
         detailEntryId = null
         pendingDetailDraw = true
         returning = false
+        recovering = false
+        recoveringHome = false
+        recoveryAttempts = 0
         observing = true
-        navigation?.addOnDestinationChangedListener(destinationListener)
+        navigation.addOnDestinationChangedListener(destinationListener)
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(detailViewListener, true)
         activity.lifecycle.addObserver(activityObserver)
         handler.postDelayed(navigationTimeout, 6000L)
@@ -223,8 +340,11 @@ internal class StremioDetailHandoff(
         handler.removeCallbacks(returnTimeout)
         returnEntryId = null
         detailEntryId = null
+        returnTargetId = null
         pendingDetailDraw = false
         returning = false
+        recovering = false
+        recoveringHome = false
         detailRevealEnd?.invoke()
         detailRevealEnd = null
         if (observing) {
@@ -235,9 +355,6 @@ internal class StremioDetailHandoff(
         }
     }
 
-    // Match the stable-frame guard used for quick-search -> detail return.
-    // Hiding a fullscreen Dialog in the very first pre-draw exposes the Home
-    // destination while the ResultFragment is still entering.
     private fun revealDetailWhenReady(detail: View) {
         detailRevealEnd?.invoke()
         val ticket = generation
@@ -253,28 +370,18 @@ internal class StremioDetailHandoff(
                 if (detailRevealEnd === release) detailRevealEnd = null
             }
             listener = ViewTreeObserver.OnPreDrawListener {
-                if (ticket != generation || !isActive || !pendingDetailDraw || returnEntryId == null ||
-                    detailEntryId != navigation?.currentBackStackEntry?.id) {
+                if (ticket != generation || !isActive || !pendingDetailDraw ||
+                    returnEntryId == null || detailEntryId != navigation?.currentBackStackEntry?.id) {
                     release()
                 } else {
-                    val hostView = activity.supportFragmentManager
-                        .findFragmentById(R.id.nav_host_fragment)?.view
-                    val bounds = hostView?.parent as? ViewGroup
-                    val ready = hostView != null && bounds != null &&
-                        hostView.visibility == View.VISIBLE &&
-                        hostView.left <= bounds.paddingLeft &&
-                        hostView.top <= bounds.paddingTop &&
-                        hostView.right >= bounds.width - bounds.paddingRight &&
-                        hostView.bottom >= bounds.height - bounds.paddingBottom &&
-                        !hostView.isLayoutRequested && detail.width > 0 && detail.height > 0 &&
-                        !detail.isLayoutRequested && detail.animation?.hasEnded() != false
+                    val ready = stremioDestinationReady(activity, detail)
                     stable = if (ready) stable + 1 else 0
-                    if (stable >= 3 || (SystemClock.uptimeMillis() - started >= 800L &&
-                        detail.isShown && detail.width > 0 && detail.height > 0)) {
+                    if (stable >= 3 || (SystemClock.uptimeMillis() - started >= 800L && ready)) {
                         release()
                         detail.postOnAnimation {
-                            if (ticket == generation && isActive && pendingDetailDraw && returnEntryId != null &&
-                                detailEntryId == navigation?.currentBackStackEntry?.id) {
+                            if (ticket == generation && isActive && pendingDetailDraw &&
+                                returnEntryId != null && detailEntryId == navigation?.currentBackStackEntry?.id &&
+                                stremioDestinationReady(activity, detail)) {
                                 pendingDetailDraw = false
                                 handler.removeCallbacks(navigationTimeout)
                                 dialog.hide()
@@ -290,14 +397,20 @@ internal class StremioDetailHandoff(
             detail.postInvalidateOnAnimation()
         }
     }
+
     private val detailViewListener = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
             fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
         ) {
+            if (returning) {
+                if (navigation?.currentBackStackEntry?.id == returnTargetId)
+                    watchReturnFrame(view)
+                return
+            }
             if (returnEntryId != null &&
                 fragment.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment") {
                 close()
-                onLeave() // Search breaks the browser -> detail -> back chain.
+                onLeave()
                 return
             }
             if (!pendingDetailDraw || !isActive) return
@@ -315,13 +428,14 @@ internal class StremioDetailHandoff(
             val current = controller.currentBackStackEntry?.id
             when {
                 current == origin -> {
-                    // Only restore after visiting another destination; await origin's first frame.
                     if (detailEntryId != null) scheduleReturn(origin)
                 }
+                recoveringHome && controller.currentDestination?.id == R.id.navigation_home -> {
+                    if (current != null) scheduleReturn(current, false)
+                }
+                recovering -> Unit // Recovery is still unwinding navigation.
                 detailEntryId == null -> detailEntryId = current
                 current != detailEntryId -> {
-                    // Detail -> quick search / cast search / another page:
-                    // discard the browser, so navigation Home stays Home.
                     close()
                     onLeave()
                 }
