@@ -417,7 +417,7 @@ internal class TrailerChooser(
         }
 
         fun watch(view: View) {
-            if (!active || watchedView === view) return
+            if (!active || !view.isAttachedToWindow || watchedView === view) return
             releaseWatcher?.invoke()
             val observer = view.viewTreeObserver
             if (!observer.isAlive) return
@@ -479,7 +479,9 @@ internal class TrailerChooser(
             override fun onFragmentViewCreated(
                 fm: FragmentManager, f: Fragment, view: View, savedInstanceState: Bundle?
             ) {
-                if (active && currentView() === view) watch(view)
+                view.doOnPreDraw {
+                    if (active && currentView() === view) watch(view)
+                }
             }
         }
         returnTimeout = object : Runnable {

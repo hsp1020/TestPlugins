@@ -203,7 +203,8 @@ internal class StremioDetailHandoff(
     }
 
     private fun watchReturnFrame(view: View) {
-        if (!returning || !isActive || detailRevealEnd != null) return
+        if (!returning || !isActive || detailRevealEnd != null ||
+            !view.isAttachedToWindow) return
         val observer = view.viewTreeObserver
         if (!observer.isAlive) return
         val ticket = generation
@@ -414,8 +415,12 @@ internal class StremioDetailHandoff(
             fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
         ) {
             if (returning) {
-                if (navigation?.currentBackStackEntry?.id == returnTargetId &&
-                    currentDestinationView() === view) watchReturnFrame(view)
+                val ticket = generation
+                view.doOnPreDraw {
+                    if (ticket == generation && returning &&
+                        navigation?.currentBackStackEntry?.id == returnTargetId &&
+                        currentDestinationView() === view) watchReturnFrame(view)
+                }
                 return
             }
             if (returnEntryId != null &&
