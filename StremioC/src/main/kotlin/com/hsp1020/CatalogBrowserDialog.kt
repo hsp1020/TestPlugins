@@ -1,5 +1,10 @@
 package com.hsp1020
 
+import com.facebook.shimmer.ShimmerFrameLayout
+import com.facebook.shimmer.Shimmer
+import androidx.cardview.widget.CardView
+import android.view.LayoutInflater
+import android.content.Context
 import androidx.appcompat.app.AppCompatDialog
 import android.content.SharedPreferences
 import android.content.res.ColorStateList
@@ -75,6 +80,50 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** The host's loading_list placeholders and shimmer animation, without extra poster requests. */
+internal class StremioLoading(context: Context, rows: Int = 1) : FrameLayout(context) {
+    private val shimmer = ShimmerFrameLayout(context).apply {
+        setShimmer(Shimmer.AlphaHighlightBuilder()
+            .setBaseAlpha(0.2f).setHighlightAlpha(0.3f).setDuration(2000L).build())
+    }
+
+    init {
+        val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        repeat(rows) {
+            val placeholder = LayoutInflater.from(context).inflate(R.layout.loading_list, list, false)
+            val fill = context.colorFromAttribute(R.attr.textColor)
+            fun tint(view: View) {
+                if (view is CardView) view.setCardBackgroundColor(fill)
+                else if (view !is ViewGroup && view.background != null) view.setBackgroundColor(fill)
+                if (view is ViewGroup) for (i in 0 until view.childCount) tint(view.getChildAt(i))
+            }
+            tint(placeholder)
+            list.addView(placeholder)
+        }
+        shimmer.addView(list, LayoutParams(-1, -2))
+        addView(shimmer, LayoutParams(-1, -1))
+        isFocusable = false
+        isClickable = false
+        visibility = View.GONE
+    }
+
+    fun loading(active: Boolean) {
+        visibility = if (active) View.VISIBLE else View.GONE
+        if (active && isAttachedToWindow) shimmer.startShimmer()
+        else if (!active) shimmer.stopShimmer()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (visibility == View.VISIBLE) shimmer.startShimmer()
+    }
+
+    override fun onDetachedFromWindow() {
+        shimmer.stopShimmer()
+        super.onDetachedFromWindow()
+    }
+}
 
 /** One dialog, one in-flight page; only All pages are shared with Home. */
 internal class CatalogBrowserDialog(

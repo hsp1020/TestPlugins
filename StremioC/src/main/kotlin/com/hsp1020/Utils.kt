@@ -1,6 +1,8 @@
 // 파일명: hsp1020/Utils.kt
 package com.hsp1020
 
+import androidx.appcompat.content.res.AppCompatResources
+import android.util.TypedValue
 import android.content.SharedPreferences
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.R
@@ -61,6 +63,23 @@ import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import com.lagradost.cloudstream3.utils.UIHelper.navigate
 import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import kotlin.math.roundToInt
+internal fun themedPressedForeground(view: View): Drawable? {
+    val out = TypedValue()
+    return if (view.context.theme.resolveAttribute(
+            android.R.attr.selectableItemBackgroundBorderless, out, true
+        ) && out.resourceId != 0)
+        AppCompatResources.getDrawable(view.context, out.resourceId)?.mutate()
+    else null
+}
+
+/** Use the episode foreground ripple, not a second hardcoded Chip ripple. */
+internal fun applyEpisodeChipFeedback(chip: Chip) {
+    chip.rippleColor = android.content.res.ColorStateList.valueOf(android.graphics.Color.TRANSPARENT)
+    chip.foreground = themedPressedForeground(chip)
+    chip.stateListAnimator = null
+    chip.tag = chip.context.getString(R.string.tv_no_focus_tag)
+}
+
 internal const val STREMIOC_DETAIL_RIPPLE_COLOR = 0x55FFFFFF
 private val QUALITY_REGEX = Regex("(\\d{3,4}[pP])")
 private val TT_REGEX = Regex("^tt\\d+$")
