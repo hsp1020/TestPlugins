@@ -9,7 +9,6 @@ import android.app.Activity
 import android.app.Dialog
 import android.content.ActivityNotFoundException
 import android.graphics.Rect
-import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.RippleDrawable
 import android.net.Uri
 import android.text.Editable
@@ -37,7 +36,6 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.view.LayoutInflater
-import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -393,8 +391,9 @@ class SettingsBottomFragment(
     }
 
     private fun EditText.activateTvInput(key: Int, event: KeyEvent): Boolean {
-        if (key != KeyEvent.KEYCODE_DPAD_CENTER || imeVisible(this)) return false
-        if (event.action == KeyEvent.ACTION_UP && !performClick()) {
+        if (key != KeyEvent.KEYCODE_DPAD_CENTER && key != KeyEvent.KEYCODE_ENTER &&
+            key != KeyEvent.KEYCODE_NUMPAD_ENTER || imeVisible(this)) return false
+        if (event.action == KeyEvent.ACTION_UP && !event.isCanceled && !performClick()) {
             (hostContext.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
                 .showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
         }
@@ -457,10 +456,10 @@ class SettingsBottomFragment(
                 row.setOnClickListener { if (view.isEnabled) view.performClick() }
                 row.isFocusable = false
                 row.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                if (view.contentDescription.isNullOrBlank() && view.text.isNullOrBlank())
+                    view.contentDescription = (row.getChildAt(0) as TextView).text
                 for (i in 0 until row.childCount) if (row.getChildAt(i) !== view)
                     row.getChildAt(i).importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                row.setAddStatesFromChildren(isLayout(TV))
-                row.makeTvCompatible()
             }
         } else if (view.isFocusable && view.isClickable) view.makeTvCompatible()
         if (view is ViewGroup) for (i in 0 until view.childCount) prepareControls(view.getChildAt(i))
@@ -544,8 +543,10 @@ class SettingsBottomFragment(
         fun frame(from: Bounds, to: Bounds, fraction: Float) {
             val f = fraction.coerceIn(0f, 1f)
             fun lerp(a: Int, b: Int) = Math.round(a + (b - a) * f)
-            place(Bounds(to.width, lerp(from.height, to.height), lerp(from.top, to.top),
-                lerp(from.bodyHeight, to.bodyHeight)))
+            val chromeHeight = (to.height - to.bodyHeight).coerceAtLeast(0)
+            val windowHeight = maxOf(chromeHeight, lerp(from.height, to.height))
+            place(Bounds(to.width, windowHeight, lerp(from.top, to.top),
+                (windowHeight - chromeHeight).coerceAtLeast(0)))
         }
         fun finishMotion() {
             if (keyboardShown) return
@@ -995,40 +996,28 @@ class SettingsBottomFragment(
         return this.findViewById(id)
     }
 
-    @SuppressLint("UseCompatLoadingForDrawables", "ClickableViewAccessibility")
     private fun View.makeTvCompatible() {
-        val outlineId = getCachedResId("outline", "drawable")
-        if (background === getTag(outlineId)) return
-        val base = background ?: ColorDrawable(Color.TRANSPARENT)
-        val outline = getDrawable("outline").apply { setTint(hostContext.colorFromAttribute(HostR.attr.textColor)) }
-        val layers = mutableListOf<Drawable>()
-        if (base is RippleDrawable) {
-            // Reuse its static content, not its old borderless effect or ripple mask.
-            for (i in 0 until base.numberOfLayers) if (base.getId(i) != android.R.id.mask)
-                base.getDrawable(i)?.let { layers.add(it) }
-        } else layers.add(base)
-        layers.add(outline)
-        // Detach first: replacing the old background must not clear its new LayerDrawable callback.
-        background = null
-        val content = LayerDrawable(layers.toTypedArray())
-        background = if (this is EditText) content else {
-            val attrs = hostContext.obtainStyledAttributes(intArrayOf(android.R.attr.colorControlHighlight))
-            val color = attrs.getColorStateList(0) ?: ColorStateList.valueOf(
-                hostContext.colorFromAttribute(androidx.appcompat.R.attr.colorControlHighlight))
-            attrs.recycle()
-            RippleDrawable(color, content, ColorDrawable(Color.WHITE))
-        }
-        if (this !is EditText) setOnTouchListener { control, event ->
-            // Show DOWN immediately even inside scrolling parents. Native handling still owns
-            // clicks, Switch dragging, UP/CANCEL and accessibility; never consume this gesture.
-            if (control.isEnabled && control.isClickable) {
-                if (event.actionMasked == MotionEvent.ACTION_DOWN) control.isPressed = true
-                if (event.actionMasked == MotionEvent.ACTION_DOWN || event.actionMasked == MotionEvent.ACTION_MOVE)
-                    control.drawableHotspotChanged(event.x, event.y)
+        // Keep native control backgrounds. The host selects ripple or outline by layout.
+        val key = getCachedResId("outline", "drawable")
+        if (getTag(key) == true) return
+        val tv = isLayout(TV)
+        if (this is com.google.android.material.button.MaterialButton ||
+            (!tv && (this is EditText || this is CompoundButton))) return
+        val attributes = hostContext.obtainStyledAttributes(intArrayOf(
+            if (tv) HostR.attr.focusBackground else android.R.attr.selectableItemBackground
+        ))
+        val effect = attributes.getDrawable(0)
+        attributes.recycle()
+        if (effect != null) {
+            when {
+                tv && this !is EditText && this !is CompoundButton && background is RippleDrawable ->
+                    background = effect
+                background == null && this !is EditText && this !is CompoundButton ->
+                    background = effect
+                android.os.Build.VERSION.SDK_INT >= 23 -> foreground = effect
             }
-            false
         }
-        setTag(outlineId, background)
+        setTag(key, true)
     }
 
     // Plugin XML cannot reference the host app's custom attrs at AAPT2 link time.
@@ -1060,23 +1049,17 @@ class SettingsBottomFragment(
                StremioC.loadProviderDynamically("phisher", "com.phisher98.StreamPlay") != null
     }
 
-    private fun dialogButton(ctx: Context, label: String, params: LinearLayout.LayoutParams) = TextView(ctx).apply {
-        text = label
-        textSize = 14f
-        typeface = android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.BOLD)
-        setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-        gravity = android.view.Gravity.CENTER
-        setPadding(dp(10), dp(10), dp(10), dp(10))
-        minHeight = dp(48)
-        isClickable = true
-        isFocusable = true
-        val ripple = android.util.TypedValue()
-        ctx.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)
-        setBackgroundResource(ripple.resourceId)
-        layoutParams = params
-        normalizeTypeface(this)
-        makeTvCompatible()
-    }
+    private fun dialogButton(ctx: Context, label: String, params: LinearLayout.LayoutParams) =
+        com.google.android.material.button.MaterialButton(
+            android.view.ContextThemeWrapper(ctx, if (label in setOf("OK", "Apply", "Save", "Add", "Restore", "Yes"))
+                HostR.style.WhiteButton else HostR.style.BlackButton), null, 0
+        ).apply {
+            text = label
+            isAllCaps = false
+            minHeight = dp(48)
+            layoutParams = params
+            normalizeTypeface(this)
+        }
 
     private fun showSavedPopup(ctx: Context, title: String, message: String, onConfirm: () -> Unit = {}) {
         val container = LinearLayout(ctx).apply {
@@ -1148,65 +1131,34 @@ class SettingsBottomFragment(
             showToast("Settings resources are unavailable. Reload the plugin and try again.")
             finish(); return
         }
-        val newSchema = listOf("settingsRoot", "pageHub", "pageSources", "pageMetadata",
-            "pageDisplay", "pageBackup", "settingsFooter", "settingsViewport").any { view.optional(it) != null }
-        if ((!newSchema && view !is NestedScrollView) || !hasViews(view, mapOf(
-            LinearLayout::class.java to listOf("settingsHeader", "settingsBody", "containerStreamSubtitleUrls",
-                "layoutHistorySyncUrl", "layoutMdbList", "layoutCustomPosterUrl"),
-            androidx.appcompat.widget.AppCompatTextView::class.java to listOf("settingsToggle"),
-            TextView::class.java to listOf("tvExport", "tvImport"),
-            ImageView::class.java to listOf("saveIcon", "addlinks", "showlinks", "btnSelectLanguage", "toggleStreamSubtitleUrls"),
-            EditText::class.java to listOf("etTmdbApiKey", "etMdbListApiKey", "etCustomPosterUrl", "etHistorySyncUrl"),
-            Switch::class.java to listOf("switchMdbList", "switchCustomPoster", "switchCineStream", "switchStreamPlay", "switchVixSrc")
-        )) || (newSchema && !hasViews(view, mapOf(
-            LinearLayout::class.java to listOf("settingsRoot", "pageHub", "pageSources", "pageMetadata", "pageDisplay", "pageBackup",
-                "settingsFooter", "saveAction", "rowCatalogs", "rowLanguage", "rowSources", "rowMetadata", "rowDisplay", "rowBackup", "rowStreamSubtitleAddons"),
+        if (view !is LinearLayout || !hasViews(view, mapOf(
+            LinearLayout::class.java to listOf("settingsRoot", "settingsHeader", "settingsBody",
+                "containerStreamSubtitleUrls", "layoutHistorySyncUrl", "layoutMdbList",
+                "layoutCustomPosterUrl", "pageHub", "pageSources", "pageMetadata",
+                "pageDisplay", "pageBackup", "settingsFooter", "saveAction", "rowCatalogs",
+                "rowLanguage", "rowSources", "rowMetadata", "rowDisplay", "rowBackup",
+                "rowStreamSubtitleAddons"),
             NestedScrollView::class.java to listOf("settingsViewport"),
-            TextView::class.java to listOf("settingsBack", "btnAddStreamSubtitleUrl"),
-            ImageButton::class.java to listOf("btnConfigureHistoryAddon", "btnDeleteHistoryAddon")
-        )))) {
+            TextView::class.java to listOf("settingsToggle", "tvExport", "tvImport", "settingsBack",
+                "btnAddStreamSubtitleUrl"),
+            ImageView::class.java to listOf("saveIcon", "addlinks", "showlinks",
+                "btnSelectLanguage", "toggleStreamSubtitleUrls"),
+            ImageButton::class.java to listOf("btnConfigureHistoryAddon", "btnDeleteHistoryAddon"),
+            EditText::class.java to listOf("etTmdbApiKey", "etMdbListApiKey",
+                "etCustomPosterUrl", "etHistorySyncUrl"),
+            Switch::class.java to listOf("switchMdbList", "switchCustomPoster",
+                "switchCineStream", "switchStreamPlay", "switchVixSrc")
+        ))) {
             showToast("Settings resources are unavailable. Reload the plugin and try again.")
             finish(); return
         }
         view.background = getDarkThemeBg()
         val settingsBody = view.findView<View>("settingsBody")
         val settingsToggle = view.findView<TextView>("settingsToggle")
-        val settingsActions = listOf("tvExport", "tvImport", "saveIcon").map { view.findView<View>(it) }
-        val header = view.findView<LinearLayout>("settingsHeader")
-        val hub = view.optional("pageHub")
-        val viewport = view.optional("settingsViewport") as? NestedScrollView
-        if (hub == null) {
-            // The host can retain an older plugin layout: rebuild this row from the existing controls.
-            (settingsToggle.parent as? ViewGroup)?.removeView(settingsToggle)
-            settingsActions.forEach { (it.parent as? ViewGroup)?.removeView(it) }
-            header.removeAllViews()
-            header.orientation = LinearLayout.HORIZONTAL
-            header.gravity = android.view.Gravity.CENTER_VERTICAL
-            settingsToggle.apply {
-                setPadding(0, 0, 0, 0)
-                setSingleLine(true)
-            }
-            header.addView(settingsToggle, LinearLayout.LayoutParams(0, dp(48), 1f))
-            settingsActions.forEachIndexed { index, action ->
-                if (index > 0) header.addView(View(ctx), LinearLayout.LayoutParams(dp(16), dp(48)))
-                if (action is TextView) action.setPadding(0, 0, 0, 0)
-                header.addView(action, LinearLayout.LayoutParams(
-                    if (index == 2) dp(36) else ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)
-                ))
-            }
-            settingsBody.visibility = View.VISIBLE
-            settingsActions.forEach { it.visibility = View.VISIBLE }
-
-            showToast("The new settings layout is unavailable. Reload the plugin.")
-        }
+        val hub = view.findView<LinearLayout>("pageHub")
+        val viewport = view.findView<NestedScrollView>("settingsViewport")
         settingsBody.visibility = View.VISIBLE
         settingsToggle.text = "Stremio Settings"
-        // Plugin drawable IDs cannot be resolved safely by the host XML inflater.
-        // Apply theme backgrounds after inflation using the plugin-independent drawable.
-        listOf("etTmdbApiKey", "etMdbListApiKey", "etCustomPosterUrl", "etHistorySyncUrl").forEach { id ->
-            view.findView<EditText>(id).background = getCardBg()
-        }
-
         val addlinks: ImageView = try { view.findView("addlinks") } catch (e: Throwable) { throw Exception("addlinks ImageView not found", e) }
         val showlinks: ImageView = try { view.findView("showlinks") } catch (e: Throwable) { throw Exception("showlinks ImageView not found", e) }
         val saveIcon: ImageView = try { view.findView("saveIcon") } catch (e: Throwable) { throw Exception("saveIcon ImageView not found", e) }
@@ -1375,8 +1327,8 @@ class SettingsBottomFragment(
                     
                     if (!isActive) return@launch
 
-                    val cancelBtn = dialogButton(ctx, "Cancel", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) })
-                    val restoreBtn = dialogButton(ctx, "Restore", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) })
+                    val cancelBtn = dialogButton(ctx, "Cancel", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, dp(8), 0) })
+                    val restoreBtn = dialogButton(ctx, "Restore", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(dp(8), 0, 0, 0) })
 
                     val container = LinearLayout(ctx).apply {
                         orientation = LinearLayout.VERTICAL
@@ -1741,8 +1693,8 @@ class SettingsBottomFragment(
             val streamPlayPrefs = context.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
             recordBackupSnapshot(streamPlayPrefs, "streamplay_restore_complete", "streamplay_last_applied_backup_hash", "native_backup_streamplay")
 
-            val cancelBtn = dialogButton(context, "No", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) })
-            val restartBtn = dialogButton(context, "Yes", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) })
+            val cancelBtn = dialogButton(context, "No", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, dp(8), 0) })
+            val restartBtn = dialogButton(context, "Yes", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(dp(8), 0, 0, 0) })
 
             val container = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
@@ -1791,12 +1743,7 @@ class SettingsBottomFragment(
                 WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING else WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
         showPage(SettingsPage.HUB)
-        if (view is LinearLayout) fitDialog(settingsDialog, view, viewport, 800)
-        else {
-            val metrics = ctx.resources.displayMetrics
-            settingsDialog.window?.setLayout(minOf(dp(800), (metrics.widthPixels * 0.9f).toInt()),
-                (metrics.heightPixels * 0.88f).toInt())
-        }
+        fitDialog(settingsDialog, view, viewport, 800)
         settingsDialog.show()
         if (isLayout(TV)) (view.optional("rowCatalogs") ?: showlinks).requestFocus()
     }
@@ -1897,7 +1844,7 @@ class SettingsBottomFragment(
                         values[index] = values[index].copy(enabled = enabled)
                         if (sourceDraft != null) { sourceDraft.clear(); sourceDraft.addAll(values) }
                         else SettingsRepository.saveLinks(sharedPref, values)
-                        adapter.updateItem(values[index], index, notify = false)
+                        adapter.updateItem(values[index], notify = false)
                         onDraftChanged()
                     }
                 }
@@ -2012,7 +1959,7 @@ class SettingsBottomFragment(
             if (isEdit) values[index] = changed else values.add(0, changed)
             if (sourceDraft == null) SettingsRepository.saveLinks(sharedPref, values)
             if (onLinksChanged != null) onLinksChanged(changed.id)
-            else (rv?.adapter as? LinksAdapter)?.updateItem(changed, position)
+            else (rv?.adapter as? LinksAdapter)?.updateItem(changed)
             showToast(if (isEdit) "Addon updated" else "Addon added")
             dlg.dismiss()
         }
@@ -2105,6 +2052,11 @@ private fun showLanguageSelectDialog() {
                 }
                 rowLayout.addView(tvName)
                 rowLayout.addView(tvCheck)
+                rowLayout.background = android.graphics.drawable.StateListDrawable().apply {
+                    addState(intArrayOf(android.R.attr.state_selected), getCardBg())
+                    addState(intArrayOf(), ColorDrawable(Color.TRANSPARENT))
+                }
+                rowLayout.makeTvCompatible()
                 normalizeTypeface(rowLayout)
                 return VH(rowLayout, tvName, tvCheck)
             }
@@ -2114,19 +2066,37 @@ private fun showLanguageSelectDialog() {
                 val isSelected = code == selectedCode
                 holder.tvName.text = langName
                 
-                holder.tvName.setTextColor(hostContext.colorFromAttribute(if (isSelected) HostR.attr.colorPrimary else HostR.attr.textColor))
-                holder.view.background = if (isSelected) getCardBg() else ColorDrawable(Color.TRANSPARENT) 
-                holder.view.makeTvCompatible()
-                holder.view.isSelected = isSelected
+                updateSelection(holder, isSelected)
                 holder.view.contentDescription = langName
                 holder.tvName.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 holder.tvCheck.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                holder.tvCheck.visibility = if (isSelected) View.VISIBLE else View.GONE
-                
                 holder.view.setOnClickListener {
                     onClick(code, langName)
                 }
             }
+            private fun updateSelection(holder: VH, selected: Boolean) {
+                holder.tvName.setTextColor(hostContext.colorFromAttribute(
+                    if (selected) HostR.attr.colorPrimary else HostR.attr.textColor
+                ))
+                holder.view.isSelected = selected
+                holder.tvCheck.visibility = if (selected) View.VISIBLE else View.GONE
+            }
+
+            override fun onBindViewHolder(holder: VH, position: Int, payloads: MutableList<Any>) {
+                if (payloads.isEmpty()) super.onBindViewHolder(holder, position, payloads)
+                else updateSelection(holder, filteredList[position].second == selectedCode)
+            }
+
+            fun select(code: String) {
+                if (selectedCode == code) return
+                val previous = filteredList.indexOfFirst { it.second == selectedCode }
+                val next = filteredList.indexOfFirst { it.second == code }
+                selectedCode = code
+                if (previous >= 0) notifyItemChanged(previous, "selection")
+                if (next >= 0 && next != previous) notifyItemChanged(next, "selection")
+            }
+            fun indexOf(code: String) = filteredList.indexOfFirst { it.second == code }
+
             override fun getItemCount() = filteredList.size
 
             @SuppressLint("NotifyDataSetChanged")
@@ -2145,9 +2115,8 @@ private fun showLanguageSelectDialog() {
         adapter = LangAdapter(LANGUAGES, selectedCode) { code, langName ->
             selectedCode = code
             selectedLangName = langName
-            adapter.selectedCode = code
-            adapter.notifyDataSetChanged() // 화면 갱신
-            val selectedIndex = LANGUAGES.indexOfFirst { it.first == langName && it.second == code }
+            adapter.select(code)
+            val selectedIndex = adapter.indexOf(code)
             if (isLayout(TV)) {
                 rv.doOnNextLayout {
                     if (!closing && rv.isShown && searchBar.text.isEmpty()) restoreRow(rv, selectedIndex)
@@ -2175,10 +2144,10 @@ private fun showLanguageSelectDialog() {
 
         val footer = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 30, 0, 0)
+            setPadding(0, dp(12), 0, 0)
         }
-        val applyBtn = dialogButton(context, "Apply", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) })
-        val cancelBtn = dialogButton(context, "Cancel", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) })
+        val applyBtn = dialogButton(context, "Apply", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(dp(8), 0, 0, 0) })
+        val cancelBtn = dialogButton(context, "Cancel", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, dp(8), 0) })
         footer.addView(cancelBtn)
         footer.addView(applyBtn)
         container.addView(footer)
@@ -2564,10 +2533,10 @@ private fun showLanguageSelectDialog() {
 
         val footer = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 30, 0, 0)
+            setPadding(0, dp(12), 0, 0)
         }
-        val cancelBtn = dialogButton(context, "Cancel", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) })
-        val saveBtn = dialogButton(context, "Save", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) })
+        val cancelBtn = dialogButton(context, "Cancel", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, dp(8), 0) })
+        val saveBtn = dialogButton(context, "Save", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(dp(8), 0, 0, 0) })
         footer.addView(cancelBtn)
         footer.addView(saveBtn)
         dialogContainer.addView(footer)
@@ -2775,7 +2744,7 @@ private fun showLanguageSelectDialog() {
             items.clear(); items.addAll(links)
             notifyDataSetChanged()
         }
-        fun updateItem(newItem: LinkItem, position: Int, notify: Boolean = true) {
+        fun updateItem(newItem: LinkItem, notify: Boolean = true) {
             val index = positionOf(newItem.id)
             if (index >= 0) {
                 items[index] = newItem

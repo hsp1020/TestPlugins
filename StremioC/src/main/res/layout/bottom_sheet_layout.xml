@@ -69,14 +69,7 @@
                             android:text="Catalogs"
                             android:textSize="16sp"
                             android:textStyle="bold" />
-                        <TextView
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:text="Add, edit and configure catalogs."
-                            android:textSize="12sp"
-                            android:tag="stremioc_secondary"
-                            android:singleLine="true"
-                            android:ellipsize="end" />
+                        
                     </LinearLayout>
                     <TextView
                         android:layout_width="24dp"
@@ -311,14 +304,7 @@
                             android:text="Streams / Subtitles Addon"
                             android:textSize="16sp"
                             android:textStyle="bold" />
-                        <TextView
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:text="Additional streams and subtitles."
-                            android:textSize="12sp"
-                            android:tag="stremioc_secondary"
-                            android:singleLine="true"
-                            android:ellipsize="end" />
+                        
                     </LinearLayout>
                     <TextView
                         android:layout_width="24dp"
@@ -630,12 +616,7 @@
                             android:paddingBottom="0dp"
                             android:background="@android:color/transparent" />
                     </FrameLayout>
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="Used when MDBList Ratings is on."
-                        android:textSize="12sp"
-                        android:tag="stremioc_secondary" />
+                    
                 </LinearLayout>
                 <LinearLayout
                     android:layout_width="match_parent"
