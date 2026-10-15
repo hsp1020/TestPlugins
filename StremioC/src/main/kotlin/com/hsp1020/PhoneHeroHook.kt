@@ -23,6 +23,7 @@ import androidx.viewpager2.widget.ViewPager2
 import com.google.android.material.chip.ChipGroup
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.utils.AppContextUtils.html

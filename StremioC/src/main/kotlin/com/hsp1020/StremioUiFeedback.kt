@@ -74,5 +74,5 @@ internal fun applyEpisodeChipFeedback(chip: Chip) {
     chip.rippleColor = android.content.res.ColorStateList.valueOf(android.graphics.Color.TRANSPARENT)
     chip.foreground = themedPressedForeground(chip)
     chip.stateListAnimator = null
-    chip.setTag(R.id.tv_no_focus_tag, true)
+    chip.tag = chip.context.getString(R.string.tv_no_focus_tag)
 }
