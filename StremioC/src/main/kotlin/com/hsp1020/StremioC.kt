@@ -21,6 +21,9 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addTMDbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
 import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.syncproviders.AccountManager
+import com.lagradost.cloudstream3.syncproviders.SyncIdName
+import com.lagradost.cloudstream3.syncproviders.providers.SimklApi
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.MainPageData
 import com.lagradost.cloudstream3.mainPageOf
@@ -181,6 +184,71 @@ open class StremioC(
         emptySet()
     }
     
+    // The shared provider alone appears in CloudStream's library opener when a
+    // metadata/history addon has been configured; catalog providers never appear.
+    override val supportedSyncNames: Set<SyncIdName>
+        get() = if (mainUrl.isBlank() && libraryMetadataBase() != null) {
+            setOf(SyncIdName.MyAnimeList, SyncIdName.Kitsu, SyncIdName.Anilist, SyncIdName.Simkl)
+        } else emptySet()
+
+    private fun libraryMetadataBase(): String? = CloudStreamApp.context
+        ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+        ?.getString("history_sync_url", null)
+        ?.trim()?.takeIf { it.isNotBlank() }?.cleanBaseUrl()
+
+    private fun libraryItemId(url: String, host: String, vararg sections: String): String? =
+        runCatching {
+            val uri = URI(if (url.startsWith("https://") || url.startsWith("http://")) url else "https://$url")
+            val parts = uri.path.split('/').filter { it.isNotBlank() }
+            if (uri.host?.lowercase()?.removePrefix("www.") != host || parts.firstOrNull() !in sections) {
+                null
+            } else {
+                parts.getOrNull(1)?.takeIf { id ->
+                    id.all(Char::isDigit) && id.toLongOrNull()?.let { it > 0L } == true
+                }
+            }
+        }.getOrNull()
+
+    private suspend fun simklLibraryMetaUrl(url: String, base: String): String? {
+        val simklId = libraryItemId(url, "simkl.com", "tv", "movies", "anime") ?: return null
+        val token = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
+            ?.authToken() ?: return null
+        val response = customSession.get(
+            "https://api.simkl.com/search/id",
+            params = mapOf("simkl" to simklId),
+            headers = SimklApi.getHeaders(token),
+            timeout = 15L
+        ).text
+        val results = parseJson<JsonNode>(response)
+        val item = results.takeIf { it.isArray }?.firstOrNull {
+            it.get("ids")?.get("simkl")?.asText() == simklId
+        } ?: return null
+        val ids = item.get("ids") ?: return null
+        val imdbId = ids.get("imdb").textOrNull()?.takeIf { IMDB_ID_REGEX.matches(it) }
+        val tmdbId = ids.get("tmdb").textOrNull()
+            ?.takeIf { it.all(Char::isDigit) && it.toLongOrNull()?.let { n -> n > 0 } == true }
+        val mediaType = when (item.get("type").textOrNull()?.lowercase()) {
+            "movie", "movies" -> "movie"
+            "tv", "show", "shows", "anime" -> "series"
+            else -> return null
+        }
+        val id = imdbId ?: tmdbId?.let { "tmdb:$it" } ?: return null
+        return "$base/meta/$mediaType/${id.urlEncode()}.json"
+    }
+
+    override suspend fun getLoadUrl(name: SyncIdName, id: String): String? {
+        if (mainUrl.isNotBlank()) return null
+        val base = libraryMetadataBase() ?: return null
+        val directId = when (name) {
+            SyncIdName.MyAnimeList -> libraryItemId(id, "myanimelist.net", "anime")?.let { "mal:$it" }
+            SyncIdName.Kitsu -> libraryItemId(id, "kitsu.app", "anime")?.let { "kitsu:$it" }
+            SyncIdName.Anilist -> libraryItemId(id, "anilist.co", "anime")?.let { "anilist:$it" }
+            SyncIdName.Simkl -> return simklLibraryMetaUrl(id, base)
+            else -> return null
+        } ?: return null
+        return "$base/meta/series/${directId.urlEncode()}.json"
+    }
+
     // 주소가 있는 실제 애드온만 홈 화면 탭 목록에 표시되도록 설정
     override val hasMainPage get() = showHome && mainUrl.isNotBlank() && isAddonEnabled()
 
@@ -1443,6 +1511,22 @@ open class StremioC(
     
     override suspend fun load(url: String): LoadResponse = coroutineScope {
         if (!isAddonEnabled()) throw IllegalStateException("This addon is disabled.")
+        if (mainUrl.isBlank()) {
+            val libraryService = when {
+                libraryItemId(url, "myanimelist.net", "anime") != null -> SyncIdName.MyAnimeList
+                libraryItemId(url, "kitsu.app", "anime") != null -> SyncIdName.Kitsu
+                libraryItemId(url, "anilist.co", "anime") != null -> SyncIdName.Anilist
+                libraryItemId(url, "simkl.com", "tv", "movies", "anime") != null -> SyncIdName.Simkl
+                else -> null
+            }
+            if (libraryService != null) {
+                val base = libraryMetadataBase()
+                    ?: throw IllegalStateException("Configure a metadata/history addon before opening a library item.")
+                val metaUrl = getLoadUrl(libraryService, url)
+                    ?: throw IllegalStateException("Unable to resolve the library item with the configured addon.")
+                return@coroutineScope StremioC(base, name).load(metaUrl)
+            }
+        }
         // Catalogs opened from a metadata Discover link do not require addon registration.
         if (mainUrl.isBlank() && (url.startsWith("https://") || url.startsWith("http://"))) {
             val origin = url.substringBefore("/meta/", "").takeIf { it.isNotBlank() }
