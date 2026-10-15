@@ -42,16 +42,10 @@
                     android:paddingBottom="0dp"
                     android:background="@android:color/transparent" />
             </FrameLayout>
-            <LinearLayout
+            <FrameLayout
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:orientation="horizontal"
-                android:gravity="center_vertical">
-                <FrameLayout
-                    android:layout_width="0dp"
-                    android:layout_height="48dp"
-                    android:layout_weight="1">
+                android:layout_height="48dp"
+                android:layout_marginTop="2dp">
                     <EditText
                         android:id="@+id/etLink"
                         android:autofillHints="Manifest URL"
@@ -68,8 +62,7 @@
                         android:paddingTop="0dp"
                         android:paddingBottom="0dp"
                         android:background="@android:color/transparent" />
-                </FrameLayout>
-            </LinearLayout>
+            </FrameLayout>
             <LinearLayout
                 android:id="@+id/catalogSyncSection"
                 android:layout_width="match_parent"
