@@ -1,6 +1,7 @@
 package com.hsp1020
 
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -33,6 +34,9 @@ import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
+import com.lagradost.cloudstream3.ui.settings.Globals.TV
+import com.lagradost.cloudstream3.ui.settings.Globals.EMULATOR
+import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
 import com.lagradost.cloudstream3.ui.search.SearchClickCallback
 import com.lagradost.cloudstream3.ui.search.SearchHelper
@@ -430,9 +434,14 @@ internal object ActorInformation {
                     .setBreakStrategy(biography.breakStrategy)
                     .setHyphenationFrequency(biography.hyphenationFrequency)
                     .build().lineCount
-                val truncated = fullLines > 8
+                val configuration = fragment.resources.configuration
+                val collapsedLines = if (
+                    configuration.orientation == Configuration.ORIENTATION_PORTRAIT &&
+                    configuration.smallestScreenWidthDp < 600 && !isLayout(TV or EMULATOR)
+                ) 8 else 20
+                val truncated = fullLines > collapsedLines
                 if (!truncated) bioExpanded = false
-                biography.maxLines = if (truncated && !bioExpanded) 8 else Int.MAX_VALUE
+                biography.maxLines = if (truncated && !bioExpanded) collapsedLines else Int.MAX_VALUE
                 toggle.visibility = if (truncated) View.VISIBLE else View.GONE
                 toggle.text = if (bioExpanded) "Less" else "More"
             }
