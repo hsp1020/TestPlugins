@@ -26,6 +26,12 @@ import com.lagradost.cloudstream3.utils.USER_PINNED_PROVIDERS
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.joinAll
@@ -42,6 +48,10 @@ class StremioCPlugin : Plugin() {
     private val PREF_FILE = "StremioC"
     private val PREF_KEY_LINKS = "stremio_saved_links"
     private val pluginIoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val reloadScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val reloadMutex = Mutex()
+    private var reloadGeneration = 0
+    private var isUnloaded = false
     private val ratingUiHandler = Handler(Looper.getMainLooper())
     private var ratingPlotHook: RatingPlotImageHook? = null
     private var activeSettingsDialog: SettingsBottomFragment? = null
@@ -120,6 +130,7 @@ class StremioCPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
+        isUnloaded = false
         val appContext = context.applicationContext
 
         // --- 1. StremioC 자체 부팅 복원 엔진 (Flag Guard + Checksum 검증) ---
@@ -302,6 +313,10 @@ class StremioCPlugin : Plugin() {
     }
 
     override fun beforeUnload() {
+        isUnloaded = true
+        reloadGeneration++
+        reloadScope.cancel()
+        pluginIoScope.cancel()
         pinSourcesReady = false
         pinSourcePrefs?.unregisterOnSharedPreferenceChangeListener(pinnedProviderListener)
         pinSourcePrefs = null
@@ -318,11 +333,14 @@ class StremioCPlugin : Plugin() {
     }
 
     fun reload(context: Context) {
+        if (isUnloaded) return
         val appContext = context.applicationContext
-
-        CoroutineScope(Dispatchers.Main).launch {
-            pinSourcesReady = false
-            try {
+        val requestGeneration = ++reloadGeneration
+        reloadScope.launch {
+            reloadMutex.withLock {
+                if (isUnloaded || requestGeneration != reloadGeneration) return@withLock
+                pinSourcesReady = false
+                try {
                 val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
                 val json = prefs.getString(PREF_KEY_LINKS, null) ?: "[]"
                 
@@ -379,6 +397,7 @@ class StremioCPlugin : Plugin() {
                                     }
                                 }
                         }
+                        currentCoroutineContext().ensureActive()
                         val manifest = rawManifest?.let {
                             runCatching { parseJson<StremioC.Manifest>(it) }.getOrNull()
                         }
@@ -411,11 +430,14 @@ class StremioCPlugin : Plugin() {
                             registerMainAPI(provider)
                             registeredProviders.add(provider)
                         }
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Throwable) {
                         Log.e("StremioCPlugin", "register failed ${e.message}")
                         e.printStackTrace()
                     }
                 }
+                currentCoroutineContext().ensureActive()
                 pinSourcesReady = true
                 syncPinnedSearchOrder()
                 try {
@@ -424,9 +446,12 @@ class StremioCPlugin : Plugin() {
                     Log.w("StremioCPlugin", "afterPluginsLoaded invoke failed ${e.message}")
                     e.printStackTrace()
                 }
-            } catch (e: Throwable) {
-                Log.e("StremioCPlugin", "reload error ${e.message}")
-                e.printStackTrace()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    Log.e("StremioCPlugin", "reload error ${e.message}")
+                    e.printStackTrace()
+                }
             }
         }
     }
