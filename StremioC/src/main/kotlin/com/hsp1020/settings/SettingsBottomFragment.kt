@@ -451,7 +451,15 @@ class SettingsBottomFragment(
             val row = view.parent as? LinearLayout
             if (view is Switch && row != null && row.orientation == LinearLayout.HORIZONTAL &&
                 row.childCount == 2 && row.getChildAt(0) is TextView) {
-                row.setOnClickListener { if (view.isEnabled) view.performClick() }
+                val switchOnly = listOf(
+                    "switchCineStream", "switchStreamPlay", "switchVixSrc", "switchMdbList"
+                ).any { view.id == getCachedResId(it, "id") }
+                if (switchOnly) {
+                    row.setOnClickListener(null)
+                    row.isClickable = false
+                } else {
+                    row.setOnClickListener { if (view.isEnabled) view.performClick() }
+                }
                 row.isFocusable = false
                 row.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 if (view.contentDescription.isNullOrBlank() && view.text.isNullOrBlank())
