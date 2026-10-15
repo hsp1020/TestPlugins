@@ -422,7 +422,7 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
                 if (System.currentTimeMillis() - savedAt < METADATA_CACHE_TTL) return poster
             }
             return runSuspendCatching {
-                val json = customSession.get(url, timeout = 3L).text
+                val json = customSession.get(url, timeout = 7L).text
                 val poster = org.json.JSONObject(json).optJSONObject("meta")?.optString("poster")
                     ?.trim()?.takeIf { it.toHttpUrlOrNull() != null }
                 if (poster != null) recommendationPosterCache[url] = poster to System.currentTimeMillis()
