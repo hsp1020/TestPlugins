@@ -413,21 +413,93 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
         private val tmdbDetailsCache = lruCacheMap<String, Pair<TmdbDetailResponse, Long>>(100)
         private val tmdbSeasonCache = lruCacheMap<String, Pair<TmdbSeasonDetail, Long>>(150)
         private val tmdbFindCache = lruCacheMap<String, Pair<Pair<String, String>?, Long>>(100)
-        private val recommendationPosterCache = lruCacheMap<String, Pair<String, Long>>(500)
         private val detailLoadHints = lruCacheMap<String, DetailUrlHint>(500)
         private const val METADATA_CACHE_TTL = 12 * 60 * 60 * 1000L
 
-        private suspend fun fetchRecommendationPoster(url: String): String? {
-            recommendationPosterCache[url]?.let { (poster, savedAt) ->
-                if (System.currentTimeMillis() - savedAt < METADATA_CACHE_TTL) return poster
+        // Rebuild supported poster-service URLs using IDs already in TMDB recommendations.
+        // Never guess arbitrary custom patterns or reuse a per-item image signature.
+        private fun recommendationPosterUrl(
+            source: String?, tmdbId: Int, movie: Boolean, fallback: String, metadataHost: String?
+        ): String? {
+            if (tmdbId <= 0) return null
+            val outer = source?.toHttpUrlOrNull() ?: return null
+            val outerParts = outer.pathSegments
+            val metaProxy = metadataHost != null && outer.host == metadataHost &&
+                outerParts.size == 5 && outerParts[0] == "poster-cache" &&
+                outerParts[1] == "proxy" && outerParts[2] == "poster" &&
+                outerParts[3] in listOf("movie", "series")
+            // AIO Metadata signs the original external URL. Do not modify that
+            // signature: supported upstream services can be used directly instead.
+            val nested = if (metaProxy) outer.queryParameter("url") else null
+            val url = if (nested != null) nested.toHttpUrlOrNull() ?: return null else outer
+            val parts = url.pathSegments
+            val host = url.host.lowercase()
+            val kind = if (movie) "movie" else "series"
+            val oldId = parts.lastOrNull().orEmpty()
+            val knownId = Regex("tt[0-9]+|tmdb:(?:(?:movie|series|tv):)?[0-9]+|(?:tvdb|kitsu|mal|anilist|anidb):[0-9]+")
+            val rpdbId = Regex("tt[0-9]+|(?:movie|series|tv)-[0-9]+")
+            val builder = url.newBuilder()
+
+            when {
+                // The key-based AIO Metadata proxy can independently resolve TMDB IDs.
+                // An URL+sig proxy is instead unwrapped above and only used if known.
+                metaProxy && nested == null && outer.queryParameter("sig") == null &&
+                    !outer.queryParameter("key").isNullOrBlank() && oldId.matches(knownId) -> {
+                    builder.setPathSegment(3, kind).setPathSegment(4, "tmdb:$tmdbId")
+                    builder.setQueryParameter("fallback",
+                        fallback.takeUnless { it == TRANSPARENT_PIXEL }.orEmpty())
+                    return builder.build().toString()
+                }
+                (host in setOf("extendedratings.com", "www.extendedratings.com", "xrdb.elfhosted.com") ||
+                    parts.size == 2 && url.queryParameter("config") != null &&
+                        url.queryParameter("v") != null) &&
+                    parts.size == 2 && parts[0] == "poster" && oldId.matches(knownId) &&
+                    url.queryParameter("sig") == null -> {
+                    builder.setPathSegment(1, "tmdb:$kind:$tmdbId")
+                }
+                host in setOf("api.ratingposterdb.com", "api.top-posters.com",
+                    "openposterdb.com", "api.openposterdb.com", "api.aioratings.com") &&
+                    parts.size == 4 && parts[0].isNotBlank() &&
+                    parts[1] in listOf("imdb", "tmdb", "tvdb") &&
+                    (host == "api.top-posters.com" && parts[2] == "poster" ||
+                        host == "api.aioratings.com" &&
+                            parts[2].matches(Regex("[a-zA-Z0-9_-]{1,64}")) &&
+                            !parts[2].startsWith("backdrop") && !parts[2].startsWith("logo") &&
+                            !parts[2].startsWith("episode") ||
+                        host !in setOf("api.top-posters.com", "api.aioratings.com") &&
+                            (parts[2].startsWith("poster-") || parts[2].startsWith("textless-"))) &&
+                    oldId.endsWith(".jpg") && oldId.removeSuffix(".jpg").matches(rpdbId) &&
+                    url.queryParameter("img") == null && url.queryParameter("sig") == null &&
+                    url.queryParameter("url") == null -> {
+                    val prefix = when {
+                        movie -> "movie"
+                        host == "api.aioratings.com" && !oldId.startsWith("series-") -> "tv"
+                        else -> "series"
+                    }
+                    builder.setPathSegment(1, "tmdb")
+                        .setPathSegment(3, "$prefix-$tmdbId.jpg")
+                    if (url.queryParameter("fallback_url") != null) {
+                        if (fallback == TRANSPARENT_PIXEL)
+                            builder.removeAllQueryParameters("fallback_url")
+                        else builder.setQueryParameter("fallback_url", fallback)
+                    } else if (host == "api.top-posters.com" && fallback != TRANSPARENT_PIXEL) {
+                        builder.setQueryParameter("fallback_url", fallback)
+                    }
+                }
+                host in setOf("easyratingsdb.com", "www.easyratingsdb.com") &&
+                    parts.size in 3..4 && parts[0].startsWith("Tk-") &&
+                    parts[1] == "poster" && oldId.endsWith(".jpg") &&
+                    oldId.removeSuffix(".jpg").matches(knownId) &&
+                    (parts.size == 3 || parts[2] in listOf("movie", "series")) -> {
+                    if (parts.size == 4) {
+                        builder.setPathSegment(2, kind).setPathSegment(3, "tmdb:$tmdbId.jpg")
+                    } else {
+                        builder.setPathSegment(2, kind).addPathSegment("tmdb:$tmdbId.jpg")
+                    }
+                }
+                else -> return null
             }
-            return runSuspendCatching {
-                val json = customSession.get(url, timeout = 7L).text
-                val poster = org.json.JSONObject(json).optJSONObject("meta")?.optString("poster")
-                    ?.trim()?.takeIf { it.toHttpUrlOrNull() != null }
-                if (poster != null) recommendationPosterCache[url] = poster to System.currentTimeMillis()
-                poster
-            }.getOrNull()
+            return builder.build().toString()
         }
 
         val catalogSentIds = ConcurrentHashMap<String, MutableSet<String>>()
@@ -2873,7 +2945,8 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
         private suspend fun fetchTmdbDetails(
             provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
             stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null,
-            preFetchedCollection: Deferred<List<TmdbMedia>>? = null
+            preFetchedCollection: Deferred<List<TmdbMedia>>? = null,
+            recommendationPoster: String? = null
         ): FetchedTmdbData {
             var fetchedRecommendations: List<SearchResponse>? = null
             
@@ -2906,7 +2979,7 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
             val context = CloudStreamApp.context
             val prefs = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
             val langCode = prefs?.getString("tmdb_language_code", "en-US") ?: "en-US"
-            val posterAddonBase = provider.metadataPosterAddonBaseUrl()
+            val metadataHost = provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host
             
             coroutineScope {
                 val shouldFocusEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType != "movie" && stremioType != "series" && !isMovie)
@@ -2965,30 +3038,18 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
                     .distinctBy { it.id }
                     .filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
 
-                val posterById = ConcurrentHashMap<Int, String>()
-                if (posterAddonBase != null) {
-                    val limiter = Semaphore(20)
-                    withTimeoutOrNull(7000L) {
-                        finalCombinedMedia.take(50).mapNotNull { rec ->
-                            val id = rec.id ?: return@mapNotNull null
-                            async(Dispatchers.IO) {
-                                limiter.withPermit {
-                                    val type = if (rec.mediaType == "movie" || rec.title != null) "movie" else "series"
-                                    val url = "$posterAddonBase/meta/$type/${"tmdb:$id".urlEncode()}.json"
-                                    StremioC.fetchRecommendationPoster(url)?.let { posterById[id] = it }
-                                }
-                            }
-                        }.awaitAll()
-                    }
-                }
                 fetchedRecommendations = finalCombinedMedia.take(50).map { rec ->
                     val recTitle = rec.title ?: rec.name ?: ""
                     val isRecMovie = rec.mediaType == "movie" || rec.title != null
                     val recTypeStr = if (isRecMovie) "movie" else "series"
                     val recType = if (isRecMovie) TvType.Movie else TvType.TvSeries
                     
-                    val recPoster = rec.id?.let { posterById[it] }
-                        ?: if (!rec.poster_path.isNullOrBlank()) "https://image.tmdb.org/t/p/w500${rec.poster_path}" else TRANSPARENT_PIXEL
+                    val tmdbPoster = if (!rec.poster_path.isNullOrBlank())
+                        "https://image.tmdb.org/t/p/w500${rec.poster_path}" else TRANSPARENT_PIXEL
+                    val recPoster = rec.id?.let {
+                        StremioC.recommendationPosterUrl(recommendationPoster, it, isRecMovie,
+                            tmdbPoster, metadataHost)
+                    } ?: tmdbPoster
                     val thinData = LoadData(id = "tmdb:${rec.id}", type = recTypeStr, addonUrl = provider.mainUrl)
                     provider.newMovieSearchResponse(recTitle, thinData.toJson(), recType) {
                         this.posterUrl = recPoster
@@ -3194,7 +3255,10 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
             prefetchedAnimeMapping: Deferred<AnimeSeasonMapping?>? = null,
             prefetchedAnimeImdbId: String? = null
         ): LoadResponse = coroutineScope {
-            val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
+            val syncedEntry = addonDeferred?.await()
+            val detailedEntry = syncedEntry ?: this@CatalogEntry
+            val recommendationPoster = if (provider.metadataPosterAddonBaseUrl() != null &&
+                (addonDeferred == null || syncedEntry != null)) detailedEntry.poster else null
             val originalAnimeId = requestedAnimeId
                 ?: this@CatalogEntry.id?.takeIf { it.startsWith("kitsu:") || it.startsWith("mal:") }
 
@@ -3292,7 +3356,8 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
                     }
                     tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!,
                         refinedMediaType == "movie", finalImdbId, finalType, finalVideos,
-                        safePrefetchedDetail, if (safePrefetchedDetail != null) preFetchedCollection else null)
+                        safePrefetchedDetail, if (safePrefetchedDetail != null) preFetchedCollection else null,
+                        recommendationPoster)
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
