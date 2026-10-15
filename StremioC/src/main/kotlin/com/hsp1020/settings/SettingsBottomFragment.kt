@@ -449,7 +449,7 @@ class SettingsBottomFragment(
                 row.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 for (i in 0 until row.childCount) if (row.getChildAt(i) !== view)
                     row.getChildAt(i).importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                row.setAddStatesFromChildren(true)
+                row.setAddStatesFromChildren(isLayout(TV))
                 row.makeTvCompatible()
             }
         } else if (view.isFocusable && view.isClickable) view.makeTvCompatible()
@@ -858,16 +858,23 @@ class SettingsBottomFragment(
         if (background === getTag(outlineId)) return
         val base = background ?: ColorDrawable(Color.TRANSPARENT)
         val outline = getDrawable("outline").apply { setTint(hostContext.colorFromAttribute(HostR.attr.textColor)) }
-        val layers = mutableListOf(base)
-        if (isClickable && this !is EditText && base !is RippleDrawable) {
-            val value = android.util.TypedValue()
-            hostContext.theme.resolveAttribute(android.R.attr.selectableItemBackground, value, true)
-            if (value.resourceId != 0) hostContext.getDrawable(value.resourceId)?.mutate()?.let { layers.add(it) }
-        }
+        val layers = mutableListOf<Drawable>()
+        if (base is RippleDrawable) {
+            // Reuse its static content, not its old borderless effect or ripple mask.
+            for (i in 0 until base.numberOfLayers) if (base.getId(i) != android.R.id.mask)
+                base.getDrawable(i)?.let { layers.add(it) }
+        } else layers.add(base)
         layers.add(outline)
         // Detach first: replacing the old background must not clear its new LayerDrawable callback.
         background = null
-        background = LayerDrawable(layers.toTypedArray())
+        val content = LayerDrawable(layers.toTypedArray())
+        background = if (this is EditText) content else {
+            val attrs = hostContext.obtainStyledAttributes(intArrayOf(android.R.attr.colorControlHighlight))
+            val color = attrs.getColorStateList(0) ?: ColorStateList.valueOf(
+                hostContext.colorFromAttribute(androidx.appcompat.R.attr.colorControlHighlight))
+            attrs.recycle()
+            RippleDrawable(color, content, ColorDrawable(Color.WHITE))
+        }
         setTag(outlineId, background)
     }
 
