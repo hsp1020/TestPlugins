@@ -22,6 +22,7 @@ import android.widget.TextView
 import androidx.core.view.doOnPreDraw
 import androidx.appcompat.app.AppCompatDialog
 import androidx.fragment.app.Fragment
+import androidx.navigation.fragment.NavHostFragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.Observer
@@ -223,6 +224,7 @@ internal object ActorInformation {
         private val stateKey = "stremioc_actor_info_return"
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
         private var dialog: AppCompatDialog? = null
+        private var detailHandoff: StremioDetailHandoff? = null
         private var requestJob: kotlinx.coroutines.Job? = null
         private var preserve = false
         private var currentPerson: ActorPersonRef? = null
@@ -278,7 +280,7 @@ internal object ActorInformation {
         }
 
         private fun maybeRestore() {
-            if (closed || dialog?.isShowing == true ||
+            if (closed || dialog?.isShowing == true || detailHandoff?.isActive == true ||
                 !fragment.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return
             val page = (model.page.value as? Resource.Success<ResultData>)?.value ?: return
             val raw = state()?.get<String>(stateKey) ?: return
@@ -317,6 +319,8 @@ internal object ActorInformation {
             if (!fragment.isAdded || closed) return
             if (dialog?.isShowing == true && currentPerson == actor && currentSource == originProvider) return
             requestJob?.cancel()
+            detailHandoff?.close()
+            detailHandoff = null
             preserve = true
             dialog?.dismiss()
             currentPerson = actor
@@ -326,6 +330,15 @@ internal object ActorInformation {
 
             val activity = fragment.activity ?: return
             val windowDialog = AppCompatDialog(activity, R.style.DialogFullscreen)
+            val navigation = (activity.supportFragmentManager
+                .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)?.navController
+            val handoff = StremioDetailHandoff(activity, windowDialog, navigation) {
+                if (dialog === windowDialog) {
+                    preserve = false
+                    windowDialog.dismiss()
+                }
+            }
+            detailHandoff = handoff
             val root = column().apply {
                 setBackgroundColor(activity.colorFromAttribute(R.attr.primaryBlackBackground))
                 setPadding(dp(10), dp(8), dp(10), dp(20))
@@ -465,6 +478,8 @@ internal object ActorInformation {
             windowDialog.setContentView(root)
             windowDialog.window?.setLayout(-1, -1)
             windowDialog.setOnDismissListener {
+                handoff.close()
+                if (detailHandoff === handoff) detailHandoff = null
                 requestJob?.cancel()
                 requestJob = null
                 skeleton.loading(false)
@@ -677,10 +692,13 @@ internal object ActorInformation {
                     ?: credit.poster?.let { "https://image.tmdb.org/t/p/w500" + it }
             }
             scroll?.let { save() }
-            preserve = true
-            dialog?.dismiss()
+            val covered = detailHandoff?.begin() == true
             SearchHelper.handleSearchClickCallback(
                 SearchClickCallback(SEARCH_ACTION_LOAD, view, -1, result))
+            if (!covered) {
+                preserve = true
+                dialog?.dismiss()
+            }
         }
 
         fun stop() {
@@ -688,6 +706,7 @@ internal object ActorInformation {
             closed = true
             preserve = true
             requestJob?.cancel()
+            detailHandoff?.close()
             dialog?.dismiss()
             scope.cancel()
             runCatching { fragment.viewLifecycleOwner.lifecycle.removeObserver(resumeObserver) }

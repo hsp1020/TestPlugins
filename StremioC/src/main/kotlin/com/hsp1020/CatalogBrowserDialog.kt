@@ -127,6 +127,144 @@ internal class StremioLoading(context: Context, rows: Int = 1) : FrameLayout(con
     }
 }
 
+/** Shared browser/actor transition: keep the old screen covered until detail is drawable. */
+internal class StremioDetailHandoff(
+    private val activity: FragmentActivity,
+    private val dialog: AppCompatDialog,
+    private val navigation: NavController?,
+    private val onLeave: () -> Unit
+) {
+    val isActive get() = returnEntryId != null
+
+    fun begin(): Boolean {
+        val origin = navigation?.currentBackStackEntry?.id ?: return false
+        if (isActive) return false
+        returnEntryId = origin
+        detailEntryId = null
+        pendingDetailDraw = true
+        navigation?.addOnDestinationChangedListener(destinationListener)
+        activity.supportFragmentManager.registerFragmentLifecycleCallbacks(detailViewListener, true)
+        return true
+    }
+
+    fun close() {
+        returnEntryId = null
+        detailEntryId = null
+        pendingDetailDraw = false
+        detailRevealEnd?.invoke()
+        detailRevealEnd = null
+        navigation?.removeOnDestinationChangedListener(destinationListener)
+        activity.supportFragmentManager.unregisterFragmentLifecycleCallbacks(detailViewListener)
+    }
+
+    private var returnEntryId: String? = null
+    private var detailEntryId: String? = null
+    private var pendingDetailDraw = false
+    private var detailRevealEnd: (() -> Unit)? = null
+
+    // Match the stable-frame guard used for quick-search -> detail return.
+    // Hiding a fullscreen Dialog in the very first pre-draw exposes the Home
+    // destination while the ResultFragment is still entering.
+    private fun revealDetailWhenReady(detail: View) {
+        detailRevealEnd?.invoke()
+        detail.doOnPreDraw {
+            if (!isActive || !pendingDetailDraw) return@doOnPreDraw
+            val observer = detail.viewTreeObserver
+            val started = SystemClock.uptimeMillis()
+            var stable = 0
+            lateinit var listener: ViewTreeObserver.OnPreDrawListener
+            val release = {
+                if (observer.isAlive) observer.removeOnPreDrawListener(listener)
+                detailRevealEnd = null
+            }
+            listener = ViewTreeObserver.OnPreDrawListener {
+                if (!isActive || !pendingDetailDraw || returnEntryId == null ||
+                    detailEntryId != navigation?.currentBackStackEntry?.id) {
+                    release()
+                } else {
+                    val hostView = activity.supportFragmentManager
+                        .findFragmentById(R.id.nav_host_fragment)?.view
+                    val bounds = hostView?.parent as? ViewGroup
+                    val ready = hostView != null && bounds != null &&
+                        hostView.visibility == View.VISIBLE &&
+                        hostView.left <= bounds.paddingLeft &&
+                        hostView.top <= bounds.paddingTop &&
+                        hostView.right >= bounds.width - bounds.paddingRight &&
+                        hostView.bottom >= bounds.height - bounds.paddingBottom &&
+                        !hostView.isLayoutRequested && detail.width > 0 && detail.height > 0 &&
+                        !detail.isLayoutRequested && detail.animation?.hasEnded() != false
+                    stable = if (ready) stable + 1 else 0
+                    if (stable >= 3 || (SystemClock.uptimeMillis() - started >= 800L &&
+                        detail.isShown && detail.width > 0 && detail.height > 0)) {
+                        release()
+                        detail.postOnAnimation {
+                            if (isActive && pendingDetailDraw && returnEntryId != null &&
+                                detailEntryId == navigation?.currentBackStackEntry?.id) {
+                                pendingDetailDraw = false
+                                dialog.hide()
+                            }
+                        }
+                    } else detail.postInvalidateOnAnimation()
+                }
+                true
+            }
+            detailRevealEnd = release
+            observer.addOnPreDrawListener(listener)
+            detail.postInvalidateOnAnimation()
+        }
+    }
+    private val detailViewListener = object : FragmentManager.FragmentLifecycleCallbacks() {
+        override fun onFragmentViewCreated(
+            fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
+        ) {
+            if (returnEntryId != null &&
+                fragment.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment") {
+                close()
+                onLeave() // Search breaks the browser -> detail -> back chain.
+                return
+            }
+            if (!pendingDetailDraw || !isActive) return
+            if (fragment.javaClass.name !in setOf(
+                    "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
+                    "com.lagradost.cloudstream3.ui.result.ResultFragmentTv",
+                    "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer"
+                )) return
+            revealDetailWhenReady(view)
+        }
+    }
+    private val destinationListener = NavController.OnDestinationChangedListener { controller, _, _ ->
+        val origin = returnEntryId
+        if (isActive && origin != null) {
+            val current = controller.currentBackStackEntry?.id
+            when {
+                current == origin -> {
+                    // Navigation through Home on the way to Search must not resurrect
+                    // the browser. Check again immediately before Home is drawn.
+                    val hostView = activity.supportFragmentManager
+                        .findFragmentById(R.id.nav_host_fragment)?.view
+                    hostView?.doOnPreDraw {
+                        if (isActive && returnEntryId == origin && detailEntryId != null &&
+                            navigation?.currentBackStackEntry?.id == origin) {
+                            returnEntryId = null
+                            detailEntryId = null
+                            pendingDetailDraw = false
+                            close()
+                            dialog.show()
+                        }
+                    }
+                }
+                detailEntryId == null -> detailEntryId = current
+                current != detailEntryId -> {
+                    // Detail -> quick search / cast search / another page:
+                    // discard the browser, so navigation Home stays Home.
+                    close()
+                    onLeave()
+                }
+            }
+        }
+    }
+}
+
 /** One dialog, one in-flight page; only All pages are shared with Home. */
 internal class CatalogBrowserDialog(
     private val activity: FragmentActivity,
@@ -171,16 +309,9 @@ internal class CatalogBrowserDialog(
         if (!closed) when (click.action) {
             SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
             SEARCH_ACTION_LOAD -> {
-                val origin = navigation?.currentBackStackEntry?.id
-                if (origin != null) {
-                    returnEntryId = origin
-                    pendingDetailDraw = true
-                    detailEntryId = null
-                }
-                // Use CloudStream's own SEARCH_ACTION_LOAD handler; keep the dialog
-                // on top until the destination's detail view can actually draw.
+                val covered = detailHandoff.begin()
                 SearchHelper.handleSearchClickCallback(click)
-                if (origin == null) dismiss()
+                if (!covered) dismiss()
             }
         }
     }
@@ -318,108 +449,8 @@ internal class CatalogBrowserDialog(
     private val navigation by lazy {
         (activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)?.navController
     }
-    private var returnEntryId: String? = null
-    private var detailEntryId: String? = null
-    private var pendingDetailDraw = false
-    private var detailRevealEnd: (() -> Unit)? = null
-
-    // Match the stable-frame guard used for quick-search -> detail return.
-    // Hiding a fullscreen Dialog in the very first pre-draw exposes the Home
-    // destination while the ResultFragment is still entering.
-    private fun revealDetailWhenReady(detail: View) {
-        detailRevealEnd?.invoke()
-        detail.doOnPreDraw {
-            if (closed || !pendingDetailDraw) return@doOnPreDraw
-            val observer = detail.viewTreeObserver
-            val started = SystemClock.uptimeMillis()
-            var stable = 0
-            lateinit var listener: ViewTreeObserver.OnPreDrawListener
-            val release = {
-                if (observer.isAlive) observer.removeOnPreDrawListener(listener)
-                detailRevealEnd = null
-            }
-            listener = ViewTreeObserver.OnPreDrawListener {
-                if (closed || !pendingDetailDraw || returnEntryId == null ||
-                    detailEntryId != navigation?.currentBackStackEntry?.id) {
-                    release()
-                } else {
-                    val hostView = activity.supportFragmentManager
-                        .findFragmentById(R.id.nav_host_fragment)?.view
-                    val bounds = hostView?.parent as? ViewGroup
-                    val ready = hostView != null && bounds != null &&
-                        hostView.visibility == View.VISIBLE &&
-                        hostView.left <= bounds.paddingLeft &&
-                        hostView.top <= bounds.paddingTop &&
-                        hostView.right >= bounds.width - bounds.paddingRight &&
-                        hostView.bottom >= bounds.height - bounds.paddingBottom &&
-                        !hostView.isLayoutRequested && detail.width > 0 && detail.height > 0 &&
-                        !detail.isLayoutRequested && detail.animation?.hasEnded() != false
-                    stable = if (ready) stable + 1 else 0
-                    if (stable >= 3 || (SystemClock.uptimeMillis() - started >= 800L &&
-                        detail.isShown && detail.width > 0 && detail.height > 0)) {
-                        release()
-                        detail.postOnAnimation {
-                            if (!closed && pendingDetailDraw && returnEntryId != null &&
-                                detailEntryId == navigation?.currentBackStackEntry?.id) {
-                                pendingDetailDraw = false
-                                dialog.hide()
-                            }
-                        }
-                    } else detail.postInvalidateOnAnimation()
-                }
-                true
-            }
-            detailRevealEnd = release
-            observer.addOnPreDrawListener(listener)
-            detail.postInvalidateOnAnimation()
-        }
-    }
-    private val detailViewListener = object : FragmentManager.FragmentLifecycleCallbacks() {
-        override fun onFragmentViewCreated(
-            fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
-        ) {
-            if (returnEntryId != null &&
-                fragment.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment") {
-                dismiss() // Search breaks the browser -> detail -> back chain.
-                return
-            }
-            if (!pendingDetailDraw || closed) return
-            if (fragment.javaClass.name !in setOf(
-                    "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
-                    "com.lagradost.cloudstream3.ui.result.ResultFragmentTv",
-                    "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer"
-                )) return
-            revealDetailWhenReady(view)
-        }
-    }
-    private val destinationListener = NavController.OnDestinationChangedListener { controller, _, _ ->
-        val origin = returnEntryId
-        if (!closed && origin != null) {
-            val current = controller.currentBackStackEntry?.id
-            when {
-                current == origin -> {
-                    // Navigation through Home on the way to Search must not resurrect
-                    // the browser. Check again immediately before Home is drawn.
-                    val hostView = activity.supportFragmentManager
-                        .findFragmentById(R.id.nav_host_fragment)?.view
-                    hostView?.doOnPreDraw {
-                        if (!closed && returnEntryId == origin && detailEntryId != null &&
-                            navigation?.currentBackStackEntry?.id == origin) {
-                            returnEntryId = null
-                            detailEntryId = null
-                            pendingDetailDraw = false
-                            dialog.show()
-                        }
-                    }
-                }
-                detailEntryId == null -> detailEntryId = current
-                current != detailEntryId -> {
-                    // Detail -> quick search / cast search / another page:
-                    // discard the browser, so navigation Home stays Home.
-                    dismiss()
-                }
-            }
-        }
+    private val detailHandoff by lazy {
+        StremioDetailHandoff(activity, dialog, navigation, ::dismiss)
     }
     private val items = ArrayList<SearchResponse>()
     private val seen = HashSet<String>()
@@ -723,9 +754,7 @@ internal class CatalogBrowserDialog(
             prefs.unregisterOnSharedPreferenceChangeListener(settingsListener)
             manifestPrefs.unregisterOnSharedPreferenceChangeListener(manifestListener)
             activity.lifecycle.removeObserver(hostObserver)
-            navigation?.removeOnDestinationChangedListener(destinationListener)
-            activity.supportFragmentManager.unregisterFragmentLifecycleCallbacks(detailViewListener)
-            detailRevealEnd?.invoke()
+            detailHandoff.close()
             grid.adapter = null
             onDismiss()
             homeTitleFocus?.takeIf { it.isAttachedToWindow }?.let { focus ->
@@ -738,8 +767,6 @@ internal class CatalogBrowserDialog(
         dialog.show()
         dialog.window?.let { WindowCompat.setDecorFitsSystemWindows(it, true) }
         ViewCompat.requestApplyInsets(root)
-        navigation?.addOnDestinationChangedListener(destinationListener)
-        activity.supportFragmentManager.registerFragmentLifecycleCallbacks(detailViewListener, true)
         dialog.window?.setBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryBlackBackground)))
         dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         activity.lifecycle.addObserver(hostObserver)
@@ -753,10 +780,7 @@ internal class CatalogBrowserDialog(
     fun dismiss() {
         if (closed) return
         closed = true
-        returnEntryId = null
-        detailEntryId = null
-        pendingDetailDraw = false
-        detailRevealEnd?.invoke()
+        detailHandoff.close()
         generation++
         scope.cancel()
         dialog.dismiss() // Detaches Spinner popups along with their anchor views.
