@@ -692,6 +692,7 @@ internal object ActorInformation {
         }
 
         private fun openCredit(providerUrl: String?, credit: Credit, view: View) {
+            if (detailHandoff?.isActive == true) return // Avoid duplicate touch / TV OK navigation.
             // A single addon URL now registers a Home provider plus search-only
             // providers. Route actor credits through the original Home provider.
             val source = providerUrl ?: (model.currentRepo?.api as? StremioC)
