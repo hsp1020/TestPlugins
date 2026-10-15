@@ -1568,8 +1568,7 @@ class SettingsBottomFragment(
         fun updateSummaries() {
             val catalogCount = catalogLinks().count { it.link.isNotBlank() }
             val catalogColumn = view.findView<LinearLayout>("rowCatalogs").getChildAt(0) as LinearLayout
-            val catalogSummary = (view.optional("summaryCatalogs") as? TextView)
-                ?: (catalogColumn.getChildAt(1) as? TextView)
+            val catalogSummary = (catalogColumn.getChildAt(1) as? TextView)
                 ?: TextView(hostContext).also {
                     it.layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
