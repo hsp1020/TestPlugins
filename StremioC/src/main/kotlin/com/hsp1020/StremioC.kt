@@ -1640,7 +1640,7 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
             expectedLogoByUrl[loadRes.url]?.let { expectedLogoByUrl[url] = it }
             trailerChoicesByUrl[loadRes.url]?.let { trailerChoicesByUrl[url] = it }
             genreCatalogsByUrl[loadRes.url]?.let { genreCatalogsByUrl[url] = it }
-            ActorInformation.alias(this, url, loadRes.url)
+            ActorInformation.alias(this@StremioC, url, loadRes.url)
         }
         collectionDeferred?.cancel() // No remaining prefetch when the final media type differs.
 

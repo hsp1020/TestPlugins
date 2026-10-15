@@ -25,6 +25,7 @@ import androidx.navigation.fragment.findNavController
 import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
