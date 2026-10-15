@@ -341,7 +341,7 @@ class StremioCPlugin : Plugin() {
                                 var uniqueLabel = label
                                 var suffix = 2
                                 while (uniqueLabel in occupied) {
-                                    uniqueLabel = "$" + "{label} ($" + "{suffix++})"
+                                    uniqueLabel = "${label} (${suffix++})"
                                 }
                                 val provider = StremioC(
                                     item.link, uniqueLabel, item.id, catalog.id, catalog.type,
@@ -353,7 +353,7 @@ class StremioCPlugin : Plugin() {
                             }
                         }
                     } catch (e: Throwable) {
-                        Log.e("StremioCPlugin", "register failed $" + "{e.message}")
+                        Log.e("StremioCPlugin", "register failed ${e.message}")
                         e.printStackTrace()
                     }
                 }
