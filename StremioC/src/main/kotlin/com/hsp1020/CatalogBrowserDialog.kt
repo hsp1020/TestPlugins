@@ -150,7 +150,7 @@ internal fun stremioCurrentDestinationView(
     val navHost = activity.supportFragmentManager
         .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment ?: return null
     val primary = navHost.childFragmentManager.primaryNavigationFragment ?: return null
-    val id = navigation?.currentDestination?.id
+    val id = navigation?.currentDestination?.id ?: return null
     val type = primary.javaClass.name
     if (id == R.id.navigation_home &&
         type != "com.lagradost.cloudstream3.ui.home.HomeFragment") return null
@@ -248,7 +248,8 @@ internal class StremioDetailHandoff(
     }
 
     private fun recoverHome(): Boolean {
-        if (!isActive || activity.isFinishing || activity.isDestroyed) return false
+        if (!isActive || activity.isFinishing || activity.isDestroyed ||
+            !activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return false
         val nav = navigation ?: return false
         recoveringHome = true
         val moved = runCatching {
@@ -382,13 +383,15 @@ internal class StremioDetailHandoff(
                     returnEntryId == null || detailEntryId != navigation?.currentBackStackEntry?.id) {
                     release()
                 } else {
-                    val ready = stremioDestinationReady(activity, detail)
+                    val ready = currentDestinationView() === detail &&
+                        stremioDestinationReady(activity, detail)
                     stable = if (ready) stable + 1 else 0
                     if (stable >= 3 || (SystemClock.uptimeMillis() - started >= 800L && ready)) {
                         release()
                         detail.postOnAnimation {
                             if (ticket == generation && isActive && pendingDetailDraw &&
                                 returnEntryId != null && detailEntryId == navigation?.currentBackStackEntry?.id &&
+                                currentDestinationView() === detail &&
                                 stremioDestinationReady(activity, detail)) {
                                 pendingDetailDraw = false
                                 handler.removeCallbacks(navigationTimeout)

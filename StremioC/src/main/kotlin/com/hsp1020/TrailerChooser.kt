@@ -344,6 +344,7 @@ internal class TrailerChooser(
             setContentView(list)
             setOnDismissListener {
                 if (dialog === this) {
+                    finishPlayerHandoff?.invoke()
                     extractionJob?.cancel()
                     extractionJob = null
                     extractionProgress = null
@@ -449,7 +450,8 @@ internal class TrailerChooser(
         }
 
         fun recoverHome(): Boolean {
-            if (homeRecovery || owner?.isFinishing == true || owner?.isDestroyed == true)
+            if (homeRecovery || owner?.isFinishing == true || owner?.isDestroyed == true ||
+                owner?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) != true)
                 return false
             homeRecovery = true
             val moved = runCatching {
