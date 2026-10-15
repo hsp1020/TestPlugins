@@ -334,9 +334,10 @@ class StremioCPlugin : Plugin() {
                             registeredProviders.add(provider)
                         } else {
                             searchCatalogs.forEachIndexed { index, catalog ->
-                                val rawLabel = catalog.name?.trim().orEmpty()
-                                val label = rawLabel.substringAfter(" - ", rawLabel)
+                                val catalogName = catalog.name?.trim().orEmpty()
                                     .ifBlank { catalog.id.orEmpty() }
+                                val typeName = catalog.type.orEmpty().replaceFirstChar { it.uppercase() }
+                                val label = "$"+"{catalogName} - $"+"{typeName}"
                                 val occupied = APIHolder.allProviders.mapTo(HashSet()) { it.name }
                                 var uniqueLabel = label
                                 var suffix = 2
