@@ -9,6 +9,7 @@ import android.text.Layout
 import android.text.StaticLayout
 import android.os.Bundle
 import android.view.Gravity
+import android.view.ViewTreeObserver
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
@@ -336,6 +337,7 @@ internal object ActorInformation {
 
             val activity = fragment.activity ?: return
             val windowDialog = AppCompatDialog(activity, R.style.DialogFullscreen)
+            val scrollListeners = mutableListOf<Pair<View, ViewTreeObserver.OnScrollChangedListener>>()
             val navigation = (activity.supportFragmentManager
                 .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)?.navController
             val handoff = StremioDetailHandoff(
@@ -501,6 +503,10 @@ internal object ActorInformation {
             windowDialog.setContentView(root)
             windowDialog.window?.setLayout(-1, -1)
             windowDialog.setOnDismissListener {
+                scrollListeners.forEach { (view, listener) ->
+                    view.viewTreeObserver.takeIf { it.isAlive }?.removeOnScrollChangedListener(listener)
+                }
+                scrollListeners.clear()
                 handoff.close()
                 if (detailHandoff === handoff) detailHandoff = null
                 requestJob?.cancel()
@@ -515,9 +521,11 @@ internal object ActorInformation {
             windowDialog.window?.setLayout(-1, -1)
             save()
             scroller.post { scroller.scrollTo(0, resumeY) }
-            scroller.viewTreeObserver.addOnScrollChangedListener {
+            val scrollerListener = ViewTreeObserver.OnScrollChangedListener {
                 if (dialog === windowDialog) save()
             }
+            scroller.viewTreeObserver.addOnScrollChangedListener(scrollerListener)
+            scrollListeners.add(scroller to scrollerListener)
 
             if (actor.id == null) {
                 biography.text = "TMDB person ID unavailable for this actor."
@@ -660,12 +668,14 @@ internal object ActorInformation {
                                 }
                                 strip.addView(row)
                                 strip.post { if (dialog === windowDialog) strip.scrollTo(creditScroll[title] ?: 0, 0) }
-                                strip.viewTreeObserver.addOnScrollChangedListener {
+                                val stripListener = ViewTreeObserver.OnScrollChangedListener {
                                     if (dialog === windowDialog) {
                                         creditScroll[title] = strip.scrollX
                                         save()
                                     }
                                 }
+                                strip.viewTreeObserver.addOnScrollChangedListener(stripListener)
+                                scrollListeners.add(strip to stripListener)
                                 filmArea.addView(strip)
                             }
                         }
