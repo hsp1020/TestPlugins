@@ -12,6 +12,7 @@ import android.view.Window
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
+import androidx.cardview.widget.CardView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -62,7 +63,9 @@ internal object ActorInformation {
         val providerUrl: String,
         val detailUrl: String,
         val actors: List<ActorData>,
-        val people: List<ActorPersonRef>
+        val people: List<ActorPersonRef>,
+        val customPosterSource: String?,
+        val metadataHost: String?
     )
 
     private val snapshots = object : LinkedHashMap<String, Snapshot>(100, 0.75f, true) {
@@ -71,10 +74,14 @@ internal object ActorInformation {
     private fun key(source: String, detail: String) = stremioManifestUrl(source) + "|" + detail
 
     @Synchronized
-    fun register(provider: StremioC, url: String, actors: List<ActorData>?, people: List<ActorPersonRef>) {
+    fun register(
+        provider: StremioC, url: String, actors: List<ActorData>?,
+        people: List<ActorPersonRef>, customPosterSource: String?, metadataHost: String?
+    ) {
         if (actors.isNullOrEmpty() || actors.size != people.size) return
         snapshots[key(provider.mainUrl, url)] =
-            Snapshot(stremioManifestUrl(provider.mainUrl), url, actors, people)
+            Snapshot(stremioManifestUrl(provider.mainUrl), url, actors, people,
+                customPosterSource, metadataHost)
     }
 
     @Synchronized
@@ -106,6 +113,16 @@ internal object ActorInformation {
         if (repo != null && stremioManifestUrl(repo.mainUrl) != matched.providerUrl &&
             matches.size != 1) return null
         return matched.providerUrl to matched.people[position]
+    }
+
+    // Use the originating metadata addon's custom-poster choice, when enabled.
+    @Synchronized
+    private fun posterFor(source: String?, detailUrl: String, credit: Credit): String? {
+        val snapshot = source?.let { snapshots[key(it, detailUrl)] }
+        return StremioC.actorPosterUrl(
+            snapshot?.customPosterSource, credit.id, credit.media == "movie",
+            credit.poster, snapshot?.metadataHost
+        )
     }
 
     // A small, bounded cache avoids repeated person/credit requests. Failed or partial
@@ -326,12 +343,18 @@ internal object ActorInformation {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.TOP
             }
-            val picture = ImageView(activity).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
-                setBackgroundColor(Color.DKGRAY)
-                actor.photo?.let { loadImage(it) }
+            // Native cast_item.xml: 70dp circle, 35dp radius and centerCrop.
+            val portraitHolder = CardView(activity).apply {
+                radius = dp(35).toFloat()
+                setCardBackgroundColor(activity.colorFromAttribute(R.attr.primaryGrayBackground))
+                addView(ImageView(activity).apply {
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    foreground = androidx.core.content.ContextCompat.getDrawable(
+                        activity, R.drawable.outline_big_35_gray)
+                    actor.photo?.let { loadImage(it) }
+                }, ViewGroup.LayoutParams(-1, -1))
             }
-            profileRow.addView(picture, LinearLayout.LayoutParams(dp(115), dp(165)))
+            profileRow.addView(portraitHolder, LinearLayout.LayoutParams(dp(70), dp(70)))
             val details = column()
             details.addView(label(actor.name, 20f, true))
             profileRow.addView(details, LinearLayout.LayoutParams(0, -2, 1f))
@@ -473,14 +496,19 @@ internal object ActorInformation {
                                         setPadding(dp(5), dp(3), dp(5), dp(8))
                                         setOnClickListener { openCredit(originProvider, credit, it) }
                                     }
-                                    val poster = ImageView(activity).apply {
-                                        scaleType = ImageView.ScaleType.CENTER_CROP
-                                        setBackgroundColor(Color.DKGRAY)
-                                        credit.poster?.let { path ->
-                                            loadImage("https://image.tmdb.org/t/p/w342" + path)
-                                        }
+                                    // Native home poster corner radius and crop.
+                                    val posterHolder = CardView(activity).apply {
+                                        radius = activity.resources.getDimension(R.dimen.rounded_image_radius)
+                                        cardElevation = 0f
+                                        setCardBackgroundColor(activity.colorFromAttribute(R.attr.primaryGrayBackground))
+                                        addView(ImageView(activity).apply {
+                                            scaleType = ImageView.ScaleType.CENTER_CROP
+                                            val url = posterFor(originProvider, origin, credit)
+                                            if (url != null) loadImage(url)
+                                            else loadImage(R.drawable.default_cover)
+                                        }, ViewGroup.LayoutParams(-1, -1))
                                     }
-                                    card.addView(poster, LinearLayout.LayoutParams(dp(112), dp(158)))
+                                    card.addView(posterHolder, LinearLayout.LayoutParams(dp(112), dp(158)))
                                     card.addView(label(credit.title, 13f).apply {
                                         maxLines = 2
                                     }, LinearLayout.LayoutParams(dp(112), -2))
@@ -529,7 +557,8 @@ internal object ActorInformation {
             val result = provider.newMovieSearchResponse(
                 credit.title, payload.toJson(), if (movie) TvType.Movie else TvType.TvSeries
             ) {
-                this.posterUrl = credit.poster?.let { "https://image.tmdb.org/t/p/w500" + it }
+                this.posterUrl = currentOrigin?.let { posterFor(providerUrl, it, credit) }
+                    ?: credit.poster?.let { "https://image.tmdb.org/t/p/w500" + it }
             }
             scroll?.let { save() }
             preserve = true

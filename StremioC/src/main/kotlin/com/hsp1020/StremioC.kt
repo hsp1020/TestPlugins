@@ -502,6 +502,17 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
             return builder.build().toString()
         }
 
+        // Same service URL resolver as the existing TMDB recommendation posters.
+        internal fun actorPosterUrl(
+            source: String?, tmdbId: Int, movie: Boolean,
+            posterPath: String?, metadataHost: String?
+        ): String? {
+            val fallback = posterPath?.takeIf { it.startsWith("/") }
+                ?.let { "https://image.tmdb.org/t/p/w500$it" } ?: TRANSPARENT_PIXEL
+            return recommendationPosterUrl(source, tmdbId, movie, fallback, metadataHost)
+                ?: fallback.takeUnless { it == TRANSPARENT_PIXEL }
+        }
+
         val catalogSentIds = ConcurrentHashMap<String, MutableSet<String>>()
         val catalogSkipState = ConcurrentHashMap<String, Int>()
         // Committed home-page URLs and the raw skip after each response. Used only
@@ -3536,7 +3547,10 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
 
 
                 }
-                ActorInformation.register(provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty())
+                ActorInformation.register(
+                    provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty(),
+                    recommendationPoster, provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host
+                )
                 return@coroutineScope response.apply { attachMappedIds() }
 
             } else {
@@ -3579,7 +3593,10 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
                     
 
                 }
-                ActorInformation.register(provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty())
+                ActorInformation.register(
+                    provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty(),
+                    recommendationPoster, provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host
+                )
                 return@coroutineScope response.apply { attachMappedIds() }
             }           
         }
