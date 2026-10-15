@@ -413,10 +413,11 @@ internal object ActorInformation {
             }
             aboutPane.addView(biography)
             aboutPane.addView(toggle)
+            // In landscape, match Nuvio's approximate 25:75 info/credits split.
             body.addView(aboutPane, if (wide) LinearLayout.LayoutParams(0, -2, 1f)
                 else LinearLayout.LayoutParams(-1, -2))
             val filmArea = column()
-            body.addView(filmArea, if (wide) LinearLayout.LayoutParams(0, -2, 1.25f)
+            body.addView(filmArea, if (wide) LinearLayout.LayoutParams(0, -2, 3f)
                 else LinearLayout.LayoutParams(-1, -2))
             windowDialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
             windowDialog.setContentView(root)
