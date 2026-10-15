@@ -368,7 +368,7 @@ internal class TrailerChooser(
     }
 
     // Keep the picker above the previous detail until the player can draw.
-    // If player creation stalls, return to the source instead of exposing a blank player.
+    // Failure recovery must also wait for a drawable result/home screen.
     private fun dismissPickerOnPlayerFrame(
         picker: BottomSheetDialog, controller: androidx.navigation.NavController
     ) {
@@ -378,17 +378,31 @@ internal class TrailerChooser(
         val handler = Handler(Looper.getMainLooper())
         var active = true
         var rollingBack = false
+        var homeRecovery = false
+        var recoveryAttempts = 0
+        var recoveryStarted = 0L
+        var watchedView: View? = null
+        var releaseWatcher: (() -> Unit)? = null
         lateinit var callback: FragmentManager.FragmentLifecycleCallbacks
         lateinit var timeout: Runnable
         lateinit var returnTimeout: Runnable
         lateinit var release: () -> Unit
         lateinit var dismiss: () -> Unit
+
+        fun currentView(): View? = owner?.let { stremioCurrentDestinationView(it, controller) }
+        fun safeToReveal(view: View): Boolean = owner != null &&
+            currentView() === view && stremioDestinationReady(owner, view) &&
+            (if (rollingBack) controller.currentDestination?.id != R.id.navigation_player
+             else controller.currentDestination?.id == R.id.navigation_player)
+
         val ownerObserver = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_DESTROY) dismiss()
         }
         release = {
             if (active) {
                 active = false
+                releaseWatcher?.invoke()
+                releaseWatcher = null
                 manager.unregisterFragmentLifecycleCallbacks(callback)
                 handler.removeCallbacks(timeout)
                 handler.removeCallbacks(returnTimeout)
@@ -400,31 +414,91 @@ internal class TrailerChooser(
             release()
             if (picker.isShowing) picker.dismiss()
         }
+
+        fun watch(view: View) {
+            if (!active || watchedView === view) return
+            releaseWatcher?.invoke()
+            watchedView = view
+            val observer = view.viewTreeObserver
+            if (!observer.isAlive) return
+            var stable = 0
+            lateinit var listener: ViewTreeObserver.OnPreDrawListener
+            lateinit var unwatch: () -> Unit
+            unwatch = {
+                if (observer.isAlive) observer.removeOnPreDrawListener(listener)
+                if (releaseWatcher === unwatch) releaseWatcher = null
+            }
+            listener = ViewTreeObserver.OnPreDrawListener {
+                if (!active || currentView() !== view) {
+                    unwatch()
+                } else {
+                    stable = if (safeToReveal(view)) stable + 1 else 0
+                    if (stable >= 2) {
+                        unwatch()
+                        view.postOnAnimation {
+                            if (active && safeToReveal(view)) dismiss()
+                        }
+                    } else view.postInvalidateOnAnimation()
+                }
+                true
+            }
+            releaseWatcher = unwatch
+            observer.addOnPreDrawListener(listener)
+            view.postInvalidateOnAnimation()
+        }
+
+        fun recoverHome(): Boolean {
+            if (homeRecovery || owner?.isFinishing == true || owner?.isDestroyed == true)
+                return false
+            homeRecovery = true
+            val moved = runCatching {
+                controller.navigate(R.id.global_to_navigation_home)
+                controller.currentDestination?.id == R.id.navigation_home
+            }.getOrDefault(false)
+            if (!moved) homeRecovery = false
+            return moved
+        }
+
+        fun attemptReturn() {
+            if (!active || owner?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) != true)
+                return
+            if (controller.currentDestination?.id == R.id.navigation_player) {
+                val popped = runCatching { controller.popBackStack() }.getOrDefault(false)
+                if (!popped || controller.currentDestination?.id == R.id.navigation_player)
+                    recoveryAttempts++
+                // Repeated failed pops must not dismiss the cover over a blank player.
+                if (recoveryAttempts >= 2) recoverHome()
+            }
+            currentView()?.let(::watch)
+        }
+
         callback = object : FragmentManager.FragmentLifecycleCallbacks() {
             override fun onFragmentViewCreated(
                 fm: FragmentManager, f: Fragment, view: View, savedInstanceState: Bundle?
             ) {
-                val name = f.javaClass.name
-                if (!rollingBack && name == "com.lagradost.cloudstream3.ui.player.GeneratorPlayer") {
-                    view.doOnPreDraw {
-                        view.postOnAnimation { if (active && !rollingBack) dismiss() }
-                    }
-                } else if (rollingBack && name in setOf(
-                        "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
-                        "com.lagradost.cloudstream3.ui.result.ResultFragmentTv"
-                    )) {
-                    view.doOnPreDraw { view.postOnAnimation { if (active && rollingBack) dismiss() } }
-                }
+                if (active && currentView() === view) watch(view)
             }
         }
-        returnTimeout = Runnable { dismiss() } // Always release on failed return.
+        returnTimeout = object : Runnable {
+            override fun run() {
+                if (!active) return
+                val current = currentView()
+                if (current != null) watch(current)
+                if (rollingBack) {
+                    if (controller.currentDestination?.id == R.id.navigation_player) attemptReturn()
+                    else if (!homeRecovery &&
+                        android.os.SystemClock.uptimeMillis() - recoveryStarted >= 6000L) recoverHome()
+                }
+                // Only the observed destination's stable frames may dismiss the picker.
+                handler.postDelayed(this, 1000L)
+            }
+        }
         timeout = Runnable {
             if (active) {
-                if (controller.currentDestination?.id == R.id.navigation_player &&
-                    runCatching { controller.popBackStack() }.getOrDefault(false)) {
-                    rollingBack = true
-                    handler.postDelayed(returnTimeout, 1500L)
-                } else dismiss()
+                rollingBack = true
+                recoveryStarted = android.os.SystemClock.uptimeMillis()
+                attemptReturn()
+                handler.postDelayed(returnTimeout, 1000L)
             }
         }
         finishPlayerHandoff = release
