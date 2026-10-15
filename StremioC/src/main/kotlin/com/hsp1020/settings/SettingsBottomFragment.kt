@@ -2,6 +2,9 @@
 package com.hsp1020
 
 import android.annotation.SuppressLint
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.app.Activity
 import android.app.Dialog
 import android.content.ActivityNotFoundException
@@ -18,7 +21,9 @@ import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.doOnNextLayout
+import androidx.core.view.doOnLayout
 import androidx.core.widget.NestedScrollView
 import com.lagradost.cloudstream3.ui.settings.Globals.TV
 import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
@@ -36,6 +41,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.animation.AnimationUtils
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.text.InputType
@@ -494,19 +500,97 @@ class SettingsBottomFragment(
     }
 
     private fun fitDialog(dialog: Dialog, root: LinearLayout, body: View?, capDp: Int) {
-        val metrics = hostContext.resources.displayMetrics
+        var metrics = hostContext.resources.displayMetrics
+        var displayWidth = metrics.widthPixels
+        var displayHeight = metrics.heightPixels
         val base = Rect()
         val hostDecor = (hostContext as? Activity)?.window?.decorView
         hostDecor?.getWindowVisibleDisplayFrame(base)
-        val baseHeight = if (base.height() > 0 && hostDecor?.let { imeVisible(it) } != true)
+        var baseHeight = if (base.height() > 0 && hostDecor?.let { imeVisible(it) } != true)
             base.height() else metrics.heightPixels
-        val heightCap = (baseHeight * 0.88f).toInt().coerceAtLeast(1)
+        var heightCap = (baseHeight * 0.88f).toInt().coerceAtLeast(1)
         val initialPadding = intArrayOf(root.paddingLeft, root.paddingTop, root.paddingRight, root.paddingBottom)
         val title = root.getChildAt(0)?.takeIf { it !== body }
         val footer = root.getChildAt(root.childCount - 1)?.takeIf { it !== body && it is LinearLayout }
         var keyboardShown = false
         var windowInsets: WindowInsetsCompat? = null
         var scrollBeforeIme: Pair<Int, Int>? = null
+        var bodyHeightBeforeIme: Int? = null
+        var restoreScroll: Pair<Int, Int>? = null
+        var scrollAnchor: View? = null
+        data class Bounds(val width: Int, val height: Int, val top: Int, val bodyHeight: Int)
+        var placed: Bounds? = null
+        var target: Bounds? = null
+        var motion: ValueAnimator? = null
+        var imeAnimation: WindowInsetsAnimationCompat? = null
+        var imeStart: Bounds? = null
+        fun place(bounds: Bounds) {
+            body?.let {
+                if (it.layoutParams.height != bounds.bodyHeight)
+                    it.layoutParams = it.layoutParams.apply { height = bounds.bodyHeight }
+            }
+            dialog.window?.let { window ->
+                val params = window.attributes
+                val gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                if (params.width != bounds.width || params.height != bounds.height ||
+                    params.gravity != gravity || params.y != bounds.top) {
+                    params.width = bounds.width; params.height = bounds.height
+                    params.gravity = gravity; params.y = bounds.top
+                    window.attributes = params
+                }
+            }
+            placed = bounds
+        }
+        fun frame(from: Bounds, to: Bounds, fraction: Float) {
+            val f = fraction.coerceIn(0f, 1f)
+            fun lerp(a: Int, b: Int) = Math.round(a + (b - a) * f)
+            place(Bounds(to.width, lerp(from.height, to.height), lerp(from.top, to.top),
+                lerp(from.bodyHeight, to.bodyHeight)))
+        }
+        fun finishMotion() {
+            if (keyboardShown) return
+            bodyHeightBeforeIme = null
+            val scroll = restoreScroll ?: return
+            restoreScroll = null
+            val anchor = scrollAnchor
+            scrollAnchor = null
+            root.doOnLayout {
+                if (alive(dialog) && topDialog() === dialog && !keyboardShown && anchor?.isShown != false)
+                    (body as? NestedScrollView)?.scrollTo(scroll.first, scroll.second)
+            }
+        }
+        fun cancelMotion() {
+            motion?.let { it.removeAllListeners(); it.removeAllUpdateListeners(); it.cancel() }
+            motion = null
+        }
+        fun move(next: Bounds, animate: Boolean) {
+            if (target == next && (motion != null || imeAnimation != null || placed == next)) return
+            target = next
+            if (placed?.width != next.width) { imeAnimation = null; imeStart = null }
+            if (imeAnimation != null) return // The keyboard's own progress drives this transition.
+            cancelMotion()
+            val from = placed
+            if (!animate || from == null || from.width != next.width || from == next) {
+                place(next); finishMotion(); return
+            }
+            val animator = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 220L
+                interpolator = AnimationUtils.loadInterpolator(hostContext, android.R.interpolator.fast_out_slow_in)
+                addUpdateListener {
+                    if (alive(dialog) && topDialog() === dialog) frame(from, next, it.animatedValue as Float)
+                    else cancelMotion()
+                }
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) {
+                        if (motion !== animation) return
+                        motion = null
+                        if (alive(dialog) && topDialog() === dialog) { place(next); finishMotion() }
+                    }
+                })
+            }
+            motion = animator
+            animator.start()
+        }
         val revealInput = Runnable {
             if (alive(dialog) && topDialog() === dialog && keyboardShown) {
                 (root.findFocus() as? EditText)?.let {
@@ -515,23 +599,44 @@ class SettingsBottomFragment(
             }
         }
         var sizing = false
-        fun resize(initial: Boolean = false) {
+        fun resize(initial: Boolean = false, settle: Boolean = false) {
             if (sizing || closing || (!initial && (!dialog.isShowing || topDialog() !== dialog))) return
             sizing = true
             try {
+                metrics = hostContext.resources.displayMetrics
                 val frame = Rect()
                 if (root.isAttachedToWindow) root.getWindowVisibleDisplayFrame(frame) else frame.set(base)
                 val availableWidth = frame.width().takeIf { it > 0 } ?: metrics.widthPixels
                 val width = minOf(dp(capDp), (availableWidth * 0.9f).toInt()).coerceAtLeast(1)
                 val bodyWidth = (width - root.paddingLeft - root.paddingRight).coerceAtLeast(1)
                 val insets = windowInsets ?: ViewCompat.getRootWindowInsets(root)
-                val imeBottom = insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0
                 // Only the active window owns IME state; frozen parent windows can retain stale insets.
                 val keyboard = if (android.os.Build.VERSION.SDK_INT >= 30 && insets != null)
                     insets.isVisible(WindowInsetsCompat.Type.ime()) else imeVisible(root)
+                if (displayWidth != metrics.widthPixels || displayHeight != metrics.heightPixels) {
+                    cancelMotion()
+                    imeAnimation = null; imeStart = null
+                    displayWidth = metrics.widthPixels; displayHeight = metrics.heightPixels
+                    baseHeight = if (!keyboard && frame.height() > 0) frame.height() else
+                        (metrics.heightPixels - frame.top -
+                            (insets?.getInsets(WindowInsetsCompat.Type.systemBars())?.bottom ?: 0)).coerceAtLeast(1)
+                    heightCap = (baseHeight * 0.88f).toInt().coerceAtLeast(1)
+                }
+                // A floating window can report only its overlap; the host supplies full-screen height,
+                // never keyboard visibility. Stale host insets therefore cannot prevent restoration.
+                val imeBottom = maxOf(insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0,
+                    if (keyboard) hostDecor?.let { ViewCompat.getRootWindowInsets(it) }
+                        ?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0 else 0)
                 val wasKeyboard = keyboardShown
-                if (keyboard && !wasKeyboard)
-                    scrollBeforeIme = (body as? NestedScrollView)?.let { it.scrollX to it.scrollY }
+                if (keyboard && !wasKeyboard) {
+                    if (restoreScroll == null) scrollAnchor = root.findFocus()
+                    scrollBeforeIme = restoreScroll ?: (body as? NestedScrollView)?.let { it.scrollX to it.scrollY }
+                    restoreScroll = null
+                    if (bodyHeightBeforeIme == null) bodyHeightBeforeIme = body?.layoutParams?.height
+                } else if (!keyboard && wasKeyboard) {
+                    restoreScroll = scrollBeforeIme
+                    scrollBeforeIme = null
+                }
                 keyboardShown = keyboard
                 val visibleHeight = minOf(frame.height().takeIf { it > 0 } ?: baseHeight,
                     if (imeBottom > 0) (metrics.heightPixels - imeBottom - frame.top).coerceAtLeast(1) else baseHeight)
@@ -590,41 +695,22 @@ class SettingsBottomFragment(
                     root.setPadding(initialPadding[0], paddingTop, initialPadding[2], paddingBottom)
                 body?.measure(View.MeasureSpec.makeMeasureSpec(bodyWidth, View.MeasureSpec.EXACTLY),
                     if (body is RecyclerView) View.MeasureSpec.makeMeasureSpec(
-                        body.layoutParams.height.coerceAtLeast(dp(48)), View.MeasureSpec.EXACTLY)
+                        (bodyHeightBeforeIme ?: body.layoutParams.height).coerceAtLeast(dp(48)), View.MeasureSpec.EXACTLY)
                     else View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
                 val natural = body?.measuredHeight ?: 0
                 val height = (chromeHeight + natural).coerceIn(1, cap.coerceAtLeast(1))
-                body?.let {
-                    val wanted = (height - chromeHeight).coerceAtLeast(0)
-                    if (it.layoutParams.height != wanted) it.layoutParams = it.layoutParams.apply { this.height = wanted }
-                }
-                dialog.window?.let {
-                    val gravity = if (keyboard) Gravity.TOP or Gravity.CENTER_HORIZONTAL else Gravity.CENTER
-                    val y = if (keyboard) ((visibleHeight - height) / 2).coerceAtLeast(0) else 0
-                    val params = it.attributes
-                    if (params.width != width || params.height != height || params.gravity != gravity || params.y != y) {
-                        params.width = width; params.height = height
-                        params.gravity = gravity; params.y = y
-                        it.attributes = params
-                    }
-                }
+                val y = (((if (keyboard) visibleHeight else baseHeight) - height) / 2).coerceAtLeast(0)
+                move(Bounds(width, height, y, (height - chromeHeight).coerceAtLeast(0)),
+                    !initial && (keyboard || wasKeyboard || motion != null || settle))
                 if (keyboard) {
                     root.removeCallbacks(revealInput)
                     root.post(revealInput)
                 } else {
                     root.removeCallbacks(revealInput)
-                    if (wasKeyboard) {
-                        val scroll = scrollBeforeIme
-                        scrollBeforeIme = null
-                        root.doOnNextLayout {
-                            if (alive(dialog) && topDialog() === dialog && !keyboardShown && scroll != null)
-                                (body as? NestedScrollView)?.scrollTo(scroll.first, scroll.second)
-                        }
-                    }
                 }
             } finally { sizing = false }
         }
-        val listener = ViewTreeObserver.OnGlobalLayoutListener { resize() }
+        val listener = ViewTreeObserver.OnGlobalLayoutListener { if (imeAnimation == null) resize() }
         val focusListener = ViewTreeObserver.OnGlobalFocusChangeListener { _, _ -> resize() }
         val reflow = Runnable { resize() }
         root.viewTreeObserver.addOnGlobalLayoutListener(listener)
@@ -635,12 +721,48 @@ class SettingsBottomFragment(
             root.post(reflow)
             insets
         }
+        ViewCompat.setWindowInsetsAnimationCallback(root, object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+            override fun onPrepare(animation: WindowInsetsAnimationCompat) {
+                if (animation.typeMask and WindowInsetsCompat.Type.ime() == 0 ||
+                    !alive(dialog) || topDialog() !== dialog) return
+                cancelMotion()
+                imeAnimation = animation
+                imeStart = placed
+            }
+            override fun onStart(animation: WindowInsetsAnimationCompat,
+                bounds: WindowInsetsAnimationCompat.BoundsCompat): WindowInsetsAnimationCompat.BoundsCompat {
+                if (imeAnimation === animation) resize()
+                return bounds
+            }
+            override fun onProgress(insets: WindowInsetsCompat,
+                runningAnimations: MutableList<WindowInsetsAnimationCompat>): WindowInsetsCompat {
+                val animation = imeAnimation
+                val from = imeStart
+                val to = target
+                if (animation != null && animation in runningAnimations && from != null && to != null &&
+                    alive(dialog) && topDialog() === dialog) frame(from, to, animation.interpolatedFraction)
+                return insets
+            }
+            override fun onEnd(animation: WindowInsetsAnimationCompat) {
+                if (imeAnimation !== animation) return
+                val finished = animation.fraction >= 1f
+                imeAnimation = null; imeStart = null
+                if (alive(dialog) && topDialog() === dialog) {
+                    if (finished) { target?.let { place(it) }; finishMotion() }
+                    windowInsets = null
+                    resize(settle = !finished)
+                }
+            }
+        })
         onClose(dialog) {
+            cancelMotion()
+            imeAnimation = null; imeStart = null
             if (root.viewTreeObserver.isAlive) {
                 root.viewTreeObserver.removeOnGlobalLayoutListener(listener)
                 root.viewTreeObserver.removeOnGlobalFocusChangeListener(focusListener)
             }
             ViewCompat.setOnApplyWindowInsetsListener(root, null)
+            ViewCompat.setWindowInsetsAnimationCallback(root, null)
             root.removeCallbacks(reflow)
             root.removeCallbacks(revealInput)
         }
@@ -825,7 +947,8 @@ class SettingsBottomFragment(
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            setSoftInputMode(if (android.os.Build.VERSION.SDK_INT >= 30)
+                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING else WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
             attributes = attributes.apply {
                 gravity = Gravity.CENTER
                 x = 0; y = 0
@@ -1664,7 +1787,8 @@ class SettingsBottomFragment(
         settingsDialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setGravity(Gravity.CENTER)
-            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            setSoftInputMode(if (android.os.Build.VERSION.SDK_INT >= 30)
+                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING else WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
         showPage(SettingsPage.HUB)
         if (view is LinearLayout) fitDialog(settingsDialog, view, viewport, 800)
