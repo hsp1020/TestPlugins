@@ -155,7 +155,10 @@ internal fun stremioCurrentDestinationView(
     if (id == R.id.navigation_home &&
         type != "com.lagradost.cloudstream3.ui.home.HomeFragment") return null
     if (id == R.id.navigation_results_phone &&
-        type != "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone") return null
+        type !in setOf(
+            "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer",
+            "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone"
+        )) return null
     if (id == R.id.navigation_results_tv &&
         type != "com.lagradost.cloudstream3.ui.result.ResultFragmentTv") return null
     if (id == R.id.navigation_player &&
