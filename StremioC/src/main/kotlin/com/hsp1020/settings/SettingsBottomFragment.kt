@@ -520,7 +520,7 @@ class SettingsBottomFragment(
         var target: Bounds? = null
         var motion: ValueAnimator? = null
         var imeAnimation: WindowInsetsAnimationCompat? = null
-        var imeStart: Bounds? = null
+        var settlingIme = false
         fun place(bounds: Bounds) {
             body?.let {
                 if (it.layoutParams.height != bounds.bodyHeight)
@@ -565,7 +565,7 @@ class SettingsBottomFragment(
         fun move(next: Bounds, animate: Boolean) {
             if (target == next && (motion != null || imeAnimation != null || placed == next)) return
             target = next
-            if (placed?.width != next.width) { imeAnimation = null; imeStart = null }
+            if (placed?.width != next.width) { imeAnimation = null }
             if (imeAnimation != null) return // The keyboard's own progress drives this transition.
             cancelMotion()
             val from = placed
@@ -610,11 +610,14 @@ class SettingsBottomFragment(
                 val bodyWidth = (width - root.paddingLeft - root.paddingRight).coerceAtLeast(1)
                 val insets = windowInsets ?: ViewCompat.getRootWindowInsets(root)
                 // Only the active window owns IME state; frozen parent windows can retain stale insets.
-                val keyboard = if (android.os.Build.VERSION.SDK_INT >= 30 && insets != null)
+                val keyboard = if (imeAnimation != null && insets != null)
+                    insets.getInsets(WindowInsetsCompat.Type.ime()).bottom >
+                        insets.getInsets(WindowInsetsCompat.Type.systemBars()).bottom
+                else if (android.os.Build.VERSION.SDK_INT >= 30 && insets != null)
                     insets.isVisible(WindowInsetsCompat.Type.ime()) else imeVisible(root)
                 if (displayWidth != metrics.widthPixels || displayHeight != metrics.heightPixels) {
                     cancelMotion()
-                    imeAnimation = null; imeStart = null
+                    imeAnimation = null
                     displayWidth = metrics.widthPixels; displayHeight = metrics.heightPixels
                     baseHeight = if (!keyboard && frame.height() > 0) frame.height() else
                         (metrics.heightPixels - frame.top -
@@ -623,7 +626,9 @@ class SettingsBottomFragment(
                 }
                 // A floating window can report only its overlap; the host supplies full-screen height,
                 // never keyboard visibility. Stale host insets therefore cannot prevent restoration.
-                val imeBottom = maxOf(insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0,
+                val imeBottom = if (imeAnimation != null && insets != null)
+                    insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+                else maxOf(insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0,
                     if (keyboard) hostDecor?.let { ViewCompat.getRootWindowInsets(it) }
                         ?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0 else 0)
                 val wasKeyboard = keyboardShown
@@ -637,8 +642,10 @@ class SettingsBottomFragment(
                     scrollBeforeIme = null
                 }
                 keyboardShown = keyboard
-                val visibleHeight = minOf(frame.height().takeIf { it > 0 } ?: baseHeight,
-                    if (imeBottom > 0) (metrics.heightPixels - imeBottom - frame.top).coerceAtLeast(1) else baseHeight)
+                // The floating window's visible frame depends on its own position.
+                val visibleHeight = if (imeBottom > 0)
+                    minOf(baseHeight, (metrics.heightPixels - imeBottom - base.top).coerceAtLeast(1))
+                else baseHeight
                 val cap = if (keyboard) minOf(heightCap, visibleHeight) else heightCap
                 var showTitle = true
                 var showFooter = true
@@ -699,19 +706,20 @@ class SettingsBottomFragment(
                 val natural = body?.measuredHeight ?: 0
                 val height = (chromeHeight + natural).coerceIn(1, cap.coerceAtLeast(1))
                 val y = (((if (keyboard) visibleHeight else baseHeight) - height) / 2).coerceAtLeast(0)
+                val imeDriven = android.os.Build.VERSION.SDK_INT >= 30 &&
+                    (keyboard || wasKeyboard || imeAnimation != null)
                 move(Bounds(width, height, y, (height - chromeHeight).coerceAtLeast(0)),
-                    !initial && (keyboard || wasKeyboard || motion != null || settle))
-                if (keyboard) {
-                    root.removeCallbacks(revealInput)
-                    root.post(revealInput)
-                } else {
-                    root.removeCallbacks(revealInput)
-                }
+                    !initial && !imeDriven && !settlingIme &&
+                        (keyboard || wasKeyboard || motion != null || settle))
+                root.removeCallbacks(revealInput)
+                if (keyboard && imeAnimation == null) root.post(revealInput)
             } finally { sizing = false }
         }
         val listener = ViewTreeObserver.OnGlobalLayoutListener { if (imeAnimation == null) resize() }
-        val focusListener = ViewTreeObserver.OnGlobalFocusChangeListener { _, _ -> resize() }
-        val reflow = Runnable { resize() }
+        val focusListener = ViewTreeObserver.OnGlobalFocusChangeListener { _, _ ->
+            if (imeAnimation == null) resize()
+        }
+        val reflow = Runnable { if (imeAnimation == null) resize() }
         root.viewTreeObserver.addOnGlobalLayoutListener(listener)
         root.viewTreeObserver.addOnGlobalFocusChangeListener(focusListener)
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
@@ -726,36 +734,35 @@ class SettingsBottomFragment(
                     !alive(dialog) || topDialog() !== dialog) return
                 cancelMotion()
                 imeAnimation = animation
-                imeStart = placed
             }
             override fun onStart(animation: WindowInsetsAnimationCompat,
-                bounds: WindowInsetsAnimationCompat.BoundsCompat): WindowInsetsAnimationCompat.BoundsCompat {
-                if (imeAnimation === animation) resize()
-                return bounds
-            }
+                bounds: WindowInsetsAnimationCompat.BoundsCompat): WindowInsetsAnimationCompat.BoundsCompat = bounds
+
             override fun onProgress(insets: WindowInsetsCompat,
                 runningAnimations: MutableList<WindowInsetsAnimationCompat>): WindowInsetsCompat {
                 val animation = imeAnimation
-                val from = imeStart
-                val to = target
-                if (animation != null && animation in runningAnimations && from != null && to != null &&
-                    alive(dialog) && topDialog() === dialog) frame(from, to, animation.interpolatedFraction)
+                if (animation != null && animation in runningAnimations &&
+                    alive(dialog) && topDialog() === dialog) {
+                    windowInsets = insets
+                    // Follow each actual IME inset instead of animating toward a stale target.
+                    resize()
+                    target?.let { place(it) }
+                }
                 return insets
             }
             override fun onEnd(animation: WindowInsetsAnimationCompat) {
                 if (imeAnimation !== animation) return
-                val finished = animation.fraction >= 1f
-                imeAnimation = null; imeStart = null
+                imeAnimation = null
                 if (alive(dialog) && topDialog() === dialog) {
-                    if (finished) { target?.let { place(it) }; finishMotion() }
-                    windowInsets = null
-                    resize(settle = !finished)
+                    settlingIme = true
+                    try { resize() } finally { settlingIme = false }
+                    finishMotion()
                 }
             }
         })
         onClose(dialog) {
             cancelMotion()
-            imeAnimation = null; imeStart = null
+            imeAnimation = null
             if (root.viewTreeObserver.isAlive) {
                 root.viewTreeObserver.removeOnGlobalLayoutListener(listener)
                 root.viewTreeObserver.removeOnGlobalFocusChangeListener(focusListener)
@@ -995,24 +1002,30 @@ class SettingsBottomFragment(
     }
 
     private fun View.makeTvCompatible() {
-        // Keep native control backgrounds. The host selects ripple or outline by layout.
         val key = getCachedResId("outline", "drawable")
         if (getTag(key) == true) return
         val tv = isLayout(TV)
-        if (this is com.google.android.material.button.MaterialButton ||
-            (!tv && (this is EditText || this is CompoundButton))) return
-        val attributes = hostContext.obtainStyledAttributes(intArrayOf(
+        if (!tv && (this is EditText || this is CompoundButton)) return
+        val navigationRow = id in listOf("rowCatalogs", "rowSources", "rowMetadata",
+            "rowBackup", "rowStreamSubtitleAddons").map { getCachedResId(it, "id") }
+        val attrs = hostContext.obtainStyledAttributes(intArrayOf(
             if (tv) HostR.attr.focusBackground else android.R.attr.selectableItemBackground
         ))
-        val effect = attributes.getDrawable(0)
-        attributes.recycle()
+        val effect = attrs.getDrawable(0)
+        attrs.recycle()
         if (effect != null) {
             when {
+                navigationRow -> {
+                    // Keep a single host ripple or TV outline for every navigation row.
+                    if (android.os.Build.VERSION.SDK_INT >= 23) foreground = null
+                    background = effect
+                }
                 tv && this !is EditText && this !is CompoundButton && background is RippleDrawable ->
                     background = effect
                 background == null && this !is EditText && this !is CompoundButton ->
                     background = effect
-                android.os.Build.VERSION.SDK_INT >= 23 -> foreground = effect
+                (background !is RippleDrawable || this is CompoundButton) &&
+                    android.os.Build.VERSION.SDK_INT >= 23 -> foreground = effect
             }
         }
         setTag(key, true)
@@ -1047,17 +1060,19 @@ class SettingsBottomFragment(
                StremioC.loadProviderDynamically("phisher", "com.phisher98.StreamPlay") != null
     }
 
-    private fun dialogButton(ctx: Context, label: String, params: LinearLayout.LayoutParams) =
-        com.google.android.material.button.MaterialButton(
-            android.view.ContextThemeWrapper(ctx, if (label in setOf("OK", "Apply", "Save", "Add", "Restore", "Yes"))
-                HostR.style.WhiteButton else HostR.style.BlackButton), null, 0
-        ).apply {
-            text = label
-            isAllCaps = false
-            minHeight = dp(48)
-            layoutParams = params
-            normalizeTypeface(this)
-        }
+    // Mirror the TextView actions in settingsFooter (font, minimum height and ripple).
+    private fun dialogButton(ctx: Context, label: String, params: LinearLayout.LayoutParams) = TextView(ctx).apply {
+        text = label
+        textSize = 14f
+        typeface = android.graphics.Typeface.create(hostTypeface, android.graphics.Typeface.BOLD)
+        setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
+        gravity = Gravity.CENTER
+        minHeight = dp(48)
+        isFocusable = true
+        isClickable = true
+        layoutParams = params
+        makeTvCompatible()
+    }
 
     private fun showSavedPopup(ctx: Context, title: String, message: String, onConfirm: () -> Unit = {}) {
         val container = LinearLayout(ctx).apply {
@@ -1801,6 +1816,7 @@ class SettingsBottomFragment(
             }
         }
         adapter = LinksAdapter(records(),
+            showCatalogs = !sources,
             onDelete = { item ->
                 val position = adapter.positionOf(item.id).coerceAtLeast(0)
                 showDeleteConfirmation(dialog, item.name,
@@ -2590,6 +2606,7 @@ private fun showLanguageSelectDialog() {
 
     inner class LinksAdapter(
         private val items: MutableList<LinkItem>,
+        private val showCatalogs: Boolean,
         private val onDelete: (LinkItem) -> Unit,
         private val onEdit: (LinkItem, Int) -> Unit,
         private val onCatalogs: (LinkItem) -> Unit,
@@ -2630,7 +2647,8 @@ private fun showLanguageSelectDialog() {
                     label.isFocusable = false
                 }
                 styleAddonIcon(it.edit, "addon_edit_icon")
-                styleAddonIcon(it.catalogs, "addon_catalog_icon")
+                if (showCatalogs) styleAddonIcon(it.catalogs, "addon_catalog_icon")
+                else { it.catalogs.visibility = View.GONE; it.catalogs.isFocusable = false }
                 styleAddonIcon(it.gear, "settings_icon")
                 styleAddonIcon(it.trash, "delete_icon")
                 val actions = it.edit.parent as LinearLayout
@@ -2656,7 +2674,7 @@ private fun showLanguageSelectDialog() {
             val label = item.name.takeUnless { it == item.link }?.ifBlank { "Addon" } ?: "Addon"
             holder.showEnabledState(item.enabled, label)
             holder.edit.contentDescription = "Edit addon $label"
-            holder.catalogs.contentDescription = "Configure catalogs for $label"
+            if (showCatalogs) holder.catalogs.contentDescription = "Configure catalogs for $label"
             holder.gear.contentDescription = "Addon settings for $label"
             holder.trash.contentDescription = "Delete addon $label"
             holder.enabled.contentDescription = "Enable addon $label"
@@ -2677,11 +2695,15 @@ private fun showLanguageSelectDialog() {
                 val index = holder.adapterPosition
                 items.getOrNull(index)?.let { onEdit(it, index) }
             }
-            holder.catalogs.setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onCatalogs) }
+            if (showCatalogs)
+                holder.catalogs.setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onCatalogs) }
             holder.gear.setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onConfigure) }
             holder.trash.setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onDelete) }
             if (isLayout(TV)) {
-                val peers = listOf(holder.edit, holder.catalogs, holder.gear, holder.trash, holder.enabled)
+                val peerIds = if (showCatalogs)
+                    listOf("btnEditAddon", "btnCatalogs", "btnConfigureAddon", "btnDelete", "switchAddonEnabled")
+                else listOf("btnEditAddon", "btnConfigureAddon", "btnDelete", "switchAddonEnabled")
+                val peers = peerIds.map { holder.itemView.findView<View>(it) }
                 peers.forEachIndexed { column, control ->
                     control.setOnKeyListener { _, key, event ->
                         if (holder.adapterPosition == RecyclerView.NO_POSITION) return@setOnKeyListener false
@@ -2695,8 +2717,7 @@ private fun showLanguageSelectDialog() {
                             val recycler = holder.itemView.parent as? RecyclerView
                             if (recycler == null || target !in items.indices) false else {
                                 if (event.action == KeyEvent.ACTION_DOWN) restoreRow(recycler, target) { row ->
-                                    row.optional(listOf("btnEditAddon", "btnCatalogs",
-                                        "btnConfigureAddon", "btnDelete", "switchAddonEnabled")[column])
+                                    row.optional(peerIds[column])
                                         ?.takeIf { it.isEnabled } ?: row.findView<View>("btnEditAddon")
                                 }
                                 true
