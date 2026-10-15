@@ -1640,6 +1640,7 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
             expectedLogoByUrl[loadRes.url]?.let { expectedLogoByUrl[url] = it }
             trailerChoicesByUrl[loadRes.url]?.let { trailerChoicesByUrl[url] = it }
             genreCatalogsByUrl[loadRes.url]?.let { genreCatalogsByUrl[url] = it }
+            ActorInformation.alias(this, url, loadRes.url)
         }
         collectionDeferred?.cancel() // No remaining prefetch when the final media type differs.
 
@@ -2869,7 +2870,8 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
         val fetchedEnglishTitle: String?,
         val fetchedVoteAverage: Double? = null,
         val fetchedLogoFallback: Boolean = false,
-        val fetchedGenreIds: List<Int> = emptyList()
+        val fetchedGenreIds: List<Int> = emptyList(),
+        val fetchedPeople: List<ActorPersonRef> = emptyList()
     )
 
     private data class ProviderArtInfo(
@@ -3067,18 +3069,29 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
                     ?: detailRes.content_ratings?.results?.firstOrNull { it.iso_3166_1 == "US" }?.rating
             }
 
-            val crewList = detailRes.credits?.crew?.filter { it.job == "Director" || it.job == "Writer" }?.groupBy { it.name ?: it.originalName }?.mapNotNull { (name, roles) ->
-                if (name == null) return@mapNotNull null
-                val sortedJobs = roles.mapNotNull { it.job }.distinct().sortedBy { if (it == "Director") 1 else 2 }.joinToString(", ")
-                val img = roles.firstNotNullOfOrNull { it.profilePath }?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
-                ActorData(Actor(name, img), roleString = sortedJobs)
-            }?.sortedBy { if (it.roleString?.contains("Director, Writer") == true) 1 else if (it.roleString?.contains("Director") == true) 2 else 3 } ?: emptyList()
-
-            val castList = detailRes.credits?.cast?.mapNotNull { cast ->
+            val crewPairs = detailRes.credits?.crew?.filter { it.job == "Director" || it.job == "Writer" }
+                ?.groupBy { it.id?.takeIf { id -> id > 0 }?.let { id -> "id:$id" }
+                    ?: "name:" + (it.name ?: it.originalName).orEmpty() }
+                ?.values?.mapNotNull { roles ->
+                    val head = roles.first()
+                    val name = head.name ?: head.originalName ?: return@mapNotNull null
+                    val jobs = roles.mapNotNull { it.job }.distinct()
+                        .sortedBy { if (it == "Director") 1 else 2 }.joinToString(", ")
+                    val img = roles.firstNotNullOfOrNull { it.profilePath }
+                        ?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
+                    ActorData(Actor(name, img), roleString = jobs) to
+                        ActorPersonRef(head.id, name, img, true)
+                }?.sortedBy { (item, _) ->
+                    if (item.roleString?.contains("Director, Writer") == true) 1
+                    else if (item.roleString?.contains("Director") == true) 2 else 3
+                } ?: emptyList()
+            val castPairs = detailRes.credits?.cast?.mapNotNull { cast ->
                 val actorName = cast.name ?: cast.originalName ?: return@mapNotNull null
-                val profileImg = cast.profilePath?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
-                ActorData(Actor(actorName, profileImg), roleString = cast.character)
+                val img = cast.profilePath?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
+                ActorData(Actor(actorName, img), roleString = cast.character) to
+                    ActorPersonRef(cast.id, actorName, img, false)
             } ?: emptyList()
+            val actorPairs = crewPairs + castPairs
 
             val trailerLanguages = tmdbTrailerLanguages()
             val rankedTrailers = detailRes.videos?.results.orEmpty()
@@ -3132,14 +3145,15 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
                         path.dropLast(4) + ".png" else path
                     "https://image.tmdb.org/t/p/w500$rasterPath"
                 },
-                fetchedTrailers, fetchedRecommendations, if (isMovie) detailRes.runtime else null, fetchedAgeRating, crewList + castList,
+                fetchedTrailers, fetchedRecommendations, if (isMovie) detailRes.runtime else null, fetchedAgeRating, actorPairs.map { it.first },
                 (detailRes.releaseDate ?: detailRes.firstAirDate)?.split("-")?.first()?.toIntOrNull(),
                 if (detailRes.status == "Returning Series") ShowStatus.Ongoing else ShowStatus.Completed, episodeTmdbMeta, detailRes.origin_country,
                 detailRes.original_title ?: detailRes.original_name,
                 extractedEnglishTitle,
                 detailRes.vote_average,
                 selectedLogo != null && selectedLogo.iso_639_1?.lowercase() != preferred,
-                detailRes.genres.orEmpty().mapNotNull { it.id }
+                detailRes.genres.orEmpty().mapNotNull { it.id },
+                actorPairs.map { it.second }
             )
         }
 
@@ -3522,6 +3536,7 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
 
 
                 }
+                ActorInformation.register(provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty())
                 return@coroutineScope response.apply { attachMappedIds() }
 
             } else {
@@ -3564,6 +3579,7 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
                     
 
                 }
+                ActorInformation.register(provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty())
                 return@coroutineScope response.apply { attachMappedIds() }
             }           
         }
@@ -3874,8 +3890,8 @@ private data class TmdbReleaseDate(@JsonProperty("certification") val certificat
 private data class TmdbContentRatings(@JsonProperty("results") val results: List<TmdbContentRatingResult>?)
 private data class TmdbContentRatingResult(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("rating") val rating: String?)
 private data class TmdbCredits(@JsonProperty("cast") val cast: List<TmdbCast>? = null, @JsonProperty("crew") val crew: List<TmdbCrew>? = null)
-private data class TmdbCast(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("character") val character: String?, @JsonProperty("profile_path") val profilePath: String?)
-private data class TmdbCrew(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("job") val job: String?, @JsonProperty("profile_path") val profilePath: String?)
+private data class TmdbCast(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("character") val character: String?, @JsonProperty("profile_path") val profilePath: String?, @JsonProperty("id") val id: Int? = null)
+private data class TmdbCrew(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("job") val job: String?, @JsonProperty("profile_path") val profilePath: String?, @JsonProperty("id") val id: Int? = null)
 private data class TmdbSeasonDetail(@JsonProperty("episodes") val episodes: List<TmdbEpisode>? = null)
 private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("episode_number") val episodeNumber: Int?, @JsonProperty("air_date") val airDate: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("runtime") val runtime: Int?)
 

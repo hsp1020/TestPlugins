@@ -49,6 +49,7 @@ import androidx.lifecycle.ViewModelProvider
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
+import com.lagradost.cloudstream3.ui.result.ActorAdaptor
 import com.lagradost.cloudstream3.utils.AppContextUtils.html
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity
@@ -668,6 +669,7 @@ internal class RatingPlotImageHook(
         private val castItems = root.resources.getIdentifier("result_cast_items", "id", root.context.packageName)
             .takeIf { it != 0 }?.let { root.findViewById<RecyclerView>(it) }
         private val actorNameId = root.resources.getIdentifier("actor_name", "id", root.context.packageName)
+        private val actorInformation = ActorInformation.Controller(fragment, detailUrl)
         private val genreGroup = root.findViewById<ChipGroup>(R.id.result_tag)
         private val boundGenreChips = mutableMapOf<View, CatalogShortcutTarget>()
         private val actorCardForegrounds = mutableMapOf<View, Drawable?>()
@@ -751,9 +753,16 @@ internal class RatingPlotImageHook(
                 .ifEmpty { fragment.arguments?.getString("name")?.trim().orEmpty() })
         }
         private val castClick = View.OnClickListener { card ->
+            val list = castItems ?: return@OnClickListener
+            val position = list.getChildAdapterPosition(card)
+            if (position == RecyclerView.NO_POSITION) return@OnClickListener
+            (list.adapter as? ActorAdaptor)?.getItemOrNull(position)?.let { actorInformation.click(position, it) }
+        }
+        private val castLongClick = View.OnLongClickListener { card ->
             if (actorNameId != 0) {
                 openSearch(card.findViewById<TextView>(actorNameId)?.text?.toString()?.trim().orEmpty())
             }
+            true
         }
         private val detailPreDraw = ViewTreeObserver.OnPreDrawListener {
             if (fragment.isAdded) {
@@ -762,6 +771,7 @@ internal class RatingPlotImageHook(
                     for (i in 0 until list.childCount) {
                         val card = list.getChildAt(i)
                         card.setOnClickListener(castClick)
+                        card.setOnLongClickListener(castLongClick)
                         bindActorCardRipple(card)
                     }
                 }
@@ -770,6 +780,7 @@ internal class RatingPlotImageHook(
             true
         }
         fun start() {
+            actorInformation.start()
             view.addTextChangedListener(this)
             searchButton?.setOnClickListener(searchClick)
             if (searchButton != null || castItems != null || genreGroup != null)
@@ -777,6 +788,7 @@ internal class RatingPlotImageHook(
             runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() }
         }
         fun detach() {
+            actorInformation.stop()
             view.removeTextChangedListener(this)
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(detailPreDraw)
             searchButton?.setOnClickListener(null)
@@ -788,6 +800,8 @@ internal class RatingPlotImageHook(
             }
             boundGenreChips.clear()
             actorCardForegrounds.forEach { (card, foreground) ->
+                card.setOnClickListener(null)
+                card.setOnLongClickListener(null)
                 card.setOnTouchListener(null)
                 card.isPressed = false
                 card.foreground = foreground
