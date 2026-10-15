@@ -25,6 +25,7 @@ import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import kotlinx.coroutines.CancellationException
 import android.content.Context
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Color
@@ -490,23 +491,25 @@ class SettingsBottomFragment(
     private fun fitDialog(dialog: Dialog, root: LinearLayout, body: View?, capDp: Int) {
         val metrics = hostContext.resources.displayMetrics
         val base = Rect()
-        (hostContext as? Activity)?.window?.decorView?.getWindowVisibleDisplayFrame(base)
-        val baseHeight = if (base.height() > 0 && !imeVisible(root)) base.height() else metrics.heightPixels
+        val hostDecor = (hostContext as? Activity)?.window?.decorView
+        hostDecor?.getWindowVisibleDisplayFrame(base)
+        val baseHeight = if (base.height() > 0 && hostDecor?.let { imeVisible(it) } != true)
+            base.height() else metrics.heightPixels
         val heightCap = (baseHeight * 0.88f).toInt().coerceAtLeast(1)
         val initialPadding = intArrayOf(root.paddingLeft, root.paddingTop, root.paddingRight, root.paddingBottom)
         val title = root.getChildAt(0)?.takeIf { it !== body }
         val footer = root.getChildAt(root.childCount - 1)?.takeIf { it !== body && it is LinearLayout }
         var sizing = false
-        fun resize() {
-            if (sizing || !dialog.isShowing || closing) return
+        fun resize(initial: Boolean = false) {
+            if (sizing || closing || (!initial && !dialog.isShowing)) return
             sizing = true
             try {
                 val frame = Rect()
-                root.getWindowVisibleDisplayFrame(frame)
+                if (root.isAttachedToWindow) root.getWindowVisibleDisplayFrame(frame) else frame.set(base)
                 val availableWidth = frame.width().takeIf { it > 0 } ?: metrics.widthPixels
                 val width = minOf(dp(capDp), (availableWidth * 0.9f).toInt()).coerceAtLeast(1)
                 val bodyWidth = (width - root.paddingLeft - root.paddingRight).coerceAtLeast(1)
-                val keyboard = imeVisible(root)
+                val keyboard = root.isAttachedToWindow && imeVisible(root)
                 val cap = if (keyboard) minOf(heightCap, frame.height().takeIf { it > 0 } ?: heightCap) else heightCap
                 var showTitle = true
                 var showFooter = true
@@ -580,25 +583,24 @@ class SettingsBottomFragment(
         onClose(dialog) {
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnGlobalLayoutListener(listener)
         }
-        resize()
+        resize(initial = true)
     }
 
     private fun styleAddonIcon(button: ImageButton, name: String) {
         button.setImageDrawable(getDrawable(name))
-        button.imageTintList = ColorStateList.valueOf(if (name == "delete_icon") Color.rgb(229, 9, 20)
-            else hostContext.colorFromAttribute(HostR.attr.textColor))
+        button.imageTintList = ColorStateList.valueOf(hostContext.colorFromAttribute(HostR.attr.textColor))
         button.makeTvCompatible()
     }
     private fun inputSlot(field: EditText) = FrameLayout(hostContext).apply {
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48))
         addView(field, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(35), Gravity.CENTER_VERTICAL))
     }
-    private fun bindAddonActions(owner: Dialog, url: EditText, gear: ImageButton, trash: ImageButton,
-        name: EditText? = null, canDelete: () -> Boolean, onDelete: () -> Unit) {
+    private fun bindAddonActions(owner: Dialog, url: EditText, gear: ImageButton, trash: ImageButton?,
+        name: EditText? = null, canDelete: () -> Boolean = { false }, onDelete: () -> Unit = {}) {
         styleAddonIcon(gear, "settings_icon")
-        styleAddonIcon(trash, "delete_icon")
+        trash?.let { styleAddonIcon(it, "delete_icon") }
         fun update() {
-            listOf(gear to url.text.isNotBlank(), trash to canDelete()).forEach { (button, enabled) ->
+            listOfNotNull(gear to url.text.isNotBlank(), trash?.let { it to canDelete() }).forEach { (button, enabled) ->
                 button.isEnabled = enabled
                 button.isFocusable = enabled
                 button.alpha = if (enabled) 1f else 0.5f
@@ -617,9 +619,9 @@ class SettingsBottomFragment(
                 url.requestFocus()
             }
         }
-        trash.setOnClickListener { if (canDelete()) onDelete() }
+        trash?.setOnClickListener { if (canDelete()) onDelete() }
         update()
-        horizontalFocus(url, gear, trash)
+        horizontalFocus(*listOfNotNull<View>(url, gear, trash).toTypedArray())
         val cleanup: () -> Unit = { url.removeTextChangedListener(watcher); name?.removeTextChangedListener(watcher) }
         onClose(owner, cleanup)
     }
@@ -749,14 +751,20 @@ class SettingsBottomFragment(
         dialogOwners[dialog] = owner
         childDialogs.add(dialog)
         dialog.setCanceledOnTouchOutside(false)
-        dialog.setOnShowListener {
-            dialog.window?.apply {
-                setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-                clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-                setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-                setGravity(Gravity.CENTER)
+        dialog.create()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            attributes = attributes.apply {
+                gravity = Gravity.CENTER
+                x = 0; y = 0
+                windowAnimations = 0
             }
-            if (root != null) fitDialog(dialog, root, body, capDp)
+        }
+        // Size before show(): the first frame must not use the host's default dialog bounds.
+        if (root != null) fitDialog(dialog, root, body, capDp)
+        dialog.setOnShowListener {
             if (isLayout(TV) || initialFocus != null) {
                 val focus = initialFocus?.invoke() ?: body?.getFocusables(View.FOCUS_FORWARD)?.firstOrNull { usable(it) }
                     ?: contentView.getFocusables(View.FOCUS_FORWARD).firstOrNull { usable(it) }
@@ -1316,7 +1324,7 @@ class SettingsBottomFragment(
         view.findView<ImageView>("toggleStreamSubtitleUrls").apply {
             visibility = View.GONE; isFocusable = false; isClickable = false
         }
-        val sourceEntry = view.optional("rowStreamSubtitleAddons") ?: simpleButton("Stream / Subtitle Addons ›").also {
+        val sourceEntry = view.optional("rowStreamSubtitleAddons") ?: simpleButton("Streams / Subtitles Addon ›").also {
             (view.findView<LinearLayout>("containerStreamSubtitleUrls").parent as ViewGroup).addView(it)
         }
         view.optional("btnAddStreamSubtitleUrl")?.visibility = View.GONE
@@ -1328,15 +1336,10 @@ class SettingsBottomFragment(
         layoutHistorySyncUrl.visibility = View.VISIBLE
         etHistorySyncUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, ""))
         val historyGear = view.optional("btnConfigureHistoryAddon") as? ImageButton
-        val historyDelete = view.optional("btnDeleteHistoryAddon") as? ImageButton
-        if (historyGear != null && historyDelete != null) bindAddonActions(settingsDialog,
-            etHistorySyncUrl, historyGear, historyDelete, canDelete = { etHistorySyncUrl.text.isNotBlank() }) {
-            showDeleteConfirmation(settingsDialog, "Meta / History addon",
-                "Clear the Meta / History addon URL?") {
-                etHistorySyncUrl.setText("")
-                focusPlans[settingsDialog] = { etHistorySyncUrl.requestFocus() }
-            }
+        view.optional("btnDeleteHistoryAddon")?.apply {
+            visibility = View.GONE; isFocusable = false; isClickable = false
         }
+        if (historyGear != null) bindAddonActions(settingsDialog, etHistorySyncUrl, historyGear, trash = null)
 
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
@@ -1406,7 +1409,7 @@ class SettingsBottomFragment(
             (view.optional("summaryMetadata") as? TextView)?.text =
                 "$code · ${if (etTmdbApiKey.text.isNotBlank()) "API key set" else "API key required"}"
             (view.optional("summaryDisplay") as? TextView)?.text =
-                "MDBList: ${if (switchMdbList.isChecked) "On" else "Off"} · XRDB: ${if (switchCustomPoster.isChecked) "On" else "Off"}"
+                "MDBList: ${if (switchMdbList.isChecked) "On" else "Off"} · Custom Poster: ${if (switchCustomPoster.isChecked) "On" else "Off"}"
             listOf("rowCatalogs", "rowSources", "rowMetadata", "rowDisplay", "rowLanguage", "rowBackup", "rowStreamSubtitleAddons").forEach { id ->
                 (view.optional(id) as? ViewGroup)?.let { row ->
                     val texts = mutableListOf<String>()
@@ -1564,13 +1567,13 @@ class SettingsBottomFragment(
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
         showPage(SettingsPage.HUB)
-        settingsDialog.show()
         if (view is LinearLayout) fitDialog(settingsDialog, view, viewport, 800)
         else {
             val metrics = ctx.resources.displayMetrics
             settingsDialog.window?.setLayout(minOf(dp(800), (metrics.widthPixels * 0.9f).toInt()),
                 (metrics.heightPixels * 0.88f).toInt())
         }
+        settingsDialog.show()
         if (isLayout(TV)) (view.optional("rowCatalogs") ?: showlinks).requestFocus()
     }
 
@@ -1595,7 +1598,7 @@ class SettingsBottomFragment(
             return
         }
         val sources = sourceDraft != null
-        (content.getChildAt(0) as? TextView)?.text = if (sources) "Stream / Subtitle Addons" else "Catalogs"
+        (content.getChildAt(0) as? TextView)?.text = if (sources) "Streams / Subtitles Addon" else "Catalogs"
         content.background = getDarkThemeBg()
         val rv = content.findView<RecyclerView>("rvLinks")
         rv.layoutManager = LinearLayoutManager(ctx)
@@ -1648,7 +1651,7 @@ class SettingsBottomFragment(
                 refreshList(changed, position.coerceAtLeast(0))
             }
         }
-        adapter = LinksAdapter(records(), showSyncBadge = !sources,
+        adapter = LinksAdapter(records(),
             onDelete = { item ->
                 val position = adapter.positionOf(item.id).coerceAtLeast(0)
                 showDeleteConfirmation(dialog, item.name,
@@ -1714,8 +1717,8 @@ class SettingsBottomFragment(
         }
         dialogView.background = getDarkThemeBg()
         (dialogView.getChildAt(0) as? TextView)?.text = when {
-            sources && isEdit -> "Edit Stream / Subtitle Addon"
-            sources -> "Add Stream / Subtitle Addon"
+            sources && isEdit -> "Edit Streams / Subtitles Addon"
+            sources -> "Add Streams / Subtitles Addon"
             isEdit -> "Edit Catalog"
             else -> "Add Catalog"
         }
@@ -2183,7 +2186,8 @@ private fun showLanguageSelectDialog() {
                 holder.checkbox.isChecked = tab.isChecked
                 holder.checkbox.text = tab.displayName
                 val itemColor = hostContext.colorFromAttribute(if (tab.isChecked) HostR.attr.colorPrimary else HostR.attr.textColor)
-                holder.checkbox.setTextColor(itemColor)
+                holder.checkbox.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
+                holder.etOrder.setTextColor(itemColor)
                 holder.checkbox.buttonTintList = ColorStateList.valueOf(itemColor)
                 holder.checkbox.setOnCheckedChangeListener { _, isChecked ->
                     (rv.findFocus() as? EditText)?.clearFocus()
@@ -2391,7 +2395,7 @@ private fun showLanguageSelectDialog() {
                 switchView.text = "Not Installed"
                 SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
             } else {
-                switchView.text = "Integration"
+                switchView.text = ""
                 switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
             }
             switchView.setOnCheckedChangeListener { _, isChecked ->
@@ -2414,7 +2418,6 @@ private fun showLanguageSelectDialog() {
 
     inner class LinksAdapter(
         private val items: MutableList<LinkItem>,
-        private val showSyncBadge: Boolean = true,
         private val onDelete: (LinkItem) -> Unit,
         private val onEdit: (LinkItem, Int) -> Unit,
         private val onCatalogs: (LinkItem) -> Unit,
@@ -2442,6 +2445,15 @@ private fun showLanguageSelectDialog() {
                 styleAddonIcon(it.catalogs, "addon_catalog_icon")
                 styleAddonIcon(it.gear, "settings_icon")
                 styleAddonIcon(it.trash, "delete_icon")
+                val actions = it.edit.parent as LinearLayout
+                fun alignActions() {
+                    val gravity = if (isLayout(TV) ||
+                        view.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+                        Gravity.END or Gravity.CENTER_VERTICAL else Gravity.CENTER
+                    actions.gravity = gravity
+                }
+                alignActions()
+                actions.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> alignActions() }
             }
         }
         override fun onBindViewHolder(holder: VH, position: Int) {
@@ -2452,8 +2464,7 @@ private fun showLanguageSelectDialog() {
             listOf(holder.tvName, holder.tvLink, holder.tvType, holder.tvSyncBadge).forEach {
                 it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             }
-            holder.tvSyncBadge.visibility = if (showSyncBadge && (item.isSyncEnabled || item.isHistorySyncEnabled ||
-                item.isStreamSubtitleSyncEnabled)) View.VISIBLE else View.GONE
+            holder.tvSyncBadge.visibility = View.GONE
             val label = item.name.takeUnless { it == item.link }?.ifBlank { "Addon" } ?: "Addon"
             holder.body.contentDescription = "$label. ${if (item.enabled) "Enabled" else "Disabled"}. Edit addon."
             holder.body.alpha = if (item.enabled) 1f else 0.6f

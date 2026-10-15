@@ -219,7 +219,7 @@
                             android:id="@+id/summaryDisplay"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:text="MDBList: Off · XRDB: Off"
+                            android:text="MDBList: Off · Custom Poster: Off"
                             android:textSize="12sp"
                             android:tag="stremioc_secondary"
                             android:singleLine="true"
@@ -308,7 +308,7 @@
                         <TextView
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:text="Stream / Subtitle Addons"
+                            android:text="Streams / Subtitles Addon"
                             android:textSize="16sp"
                             android:textStyle="bold" />
                         <TextView
@@ -335,6 +335,8 @@
                     android:layout_marginTop="3dp"
                     android:layout_marginBottom="3dp"
                     android:orientation="horizontal"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
                     android:gravity="center_vertical">
                     <TextView
                         android:layout_width="0dp"
@@ -358,6 +360,8 @@
                     android:layout_marginTop="3dp"
                     android:layout_marginBottom="3dp"
                     android:orientation="horizontal"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
                     android:gravity="center_vertical">
                     <TextView
                         android:layout_width="0dp"
@@ -381,6 +385,8 @@
                     android:layout_marginTop="3dp"
                     android:layout_marginBottom="3dp"
                     android:orientation="horizontal"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
                     android:gravity="center_vertical">
                     <TextView
                         android:layout_width="0dp"
@@ -525,7 +531,7 @@
                                 android:layout_width="match_parent"
                                 android:layout_height="35dp"
                                 android:layout_gravity="center_vertical"
-                                android:hint="Addon URL (http/https)"
+                                android:hint="Aiometadata URL"
                                 android:inputType="textUri"
                                 android:singleLine="true"
                                 android:textSize="14sp"
@@ -552,7 +558,9 @@
                             android:padding="12dp"
                             android:scaleType="centerInside"
                             android:contentDescription="Delete Meta / History addon URL"
-                            android:focusable="true"
+                            android:visibility="gone"
+                            android:focusable="false"
+                            android:importantForAccessibility="no"
                             android:background="?android:attr/selectableItemBackgroundBorderless" />
                     </LinearLayout>
                     <TextView
@@ -639,7 +647,7 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="XRDB Poster"
+                        android:text="Custom Poster"
                         android:textSize="16sp"
                         android:textStyle="bold" />
                     <Switch
@@ -648,7 +656,7 @@
                         android:layout_height="wrap_content"
                         android:minHeight="48dp"
                         android:focusable="true"
-                        android:contentDescription="XRDB Poster" />
+                        android:contentDescription="Custom Poster" />
                 </LinearLayout>
                 <LinearLayout
                     android:id="@+id/layoutCustomPosterUrl"
@@ -705,7 +713,7 @@
                     android:layout_marginBottom="3dp"
                     android:paddingStart="12dp"
                     android:paddingEnd="12dp"
-                    android:gravity="center_vertical"
+                    android:gravity="center"
                     android:text="Export"
                     android:textSize="16sp"
                     android:textStyle="bold"
@@ -721,7 +729,7 @@
                     android:layout_marginBottom="3dp"
                     android:paddingStart="12dp"
                     android:paddingEnd="12dp"
-                    android:gravity="center_vertical"
+                    android:gravity="center"
                     android:text="Import"
                     android:textSize="16sp"
                     android:textStyle="bold"
