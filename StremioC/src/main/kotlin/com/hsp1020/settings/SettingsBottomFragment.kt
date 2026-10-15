@@ -32,6 +32,7 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -376,7 +377,10 @@ class SettingsBottomFragment(
     }
     private fun imeVisible(view: View): Boolean {
         if (!view.isAttachedToWindow) return false
-        if (ViewCompat.getRootWindowInsets(view)?.isVisible(WindowInsetsCompat.Type.ime()) == true) return true
+        ViewCompat.getRootWindowInsets(view)?.let { insets ->
+            val visible = insets.isVisible(WindowInsetsCompat.Type.ime())
+            if (android.os.Build.VERSION.SDK_INT >= 30 || visible) return visible
+        }
         val frame = Rect()
         view.getWindowVisibleDisplayFrame(frame)
         return frame.height() > 0 && hostContext.resources.displayMetrics.heightPixels - frame.bottom > dp(120)
@@ -501,6 +505,8 @@ class SettingsBottomFragment(
         val title = root.getChildAt(0)?.takeIf { it !== body }
         val footer = root.getChildAt(root.childCount - 1)?.takeIf { it !== body && it is LinearLayout }
         var keyboardShown = false
+        var windowInsets: WindowInsetsCompat? = null
+        var scrollBeforeIme: Pair<Int, Int>? = null
         val revealInput = Runnable {
             if (alive(dialog) && topDialog() === dialog && keyboardShown) {
                 (root.findFocus() as? EditText)?.let {
@@ -518,11 +524,14 @@ class SettingsBottomFragment(
                 val availableWidth = frame.width().takeIf { it > 0 } ?: metrics.widthPixels
                 val width = minOf(dp(capDp), (availableWidth * 0.9f).toInt()).coerceAtLeast(1)
                 val bodyWidth = (width - root.paddingLeft - root.paddingRight).coerceAtLeast(1)
-                val imeBottom = maxOf(ViewCompat.getRootWindowInsets(root)
-                    ?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0,
-                    hostDecor?.let { ViewCompat.getRootWindowInsets(it) }
-                        ?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0)
-                val keyboard = imeBottom > 0 || imeVisible(root) || hostDecor?.let { imeVisible(it) } == true
+                val insets = windowInsets ?: ViewCompat.getRootWindowInsets(root)
+                val imeBottom = insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0
+                // Only the active window owns IME state; frozen parent windows can retain stale insets.
+                val keyboard = if (android.os.Build.VERSION.SDK_INT >= 30 && insets != null)
+                    insets.isVisible(WindowInsetsCompat.Type.ime()) else imeVisible(root)
+                val wasKeyboard = keyboardShown
+                if (keyboard && !wasKeyboard)
+                    scrollBeforeIme = (body as? NestedScrollView)?.let { it.scrollX to it.scrollY }
                 keyboardShown = keyboard
                 val visibleHeight = minOf(frame.height().takeIf { it > 0 } ?: baseHeight,
                     if (imeBottom > 0) (metrics.heightPixels - imeBottom - frame.top).coerceAtLeast(1) else baseHeight)
@@ -602,6 +611,16 @@ class SettingsBottomFragment(
                 if (keyboard) {
                     root.removeCallbacks(revealInput)
                     root.post(revealInput)
+                } else {
+                    root.removeCallbacks(revealInput)
+                    if (wasKeyboard) {
+                        val scroll = scrollBeforeIme
+                        scrollBeforeIme = null
+                        root.doOnNextLayout {
+                            if (alive(dialog) && topDialog() === dialog && !keyboardShown && scroll != null)
+                                (body as? NestedScrollView)?.scrollTo(scroll.first, scroll.second)
+                        }
+                    }
                 }
             } finally { sizing = false }
         }
@@ -611,6 +630,7 @@ class SettingsBottomFragment(
         root.viewTreeObserver.addOnGlobalLayoutListener(listener)
         root.viewTreeObserver.addOnGlobalFocusChangeListener(focusListener)
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+            windowInsets = insets
             root.removeCallbacks(reflow)
             root.post(reflow)
             insets
@@ -852,7 +872,7 @@ class SettingsBottomFragment(
         return this.findViewById(id)
     }
 
-    @SuppressLint("UseCompatLoadingForDrawables")
+    @SuppressLint("UseCompatLoadingForDrawables", "ClickableViewAccessibility")
     private fun View.makeTvCompatible() {
         val outlineId = getCachedResId("outline", "drawable")
         if (background === getTag(outlineId)) return
@@ -874,6 +894,16 @@ class SettingsBottomFragment(
                 hostContext.colorFromAttribute(androidx.appcompat.R.attr.colorControlHighlight))
             attrs.recycle()
             RippleDrawable(color, content, ColorDrawable(Color.WHITE))
+        }
+        if (this !is EditText) setOnTouchListener { control, event ->
+            // Show DOWN immediately even inside scrolling parents. Native handling still owns
+            // clicks, Switch dragging, UP/CANCEL and accessibility; never consume this gesture.
+            if (control.isEnabled && control.isClickable) {
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) control.isPressed = true
+                if (event.actionMasked == MotionEvent.ACTION_DOWN || event.actionMasked == MotionEvent.ACTION_MOVE)
+                    control.drawableHotspotChanged(event.x, event.y)
+            }
+            false
         }
         setTag(outlineId, background)
     }
@@ -2513,9 +2543,21 @@ private fun showLanguageSelectDialog() {
         }
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
             val view = getLayout("item_saved_link", LayoutInflater.from(parent.context), parent)
-            view.background = getCardBg()
+            view.background = null
             prepareControls(view)
             return VH(view).also {
+                it.body.background = null
+                it.body.isClickable = false
+                it.body.isLongClickable = false
+                it.body.isFocusable = false
+                listOf(it.tvName, it.tvLink, it.tvType, it.tvSyncBadge).forEach { label ->
+                    label.setTextIsSelectable(false)
+                    label.linksClickable = false
+                    label.movementMethod = null
+                    label.isClickable = false
+                    label.isLongClickable = false
+                    label.isFocusable = false
+                }
                 styleAddonIcon(it.edit, "addon_edit_icon")
                 styleAddonIcon(it.catalogs, "addon_catalog_icon")
                 styleAddonIcon(it.gear, "settings_icon")

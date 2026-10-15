@@ -12,7 +12,10 @@
     android:paddingStart="8dp"
     android:paddingTop="0dp"
     android:paddingEnd="8dp"
-    android:paddingBottom="0dp">
+    android:paddingBottom="0dp"
+    android:clickable="false"
+    android:longClickable="false"
+    android:focusable="false">
     <LinearLayout
         android:id="@+id/addonRowBody"
         android:layout_width="match_parent"
@@ -22,13 +25,17 @@
         android:gravity="center_vertical"
         android:focusable="false"
         android:clickable="false"
-        android:background="?android:attr/selectableItemBackground">
+        android:longClickable="false">
         <TextView
             android:id="@+id/tvName"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:textSize="15sp"
             android:textStyle="bold"
+            android:textIsSelectable="false"
+            android:longClickable="false"
+            android:clickable="false"
+            android:focusable="false"
             android:singleLine="true"
             android:ellipsize="end" />
         <LinearLayout
@@ -44,6 +51,11 @@
                 android:layout_weight="1"
                 android:textSize="12sp"
                 android:tag="stremioc_secondary"
+                android:textIsSelectable="false"
+                android:linksClickable="false"
+                android:longClickable="false"
+                android:clickable="false"
+                android:focusable="false"
                 android:singleLine="true"
                 android:ellipsize="end" />
             <TextView
