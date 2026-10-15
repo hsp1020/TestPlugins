@@ -58,6 +58,7 @@ import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.ui.settings.Globals.TV
 import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
@@ -150,7 +151,7 @@ internal class CatalogBrowserDialog(
         typeface = Typeface.create(typeface, Typeface.BOLD)
     }
     private val retry = button("Retry").apply { visibility = View.GONE }
-    private val initialLoading = StremioLoading(activity, 3)
+    private var initialSkeleton = false
     // The appended-page shimmer is a view overlay, not an adapter item or catalog record.
     private val pageSkeleton = ShimmerFrameLayout(activity).apply {
         setShimmer(Shimmer.AlphaHighlightBuilder()
@@ -210,10 +211,18 @@ internal class CatalogBrowserDialog(
     private val homeTitleFocus = if (initialCatalog != null)
         activity.currentFocus?.takeIf { it.id == R.id.home_child_more_info } else null
     private fun initialProgress(active: Boolean) {
-        initialLoading.loading(active)
+        initialSkeleton = active
         grid.visibility = if (active) View.INVISIBLE else View.VISIBLE
+        pageSkeleton.visibility = if (active) View.VISIBLE else View.GONE
+        if (active) {
+            pageSkeleton.startShimmer()
+            pageSkeleton.post {
+                if (!closed && initialSkeleton) updatePageSkeleton()
+            }
+        } else pageSkeleton.stopShimmer()
     }
     private fun pageProgress(active: Boolean) {
+        initialSkeleton = false
         pageSkeleton.visibility = if (active) View.VISIBLE else View.GONE
         if (active) pageSkeleton.startShimmer() else pageSkeleton.stopShimmer()
         // When the preceding row is complete, let the grid scroll far enough to
@@ -238,8 +247,32 @@ internal class CatalogBrowserDialog(
     }
 
     private fun updatePageSkeleton() {
-        if (pageSkeleton.visibility != View.VISIBLE || items.isEmpty()) return
+        if (pageSkeleton.visibility != View.VISIBLE) return
         val columns = grid.spanCount.coerceAtLeast(1)
+        if (initialSkeleton) {
+            // No results are present yet: mirror SearchAdapter's 0.68 cover ratio
+            // and the native grid's 2dp poster margins without adding adapter items.
+            val cellWidth = grid.itemWidth
+            if (cellWidth <= dp(4) || grid.height <= 0) return
+            val posterHeight = (cellWidth / 0.68).roundToInt()
+            val rowHeight = posterHeight + dp(4)
+            val rows = ((grid.height + rowHeight - 1) / rowHeight).coerceAtLeast(1)
+            val count = rows * columns
+            resizeSkeletonSlots(count)
+            for (i in 0 until count) {
+                val column = i % columns
+                val left = if (ViewCompat.getLayoutDirection(grid) == ViewCompat.LAYOUT_DIRECTION_RTL)
+                    grid.width - (column + 1) * cellWidth + dp(2)
+                else column * cellWidth + dp(2)
+                pageSkeletonSlots.getChildAt(i).layoutParams =
+                    FrameLayout.LayoutParams(cellWidth - dp(4), posterHeight).apply {
+                        leftMargin = left
+                        topMargin = (i / columns) * rowHeight + dp(2)
+                    }
+            }
+            return
+        }
+        if (items.isEmpty()) return
         val last = grid.layoutManager?.findViewByPosition(items.lastIndex) ?: return
         val poster = last.findViewById<View>(R.id.background_card) ?: return
         if (last.width <= 0 || last.height <= 0 || poster.width <= 0 || poster.height <= 0) return
@@ -251,18 +284,7 @@ internal class CatalogBrowserDialog(
         val start = items.size % columns
         val number = columns - start
         val top = (if (start == 0) last.bottom else last.top) + posterBounds.top - last.top
-        while (pageSkeletonSlots.childCount > number)
-            pageSkeletonSlots.removeViewAt(pageSkeletonSlots.childCount - 1)
-        while (pageSkeletonSlots.childCount < number) {
-            pageSkeletonSlots.addView(CardView(activity).apply {
-                radius = activity.resources.getDimension(R.dimen.rounded_image_radius)
-                cardElevation = 0f
-                setCardBackgroundColor(activity.colorFromAttribute(R.attr.textColor))
-                isClickable = false
-                isFocusable = false
-                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            })
-        }
+        resizeSkeletonSlots(number)
         for (index in 0 until number) {
             val columnIndex = start + index
             val left = firstLeft + (if (rtl) -columnIndex else columnIndex) * last.width +
@@ -274,6 +296,23 @@ internal class CatalogBrowserDialog(
                 }
         }
     }
+    private fun resizeSkeletonSlots(count: Int) {
+        while (pageSkeletonSlots.childCount > count)
+            pageSkeletonSlots.removeViewAt(pageSkeletonSlots.childCount - 1)
+        while (pageSkeletonSlots.childCount < count) {
+            pageSkeletonSlots.addView(CardView(activity).apply {
+                // Use CloudStream's loading_poster resources, not the normal poster style.
+                radius = activity.resources.getDimension(R.dimen.loading_radius)
+                cardElevation = 0f
+                setCardBackgroundColor(
+                    androidx.core.content.ContextCompat.getColor(activity, R.color.grayShimmer))
+                isClickable = false
+                isFocusable = false
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            })
+        }
+    }
+
     private var touchStartY = 0f
     private var closed = false
     private val navigation by lazy {
@@ -620,7 +659,6 @@ internal class CatalogBrowserDialog(
             addView(grid, FrameLayout.LayoutParams(-1, -1))
             pageSkeleton.addView(pageSkeletonSlots, FrameLayout.LayoutParams(-1, -1))
             addView(pageSkeleton, FrameLayout.LayoutParams(-1, -1))
-            addView(initialLoading, FrameLayout.LayoutParams(-1, -1))
             addView(edgeFade, FrameLayout.LayoutParams(-1, dp(15), Gravity.TOP))
         }
         header.addOnOffsetChangedListener(AppBarLayout.OnOffsetChangedListener { bar, offset ->
