@@ -318,9 +318,8 @@ internal object ActorInformation {
             }
             val heading = LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
             }
-            heading.addView(label(actor.name, 23f, true), LinearLayout.LayoutParams(0, -2, 1f))
             val close = label("✕", 23f, true).apply {
                 isFocusable = true
                 isClickable = true
@@ -343,14 +342,19 @@ internal object ActorInformation {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.TOP
             }
-            // Native cast_item.xml: 70dp circle, 35dp radius and centerCrop.
+            // Use the native actor's centerCrop and border, with a responsive circle
+            // spanning the name through the last available biography fact.
             val portraitHolder = CardView(activity).apply {
                 radius = dp(35).toFloat()
                 setCardBackgroundColor(activity.colorFromAttribute(R.attr.primaryGrayBackground))
                 addView(ImageView(activity).apply {
                     scaleType = ImageView.ScaleType.CENTER_CROP
-                    foreground = androidx.core.content.ContextCompat.getDrawable(
-                        activity, R.drawable.outline_big_35_gray)
+                    foreground = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(Color.TRANSPARENT)
+                        setStroke(dp(2), androidx.core.content.ContextCompat.getColor(
+                            activity, R.color.white_attr_20))
+                    }
                     actor.photo?.let { loadImage(it) }
                 }, ViewGroup.LayoutParams(-1, -1))
             }
@@ -358,6 +362,20 @@ internal object ActorInformation {
             val details = column()
             details.addView(label(actor.name, 20f, true))
             profileRow.addView(details, LinearLayout.LayoutParams(0, -2, 1f))
+            var profileLoaded = false
+            details.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                if (!profileLoaded || dialog !== windowDialog) return@addOnLayoutChangeListener
+                // Preserve enough space for the text on compact phones.
+                val maxDiameter = (profileRow.width - dp(140)).coerceAtLeast(dp(70))
+                val diameter = details.height.coerceIn(dp(70), maxDiameter)
+                val params = portraitHolder.layoutParams
+                if (params.width != diameter || params.height != diameter) {
+                    params.width = diameter
+                    params.height = diameter
+                    portraitHolder.layoutParams = params
+                    portraitHolder.radius = diameter / 2f
+                }
+            }
             val aboutPane = column()
             aboutPane.addView(profileRow)
             val biography = label("Loading biography…")
@@ -411,6 +429,7 @@ internal object ActorInformation {
                 requestJob?.cancel()
                 ticket++
                 val generation = ticket
+                profileLoaded = false
                 details.removeViews(1, details.childCount - 1)
                 biography.text = "Loading biography…"
                 toggle.visibility = View.GONE
@@ -446,6 +465,7 @@ internal object ActorInformation {
                             birth?.let { "Born: " + it + ageText(it, death) },
                             death?.let { "Died: " + it },
                             place).forEach { details.addView(label(it, 13f)) }
+                        profileLoaded = true
                         val about = info.optString("biography").ifBlank { "No biography available." }
                         biography.text = about
                         biography.maxLines = if (bioExpanded) Int.MAX_VALUE else 8
