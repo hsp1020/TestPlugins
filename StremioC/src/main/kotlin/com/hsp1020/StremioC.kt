@@ -273,6 +273,11 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
         }
     }
 
+    private fun metadataPosterAddonBaseUrl(): String? {
+        val (syncUrl, syncMap, _) = getSyncSettings()
+        return syncUrl.takeIf { it.isNotBlank() && syncMap[mainUrl.cleanBaseUrl().lowercase()] == true }?.cleanBaseUrl()
+    }
+
     fun getTargetApiName(): String {
         val (_, syncMap, _) = getSyncSettings()
         val currentCleanUrl = mainUrl.cleanBaseUrl().lowercase()
@@ -408,8 +413,22 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
         private val tmdbDetailsCache = lruCacheMap<String, Pair<TmdbDetailResponse, Long>>(100)
         private val tmdbSeasonCache = lruCacheMap<String, Pair<TmdbSeasonDetail, Long>>(150)
         private val tmdbFindCache = lruCacheMap<String, Pair<Pair<String, String>?, Long>>(100)
+        private val recommendationPosterCache = lruCacheMap<String, Pair<String, Long>>(500)
         private val detailLoadHints = lruCacheMap<String, DetailUrlHint>(500)
         private const val METADATA_CACHE_TTL = 12 * 60 * 60 * 1000L
+
+        private suspend fun fetchRecommendationPoster(url: String): String? {
+            recommendationPosterCache[url]?.let { (poster, savedAt) ->
+                if (System.currentTimeMillis() - savedAt < METADATA_CACHE_TTL) return poster
+            }
+            return runSuspendCatching {
+                val json = customSession.get(url, timeout = 3L).text
+                val poster = org.json.JSONObject(json).optJSONObject("meta")?.optString("poster")
+                    ?.trim()?.takeIf { it.toHttpUrlOrNull() != null }
+                if (poster != null) recommendationPosterCache[url] = poster to System.currentTimeMillis()
+                poster
+            }.getOrNull()
+        }
 
         val catalogSentIds = ConcurrentHashMap<String, MutableSet<String>>()
         val catalogSkipState = ConcurrentHashMap<String, Int>()
@@ -2887,8 +2906,7 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
             val context = CloudStreamApp.context
             val prefs = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
             val langCode = prefs?.getString("tmdb_language_code", "en-US") ?: "en-US"
-            val customPosterEnabled = prefs?.getBoolean("custom_poster_enabled", false) ?: false
-            val customPosterBase = prefs?.getString("custom_poster_url", "") ?: ""
+            val posterAddonBase = provider.metadataPosterAddonBaseUrl()
             
             coroutineScope {
                 val shouldFocusEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType != "movie" && stremioType != "series" && !isMovie)
@@ -2947,31 +2965,35 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
                     .distinctBy { it.id }
                     .filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
 
-                fetchedRecommendations = finalCombinedMedia.map { rec ->
+                val posterById = ConcurrentHashMap<Int, String>()
+                if (posterAddonBase != null) {
+                    val limiter = Semaphore(10)
+                    withTimeoutOrNull(3000L) {
+                        finalCombinedMedia.take(50).mapNotNull { rec ->
+                            val id = rec.id ?: return@mapNotNull null
+                            async(Dispatchers.IO) {
+                                limiter.withPermit {
+                                    val type = if (rec.mediaType == "movie" || rec.title != null) "movie" else "series"
+                                    val url = "$posterAddonBase/meta/$type/${"tmdb:$id".urlEncode()}.json"
+                                    StremioC.fetchRecommendationPoster(url)?.let { posterById[id] = it }
+                                }
+                            }
+                        }.awaitAll()
+                    }
+                }
+                fetchedRecommendations = finalCombinedMedia.take(50).map { rec ->
                     val recTitle = rec.title ?: rec.name ?: ""
                     val isRecMovie = rec.mediaType == "movie" || rec.title != null
                     val recTypeStr = if (isRecMovie) "movie" else "series"
                     val recType = if (isRecMovie) TvType.Movie else TvType.TvSeries
                     
-                    val recPoster = if (customPosterEnabled && customPosterBase.isNotBlank()) {
-                        val rawUrl = customPosterBase.trim()
-                        val mediaTypeParam = if (isRecMovie) "movie" else "tv"
-                        rawUrl.replace("\$posterType", mediaTypeParam)
-                              .replace("posterType", mediaTypeParam)
-                              .replace("{type}", mediaTypeParam)
-                              .replace("\$recTmdbId", rec.id.toString())
-                              .replace("recTmdbId", rec.id.toString())
-                              .replace("{tmdb_id}", rec.id.toString())
-                    } else {
-                        // rec.posterPath -> rec.poster_path로 교정
-                        if (!rec.poster_path.isNullOrBlank()) "https://image.tmdb.org/t/p/w500${rec.poster_path}" else TRANSPARENT_PIXEL
-                    }
-                    
+                    val recPoster = rec.id?.let { posterById[it] }
+                        ?: if (!rec.poster_path.isNullOrBlank()) "https://image.tmdb.org/t/p/w500${rec.poster_path}" else TRANSPARENT_PIXEL
                     val thinData = LoadData(id = "tmdb:${rec.id}", type = recTypeStr, addonUrl = provider.mainUrl)
                     provider.newMovieSearchResponse(recTitle, thinData.toJson(), recType) {
                         this.posterUrl = recPoster
                     }
-                }.take(50)
+                }
             }
             
             val countryCode = langCode.substringAfter("-", "KR").uppercase()

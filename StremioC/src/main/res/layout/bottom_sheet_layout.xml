@@ -182,51 +182,6 @@
                         android:importantForAccessibility="no" />
                 </LinearLayout>
                 <LinearLayout
-                    android:id="@+id/rowDisplay"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:minHeight="56dp"
-                    android:layout_marginTop="3dp"
-                    android:layout_marginBottom="3dp"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:paddingTop="8dp"
-                    android:paddingBottom="8dp"
-                    android:focusable="true"
-                    android:clickable="true"
-                    android:background="?android:attr/selectableItemBackground">
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:orientation="vertical">
-                        <TextView
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:text="Display &amp; Ratings"
-                            android:textSize="16sp"
-                            android:textStyle="bold" />
-                        <TextView
-                            android:id="@+id/summaryDisplay"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:text="MDBList: Off · Custom Poster: Off"
-                            android:textSize="12sp"
-                            android:tag="stremioc_secondary"
-                            android:singleLine="true"
-                            android:ellipsize="end" />
-                    </LinearLayout>
-                    <TextView
-                        android:layout_width="24dp"
-                        android:layout_height="wrap_content"
-                        android:gravity="center"
-                        android:text="›"
-                        android:textSize="24sp"
-                        android:importantForAccessibility="no" />
-                </LinearLayout>
-                <LinearLayout
                     android:id="@+id/rowBackup"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -552,20 +507,14 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Watch history and metadata sync when enabled per catalog."
+                        android:text="History and metadata sync, including recommendation posters, for enabled catalogs."
                         android:textSize="12sp"
                         android:tag="stremioc_secondary" />
                 </LinearLayout>
-            </LinearLayout>
-            <LinearLayout
-                android:id="@+id/pageDisplay"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:visibility="gone">
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
                     android:minHeight="48dp"
                     android:orientation="horizontal"
                     android:gravity="center_vertical">
@@ -617,66 +566,6 @@
                             android:background="@android:color/transparent" />
                     </FrameLayout>
                     
-                </LinearLayout>
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:minHeight="48dp"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical">
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="Custom Poster"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
-                    <Switch
-                        android:id="@+id/switchCustomPoster"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:minHeight="48dp"
-                        android:focusable="true"
-                        android:contentDescription="Custom Poster" />
-                </LinearLayout>
-                <LinearLayout
-                    android:id="@+id/layoutCustomPosterUrl"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:visibility="gone">
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="Poster URL template"
-                        android:textSize="12sp"
-                        android:tag="stremioc_secondary" />
-                    <FrameLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="48dp"
-                        android:layout_marginTop="2dp">
-                        <EditText
-                            android:id="@+id/etCustomPosterUrl"
-                            android:layout_width="match_parent"
-                            android:layout_height="35dp"
-                            android:layout_gravity="center_vertical"
-                            android:hint="https://extendedratings.com/poster/..."
-                            android:inputType="textUri"
-                            android:singleLine="true"
-                            android:textSize="14sp"
-                            android:fontFamily="sans-serif"
-                            android:paddingStart="12dp"
-                            android:paddingEnd="12dp"
-                            android:paddingTop="0dp"
-                            android:paddingBottom="0dp"
-                            android:background="@android:color/transparent" />
-                    </FrameLayout>
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="Used for TMDB recommendations only."
-                        android:textSize="12sp"
-                        android:tag="stremioc_secondary" />
                 </LinearLayout>
             </LinearLayout>
             <LinearLayout

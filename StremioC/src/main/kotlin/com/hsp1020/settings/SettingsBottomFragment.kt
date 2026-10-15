@@ -102,8 +102,6 @@ object SettingsRepository {
     const val PREF_KEY_STREAM_SUBTITLE_EXPANDED = "stream_subtitle_urls_expanded"
     
     const val PREF_KEY_TMDB_LANG_CODE = "tmdb_language_code"
-    const val PREF_KEY_CUSTOM_POSTER_ENABLED = "custom_poster_enabled"
-    const val PREF_KEY_CUSTOM_POSTER_URL = "custom_poster_url"
 
     const val PREF_KEY_TMDB_API_KEY = "tmdb_api_key"
     const val PREF_KEY_MDBLIST_ENABLED = "mdblist_enabled"
@@ -324,7 +322,7 @@ class SettingsBottomFragment(
     }
 
 
-    private enum class SettingsPage { HUB, SOURCES, METADATA, DISPLAY, BACKUP }
+    private enum class SettingsPage { HUB, SOURCES, METADATA, BACKUP }
     private var backHandler: (() -> Boolean)? = null
     private var refreshSummaries: (() -> Unit)? = null
     private var closing = false
@@ -1134,9 +1132,9 @@ class SettingsBottomFragment(
         if (view !is LinearLayout || !hasViews(view, mapOf(
             LinearLayout::class.java to listOf("settingsRoot", "settingsHeader", "settingsBody",
                 "containerStreamSubtitleUrls", "layoutHistorySyncUrl", "layoutMdbList",
-                "layoutCustomPosterUrl", "pageHub", "pageSources", "pageMetadata",
-                "pageDisplay", "pageBackup", "settingsFooter", "saveAction", "rowCatalogs",
-                "rowLanguage", "rowSources", "rowMetadata", "rowDisplay", "rowBackup",
+                "pageHub", "pageSources", "pageMetadata",
+                "pageBackup", "settingsFooter", "saveAction", "rowCatalogs",
+                "rowLanguage", "rowSources", "rowMetadata", "rowBackup",
                 "rowStreamSubtitleAddons"),
             NestedScrollView::class.java to listOf("settingsViewport"),
             TextView::class.java to listOf("settingsToggle", "tvExport", "tvImport", "settingsBack",
@@ -1144,10 +1142,8 @@ class SettingsBottomFragment(
             ImageView::class.java to listOf("saveIcon", "addlinks", "showlinks",
                 "btnSelectLanguage", "toggleStreamSubtitleUrls"),
             ImageButton::class.java to listOf("btnConfigureHistoryAddon", "btnDeleteHistoryAddon"),
-            EditText::class.java to listOf("etTmdbApiKey", "etMdbListApiKey",
-                "etCustomPosterUrl", "etHistorySyncUrl"),
-            Switch::class.java to listOf("switchMdbList", "switchCustomPoster",
-                "switchCineStream", "switchStreamPlay", "switchVixSrc")
+            EditText::class.java to listOf("etTmdbApiKey", "etMdbListApiKey", "etHistorySyncUrl"),
+            Switch::class.java to listOf("switchMdbList", "switchCineStream", "switchStreamPlay", "switchVixSrc")
         ))) {
             showToast("Settings resources are unavailable. Reload the plugin and try again.")
             finish(); return
@@ -1517,23 +1513,9 @@ class SettingsBottomFragment(
         setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
 
         val btnSelectLanguage: ImageView = try { view.findView("btnSelectLanguage") } catch (e: Throwable) { throw Exception("btnSelectLanguage ImageView not found", e) }
-        val switchCustomPoster: Switch = try { view.findView("switchCustomPoster") } catch (e: Throwable) { throw Exception("switchCustomPoster Switch not found", e) }
-        val layoutCustomPosterUrl: View = try { view.findView("layoutCustomPosterUrl") } catch (e: Throwable) { throw Exception("layoutCustomPosterUrl View not found", e) }
-        val etCustomPosterUrl: EditText = try { view.findView("etCustomPosterUrl") } catch (e: Throwable) { throw Exception("etCustomPosterUrl EditText not found", e) }
-
         btnSelectLanguage.setImageDrawable(getDrawable("settings_icon"))
         btnSelectLanguage.imageTintList = actionIconTint
         btnSelectLanguage.makeTvCompatible()
-
-        val isPosterEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_CUSTOM_POSTER_ENABLED, false)
-        switchCustomPoster.isChecked = isPosterEnabled
-        layoutCustomPosterUrl.visibility = if (isPosterEnabled) View.VISIBLE else View.GONE
-        etCustomPosterUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, ""))
-
-        switchCustomPoster.setOnCheckedChangeListener { _, isChecked ->
-            if (!isChecked && layoutCustomPosterUrl.hasFocus()) switchCustomPoster.requestFocus()
-            layoutCustomPosterUrl.visibility = if (isChecked) View.VISIBLE else View.GONE
-        }
 
         btnSelectLanguage.setOnClickListener {
             showLanguageSelectDialog()
@@ -1565,8 +1547,8 @@ class SettingsBottomFragment(
         var currentPage = SettingsPage.HUB
         val pageScroll = IntArray(SettingsPage.entries.size)
         val pageFocus = arrayOfNulls<View>(SettingsPage.entries.size)
-        val pages = listOf("pageHub", "pageSources", "pageMetadata", "pageDisplay", "pageBackup").map { view.optional(it) }
-        val titles = listOf("Stremio Settings", "Sources & Integrations", "Metadata & Sync", "Display & Ratings", "Backup")
+        val pages = listOf("pageHub", "pageSources", "pageMetadata", "pageBackup").map { view.optional(it) }
+        val titles = listOf("Stremio Settings", "Sources & Integrations", "Metadata & Sync", "Backup")
         val back = view.optional("settingsBack") as? TextView
         fun updateSummaries() {
             val count = sourceDraft.count { it.link.isNotBlank() }
@@ -1578,10 +1560,8 @@ class SettingsBottomFragment(
             val names = LANGUAGES.filter { it.second == code }
             (view.optional("summaryLanguage") as? TextView)?.text = names.singleOrNull()?.first ?: code
             (view.optional("summaryMetadata") as? TextView)?.text =
-                "$code · ${if (etTmdbApiKey.text.isNotBlank()) "API key set" else "API key required"}"
-            (view.optional("summaryDisplay") as? TextView)?.text =
-                "MDBList: ${if (switchMdbList.isChecked) "On" else "Off"} · Custom Poster: ${if (switchCustomPoster.isChecked) "On" else "Off"}"
-            listOf("rowCatalogs", "rowSources", "rowMetadata", "rowDisplay", "rowLanguage", "rowBackup", "rowStreamSubtitleAddons").forEach { id ->
+                "$code · ${if (etTmdbApiKey.text.isNotBlank()) "API key set" else "API key required"} · MDBList: ${if (switchMdbList.isChecked) "On" else "Off"}"
+            listOf("rowCatalogs", "rowSources", "rowMetadata", "rowLanguage", "rowBackup", "rowStreamSubtitleAddons").forEach { id ->
                 (view.optional(id) as? ViewGroup)?.let { row ->
                     val texts = mutableListOf<String>()
                     fun labels(node: View) {
@@ -1625,7 +1605,7 @@ class SettingsBottomFragment(
         if (hub != null) {
             view.findView<View>("rowCatalogs").setOnClickListener { showlinks.performClick() }
             listOf("rowSources" to SettingsPage.SOURCES, "rowMetadata" to SettingsPage.METADATA,
-                "rowDisplay" to SettingsPage.DISPLAY, "rowBackup" to SettingsPage.BACKUP).forEach { (id, page) ->
+                "rowBackup" to SettingsPage.BACKUP).forEach { (id, page) ->
                 view.findView<View>(id).setOnClickListener { showPage(page) }
             }
             view.findView<View>("rowLanguage").setOnClickListener { btnSelectLanguage.performClick() }
@@ -1677,9 +1657,7 @@ class SettingsBottomFragment(
                 }
             }.toString())
             editor.putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
-            editor.putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim())
-            
-            editor.putBoolean(SettingsRepository.PREF_KEY_CUSTOM_POSTER_ENABLED, switchCustomPoster.isChecked)
+            editor.remove("custom_poster_url").remove("custom_poster_enabled")
             editor.putBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, switchMdbList.isChecked)
             
             editor.putBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, switchCineStream.isChecked)
