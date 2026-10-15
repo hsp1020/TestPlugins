@@ -531,6 +531,11 @@ internal class RatingPlotImageHook(
         }
         // Do not affect navigation between ordinary search/home/library screens.
         if (listOf("nav_view", "nav_rail_view").any { find(it)?.visibility == View.VISIBLE }) return
+        val navHost = activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)
+            as? androidx.navigation.fragment.NavHostFragment ?: return
+        if (navHost.navController.currentDestination?.id !in setOf(
+                R.id.navigation_results_phone, R.id.navigation_results_tv
+            )) return
         val content = find("nav_host_fragment") ?: return
         val bounds = content.parent as? android.view.ViewGroup ?: return
         // Observe only the NavHost; never block drawing of the whole Activity.
@@ -540,9 +545,12 @@ internal class RatingPlotImageHook(
         val started = android.os.SystemClock.uptimeMillis()
         var stable = 0
         lateinit var listener: ViewTreeObserver.OnPreDrawListener
-        val release = {
+        lateinit var timeout: Runnable
+        lateinit var release: () -> Unit
+        release = {
             if (observer.isAlive) observer.removeOnPreDrawListener(listener)
-            detailRevealEnd = null
+            main.removeCallbacks(timeout)
+            if (detailRevealEnd === release) detailRevealEnd = null
         }
         listener = ViewTreeObserver.OnPreDrawListener {
             val elapsed = android.os.SystemClock.uptimeMillis() - started
@@ -556,11 +564,21 @@ internal class RatingPlotImageHook(
             if (stable >= 2 || elapsed >= 600L) {
                 release()
                 true
-            } else true
+            } else {
+                // Keep the previous search frame until the result fills the NavHost.
+                content.postInvalidateOnAnimation()
+                false
+            }
+        }
+        timeout = Runnable {
+            if (detailRevealEnd === release) {
+                release()
+                content.postInvalidateOnAnimation()
+            }
         }
         detailRevealEnd = release
         observer.addOnPreDrawListener(listener)
-        main.postDelayed({ if (detailRevealEnd === release) release() }, 650L)
+        main.postDelayed(timeout, 650L)
     }
 
     private val fragmentCallback = object : FragmentManager.FragmentLifecycleCallbacks() {
