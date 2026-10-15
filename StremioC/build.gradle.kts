@@ -41,7 +41,7 @@ cloudstream {
    
  // All of these properties are optional, you can safely remove them
 
-     description = "StremioC allows you to use catalog addons"
+     description = "StremioC Allow you to use all addons"
      authors = listOf("hsp1020")
 
     /**
