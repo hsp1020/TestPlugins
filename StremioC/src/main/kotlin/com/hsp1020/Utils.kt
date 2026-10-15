@@ -715,7 +715,11 @@ internal class RatingPlotImageHook(
                     }
                 } else {
                     (chip as? Chip)?.let(::applyEpisodeChipFeedback)
-                    chip.setOnClickListener { openCatalog(target, null) }
+                    chip.setOnClickListener {
+                        CatalogSyncTrace.emit("DETAIL_GENRE_OPEN",
+                            "target=${CatalogSyncTrace.target(target)} snapshot=false")
+                        openCatalog(target, null)
+                    }
                     chip.isFocusable = true
                     boundGenreChips[chip] = target
                 }
