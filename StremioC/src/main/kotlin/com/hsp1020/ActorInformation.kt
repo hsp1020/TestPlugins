@@ -4,6 +4,8 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.text.Layout
+import android.text.StaticLayout
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -411,6 +413,37 @@ internal object ActorInformation {
                 isFocusable = true
                 foreground = themedPressedForeground(this)
             }
+            // Measure the full text at its actual width; a character threshold is not
+            // equivalent to truncation on tablets, TV or landscape layouts.
+            var biographyReady = false
+            fun updateBiographyToggle() {
+                if (!biographyReady || dialog !== windowDialog) return
+                val contentWidth = biography.width - biography.compoundPaddingLeft -
+                    biography.compoundPaddingRight
+                if (contentWidth <= 0) return
+                val text = biography.text
+                val fullLines = StaticLayout.Builder.obtain(
+                    text, 0, text.length, biography.paint, contentWidth
+                ).setAlignment(Layout.Alignment.ALIGN_NORMAL)
+                    .setIncludePad(biography.includeFontPadding)
+                    .setLineSpacing(biography.lineSpacingExtra, biography.lineSpacingMultiplier)
+                    .setBreakStrategy(biography.breakStrategy)
+                    .setHyphenationFrequency(biography.hyphenationFrequency)
+                    .build().lineCount
+                val truncated = fullLines > 8
+                if (!truncated) bioExpanded = false
+                biography.maxLines = if (truncated && !bioExpanded) 8 else Int.MAX_VALUE
+                toggle.visibility = if (truncated) View.VISIBLE else View.GONE
+                toggle.text = if (bioExpanded) "Less" else "More"
+            }
+            biography.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+                if (right - left != oldRight - oldLeft) updateBiographyToggle()
+            }
+            toggle.setOnClickListener {
+                bioExpanded = !bioExpanded
+                updateBiographyToggle()
+                save()
+            }
             aboutPane.addView(biography)
             aboutPane.addView(toggle)
             // In landscape, match Nuvio's approximate 25:75 info/credits split.
@@ -470,6 +503,7 @@ internal object ActorInformation {
                 body.visibility = View.INVISIBLE
                 loadingName.visibility = View.VISIBLE
                 details.removeViews(1, details.childCount - 1)
+                biographyReady = false
                 biography.text = "Loading biography…"
                 toggle.visibility = View.GONE
                 filmArea.removeAllViews()
@@ -507,16 +541,11 @@ internal object ActorInformation {
                         profileLoaded = true
                         val about = info.optString("biography").ifBlank { "No biography available." }
                         biography.text = about
-                        biography.maxLines = if (bioExpanded) Int.MAX_VALUE else 8
-                        if (about.length > 320) {
-                            toggle.visibility = View.VISIBLE
-                            toggle.text = if (bioExpanded) "Less" else "More"
-                            toggle.setOnClickListener {
-                                bioExpanded = !bioExpanded
-                                biography.maxLines = if (bioExpanded) Int.MAX_VALUE else 8
-                                toggle.text = if (bioExpanded) "Less" else "More"
-                                save()
-                            }
+                        biographyReady = true
+                        updateBiographyToggle()
+                        biography.doOnPreDraw {
+                            if (dialog === windowDialog && generation == ticket)
+                                updateBiographyToggle()
                         }
                     }.onFailure { error ->
                         profileLoaded = true
@@ -616,9 +645,13 @@ internal object ActorInformation {
         }
 
         private fun openCredit(providerUrl: String?, credit: Credit, view: View) {
+            // A single addon URL now registers a Home provider plus search-only
+            // providers. Route actor credits through the original Home provider.
+            val source = providerUrl ?: (model.currentRepo?.api as? StremioC)
+                ?.mainUrl?.let(::stremioManifestUrl)
             val provider = getSafeAllProviders().filterIsInstance<StremioC>()
-                .filter { stremioManifestUrl(it.mainUrl) == providerUrl }
-                .singleOrNull() ?: run {
+                .firstOrNull { it.hasMainPage && stremioManifestUrl(it.mainUrl) == source }
+                ?: run {
                     android.widget.Toast.makeText(fragment.context,
                         "Original StremioC addon is unavailable.", android.widget.Toast.LENGTH_SHORT).show()
                     return
