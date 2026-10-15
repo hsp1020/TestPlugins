@@ -2967,8 +2967,8 @@ open class StremioC(override var mainUrl: String, override var name: String, pri
 
                 val posterById = ConcurrentHashMap<Int, String>()
                 if (posterAddonBase != null) {
-                    val limiter = Semaphore(10)
-                    withTimeoutOrNull(3000L) {
+                    val limiter = Semaphore(20)
+                    withTimeoutOrNull(7000L) {
                         finalCombinedMedia.take(50).mapNotNull { rec ->
                             val id = rec.id ?: return@mapNotNull null
                             async(Dispatchers.IO) {
