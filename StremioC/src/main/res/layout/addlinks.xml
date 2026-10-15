@@ -69,24 +69,6 @@
                         android:paddingBottom="0dp"
                         android:background="@android:color/transparent" />
                 </FrameLayout>
-                <ImageButton
-                    android:id="@+id/btnConfigureAddon"
-                    android:layout_width="48dp"
-                    android:layout_height="48dp"
-                    android:padding="12dp"
-                    android:scaleType="centerInside"
-                    android:contentDescription="Addon settings"
-                    android:focusable="true"
-                    android:background="?android:attr/selectableItemBackgroundBorderless" />
-                <ImageButton
-                    android:id="@+id/btnDeleteAddon"
-                    android:layout_width="48dp"
-                    android:layout_height="48dp"
-                    android:padding="12dp"
-                    android:scaleType="centerInside"
-                    android:contentDescription="Delete addon"
-                    android:focusable="true"
-                    android:background="?android:attr/selectableItemBackgroundBorderless" />
             </LinearLayout>
             <LinearLayout
                 android:id="@+id/catalogSyncSection"

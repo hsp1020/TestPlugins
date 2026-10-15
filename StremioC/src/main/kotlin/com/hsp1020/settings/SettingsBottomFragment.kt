@@ -1878,7 +1878,6 @@ class SettingsBottomFragment(
         if (!hasViews(dialogView, mapOf(
             EditText::class.java to listOf("etName", "etLink"),
             Switch::class.java to listOf("switchStreamSubtitleSync", "switchLinkSync", "switchHistorySync"),
-            ImageButton::class.java to listOf("btnConfigureAddon", "btnDeleteAddon"),
             NestedScrollView::class.java to listOf("catalogEditorScroll")
         ))) {
             showToast("Settings resources are unavailable. Reload the plugin and try again.")
@@ -1908,25 +1907,6 @@ class SettingsBottomFragment(
         val dlg = AlertDialog.Builder(ctx).setView(dialogView).create()
         setupCustomDialog(dlg, dialogView, dialogView.optional("catalogEditorScroll"), 600, owner,
             initialFocus = { if (urlError != null) url else name })
-        bindAddonActions(dlg, url, dialogView.findView("btnConfigureAddon"), dialogView.findView("btnDeleteAddon"), name,
-            canDelete = { isEdit || name.text.isNotBlank() || url.text.isNotBlank() }) {
-            showDeleteConfirmation(dlg, itemToEdit?.name ?: "Addon",
-                when {
-                    sources && isEdit -> "Remove this stream / subtitle addon and discard changes in this editor?"
-                    isEdit -> "Delete this saved catalog addon? This change is saved immediately and discards changes in this editor."
-                    else -> "Clear this addon entry from the form?"
-                }) {
-                if (isEdit && itemToEdit != null) {
-                    if (sourceDraft != null) sourceDraft.removeAll { it.id == itemToEdit.id }
-                    else deleteCatalogById(itemToEdit.id)
-                    onLinksChanged?.invoke(null)
-                    dlg.dismiss()
-                } else {
-                    name.setText(""); url.setText("")
-                    focusPlans[dlg] = { name.requestFocus() }
-                }
-            }
-        }
         save.setOnClickListener {
             if (!alive(dlg) || !save.isEnabled) return@setOnClickListener
             val raw = url.text.toString().trim()
