@@ -1566,6 +1566,9 @@ class SettingsBottomFragment(
         val titles = listOf("Stremio Settings", "Sources & Integrations", "Metadata & Sync", "Backup")
         val back = view.optional("settingsBack") as? TextView
         fun updateSummaries() {
+            val catalogCount = catalogLinks().count { it.link.isNotBlank() }
+            (view.optional("summaryCatalogs") as? TextView)?.text =
+                if (catalogCount == 0) "No URL entries" else if (catalogCount == 1) "1 URL entry" else "$catalogCount URL entries"
             val count = sourceDraft.count { it.link.isNotBlank() }
             val integrations = listOf("switchCineStream", "switchStreamPlay", "switchVixSrc")
                 .count { view.findView<Switch>(it).isChecked }
@@ -1575,7 +1578,7 @@ class SettingsBottomFragment(
             val names = LANGUAGES.filter { it.second == code }
             (view.optional("summaryLanguage") as? TextView)?.text = names.singleOrNull()?.first ?: code
             (view.optional("summaryMetadata") as? TextView)?.text =
-                "$code · ${if (etTmdbApiKey.text.isNotBlank()) "API key set" else "API key required"} · MDBList: ${if (switchMdbList.isChecked) "On" else "Off"}"
+                "$code · ${if (etTmdbApiKey.text.isNotBlank()) "API key set" else "API key required"} · MDB Ratings: ${if (switchMdbList.isChecked) "On" else "Off"}"
             listOf("rowCatalogs", "rowSources", "rowMetadata", "rowLanguage", "rowBackup", "rowStreamSubtitleAddons").forEach { id ->
                 (view.optional(id) as? ViewGroup)?.let { row ->
                     val texts = mutableListOf<String>()
@@ -1742,7 +1745,7 @@ class SettingsBottomFragment(
     }
 
 
-    private fun showSavedLinksDialog() = showAddonListDialog()
+    private fun showSavedLinksDialog() = showAddonListDialog(onDraftChanged = { refreshSummaries?.invoke() })
 
     private fun showAddonListDialog(sourceDraft: MutableList<LinkItem>? = null,
         onDraftChanged: () -> Unit = {}, invalidId: Long? = null) {
