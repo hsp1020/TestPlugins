@@ -374,7 +374,6 @@ internal class StremioDetailHandoff(
         detail.doOnPreDraw {
             if (ticket != generation || !isActive || !pendingDetailDraw) return@doOnPreDraw
             val observer = detail.viewTreeObserver
-            val started = SystemClock.uptimeMillis()
             var stable = 0
             lateinit var listener: ViewTreeObserver.OnPreDrawListener
             lateinit var release: () -> Unit
@@ -390,7 +389,7 @@ internal class StremioDetailHandoff(
                     val ready = currentDestinationView() === detail &&
                         stremioDestinationReady(activity, detail)
                     stable = if (ready) stable + 1 else 0
-                    if (stable >= 3 || (SystemClock.uptimeMillis() - started >= 800L && ready)) {
+                    if (stable >= 3) {
                         release()
                         detail.postOnAnimation {
                             if (ticket == generation && isActive && pendingDetailDraw &&
