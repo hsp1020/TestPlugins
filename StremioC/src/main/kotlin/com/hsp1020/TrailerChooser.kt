@@ -216,7 +216,12 @@ internal class TrailerChooser(
         if (button == null) {
             button = Chip(context).apply {
                 // Use the exact genre-tag Chip style, preserving its font size, padding and shape.
-                setChipDrawable(ChipDrawable.createFromAttributes(context, null, 0, R.style.ChipFilled))
+                setChipDrawable(ChipDrawable.createFromAttributes(context, null, 0, R.style.ChipFilled).apply {
+                    alpha = 0x80
+                })
+                chipBackgroundColor = ColorStateList.valueOf(
+                    androidx.core.content.ContextCompat.getColor(context, R.color.primaryGrayBackground))
+                setTextColor(androidx.core.content.ContextCompat.getColor(context, R.color.white))
                 applyEpisodeChipFeedback(this)
                 typeface = Typeface.create(ResourcesCompat.getFont(context, R.font.google_sans), Typeface.BOLD)
                 fontFeatureSettings = "'liga' 0, 'clig' 0, 'calt' 0, 'dlig' 0"

@@ -11,6 +11,7 @@ import android.content.res.ColorStateList
 import android.content.res.Resources
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.text.TextUtils
 import android.view.View
@@ -150,7 +151,20 @@ internal class CatalogBrowserDialog(
     }
     private val retry = button("Retry").apply { visibility = View.GONE }
     private val initialLoading = StremioLoading(activity, 3)
-    private val loadingIndicator = StremioLoading(activity)
+    // The appended-page shimmer is a view overlay, not an adapter item or catalog record.
+    private val pageSkeleton = ShimmerFrameLayout(activity).apply {
+        setShimmer(Shimmer.AlphaHighlightBuilder()
+            .setBaseAlpha(0.2f).setHighlightAlpha(0.3f).setDuration(2000L).build())
+        visibility = View.GONE
+        isClickable = false
+        isFocusable = false
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+    }
+    private val pageSkeletonSlots = FrameLayout(activity).apply {
+        isClickable = false
+        isFocusable = false
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+    }
     private val grid = AutofitRecyclerView(activity)
     private val adapter = SearchAdapter(grid, false) { click ->
         if (!closed) when (click.action) {
@@ -200,9 +214,65 @@ internal class CatalogBrowserDialog(
         grid.visibility = if (active) View.INVISIBLE else View.VISIBLE
     }
     private fun pageProgress(active: Boolean) {
-        loadingIndicator.loading(active)
-        grid.setPadding(grid.paddingLeft, grid.paddingTop, grid.paddingRight, if (active) dp(192) else 0)
-        grid.clipToPadding = !active
+        pageSkeleton.visibility = if (active) View.VISIBLE else View.GONE
+        if (active) pageSkeleton.startShimmer() else pageSkeleton.stopShimmer()
+        // When the preceding row is complete, let the grid scroll far enough to
+        // expose placeholders on the next row without inserting fake SearchResponses.
+        val last = grid.layoutManager?.findViewByPosition(items.lastIndex)
+        val extra = if (active && items.isNotEmpty() &&
+            items.size % grid.spanCount.coerceAtLeast(1) == 0) last?.height ?: dp(190) else 0
+        grid.setPadding(grid.paddingLeft, grid.paddingTop, grid.paddingRight, extra)
+        grid.clipToPadding = extra == 0
+        if (active) grid.post {
+            if (closed || !loading || pageSkeleton.visibility != View.VISIBLE) return@post
+            updatePageSkeleton()
+            val lastView = grid.layoutManager?.findViewByPosition(items.lastIndex)
+            if (lastView != null) {
+                val nextRow = items.size % grid.spanCount.coerceAtLeast(1) == 0
+                val desiredBottom = (if (nextRow) lastView.bottom + lastView.height else lastView.bottom)
+                val overflow = desiredBottom - (grid.height - grid.paddingBottom)
+                if (overflow > 0) grid.scrollBy(0, overflow)
+            }
+            updatePageSkeleton()
+        }
+    }
+
+    private fun updatePageSkeleton() {
+        if (pageSkeleton.visibility != View.VISIBLE || items.isEmpty()) return
+        val columns = grid.spanCount.coerceAtLeast(1)
+        val last = grid.layoutManager?.findViewByPosition(items.lastIndex) ?: return
+        val poster = last.findViewById<View>(R.id.background_card) ?: return
+        if (last.width <= 0 || last.height <= 0 || poster.width <= 0 || poster.height <= 0) return
+        val posterBounds = Rect(0, 0, poster.width, poster.height)
+        grid.offsetDescendantRectToMyCoords(poster, posterBounds)
+        val column = (items.size - 1) % columns
+        val rtl = ViewCompat.getLayoutDirection(grid) == ViewCompat.LAYOUT_DIRECTION_RTL
+        val firstLeft = last.left + (if (rtl) column else -column) * last.width
+        val start = items.size % columns
+        val number = columns - start
+        val top = (if (start == 0) last.bottom else last.top) + posterBounds.top - last.top
+        while (pageSkeletonSlots.childCount > number)
+            pageSkeletonSlots.removeViewAt(pageSkeletonSlots.childCount - 1)
+        while (pageSkeletonSlots.childCount < number) {
+            pageSkeletonSlots.addView(CardView(activity).apply {
+                radius = activity.resources.getDimension(R.dimen.rounded_image_radius)
+                cardElevation = 0f
+                setCardBackgroundColor(activity.colorFromAttribute(R.attr.textColor))
+                isClickable = false
+                isFocusable = false
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            })
+        }
+        for (index in 0 until number) {
+            val columnIndex = start + index
+            val left = firstLeft + (if (rtl) -columnIndex else columnIndex) * last.width +
+                posterBounds.left - last.left
+            pageSkeletonSlots.getChildAt(index).layoutParams =
+                FrameLayout.LayoutParams(poster.width, poster.height).apply {
+                    leftMargin = left
+                    topMargin = top
+                }
+        }
     }
     private var touchStartY = 0f
     private var closed = false
@@ -548,6 +618,8 @@ internal class CatalogBrowserDialog(
         }
         val content = FrameLayout(activity).apply {
             addView(grid, FrameLayout.LayoutParams(-1, -1))
+            pageSkeleton.addView(pageSkeletonSlots, FrameLayout.LayoutParams(-1, -1))
+            addView(pageSkeleton, FrameLayout.LayoutParams(-1, -1))
             addView(initialLoading, FrameLayout.LayoutParams(-1, -1))
             addView(edgeFade, FrameLayout.LayoutParams(-1, dp(15), Gravity.TOP))
         }
@@ -570,14 +642,12 @@ internal class CatalogBrowserDialog(
             behavior = AppBarLayout.ScrollingViewBehavior()
         })
         root.addView(header, CoordinatorLayout.LayoutParams(-1, -2))
-        root.addView(loadingIndicator, CoordinatorLayout.LayoutParams(-1, dp(190)).apply {
-            gravity = Gravity.BOTTOM
-        })
         root.addView(retry, CoordinatorLayout.LayoutParams(-1, -2).apply {
             gravity = Gravity.BOTTOM
         })
         grid.adapter = adapter
         grid.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+            if (pageSkeleton.visibility == View.VISIBLE) grid.post { updatePageSkeleton() }
             if (right - left != oldRight - oldLeft) {
                 grid.post {
                     if (!closed) {
@@ -589,6 +659,7 @@ internal class CatalogBrowserDialog(
         }
         grid.addOnScrollListener(object : RecyclerView.OnScrollListener() {
             override fun onScrolled(view: RecyclerView, dx: Int, dy: Int) {
+                if (pageSkeleton.visibility == View.VISIBLE) updatePageSkeleton()
                 if (dy > 0 && !view.canScrollVertically(1)) requestPage()
             }
         })

@@ -50,6 +50,7 @@ import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /** All actor-detail models, lookup, view and navigation live in this one file. */
 internal data class ActorPersonRef(
@@ -568,7 +569,9 @@ internal object ActorInformation {
                                             else loadImage(R.drawable.default_cover)
                                         }, ViewGroup.LayoutParams(-1, -1))
                                     }
-                                    card.addView(posterHolder, LinearLayout.LayoutParams(dp(112), dp(158)))
+                                    // Match CloudStream HomeChildItemAdapter's 114:180 poster aspect.
+                                    card.addView(posterHolder, LinearLayout.LayoutParams(
+                                        dp(112), (dp(112) * 180f / 114f).roundToInt()))
                                     card.addView(label(credit.title, 13f).apply {
                                         maxLines = 2
                                     }, LinearLayout.LayoutParams(dp(112), -2))
