@@ -2,6 +2,7 @@
 package com.hsp1020
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Handler
 import android.os.Looper
 import android.os.Build
@@ -19,6 +20,9 @@ import com.lagradost.cloudstream3.plugins.PluginManager
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.getActivity
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs
+import com.lagradost.cloudstream3.utils.DataStoreHelper
+import com.lagradost.cloudstream3.utils.USER_PINNED_PROVIDERS
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
@@ -43,6 +47,56 @@ class StremioCPlugin : Plugin() {
     private var activeSettingsDialog: SettingsBottomFragment? = null
     private var activeBrowser: CatalogBrowserDialog? = null
     private val registeredProviders = mutableListOf<StremioC>()
+    private var pinSourcePrefs: SharedPreferences? = null
+    private var pinStatePrefs: SharedPreferences? = null
+    private var pinSourcesReady = false
+    private val pinnedProviderListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == USER_PINNED_PROVIDERS) ratingUiHandler.post { syncPinnedSearchOrder() }
+    }
+
+    private fun syncPinnedSearchOrder() {
+        if (!pinSourcesReady) return
+        val state = pinStatePrefs ?: return
+        val managedKey = "auto_pinned_search_providers"
+        val previouslyManaged = state.getStringSet(managedKey, emptySet())?.toSet().orEmpty()
+        val stored = DataStoreHelper.pinnedProviders.toList()
+        val original = stored.filterNot { it in previouslyManaged }
+        val originalNames = original.toHashSet()
+        val searchByUrl = registeredProviders.filter { !it.hasMainPage && it.mainUrl.isNotBlank() }
+            .groupBy { it.mainUrl }
+        val homeByName = registeredProviders.filter { it.hasMainPage }
+            .associateBy { it.name }
+        val newManaged = mutableSetOf<String>()
+        val target = mutableListOf<String>()
+        for (providerName in original) {
+            val home = homeByName[providerName]
+            if (home != null) {
+                // CloudStream ranks pinned names in reverse: keep manifest catalog order on screen.
+                for (child in searchByUrl[home.mainUrl].orEmpty().asReversed()) {
+                    if (child.name !in originalNames && newManaged.add(child.name)) {
+                        target.add(child.name)
+                    }
+                }
+            }
+            target.add(providerName)
+        }
+        if (previouslyManaged != newManaged) {
+            state.edit().putStringSet(managedKey, newManaged).apply()
+        }
+        if (stored != target) {
+            DataStoreHelper.pinnedProviders = target.toTypedArray()
+        }
+    }
+
+    private fun watchPinnedProviders(context: Context) {
+        val source = context.getSharedPrefs()
+        if (pinSourcePrefs === source) return
+        pinSourcePrefs?.unregisterOnSharedPreferenceChangeListener(pinnedProviderListener)
+        pinStatePrefs = context.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
+        pinSourcePrefs = source
+        source.registerOnSharedPreferenceChangeListener(pinnedProviderListener)
+        if (pinSourcesReady) syncPinnedSearchOrder()
+    }
 
     private fun dismissProviderPicker(host: AppCompatActivity) {
         // selectHomepage keeps its BottomSheetDialog local and passes only the Activity
@@ -177,6 +231,7 @@ class StremioCPlugin : Plugin() {
             e.printStackTrace()
         }
         reload(appContext)
+        watchPinnedProviders(appContext)
 
         // Only overlays existing MDBList emojis with bundled logos.
         // No changes to MDBList fetching, metadata, stream URLs, subtitles or ranking.
@@ -247,6 +302,10 @@ class StremioCPlugin : Plugin() {
     }
 
     override fun beforeUnload() {
+        pinSourcesReady = false
+        pinSourcePrefs?.unregisterOnSharedPreferenceChangeListener(pinnedProviderListener)
+        pinSourcePrefs = null
+        pinStatePrefs = null
         ratingUiHandler.post {
             activeBrowser?.dismiss()
             activeBrowser = null
@@ -262,6 +321,7 @@ class StremioCPlugin : Plugin() {
         val appContext = context.applicationContext
 
         CoroutineScope(Dispatchers.Main).launch {
+            pinSourcesReady = false
             try {
                 val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
                 val json = prefs.getString(PREF_KEY_LINKS, null) ?: "[]"
@@ -356,6 +416,8 @@ class StremioCPlugin : Plugin() {
                         e.printStackTrace()
                     }
                 }
+                pinSourcesReady = true
+                syncPinnedSearchOrder()
                 try {
                     MainActivity.afterPluginsLoadedEvent.invoke(true)
                 } catch (e: Throwable) {
