@@ -16,6 +16,7 @@ import androidx.cardview.widget.CardView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.core.view.doOnPreDraw
 import androidx.appcompat.app.AppCompatDialog
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
@@ -223,6 +224,7 @@ internal object ActorInformation {
         private var currentOrigin: String? = null
         private var scroll: ScrollView? = null
         private var bioExpanded = false
+        private val creditScroll = mutableMapOf<String, Int>()
         private var closed = false
         private val resumeObserver = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) maybeRestore()
@@ -240,6 +242,7 @@ internal object ActorInformation {
             val actualUrl = sourceUrl ?: page.url
             val ref = resolve(actualUrl, provider, page, position, item)
             bioExpanded = false
+            creditScroll.clear()
             if (ref == null) {
                 show(null, ActorPersonRef(null, item.actor.name, item.actor.image, false), page.url)
             } else show(ref.first, ref.second, page.url)
@@ -259,6 +262,7 @@ internal object ActorInformation {
                 put("photo", actor.photo)
                 put("crew", actor.preferCrew)
                 put("scroll", scroll?.scrollY ?: 0)
+                put("creditScroll", JSONObject(creditScroll.toMap()))
                 put("expanded", bioExpanded)
             }.toString())
         }
@@ -281,6 +285,10 @@ internal object ActorInformation {
                 obj.optBoolean("crew")
             )
             bioExpanded = obj.optBoolean("expanded")
+            creditScroll.clear()
+            obj.optJSONObject("creditScroll")?.let { saved ->
+                saved.keys().forEach { name -> creditScroll[name] = saved.optInt(name) }
+            }
             show(obj.optString("source").takeIf { it.isNotBlank() && it != "null" },
                 ref, page.url, obj.optInt("scroll"))
         }
@@ -325,7 +333,10 @@ internal object ActorInformation {
                 isClickable = true
                 setOnClickListener { windowDialog.dismiss() }
             }
+            val loadingName = label(actor.name, 20f, true)
+            heading.addView(loadingName, LinearLayout.LayoutParams(0, -2, 1f))
             heading.addView(close)
+            close.foreground = themedPressedForeground(close)
             root.addView(heading)
 
             val scroller = ScrollView(activity).apply {
@@ -336,8 +347,23 @@ internal object ActorInformation {
             val body = LinearLayout(activity).apply {
                 orientation = if (wide) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
             }
-            scroller.addView(body)
+            val bodyFrame = FrameLayout(activity)
+            bodyFrame.addView(body, FrameLayout.LayoutParams(-1, -2))
+            val skeleton = StremioLoading(activity, 3)
+            bodyFrame.addView(skeleton, FrameLayout.LayoutParams(-1, -1))
+            body.visibility = View.INVISIBLE
+            skeleton.loading(true)
+            scroller.addView(bodyFrame)
             root.addView(scroller, LinearLayout.LayoutParams(-1, 0, 1f))
+            fun revealBody() {
+                body.doOnPreDraw {
+                    if (dialog === windowDialog) {
+                        body.visibility = View.VISIBLE
+                        loadingName.visibility = View.GONE
+                        skeleton.loading(false)
+                    }
+                }
+            }
             val profileRow = LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.TOP
@@ -379,7 +405,12 @@ internal object ActorInformation {
             val aboutPane = column()
             aboutPane.addView(profileRow)
             val biography = label("Loading biography…")
-            val toggle = label("More", 13f, true).apply { visibility = View.GONE }
+            val toggle = label("More", 13f, true).apply {
+                visibility = View.GONE
+                isClickable = true
+                isFocusable = true
+                foreground = themedPressedForeground(this)
+            }
             aboutPane.addView(biography)
             aboutPane.addView(toggle)
             body.addView(aboutPane, if (wide) LinearLayout.LayoutParams(0, -2, 1f)
@@ -393,6 +424,7 @@ internal object ActorInformation {
             windowDialog.setOnDismissListener {
                 requestJob?.cancel()
                 requestJob = null
+                skeleton.loading(false)
                 dialog = null
                 scroll = null
                 if (!preserve && !closed) clearState()
@@ -403,16 +435,18 @@ internal object ActorInformation {
             save()
             scroller.post { scroller.scrollTo(0, resumeY) }
             scroller.viewTreeObserver.addOnScrollChangedListener {
-                if (dialog === windowDialog && scroller.scrollY > 0) save()
+                if (dialog === windowDialog) save()
             }
 
             if (actor.id == null) {
                 biography.text = "TMDB person ID unavailable for this actor."
+                revealBody()
                 return
             }
             val (key, language) = configuration(activity)
             if (key.isBlank()) {
                 biography.text = "Set a TMDB API key in StremioC settings."
+                revealBody()
                 return
             }
             fun showError(target: LinearLayout?, message: String, retry: () -> Unit) {
@@ -421,6 +455,7 @@ internal object ActorInformation {
                 container.addView(label("Retry", 15f, true).apply {
                     isClickable = true
                     isFocusable = true
+                    foreground = themedPressedForeground(this)
                     setOnClickListener { retry() }
                 })
             }
@@ -430,6 +465,9 @@ internal object ActorInformation {
                 ticket++
                 val generation = ticket
                 profileLoaded = false
+                skeleton.loading(true)
+                body.visibility = View.INVISIBLE
+                loadingName.visibility = View.VISIBLE
                 details.removeViews(1, details.childCount - 1)
                 biography.text = "Loading biography…"
                 toggle.visibility = View.GONE
@@ -480,10 +518,12 @@ internal object ActorInformation {
                             }
                         }
                     }.onFailure { error ->
+                        profileLoaded = true
                         biography.text = "Biography unavailable: " + (error.message ?: "Network error")
                         details.addView(label("Retry profile", 14f, true).apply {
                             isClickable = true
                             isFocusable = true
+                            foreground = themedPressedForeground(this)
                             setOnClickListener { begin() }
                         })
                     }
@@ -509,10 +549,7 @@ internal object ActorInformation {
                                     val card = column().apply {
                                         isClickable = true
                                         isFocusable = true
-                                        val ripple = android.util.TypedValue()
-                                        if (activity.theme.resolveAttribute(
-                                            android.R.attr.selectableItemBackground, ripple, true
-                                        )) setBackgroundResource(ripple.resourceId)
+                                        setBackgroundResource(R.drawable.outline_drawable)
                                         setPadding(dp(5), dp(3), dp(5), dp(8))
                                         setOnClickListener { openCredit(originProvider, credit, it) }
                                     }
@@ -521,8 +558,11 @@ internal object ActorInformation {
                                         radius = activity.resources.getDimension(R.dimen.rounded_image_radius)
                                         cardElevation = 0f
                                         setCardBackgroundColor(activity.colorFromAttribute(R.attr.primaryGrayBackground))
+                                        isDuplicateParentStateEnabled = true
                                         addView(ImageView(activity).apply {
                                             scaleType = ImageView.ScaleType.CENTER_CROP
+                                            isDuplicateParentStateEnabled = true
+                                            foreground = themedPressedForeground(this)
                                             val url = posterFor(originProvider, origin, credit)
                                             if (url != null) loadImage(url)
                                             else loadImage(R.drawable.default_cover)
@@ -537,6 +577,13 @@ internal object ActorInformation {
                                     row.addView(card, LinearLayout.LayoutParams(dp(122), -2))
                                 }
                                 strip.addView(row)
+                                strip.post { if (dialog === windowDialog) strip.scrollTo(creditScroll[title] ?: 0, 0) }
+                                strip.viewTreeObserver.addOnScrollChangedListener {
+                                    if (dialog === windowDialog) {
+                                        creditScroll[title] = strip.scrollX
+                                        save()
+                                    }
+                                }
                                 filmArea.addView(strip)
                             }
                         }
@@ -544,6 +591,7 @@ internal object ActorInformation {
                         showError(filmArea, "Credits unavailable: " +
                             (error.message ?: "Network error")) { begin() }
                     }
+                    revealBody()
                 }
             }
             begin()

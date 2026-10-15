@@ -100,15 +100,8 @@ internal class CatalogBrowserDialog(
         typeface = Typeface.create(typeface, Typeface.BOLD)
     }
     private val retry = button("Retry").apply { visibility = View.GONE }
-    private val loadingIndicator = TextView(activity).apply {
-        text = "loading.."
-        typeface = selectorLabelStyle.typeface
-        setTextSize(TypedValue.COMPLEX_UNIT_PX, selectorLabelStyle.textSize)
-        setTextColor(activity.colorFromAttribute(R.attr.textColor))
-        gravity = Gravity.CENTER
-        setPadding(dp(8), dp(8), dp(8), dp(8))
-        visibility = View.GONE
-    }
+    private val initialLoading = StremioLoading(activity, 3)
+    private val loadingIndicator = StremioLoading(activity)
     private val grid = AutofitRecyclerView(activity)
     private val adapter = SearchAdapter(grid, false) { click ->
         if (!closed) when (click.action) {
@@ -149,23 +142,16 @@ internal class CatalogBrowserDialog(
     private var autoFillCount = 0
     // Stop pathological one-item pages without leaving normal short TV catalogs stranded.
     private val maxAutoFillPages = 12
-    private var initialRevealFinished = false
     private val homeTitleFocus = if (initialCatalog != null)
         activity.currentFocus?.takeIf { it.id == R.id.home_child_more_info } else null
-    private val initialRevealListener = ViewTreeObserver.OnPreDrawListener {
-        if (!initialRevealFinished && chosen && items.isNotEmpty() &&
-            grid.childCount > 0 && (0 until grid.childCount).all { index ->
-                val image = grid.getChildAt(index).findViewById<ImageView>(R.id.imageView)
-                image != null && image.width > 0 && image.drawable != null
-            }) finishInitialReveal()
-        true
+    private fun initialProgress(active: Boolean) {
+        initialLoading.loading(active)
+        grid.visibility = if (active) View.INVISIBLE else View.VISIBLE
     }
-    private fun finishInitialReveal() {
-        if (initialRevealFinished || closed) return
-        initialRevealFinished = true
-        if (root.viewTreeObserver.isAlive)
-            root.viewTreeObserver.removeOnPreDrawListener(initialRevealListener)
-        root.alpha = 1f
+    private fun pageProgress(active: Boolean) {
+        loadingIndicator.loading(active)
+        grid.setPadding(grid.paddingLeft, grid.paddingTop, grid.paddingRight, if (active) dp(192) else 0)
+        grid.clipToPadding = !active
     }
     private var touchStartY = 0f
     private var closed = false
@@ -474,9 +460,7 @@ internal class CatalogBrowserDialog(
     }
 
     fun show(onDismiss: () -> Unit) {
-        root.alpha = 0f // Release title, selectors and loaded poster cards in one frame.
-        root.viewTreeObserver.addOnPreDrawListener(initialRevealListener)
-        root.postDelayed({ finishInitialReveal() }, 3000L) // Broken images/network must not trap an invisible UI.
+        // Header/filters are visible immediately; neither artwork nor a timeout gates the dialog.
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         root.setBackgroundColor(activity.colorFromAttribute(R.attr.primaryBlackBackground))
         val headerColor = activity.colorFromAttribute(R.attr.primaryBlackBackground)
@@ -508,6 +492,7 @@ internal class CatalogBrowserDialog(
         }
         val content = FrameLayout(activity).apply {
             addView(grid, FrameLayout.LayoutParams(-1, -1))
+            addView(initialLoading, FrameLayout.LayoutParams(-1, -1))
             addView(edgeFade, FrameLayout.LayoutParams(-1, dp(15), Gravity.TOP))
         }
         header.addOnOffsetChangedListener(AppBarLayout.OnOffsetChangedListener { bar, offset ->
@@ -529,9 +514,8 @@ internal class CatalogBrowserDialog(
             behavior = AppBarLayout.ScrollingViewBehavior()
         })
         root.addView(header, CoordinatorLayout.LayoutParams(-1, -2))
-        root.addView(loadingIndicator, CoordinatorLayout.LayoutParams(-2, -2).apply {
-            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            bottomMargin = dp(16)
+        root.addView(loadingIndicator, CoordinatorLayout.LayoutParams(-1, dp(190)).apply {
+            gravity = Gravity.BOTTOM
         })
         root.addView(retry, CoordinatorLayout.LayoutParams(-1, -2).apply {
             gravity = Gravity.BOTTOM
@@ -566,8 +550,8 @@ internal class CatalogBrowserDialog(
         }
         dialog.setContentView(root)
         dialog.setOnDismissListener {
-            if (root.viewTreeObserver.isAlive)
-                root.viewTreeObserver.removeOnPreDrawListener(initialRevealListener)
+            initialProgress(false)
+            pageProgress(false)
             closed = true
             generation++
             scope.cancel()
@@ -616,7 +600,8 @@ internal class CatalogBrowserDialog(
         generation++
         job?.cancel()
         loading = false
-        loadingIndicator.visibility = View.GONE
+        initialProgress(false)
+        pageProgress(false)
         if (catalog == null || (chosen && hasNext)) {
             retry.visibility = View.VISIBLE
         }
@@ -627,7 +612,8 @@ internal class CatalogBrowserDialog(
         fetchingCatalogs = false
         job?.cancel()
         loading = false
-        loadingIndicator.visibility = View.GONE
+        initialProgress(false)
+        pageProgress(false)
         offset = 0
         autoFillCount = 0
         items.clear()
@@ -664,6 +650,7 @@ internal class CatalogBrowserDialog(
             }
         }
         val activeSources = sources.filter { StremioC.isCatalogAddonEnabled(it.first) }
+        if (activeSources.isNotEmpty()) initialProgress(true)
         if (activeSources.isEmpty()) {
             Toast.makeText(activity, "No Stremio catalogs available.", Toast.LENGTH_SHORT).show()
             return
@@ -718,6 +705,7 @@ internal class CatalogBrowserDialog(
             if (ticket != generation || closed) return@launch
             catalogs = result
             if (result.isEmpty()) {
+                initialProgress(false)
                 Toast.makeText(activity, "Unable to load any catalog manifests.", Toast.LENGTH_SHORT).show()
                 retry.visibility = View.VISIBLE
                 return@launch
@@ -829,7 +817,7 @@ internal class CatalogBrowserDialog(
             seen.addAll(home.items.map { it.url })
             offset = home.nextSkip
             hasNext = home.hasNext && next.catalog.supportsExtra("skip")
-            adapter.submitList(items.toList())
+            adapter.submitList(items.toList()) { if (!closed) initialProgress(false) }
             autoFillIfShort(generation)
         } else requestPage()
     }
@@ -911,7 +899,8 @@ internal class CatalogBrowserDialog(
         val selectedGenre = genre
         val requestedOffset = offset
         loading = true
-        loadingIndicator.visibility = View.VISIBLE
+        val firstPage = items.isEmpty()
+        if (firstPage) initialProgress(true) else pageProgress(true)
         retry.visibility = View.GONE
         job = scope.launch {
             try {
@@ -924,7 +913,9 @@ internal class CatalogBrowserDialog(
                 items.addAll(fresh)
                 offset += rawCount // Never advance by the deduplicated display count.
                 hasNext = selectedCatalog.supportsExtra("skip") && rawCount > 0 && !repeated && fresh.isNotEmpty()
-                adapter.submitList(items.toList())
+                adapter.submitList(items.toList()) {
+                    if (ticket == generation && !closed && firstPage) initialProgress(false)
+                }
                 if (selectedGenre == null) {
                     try {
                         syncHomePage(selectedProvider, selectedCatalog, requestedOffset, page, rawCount, hasNext)
@@ -944,7 +935,8 @@ internal class CatalogBrowserDialog(
             } finally {
                 if (ticket == generation) {
                     loading = false
-                    loadingIndicator.visibility = View.GONE
+                    if (firstPage && items.isEmpty()) initialProgress(false)
+                    if (!firstPage) pageProgress(false)
                 }
             }
         }
@@ -1038,6 +1030,7 @@ internal class CatalogHomeEntryHook(
     private inner class Row(val view: View, private val child: RecyclerView, val adapter: HomeChildItemAdapter) {
         private val title = view.findViewById<View>(R.id.home_child_more_info)
         private val originalFocusable = title?.isFocusable == true
+        private val originalForeground = title?.foreground
         private var queued = false
         private val observer = object : RecyclerView.AdapterDataObserver() {
             override fun onChanged() = schedule()
@@ -1078,6 +1071,8 @@ internal class CatalogHomeEntryHook(
             adapter.registerAdapterDataObserver(observer)
             refreshFocus()
             val control = title ?: return
+            if (isLayout(TV)) control.foreground = themedPressedForeground(control)
+            control.setOnClickListener { homeTarget()?.let(::openTarget) }
             val slop = ViewConfiguration.get(control.context).scaledTouchSlop
             var pressedTarget: CatalogShortcutTarget? = null
             var downX = 0f
@@ -1105,7 +1100,7 @@ internal class CatalogHomeEntryHook(
                         pressedTarget = null
                         v.isPressed = false
                         if (!moved && event.eventTime - downAt < ViewConfiguration.getLongPressTimeout() &&
-                            homeTarget() == target) openTarget(target)
+                            homeTarget() == target) v.performClick()
                     }
                     MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> {
                         if (pressedTarget == null) return@setOnTouchListener false
@@ -1122,7 +1117,7 @@ internal class CatalogHomeEntryHook(
                     key != KeyEvent.KEYCODE_NUMPAD_ENTER && key != KeyEvent.KEYCODE_BUTTON_A
                 ) return@setOnKeyListener false
                 val target = homeTarget() ?: return@setOnKeyListener false
-                if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) openTarget(target)
+                if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) control.performClick()
                 true
             }
         }
@@ -1132,6 +1127,8 @@ internal class CatalogHomeEntryHook(
             title?.apply {
                 setOnTouchListener(null)
                 setOnKeyListener(null)
+                setOnClickListener(null)
+                foreground = originalForeground
                 isPressed = false
                 if (isLayout(TV)) isFocusable = originalFocusable
             }

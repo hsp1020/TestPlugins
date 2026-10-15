@@ -82,6 +82,8 @@ internal class TrailerChooser(
     private var button: TextView? = null
     private var dialog: BottomSheetDialog? = null
     private var opening = false
+    private var extractionJob: kotlinx.coroutines.Job? = null
+    private var extractionProgress: android.widget.ProgressBar? = null
     private var finishPlayerHandoff: (() -> Unit)? = null
     private var reopenAfterPlayback = false
     private var reopenScrollY = 0
@@ -163,7 +165,6 @@ internal class TrailerChooser(
         if (tvContainer?.visibility != desired) tvContainer?.visibility = desired
         // The host can replace the click listener or button style after metadata arrives.
         if (desired == View.VISIBLE) {
-            (tvButton as? TextView)?.let { if (it.currentTextColor != Color.WHITE) it.setTextColor(Color.WHITE) }
             tvButton?.setOnClickListener(pickerClick)
         }
     }
@@ -215,24 +216,14 @@ internal class TrailerChooser(
         if (button == null) {
             button = Chip(context).apply {
                 // Use the exact genre-tag Chip style, preserving its font size, padding and shape.
-                setChipDrawable(ChipDrawable.createFromAttributes(context, null, 0, R.style.ChipFilled).apply {
-                    alpha = 0x80
-                })
-                chipBackgroundColor = ColorStateList.valueOf(0xFF2B2C30.toInt())
-                rippleColor = ColorStateList.valueOf(STREMIOC_DETAIL_RIPPLE_COLOR)
-                setTextColor(Color.WHITE)
+                setChipDrawable(ChipDrawable.createFromAttributes(context, null, 0, R.style.ChipFilled))
+                applyEpisodeChipFeedback(this)
                 typeface = Typeface.create(ResourcesCompat.getFont(context, R.font.google_sans), Typeface.BOLD)
                 fontFeatureSettings = "'liga' 0, 'clig' 0, 'calt' 0, 'dlig' 0"
                 isCheckable = false
                 isClickable = true
                 isFocusable = true
-                setOnTouchListener { view, event ->
-                    if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                        view.background?.setHotspot(event.x, event.y)
-                        view.isPressed = true
-                    }
-                    false
-                }
+                // Chip handles DOWN/UP/CANCEL; do not set pressed state manually.
                 setOnClickListener { showPicker() }
             }.also {
                 hero.addView(it, FrameLayout.LayoutParams(
@@ -337,9 +328,24 @@ internal class TrailerChooser(
             ViewGroup.LayoutParams.MATCH_PARENT,
             minOf(dp(88) * items.size + dp(1), (activity.resources.displayMetrics.heightPixels * 0.6f).toInt())
         ))
+        val progress = android.widget.ProgressBar(activity).apply {
+            isIndeterminate = true
+            visibility = View.GONE
+            isFocusable = false
+        }
+        list.addView(progress, LinearLayout.LayoutParams(-1, dp(36)))
+        extractionProgress = progress
         val picker = BottomSheetDialog(activity).apply {
             setContentView(list)
-            setOnDismissListener { if (dialog === this) dialog = null }
+            setOnDismissListener {
+                if (dialog === this) {
+                    extractionJob?.cancel()
+                    extractionJob = null
+                    extractionProgress = null
+                    opening = false
+                    dialog = null
+                }
+            }
             if (isTv) setOnShowListener {
                 rows.getChildAt(restoreFocus.takeIf { it in 0 until rows.childCount } ?: 0)?.requestFocus()
             }
@@ -397,7 +403,8 @@ internal class TrailerChooser(
         if (opening) return
         val picker = dialog?.takeIf { it.isShowing } ?: return
         opening = true
-        scope.launch {
+        extractionProgress?.visibility = View.VISIBLE
+        extractionJob = scope.launch {
             try {
                 val (playable, subtitles) = extractTrailerMedia(entry.youtubeId)
                 if (!fragment.isResumed || fragment.view !== root || dialog !== picker || !picker.isShowing)
@@ -438,6 +445,8 @@ internal class TrailerChooser(
                 if (fragment.isAdded) toast(fragment.requireContext().getString(R.string.error))
             } finally {
                 opening = false
+                if (dialog === picker) extractionProgress?.visibility = View.GONE
+                extractionJob = null
             }
         }
     }
@@ -454,6 +463,8 @@ internal class TrailerChooser(
         }
         // Navigation is transferring visibility to the player; its one-shot
         // callback owns dialog dismissal until the next drawable frame.
+        extractionJob?.cancel()
+        extractionJob = null
         if (finishPlayerHandoff == null) dialog?.dismiss()
         dialog = null
         (button?.parent as? ViewGroup)?.removeView(button)

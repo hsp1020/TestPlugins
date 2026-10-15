@@ -130,15 +130,15 @@ internal class PhoneHeroHook(
         private var previousHeight = -1
 
         private val details = TextView(activity).apply {
-            setTextColor(ContextCompat.getColor(activity, R.color.gray_200)); textSize = 14f
+            setTextColor(activity.colorFromAttribute(R.attr.white)); textSize = 14f
             setShadowLayer(4f, 0f, 2f, 0xB0000000.toInt())
         }
         private val rating = TextView(activity).apply {
-            setTextColor(ContextCompat.getColor(activity, R.color.white)); textSize = 14f; maxLines = 2
+            setTextColor(activity.colorFromAttribute(R.attr.white)); textSize = 14f; maxLines = 2
             setShadowLayer(4f, 0f, 2f, 0xB0000000.toInt())
         }
         private val plot = TextView(activity).apply {
-            setTextColor(ContextCompat.getColor(activity, R.color.textColor)); textSize = 15f; maxLines = 3
+            setTextColor(activity.colorFromAttribute(R.attr.white)); textSize = 15f; maxLines = 3
             ellipsize = android.text.TextUtils.TruncateAt.END
             setShadowLayer(4f, 0f, 2f, 0xB0000000.toInt())
         }

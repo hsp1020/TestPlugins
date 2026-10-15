@@ -514,8 +514,8 @@ internal class RatingPlotImageHook(
         if (listOf("nav_view", "nav_rail_view").any { find(it)?.visibility == View.VISIBLE }) return
         val content = find("nav_host_fragment") ?: return
         val bounds = content.parent as? android.view.ViewGroup ?: return
-        val root = activity.window.decorView
-        val observer = root.viewTreeObserver
+        // Observe only the NavHost; never block drawing of the whole Activity.
+        val observer = content.viewTreeObserver
         if (!observer.isAlive) return
         detailRevealEnd?.invoke()
         val started = android.os.SystemClock.uptimeMillis()
@@ -537,7 +537,7 @@ internal class RatingPlotImageHook(
             if (stable >= 2 || elapsed >= 600L) {
                 release()
                 true
-            } else false
+            } else true
         }
         detailRevealEnd = release
         observer.addOnPreDrawListener(listener)
@@ -714,14 +714,7 @@ internal class RatingPlotImageHook(
                         chip.isFocusable = false
                     }
                 } else {
-                    (chip as? Chip)?.rippleColor = ColorStateList.valueOf(STREMIOC_DETAIL_RIPPLE_COLOR)
-                    chip.setOnTouchListener { view, event ->
-                        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                            view.background?.setHotspot(event.x, event.y)
-                            view.isPressed = true
-                        }
-                        false
-                    }
+                    (chip as? Chip)?.let(::applyEpisodeChipFeedback)
                     chip.setOnClickListener { openCatalog(target, null) }
                     chip.isFocusable = true
                     boundGenreChips[chip] = target

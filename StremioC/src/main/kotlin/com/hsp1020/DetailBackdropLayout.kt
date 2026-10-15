@@ -413,13 +413,17 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         }
         var size = paint.textSize
         if (!fits(size)) {
-            var low = 0f
+            val floor = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 12f,
+                overlay.resources.displayMetrics)
+            var low = floor.coerceAtMost(size)
             var high = size
             repeat(18) {
                 val mid = (low + high) / 2f
                 if (fits(mid)) low = mid else high = mid
             }
-            size = low.coerceAtLeast(0.00001f) // Numeric safeguard only, not a readability floor.
+            size = low.coerceAtLeast(floor)
+            overlay.maxLines = 4
+            overlay.ellipsize = android.text.TextUtils.TruncateAt.END
         }
         if (overlay.textSize != size) overlay.setTextSize(TypedValue.COMPLEX_UNIT_PX, size)
         lastFitText = text
@@ -516,10 +520,15 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         }
     }
     private fun portraitMode() = phoneHero != null && !splitMode()
-    private fun maskPortraitTitle(): Boolean =
-        detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true &&
-            !(detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true &&
-              logo?.visibility == View.VISIBLE && logo.drawable != null && logo.width > 0)
+    private fun maskPortraitTitle(): Boolean {
+        if (detailUrl?.let { StremioC.expectedLogoByUrl[it] } != true) return false
+        val image = logo ?: return false
+        // Respect the host onError fallback (GONE), including failed/expired requests.
+        if (image.visibility == View.GONE) return false
+        val ready = image.visibility == View.VISIBLE && image.drawable != null && image.width > 0
+        if (!ready && started && SystemClock.uptimeMillis() - artworkRevealStart >= 6000L) return false
+        return !(detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true && ready)
+    }
     private fun updatePortraitTitle() {
         if (!portraitMode()) return
         if (detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true) {
@@ -643,8 +652,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             val ready = artworkReady()
             visibility(ready)
             if (!ready) title?.alpha = 0f
-            else if (detailUrl?.let { StremioC.expectedLogoByUrl[it] } != true)
-                title?.alpha = originalTitleAlpha
+            else if (!maskPortraitTitle()) title?.alpha = originalTitleAlpha
             return
         }
 
