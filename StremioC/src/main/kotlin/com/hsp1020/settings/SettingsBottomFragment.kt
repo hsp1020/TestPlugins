@@ -375,10 +375,11 @@ class SettingsBottomFragment(
             .hideSoftInputFromWindow(view.windowToken, 0)
     }
     private fun imeVisible(view: View): Boolean {
-        ViewCompat.getRootWindowInsets(view)?.let { return it.isVisible(WindowInsetsCompat.Type.ime()) }
+        if (!view.isAttachedToWindow) return false
+        if (ViewCompat.getRootWindowInsets(view)?.isVisible(WindowInsetsCompat.Type.ime()) == true) return true
         val frame = Rect()
         view.getWindowVisibleDisplayFrame(frame)
-        return hostContext.resources.displayMetrics.heightPixels - frame.bottom > dp(120)
+        return frame.height() > 0 && hostContext.resources.displayMetrics.heightPixels - frame.bottom > dp(120)
     }
 
     private fun EditText.activateTvInput(key: Int, event: KeyEvent): Boolean {
@@ -473,7 +474,7 @@ class SettingsBottomFragment(
         }
     }
 
-    private fun restoreRow(rv: RecyclerView, position: Int, target: (View) -> View = { it.optional("addonRowBody") ?: it }) {
+    private fun restoreRow(rv: RecyclerView, position: Int, target: (View) -> View = { it.optional("btnEditAddon") ?: it }) {
         if (position !in 0 until (rv.adapter?.itemCount ?: 0) || !rv.isAttachedToWindow ||
             !rv.isShown || topDialog().window?.decorView !== rv.rootView) return
         fun focus() {
@@ -499,9 +500,17 @@ class SettingsBottomFragment(
         val initialPadding = intArrayOf(root.paddingLeft, root.paddingTop, root.paddingRight, root.paddingBottom)
         val title = root.getChildAt(0)?.takeIf { it !== body }
         val footer = root.getChildAt(root.childCount - 1)?.takeIf { it !== body && it is LinearLayout }
+        var keyboardShown = false
+        val revealInput = Runnable {
+            if (alive(dialog) && topDialog() === dialog && keyboardShown) {
+                (root.findFocus() as? EditText)?.let {
+                    it.requestRectangleOnScreen(Rect(0, 0, it.width, it.height), true)
+                }
+            }
+        }
         var sizing = false
         fun resize(initial: Boolean = false) {
-            if (sizing || closing || (!initial && !dialog.isShowing)) return
+            if (sizing || closing || (!initial && (!dialog.isShowing || topDialog() !== dialog))) return
             sizing = true
             try {
                 val frame = Rect()
@@ -509,8 +518,15 @@ class SettingsBottomFragment(
                 val availableWidth = frame.width().takeIf { it > 0 } ?: metrics.widthPixels
                 val width = minOf(dp(capDp), (availableWidth * 0.9f).toInt()).coerceAtLeast(1)
                 val bodyWidth = (width - root.paddingLeft - root.paddingRight).coerceAtLeast(1)
-                val keyboard = root.isAttachedToWindow && imeVisible(root)
-                val cap = if (keyboard) minOf(heightCap, frame.height().takeIf { it > 0 } ?: heightCap) else heightCap
+                val imeBottom = maxOf(ViewCompat.getRootWindowInsets(root)
+                    ?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0,
+                    hostDecor?.let { ViewCompat.getRootWindowInsets(it) }
+                        ?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0)
+                val keyboard = imeBottom > 0 || imeVisible(root) || hostDecor?.let { imeVisible(it) } == true
+                keyboardShown = keyboard
+                val visibleHeight = minOf(frame.height().takeIf { it > 0 } ?: baseHeight,
+                    if (imeBottom > 0) (metrics.heightPixels - imeBottom - frame.top).coerceAtLeast(1) else baseHeight)
+                val cap = if (keyboard) minOf(heightCap, visibleHeight) else heightCap
                 var showTitle = true
                 var showFooter = true
                 var paddingTop = initialPadding[1]
@@ -574,14 +590,39 @@ class SettingsBottomFragment(
                     if (it.layoutParams.height != wanted) it.layoutParams = it.layoutParams.apply { this.height = wanted }
                 }
                 dialog.window?.let {
-                    if (it.attributes.width != width || it.attributes.height != height) it.setLayout(width, height)
+                    val gravity = if (keyboard) Gravity.TOP or Gravity.CENTER_HORIZONTAL else Gravity.CENTER
+                    val y = if (keyboard) ((visibleHeight - height) / 2).coerceAtLeast(0) else 0
+                    val params = it.attributes
+                    if (params.width != width || params.height != height || params.gravity != gravity || params.y != y) {
+                        params.width = width; params.height = height
+                        params.gravity = gravity; params.y = y
+                        it.attributes = params
+                    }
+                }
+                if (keyboard) {
+                    root.removeCallbacks(revealInput)
+                    root.post(revealInput)
                 }
             } finally { sizing = false }
         }
         val listener = ViewTreeObserver.OnGlobalLayoutListener { resize() }
+        val focusListener = ViewTreeObserver.OnGlobalFocusChangeListener { _, _ -> resize() }
+        val reflow = Runnable { resize() }
         root.viewTreeObserver.addOnGlobalLayoutListener(listener)
+        root.viewTreeObserver.addOnGlobalFocusChangeListener(focusListener)
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+            root.removeCallbacks(reflow)
+            root.post(reflow)
+            insets
+        }
         onClose(dialog) {
-            if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnGlobalLayoutListener(listener)
+            if (root.viewTreeObserver.isAlive) {
+                root.viewTreeObserver.removeOnGlobalLayoutListener(listener)
+                root.viewTreeObserver.removeOnGlobalFocusChangeListener(focusListener)
+            }
+            ViewCompat.setOnApplyWindowInsetsListener(root, null)
+            root.removeCallbacks(reflow)
+            root.removeCallbacks(revealInput)
         }
         resize(initial = true)
     }
@@ -751,6 +792,15 @@ class SettingsBottomFragment(
         dialogOwners[dialog] = owner
         childDialogs.add(dialog)
         dialog.setCanceledOnTouchOutside(false)
+        val ownerWindow = owner.window
+        val ownerInputMode = ownerWindow?.attributes?.softInputMode
+        if (ownerInputMode != null) {
+            ownerWindow.setSoftInputMode((ownerInputMode and WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST.inv()) or
+                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+            onClose(dialog) {
+                if (!closing && owner.isShowing) ownerWindow.setSoftInputMode(ownerInputMode)
+            }
+        }
         dialog.create()
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
@@ -815,6 +865,8 @@ class SettingsBottomFragment(
             if (value.resourceId != 0) hostContext.getDrawable(value.resourceId)?.mutate()?.let { layers.add(it) }
         }
         layers.add(outline)
+        // Detach first: replacing the old background must not clear its new LayerDrawable callback.
+        background = null
         background = LayerDrawable(layers.toTypedArray())
         setTag(outlineId, background)
     }
@@ -902,6 +954,13 @@ class SettingsBottomFragment(
     fun show(onDismiss: () -> Unit = {}) {
         settingsDialog.setCancelable(true)
         settingsDialog.setCanceledOnTouchOutside(false)
+        val hostWindow = (hostContext as? Activity)?.window
+        val hostInputMode = hostWindow?.attributes?.softInputMode
+        if (hostInputMode != null) {
+            hostWindow.setSoftInputMode((hostInputMode and WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST.inv()) or
+                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+            onClose(settingsDialog) { hostWindow.setSoftInputMode(hostInputMode) }
+        }
         var finished = false
         val finish: () -> Unit = {
             if (!finished) {
@@ -1428,6 +1487,10 @@ class SettingsBottomFragment(
         fun showPage(next: SettingsPage, errorField: EditText? = null) {
             if (hub == null) { errorField?.requestFocus(); return }
             if (next != currentPage) {
+                back?.apply {
+                    isPressed = false
+                    jumpDrawablesToCurrentState()
+                }
                 pageScroll[currentPage.ordinal] = viewport?.scrollY ?: 0
                 pages[currentPage.ordinal]?.findFocus()?.let { pageFocus[currentPage.ordinal] = it }
             }
@@ -1638,7 +1701,7 @@ class SettingsBottomFragment(
                 if (adapter.itemCount == 0) add.requestFocus()
                 else restoreRow(rv, adapter.positionOf(focusId).takeIf { it >= 0 }
                     ?: fallback.coerceIn(0, adapter.itemCount - 1)) {
-                    controlId?.let { id -> it.optional(id) } ?: it.optional("addonRowBody") ?: it
+                    controlId?.let { id -> it.optional(id) } ?: it.optional("btnEditAddon") ?: it
                 }
             }
             if (topDialog() === dialog) rv.post {
@@ -1673,7 +1736,8 @@ class SettingsBottomFragment(
                         values[index] = values[index].copy(enabled = enabled)
                         if (sourceDraft != null) { sourceDraft.clear(); sourceDraft.addAll(values) }
                         else SettingsRepository.saveLinks(sharedPref, values)
-                        refreshList(item.id, index, "switchAddonEnabled")
+                        adapter.updateItem(values[index], index, notify = false)
+                        onDraftChanged()
                     }
                 }
             }
@@ -2435,6 +2499,10 @@ private fun showLanguageSelectDialog() {
             val gear: ImageButton = view.findView("btnConfigureAddon")
             val trash: ImageButton = view.findView("btnDelete")
             val enabled: Switch = view.findView("switchAddonEnabled")
+            fun showEnabledState(checked: Boolean, label: String) {
+                body.contentDescription = "$label. ${if (checked) "Enabled" else "Disabled"}."
+                body.alpha = if (checked) 1f else 0.6f
+            }
         }
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
             val view = getLayout("item_saved_link", LayoutInflater.from(parent.context), parent)
@@ -2466,8 +2534,7 @@ private fun showLanguageSelectDialog() {
             }
             holder.tvSyncBadge.visibility = View.GONE
             val label = item.name.takeUnless { it == item.link }?.ifBlank { "Addon" } ?: "Addon"
-            holder.body.contentDescription = "$label. ${if (item.enabled) "Enabled" else "Disabled"}. Edit addon."
-            holder.body.alpha = if (item.enabled) 1f else 0.6f
+            holder.showEnabledState(item.enabled, label)
             holder.edit.contentDescription = "Edit addon $label"
             holder.catalogs.contentDescription = "Configure catalogs for $label"
             holder.gear.contentDescription = "Addon settings for $label"
@@ -2476,7 +2543,12 @@ private fun showLanguageSelectDialog() {
             holder.enabled.setOnCheckedChangeListener(null)
             holder.enabled.isChecked = item.enabled
             holder.enabled.setOnCheckedChangeListener { _, checked ->
-                items.getOrNull(holder.adapterPosition)?.takeIf { it.enabled != checked }?.let { onToggle(it, checked) }
+                items.getOrNull(holder.adapterPosition)?.takeIf { it.enabled != checked }?.let { changed ->
+                    onToggle(changed, checked)
+                    items.getOrNull(holder.adapterPosition)?.takeIf { it.id == changed.id }?.let {
+                        holder.showEnabledState(it.enabled, label)
+                    }
+                }
             }
             holder.gear.isEnabled = item.link.isNotBlank()
             holder.gear.isFocusable = holder.gear.isEnabled
@@ -2485,12 +2557,11 @@ private fun showLanguageSelectDialog() {
                 val index = holder.adapterPosition
                 items.getOrNull(index)?.let { onEdit(it, index) }
             }
-            holder.body.setOnClickListener { holder.edit.performClick() }
             holder.catalogs.setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onCatalogs) }
             holder.gear.setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onConfigure) }
             holder.trash.setOnClickListener { items.getOrNull(holder.adapterPosition)?.let(onDelete) }
             if (isLayout(TV)) {
-                val peers = listOf(holder.body, holder.edit, holder.catalogs, holder.gear, holder.trash, holder.enabled)
+                val peers = listOf(holder.edit, holder.catalogs, holder.gear, holder.trash, holder.enabled)
                 peers.forEachIndexed { column, control ->
                     control.setOnKeyListener { _, key, event ->
                         if (holder.adapterPosition == RecyclerView.NO_POSITION) return@setOnKeyListener false
@@ -2504,9 +2575,9 @@ private fun showLanguageSelectDialog() {
                             val recycler = holder.itemView.parent as? RecyclerView
                             if (recycler == null || target !in items.indices) false else {
                                 if (event.action == KeyEvent.ACTION_DOWN) restoreRow(recycler, target) { row ->
-                                    row.optional(listOf("addonRowBody", "btnEditAddon", "btnCatalogs",
+                                    row.optional(listOf("btnEditAddon", "btnCatalogs",
                                         "btnConfigureAddon", "btnDelete", "switchAddonEnabled")[column])
-                                        ?.takeIf { it.isEnabled } ?: row.findView<View>("addonRowBody")
+                                        ?.takeIf { it.isEnabled } ?: row.findView<View>("btnEditAddon")
                                 }
                                 true
                             }
@@ -2531,9 +2602,12 @@ private fun showLanguageSelectDialog() {
             items.clear(); items.addAll(links)
             notifyDataSetChanged()
         }
-        fun updateItem(newItem: LinkItem, position: Int) {
+        fun updateItem(newItem: LinkItem, position: Int, notify: Boolean = true) {
             val index = positionOf(newItem.id)
-            if (index >= 0) { items[index] = newItem; notifyItemChanged(index) }
+            if (index >= 0) {
+                items[index] = newItem
+                if (notify) notifyItemChanged(index)
+            }
         }
     }
 }

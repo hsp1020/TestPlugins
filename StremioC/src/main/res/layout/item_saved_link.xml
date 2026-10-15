@@ -20,8 +20,8 @@
         android:minHeight="48dp"
         android:orientation="vertical"
         android:gravity="center_vertical"
-        android:focusable="true"
-        android:clickable="true"
+        android:focusable="false"
+        android:clickable="false"
         android:background="?android:attr/selectableItemBackground">
         <TextView
             android:id="@+id/tvName"
