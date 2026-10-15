@@ -1567,21 +1567,8 @@ class SettingsBottomFragment(
         val back = view.optional("settingsBack") as? TextView
         fun updateSummaries() {
             val catalogCount = catalogLinks().count { it.link.isNotBlank() }
-            val catalogColumn = view.findView<LinearLayout>("rowCatalogs").getChildAt(0) as LinearLayout
-            val catalogSummary = (catalogColumn.getChildAt(1) as? TextView)
-                ?: TextView(hostContext).also {
-                    it.layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                    it.textSize = 12f
-                    it.setTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
-                    it.tag = "stremioc_secondary"
-                    it.isSingleLine = true
-                    it.ellipsize = android.text.TextUtils.TruncateAt.END
-                    catalogColumn.addView(it)
-                }
-            catalogSummary.text =
+            (view.optional("summaryCatalogs") as? TextView)?.text =
                 if (catalogCount == 0) "No URL entries" else if (catalogCount == 1) "1 URL entry" else "$catalogCount URL entries"
-            catalogSummary.visibility = View.VISIBLE
             val count = sourceDraft.count { it.link.isNotBlank() }
             val integrations = listOf("switchCineStream", "switchStreamPlay", "switchVixSrc")
                 .count { view.findView<Switch>(it).isChecked }
