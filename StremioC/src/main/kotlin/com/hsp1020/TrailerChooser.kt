@@ -368,24 +368,35 @@ internal class TrailerChooser(
     }
 
     // Keep the picker above the previous detail until the player can draw.
-    // This also avoids dismissing a dialog from a stale detail view during navigation.
-    private fun dismissPickerOnPlayerFrame(picker: BottomSheetDialog) {
+    // If player creation stalls, return to the source instead of exposing a blank player.
+    private fun dismissPickerOnPlayerFrame(
+        picker: BottomSheetDialog, controller: androidx.navigation.NavController
+    ) {
         finishPlayerHandoff?.invoke()
         val manager = fragment.parentFragmentManager
+        val owner = fragment.activity
         val handler = Handler(Looper.getMainLooper())
         var active = true
+        var rollingBack = false
         lateinit var callback: FragmentManager.FragmentLifecycleCallbacks
         lateinit var timeout: Runnable
+        lateinit var returnTimeout: Runnable
         lateinit var release: () -> Unit
+        lateinit var dismiss: () -> Unit
+        val ownerObserver = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_DESTROY) dismiss()
+        }
         release = {
             if (active) {
                 active = false
                 manager.unregisterFragmentLifecycleCallbacks(callback)
                 handler.removeCallbacks(timeout)
+                handler.removeCallbacks(returnTimeout)
+                owner?.lifecycle?.removeObserver(ownerObserver)
                 if (finishPlayerHandoff === release) finishPlayerHandoff = null
             }
         }
-        val dismiss = {
+        dismiss = {
             release()
             if (picker.isShowing) picker.dismiss()
         }
@@ -393,15 +404,33 @@ internal class TrailerChooser(
             override fun onFragmentViewCreated(
                 fm: FragmentManager, f: Fragment, view: View, savedInstanceState: Bundle?
             ) {
-                if (f.javaClass.name == "com.lagradost.cloudstream3.ui.player.GeneratorPlayer") {
-                    view.doOnPreDraw { view.postOnAnimation { dismiss() } }
+                val name = f.javaClass.name
+                if (!rollingBack && name == "com.lagradost.cloudstream3.ui.player.GeneratorPlayer") {
+                    view.doOnPreDraw {
+                        view.postOnAnimation { if (active && !rollingBack) dismiss() }
+                    }
+                } else if (rollingBack && name in setOf(
+                        "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
+                        "com.lagradost.cloudstream3.ui.result.ResultFragmentTv"
+                    )) {
+                    view.doOnPreDraw { view.postOnAnimation { if (active && rollingBack) dismiss() } }
                 }
             }
         }
-        timeout = Runnable { dismiss() } // Never retain the old dialog if the player fails to draw.
+        returnTimeout = Runnable { dismiss() } // Always release on failed return.
+        timeout = Runnable {
+            if (active) {
+                if (controller.currentDestination?.id == R.id.navigation_player &&
+                    runCatching { controller.popBackStack() }.getOrDefault(false)) {
+                    rollingBack = true
+                    handler.postDelayed(returnTimeout, 1500L)
+                } else dismiss()
+            }
+        }
         finishPlayerHandoff = release
         manager.registerFragmentLifecycleCallbacks(callback, false)
-        handler.postDelayed(timeout, 1200L)
+        owner?.lifecycle?.addObserver(ownerObserver)
+        handler.postDelayed(timeout, 6000L)
     }
 
     private fun play(entry: TrailerChoice, scrollY: Int, focusedRow: Int) {
@@ -434,7 +463,7 @@ internal class TrailerChooser(
                 saved.set(returnScrollKey, scrollY)
                 saved.set(returnFocusKey, focusedRow)
                 try {
-                    dismissPickerOnPlayerFrame(picker)
+                    dismissPickerOnPlayerFrame(picker, controller)
                     controller.navigate(R.id.global_to_navigation_player, playerArgs)
                 } catch (error: Exception) {
                     finishPlayerHandoff?.invoke()
