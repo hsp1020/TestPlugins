@@ -397,7 +397,7 @@ open class StremioC(
         val remoteType = runSuspendCatching {
             DetailLoadPerf.step("library.anime.typeRemote.$name") { when (name) {
                 SyncIdName.MyAnimeList -> {
-                    val token = auth?.token?.accessToken ?: return@runSuspendCatching null
+                    val token = auth?.token?.accessToken ?: return@step null
                     val item = parseJson<JsonNode>(customSession.get(
                         "https://api.myanimelist.net/v2/anime/$itemId",
                         params = mapOf("fields" to "media_type"),
@@ -2026,7 +2026,7 @@ open class StremioC(
         DetailLoadPerf.event("TMDB_PREFETCH_RESULT", "spec=${speculativeTmdbDetail != null} hasDetail=${preFetchedTmdbDetail != null} media=$targetTmdbMediaType")
         // Movie collections are independent of the second metadata addon's response.
         // Fetch them as soon as an authoritative movie detail exposes a collection ID.
-        DetailLoadPerf.event("LOAD_ENRICH_PLAN", "tmdb=${targetTmdbId != null} imdb=${!imdbId.isNullOrBlank()} mdb=$mdbEnabled")
+        DetailLoadPerf.event("LOAD_ENRICH_PLAN", "tmdb=${targetTmdbId != null} imdb=${!resolvedImdbId.isNullOrBlank() || !preFetchedTmdbDetail?.external_ids?.imdb_id.isNullOrBlank()} mdb=$mdbEnabled")
         val collectionDeferred: Deferred<List<TmdbMedia>>? = if (targetTmdbMediaType == "movie") {
             preFetchedTmdbDetail?.belongs_to_collection?.id?.let { collectionId ->
                 async(Dispatchers.IO) {
@@ -3969,7 +3969,7 @@ open class StremioC(
                     movieId
                 }
 
-                val response = DetailLoadPerf.stepNow("response.movie.build") { provider.newMovieLoadResponse(
+                val response = DetailLoadPerf.step("response.movie.build") { provider.newMovieLoadResponse(
                     finalName, metaUrl, finalMovieType, 
                     LoadData(
                         type = finalType, 
@@ -4037,7 +4037,7 @@ open class StremioC(
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
                 StremioC.trailerChoicesByUrl[metaUrl] = finalTrailers
                 StremioC.genreCatalogsByUrl[metaUrl] = genreTargets
-                val response = DetailLoadPerf.stepNow("response.series.build") { provider.newTvSeriesLoadResponse(
+                val response = DetailLoadPerf.step("response.series.build") { provider.newTvSeriesLoadResponse(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
