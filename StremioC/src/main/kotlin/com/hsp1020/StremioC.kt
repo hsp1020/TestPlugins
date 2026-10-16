@@ -117,9 +117,11 @@ private fun mdbCredentialFingerprint(): String {
 
 internal data class StremioManifestCachePolicy(val ttlMs: Long, val noStore: Boolean)
 
-internal fun stremioManifestCachePolicy(headers: Map<String, String>): StremioManifestCachePolicy {
-    fun header(name: String): String? = headers.entries
-        .firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+internal fun stremioManifestCachePolicy(
+    headers: Iterable<Pair<String, String>>
+): StremioManifestCachePolicy {
+    fun header(name: String): String? = headers
+        .firstOrNull { it.first.equals(name, ignoreCase = true) }?.second
     val directives = header("Cache-Control").orEmpty().lowercase(java.util.Locale.ROOT)
         .split(',').map { it.trim() }
     val noStore = "no-store" in directives
@@ -1126,8 +1128,8 @@ open class StremioC(
                         }
                         val body = response.text
                         val root = parseJson<JsonNode>(body)
-                        fun header(name: String): String? = response.headers.entries
-                            .firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+                        fun header(name: String): String? = response.headers
+                            .firstOrNull { it.first.equals(name, ignoreCase = true) }?.second
                         val policy = header("Cache-Control")
                         val vary = header("Vary")
                         val ttlMs = addonMetaTtlMs(
@@ -1817,7 +1819,7 @@ open class StremioC(
                 val parsed = parseJson<Manifest>(resText)
                 if (parsed?.catalogs?.isNotEmpty() == true) {
                     val cachePolicy = stremioManifestCachePolicy(
-                        manifestResponse?.headers.orEmpty())
+                        manifestResponse?.headers?.toList().orEmpty())
                     manifestCacheTtlMs = cachePolicy.ttlMs
                     val context = CloudStreamApp.context
                     val stored = context?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
