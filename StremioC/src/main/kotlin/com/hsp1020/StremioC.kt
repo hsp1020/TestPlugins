@@ -827,6 +827,132 @@ open class StremioC(
         private val libraryOriginalUrlsByMeta = lruCacheMap<String, MutableSet<String>>(200)
         internal val expectedLogoByUrl = lruCacheMap<String, Boolean>(200)
         internal val trailerChoicesByUrl = lruCacheMap<String, List<TrailerChoice>>(200)
+        // A /meta response is shared by detail and episode loading. Keep a bounded
+        // byte cache and join concurrent fetches for the identical exact URL.
+        private data class AddonMetaEntry(val bytes: ByteArray, val at: Long, val ttlMs: Long)
+        private val addonMetaCache = LinkedHashMap<String, AddonMetaEntry>(48, 0.75f, true)
+        private var addonMetaCacheBytes = 0L
+        private const val ADDON_META_RAM_LIMIT = 12L * 1024 * 1024
+        private const val ADDON_META_RAM_ENTRIES = 48
+        private const val ADDON_META_MAX_RAW = 2 * 1024 * 1024
+        private const val ADDON_META_MOVIE_TTL_MS = 3L * 24 * 60 * 60 * 1000
+        private const val ADDON_META_SERIES_TTL_MS = 12L * 60 * 60 * 1000
+        private const val ADDON_META_MAX_TTL_MS = 7L * 24 * 60 * 60 * 1000
+        private val addonMetaScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val addonMetaFlights = mutableMapOf<String, Deferred<String>>()
+
+        private fun cacheAddonMetaInRam(url: String, text: String, ttlMs: Long) {
+            val bytes = text.toByteArray(Charsets.UTF_8)
+            if (ttlMs <= 0L || bytes.size > ADDON_META_MAX_RAW) return
+            synchronized(addonMetaCache) {
+                addonMetaCache.remove(url)?.let { addonMetaCacheBytes -= it.bytes.size.toLong() }
+                addonMetaCache[url] = AddonMetaEntry(bytes, System.currentTimeMillis(), ttlMs)
+                addonMetaCacheBytes += bytes.size.toLong()
+                val cursor = addonMetaCache.entries.iterator()
+                while ((addonMetaCache.size > ADDON_META_RAM_ENTRIES ||
+                        addonMetaCacheBytes > ADDON_META_RAM_LIMIT) && cursor.hasNext()) {
+                    val removed = cursor.next()
+                    addonMetaCacheBytes -= removed.value.bytes.size.toLong()
+                    cursor.remove()
+                }
+            }
+        }
+
+        private fun cachedAddonMetaInRam(url: String): String? {
+            val bytes = synchronized(addonMetaCache) {
+                val held = addonMetaCache[url]
+                if (held != null && System.currentTimeMillis() - held.at < held.ttlMs) {
+                    held.bytes
+                } else {
+                    addonMetaCache.remove(url)?.let { addonMetaCacheBytes -= it.bytes.size.toLong() }
+                    null
+                }
+            }
+            return bytes?.let { String(it, Charsets.UTF_8) }
+        }
+
+        // Do not cache embedded stream links (often signed or short-lived) or inline images.
+        private fun containsTransientMetaLinks(root: JsonNode): Boolean {
+            val meta = root.get("meta") ?: root
+            val videos = meta.get("videos") ?: return false
+            return videos.any { video ->
+                video.get("streams")?.size()?.let { it > 0 } == true ||
+                    video.get("url")?.asText()?.isNotBlank() == true
+            }
+        }
+
+        private fun addonMetaTtlMs(
+            url: String, cacheControl: String?, root: JsonNode
+        ): Long {
+            val policy = cacheControl.orEmpty().lowercase(java.util.Locale.ROOT)
+            if (policy.split(',').any { directive ->
+                    val trimmed = directive.trim()
+                    trimmed == "no-store" || trimmed == "no-cache" || trimmed == "private"
+                }) return 0L
+            val maxAgePart = policy.split(',').map { it.trim() }
+                .firstOrNull { it.startsWith("max-age=") }
+                ?.substringAfter('=')
+                ?.trim('"', ' ')
+            val headerSeconds = maxAgePart?.toLongOrNull()
+            if (headerSeconds != null) {
+                return headerSeconds.coerceIn(0L, ADDON_META_MAX_TTL_MS / 1000L) * 1000L
+            }
+            val addonSeconds = root.get("cacheMaxAge")?.takeIf { it.isNumber }?.asLong()
+            if (addonSeconds != null) {
+                return addonSeconds.coerceIn(0L, ADDON_META_MAX_TTL_MS / 1000L) * 1000L
+            }
+            return if (url.contains("/meta/movie/", ignoreCase = true))
+                ADDON_META_MOVIE_TTL_MS else ADDON_META_SERIES_TTL_MS
+        }
+
+        private fun isAddonMetaUrl(url: String): Boolean {
+            val path = url.substringBefore('?')
+            return (path.startsWith("https://") || path.startsWith("http://")) &&
+                path.contains("/meta/") && path.endsWith(".json", ignoreCase = true)
+        }
+
+        private suspend fun fetchAddonMetaText(url: String, forceRefresh: Boolean = false): String {
+            if (!isAddonMetaUrl(url)) {
+                return customSession.get(url, headers = if (forceRefresh)
+                    mapOf("Cache-Control" to "no-cache") else emptyMap()).text
+            }
+            if (!forceRefresh) {
+                cachedAddonMetaInRam(url)?.let { return it }
+                MetadataDiskCache.read("meta", url)?.let { return it.first }
+            }
+
+            val flightKey = (if (forceRefresh) "force|" else "normal|") + url
+            val flight = synchronized(addonMetaFlights) {
+                addonMetaFlights[flightKey] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
+                    try {
+                        val response = customSession.get(url, headers = if (forceRefresh)
+                            mapOf("Cache-Control" to "no-cache") else emptyMap())
+                        if (response.code !in 200..299) {
+                            throw IllegalStateException("Stremio meta HTTP " + response.code)
+                        }
+                        val body = response.text
+                        val root = parseJson<JsonNode>(body)
+                        val policy = response.headers["Cache-Control"]
+                            ?: response.headers["cache-control"]
+                        val vary = response.headers["Vary"] ?: response.headers["vary"]
+                        val ttlMs = addonMetaTtlMs(url, policy, root)
+                        if (ttlMs > 0L && vary?.trim() != "*" &&
+                            !containsTransientMetaLinks(root) &&
+                            !body.contains("data:image/", ignoreCase = true)) {
+                            cacheAddonMetaInRam(url, body, ttlMs)
+                            MetadataDiskCache.write("meta", url, body, ttlMs)
+                        }
+                        body
+                    } finally {
+                        synchronized(addonMetaFlights) { addonMetaFlights.remove(flightKey) }
+                    }
+                }.also { deferred ->
+                    addonMetaFlights[flightKey] = deferred
+                    deferred.start()
+                }
+            }
+            return flight.await()
+        }
         internal val genreCatalogsByUrl = lruCacheMap<String, Map<String, CatalogShortcutTarget>>(200)
         private val tmdbDetailsCache = lruCacheMap<String, Pair<TmdbDetailResponse, Long>>(200)
         private val tmdbSeasonCache = lruCacheMap<String, Pair<TmdbSeasonDetail, Long>>(300)
@@ -1478,7 +1604,12 @@ open class StremioC(
             }
         }
 
-        return cachedManifest
+        if (lastManifestUrl == currentUrl && now - lastCacheTime <= 72L * 60 * 60 * 1000) {
+            return cachedManifest
+        }
+        // A previous successful manifest remains a fallback only for this same addon.
+        // Never hand an old addon's manifest to another URL after a settings change.
+        return null
     }
 
 
@@ -1946,7 +2077,7 @@ open class StremioC(
         suspend fun fetchSecondaryMeta(metaUrl: String, expectedId: String): CatalogEntry? =
             DetailLoadPerf.step("meta.secondary.total") {
                 runSuspendCatching {
-                    val text = DetailLoadPerf.step("meta.secondary.http") { customSession.get(metaUrl).text }
+                    val text = DetailLoadPerf.step("meta.secondary.http") { fetchAddonMetaText(metaUrl) }
                     val response = DetailLoadPerf.stepNow("meta.secondary.parse") {
                         if (text.isNotBlank()) parseJson<CatalogResponse>(text) else null
                     }
@@ -2043,7 +2174,7 @@ open class StremioC(
         val res: CatalogEntry = if (url.startsWith("{")) {
             DetailLoadPerf.stepNow("meta.embedded.parse") { parseJson<CatalogEntry>(url) }
         } else {
-            val responseText = DetailLoadPerf.step("meta.primary.http") { customSession.get(url).text }
+            val responseText = DetailLoadPerf.step("meta.primary.http") { fetchAddonMetaText(url) }
             try {
                 DetailLoadPerf.stepNow("meta.primary.parse") {
                     val rootNode = parseJson<JsonNode>(responseText)
