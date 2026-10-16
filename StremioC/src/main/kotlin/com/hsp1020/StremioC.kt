@@ -1001,10 +1001,13 @@ open class StremioC(
         // Do not cache embedded stream links (often signed or short-lived) or inline images.
         private fun containsTransientMetaLinks(root: JsonNode): Boolean {
             val meta = root.get("meta") ?: root
+            if (meta.get("streams")?.size()?.let { it > 0 } == true ||
+                meta.get("url")?.asText()?.isNotBlank() == true) return true
             val videos = meta.get("videos") ?: return false
             return videos.any { video ->
-                video.get("streams")?.size()?.let { it > 0 } == true ||
-                    video.get("url")?.asText()?.isNotBlank() == true
+                listOf("streams", "sources", "stream").any { key ->
+                    video.get(key)?.let { it.isObject || it.isArray && it.size() > 0 } == true
+                } || video.get("url")?.asText()?.isNotBlank() == true
             }
         }
 
@@ -1135,10 +1138,13 @@ open class StremioC(
                         val ttlMs = addonMetaTtlMs(
                             url, policy, header("Age"), header("Expires"), header("Date"), root
                         )
-                        // Non-empty Vary requires header-aware cache keys. Delegate such
-                        // responses to the host HTTP client rather than miskeying here.
+                        // Only Accept-Encoding varies the wire representation, not the
+                        // parsed JSON. Other Vary fields require request-header-aware keys.
+                        val safeVary = vary.orEmpty().split(',').all {
+                            it.trim().isEmpty() || it.trim().equals("Accept-Encoding", true)
+                        }
                         if (isCacheableAddonMeta(url, root) && ttlMs > 0L &&
-                            vary.isNullOrBlank() &&
+                            safeVary &&
                             !containsTransientMetaLinks(root) &&
                             !body.contains("data:image/", ignoreCase = true)) {
                             cacheAddonMetaInRam(storageKey, body, ttlMs)
