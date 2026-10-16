@@ -3,7 +3,7 @@ package com.hsp1020
 import android.os.Build
 import android.util.TypedValue
 import android.view.View
-import androidx.activity.PictureInPictureModeChangedInfo
+import androidx.core.app.PictureInPictureModeChangedInfo
 import androidx.annotation.OptIn
 import androidx.core.util.Consumer
 import androidx.fragment.app.Fragment
