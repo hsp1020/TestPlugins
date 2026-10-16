@@ -257,6 +257,7 @@ internal class RatingPlotImageHook(
     private val main = Handler(Looper.getMainLooper())
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
+    private val pipSubtitles = PipSubtitleScaler()
     private val mdbUpdate: (String) -> Unit = { cacheKey ->
         val matched = watchers.values.filter { it.matchesMdbKey(cacheKey) }
         val applied = matched.count { it.refreshLateMdb() }
@@ -608,6 +609,7 @@ internal class RatingPlotImageHook(
                         }
                     }
                 } else attach(f, v)
+                pipSubtitles.attach(f)
             }
         }
 
@@ -624,6 +626,7 @@ internal class RatingPlotImageHook(
         }
 
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
+            pipSubtitles.attach(f)
             watchers[f]?.let { watcher ->
                 watcher.render() // CloudStream may reuse an old LoadResponse without calling load().
                 watcher.auditReentry()
@@ -634,6 +637,7 @@ internal class RatingPlotImageHook(
             if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
                 homeEntries.detach()
             releaseHomeMenu(f)
+            pipSubtitles.detach(f)
             watchers.remove(f)?.detach()
         }
     }
@@ -653,6 +657,7 @@ internal class RatingPlotImageHook(
     }
 
     fun stop() {
+        pipSubtitles.detach()
         StremioCMdbUiBridge.listen(null)
         homeEntries.detach()
         detachPreview()
@@ -668,6 +673,7 @@ internal class RatingPlotImageHook(
 
     private fun use(activity: FragmentActivity) {
         if (host === activity) return
+        pipSubtitles.detach()
         homeEntries.detach()
         detachPreview()
         detailRevealEnd?.invoke()
@@ -924,6 +930,7 @@ internal class RatingPlotImageHook(
         detachPreview()
         detailRevealEnd?.invoke()
         resetSearchState()
+        pipSubtitles.detach()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
         watchers.clear(); host = null

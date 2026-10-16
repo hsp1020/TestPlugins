@@ -34,6 +34,8 @@ dependencies {
     implementation("com.google.android.material:material:1.13.0")
     compileOnly("androidx.navigation:navigation-common:2.9.8")
     compileOnly("androidx.navigation:navigation-fragment:2.9.8")
+    // Compile against the host's Media3 SubtitleView without packaging another copy.
+    compileOnly("androidx.media3:media3-ui:1.9.3")
     // Supplied by the CloudStream host; do not bundle another runtime copy.
     compileOnly("com.facebook.shimmer:shimmer:0.5.0")
 }
