@@ -873,6 +873,7 @@ open class StremioC(
         fun invalidateSyncSettingsCache() = synchronized(StremioC::class.java) {
             cachedSyncSettings = null
             cachedSyncSettingsTime = 0L
+            StremioCCacheAudit.log("settings", "CACHE_INVALIDATE", "sync_settings")
             // Metadata keys already include the exact addon URL, locale and
             // manifest version. Unrelated settings must not flush other addons.
         }
@@ -887,11 +888,16 @@ open class StremioC(
             val now = System.currentTimeMillis()
             val cached = cachedSyncSettings
             if (cached != null && (now - cachedSyncSettingsTime) < SYNC_SETTINGS_TTL) {
+                StremioCCacheAudit.log("settings", "RAM_HIT", "sync_settings",
+                    "ageMs=${now - cachedSyncSettingsTime} ttlMs=$SYNC_SETTINGS_TTL")
                 return cached
             }
+            StremioCCacheAudit.log("settings", if (cached == null) "RAM_MISS" else "RAM_EXPIRED",
+                "sync_settings", "ageMs=${now - cachedSyncSettingsTime}")
             synchronized(StremioC::class.java) {
                 val doubleCached = cachedSyncSettings
                 if (doubleCached != null && (now - cachedSyncSettingsTime) < SYNC_SETTINGS_TTL) {
+                    StremioCCacheAudit.log("settings", "RAM_REUSE_AFTER_LOCK", "sync_settings")
                     return doubleCached
                 }
                 val context = CloudStreamApp.context ?: return SyncSettings("", emptyMap(), emptyMap(), emptyMap(), emptyList())
@@ -942,6 +948,8 @@ open class StremioC(
                     catalogEnabled.filterValues { !it }.keys.toSet(), catalogEnabledIds)
                 cachedSyncSettings = result
                 cachedSyncSettingsTime = System.currentTimeMillis()
+                StremioCCacheAudit.log("settings", "RAM_WRITE_OK", "sync_settings",
+                    "links=${map.size} extraAddons=${extraUrls.size} disabled=${result.disabledCatalogUrls.size}")
                 return result
             }
         }
@@ -2497,6 +2505,8 @@ open class StremioC(
         val forceRefresh = requested?.queryParameter("__stremioc_refresh") == "1"
         val effectiveUrl = if (forceRefresh) requested!!.newBuilder()
             .removeAllQueryParameters("__stremioc_refresh").build().toString() else url
+        StremioCCacheAudit.log("detail_load", "PROVIDER_LOAD_ENTER", effectiveUrl,
+            "force=$forceRefresh")
         val trace = DetailLoadPerf.current.get() ?: DetailLoadPerf.Session()
         return withContext(DetailLoadPerf.current.asContextElement(trace)) {
             val source = when {
@@ -2511,6 +2521,12 @@ open class StremioC(
             try {
                 val result = DetailLoadPerf.step("load.coroutineScope") { loadInternal(effectiveUrl, forceRefresh) }
                 DetailLoadPerf.event("LOAD_RETURN", "type=${result.type} poster=${!result.posterUrl.isNullOrBlank()} backdrop=${!result.backgroundPosterUrl.isNullOrBlank()}")
+                StremioCCacheAudit.log("detail_load", "PROVIDER_LOAD_RETURN", effectiveUrl,
+                    "type=${result.type} plotChars=${result.plot?.length ?: 0}")
+                addonMetaScope.launch {
+                    StremioCCacheAudit.log("summary", "USAGE_AFTER_LOAD", effectiveUrl,
+                        metadataCacheDiagnostics())
+                }
                 if (Log.isLoggable("StremioCCache", Log.DEBUG)) {
                     Log.d("StremioCCache", metadataCacheDiagnostics())
                 }
@@ -5306,19 +5322,32 @@ internal fun stremioReadManifest(
     prefs: SharedPreferences, source: String, requireFresh: Boolean = false
 ): String? {
     val key = stremioCatalogKey(source)
-    if (prefs.getBoolean("manifest_no_store_" + key, false)) return null
+    if (prefs.getBoolean("manifest_no_store_" + key, false)) {
+        StremioCCacheAudit.log("manifest", "PREFS_BLOCKED_NO_STORE", source)
+        return null
+    }
     val raw = prefs.getString(key, null) ?: stremioOldCatalogKeys(source)
-        .firstNotNullOfOrNull { prefs.getString(it, null) } ?: return null
+        .firstNotNullOfOrNull { prefs.getString(it, null) }
+    if (raw == null) {
+        StremioCCacheAudit.log("manifest", "PREFS_MISS", source,
+            "requireFresh=$requireFresh")
+        return null
+    }
     val now = System.currentTimeMillis()
     val stampKey = "manifest_saved_at_$key"
     val savedAt = prefs.getLong(stampKey, 0L)
     // One-time migration for manifests stored before timestamp tracking.
     if (savedAt == 0L) {
         prefs.edit().putString(key, raw).putLong(stampKey, now).apply()
+        StremioCCacheAudit.log("manifest", "PREFS_MIGRATE_AND_REUSE", source,
+            "chars=${raw.length} requireFresh=$requireFresh")
         return raw
     }
     val maxAge = if (requireFresh) prefs.getLong(
         "manifest_ttl_ms_" + key, 3_600_000L
     ).coerceIn(0L, 72L * 60 * 60 * 1000) else 72L * 60 * 60 * 1000
-    return raw.takeIf { savedAt <= now && now - savedAt <= maxAge }
+    val valid = savedAt <= now && now - savedAt <= maxAge
+    StremioCCacheAudit.log("manifest", if (valid) "PREFS_HIT" else "PREFS_EXPIRED",
+        source, "ageMs=${now - savedAt} ttlMs=$maxAge requireFresh=$requireFresh chars=${raw.length}")
+    return raw.takeIf { valid }
 }
