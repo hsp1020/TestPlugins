@@ -1693,6 +1693,8 @@ open class StremioC(
 
     private suspend fun fetchMdbAttempt(target: MdbTarget): SpeculativeMdbResult {
         val cacheKey = "${target.credentialFingerprint}:${target.isTmdb}:${target.mediaType}:${target.id}"
+        StremioCCacheAudit.log("mdb", "FETCH_ENTER", cacheKey,
+            "source=${if (target.isTmdb) "tmdb" else "imdb"} media=${target.mediaType}")
         val cached = stremioCacheMemoryRead("mdb", cacheKey, mdbRatingsCache[cacheKey], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("mdb", cacheKey)?.let { (json, stamp) ->
             runCatching { parseJson<List<String>>(json) }.getOrNull()
                 ?.takeIf { it.isNotEmpty() }?.let { ratings ->
@@ -1704,15 +1706,29 @@ open class StremioC(
                 }
         }
         DetailLoadPerf.event("MDB_CACHE", "hit=${cached != null}")
-        if (cached != null) return SpeculativeMdbResult(target, cached.first, true)
+        if (cached != null) {
+            StremioCCacheAudit.log("mdb", "REUSE_CACHE", cacheKey,
+                "ratings=${cached.first.size} ageMs=${System.currentTimeMillis() - cached.second}")
+            return SpeculativeMdbResult(target, cached.first, true)
+        }
+        StremioCCacheAudit.log("mdb", "HTTP_PENDING", cacheKey)
 
         val attempt = runSuspendCatching {
             DetailLoadPerf.step("mdb.httpAndParse") {
                 mdbFetchSemaphore.withPermit {
-                    fetchMdbListRatings(target.id, target.isTmdb, target.mediaType)
+                    val started = SystemClock.elapsedRealtime()
+                    StremioCCacheAudit.log("mdb", "HTTP_START", cacheKey)
+                    val values = fetchMdbListRatings(target.id, target.isTmdb, target.mediaType)
+                    StremioCCacheAudit.log("mdb", "HTTP_DONE", cacheKey,
+                        "durationMs=${SystemClock.elapsedRealtime() - started} ratings=${values.size}")
+                    values
                 }
             }
-        }.onFailure { DetailLoadPerf.event("MDB_ERROR", "error=${it.javaClass.simpleName}") }
+        }.onFailure {
+            DetailLoadPerf.event("MDB_ERROR", "error=${it.javaClass.simpleName}")
+            StremioCCacheAudit.log("mdb", "HTTP_ERROR", cacheKey,
+                "error=${it.javaClass.simpleName}")
+        }
         val ratings = attempt.getOrDefault(emptyList())
         if (ratings.isNotEmpty()) {
             mdbRatingsCache[cacheKey] = ratings to System.currentTimeMillis()
@@ -1720,6 +1736,8 @@ open class StremioC(
             MetadataDiskCache.write("mdb", cacheKey, ratings.toJson())
         }
         DetailLoadPerf.event("MDB_RESULT", "success=${attempt.isSuccess} ratings=${ratings.size} type=${target.mediaType}")
+        StremioCCacheAudit.log("mdb", "FETCH_RESULT", cacheKey,
+            "success=${attempt.isSuccess} ratings=${ratings.size} stored=${ratings.isNotEmpty()}")
         return SpeculativeMdbResult(target, ratings, attempt.isSuccess)
     }
 
@@ -1727,11 +1745,18 @@ open class StremioC(
     private fun CoroutineScope.launchMdbAttempt(target: MdbTarget?): Deferred<SpeculativeMdbResult?>? =
         target?.let { requested ->
             synchronized(mdbInflight) {
-                mdbInflight[requested] ?: mdbFetchScope.async(start = CoroutineStart.LAZY) {
+                val auditKey = "${requested.credentialFingerprint}:${requested.isTmdb}:${requested.mediaType}:${requested.id}"
+                mdbInflight[requested]?.also {
+                    StremioCCacheAudit.log("mdb", "INFLIGHT_JOIN", auditKey)
+                } ?: mdbFetchScope.async(start = CoroutineStart.LAZY) {
+                    StremioCCacheAudit.log("mdb", "JOB_START", auditKey)
                     DetailLoadPerf.step("task.mdbPrefetch") { fetchMdbAttempt(requested) }
                 }.also { job ->
+                    StremioCCacheAudit.log("mdb", "INFLIGHT_NEW", auditKey)
                     mdbInflight[requested] = job
-                    job.invokeOnCompletion {
+                    job.invokeOnCompletion { error ->
+                        StremioCCacheAudit.log("mdb", "JOB_COMPLETE", auditKey,
+                            "cancelled=${job.isCancelled} failure=${error?.javaClass?.simpleName ?: "none"}")
                         synchronized(mdbInflight) {
                             if (mdbInflight[requested] === job) mdbInflight.remove(requested)
                         }
@@ -1749,8 +1774,7 @@ open class StremioC(
         if (imdbId.isNullOrBlank() || tmdbId.isNullOrBlank()) return false
         val cached = stremioCacheMemoryRead("find", imdbId,
             tmdbFindCache[imdbId], METADATA_CACHE_TTL) ?: return false
-        return
-            cached.first?.first == tmdbId && cached.first?.second == mediaType
+        return cached.first?.first == tmdbId && cached.first?.second == mediaType
     }
 
     private fun hasUsableSpeculativeMdbTarget(
@@ -2819,6 +2843,9 @@ open class StremioC(
                 DetailLoadPerf.step("await.mdbForFinalTarget") { authoritativeMdb?.await() }
                     ?.takeIf { it.matches(finalMdbTarget) }?.ratings
             }
+            val mdbAuditKey = "${finalMdbTarget.credentialFingerprint}:${finalMdbTarget.isTmdb}:${finalMdbTarget.mediaType}:${finalMdbTarget.id}"
+            StremioCCacheAudit.log("mdb", if (mdbRatings == null) "DISPLAY_TIMEOUT_OR_NO_RESULT" else "DISPLAY_RESULT",
+                mdbAuditKey, "ratings=${mdbRatings?.size ?: 0} finished=${authoritativeMdb?.isCompleted}")
             mdbRatings?.takeIf { it.isNotEmpty() }?.let { ratings ->
                 val ratingStr = "\u2063" + ratings.joinToString("  ")
                 val currentPlot = loadRes.plot
