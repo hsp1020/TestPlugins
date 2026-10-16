@@ -1183,7 +1183,7 @@ internal class CatalogBrowserDialog(
         genre = genres.getOrNull(genreIndex)
         chosen = true
         hasNext = true
-        val snapshot = pendingHome ?: liveHomeSnapshot(next)
+        val snapshot = liveHomeSnapshot(next) ?: pendingHome
         val sameCatalog = snapshot?.target?.catalogId == next.catalog.id
         val sameType = snapshot?.target?.type == next.catalog.type
         val sameSource = snapshot?.let {
