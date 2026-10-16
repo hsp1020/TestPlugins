@@ -115,6 +115,35 @@ private fun mdbCredentialFingerprint(): String {
     return key.toUniqueKey()
 }
 
+internal data class StremioManifestCachePolicy(val ttlMs: Long, val noStore: Boolean)
+
+internal fun stremioManifestCachePolicy(headers: Map<String, String>): StremioManifestCachePolicy {
+    fun header(name: String): String? = headers.entries
+        .firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+    val directives = header("Cache-Control").orEmpty().lowercase(java.util.Locale.ROOT)
+        .split(',').map { it.trim() }
+    val noStore = "no-store" in directives
+    if (noStore || "no-cache" in directives) return StremioManifestCachePolicy(0L, noStore)
+    val age = header("Age")?.trim()?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
+    val maxAge = directives.firstOrNull { it.startsWith("max-age=") }
+        ?.substringAfter('=')?.trim('"', ' ')?.toLongOrNull()
+    val ttl = if (maxAge != null) {
+        (maxAge - age).coerceIn(0L, 72L * 3600L) * 1000L
+    } else {
+        fun parseDate(value: String?): Long? = runCatching {
+            java.text.SimpleDateFormat(
+                "EEE, dd MMM yyyy HH:mm:ss zzz", java.util.Locale.US
+            ).parse(value ?: "")?.time
+        }.getOrNull()
+        val expires = parseDate(header("Expires"))
+        if (expires != null) {
+            val serverDate = parseDate(header("Date")) ?: System.currentTimeMillis()
+            (expires - serverDate - age * 1000L).coerceIn(0L, 72L * 3600L * 1000L)
+        } else 3_600_000L
+    }
+    return StremioManifestCachePolicy(ttl, false)
+}
+
 private object MetadataDiskCache {
     private const val TTL_MS = 24L * 60 * 60 * 1000
     private const val SEASON_TTL_MS = 12L * 60 * 60 * 1000
@@ -1787,16 +1816,9 @@ open class StremioC(
             try {
                 val parsed = parseJson<Manifest>(resText)
                 if (parsed?.catalogs?.isNotEmpty() == true) {
-                    val cacheControl = manifestResponse?.headers?.get("Cache-Control").orEmpty()
-                    val directives = cacheControl.lowercase(java.util.Locale.ROOT)
-                        .split(',').map { it.trim() }
-                    val seconds = directives.firstOrNull { it.startsWith("max-age=") }
-                        ?.substringAfter('=')?.trim('"', ' ')?.toLongOrNull()
-                    manifestCacheTtlMs = when {
-                        directives.any { it == "no-cache" || it == "no-store" } -> 0L
-                        seconds != null -> seconds.coerceIn(0L, 72L * 60 * 60) * 1000L
-                        else -> MANIFEST_CACHE_TTL_MS
-                    }
+                    val cachePolicy = stremioManifestCachePolicy(
+                        manifestResponse?.headers.orEmpty())
+                    manifestCacheTtlMs = cachePolicy.ttlMs
                     val context = CloudStreamApp.context
                     val stored = context?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
                     val manifestKey = currentUrl.toUniqueKey()
@@ -1812,7 +1834,7 @@ open class StremioC(
                     lastManifestUrl = currentUrl
                     lastCacheTime = now
                     stored?.edit()?.apply {
-                        if (directives.any { it == "no-store" }) {
+                        if (cachePolicy.noStore) {
                             putBoolean("manifest_no_store_" + manifestKey, true)
                             remove(manifestKey)
                             remove("manifest_saved_at_" + manifestKey)
