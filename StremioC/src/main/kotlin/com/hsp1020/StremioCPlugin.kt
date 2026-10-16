@@ -388,32 +388,47 @@ class StremioCPlugin : Plugin() {
                     
                     try {
                         val rawManifest = withContext(Dispatchers.IO) {
-                            stremioReadManifest(manifestPrefs, item.link)
-                                ?: runCatching {
+                            stremioReadManifest(manifestPrefs, item.link, requireFresh = true)
+                                ?: (runCatching {
                                     StremioC.customSession.get(stremioManifestUrl(item.link), timeout = 15L)
                                 }.getOrNull()?.let { response ->
                                     val raw = response.text.takeIf { it.isNotBlank() }
                                         ?: return@let null
-                                    if (runCatching { JSONObject(raw).has("catalogs") }.getOrDefault(false)) {
-                                        val key = stremioCatalogKey(item.link)
-                                        val noStore = response.headers.entries.any { (header, value) ->
-                                            header.equals("Cache-Control", ignoreCase = true) &&
-                                                value.split(',').any { it.trim().equals("no-store", ignoreCase = true) }
-                                        }
-                                        manifestPrefs.edit().apply {
-                                            if (noStore) {
-                                                putBoolean("manifest_no_store_" + key, true)
-                                                remove(key)
-                                                remove("manifest_saved_at_" + key)
-                                            } else {
-                                                putBoolean("manifest_no_store_" + key, false)
-                                                putString(key, raw)
-                                                putLong("manifest_saved_at_" + key, System.currentTimeMillis())
-                                            }
-                                        }.apply()
+                                    if (!runCatching { JSONObject(raw).has("catalogs") }.getOrDefault(false))
+                                        return@let null
+                                    val key = stremioCatalogKey(item.link)
+                                    val cacheControl = response.headers.entries
+                                        .firstOrNull { it.key.equals("Cache-Control", ignoreCase = true) }
+                                        ?.value.orEmpty()
+                                    val directives = cacheControl.lowercase(java.util.Locale.ROOT)
+                                        .split(',').map { it.trim() }
+                                    val noStore = "no-store" in directives
+                                    val maxAge = directives.firstOrNull { it.startsWith("max-age=") }
+                                        ?.substringAfter('=')?.trim('"', ' ')?.toLongOrNull()
+                                    val ttl = when {
+                                        noStore || "no-cache" in directives -> 0L
+                                        maxAge != null -> maxAge.coerceIn(0L, 72L * 3600L) * 1000L
+                                        else -> 3_600_000L
                                     }
+                                    val newVersion = runCatching { JSONObject(raw).optString("version") }
+                                        .getOrNull()?.takeIf { it.isNotBlank() }
+                                    manifestPrefs.edit().apply {
+                                        if (noStore) {
+                                            putBoolean("manifest_no_store_" + key, true)
+                                            remove(key)
+                                            remove("manifest_saved_at_" + key)
+                                            remove("manifest_ttl_ms_" + key)
+                                        } else {
+                                            putBoolean("manifest_no_store_" + key, false)
+                                            putString(key, raw)
+                                            putLong("manifest_saved_at_" + key, System.currentTimeMillis())
+                                            putLong("manifest_ttl_ms_" + key, ttl)
+                                        }
+                                        if (newVersion != null) putString("manifest_version_" + key, newVersion)
+                                    }.apply()
                                     raw
-                                }
+                                })
+                                ?: stremioReadManifest(manifestPrefs, item.link)
                         }
                         currentCoroutineContext().ensureActive()
                         val manifest = rawManifest?.let {
@@ -428,7 +443,9 @@ class StremioCPlugin : Plugin() {
                         manifest?.let {
                             val noStore = manifestPrefs.getBoolean(
                                 "manifest_no_store_" + stremioCatalogKey(item.link), false)
-                            homeProvider.primeManifest(it, if (noStore) 0L else 3_600_000L)
+                            val ttl = manifestPrefs.getLong(
+                                "manifest_ttl_ms_" + stremioCatalogKey(item.link), 3_600_000L)
+                            homeProvider.primeManifest(it, if (noStore) 0L else ttl)
                         }
                         registerMainAPI(homeProvider)
                         registeredProviders.add(homeProvider)
