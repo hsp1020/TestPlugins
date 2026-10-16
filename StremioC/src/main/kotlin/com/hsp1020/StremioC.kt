@@ -519,13 +519,28 @@ open class StremioC(
         return withContext(DetailLoadPerf.current.asContextElement(trace)) {
             DetailLoadPerf.event("GET_LOAD_URL_ENTER", "service=$name")
             val resolved = DetailLoadPerf.step("getLoadUrl.total") { getLoadUrlInternal(name, id) }
-            // The host may call load(metaUrl) directly after getLoadUrl(), bypassing
-            // the library load(url) path. Remember the original URL for title/logo visibility.
-            if (mainUrl.isBlank() && name in listOf(
-                    SyncIdName.MyAnimeList, SyncIdName.Kitsu, SyncIdName.Anilist
-                ) && resolved != null) {
-                synchronized(libraryOriginalUrlsByMeta) {
-                    libraryOriginalUrlsByMeta.getOrPut(resolved) { LinkedHashSet() }.add(id)
+            // The sync provider's lookup URL is not necessarily the URL kept in
+            // ResultFragment arguments. MAL and AniList can differ from the host's
+            // canonical URL even for the same anime ID; Kitsu often does not.
+            // Register the canonical forms as well, without another HTTP request.
+            if (mainUrl.isBlank() && resolved != null) {
+                val canonical = when (name) {
+                    SyncIdName.MyAnimeList -> libraryItemId(id, "myanimelist.net", "anime")
+                        ?.let { "https://myanimelist.net/anime/$it/" }
+                    SyncIdName.Anilist -> libraryItemId(id, "anilist.co", "anime")
+                        ?.let { "https://anilist.co/anime/$it/" }
+                    SyncIdName.Kitsu -> libraryItemId(id, "kitsu.app", "anime")
+                        ?.let { "https://kitsu.app/anime/$it/" }
+                    else -> null
+                }
+                if (canonical != null) {
+                    synchronized(libraryOriginalUrlsByMeta) {
+                        libraryOriginalUrlsByMeta.getOrPut(resolved) { LinkedHashSet() }.apply {
+                            add(id)
+                            add(canonical)
+                            add(canonical.dropLast(1))
+                        }
+                    }
                 }
             }
             DetailLoadPerf.event("GET_LOAD_URL_RESULT", "service=$name resolved=${resolved != null} type=${resolved?.substringAfter("/meta/")?.substringBefore('/')}")
@@ -2241,6 +2256,11 @@ open class StremioC(
         for (originalUrl in libraryOrigins) {
             fallbackLogoTitles[url]?.let { fallbackLogoTitles[originalUrl] = it }
             expectedLogoByUrl[url]?.let { expectedLogoByUrl[originalUrl] = it }
+        }
+        if (libraryOrigins.isNotEmpty()) {
+            DetailLoadPerf.event("LIBRARY_TITLE_ALIAS",
+                "targets=${libraryOrigins.size} fallback=${fallbackLogoTitles[url]}" +
+                " expected=${expectedLogoByUrl[url]}")
         }
         collectionDeferred?.cancel() // No remaining prefetch when the final media type differs.
 
