@@ -197,7 +197,7 @@ private object MetadataDiskCache {
     private const val MAX_BYTES = 50L * 1024 * 1024
     private const val MAX_ENTRY_BYTES = 2L * 1024 * 1024
     private const val MAX_RAW_BYTES = 2 * 1024 * 1024
-    private val entryLimits = mapOf("detail" to 200, "season" to 300, "find" to 5000,
+    private val entryLimits = mapOf("detail" to 700, "season" to 300, "find" to 5000,
         "anime" to 5000, "mdb" to 1000, "meta" to 200)
     private val lock = Any()
     private val diskHits = AtomicLong()
@@ -1202,7 +1202,17 @@ open class StremioC(
             if (returnedType != expectedType) {
                 return "type_mismatch expected=$expectedType actual=$returnedType"
             }
-            if (returnedId != expectedId) {
+            // Kitsu/MAL/AniList metadata addons intentionally translate their own
+            // request identity to IMDb or TMDB. The response stays indexed under
+            // the original exact request URL, with the matching media type.
+            val expectedAnime = expectedId.startsWith("kitsu:") ||
+                expectedId.startsWith("mal:") || expectedId.startsWith("anilist:")
+            val mappedExternal = (returnedId.startsWith("tt") &&
+                IMDB_ID_REGEX.matches(returnedId)) ||
+                (returnedId.startsWith("tmdb:") &&
+                    returnedId.removePrefix("tmdb:").toIntOrNull()?.let { it > 0 } == true)
+            if (returnedId != expectedId && !(expectedAnime && mappedExternal &&
+                    !entry.name.isNullOrBlank())) {
                 fun idKind(id: String) = when {
                     id.startsWith("tt") -> "imdb"
                     id.startsWith("mal:") -> "mal"
@@ -1353,7 +1363,7 @@ open class StremioC(
         private val mdbFetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val mdbFetchSemaphore = Semaphore(5)
         private val mdbInflight = mutableMapOf<MdbTarget, Deferred<SpeculativeMdbResult?>>()
-        private val detailLoadHints = lruCacheMap<String, DetailUrlHint>(500)
+        private val detailLoadHints = lruCacheMap<String, DetailUrlHint>(2000)
         private const val METADATA_CACHE_TTL = 24 * 60 * 60 * 1000L
         private const val SEASON_CACHE_TTL = 12 * 60 * 60 * 1000L
 
