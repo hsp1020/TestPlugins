@@ -2220,6 +2220,8 @@ open class StremioC(
         for (originalUrl in libraryOrigins) {
             fallbackLogoTitles[url]?.let { fallbackLogoTitles[originalUrl] = it }
             expectedLogoByUrl[url]?.let { expectedLogoByUrl[originalUrl] = it }
+            trailerChoicesByUrl[url]?.let { trailerChoicesByUrl[originalUrl] = it }
+            genreCatalogsByUrl[url]?.let { genreCatalogsByUrl[originalUrl] = it }
         }
         collectionDeferred?.cancel() // No remaining prefetch when the final media type differs.
 
