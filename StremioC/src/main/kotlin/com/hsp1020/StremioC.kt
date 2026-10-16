@@ -1816,10 +1816,12 @@ open class StremioC(
                             putBoolean("manifest_no_store_" + manifestKey, true)
                             remove(manifestKey)
                             remove("manifest_saved_at_" + manifestKey)
+                            remove("manifest_ttl_ms_" + manifestKey)
                         } else {
                             putBoolean("manifest_no_store_" + manifestKey, false)
                             putString(manifestKey, resText)
                             putLong("manifest_saved_at_" + manifestKey, now)
+                            putLong("manifest_ttl_ms_" + manifestKey, manifestCacheTtlMs)
                         }
                         if (newVersion != null) putString("manifest_version_" + manifestKey, newVersion)
                     }?.apply()
@@ -5053,7 +5055,9 @@ internal fun migrateStremioCatalogSettings(prefs: SharedPreferences, source: Str
     }
 }
 
-internal fun stremioReadManifest(prefs: SharedPreferences, source: String): String? {
+internal fun stremioReadManifest(
+    prefs: SharedPreferences, source: String, requireFresh: Boolean = false
+): String? {
     val key = stremioCatalogKey(source)
     if (prefs.getBoolean("manifest_no_store_" + key, false)) return null
     val raw = prefs.getString(key, null) ?: stremioOldCatalogKeys(source)
@@ -5066,5 +5070,8 @@ internal fun stremioReadManifest(prefs: SharedPreferences, source: String): Stri
         prefs.edit().putString(key, raw).putLong(stampKey, now).apply()
         return raw
     }
-    return raw.takeIf { savedAt <= now && now - savedAt <= 72L * 60 * 60 * 1000 }
+    val maxAge = if (requireFresh) prefs.getLong(
+        "manifest_ttl_ms_" + key, 3_600_000L
+    ).coerceIn(0L, 72L * 60 * 60 * 1000) else 72L * 60 * 60 * 1000
+    return raw.takeIf { savedAt <= now && now - savedAt <= maxAge }
 }
