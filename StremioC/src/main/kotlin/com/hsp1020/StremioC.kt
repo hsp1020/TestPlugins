@@ -166,6 +166,11 @@ private object MetadataDiskCache {
         withContext(Dispatchers.IO) {
             synchronized(lock) {
                 val dir = directory() ?: return@synchronized
+                // Reserve the maximum entry size before writing a temporary file.
+                // Old abandoned temporaries are removed under the same lock.
+                dir.listFiles()?.filter { it.isFile && it.name.endsWith(".tmp") }
+                    ?.forEach { it.delete() }
+                trim(dir, MAX_BYTES - MAX_ENTRY_BYTES)
                 val file = target(dir, kind, key)
                 val temp = File(dir, file.name + ".tmp")
                 try {
@@ -194,7 +199,7 @@ private object MetadataDiskCache {
         }
     }
 
-    private fun trim(dir: File) {
+    private fun trim(dir: File, limitBytes: Long = MAX_BYTES) {
         val files = dir.listFiles()?.filter { it.isFile && it.name.endsWith(".gz") } ?: return
         for ((kind, limit) in entryLimits) {
             files.filter { it.name.startsWith("${kind}_") }
@@ -203,7 +208,7 @@ private object MetadataDiskCache {
         val remaining = files.filter { it.exists() }.sortedBy { it.lastModified() }
         var total = remaining.sumOf { it.length() }
         for (file in remaining) {
-            if (total <= MAX_BYTES) break
+            if (total <= limitBytes) break
             val length = file.length()
             if (file.delete()) total -= length
         }
