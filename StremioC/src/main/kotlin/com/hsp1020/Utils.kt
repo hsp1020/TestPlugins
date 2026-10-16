@@ -709,55 +709,6 @@ internal class RatingPlotImageHook(
         private val actorInformation = ActorInformation.Controller(fragment, detailUrl)
         private val genreGroup = root.findViewById<ChipGroup>(R.id.result_tag)
         private val boundGenreChips = mutableMapOf<View, CatalogShortcutTarget>()
-        // Keep the core LayoutTransition and its animations intact. Initial
-        // metadata-dependent buttons settle while their original holder is
-        // transparent, then the unmodified core holder is shown in one frame.
-        // TV has no media_route_button_holder, so this is Phone UI only.
-        private val toolbarActions = root.resources.getIdentifier(
-            "media_route_button_holder", "id", root.context.packageName
-        ).takeIf { it != 0 }?.let { root.findViewById<ViewGroup>(it) }
-        private val originalToolbarAlpha = toolbarActions?.alpha ?: 1f
-        private val finishedLoading = root.resources.getIdentifier(
-            "result_finish_loading", "id", root.context.packageName
-        ).takeIf { it != 0 }?.let { root.findViewById<View>(it) }
-        private var toolbarStaged = false
-        private var toolbarLastState = ""
-        private var toolbarStableSince = 0L
-        private val toolbarRevealTimeout = Runnable { revealToolbarActions() }
-
-        private fun revealToolbarActions() {
-            if (!toolbarStaged) return
-            toolbarStaged = false
-            root.removeCallbacks(toolbarRevealTimeout)
-            toolbarActions?.let { if (it.alpha != originalToolbarAlpha) it.alpha = originalToolbarAlpha }
-        }
-
-        private fun settleToolbarActions() {
-            val actions = toolbarActions ?: return
-            if (!toolbarStaged) return
-            val loaded = searchTitle?.text?.isNotBlank() == true &&
-                finishedLoading?.isShown == true
-            if (!loaded) return
-            val signature = buildString {
-                for (i in 0 until actions.childCount) {
-                    val child = actions.getChildAt(i)
-                    append(child.id).append(':').append(child.visibility)
-                        .append(':').append(child.width).append(',')
-                }
-            }
-            val settled = toolbarLastState == signature &&
-                actions.layoutTransition?.isRunning != true &&
-                !actions.isLayoutRequested
-            if (settled) {
-                if (toolbarStableSince == 0L) toolbarStableSince = android.os.SystemClock.uptimeMillis()
-            } else toolbarStableSince = 0L
-            toolbarLastState = signature
-            if (toolbarStableSince != 0L &&
-                android.os.SystemClock.uptimeMillis() - toolbarStableSince >= 140L) {
-                revealToolbarActions()
-            } else root.postInvalidateOnAnimation()
-        }
-
         private val actorCardForegrounds = mutableMapOf<View, Drawable?>()
 
         private fun bindActorCardRipple(card: View) {
@@ -859,17 +810,10 @@ internal class RatingPlotImageHook(
                     }
                 }
                 bindGenreClicks()
-                settleToolbarActions()
             }
             true
         }
         fun start() {
-            // Do not disable/replace the native animateLayoutChanges behavior.
-            if (toolbarActions != null && searchTitle?.text.isNullOrBlank()) {
-                toolbarStaged = true
-                toolbarActions.alpha = 0f
-                root.postDelayed(toolbarRevealTimeout, 7000L)
-            }
             actorInformation.start()
             view.addTextChangedListener(this)
             searchButton?.setOnClickListener(searchClick)
@@ -878,8 +822,6 @@ internal class RatingPlotImageHook(
             runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() }
         }
         fun detach() {
-            revealToolbarActions()
-            root.removeCallbacks(toolbarRevealTimeout)
             actorInformation.stop()
             view.removeTextChangedListener(this)
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(detailPreDraw)
