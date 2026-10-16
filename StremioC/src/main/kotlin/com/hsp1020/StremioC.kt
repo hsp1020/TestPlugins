@@ -612,11 +612,11 @@ open class StremioC(
 
     private fun isAddonEnabled() = isCatalogAddonEnabled(mainUrl, addonId)
 
-    internal fun primeManifest(manifest: Manifest) {
+    internal fun primeManifest(manifest: Manifest, ttlMs: Long = MANIFEST_CACHE_TTL_MS) {
         cachedManifest = manifest
         lastManifestUrl = stremioManifestUrl(mainUrl)
         lastCacheTime = System.currentTimeMillis()
-        manifestCacheTtlMs = MANIFEST_CACHE_TTL_MS
+        manifestCacheTtlMs = ttlMs
     }
      
     private var cachedManifest: Manifest? = null
@@ -1803,7 +1803,8 @@ open class StremioC(
             }
         }
 
-        if (lastManifestUrl == currentUrl && now - lastCacheTime <= 72L * 60 * 60 * 1000) {
+        if (manifestCacheTtlMs > 0L && lastManifestUrl == currentUrl &&
+            now - lastCacheTime <= 72L * 60 * 60 * 1000) {
             return cachedManifest
         }
         val saved = CloudStreamApp.context
