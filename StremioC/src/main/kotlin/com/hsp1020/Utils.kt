@@ -766,7 +766,7 @@ internal class RatingPlotImageHook(
         private val castItems = root.resources.getIdentifier("result_cast_items", "id", root.context.packageName)
             .takeIf { it != 0 }?.let { root.findViewById<RecyclerView>(it) }
         private val episodeList = root.findViewById<RecyclerView>(R.id.result_episodes)
-        private val episodeIndicatorOriginals = mutableMapOf<View, Pair<FrameLayout.LayoutParams, Float>>()
+        private val episodeIndicatorRestores = mutableMapOf<View, () -> Unit>()
         private val episodeChildListener = object : RecyclerView.OnChildAttachStateChangeListener {
             override fun onChildViewAttachedToWindow(view: View) = positionEpisodeIndicator(view)
             override fun onChildViewDetachedFromWindow(view: View) = restoreEpisodeIndicator(view)
@@ -776,24 +776,45 @@ internal class RatingPlotImageHook(
             // The compact text-only episode row has no thumbnail and must remain native.
             if (row.findViewById<View>(R.id.episode_poster) == null) return
             val indicator = row.findViewById<View>(R.id.watch_progress_container) ?: return
-            if (episodeIndicatorOriginals.containsKey(indicator)) return
+            if (episodeIndicatorRestores.containsKey(indicator)) return
             val original = indicator.layoutParams as? FrameLayout.LayoutParams ?: return
-            val inset = (4f * indicator.resources.displayMetrics.density + 0.5f).toInt()
+            val inset = (1.5f * indicator.resources.displayMetrics.density + 0.5f).toInt()
             val positioned = FrameLayout.LayoutParams(original).apply {
                 gravity = Gravity.BOTTOM or Gravity.START
                 marginStart = inset
                 bottomMargin = inset
             }
-            episodeIndicatorOriginals[indicator] = original to indicator.alpha
+            val alpha = indicator.alpha
+            val scaleX = indicator.scaleX
+            val scaleY = indicator.scaleY
+            val pivotX = indicator.pivotX
+            val pivotY = indicator.pivotY
+            // Scale toward the bottom-left, so 1.5dp is the visible circle's inset.
+            val pivotListener = View.OnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+                v.pivotX = 0f
+                v.pivotY = v.height.toFloat()
+            }
+            episodeIndicatorRestores[indicator] = {
+                indicator.removeOnLayoutChangeListener(pivotListener)
+                indicator.layoutParams = original
+                indicator.alpha = alpha
+                indicator.scaleX = scaleX
+                indicator.scaleY = scaleY
+                indicator.pivotX = pivotX
+                indicator.pivotY = pivotY
+            }
+            indicator.addOnLayoutChangeListener(pivotListener)
             indicator.layoutParams = positioned
+            indicator.pivotX = 0f
+            indicator.pivotY = indicator.height.toFloat()
+            indicator.scaleX = scaleX * 0.8f
+            indicator.scaleY = scaleY * 0.8f
             indicator.alpha = 0.8f
         }
 
         private fun restoreEpisodeIndicator(row: View) {
             val indicator = row.findViewById<View>(R.id.watch_progress_container) ?: return
-            val (original, alpha) = episodeIndicatorOriginals.remove(indicator) ?: return
-            indicator.layoutParams = original
-            indicator.alpha = alpha
+            episodeIndicatorRestores.remove(indicator)?.invoke()
         }
         private val actorNameId = root.resources.getIdentifier("actor_name", "id", root.context.packageName)
         private val actorInformation = ActorInformation.Controller(fragment, detailUrl)
@@ -915,11 +936,8 @@ internal class RatingPlotImageHook(
         }
         fun detach() {
             episodeList?.removeOnChildAttachStateChangeListener(episodeChildListener)
-            episodeIndicatorOriginals.toMap().forEach { (indicator, original) ->
-                indicator.layoutParams = original.first
-                indicator.alpha = original.second
-            }
-            episodeIndicatorOriginals.clear()
+            episodeIndicatorRestores.values.toList().forEach { it.invoke() }
+            episodeIndicatorRestores.clear()
             actorInformation.stop()
             view.removeTextChangedListener(this)
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(detailPreDraw)
