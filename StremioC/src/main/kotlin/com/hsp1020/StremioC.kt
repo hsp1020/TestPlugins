@@ -168,6 +168,20 @@ internal object StremioCCacheAudit {
     }
 }
 
+internal fun <T> stremioCacheMemoryRead(
+    group: String, key: String, cached: Pair<T, Long>?, ttlMs: Long
+): Pair<T, Long>? {
+    if (cached == null) {
+        StremioCCacheAudit.log(group, "RAM_MISS", key)
+        return null
+    }
+    val age = System.currentTimeMillis() - cached.second
+    val valid = age >= 0L && age < ttlMs
+    StremioCCacheAudit.log(group, if (valid) "RAM_HIT" else "RAM_EXPIRED",
+        key, "ageMs=$age ttlMs=$ttlMs")
+    return cached.takeIf { valid }
+}
+
 private object MetadataDiskCache {
     private const val TTL_MS = 24L * 60 * 60 * 1000
     private const val SEASON_TTL_MS = 12L * 60 * 60 * 1000
@@ -1679,9 +1693,7 @@ open class StremioC(
 
     private suspend fun fetchMdbAttempt(target: MdbTarget): SpeculativeMdbResult {
         val cacheKey = "${target.credentialFingerprint}:${target.isTmdb}:${target.mediaType}:${target.id}"
-        val cached = mdbRatingsCache[cacheKey]?.takeIf {
-            System.currentTimeMillis() - it.second < METADATA_CACHE_TTL
-        } ?: MetadataDiskCache.read("mdb", cacheKey)?.let { (json, stamp) ->
+        val cached = stremioCacheMemoryRead("mdb", cacheKey, mdbRatingsCache[cacheKey], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("mdb", cacheKey)?.let { (json, stamp) ->
             runCatching { parseJson<List<String>>(json) }.getOrNull()
                 ?.takeIf { it.isNotEmpty() }?.let { ratings ->
                     Pair(ratings, stamp).also { mdbRatingsCache[cacheKey] = it }
@@ -1730,8 +1742,9 @@ open class StremioC(
         mediaType: String
     ): Boolean {
         if (imdbId.isNullOrBlank() || tmdbId.isNullOrBlank()) return false
-        val cached = tmdbFindCache[imdbId] ?: return false
-        return System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL &&
+        val cached = stremioCacheMemoryRead("find", imdbId,
+            tmdbFindCache[imdbId], METADATA_CACHE_TTL) ?: return false
+        return
             cached.first?.first == tmdbId && cached.first?.second == mediaType
     }
 
@@ -1778,9 +1791,7 @@ open class StremioC(
     private suspend fun fetchTmdbFindForLoad(
         imdbId: String
     ): Pair<String, String>? {
-        val cachedFind = tmdbFindCache[imdbId]?.takeIf {
-            System.currentTimeMillis() - it.second < METADATA_CACHE_TTL
-        } ?: MetadataDiskCache.read("find", imdbId)?.let { (encoded, stamp) ->
+        val cachedFind = stremioCacheMemoryRead("find", imdbId, tmdbFindCache[imdbId], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("find", imdbId)?.let { (encoded, stamp) ->
             val parts = encoded.split('|')
             if (parts.size == 2 && parts[0].toIntOrNull() != null && parts[1] in listOf("tv", "movie")) {
                 Pair(Pair(parts[0], parts[1]), stamp).also { tmdbFindCache[imdbId] = it }
@@ -1828,9 +1839,7 @@ open class StremioC(
         val detailUrl = buildTmdbUrl("/$mediaType/$tmdbId",
             "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages(),
             *videoLanguages)
-        val cached = tmdbDetailsCache[detailUrl]?.takeIf {
-            System.currentTimeMillis() - it.second < METADATA_CACHE_TTL
-        } ?: MetadataDiskCache.read("detail", detailUrl)?.let { (json, stamp) ->
+        val cached = stremioCacheMemoryRead("detail", detailUrl, tmdbDetailsCache[detailUrl], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("detail", detailUrl)?.let { (json, stamp) ->
             runCatching { parseJson<TmdbDetailResponse>(json) }.getOrNull()?.let { value ->
                 Pair(value, stamp).also { tmdbDetailsCache[detailUrl] = it }
             }
@@ -3230,9 +3239,7 @@ open class StremioC(
                 (if (season != null) "&season=$season" else "") +
                 (if (episode != null) "&episode=$episode" else "")
         }
-        val cachedAnime = animeMappingCache[query]?.takeIf {
-            System.currentTimeMillis() - it.second < METADATA_CACHE_TTL
-        } ?: MetadataDiskCache.read("anime", query)?.let { (json, stamp) ->
+        val cachedAnime = stremioCacheMemoryRead("anime", query, animeMappingCache[query], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("anime", query)?.let { (json, stamp) ->
             runCatching { parseJson<AnimeSeasonMapping>(json) }.getOrNull()?.let { value ->
                 Pair(value, stamp).also { animeMappingCache[query] = it }
             }
@@ -4112,9 +4119,7 @@ open class StremioC(
                 "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages(),
                 *videoLanguages)
             val cacheKey = detailUrl
-            val cached = tmdbDetailsCache[cacheKey]?.takeIf {
-                System.currentTimeMillis() - it.second < METADATA_CACHE_TTL
-            } ?: MetadataDiskCache.read("detail", cacheKey)?.let { (json, stamp) ->
+            val cached = stremioCacheMemoryRead("detail", cacheKey, tmdbDetailsCache[cacheKey], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("detail", cacheKey)?.let { (json, stamp) ->
                 runCatching { parseJson<TmdbDetailResponse>(json) }.getOrNull()?.let { value ->
                     Pair(value, stamp).also { tmdbDetailsCache[cacheKey] = it }
                 }
@@ -4166,9 +4171,7 @@ open class StremioC(
                                     runSuspendCatching {
                                         val seasonUrl = provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")
                                         val seasonCacheKey = seasonUrl
-                                        val cachedSeason = tmdbSeasonCache[seasonCacheKey]?.takeIf {
-                                            System.currentTimeMillis() - it.second < SEASON_CACHE_TTL
-                                        } ?: MetadataDiskCache.read("season", seasonCacheKey)?.let { (json, stamp) ->
+                                        val cachedSeason = stremioCacheMemoryRead("season", seasonCacheKey, tmdbSeasonCache[seasonCacheKey], SEASON_CACHE_TTL) ?: MetadataDiskCache.read("season", seasonCacheKey)?.let { (json, stamp) ->
                                             runCatching { parseJson<TmdbSeasonDetail>(json) }.getOrNull()?.let { value ->
                                                 Pair(value, stamp).also { tmdbSeasonCache[seasonCacheKey] = it }
                                             }
