@@ -2215,7 +2215,7 @@ private fun showLanguageSelectDialog() {
                 val catalogs = manifest.catalogs
                 val key = stremioCatalogKey(item.link)
                 val cachePolicy = stremioManifestCachePolicy(
-                    manifestResponse?.headers.orEmpty())
+                    manifestResponse?.headers?.toList().orEmpty())
                 val noStore = cachePolicy.noStore
                 val ttl = cachePolicy.ttlMs
                 val version = runCatching { JSONObject(manifestText).optString("version") }
