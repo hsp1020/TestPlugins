@@ -390,12 +390,21 @@ class StremioCPlugin : Plugin() {
                         val rawManifest = withContext(Dispatchers.IO) {
                             stremioReadManifest(manifestPrefs, item.link, requireFresh = true)
                                 ?: (runCatching {
+                                    StremioCCacheAudit.log("manifest", "REGISTER_HTTP_START", item.link)
                                     StremioC.customSession.get(stremioManifestUrl(item.link), timeout = 15L)
+                                }.onFailure { error ->
+                                    StremioCCacheAudit.log("manifest", "REGISTER_HTTP_ERROR", item.link,
+                                        "error=${error.javaClass.simpleName}")
                                 }.getOrNull()?.let { response ->
+                                    StremioCCacheAudit.log("manifest", "REGISTER_HTTP_DONE", item.link,
+                                        "code=${response.code}")
                                     val raw = response.text.takeIf { it.isNotBlank() }
                                         ?: return@let null
-                                    if (!runCatching { JSONObject(raw).has("catalogs") }.getOrDefault(false))
+                                    if (!runCatching { JSONObject(raw).has("catalogs") }.getOrDefault(false)) {
+                                        StremioCCacheAudit.log("manifest", "REGISTER_SKIP_INVALID", item.link,
+                                            "chars=${raw.length}")
                                         return@let null
+                                    }
                                     val key = stremioCatalogKey(item.link)
                                     val cachePolicy = stremioManifestCachePolicy(response.headers)
                                     val noStore = cachePolicy.noStore
@@ -416,6 +425,10 @@ class StremioCPlugin : Plugin() {
                                         }
                                         if (newVersion != null) putString("manifest_version_" + key, newVersion)
                                     }.apply()
+                                    StremioCCacheAudit.log("manifest",
+                                        if (noStore) "REGISTER_SKIP_NO_STORE" else "REGISTER_PREFS_WRITE_OK",
+                                        item.link,
+                                        "chars=${raw.length} ttlMs=$ttl versionPresent=${newVersion != null}")
                                     raw
                                 })
                                 ?: stremioReadManifest(manifestPrefs, item.link)
