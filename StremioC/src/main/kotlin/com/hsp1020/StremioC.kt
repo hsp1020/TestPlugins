@@ -223,6 +223,13 @@ open class StremioC(
         val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
             ?.authData() ?: return null
 
+        val headers = SimklApi.getHeaders(auth.token) + ("User-Agent" to "StremioC/1.0")
+        val params = mapOf(
+            "client_id" to (headers["simkl-api-key"] ?: return null),
+            "app-name" to "stremioc",
+            "app-version" to "1.0"
+        )
+
         // CloudStream persists the complete, account-scoped Simkl library, including external IDs.
         val cached = getKey<JsonNode>(SimklApi.SIMKL_CACHED_LIST, auth.user.id.toString())
         for ((section, type) in listOf("movies" to "movie", "shows" to "series", "anime" to "series")) {
@@ -231,16 +238,35 @@ open class StremioC(
                 content?.get("ids")?.get("simkl")?.asText() == simklId
             } ?: continue
             val ids = (if (section == "movies") item.get("movie") else item.get("show"))?.get("ids")
-            simklMetaUrl(base, type, ids)?.let { return it }
+            if (section != "anime") {
+                simklMetaUrl(base, type, ids)?.let { return it }
+                continue
+            }
+
+            // CloudStream's cached Simkl anime model drops anime_type. Do not assume
+            // an anime is a series: confirm its type with one Simkl summary request.
+            val animeType = item.get("anime_type").textOrNull()
+                ?: item.get("show")?.get("anime_type").textOrNull()
+            val detail = if (animeType == null) runSuspendCatching {
+                parseJson<JsonNode>(customSession.get(
+                    "https://api.simkl.com/anime/$simklId",
+                    params = params,
+                    headers = headers,
+                    timeout = 15L
+                ).text)
+            }.getOrNull()?.takeIf {
+                it.get("ids")?.get("simkl")?.asText() == simklId
+            } else null
+            val resolvedType = when ((animeType ?: detail?.get("anime_type").textOrNull())?.lowercase()) {
+                "movie" -> "movie"
+                "tv", "ova", "ona", "special", "music video" -> "series"
+                else -> return null
+            }
+            return simklMetaUrl(base, resolvedType, ids)
+                ?: simklMetaUrl(base, resolvedType, detail?.get("ids"))
         }
 
         // Cache miss (or no external ID): first identify the media type, then fetch full IDs.
-        val headers = SimklApi.getHeaders(auth.token) + ("User-Agent" to "StremioC/1.0")
-        val params = mapOf(
-            "client_id" to (headers["simkl-api-key"] ?: return null),
-            "app-name" to "stremioc",
-            "app-version" to "1.0"
-        )
         val matches = runSuspendCatching {
             parseJson<JsonNode>(customSession.get(
                 "https://api.simkl.com/search/id",
@@ -267,9 +293,13 @@ open class StremioC(
             ).text)
         }.getOrNull() ?: return null
         if (detail.get("ids")?.get("simkl")?.asText() != simklId) return null
-        val type = if (endpoint == "movies" ||
-            (endpoint == "anime" && detail.get("anime_type").textOrNull()?.lowercase() == "movie")
-        ) "movie" else "series"
+        val type = if (endpoint == "anime") {
+            when (detail.get("anime_type").textOrNull()?.lowercase()) {
+                "movie" -> "movie"
+                "tv", "ova", "ona", "special", "music video" -> "series"
+                else -> return null
+            }
+        } else if (endpoint == "movies") "movie" else "series"
         return simklMetaUrl(base, type, detail.get("ids"))
     }
 
