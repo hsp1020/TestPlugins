@@ -1696,7 +1696,11 @@ open class StremioC(
         val cached = stremioCacheMemoryRead("mdb", cacheKey, mdbRatingsCache[cacheKey], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("mdb", cacheKey)?.let { (json, stamp) ->
             runCatching { parseJson<List<String>>(json) }.getOrNull()
                 ?.takeIf { it.isNotEmpty() }?.let { ratings ->
-                    Pair(ratings, stamp).also { mdbRatingsCache[cacheKey] = it }
+                    Pair(ratings, stamp).also {
+                        mdbRatingsCache[cacheKey] = it
+                        StremioCCacheAudit.log("mdb", "RAM_RESTORE_DISK", cacheKey,
+                            "ratings=${ratings.size}")
+                    }
                 }
         }
         DetailLoadPerf.event("MDB_CACHE", "hit=${cached != null}")
@@ -1712,6 +1716,7 @@ open class StremioC(
         val ratings = attempt.getOrDefault(emptyList())
         if (ratings.isNotEmpty()) {
             mdbRatingsCache[cacheKey] = ratings to System.currentTimeMillis()
+            StremioCCacheAudit.log("mdb", "RAM_WRITE_OK", cacheKey, "ratings=${ratings.size}")
             MetadataDiskCache.write("mdb", cacheKey, ratings.toJson())
         }
         DetailLoadPerf.event("MDB_RESULT", "success=${attempt.isSuccess} ratings=${ratings.size} type=${target.mediaType}")
@@ -1794,7 +1799,10 @@ open class StremioC(
         val cachedFind = stremioCacheMemoryRead("find", imdbId, tmdbFindCache[imdbId], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("find", imdbId)?.let { (encoded, stamp) ->
             val parts = encoded.split('|')
             if (parts.size == 2 && parts[0].toIntOrNull() != null && parts[1] in listOf("tv", "movie")) {
-                Pair(Pair(parts[0], parts[1]), stamp).also { tmdbFindCache[imdbId] = it }
+                Pair(Pair(parts[0], parts[1]), stamp).also {
+                    tmdbFindCache[imdbId] = it
+                    StremioCCacheAudit.log("find", "RAM_RESTORE_DISK", imdbId)
+                }
             } else null
         }
         DetailLoadPerf.event("TMDB_FIND_CACHE", "hit=${cachedFind != null}")
@@ -1817,6 +1825,7 @@ open class StremioC(
             }.getOrNull()
             if (fetchedFind != null) {
                 tmdbFindCache[imdbId] = Pair(fetchedFind, System.currentTimeMillis())
+                StremioCCacheAudit.log("find", "RAM_WRITE_OK", imdbId, "type=${fetchedFind.second}")
                 MetadataDiskCache.write("find", imdbId, "${fetchedFind.first}|${fetchedFind.second}")
             }
             fetchedFind
@@ -1841,7 +1850,10 @@ open class StremioC(
             *videoLanguages)
         val cached = stremioCacheMemoryRead("detail", detailUrl, tmdbDetailsCache[detailUrl], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("detail", detailUrl)?.let { (json, stamp) ->
             runCatching { parseJson<TmdbDetailResponse>(json) }.getOrNull()?.let { value ->
-                Pair(value, stamp).also { tmdbDetailsCache[detailUrl] = it }
+                Pair(value, stamp).also {
+                    tmdbDetailsCache[detailUrl] = it
+                    StremioCCacheAudit.log("detail", "RAM_RESTORE_DISK", detailUrl)
+                }
             }
         }
         DetailLoadPerf.event("TMDB_DETAIL_CACHE", "hit=${cached != null} media=$mediaType")
@@ -1855,6 +1867,7 @@ open class StremioC(
                 }
                 if (fetched != null) {
                     tmdbDetailsCache[detailUrl] = Pair(fetched, System.currentTimeMillis())
+                    StremioCCacheAudit.log("detail", "RAM_WRITE_OK", detailUrl)
                     MetadataDiskCache.write("detail", detailUrl, text)
                 }
                 fetched
@@ -3241,7 +3254,10 @@ open class StremioC(
         }
         val cachedAnime = stremioCacheMemoryRead("anime", query, animeMappingCache[query], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("anime", query)?.let { (json, stamp) ->
             runCatching { parseJson<AnimeSeasonMapping>(json) }.getOrNull()?.let { value ->
-                Pair(value, stamp).also { animeMappingCache[query] = it }
+                Pair(value, stamp).also {
+                    animeMappingCache[query] = it
+                    StremioCCacheAudit.log("anime", "RAM_RESTORE_DISK", query)
+                }
             }
         }
         DetailLoadPerf.event("ANIME_MAP_CACHE", "hit=${cachedAnime != null}")
@@ -3317,6 +3333,7 @@ open class StremioC(
             if (noMapping) return null
             if (mapping != null) {
                 animeMappingCache[query] = mapping to System.currentTimeMillis()
+                StremioCCacheAudit.log("anime", "RAM_WRITE_OK", query)
                 MetadataDiskCache.write("anime", query, mapping.toJson())
                 return mapping
             }
@@ -4121,7 +4138,10 @@ open class StremioC(
             val cacheKey = detailUrl
             val cached = stremioCacheMemoryRead("detail", cacheKey, tmdbDetailsCache[cacheKey], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("detail", cacheKey)?.let { (json, stamp) ->
                 runCatching { parseJson<TmdbDetailResponse>(json) }.getOrNull()?.let { value ->
-                    Pair(value, stamp).also { tmdbDetailsCache[cacheKey] = it }
+                    Pair(value, stamp).also {
+                    tmdbDetailsCache[cacheKey] = it
+                    StremioCCacheAudit.log("detail", "RAM_RESTORE_DISK", cacheKey)
+                }
                 }
             }
             DetailLoadPerf.event("TMDB_ENRICH_CACHE", "prefetch=${preFetchedDetail != null} cacheHit=${cached != null} media=$tmdbMediaType")
@@ -4134,6 +4154,7 @@ open class StremioC(
                 }
                 if (fetched != null) {
                     tmdbDetailsCache[cacheKey] = Pair(fetched, System.currentTimeMillis())
+                    StremioCCacheAudit.log("detail", "RAM_WRITE_OK", cacheKey)
                     MetadataDiskCache.write("detail", cacheKey, text)
                 }
                 fetched
@@ -4173,7 +4194,10 @@ open class StremioC(
                                         val seasonCacheKey = seasonUrl
                                         val cachedSeason = stremioCacheMemoryRead("season", seasonCacheKey, tmdbSeasonCache[seasonCacheKey], SEASON_CACHE_TTL) ?: MetadataDiskCache.read("season", seasonCacheKey)?.let { (json, stamp) ->
                                             runCatching { parseJson<TmdbSeasonDetail>(json) }.getOrNull()?.let { value ->
-                                                Pair(value, stamp).also { tmdbSeasonCache[seasonCacheKey] = it }
+                                                Pair(value, stamp).also {
+                                                    tmdbSeasonCache[seasonCacheKey] = it
+                                                    StremioCCacheAudit.log("season", "RAM_RESTORE_DISK", seasonCacheKey)
+                                                }
                                             }
                                         }
                                         DetailLoadPerf.event("TMDB_SEASON_CACHE", "season=$seasonNum hit=${cachedSeason != null}")
@@ -4188,6 +4212,8 @@ open class StremioC(
                                             }
                                             if (fetchedSeason != null) {
                                                 tmdbSeasonCache[seasonCacheKey] = Pair(fetchedSeason, System.currentTimeMillis())
+                                                StremioCCacheAudit.log("season", "RAM_WRITE_OK", seasonCacheKey,
+                                                    "season=$seasonNum")
                                                 MetadataDiskCache.write("season", seasonCacheKey, fetchedSeasonText)
                                             }
                                             fetchedSeason
