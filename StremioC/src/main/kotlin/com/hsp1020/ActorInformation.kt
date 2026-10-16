@@ -464,22 +464,27 @@ internal object ActorInformation {
                     actor.photo?.let { loadImage(it) }
                 }, ViewGroup.LayoutParams(-1, -1))
             }
-            // Align the portrait top with the padded name and Popular heading.
+            // Align the portrait with the visible top of the padded Popular heading.
             profileRow.addView(portraitHolder, LinearLayout.LayoutParams(dp(70), dp(70)).apply {
-                topMargin = dp(6)
+                topMargin = dp(12)
             })
-            fun fact(text: String) = label(text, 13f).apply {
+            fun fact(text: String) = label(text, 20f).apply {
                 setPadding(dp(8), dp(3), dp(8), dp(3))
             }
             val details = column()
-            details.addView(label(actor.name, 20f, true))
+            // Nuvio headlineMedium / titleLarge = 28 / 22; Popular is 19sp here.
+            details.addView(label(actor.name, 24f, true))
             profileRow.addView(details, LinearLayout.LayoutParams(0, -2, 1f))
             var profileLoaded = false
             details.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
                 if (!profileLoaded || dialog !== windowDialog) return@addOnLayoutChangeListener
                 // Preserve enough space for the text on compact phones.
                 val maxDiameter = (profileRow.width - dp(140)).coerceAtLeast(dp(70))
-                val diameter = details.height.coerceIn(dp(70), maxDiameter)
+                // End the circle at the last fact's visible bottom edge.
+                val lastPadding = (details.getChildAt(details.childCount - 1) as? TextView)
+                    ?.paddingBottom ?: 0
+                val diameter = (details.height - dp(12) - lastPadding)
+                    .coerceIn(dp(70), maxDiameter)
                 val params = portraitHolder.layoutParams
                 if (params.width != diameter || params.height != diameter) {
                     params.width = diameter
