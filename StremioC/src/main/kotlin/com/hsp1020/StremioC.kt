@@ -1011,6 +1011,10 @@ open class StremioC(
                     mapOf("Cache-Control" to "no-cache") else emptyMap()).text
             }
             val storageKey = addonMetaStorageKey(url)
+            val previous = if (forceRefresh) {
+                cachedAddonMetaInRam(storageKey)
+                    ?: MetadataDiskCache.read("meta", storageKey)?.first
+            } else null
             if (!forceRefresh) {
                 cachedAddonMetaInRam(storageKey)?.let { return it }
                 MetadataDiskCache.read("meta", storageKey)?.let { return it.first }
@@ -1055,7 +1059,13 @@ open class StremioC(
                     deferred.start()
                 }
             }
-            return flight.await()
+            return try {
+                flight.await()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                if (forceRefresh && previous != null) previous else throw error
+            }
         }
         internal val genreCatalogsByUrl = lruCacheMap<String, Map<String, CatalogShortcutTarget>>(200)
         private val tmdbDetailsCache = lruCacheMap<String, Pair<TmdbDetailResponse, Long>>(200)
@@ -2172,6 +2182,12 @@ open class StremioC(
     
 
     override suspend fun load(url: String): LoadResponse {
+        // Explicit refresh requests bypass only StremioC's own /meta cache.
+        // The marker is stripped before any addon URL, hint or artwork lookup.
+        val requested = url.toHttpUrlOrNull()
+        val forceRefresh = requested?.queryParameter("__stremioc_refresh") == "1"
+        val effectiveUrl = if (forceRefresh) requested!!.newBuilder()
+            .removeAllQueryParameters("__stremioc_refresh").build().toString() else url
         val trace = DetailLoadPerf.current.get() ?: DetailLoadPerf.Session()
         return withContext(DetailLoadPerf.current.asContextElement(trace)) {
             val source = when {
@@ -2184,7 +2200,7 @@ open class StremioC(
             }
             DetailLoadPerf.event("LOAD_ENTER", "source=$source provider=${if (mainUrl.isBlank()) "library" else "addon"}")
             try {
-                val result = DetailLoadPerf.step("load.coroutineScope") { loadInternal(url) }
+                val result = DetailLoadPerf.step("load.coroutineScope") { loadInternal(effectiveUrl, forceRefresh) }
                 DetailLoadPerf.event("LOAD_RETURN", "type=${result.type} poster=${!result.posterUrl.isNullOrBlank()} backdrop=${!result.backgroundPosterUrl.isNullOrBlank()}")
                 result
             } catch (error: Throwable) {
@@ -2194,7 +2210,7 @@ open class StremioC(
         }
     }
 
-    private suspend fun loadInternal(url: String): LoadResponse = coroutineScope {
+    private suspend fun loadInternal(url: String, forceRefresh: Boolean = false): LoadResponse = coroutineScope {
         if (!isAddonEnabled()) throw IllegalStateException("This addon is disabled.")
         if (mainUrl.isBlank()) {
             val libraryService = when {
@@ -2230,12 +2246,16 @@ open class StremioC(
         // Catalogs opened from a metadata Discover link do not require addon registration.
         if (mainUrl.isBlank() && (url.startsWith("https://") || url.startsWith("http://"))) {
             val origin = url.substringBefore("/meta/", "").takeIf { it.isNotBlank() }
-            if (origin != null) return@coroutineScope StremioC(origin, name).load(url)
+            if (origin != null) {
+                val delegatedUrl = if (forceRefresh) url.toHttpUrlOrNull()?.newBuilder()
+                    ?.addQueryParameter("__stremioc_refresh", "1")?.build()?.toString() ?: url else url
+                return@coroutineScope StremioC(origin, name).load(delegatedUrl)
+            }
         }
         suspend fun fetchSecondaryMeta(metaUrl: String, expectedId: String): CatalogEntry? =
             DetailLoadPerf.step("meta.secondary.total") {
                 runSuspendCatching {
-                    val text = DetailLoadPerf.step("meta.secondary.http") { fetchAddonMetaText(metaUrl) }
+                    val text = DetailLoadPerf.step("meta.secondary.http") { fetchAddonMetaText(metaUrl, forceRefresh) }
                     val response = DetailLoadPerf.stepNow("meta.secondary.parse") {
                         if (text.isNotBlank()) parseJson<CatalogResponse>(text) else null
                     }
@@ -2332,7 +2352,7 @@ open class StremioC(
         val res: CatalogEntry = if (url.startsWith("{")) {
             DetailLoadPerf.stepNow("meta.embedded.parse") { parseJson<CatalogEntry>(url) }
         } else {
-            val responseText = DetailLoadPerf.step("meta.primary.http") { fetchAddonMetaText(url) }
+            val responseText = DetailLoadPerf.step("meta.primary.http") { fetchAddonMetaText(url, forceRefresh) }
             try {
                 DetailLoadPerf.stepNow("meta.primary.parse") {
                     val rootNode = parseJson<JsonNode>(responseText)
