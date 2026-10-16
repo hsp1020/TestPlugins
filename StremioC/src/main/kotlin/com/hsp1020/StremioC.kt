@@ -734,6 +734,16 @@ open class StremioC(
         fun invalidateSyncSettingsCache() = synchronized(StremioC::class.java) {
             cachedSyncSettings = null
             cachedSyncSettingsTime = 0L
+            // Change the persistent namespace instead of deleting many GZIP files
+            // on the UI thread. Old entries are retired by the existing LRU trim.
+            CloudStreamApp.context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)?.let { prefs ->
+                val next = prefs.getLong("addon_meta_epoch", 0L) + 1L
+                prefs.edit().putLong("addon_meta_epoch", next).apply()
+            }
+            synchronized(addonMetaCache) {
+                addonMetaCache.clear()
+                addonMetaCacheBytes = 0L
+            }
         }
 
         internal fun isCatalogAddonEnabled(url: String, id: Long? = null): Boolean {
@@ -911,17 +921,25 @@ open class StremioC(
                 path.contains("/meta/") && path.endsWith(".json", ignoreCase = true)
         }
 
+        private fun addonMetaStorageKey(url: String): String {
+            val generation = CloudStreamApp.context
+                ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+                ?.getLong("addon_meta_epoch", 0L) ?: 0L
+            return "$generation|$url"
+        }
+
         private suspend fun fetchAddonMetaText(url: String, forceRefresh: Boolean = false): String {
             if (!isAddonMetaUrl(url)) {
                 return customSession.get(url, headers = if (forceRefresh)
                     mapOf("Cache-Control" to "no-cache") else emptyMap()).text
             }
+            val storageKey = addonMetaStorageKey(url)
             if (!forceRefresh) {
-                cachedAddonMetaInRam(url)?.let { return it }
-                MetadataDiskCache.read("meta", url)?.let { return it.first }
+                cachedAddonMetaInRam(storageKey)?.let { return it }
+                MetadataDiskCache.read("meta", storageKey)?.let { return it.first }
             }
 
-            val flightKey = (if (forceRefresh) "force|" else "normal|") + url
+            val flightKey = (if (forceRefresh) "force|" else "normal|") + storageKey
             val flight = synchronized(addonMetaFlights) {
                 addonMetaFlights[flightKey] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
                     try {
@@ -939,8 +957,8 @@ open class StremioC(
                         if (ttlMs > 0L && vary?.trim() != "*" &&
                             !containsTransientMetaLinks(root) &&
                             !body.contains("data:image/", ignoreCase = true)) {
-                            cacheAddonMetaInRam(url, body, ttlMs)
-                            MetadataDiskCache.write("meta", url, body, ttlMs)
+                            cacheAddonMetaInRam(storageKey, body, ttlMs)
+                            MetadataDiskCache.write("meta", storageKey, body, ttlMs)
                         }
                         body
                     } finally {
@@ -1596,7 +1614,10 @@ open class StremioC(
 
                     val context = CloudStreamApp.context
                     context?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
-                        ?.edit()?.putString(currentUrl.toUniqueKey(), resText)?.apply()
+                        ?.edit()
+                        ?.putString(currentUrl.toUniqueKey(), resText)
+                        ?.putLong("manifest_saved_at_" + currentUrl.toUniqueKey(), now)
+                        ?.apply()
                     return parsed
                 }
             } catch (e: Exception) {
@@ -1607,9 +1628,20 @@ open class StremioC(
         if (lastManifestUrl == currentUrl && now - lastCacheTime <= 72L * 60 * 60 * 1000) {
             return cachedManifest
         }
-        // A previous successful manifest remains a fallback only for this same addon.
-        // Never hand an old addon's manifest to another URL after a settings change.
-        return null
+        val saved = CloudStreamApp.context
+            ?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
+            ?: return null
+        val key = stremioCatalogKey(mainUrl)
+        val raw = stremioReadManifest(saved, mainUrl) ?: return null
+        val savedAt = saved.getLong("manifest_saved_at_" + key, 0L)
+        // Legacy stored manifests had no timestamp; preserve them during migration.
+        val effectiveAt = if (savedAt > 0L) savedAt else now.also {
+            saved.edit().putLong("manifest_saved_at_" + key, it).apply()
+        }
+        if (effectiveAt > now || now - effectiveAt > 72L * 60 * 60 * 1000) return null
+        return runCatching { parseJson<Manifest>(raw) }.getOrNull()
+            ?.takeIf { it.catalogs.isNotEmpty() }
+            ?.also { cachedManifest = it; lastManifestUrl = currentUrl; lastCacheTime = effectiveAt }
     }
 
 
