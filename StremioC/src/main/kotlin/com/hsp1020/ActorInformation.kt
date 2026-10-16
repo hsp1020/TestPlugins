@@ -468,7 +468,7 @@ internal object ActorInformation {
             profileRow.addView(portraitHolder, LinearLayout.LayoutParams(dp(70), dp(70)).apply {
                 topMargin = dp(12)
             })
-            fun fact(text: String) = label(text, 20f).apply {
+            fun fact(text: String) = label(text, 16f).apply {
                 setPadding(dp(8), dp(3), dp(8), dp(3))
             }
             val details = column()
