@@ -1179,23 +1179,44 @@ open class StremioC(
         // Validate the metadata against the requested URL before allowing persistence.
         // An addon may legitimately remap anime IDs: display those results, but
         // never keep a mismatched or incomplete response across page loads.
-        private fun isCacheableAddonMeta(url: String, root: JsonNode): Boolean {
-            if (root.get("success")?.asBoolean() == false) return false
+        // Report why a /meta response was not persisted. Only fingerprint IDs:
+        // full addon URLs can include tokens and must never appear in Logcat.
+        private fun addonMetaRejectReason(url: String, root: JsonNode): String? {
+            if (root.get("success")?.asBoolean() == false) return "server_success_false"
             val meta = root.get("meta") ?: root
-            if (!meta.isObject) return false
+            if (!meta.isObject) return "meta_not_object"
             val entry = runCatching { parseJson<CatalogEntry>(meta.toString()) }.getOrNull()
-                ?: return false
-            val returnedId = entry.id?.trim()?.takeIf { it.isNotEmpty() } ?: return false
-            val returnedType = canonicalDetailType(entry.type) ?: return false
+                ?: return "meta_parse_failed"
+            val returnedId = entry.id?.trim()?.takeIf { it.isNotEmpty() }
+                ?: return "missing_response_id"
+            val returnedType = canonicalDetailType(entry.type)
+                ?: return "missing_response_type"
             val encodedId = url.substringBefore('?').substringAfterLast('/')
                 .removeSuffix(".json")
             val expectedId = runCatching {
                 URLDecoder.decode(encodedId, "UTF-8")
             }.getOrDefault(encodedId)
-            val expectedType = url.substringBefore("/meta/")
-                .let { url.substringAfter("/meta/").substringBefore('/') }
-            return returnedId == expectedId &&
-                returnedType == canonicalDetailType(expectedType)
+            val expectedType = canonicalDetailType(
+                url.substringAfter("/meta/").substringBefore('/')
+            )
+            if (returnedType != expectedType) {
+                return "type_mismatch expected=$expectedType actual=$returnedType"
+            }
+            if (returnedId != expectedId) {
+                fun idKind(id: String) = when {
+                    id.startsWith("tt") -> "imdb"
+                    id.startsWith("mal:") -> "mal"
+                    id.startsWith("kitsu:") -> "kitsu"
+                    id.startsWith("anilist:") -> "anilist"
+                    id.startsWith("tmdb:") -> "tmdb"
+                    else -> "other"
+                }
+                return "id_mismatch expectedKind=${idKind(expectedId)} " +
+                    "actualKind=${idKind(returnedId)} " +
+                    "expectedHash=${StremioCCacheAudit.id(expectedId)} " +
+                    "actualHash=${StremioCCacheAudit.id(returnedId)}"
+            }
+            return null
         }
 
         private fun isAddonMetaUrl(url: String): Boolean {
@@ -1283,11 +1304,13 @@ open class StremioC(
                         val safeVary = vary.orEmpty().split(',').all {
                             it.trim().isEmpty() || it.trim().equals("Accept-Encoding", true)
                         }
-                        val valid = isCacheableAddonMeta(url, root)
+                        val rejectReason = addonMetaRejectReason(url, root)
+                        val valid = rejectReason == null
                         val transient = containsTransientMetaLinks(root)
                         val image = body.contains("data:image/", ignoreCase = true)
                         StremioCCacheAudit.log("meta", "CACHE_DECISION", storageKey,
-                            "valid=$valid ttlMs=$ttlMs safeVary=$safeVary transient=$transient inlineImage=$image")
+                            "valid=$valid reason=${rejectReason ?: "accepted"} " +
+                                "ttlMs=$ttlMs safeVary=$safeVary transient=$transient inlineImage=$image")
                         if (valid && ttlMs > 0L && safeVary && !transient && !image) {
                             cacheAddonMetaInRam(storageKey, body, ttlMs)
                             // Never delay the first detail paint on GZIP or disk trimming.
@@ -1774,9 +1797,10 @@ open class StremioC(
             StremioCCacheAudit.log("mdb", "RAM_WRITE_OK", cacheKey, "ratings=${ratings.size}")
             MetadataDiskCache.write("mdb", cacheKey, ratings.toJson())
         }
-        DetailLoadPerf.event("MDB_RESULT", "success=${attempt.isSuccess} ratings=${ratings.size} type=${target.mediaType}")
+        DetailLoadPerf.event("MDB_RESULT", "callReturned=${attempt.isSuccess} usableRatings=${ratings.isNotEmpty()} ratings=${ratings.size} type=${target.mediaType}")
         StremioCCacheAudit.log("mdb", "FETCH_RESULT", cacheKey,
-            "success=${attempt.isSuccess} ratings=${ratings.size} stored=${ratings.isNotEmpty()}")
+            "callReturned=${attempt.isSuccess} usableRatings=${ratings.isNotEmpty()} " +
+                "ratings=${ratings.size} stored=${ratings.isNotEmpty()}")
         return SpeculativeMdbResult(target, ratings, attempt.isSuccess)
     }
 
