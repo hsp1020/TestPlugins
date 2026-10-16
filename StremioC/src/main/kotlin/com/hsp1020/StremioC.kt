@@ -225,13 +225,17 @@ private object MetadataDiskCache {
     private const val MAX_BYTES = 50L * 1024 * 1024
     private const val MAX_ENTRY_BYTES = 2L * 1024 * 1024
     private const val MAX_RAW_BYTES = 2 * 1024 * 1024
+    private const val ANIME_EMPTY_TTL_MS = 15L * 60 * 1000
     private val entryLimits = mapOf("detail" to 700, "season" to 300, "find" to 5000,
-        "anime" to 5000, "mdb" to 1000, "meta" to 200)
+        "anime" to 5000, "anime_empty" to 1000, "mdb" to 1000, "meta" to 200)
     private val lock = Any()
+    private var quotaChecked = false
+    private var cleanedOldTemps = false
     private val diskHits = AtomicLong()
     private val diskMisses = AtomicLong()
 
     data class Usage(val items: Int, val bytes: Long, val tempBytes: Long, val hits: Long, val misses: Long)
+    data class Entry(val json: String, val timestamp: Long, val ttlMs: Long)
 
     suspend fun usage(): Usage = withContext(Dispatchers.IO) {
         synchronized(lock) {
@@ -252,7 +256,10 @@ private object MetadataDiskCache {
         return File(dir, "${kind}_${hash}.gz")
     }
 
-    suspend fun read(kind: String, key: String): Pair<String, Long>? = withContext(Dispatchers.IO) {
+    suspend fun read(kind: String, key: String): Pair<String, Long>? =
+        readWithTtl(kind, key)?.let { it.json to it.timestamp }
+
+    suspend fun readWithTtl(kind: String, key: String): Entry? = withContext(Dispatchers.IO) {
         synchronized(lock) {
             val file = directory()?.let { target(it, kind, key) }
             if (file == null) {
@@ -273,6 +280,7 @@ private object MetadataDiskCache {
                     body.indexOf('\n', firstNewline + 1) else -1
                 val ttl = when (kind) {
                     "season" -> SEASON_TTL_MS
+                    "anime_empty" -> ANIME_EMPTY_TTL_MS
                     "meta" -> if (secondNewline > firstNewline)
                         body.substring(firstNewline + 1, secondNewline).toLongOrNull() ?: 0L else 0L
                     else -> TTL_MS
@@ -289,7 +297,7 @@ private object MetadataDiskCache {
                     StremioCCacheAudit.log(kind, "DISK_HIT", key,
                         "ageMs=${now - stamp} ttlMs=$ttl jsonChars=${body.length} compressedBytes=${file.length()}")
                     file.setLastModified(now) // Disk LRU; TTL stays in the file header.
-                    body.substring(if (kind == "meta") secondNewline + 1 else firstNewline + 1) to stamp
+                    Entry(body.substring(if (kind == "meta") secondNewline + 1 else firstNewline + 1), stamp, ttl)
                 }
             } catch (error: Exception) {
                 file.delete()
@@ -307,55 +315,67 @@ private object MetadataDiskCache {
             return
         }
         val rawBytes = json.toByteArray(Charsets.UTF_8).size
-        if (json.contains("data:image/", ignoreCase = true) ||
-            rawBytes > MAX_RAW_BYTES) {
+        if (json.contains("data:image/", ignoreCase = true) || rawBytes > MAX_RAW_BYTES) {
             StremioCCacheAudit.log(kind, "DISK_SKIP", key, "reason=image_or_oversize rawBytes=$rawBytes")
             return
         }
         withContext(Dispatchers.IO) {
-            synchronized(lock) {
-                val dir = directory() ?: run {
-                    StremioCCacheAudit.log(kind, "DISK_WRITE_UNAVAILABLE", key)
-                    return@synchronized
-                }
-                // Reserve the maximum entry size before writing a temporary file.
-                // Old abandoned temporaries are removed under the same lock.
-                dir.listFiles()?.filter { it.isFile && it.name.endsWith(".tmp") }
-                    ?.forEach { it.delete() }
-                trim(dir, MAX_BYTES - MAX_ENTRY_BYTES)
-                val file = target(dir, kind, key)
-                val temp = File(dir, file.name + ".tmp")
-                try {
-                    GZIPOutputStream(temp.outputStream()).bufferedWriter(Charsets.UTF_8).use {
-                        it.write(System.currentTimeMillis().toString())
+            val dir = directory() ?: run {
+                StremioCCacheAudit.log(kind, "DISK_WRITE_UNAVAILABLE", key)
+                return@withContext
+            }
+            // Compress outside the global cache lock. Unique temp names allow concurrent writers.
+            val temp = try { File.createTempFile("stremioc_${kind}_", ".tmp", dir) } catch (error: Exception) {
+                StremioCCacheAudit.log(kind, "DISK_WRITE_ERROR", key, "error=${error.javaClass.simpleName}")
+                return@withContext
+            }
+            try {
+                GZIPOutputStream(temp.outputStream()).bufferedWriter(Charsets.UTF_8).use {
+                    it.write(System.currentTimeMillis().toString())
+                    it.newLine()
+                    if (kind == "meta") {
+                        it.write(ttlMs.toString())
                         it.newLine()
-                        if (kind == "meta") {
-                            it.write(ttlMs.toString())
-                            it.newLine()
-                        }
-                        it.write(json)
                     }
-                    if (temp.length() > MAX_ENTRY_BYTES) {
-                        StremioCCacheAudit.log(kind, "DISK_SKIP", key,
-                            "reason=compressed_oversize bytes=${temp.length()}")
-                        temp.delete()
-                        return@synchronized
+                    it.write(json)
+                }
+                if (temp.length() > MAX_ENTRY_BYTES) {
+                    StremioCCacheAudit.log(kind, "DISK_SKIP", key,
+                        "reason=compressed_oversize bytes=${temp.length()}")
+                    return@withContext
+                }
+                synchronized(lock) {
+                    if (!cleanedOldTemps) {
+                        cleanedOldTemps = true
+                        val cutoff = System.currentTimeMillis() - 10L * 60 * 1000
+                        dir.listFiles()?.filter { it.isFile && it.name.endsWith(".tmp") &&
+                            it != temp && it.lastModified() < cutoff }?.forEach { it.delete() }
                     }
+                    val file = target(dir, kind, key)
                     if (!temp.renameTo(file)) {
                         StremioCCacheAudit.log(kind, "DISK_WRITE_ERROR", key, "reason=rename")
-                        temp.delete()
                     } else {
                         StremioCCacheAudit.log(kind, "DISK_WRITE_OK", key,
                             "rawBytes=$rawBytes compressedBytes=${file.length()} ttlMs=$ttlMs")
-                        trim(dir) // Enforce the 50 MiB budget on every successful write.
+                        val files = dir.listFiles()?.filter { it.isFile && it.name.endsWith(".gz") }.orEmpty()
+                        val totalBytes = files.sumOf { it.length() }
+                        val kindCount = files.count { it.name.startsWith("${kind}_") }
+                        if (!quotaChecked || totalBytes > MAX_BYTES ||
+                            kindCount > (entryLimits[kind] ?: Int.MAX_VALUE)) {
+                            trim(dir)
+                            quotaChecked = true
+                        }
                         StremioCCacheAudit.log(kind, "DISK_BUDGET", key,
-                            "totalBytes=${dir.listFiles()?.filter { it.isFile }?.sumOf { it.length() } ?: -1}")
+                            "totalBytes=${if (totalBytes > MAX_BYTES || kindCount > (entryLimits[kind] ?: Int.MAX_VALUE))
+                                dir.listFiles()?.filter { it.isFile && it.name.endsWith(".gz") }?.sumOf { it.length() } ?: 0L
+                            else totalBytes}")
                     }
-                } catch (error: Exception) {
-                    StremioCCacheAudit.log(kind, "DISK_WRITE_ERROR", key,
-                        "error=${error.javaClass.simpleName}")
-                    temp.delete()
                 }
+            } catch (error: Exception) {
+                StremioCCacheAudit.log(kind, "DISK_WRITE_ERROR", key,
+                    "error=${error.javaClass.simpleName}")
+            } finally {
+                temp.delete()
             }
         }
     }
@@ -1107,7 +1127,7 @@ open class StremioC(
             return task.await()
         }
 
-        private fun cacheAddonMetaInRam(url: String, text: String, ttlMs: Long) {
+        private fun cacheAddonMetaInRam(url: String, text: String, ttlMs: Long, stamp: Long = System.currentTimeMillis()) {
             val bytes = text.toByteArray(Charsets.UTF_8)
             if (ttlMs <= 0L || bytes.size > ADDON_META_MAX_RAW) {
                 StremioCCacheAudit.log("meta", "RAM_SKIP", url,
@@ -1116,7 +1136,7 @@ open class StremioC(
             }
             synchronized(addonMetaCache) {
                 addonMetaCache.remove(url)?.let { addonMetaCacheBytes -= it.bytes.size.toLong() }
-                addonMetaCache[url] = AddonMetaEntry(bytes, System.currentTimeMillis(), ttlMs)
+                addonMetaCache[url] = AddonMetaEntry(bytes, stamp, ttlMs)
                 addonMetaCacheBytes += bytes.size.toLong()
                 val cursor = addonMetaCache.entries.iterator()
                 while ((addonMetaCache.size > ADDON_META_RAM_ENTRIES ||
@@ -1305,10 +1325,13 @@ open class StremioC(
                     StremioCCacheAudit.log("meta", "REUSE_RAM", storageKey, "chars=${it.length}")
                     return it
                 }
-                MetadataDiskCache.read("meta", storageKey)?.let {
+                MetadataDiskCache.readWithTtl("meta", storageKey)?.let {
+                    cacheAddonMetaInRam(storageKey, it.json, it.ttlMs, it.timestamp)
+                    StremioCCacheAudit.log("meta", "RAM_RESTORE_DISK", storageKey,
+                        "ageMs=${System.currentTimeMillis() - it.timestamp} ttlMs=${it.ttlMs}")
                     StremioCCacheAudit.log("meta", "REUSE_DISK", storageKey,
-                        "chars=${it.first.length}")
-                    return it.first
+                        "chars=${it.json.length}")
+                    return it.json
                 }
             }
 
@@ -1387,6 +1410,7 @@ open class StremioC(
         private val tmdbSeasonCache = lruCacheMap<String, Pair<TmdbSeasonDetail, Long>>(300)
         private val tmdbFindCache = lruCacheMap<String, Pair<Pair<String, String>?, Long>>(5000)
         private val animeMappingCache = lruCacheMap<String, Pair<AnimeSeasonMapping, Long>>(5000)
+        private val animeNoMappingCache = lruCacheMap<String, Long>(1000)
         private val mdbRatingsCache = lruCacheMap<String, Pair<List<String>, Long>>(1000)
         private val mdbFetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val mdbFetchSemaphore = Semaphore(5)
@@ -1816,6 +1840,8 @@ open class StremioC(
         if (cached != null) {
             StremioCCacheAudit.log("mdb", "REUSE_CACHE", cacheKey,
                 "ratings=${cached.first.size} ageMs=${System.currentTimeMillis() - cached.second}")
+            // Disk-restored ratings need the same UI notification as fresh HTTP results.
+            StremioCMdbUiBridge.publish(cacheKey)
             return SpeculativeMdbResult(target, cached.first, true)
         }
         StremioCCacheAudit.log("mdb", "HTTP_PENDING", cacheKey)
@@ -2995,19 +3021,21 @@ open class StremioC(
 
         val finalMdbTarget = actualMdbTarget
         if (finalMdbTarget != null && mdbEnabled) {
-            // Always await the authoritative ID, not a speculative request for a different ID.
-            // The detached request keeps populating the cache after the display budget expires.
+            // Never block the detail response for ratings: reuse RAM immediately and let
+            // the existing detached fetch + UI bridge deliver disk/HTTP results later.
             val mdbAuditKey = "${finalMdbTarget.credentialFingerprint}:${finalMdbTarget.isTmdb}:${finalMdbTarget.mediaType}:${finalMdbTarget.id}"
             StremioCMdbUiBridge.bind(mdbAuditKey, listOf(url, loadRes.url) + libraryOrigins)
-            val authoritativeMdb = if (postMetaMdbTarget == finalMdbTarget) {
-                postMetaMdbDeferred ?: launchMdbAttempt(finalMdbTarget)
-            } else launchMdbAttempt(finalMdbTarget)
-            val mdbRatings = withTimeoutOrNull(4000L) {
-                DetailLoadPerf.step("await.mdbForFinalTarget") { authoritativeMdb?.await() }
-                    ?.takeIf { it.matches(finalMdbTarget) }?.ratings
+            val mdbRatings = mdbRatingsForUi(mdbAuditKey)
+            if (mdbRatings == null) {
+                if (postMetaMdbTarget != finalMdbTarget || postMetaMdbDeferred == null) {
+                    launchMdbAttempt(finalMdbTarget)
+                }
+                StremioCCacheAudit.log("mdb", "DISPLAY_ASYNC", mdbAuditKey,
+                    "source=cache_or_http blockMs=0")
+            } else {
+                StremioCCacheAudit.log("mdb", "DISPLAY_RAM_HIT", mdbAuditKey,
+                    "ratings=${mdbRatings.size} blockMs=0")
             }
-            StremioCCacheAudit.log("mdb", if (mdbRatings == null) "DISPLAY_TIMEOUT_OR_NO_RESULT" else "DISPLAY_RESULT",
-                mdbAuditKey, "ratings=${mdbRatings?.size ?: 0} finished=${authoritativeMdb?.isCompleted}")
             mdbRatings?.takeIf { it.isNotEmpty() }?.let { ratings ->
                 val ratingStr = "\u2063" + ratings.joinToString("  ")
                 val currentPlot = loadRes.plot
@@ -3463,6 +3491,21 @@ open class StremioC(
                 "ageMs=${System.currentTimeMillis() - cachedAnime.second}")
             return cachedAnime.first
         }
+        val noMappingStamp = animeNoMappingCache[query]
+        if (noMappingStamp != null) {
+            val age = System.currentTimeMillis() - noMappingStamp
+            if (age >= 0L && age < 15L * 60 * 1000) {
+                StremioCCacheAudit.log("anime", "REUSE_NEGATIVE_RAM", query, "ageMs=$age")
+                return null
+            }
+            animeNoMappingCache.remove(query)
+        }
+        MetadataDiskCache.read("anime_empty", query)?.takeIf { it.first == "null" }?.let {
+            animeNoMappingCache[query] = it.second
+            StremioCCacheAudit.log("anime", "REUSE_NEGATIVE_DISK", query,
+                "ageMs=${System.currentTimeMillis() - it.second}")
+            return null
+        }
         StremioCCacheAudit.log("anime", "CACHE_MISS_ALL", query)
 
         val hosts = listOf(
@@ -3539,7 +3582,12 @@ open class StremioC(
             StremioCCacheAudit.log("anime", "HOST_RESULT", query,
                 "host=$host noData=$noMapping validMapping=${mapping != null}")
             if (noMapping) {
-                StremioCCacheAudit.log("anime", "NO_MAPPING_RETURN", query)
+                // Cache only an authoritative success=true/data=null response, never host errors.
+                animeNoMappingCache[query] = System.currentTimeMillis()
+                addonMetaScope.launch {
+                    MetadataDiskCache.write("anime_empty", query, "null", 15L * 60 * 1000)
+                }
+                StremioCCacheAudit.log("anime", "NO_MAPPING_CACHED", query, "ttlMs=900000")
                 return null
             }
             if (mapping != null) {
