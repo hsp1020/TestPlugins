@@ -15,6 +15,7 @@ import kotlin.math.round
 import android.app.Activity
 import android.app.Application
 import android.app.Dialog
+import android.os.Build
 import android.content.Context
 import android.content.res.Resources
 import android.content.res.ColorStateList
@@ -51,6 +52,16 @@ import androidx.fragment.app.FragmentManager
 import androidx.appcompat.app.AlertDialog
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
+import androidx.core.app.PictureInPictureModeChangedInfo
+import androidx.core.util.Consumer
+import androidx.annotation.OptIn
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.ui.SubtitleView
+import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
+import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
+import com.lagradost.cloudstream3.ui.player.VideoLive
+import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment
+import com.lagradost.cloudstream3.ui.subtitles.SaveCaptionStyle
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
@@ -612,7 +623,7 @@ internal class RatingPlotImageHook(
                         }
                     }
                 } else attach(f, v)
-                pipSubtitles.attach(f)
+                pipSubtitles.watch(f)
             }
         }
 
@@ -629,7 +640,7 @@ internal class RatingPlotImageHook(
         }
 
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
-            pipSubtitles.attach(f)
+            pipSubtitles.watch(f)
             watchers[f]?.let { watcher ->
                 watcher.render() // CloudStream may reuse an old LoadResponse without calling load().
                 watcher.auditReentry()
@@ -693,6 +704,7 @@ internal class RatingPlotImageHook(
                     if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
                         homeEntries.attach(it)
                     attach(f, it)
+                    pipSubtitles.watch(f)
                 }
                 if (f.isAdded) scan(f.childFragmentManager)
             }
@@ -782,11 +794,8 @@ internal class RatingPlotImageHook(
             val progress = row.findViewById<CircularProgressIndicator>(R.id.episode_progress) ?: return
             val originalInset = progress.indicatorInset
             val originalColors = progress.indicatorColor.copyOf()
-            val originalTrackColor = progress.trackColor
+            // Leave the CloudStream native white 20% track color untouched.
             val themeColor = row.context.colorFromAttribute(R.attr.colorPrimary)
-            val themeTrackColor = androidx.core.graphics.ColorUtils.setAlphaComponent(
-                themeColor, (android.graphics.Color.alpha(themeColor) * 0.2f).roundToInt()
-            )
             val inset = (1.5f * indicator.resources.displayMetrics.density + 0.5f).toInt()
             val positioned = FrameLayout.LayoutParams(original).apply {
                 gravity = Gravity.BOTTOM or Gravity.START
@@ -813,12 +822,10 @@ internal class RatingPlotImageHook(
                 indicator.pivotY = pivotY
                 progress.setIndicatorInset(originalInset)
                 progress.setIndicatorColor(*originalColors)
-                progress.setTrackColor(originalTrackColor)
                 progress.requestLayout()
             }
             progress.setIndicatorInset(0)
             progress.setIndicatorColor(themeColor)
-            progress.setTrackColor(themeTrackColor)
             // Material's inset setter only invalidates drawing; force the new 40dp measure.
             progress.requestLayout()
             indicator.addOnLayoutChangeListener(pivotListener)
@@ -1018,4 +1025,101 @@ internal class RatingPlotImageHook(
     override fun onActivityPaused(activity: Activity) = Unit
     override fun onActivityStopped(activity: Activity) = Unit
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+}
+
+/**
+ * StremioC-only PiP subtitles, based on Next Player's Media3 fractional sizing.
+ * The CloudStream player keeps ownership of subtitle positioning and rendering.
+ */
+@OptIn(UnstableApi::class)
+private class PipSubtitleScaler {
+    private var watched: Fragment? = null
+    private var removeObserver: (() -> Unit)? = null
+    private var attached: Fragment? = null
+    private var activity: FragmentActivity? = null
+    private var subtitle: SubtitleView? = null
+    private var inPip = false
+
+    private val pipListener = Consumer<PictureInPictureModeChangedInfo> { event ->
+        if (event.isInPictureInPictureMode) enterPip() else leavePip()
+    }
+    private val subtitleStyleListener: (SaveCaptionStyle) -> Unit = {
+        // Core applies the saved fixed size first; keep the PiP override afterward.
+        subtitle?.post {
+            if (inPip) subtitle?.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION)
+        }
+    }
+
+    fun watch(candidate: Fragment) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || candidate !is GeneratorPlayer) return
+        if (watched !== candidate) {
+            detach()
+            watched = candidate
+            val model = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
+            // onFragmentViewCreated can run before loadLinks() has attached the page.
+            val observer = Observer<VideoLive<Resource<Unit>>> { bind(candidate) }
+            model.loadingLinks.observe(candidate.viewLifecycleOwner, observer)
+            removeObserver = { model.loadingLinks.removeObserver(observer) }
+        }
+        bind(candidate)
+    }
+
+    private fun bind(candidate: Fragment) {
+        if (watched !== candidate || !candidate.isAdded) return
+        val playerFragment = candidate as? GeneratorPlayer ?: return
+        val host = playerFragment.activity as? FragmentActivity ?: return
+        val name = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
+            .state.generatorState?.response?.apiName ?: return
+        val isStremioC = name == "StremioC" || APIHolder.allProviders.any {
+            it is StremioC && it.name.equals(name, ignoreCase = true)
+        }
+        if (!isStremioC) {
+            unbind()
+            return
+        }
+        val view = playerFragment.subView ?: return
+        if (attached === candidate && subtitle === view) return
+        unbind()
+        attached = candidate
+        activity = host
+        subtitle = view
+        host.addOnPictureInPictureModeChangedListener(pipListener)
+        SubtitlesFragment.applyStyleEvent += subtitleStyleListener
+        if (host.isInPictureInPictureMode) enterPip()
+    }
+
+    private fun enterPip() {
+        val view = subtitle ?: return
+        if (inPip) return
+        inPip = true
+        // Next Player: scale according to the current PiP subtitle viewport.
+        // Media3 recalculates automatically when the window is resized.
+        view.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION)
+    }
+
+    private fun leavePip() {
+        if (!inPip) return
+        inPip = false
+        subtitle?.setFixedTextSize(
+            TypedValue.COMPLEX_UNIT_SP,
+            SubtitlesFragment.getCurrentSavedStyle().fixedTextSize ?: 25f
+        )
+    }
+
+    private fun unbind() {
+        leavePip()
+        activity?.removeOnPictureInPictureModeChangedListener(pipListener)
+        if (subtitle != null) SubtitlesFragment.applyStyleEvent -= subtitleStyleListener
+        attached = null
+        activity = null
+        subtitle = null
+    }
+
+    fun detach(candidate: Fragment? = null) {
+        if (candidate != null && watched !== candidate && attached !== candidate) return
+        removeObserver?.invoke()
+        removeObserver = null
+        watched = null
+        unbind()
+    }
 }
