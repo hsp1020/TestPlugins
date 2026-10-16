@@ -108,6 +108,13 @@ private inline fun <K, V> lruCacheMap(maxSize: Int): MutableMap<K, V> {
 }
 
 
+private fun mdbCredentialFingerprint(): String {
+    val key = CloudStreamApp.context
+        ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+        ?.getString("mdblist_api_key", "").orEmpty()
+    return key.toUniqueKey()
+}
+
 private object MetadataDiskCache {
     private const val TTL_MS = 24L * 60 * 60 * 1000
     private const val SEASON_TTL_MS = 12L * 60 * 60 * 1000
@@ -1447,13 +1454,6 @@ open class StremioC(
         fun matchesDirect(id: String, type: String): Boolean = tmdbId == id && mediaType == type
         fun matchesFind(imdbId: String?): Boolean = viaFind && !imdbId.isNullOrBlank() && sourceImdbId == imdbId
         fun asFindResult(): Pair<String, String>? = if (viaFind) tmdbId to mediaType else null
-    }
-
-    private fun mdbCredentialFingerprint(): String {
-        val key = CloudStreamApp.context
-            ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-            ?.getString("mdblist_api_key", "").orEmpty()
-        return key.toUniqueKey()
     }
 
     private data class MdbTarget(
