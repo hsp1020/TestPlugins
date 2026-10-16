@@ -1183,7 +1183,11 @@ internal class CatalogBrowserDialog(
         genre = genres.getOrNull(genreIndex)
         chosen = true
         hasNext = true
-        val snapshot = liveHomeSnapshot(next) ?: pendingHome
+        val liveSnapshot = liveHomeSnapshot(next)
+        val snapshot = liveSnapshot ?: pendingHome
+        val auditKey = "${next.url}|${next.catalog.type}|${next.catalog.id}"
+        StremioCCacheAudit.log("genre", "SNAPSHOT_SELECT", auditKey,
+            "live=${liveSnapshot != null} pending=${pendingHome != null} selected=${snapshot != null} genreAll=${genre == null}")
         val sameCatalog = snapshot?.target?.catalogId == next.catalog.id
         val sameType = snapshot?.target?.type == next.catalog.type
         val sameSource = snapshot?.let {
@@ -1196,6 +1200,8 @@ internal class CatalogBrowserDialog(
         }
         pendingHome = null
         if (home != null) {
+            StremioCCacheAudit.log("genre", "REUSE_HOME", auditKey,
+                "items=${home.items.size} cursor=${home.nextSkip} hasNext=${home.hasNext}")
             // Display the already-loaded home SearchResponses without a first-page request.
             // The browser starts at Home's raw cursor; subsequent All pages synchronize back.
             items.addAll(home.items)
@@ -1204,13 +1210,21 @@ internal class CatalogBrowserDialog(
             hasNext = home.hasNext && next.catalog.supportsExtra("skip")
             adapter.submitList(items.toList()) { if (!closed) initialProgress(false) }
             autoFillIfShort(generation)
-        } else requestPage()
+        } else {
+            StremioCCacheAudit.log("genre", "RELOAD_CATALOG", auditKey,
+                "reason=${if (snapshot == null) "no_snapshot" else if (genre != null) "filtered_genre" else "snapshot_incompatible"}")
+            requestPage()
+        }
     }
 
     // The heading hook can miss the snapshot when CloudStream rebinds its row.
     // Recover it from the actual displayed Home state, not from a second GET.
     private fun liveHomeSnapshot(source: CatalogSource): CatalogHomeSnapshot? {
-        if (genre != null) return null
+        val auditKey = "${source.url}|${source.catalog.type}|${source.catalog.id}"
+        if (genre != null) {
+            StremioCCacheAudit.log("genre", "LIVE_SNAPSHOT_MISS", auditKey, "reason=genre_filter")
+            return null
+        }
         val type = source.catalog.type ?: return null
         val id = source.catalog.id ?: return null
         val path = "/catalog/" + type.urlEncodeLocal() + "/" + id.urlEncodeLocal()
@@ -1230,6 +1244,8 @@ internal class CatalogBrowserDialog(
         val items = record.list.list.takeIf { it.isNotEmpty() } ?: return null
         val target = CatalogShortcutTarget(source.url, type, id)
         val cursor = source.provider.homeCursorFor(target, items) ?: return null
+        StremioCCacheAudit.log("genre", "LIVE_SNAPSHOT_HIT", auditKey,
+            "items=${items.size} cursor=$cursor homePage=${record.currentPage}")
         return CatalogHomeSnapshot(target, items.toList(), cursor, displayed.hasNext)
     }
 
@@ -1242,6 +1258,9 @@ internal class CatalogBrowserDialog(
         val type = catalog.type ?: return
         val id = catalog.id ?: return
         val target = CatalogShortcutTarget(addonUrl ?: return, type, id)
+        val auditKey = "${target.addonUrl}|$type|$id"
+        StremioCCacheAudit.log("genre", "SYNC_HOME_BEGIN", auditKey,
+            "offset=$requestedOffset pageItems=${page.size} rawCount=$rawCount more=$more")
         val basePath = "/catalog/" + type.urlEncodeLocal() + "/" + id.urlEncodeLocal()
         val tab = source.mainPage.firstOrNull {
             it.data.startsWith("$basePath/") || it.data.startsWith("$basePath.json")
@@ -1282,8 +1301,12 @@ internal class CatalogBrowserDialog(
         // This checks the native page-flight and offset under the provider mutex.
         val accepted = source.adoptBrowserPage(target, requestedOffset, page, rawCount)
         if (accepted == null) {
+            StremioCCacheAudit.log("genre", "SYNC_HOME_REJECT", auditKey,
+                "reason=provider_cursor_guard")
             return
         }
+        StremioCCacheAudit.log("genre", "SYNC_HOME_ACCEPT", auditKey,
+            "accepted=${accepted.size} offset=$requestedOffset")
         val urls = record.list.list.mapTo(HashSet<String>()) { it.url }
         val added = accepted.filter { urls.add(it.url) }
         record.list = record.list.copy(list = record.list.list + added)
@@ -1499,6 +1522,8 @@ internal class CatalogHomeEntryHook(
             val snapshot = cursor?.let {
                 CatalogHomeSnapshot(target, cards.toList(), it, adapter.hasNext)
             }
+            StremioCCacheAudit.log("genre", "OPEN_FROM_HOME", "${target.addonUrl}|${target.type}|${target.catalogId}",
+                "cards=${cards.size} cursor=${cursor ?: -1} snapshot=${snapshot != null}")
             open(target, snapshot)
         }
 
