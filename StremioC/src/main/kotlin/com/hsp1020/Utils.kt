@@ -650,7 +650,10 @@ internal class RatingPlotImageHook(
         }
 
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
-            watchers[f]?.render() // CloudStream may reuse an old LoadResponse without calling load().
+            watchers[f]?.let { watcher ->
+                watcher.render() // CloudStream may reuse an old LoadResponse without calling load().
+                watcher.auditReentry()
+            }
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
@@ -728,7 +731,10 @@ internal class RatingPlotImageHook(
         val resId = root.resources.getIdentifier("result_description", "id", root.context.packageName)
         if (resId == 0) return
         val view = root.findViewById<TextView>(resId) ?: return
-        watchers[f] = Watcher(view, root, f.arguments?.getString("url"), f).also { it.start() }
+        watchers[f] = Watcher(view, root, f.arguments?.getString("url"), f).also {
+            it.start()
+            it.auditReentry()
+        }
     }
 
     private inner class Watcher(private val view: TextView, private val root: View, private val detailUrl: String?, private val fragment: Fragment) : TextWatcher {
@@ -737,6 +743,13 @@ internal class RatingPlotImageHook(
         private var changing = false
 
         fun matchesMdbKey(key: String): Boolean = StremioCMdbUiBridge.keyFor(detailUrl) == key
+
+        fun auditReentry() {
+            val key = StremioCMdbUiBridge.keyFor(detailUrl) ?: return
+            StremioCCacheAudit.log("mdb_ui", "FRAGMENT_RESUMED", key,
+                "visible=${fragment.isVisible} hasRatings=${StremioC.mdbRatingsForUi(key) != null} " +
+                    "rendered=${view.text?.startsWith('\u2063') == true}")
+        }
 
         fun refreshLateMdb(): Boolean {
             val key = StremioCMdbUiBridge.keyFor(detailUrl) ?: return false
@@ -752,12 +765,13 @@ internal class RatingPlotImageHook(
             val key = StremioCMdbUiBridge.keyFor(detailUrl) ?: return false
             val ratings = StremioC.mdbRatingsForUi(key)
             if (ratings == null) {
-                if (reason == "late") StremioCCacheAudit.log("mdb_ui", "SKIP_CACHE_UNAVAILABLE", key)
+                StremioCCacheAudit.log("mdb_ui", "SKIP_CACHE_UNAVAILABLE", key, "reason=$reason")
                 return false
             }
             val old = view.text ?: return false
             if (old.isEmpty() || old.startsWith('\u2063')) {
-                if (reason == "late") StremioCCacheAudit.log("mdb_ui", "SKIP_ALREADY_RENDERED_OR_EMPTY", key)
+                StremioCCacheAudit.log("mdb_ui", "SKIP_ALREADY_RENDERED_OR_EMPTY", key,
+                    "reason=$reason empty=${old.isEmpty()} alreadyRendered=${old.startsWith('\u2063')}")
                 return false
             }
             val combined = SpannableStringBuilder("\u2063${ratings.joinToString("  ")}\n").append(old)
