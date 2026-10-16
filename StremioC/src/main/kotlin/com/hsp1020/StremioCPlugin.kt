@@ -402,9 +402,11 @@ class StremioCPlugin : Plugin() {
                                         }
                                         manifestPrefs.edit().apply {
                                             if (noStore) {
+                                                putBoolean("manifest_no_store_" + key, true)
                                                 remove(key)
                                                 remove("manifest_saved_at_" + key)
                                             } else {
+                                                putBoolean("manifest_no_store_" + key, false)
                                                 putString(key, raw)
                                                 putLong("manifest_saved_at_" + key, System.currentTimeMillis())
                                             }
