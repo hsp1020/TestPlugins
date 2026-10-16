@@ -94,7 +94,10 @@ private fun String.cleanBaseUrl(): String {
 private inline fun <T> lruSet(maxSize: Int): MutableSet<T> {
     return Collections.synchronizedSet(Collections.newSetFromMap(object : java.util.LinkedHashMap<T, Boolean>(maxSize, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<T, Boolean>): Boolean {
-            return size > maxSize
+            val evicted = size > maxSize
+            if (evicted) StremioCCacheAudit.log("lru_set", "RAM_EVICT",
+                eldest.key.toString(), "limit=$maxSize")
+            return evicted
         }
     }))
 }
@@ -102,7 +105,10 @@ private inline fun <T> lruSet(maxSize: Int): MutableSet<T> {
 private inline fun <K, V> lruCacheMap(maxSize: Int): MutableMap<K, V> {
     return Collections.synchronizedMap(object : java.util.LinkedHashMap<K, V>(maxSize, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>): Boolean {
-            return size > maxSize
+            val evicted = size > maxSize
+            if (evicted) StremioCCacheAudit.log("lru_map", "RAM_EVICT",
+                eldest.key.toString(), "limit=$maxSize")
+            return evicted
         }
     })
 }
@@ -1884,6 +1890,8 @@ open class StremioC(
                 tmdbFindCache[imdbId] = Pair(fetchedFind, System.currentTimeMillis())
                 StremioCCacheAudit.log("find", "RAM_WRITE_OK", imdbId, "type=${fetchedFind.second}")
                 MetadataDiskCache.write("find", imdbId, "${fetchedFind.first}|${fetchedFind.second}")
+            } else {
+                StremioCCacheAudit.log("find", "CACHE_SKIP_EMPTY_RESULT", imdbId)
             }
             fetchedFind
         }
@@ -1926,6 +1934,8 @@ open class StremioC(
                     tmdbDetailsCache[detailUrl] = Pair(fetched, System.currentTimeMillis())
                     StremioCCacheAudit.log("detail", "RAM_WRITE_OK", detailUrl)
                     MetadataDiskCache.write("detail", detailUrl, text)
+                } else {
+                    StremioCCacheAudit.log("detail", "CACHE_SKIP_PARSE_EMPTY", detailUrl)
                 }
                 fetched
             }.onFailure { it.printStackTrace() }.getOrNull()
@@ -4289,6 +4299,8 @@ open class StremioC(
                     tmdbDetailsCache[cacheKey] = Pair(fetched, System.currentTimeMillis())
                     StremioCCacheAudit.log("detail", "RAM_WRITE_OK", cacheKey)
                     MetadataDiskCache.write("detail", cacheKey, text)
+                } else {
+                    StremioCCacheAudit.log("detail", "CACHE_SKIP_PARSE_EMPTY", cacheKey)
                 }
                 fetched
             }
@@ -4348,6 +4360,9 @@ open class StremioC(
                                                 StremioCCacheAudit.log("season", "RAM_WRITE_OK", seasonCacheKey,
                                                     "season=$seasonNum")
                                                 MetadataDiskCache.write("season", seasonCacheKey, fetchedSeasonText)
+                                            } else {
+                                                StremioCCacheAudit.log("season", "CACHE_SKIP_PARSE_EMPTY", seasonCacheKey,
+                                                    "season=$seasonNum")
                                             }
                                             fetchedSeason
                                         }
