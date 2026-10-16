@@ -110,11 +110,13 @@ private inline fun <K, V> lruCacheMap(maxSize: Int): MutableMap<K, V> {
 
 private object MetadataDiskCache {
     private const val TTL_MS = 24L * 60 * 60 * 1000
+    private const val SEASON_TTL_MS = 12L * 60 * 60 * 1000
     private const val MAX_BYTES = 50L * 1024 * 1024
+    private const val MAX_ENTRY_BYTES = 2L * 1024 * 1024
+    private const val MAX_RAW_BYTES = 2 * 1024 * 1024
     private val entryLimits = mapOf("detail" to 200, "season" to 300, "find" to 5000,
-        "anime" to 5000, "mdb" to 1000)
+        "anime" to 5000, "mdb" to 1000, "meta" to 200)
     private val lock = Any()
-    private var writes = 0
 
     private fun directory(): File? = CloudStreamApp.context?.filesDir
         ?.let { File(it, "stremioc-metadata-v1").apply { mkdirs() }.takeIf { dir -> dir.isDirectory } }
@@ -133,12 +135,22 @@ private object MetadataDiskCache {
                 val body = GZIPInputStream(file.inputStream()).bufferedReader(Charsets.UTF_8).use { it.readText() }
                 val stamp = body.substringBefore('\n').toLongOrNull()
                 val now = System.currentTimeMillis()
-                if (stamp == null || stamp > now || now - stamp >= TTL_MS || !body.contains('\n')) {
+                val firstNewline = body.indexOf('\n')
+                val secondNewline = if (kind == "meta" && firstNewline >= 0)
+                    body.indexOf('\n', firstNewline + 1) else -1
+                val ttl = when (kind) {
+                    "season" -> SEASON_TTL_MS
+                    "meta" -> if (secondNewline > firstNewline)
+                        body.substring(firstNewline + 1, secondNewline).toLongOrNull() ?: 0L else 0L
+                    else -> TTL_MS
+                }
+                if (stamp == null || stamp > now || ttl <= 0L ||
+                    now - stamp >= ttl || firstNewline < 0 || (kind == "meta" && secondNewline < 0)) {
                     file.delete()
                     null
                 } else {
                     file.setLastModified(now) // Disk LRU; TTL stays in the file header.
-                    body.substringAfter('\n') to stamp
+                    body.substring(if (kind == "meta") secondNewline + 1 else firstNewline + 1) to stamp
                 }
             } catch (_: Exception) {
                 file.delete()
@@ -147,8 +159,10 @@ private object MetadataDiskCache {
         }
     }
 
-    suspend fun write(kind: String, key: String, json: String) {
-        if (json.length > 2_000_000) return
+    suspend fun write(kind: String, key: String, json: String, ttlMs: Long = TTL_MS) {
+        if (kind == "meta" && ttlMs <= 0L) return
+        if (json.contains("data:image/", ignoreCase = true) ||
+            json.toByteArray(Charsets.UTF_8).size > MAX_RAW_BYTES) return
         withContext(Dispatchers.IO) {
             synchronized(lock) {
                 val dir = directory() ?: return@synchronized
@@ -158,10 +172,21 @@ private object MetadataDiskCache {
                     GZIPOutputStream(temp.outputStream()).bufferedWriter(Charsets.UTF_8).use {
                         it.write(System.currentTimeMillis().toString())
                         it.newLine()
+                        if (kind == "meta") {
+                            it.write(ttlMs.toString())
+                            it.newLine()
+                        }
                         it.write(json)
                     }
-                    if (!temp.renameTo(file)) temp.delete()
-                    if (++writes % 32 == 0) trim(dir)
+                    if (temp.length() > MAX_ENTRY_BYTES) {
+                        temp.delete()
+                        return@synchronized
+                    }
+                    if (!temp.renameTo(file)) {
+                        temp.delete()
+                    } else {
+                        trim(dir) // Enforce the 50 MiB budget on every successful write.
+                    }
                 } catch (_: Exception) {
                     temp.delete()
                 }
@@ -813,6 +838,7 @@ open class StremioC(
         private val mdbInflight = mutableMapOf<MdbTarget, Deferred<SpeculativeMdbResult?>>()
         private val detailLoadHints = lruCacheMap<String, DetailUrlHint>(500)
         private const val METADATA_CACHE_TTL = 24 * 60 * 60 * 1000L
+        private const val SEASON_CACHE_TTL = 12 * 60 * 60 * 1000L
 
         // Rebuild supported poster-service URLs using IDs already in TMDB recommendations.
         // Never guess arbitrary custom patterns or reuse a per-item image signature.
@@ -3617,7 +3643,7 @@ open class StremioC(
                                         val seasonUrl = provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")
                                         val seasonCacheKey = seasonUrl
                                         val cachedSeason = tmdbSeasonCache[seasonCacheKey]?.takeIf {
-                                            System.currentTimeMillis() - it.second < METADATA_CACHE_TTL
+                                            System.currentTimeMillis() - it.second < SEASON_CACHE_TTL
                                         } ?: MetadataDiskCache.read("season", seasonCacheKey)?.let { (json, stamp) ->
                                             runCatching { parseJson<TmdbSeasonDetail>(json) }.getOrNull()?.let { value ->
                                                 Pair(value, stamp).also { tmdbSeasonCache[seasonCacheKey] = it }

@@ -136,10 +136,13 @@ internal object ActorInformation {
 
     // A small, bounded cache avoids repeated person/credit requests. Failed or partial
     // HTTP responses are never stored as successful empty credits.
-    private data class CacheEntry(val json: JSONObject, val time: Long)
-    private val cache = object : LinkedHashMap<String, CacheEntry>(80, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CacheEntry>) = size > 80
-    }
+    // Keep only the serialized JSON bytes in the LRU: both entry count and
+    // retained payload bytes are now strictly bounded, independent of cast size.
+    private data class CacheEntry(val bytes: ByteArray, val time: Long)
+    private val cache = LinkedHashMap<String, CacheEntry>(50, 0.75f, true)
+    private var cacheBytes = 0L
+    private const val MAX_CACHE_ENTRIES = 50
+    private const val MAX_CACHE_BYTES = 8L * 1024 * 1024
     private val flights = mutableMapOf<String, Deferred<JSONObject>>()
     private val sharedScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private const val TTL = 12L * 60 * 60 * 1000
@@ -170,8 +173,20 @@ internal object ActorInformation {
 
     private suspend fun cached(personId: Int, endpoint: String, lang: String, apiKey: String): JSONObject {
         val cacheKey = personId.toString() + "|" + endpoint + "|" + lang + "|" + apiKey
-        synchronized(cache) {
-            cache[cacheKey]?.takeIf { System.currentTimeMillis() - it.time < TTL }?.let { return it.json }
+        val hit = synchronized(cache) {
+            val entry = cache[cacheKey]
+            if (entry != null && System.currentTimeMillis() - entry.time < TTL) {
+                entry.bytes
+            } else {
+                cache.remove(cacheKey)?.let { cacheBytes -= it.bytes.size.toLong() }
+                null
+            }
+        }
+        if (hit != null) {
+            runCatching { JSONObject(String(hit, Charsets.UTF_8)) }.getOrNull()?.let { return it }
+            synchronized(cache) {
+                cache.remove(cacheKey)?.let { cacheBytes -= it.bytes.size.toLong() }
+            }
         }
         val task = synchronized(flights) {
             flights[cacheKey] ?: sharedScope.async {
@@ -180,7 +195,21 @@ internal object ActorInformation {
         }
         try {
             val result = task.await()
-            synchronized(cache) { cache[cacheKey] = CacheEntry(result, System.currentTimeMillis()) }
+            val bytes = result.toString().toByteArray(Charsets.UTF_8)
+            if (bytes.size.toLong() <= MAX_CACHE_BYTES) {
+                synchronized(cache) {
+                    cache.remove(cacheKey)?.let { cacheBytes -= it.bytes.size.toLong() }
+                    cache[cacheKey] = CacheEntry(bytes, System.currentTimeMillis())
+                    cacheBytes += bytes.size.toLong()
+                    val iterator = cache.entries.iterator()
+                    while ((cache.size > MAX_CACHE_ENTRIES || cacheBytes > MAX_CACHE_BYTES) &&
+                        iterator.hasNext()) {
+                        val evicted = iterator.next()
+                        cacheBytes -= evicted.value.bytes.size.toLong()
+                        iterator.remove()
+                    }
+                }
+            }
             return result
         } finally {
             if (task.isCompleted) synchronized(flights) {
