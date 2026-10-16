@@ -3346,6 +3346,8 @@ open class StremioC(
                 (if (season != null) "&season=$season" else "") +
                 (if (episode != null) "&episode=$episode" else "")
         }
+        StremioCCacheAudit.log("anime", "LOOKUP_BEGIN", query,
+            "season=${season ?: -1} episode=${episode ?: -1}")
         val cachedAnime = stremioCacheMemoryRead("anime", query, animeMappingCache[query], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("anime", query)?.let { (json, stamp) ->
             runCatching { parseJson<AnimeSeasonMapping>(json) }.getOrNull()?.let { value ->
                 Pair(value, stamp).also {
@@ -3355,7 +3357,12 @@ open class StremioC(
             }
         }
         DetailLoadPerf.event("ANIME_MAP_CACHE", "hit=${cachedAnime != null}")
-        if (cachedAnime != null) return cachedAnime.first
+        if (cachedAnime != null) {
+            StremioCCacheAudit.log("anime", "REUSE_CACHE", query,
+                "ageMs=${System.currentTimeMillis() - cachedAnime.second}")
+            return cachedAnime.first
+        }
+        StremioCCacheAudit.log("anime", "CACHE_MISS_ALL", query)
 
         val hosts = listOf(
             "aiostreams.elfhosted.com",
@@ -3422,9 +3429,18 @@ open class StremioC(
                 imdbSeason = data.get("imdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 },
                 traktSeason = data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
             )
-            }.onFailure { DetailLoadPerf.event("ANIME_HOST_ERROR", "host=$host error=${it.javaClass.simpleName}") }.getOrNull()
+            }.onFailure {
+                DetailLoadPerf.event("ANIME_HOST_ERROR", "host=$host error=${it.javaClass.simpleName}")
+                StremioCCacheAudit.log("anime", "HOST_ERROR", query,
+                    "host=$host error=${it.javaClass.simpleName}")
+            }.getOrNull()
             DetailLoadPerf.event("ANIME_HOST_RESULT", "host=$host dataNull=$noMapping mapped=${mapping != null}")
-            if (noMapping) return null
+            StremioCCacheAudit.log("anime", "HOST_RESULT", query,
+                "host=$host noData=$noMapping validMapping=${mapping != null}")
+            if (noMapping) {
+                StremioCCacheAudit.log("anime", "NO_MAPPING_RETURN", query)
+                return null
+            }
             if (mapping != null) {
                 animeMappingCache[query] = mapping to System.currentTimeMillis()
                 StremioCCacheAudit.log("anime", "RAM_WRITE_OK", query)
@@ -3432,6 +3448,7 @@ open class StremioC(
                 return mapping
             }
         }
+        StremioCCacheAudit.log("anime", "ALL_HOSTS_EXHAUSTED", query)
         return null
         } finally {
             DetailLoadPerf.event("ANIME_MAP_EXIT", "tookMs=${(SystemClock.elapsedRealtimeNanos() - mapStarted) / 1_000_000L}")
@@ -4239,6 +4256,9 @@ open class StremioC(
                 }
             }
             DetailLoadPerf.event("TMDB_ENRICH_CACHE", "prefetch=${preFetchedDetail != null} cacheHit=${cached != null} media=$tmdbMediaType")
+            if (preFetchedDetail != null) StremioCCacheAudit.log("detail", "REUSE_PREFETCH", cacheKey,
+                "media=$tmdbMediaType")
+            else if (cached != null) StremioCCacheAudit.log("detail", "REUSE_CACHED", cacheKey)
             val detailRes = preFetchedDetail ?: if (cached != null) {
                 cached.first
             } else {
