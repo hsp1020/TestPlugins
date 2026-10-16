@@ -227,7 +227,7 @@ private object MetadataDiskCache {
     private const val MAX_RAW_BYTES = 2 * 1024 * 1024
     private const val ANIME_EMPTY_TTL_MS = 15L * 60 * 1000
     private val entryLimits = mapOf("detail" to 700, "season" to 300, "find" to 5000,
-        "anime" to 5000, "anime_empty" to 1000, "mdb" to 1000, "meta" to 200)
+        "anime" to 5000, "missing_anime" to 1000, "mdb" to 1000, "meta" to 200)
     private val lock = Any()
     private var quotaChecked = false
     private var cleanedOldTemps = false
@@ -280,7 +280,7 @@ private object MetadataDiskCache {
                     body.indexOf('\n', firstNewline + 1) else -1
                 val ttl = when (kind) {
                     "season" -> SEASON_TTL_MS
-                    "anime_empty" -> ANIME_EMPTY_TTL_MS
+                    "missing_anime" -> ANIME_EMPTY_TTL_MS
                     "meta" -> if (secondNewline > firstNewline)
                         body.substring(firstNewline + 1, secondNewline).toLongOrNull() ?: 0L else 0L
                     else -> TTL_MS
@@ -3500,7 +3500,7 @@ open class StremioC(
             }
             animeNoMappingCache.remove(query)
         }
-        MetadataDiskCache.read("anime_empty", query)?.takeIf { it.first == "null" }?.let {
+        MetadataDiskCache.read("missing_anime", query)?.takeIf { it.first == "null" }?.let {
             animeNoMappingCache[query] = it.second
             StremioCCacheAudit.log("anime", "REUSE_NEGATIVE_DISK", query,
                 "ageMs=${System.currentTimeMillis() - it.second}")
@@ -3585,7 +3585,7 @@ open class StremioC(
                 // Cache only an authoritative success=true/data=null response, never host errors.
                 animeNoMappingCache[query] = System.currentTimeMillis()
                 addonMetaScope.launch {
-                    MetadataDiskCache.write("anime_empty", query, "null", 15L * 60 * 1000)
+                    MetadataDiskCache.write("missing_anime", query, "null", 15L * 60 * 1000)
                 }
                 StremioCCacheAudit.log("anime", "NO_MAPPING_CACHED", query, "ttlMs=900000")
                 return null
