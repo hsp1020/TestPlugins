@@ -591,11 +591,13 @@ open class StremioC(
         cachedManifest = manifest
         lastManifestUrl = stremioManifestUrl(mainUrl)
         lastCacheTime = System.currentTimeMillis()
+        manifestCacheTtlMs = MANIFEST_CACHE_TTL_MS
     }
      
     private var cachedManifest: Manifest? = null
     private var lastManifestUrl: String = ""
     private var lastCacheTime: Long = 0
+    private var manifestCacheTtlMs: Long = MANIFEST_CACHE_TTL_MS
 
     // StremioC class 내부에 추가
     // ExtractorLink import는 기존 StremioC.kt에 이미 존재함.
@@ -1597,32 +1599,53 @@ open class StremioC(
     private suspend fun fetchManifestLocked(): Manifest? {
         val currentUrl = stremioManifestUrl(mainUrl)
         val now = System.currentTimeMillis()
-        val isExpired = (now - lastCacheTime) > MANIFEST_CACHE_TTL_MS
+        val isExpired = (now - lastCacheTime) > manifestCacheTtlMs
 
         if (cachedManifest != null && lastManifestUrl == currentUrl && !isExpired && !cachedManifest?.catalogs.isNullOrEmpty()) {
             return cachedManifest
         }
 
-        val resText = runSuspendCatching {
-            customSession.get(currentUrl, timeout = 15L).text
+        val manifestResponse = runSuspendCatching {
+            customSession.get(currentUrl, timeout = 15L)
         }.onFailure {
             it.printStackTrace()
         }.getOrNull()
+        val resText = manifestResponse?.text
 
         if (!resText.isNullOrBlank()) {
             try {
                 val parsed = parseJson<Manifest>(resText)
                 if (parsed?.catalogs?.isNotEmpty() == true) {
+                    val cacheControl = manifestResponse?.headers?.get("Cache-Control").orEmpty()
+                    val directives = cacheControl.lowercase(java.util.Locale.ROOT)
+                        .split(',').map { it.trim() }
+                    val seconds = directives.firstOrNull { it.startsWith("max-age=") }
+                        ?.substringAfter('=')?.trim('"', ' ')?.toLongOrNull()
+                    manifestCacheTtlMs = when {
+                        directives.any { it == "no-cache" || it == "no-store" } -> 0L
+                        seconds != null -> seconds.coerceIn(0L, 72L * 60 * 60) * 1000L
+                        else -> MANIFEST_CACHE_TTL_MS
+                    }
+                    val context = CloudStreamApp.context
+                    val stored = context?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
+                    val manifestKey = currentUrl.toUniqueKey()
+                    val newVersion = runCatching {
+                        parseJson<JsonNode>(resText).get("version")?.asText()?.trim()
+                    }.getOrNull()?.takeIf { it.isNotBlank() }
+                    val oldVersion = stored?.getString("manifest_version_" + manifestKey, null)
+                    if (oldVersion != null && newVersion != null && oldVersion != newVersion) {
+                        invalidateSyncSettingsCache()
+                    }
                     cachedManifest = parsed
                     preparedMainPageManifest = PreparedMainPageManifest(currentUrl, resText.toUniqueKey(), parsed)
                     lastManifestUrl = currentUrl
                     lastCacheTime = now
-
-                    val context = CloudStreamApp.context
-                    context?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
-                        ?.edit()
-                        ?.putString(currentUrl.toUniqueKey(), resText)
-                        ?.putLong("manifest_saved_at_" + currentUrl.toUniqueKey(), now)
+                    stored?.edit()
+                        ?.putString(manifestKey, resText)
+                        ?.putLong("manifest_saved_at_" + manifestKey, now)
+                        ?.apply {
+                            if (newVersion != null) putString("manifest_version_" + manifestKey, newVersion)
+                        }
                         ?.apply()
                     return parsed
                 }
