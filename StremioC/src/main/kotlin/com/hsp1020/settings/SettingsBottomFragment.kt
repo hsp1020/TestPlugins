@@ -2214,19 +2214,10 @@ private fun showLanguageSelectDialog() {
                 val manifest = parseJson<StremioC.Manifest>(manifestText)
                 val catalogs = manifest.catalogs
                 val key = stremioCatalogKey(item.link)
-                val cachePolicy = manifestResponse?.headers?.entries
-                    ?.firstOrNull { it.key.equals("Cache-Control", ignoreCase = true) }
-                    ?.value.orEmpty()
-                val directives = cachePolicy.lowercase(java.util.Locale.ROOT)
-                    .split(',').map { it.trim() }
-                val noStore = "no-store" in directives
-                val maxAge = directives.firstOrNull { it.startsWith("max-age=") }
-                    ?.substringAfter('=')?.trim('"', ' ')?.toLongOrNull()
-                val ttl = when {
-                    noStore || "no-cache" in directives -> 0L
-                    maxAge != null -> maxAge.coerceIn(0L, 72L * 3600L) * 1000L
-                    else -> 3_600_000L
-                }
+                val cachePolicy = stremioManifestCachePolicy(
+                    manifestResponse?.headers.orEmpty())
+                val noStore = cachePolicy.noStore
+                val ttl = cachePolicy.ttlMs
                 val version = runCatching { JSONObject(manifestText).optString("version") }
                     .getOrNull()?.takeIf { it.isNotBlank() }
                 manifestPrefs.edit().apply {
