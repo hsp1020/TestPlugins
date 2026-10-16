@@ -1183,7 +1183,7 @@ internal class CatalogBrowserDialog(
         genre = genres.getOrNull(genreIndex)
         chosen = true
         hasNext = true
-        val snapshot = pendingHome
+        val snapshot = pendingHome ?: liveHomeSnapshot(next)
         val sameCatalog = snapshot?.target?.catalogId == next.catalog.id
         val sameType = snapshot?.target?.type == next.catalog.type
         val sameSource = snapshot?.let {
@@ -1205,6 +1205,32 @@ internal class CatalogBrowserDialog(
             adapter.submitList(items.toList()) { if (!closed) initialProgress(false) }
             autoFillIfShort(generation)
         } else requestPage()
+    }
+
+    // The heading hook can miss the snapshot when CloudStream rebinds its row.
+    // Recover it from the actual displayed Home state, not from a second GET.
+    private fun liveHomeSnapshot(source: CatalogSource): CatalogHomeSnapshot? {
+        if (genre != null) return null
+        val type = source.catalog.type ?: return null
+        val id = source.catalog.id ?: return null
+        val path = "/catalog/" + type.urlEncodeLocal() + "/" + id.urlEncodeLocal()
+        val tab = source.provider.mainPage.firstOrNull {
+            it.data.startsWith("$path/") || it.data.startsWith("$path.json")
+        } ?: return null
+        val model = ViewModelProvider(activity)[HomeViewModel::class.java]
+        if (model.apiName.value != source.provider.name) return null
+        val record = ((model.page.value as? Resource.Success<*>)?.value as? Map<*, *>)
+            ?.get(tab.name) as? HomeViewModel.ExpandableHomepageList ?: return null
+        val parent = activity.findViewById<RecyclerView>(R.id.home_master_recycler)
+        val parentAdapter = parent?.adapter as? ParentItemAdapter ?: return null
+        val displayed = parentAdapter.immutableCurrentList
+            .firstOrNull { it.list.name == tab.name } ?: return null
+        if (record.currentPage != displayed.currentPage ||
+            record.list.list.map { it.url } != displayed.list.list.map { it.url }) return null
+        val items = record.list.list.takeIf { it.isNotEmpty() } ?: return null
+        val target = CatalogShortcutTarget(source.url, type, id)
+        val cursor = source.provider.homeCursorFor(target, items) ?: return null
+        return CatalogHomeSnapshot(target, items.toList(), cursor, displayed.hasNext)
     }
 
     // The unfiltered catalog shares one raw cursor with Home, but filtered
