@@ -39,6 +39,7 @@ import android.view.ViewTreeObserver
 import android.widget.TextView
 import android.widget.FrameLayout
 import com.google.android.material.chip.ChipGroup
+import com.google.android.material.progressindicator.CircularProgressIndicator
 import androidx.core.content.ContextCompat
 import androidx.appcompat.widget.SearchView
 import androidx.recyclerview.widget.RecyclerView
@@ -778,6 +779,14 @@ internal class RatingPlotImageHook(
             val indicator = row.findViewById<View>(R.id.watch_progress_container) ?: return
             if (episodeIndicatorRestores.containsKey(indicator)) return
             val original = indicator.layoutParams as? FrameLayout.LayoutParams ?: return
+            val progress = row.findViewById<CircularProgressIndicator>(R.id.episode_progress) ?: return
+            val originalInset = progress.indicatorInset
+            val originalColors = progress.indicatorColor.copyOf()
+            val originalTrackColor = progress.trackColor
+            val themeColor = row.context.colorFromAttribute(R.attr.colorPrimary)
+            val themeTrackColor = androidx.core.graphics.ColorUtils.setAlphaComponent(
+                themeColor, (android.graphics.Color.alpha(themeColor) * 0.2f).roundToInt()
+            )
             val inset = (1.5f * indicator.resources.displayMetrics.density + 0.5f).toInt()
             val positioned = FrameLayout.LayoutParams(original).apply {
                 gravity = Gravity.BOTTOM or Gravity.START
@@ -802,13 +811,22 @@ internal class RatingPlotImageHook(
                 indicator.scaleY = scaleY
                 indicator.pivotX = pivotX
                 indicator.pivotY = pivotY
+                progress.setIndicatorInset(originalInset)
+                progress.setIndicatorColor(*originalColors)
+                progress.setTrackColor(originalTrackColor)
+                progress.requestLayout()
             }
+            progress.setIndicatorInset(0)
+            progress.setIndicatorColor(themeColor)
+            progress.setTrackColor(themeTrackColor)
+            // Material's inset setter only invalidates drawing; force the new 40dp measure.
+            progress.requestLayout()
             indicator.addOnLayoutChangeListener(pivotListener)
             indicator.layoutParams = positioned
             indicator.pivotX = 0f
             indicator.pivotY = indicator.height.toFloat()
-            indicator.scaleX = scaleX * 0.8f
-            indicator.scaleY = scaleY * 0.8f
+            indicator.scaleX = scaleX * 0.9f
+            indicator.scaleY = scaleY * 0.9f
             indicator.alpha = 0.8f
         }
 
