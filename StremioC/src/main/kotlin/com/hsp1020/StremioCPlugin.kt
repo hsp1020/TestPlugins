@@ -390,11 +390,27 @@ class StremioCPlugin : Plugin() {
                         val rawManifest = withContext(Dispatchers.IO) {
                             stremioReadManifest(manifestPrefs, item.link)
                                 ?: runCatching {
-                                    StremioC.customSession.get(stremioManifestUrl(item.link), timeout = 15L).text
-                                }.getOrNull()?.takeIf { it.isNotBlank() }?.also { raw ->
+                                    StremioC.customSession.get(stremioManifestUrl(item.link), timeout = 15L)
+                                }.getOrNull()?.let { response ->
+                                    val raw = response.text.takeIf { it.isNotBlank() }
+                                        ?: return@let null
                                     if (runCatching { JSONObject(raw).has("catalogs") }.getOrDefault(false)) {
-                                        manifestPrefs.edit().putString(stremioCatalogKey(item.link), raw).apply()
+                                        val key = stremioCatalogKey(item.link)
+                                        val noStore = response.headers.entries.any { (header, value) ->
+                                            header.equals("Cache-Control", ignoreCase = true) &&
+                                                value.split(',').any { it.trim().equals("no-store", ignoreCase = true) }
+                                        }
+                                        manifestPrefs.edit().apply {
+                                            if (noStore) {
+                                                remove(key)
+                                                remove("manifest_saved_at_" + key)
+                                            } else {
+                                                putString(key, raw)
+                                                putLong("manifest_saved_at_" + key, System.currentTimeMillis())
+                                            }
+                                        }.apply()
                                     }
+                                    raw
                                 }
                         }
                         currentCoroutineContext().ensureActive()
