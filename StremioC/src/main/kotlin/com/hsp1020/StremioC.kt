@@ -1734,13 +1734,16 @@ open class StremioC(
                     preparedMainPageManifest = PreparedMainPageManifest(currentUrl, resText.toUniqueKey(), parsed)
                     lastManifestUrl = currentUrl
                     lastCacheTime = now
-                    stored?.edit()
-                        ?.putString(manifestKey, resText)
-                        ?.putLong("manifest_saved_at_" + manifestKey, now)
-                        ?.apply {
-                            if (newVersion != null) putString("manifest_version_" + manifestKey, newVersion)
+                    stored?.edit()?.apply {
+                        if (directives.any { it == "no-store" }) {
+                            remove(manifestKey)
+                            remove("manifest_saved_at_" + manifestKey)
+                        } else {
+                            putString(manifestKey, resText)
+                            putLong("manifest_saved_at_" + manifestKey, now)
                         }
-                        ?.apply()
+                        if (newVersion != null) putString("manifest_version_" + manifestKey, newVersion)
+                    }?.apply()
                     return parsed
                 }
             } catch (e: Exception) {
@@ -4958,9 +4961,16 @@ internal fun migrateStremioCatalogSettings(prefs: SharedPreferences, source: Str
 }
 
 internal fun stremioReadManifest(prefs: SharedPreferences, source: String): String? {
-    prefs.getString(stremioCatalogKey(source), null)?.let { return it }
-    for (old in stremioOldCatalogKeys(source)) {
-        prefs.getString(old, null)?.let { return it }
+    val key = stremioCatalogKey(source)
+    val raw = prefs.getString(key, null) ?: stremioOldCatalogKeys(source)
+        .firstNotNullOfOrNull { prefs.getString(it, null) } ?: return null
+    val now = System.currentTimeMillis()
+    val stampKey = "manifest_saved_at_$key"
+    val savedAt = prefs.getLong(stampKey, 0L)
+    // One-time migration for manifests stored before timestamp tracking.
+    if (savedAt == 0L) {
+        prefs.edit().putString(key, raw).putLong(stampKey, now).apply()
+        return raw
     }
-    return null
+    return raw.takeIf { savedAt <= now && now - savedAt <= 72L * 60 * 60 * 1000 }
 }
