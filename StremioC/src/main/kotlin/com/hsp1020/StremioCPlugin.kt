@@ -425,7 +425,11 @@ class StremioCPlugin : Plugin() {
 
                         // The original addon owns Home and metadata only; it never contributes search results.
                         val homeProvider = StremioC(item.link, item.name, item.id, disableSearch = true)
-                        manifest?.let { homeProvider.primeManifest(it) }
+                        manifest?.let {
+                            val noStore = manifestPrefs.getBoolean(
+                                "manifest_no_store_" + stremioCatalogKey(item.link), false)
+                            homeProvider.primeManifest(it, if (noStore) 0L else 3_600_000L)
+                        }
                         registerMainAPI(homeProvider)
                         registeredProviders.add(homeProvider)
 
