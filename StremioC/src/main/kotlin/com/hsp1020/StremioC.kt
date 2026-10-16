@@ -2,6 +2,9 @@ package com.hsp1020
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.SystemClock
+import android.util.Log
+import java.util.concurrent.atomic.AtomicLong
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonAlias
 import com.fasterxml.jackson.databind.JsonNode
@@ -98,6 +101,53 @@ private inline fun <K, V> lruCacheMap(maxSize: Int): MutableMap<K, V> {
             return size > maxSize
         }
     })
+}
+
+
+private object DetailLoadPerf {
+    private val sequence = AtomicLong()
+    val current = ThreadLocal<Session?>()
+    private const val TAG = "StremioCLoadPerf"
+
+    class Session {
+        val id = sequence.incrementAndGet()
+        private val origin = SystemClock.elapsedRealtimeNanos()
+        fun event(stage: String, detail: String = "") {
+            val totalMs = (SystemClock.elapsedRealtimeNanos() - origin) / 1_000_000L
+            Log.i(TAG, "run=$id totalMs=$totalMs stage=$stage $detail")
+        }
+    }
+
+    fun event(stage: String, detail: String = "") = current.get()?.event(stage, detail)
+
+    suspend fun <T> step(stage: String, block: suspend () -> T): T {
+        val trace = current.get() ?: return block()
+        val start = SystemClock.elapsedRealtimeNanos()
+        trace.event("BEGIN", "op=$stage")
+        try {
+            val result = block()
+            trace.event("END", "op=$stage tookMs=${(SystemClock.elapsedRealtimeNanos() - start) / 1_000_000L}")
+            return result
+        } catch (error: Throwable) {
+            trace.event(if (error is CancellationException) "CANCEL" else "FAIL",
+                "op=$stage tookMs=${(SystemClock.elapsedRealtimeNanos() - start) / 1_000_000L} error=${error.javaClass.simpleName}")
+            throw error
+        }
+    }
+
+    fun <T> stepNow(stage: String, block: () -> T): T {
+        val trace = current.get() ?: return block()
+        val start = SystemClock.elapsedRealtimeNanos()
+        trace.event("BEGIN", "op=$stage")
+        try {
+            val result = block()
+            trace.event("END", "op=$stage tookMs=${(SystemClock.elapsedRealtimeNanos() - start) / 1_000_000L}")
+            return result
+        } catch (error: Throwable) {
+            trace.event("FAIL", "op=$stage tookMs=${(SystemClock.elapsedRealtimeNanos() - start) / 1_000_000L} error=${error.javaClass.simpleName}")
+            throw error
+        }
+    }
 }
 
 private fun JsonNode?.textOrNull(): String? {
@@ -1642,7 +1692,31 @@ open class StremioC(
         }
     }
     
-    override suspend fun load(url: String): LoadResponse = coroutineScope {
+
+    override suspend fun load(url: String): LoadResponse {
+        val trace = DetailLoadPerf.current.get() ?: DetailLoadPerf.Session()
+        return withContext(DetailLoadPerf.current.asContextElement(trace)) {
+            val source = when {
+                url.contains("simkl.com/") -> "simkl"
+                url.contains("myanimelist.net/") -> "mal"
+                url.contains("anilist.co/") -> "anilist"
+                url.contains("kitsu.app/") -> "kitsu"
+                url.contains("/meta/") -> "addon-meta"
+                else -> "other"
+            }
+            DetailLoadPerf.event("LOAD_ENTER", "source=$source provider=${if (mainUrl.isBlank()) "library" else "addon"}")
+            try {
+                val result = DetailLoadPerf.step("load.coroutineScope") { loadInternal(url) }
+                DetailLoadPerf.event("LOAD_RETURN", "type=${result.type} poster=${!result.posterUrl.isNullOrBlank()} backdrop=${!result.backgroundPosterUrl.isNullOrBlank()}")
+                result
+            } catch (error: Throwable) {
+                DetailLoadPerf.event("LOAD_THROW", "error=${error.javaClass.simpleName}")
+                throw error
+            }
+        }
+    }
+
+    private suspend fun loadInternal(url: String): LoadResponse = coroutineScope {
         if (!isAddonEnabled()) throw IllegalStateException("This addon is disabled.")
         if (mainUrl.isBlank()) {
             val libraryService = when {
@@ -1655,9 +1729,15 @@ open class StremioC(
             if (libraryService != null) {
                 val base = libraryMetadataBase()
                     ?: throw IllegalStateException("Configure a metadata/history addon before opening a library item.")
-                val metaUrl = getLoadUrl(libraryService, url)
-                    ?: throw IllegalStateException("Unable to resolve the library item with the configured addon.")
-                return@coroutineScope StremioC(base, name).load(metaUrl)
+                DetailLoadPerf.event("LIBRARY_SOURCE", "service=$libraryService")
+                val metaUrl = DetailLoadPerf.step("library.resolveUrl.$libraryService") {
+                    getLoadUrl(libraryService, url)
+                } ?: throw IllegalStateException("Unable to resolve the library item with the configured addon.")
+                val hint = parseDetailUrlHint(metaUrl)
+                DetailLoadPerf.event("LIBRARY_MAPPED", "type=${hint?.type} id=${hint?.id}")
+                return@coroutineScope DetailLoadPerf.step("library.delegateLoad") {
+                    StremioC(base, name).load(metaUrl)
+                }
             }
         }
         // Catalogs opened from a metadata Discover link do not require addon registration.
@@ -1758,18 +1838,21 @@ open class StremioC(
 
         var initialMetaFromResponse: CatalogEntry? = null
         val res: CatalogEntry = if (url.startsWith("{")) {
-            parseJson<CatalogEntry>(url)
+            DetailLoadPerf.stepNow("meta.embedded.parse") { parseJson<CatalogEntry>(url) }
         } else {
-            val responseText = customSession.get(url).text
+            val responseText = DetailLoadPerf.step("meta.primary.http") { customSession.get(url).text }
             try {
-                val rootNode = parseJson<JsonNode>(responseText)
-                val metaNode = if (rootNode.has("meta")) rootNode.get("meta") else rootNode
-                val parsedEntry = parseJson<CatalogEntry>(metaNode.toString())
-                    ?: throw IllegalStateException("Failed to bind JSON to CatalogEntry")
-                if (rootNode.has("meta") && metaNode.isObject) {
-                    initialMetaFromResponse = parsedEntry
+                DetailLoadPerf.stepNow("meta.primary.parse") {
+                    val rootNode = parseJson<JsonNode>(responseText)
+                    val metaNode = if (rootNode.has("meta")) rootNode.get("meta") else rootNode
+                    val parsedEntry = parseJson<CatalogEntry>(metaNode.toString())
+                        ?: throw IllegalStateException("Failed to bind JSON to CatalogEntry")
+                    if (rootNode.has("meta") && metaNode.isObject) {
+                        initialMetaFromResponse = parsedEntry
+                    }
+                    DetailLoadPerf.event("META_PRIMARY_RESULT", "bytes=${responseText.length} type=${parsedEntry.type} id=${parsedEntry.id} videos=${parsedEntry.videos?.size ?: 0}")
+                    parsedEntry
                 }
-                parsedEntry
             } catch (e: Exception) {
                 e.printStackTrace()
                 throw IllegalStateException("Metadata not found or parsing failed: $url", e)
@@ -1914,7 +1997,7 @@ open class StremioC(
 
         val resolvedIdHolder = arrayOf<String?>(null, null)
 
-        val loadRes = res.toLoadResponse(
+        val loadRes = DetailLoadPerf.step("toLoadResponse.total") { res.toLoadResponse(
             provider = this@StremioC,
             imdbId = finalProcessedId,
             addonDeferred = addonDeferred,
@@ -1932,7 +2015,7 @@ open class StremioC(
             requestedAnimeId = requestedAnimeId,
             prefetchedAnimeMapping = speculativeImdbAnimeDeferred?.takeIf { hintedImdbId == res.id },
             prefetchedAnimeImdbId = hintedImdbId
-        )
+        ) }
         // The detail fragment keeps the originally requested URL (e.g. kitsu:...),
         // while the returned metadata may use the mapped IMDb URL. Share the same
         // logo visibility decisions under both exact keys without another request.
@@ -1973,6 +2056,7 @@ open class StremioC(
             }
         }
 
+        DetailLoadPerf.event("LOAD_RESULT_READY", "type=${loadRes.type} mdbEnabled=$mdbEnabled")
         return@coroutineScope loadRes
     }
 
