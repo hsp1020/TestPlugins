@@ -515,37 +515,32 @@ open class StremioC(
     }
 
     override suspend fun getLoadUrl(name: SyncIdName, id: String): String? {
-        val trace = DetailLoadPerf.current.get() ?: DetailLoadPerf.Session()
-        return withContext(DetailLoadPerf.current.asContextElement(trace)) {
-            DetailLoadPerf.event("GET_LOAD_URL_ENTER", "service=$name")
-            val resolved = DetailLoadPerf.step("getLoadUrl.total") { getLoadUrlInternal(name, id) }
-            // The sync provider's lookup URL is not necessarily the URL kept in
-            // ResultFragment arguments. MAL and AniList can differ from the host's
-            // canonical URL even for the same anime ID; Kitsu often does not.
-            // Register the canonical forms as well, without another HTTP request.
-            if (mainUrl.isBlank() && resolved != null) {
-                val canonical = when (name) {
-                    SyncIdName.MyAnimeList -> libraryItemId(id, "myanimelist.net", "anime")
-                        ?.let { "https://myanimelist.net/anime/$it/" }
-                    SyncIdName.Anilist -> libraryItemId(id, "anilist.co", "anime")
-                        ?.let { "https://anilist.co/anime/$it/" }
-                    SyncIdName.Kitsu -> libraryItemId(id, "kitsu.app", "anime")
-                        ?.let { "https://kitsu.app/anime/$it/" }
-                    else -> null
-                }
-                if (canonical != null) {
-                    synchronized(libraryOriginalUrlsByMeta) {
-                        libraryOriginalUrlsByMeta.getOrPut(resolved) { LinkedHashSet() }.apply {
-                            add(id)
-                            add(canonical)
-                            add(canonical.dropLast(1))
-                        }
+        val resolved = getLoadUrlInternal(name, id)
+        // The sync provider's lookup URL is not necessarily the URL kept in
+        // ResultFragment arguments. MAL and AniList can differ from the host's
+        // canonical URL even for the same anime ID; Kitsu often does not.
+        // Register the canonical forms as well, without another HTTP request.
+        if (mainUrl.isBlank() && resolved != null) {
+            val canonical = when (name) {
+                SyncIdName.MyAnimeList -> libraryItemId(id, "myanimelist.net", "anime")
+                    ?.let { "https://myanimelist.net/anime/$it/" }
+                SyncIdName.Anilist -> libraryItemId(id, "anilist.co", "anime")
+                    ?.let { "https://anilist.co/anime/$it/" }
+                SyncIdName.Kitsu -> libraryItemId(id, "kitsu.app", "anime")
+                    ?.let { "https://kitsu.app/anime/$it/" }
+                else -> null
+            }
+            if (canonical != null) {
+                synchronized(libraryOriginalUrlsByMeta) {
+                    libraryOriginalUrlsByMeta.getOrPut(resolved) { LinkedHashSet() }.apply {
+                        add(id)
+                        add(canonical)
+                        add(canonical.dropLast(1))
                     }
                 }
             }
-            DetailLoadPerf.event("GET_LOAD_URL_RESULT", "service=$name resolved=${resolved != null} type=${resolved?.substringAfter("/meta/")?.substringBefore('/')}")
-            resolved
         }
+        return resolved
     }
 
     private suspend fun getLoadUrlInternal(name: SyncIdName, id: String): String? {
@@ -1587,9 +1582,7 @@ open class StremioC(
     }
 
     internal fun homeCursorFor(target: CatalogShortcutTarget, visible: List<SearchResponse>): Int? {
-        val identity = "p=${CatalogSyncTrace.provider(this)} target=${CatalogSyncTrace.target(target)} ${CatalogSyncTrace.list(visible)}"
         if (visible.isEmpty()) {
-            CatalogSyncTrace.emit("CURSOR_FAIL", "$identity reason=EMPTY_VISIBLE")
             return null
         }
         val path = "/catalog/${target.type.urlEncodeLocal()}/${target.catalogId.urlEncodeLocal()}"
@@ -1597,37 +1590,27 @@ open class StremioC(
             it.data.startsWith("$path/") || it.data.startsWith("$path.json")
         }
         if (tab == null) {
-            CatalogSyncTrace.emit("CURSOR_FAIL", "$identity reason=NO_HOME_TAB tabs=${mainPage.size}")
             return null
         }
         val stateKey = "$mainUrl|${tab.data}"
         val offsets = catalogHomeCursors[stateKey]
-        val state = "tab=${tab.name},key=${stateKey.hashCode().toString(16)}," +
-            "skip=${catalogSkipState[stateKey]},generation=${catalogGenerations[stateKey]}"
         if (offsets == null) {
-            CatalogSyncTrace.emit("CURSOR_FAIL", "$identity $state reason=NO_CURSOR_MAP")
             return null
         }
         var last = -1
-        for ((index, item) in visible.withIndex()) {
+        for (item in visible) {
             val next = offsets[item.url]
             if (next == null) {
-                CatalogSyncTrace.emit("CURSOR_FAIL",
-                    "$identity $state reason=MISSING_ITEM index=$index urlHash=${item.url.hashCode().toString(16)} mapSize=${offsets.size}")
                 return null
             }
             if (next < last) {
-                CatalogSyncTrace.emit("CURSOR_FAIL",
-                    "$identity $state reason=CURSOR_ORDER index=$index prev=$last next=$next mapSize=${offsets.size}")
                 return null
             }
             last = next
         }
         if (last <= 0) {
-            CatalogSyncTrace.emit("CURSOR_FAIL", "$identity $state reason=NONPOSITIVE_LAST last=$last")
             return null
         }
-        CatalogSyncTrace.emit("CURSOR_OK", "$identity $state next=$last mapSize=${offsets.size} actualSkip=${catalogSkipState[stateKey]}")
         return last
     }
 
@@ -1637,9 +1620,7 @@ open class StremioC(
         target: CatalogShortcutTarget, offset: Int,
         page: List<SearchResponse>, rawCount: Int
     ): List<SearchResponse>? {
-        val trace = "p=${CatalogSyncTrace.provider(this)} target=${CatalogSyncTrace.target(target)} offset=$offset raw=$rawCount page=${page.size}"
         if (rawCount < 0) {
-            CatalogSyncTrace.emit("ADOPT_REJECT", "$trace reason=NEGATIVE_COUNT")
             return null
         }
         val path = "/catalog/" + target.type.urlEncodeLocal() + "/" +
@@ -1648,7 +1629,6 @@ open class StremioC(
             it.data.startsWith("$path/") || it.data.startsWith("$path.json")
         }
         if (tab == null) {
-            CatalogSyncTrace.emit("ADOPT_REJECT", "$trace reason=NO_HOME_TAB")
             return null
         }
         val stateKey = mainUrl + "|" + tab.data
@@ -1656,8 +1636,6 @@ open class StremioC(
             val currentSkip = catalogSkipState[stateKey]
             val active = activePageRequests.keys.count { it.startsWith("$stateKey|page=") }
             if (currentSkip != offset || active != 0) {
-                CatalogSyncTrace.emit("ADOPT_REJECT",
-                    "$trace reason=${if (currentSkip != offset) "SKIP_MISMATCH" else "HOME_REQUEST_ACTIVE"} homeSkip=$currentSkip active=$active")
                 return@withLock null
             }
 
@@ -1667,8 +1645,6 @@ open class StremioC(
             catalogSkipState[stateKey] = nextSkip
             val cursors = catalogHomeCursors.getOrPut(stateKey) { ConcurrentHashMap() }
             accepted.forEach { cursors[it.url] = nextSkip }
-            CatalogSyncTrace.emit("ADOPT_OK",
-                "$trace accepted=${accepted.size} nextSkip=$nextSkip mapSize=${cursors.size}")
             accepted
         }
     }
@@ -1706,20 +1682,16 @@ open class StremioC(
     ): HomePageResponse {
         val stateKey = getCatalogStateKey(request)
         val key = "$stateKey|page=$page"
-        CatalogSyncTrace.emit("HOME_ENTER",
-            "p=${CatalogSyncTrace.provider(this)} tab=${request.name} page=$page state=${stateKey.hashCode().toString(16)} skip=${catalogSkipState[stateKey]} cursorSize=${catalogHomeCursors[stateKey]?.size}")
         var owner = false
 
         val flight = pageMutex.withLock {
             val existing = activePageRequests[key]
             if (existing != null) {
                 existing.waiters++
-                CatalogSyncTrace.emit("HOME_JOIN", "tab=${request.name} page=$page waiters=${existing.waiters}")
                 existing
             } else {
                 owner = true
                 val generation = if (page <= 1) {
-                    CatalogSyncTrace.emit("HOME_RESET", "tab=${request.name} state=${stateKey.hashCode().toString(16)} prevSkip=${catalogSkipState[stateKey]} prevCursorSize=${catalogHomeCursors[stateKey]?.size} prevGeneration=${catalogGenerations[stateKey]}")
                     catalogSentIds.remove(stateKey)
                     catalogSkipState.remove(stateKey)
                     catalogHomeCursors.remove(stateKey)
@@ -1735,7 +1707,6 @@ open class StremioC(
 
         try {
             val response = flight.deferred.await()
-            CatalogSyncTrace.emit("HOME_EXIT", "tab=${request.name} page=$page owner=$owner skip=${catalogSkipState[stateKey]} cursorSize=${catalogHomeCursors[stateKey]?.size} duplicateSuppressed=${!owner && page > 1}")
             return if (!owner && page > 1) newHomePageResponse(emptyList(), hasNext = true) else response
         } finally {
             withContext(NonCancellable) {
@@ -1758,7 +1729,6 @@ open class StremioC(
         val stateKey = getCatalogStateKey(request)
 
         if ((catalogGenerations[stateKey] ?: 0L) != generation) {
-            CatalogSyncTrace.emit("HOME_STALE", "tab=${request.name} page=$page stage=beforeFetch generation=$generation actual=${catalogGenerations[stateKey]}")
             return newHomePageResponse(emptyList(), hasNext = false)
         }
 
@@ -1772,7 +1742,6 @@ open class StremioC(
 
         val currentSkip = catalogSkipState[stateKey] ?: 0
         val targetPath = request.data.replace("###", currentSkip.toString())
-        CatalogSyncTrace.emit("HOME_FETCH", "p=${CatalogSyncTrace.provider(this)} tab=${request.name} page=$page offset=$currentSkip generation=$generation")
         val resultPair = fetchCatalogItems(targetPath)
 
         if ((catalogGenerations[stateKey] ?: 0L) != generation) {
@@ -1800,8 +1769,6 @@ open class StremioC(
             // Save raw response offsets, never filtered item counts.
             val nextSkip = currentSkip + resultPair.second
             filteredItems.forEach { cursors[it.url] = nextSkip }
-            CatalogSyncTrace.emit("HOME_COMMIT",
-                "p=${CatalogSyncTrace.provider(this)} tab=${request.name} page=$page requested=$currentSkip raw=${resultPair.second} accepted=${filteredItems.size} nextSkip=$nextSkip mapSize=${cursors.size} generation=$generation ${CatalogSyncTrace.list(filteredItems)}")
 
             newHomePageResponse(
                 listOf(HomePageList(request.name, filteredItems)),
@@ -1813,7 +1780,6 @@ open class StremioC(
     // Both callers share transport/parsing, never pagination state. Browser requests do not
     // reset catalogSkipState/catalogSentIds or join the homepage's stateful PageFlight.
     private suspend fun fetchCatalogItems(path: String, fallbackType: String = "movie"): Pair<List<SearchResponse>, Int> {
-        val begin = android.os.SystemClock.elapsedRealtime()
         val json = homeForegroundSemaphore.withPermit { fetchHomeJson(buildUrl(path)) }
         val metas = parseJson<HomeCatalogResponse>(json).metas
             ?: throw IllegalStateException("Catalog response is missing metas")
@@ -1826,8 +1792,6 @@ open class StremioC(
             rememberDetailLoadHint(metaUrl, type, id, meta.moviedb_id?.toString() ?: meta.tmdbIdExt)
             newMovieSearchResponse(title, metaUrl, TvType.Others) { posterUrl = meta.poster }
         }
-        CatalogSyncTrace.emit("HTTP_CATALOG",
-            "p=${CatalogSyncTrace.provider(this)} pathHash=${path.hashCode().toString(16)} raw=${metas.size} parsed=${items.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - begin}")
         return items to metas.size
     }
 
@@ -2256,11 +2220,6 @@ open class StremioC(
         for (originalUrl in libraryOrigins) {
             fallbackLogoTitles[url]?.let { fallbackLogoTitles[originalUrl] = it }
             expectedLogoByUrl[url]?.let { expectedLogoByUrl[originalUrl] = it }
-        }
-        if (libraryOrigins.isNotEmpty()) {
-            DetailLoadPerf.event("LIBRARY_TITLE_ALIAS",
-                "targets=${libraryOrigins.size} fallback=${fallbackLogoTitles[url]}" +
-                " expected=${expectedLogoByUrl[url]}")
         }
         collectionDeferred?.cancel() // No remaining prefetch when the final media type differs.
 
@@ -4635,24 +4594,6 @@ fun getSafeAllProviders(): List<MainAPI> {
     } catch (e: Exception) {
         e.printStackTrace()
         emptyList()
-    }
-}
-
-/** Temporary, single-tag catalog pagination diagnostics; never print credential-bearing URLs. */
-internal object CatalogSyncTrace {
-    private const val TAG = "StremioCCatalogSync"
-    fun source(url: String?): String = url?.takeIf { it.isNotBlank() }
-        ?.let { Integer.toHexString(stremioManifestUrl(it).hashCode()) } ?: "none"
-    fun provider(p: StremioC?): String = p?.let {
-        "${source(it.mainUrl)}#${Integer.toHexString(System.identityHashCode(it))}(${it.name})"
-    } ?: "none"
-    fun target(t: CatalogShortcutTarget?): String =
-        t?.let { "${source(it.addonUrl)}/${it.type}/${it.catalogId}/${it.genre ?: "All"}" } ?: "none"
-    fun list(items: List<SearchResponse>): String =
-        "count=${items.size},first=${items.firstOrNull()?.url?.hashCode()?.let { it.toString(16) } ?: "none"}," +
-            "last=${items.lastOrNull()?.url?.hashCode()?.let { it.toString(16) } ?: "none"}"
-    fun emit(event: String, data: String) {
-        android.util.Log.i(TAG, "$event $data")
     }
 }
 

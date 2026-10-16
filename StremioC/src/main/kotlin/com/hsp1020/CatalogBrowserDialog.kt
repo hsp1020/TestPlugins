@@ -520,8 +520,6 @@ internal class CatalogBrowserDialog(
     private var pendingCatalog = initialCatalog
     private var pendingGenre = initialCatalog?.genre
     private var pendingHome = initialHome?.takeIf { it.target == initialCatalog }
-    private val snapshotInputPresent = initialHome != null
-    private val initialTargetText = CatalogSyncTrace.target(initialCatalog)
     private var fetchingCatalogs = false
     private var provider: StremioC? = null
     private var addonUrl: String? = null
@@ -661,13 +659,11 @@ internal class CatalogBrowserDialog(
     }
     private val settingsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "stremio_saved_links") {
-            CatalogSyncTrace.emit("BROWSER_PREF", "event=linksChanged")
             scope.launch { reloadLinks() }
         }
     }
     private val manifestListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (!fetchingCatalogs && links.any { key == stremioCatalogKey(it.link) }) {
-            CatalogSyncTrace.emit("BROWSER_PREF", "event=manifestChanged")
             scope.launch { reloadLinks() }
         }
     }
@@ -969,8 +965,6 @@ internal class CatalogBrowserDialog(
         activity.lifecycle.addObserver(hostObserver)
         prefs.registerOnSharedPreferenceChangeListener(settingsListener)
         manifestPrefs.registerOnSharedPreferenceChangeListener(manifestListener)
-        CatalogSyncTrace.emit("BROWSER_SHOW",
-            "target=$initialTargetText inputSnapshot=$snapshotInputPresent matched=${pendingHome != null} pendingCount=${pendingHome?.items?.size} pendingSkip=${pendingHome?.nextSkip} pendingNext=${pendingHome?.hasNext}")
         reloadLinks()
     }
 
@@ -996,8 +990,6 @@ internal class CatalogBrowserDialog(
     }
 
     private fun reset() {
-        CatalogSyncTrace.emit("BROWSER_RESET",
-            "generation=$generation selected=${CatalogSyncTrace.source(addonUrl)}/${catalog?.type}/${catalog?.id}/${genre ?: "All"} offset=$offset count=${items.size} pending=${pendingHome != null} loading=$loading")
         generation++
         fetchingCatalogs = false
         job?.cancel()
@@ -1016,7 +1008,6 @@ internal class CatalogBrowserDialog(
     }
 
     private fun reloadLinks() {
-        CatalogSyncTrace.emit("BROWSER_RELOAD", "target=$initialTargetText direct=${directTarget != null} pending=${pendingHome != null} selectedType=$selectedType")
         reset()
         links = if (directTarget == null) SettingsRepository.loadLinks(prefs).filter { it.enabled && it.link.isNotBlank() } else emptyList()
         provider = null
@@ -1041,8 +1032,6 @@ internal class CatalogBrowserDialog(
             }
         }
         val activeSources = sources.filter { StremioC.isCatalogAddonEnabled(it.first) }
-        CatalogSyncTrace.emit("BROWSER_SOURCES",
-            "target=$initialTargetText sources=${sources.size} active=${activeSources.size} providers=${activeSources.joinToString(",") { CatalogSyncTrace.provider(it.second) }}")
         if (activeSources.isNotEmpty()) initialProgress(true)
         if (activeSources.isEmpty()) {
             Toast.makeText(activity, "No Stremio catalogs available.", Toast.LENGTH_SHORT).show()
@@ -1097,8 +1086,6 @@ internal class CatalogBrowserDialog(
             }
             if (ticket != generation || closed) return@launch
             catalogs = result
-            CatalogSyncTrace.emit("BROWSER_MANIFEST",
-                "target=$initialTargetText result=${result.size} types=${result.mapNotNull { it.catalog.type }.distinct()} generation=$generation")
             if (result.isEmpty()) {
                 initialProgress(false)
                 Toast.makeText(activity, "Unable to load any catalog manifests.", Toast.LENGTH_SHORT).show()
@@ -1126,7 +1113,6 @@ internal class CatalogBrowserDialog(
     }
 
     private fun selectType(type: String) {
-        CatalogSyncTrace.emit("BROWSER_SELECT_TYPE", "new=$type pendingCatalog=${CatalogSyncTrace.target(pendingCatalog)} pendingHome=${pendingHome != null}")
         reset()
         selectedType = type
         provider = null
@@ -1143,8 +1129,6 @@ internal class CatalogBrowserDialog(
             }
         }
         val initial = if (requested?.genre != null) target else target ?: entries.firstOrNull()
-        CatalogSyncTrace.emit("BROWSER_MATCH_CATALOG",
-            "wanted=${CatalogSyncTrace.target(requested)} entries=${entries.size} exactMatch=${target != null} chosen=${initial?.catalog?.id} source=${CatalogSyncTrace.provider(initial?.provider)}")
         catalogSelector.choices("Catalog name", entries.map { entry ->
             val name = entry.catalog.name ?: entry.catalog.id ?: "Untitled"
             if (directTarget != null) name else
@@ -1162,8 +1146,6 @@ internal class CatalogBrowserDialog(
     }
 
     private fun selectCatalog(next: CatalogSource) {
-        CatalogSyncTrace.emit("BROWSER_SELECT_CATALOG",
-            "catalog=${next.catalog.type}/${next.catalog.id} p=${CatalogSyncTrace.provider(next.provider)} pendingHome=${pendingHome != null} same=${catalog === next.catalog && addonUrl == next.url}")
         if (catalog === next.catalog && addonUrl == next.url) return
         reset()
         provider = next.provider
@@ -1192,8 +1174,7 @@ internal class CatalogBrowserDialog(
             genre = genres[it]
             chosen = true
             hasNext = true
-            CatalogSyncTrace.emit("BROWSER_GENRE_CHANGED", "genre=${genre ?: "All"} catalog=${catalog?.id} generation=$generation")
-            requestPage("genreChanged")
+            requestPage()
         }
         if (initialGenre != null && genreIndex < 0) {
             Toast.makeText(activity, "Requested genre is not available.", Toast.LENGTH_SHORT).show()
@@ -1213,10 +1194,6 @@ internal class CatalogBrowserDialog(
             !required && genre == null && sameCatalog && sameType && sameSource == true &&
                 it.items.isNotEmpty() && it.nextSkip > 0
         }
-        CatalogSyncTrace.emit("BROWSER_SNAPSHOT",
-            "catalog=${next.catalog.type}/${next.catalog.id} provider=${CatalogSyncTrace.provider(next.provider)} snapshot=${snapshot != null} requested=$initialTargetText genre=${genre ?: "All"} required=$required sameCatalog=$sameCatalog sameType=$sameType sameSource=$sameSource homeCount=${snapshot?.items?.size} rawSkip=${snapshot?.nextSkip} hasNext=${snapshot?.hasNext} outcome=${if (home == null) "FETCH_NEW" else "REUSE_HOME"}")
-        // Inspect CloudStream's actual home row even when no snapshot was handed off.
-        traceHomePresence(next)
         pendingHome = null
         if (home != null) {
             // Display the already-loaded home SearchResponses without a first-page request.
@@ -1226,28 +1203,8 @@ internal class CatalogBrowserDialog(
             offset = home.nextSkip
             hasNext = home.hasNext && next.catalog.supportsExtra("skip")
             adapter.submitList(items.toList()) { if (!closed) initialProgress(false) }
-            CatalogSyncTrace.emit("BROWSER_REUSE", "count=${items.size} skip=$offset hasNext=$hasNext generation=$generation")
             autoFillIfShort(generation)
-        } else requestPage("noSnapshot")
-    }
-
-    private fun traceHomePresence(next: CatalogSource) {
-        val model = ViewModelProvider(activity)[HomeViewModel::class.java]
-        val tab = next.provider.mainPage.firstOrNull { page ->
-            val prefix = "/catalog/${next.catalog.type?.urlEncodeLocal()}/${next.catalog.id?.urlEncodeLocal()}"
-            page.data.startsWith("$prefix/") || page.data.startsWith("$prefix.json")
-        }
-        val record = (model.page.value as? Resource.Success<*>)?.value
-            ?.let { it as? Map<*, *> }?.get(tab?.name) as? HomeViewModel.ExpandableHomepageList
-        val parent = activity.findViewById<RecyclerView>(R.id.home_master_recycler)
-        val displayed = (parent?.adapter as? ParentItemAdapter)?.immutableCurrentList
-            ?.firstOrNull { it.list.name == tab?.name }
-        CatalogSyncTrace.emit("BROWSER_HOME_VISIBLE",
-            "p=${CatalogSyncTrace.provider(next.provider)} api=${model.apiName.value} tab=${tab?.name} modelStatus=${model.page.value?.javaClass?.simpleName} modelPage=${record?.currentPage} modelCount=${record?.list?.list?.size} uiPage=${displayed?.currentPage} uiCount=${displayed?.list?.list?.size} uiAdapter=${parent?.adapter?.javaClass?.simpleName} sameList=${record?.list?.list?.map { it.url } == displayed?.list?.list?.map { it.url }}")
-        if (record != null && tab != null) {
-            val raw = CatalogShortcutTarget(next.url, next.catalog.type.orEmpty(), next.catalog.id.orEmpty())
-            next.provider.homeCursorFor(raw, record.list.list)
-        }
+        } else requestPage()
     }
 
     // The unfiltered catalog shares one raw cursor with Home, but filtered
@@ -1259,60 +1216,46 @@ internal class CatalogBrowserDialog(
         val type = catalog.type ?: return
         val id = catalog.id ?: return
         val target = CatalogShortcutTarget(addonUrl ?: return, type, id)
-        CatalogSyncTrace.emit("SYNC_BEGIN",
-            "p=${CatalogSyncTrace.provider(source)} target=${CatalogSyncTrace.target(target)} offset=$requestedOffset raw=$rawCount pageCount=${page.size} hasNext=$more")
         val basePath = "/catalog/" + type.urlEncodeLocal() + "/" + id.urlEncodeLocal()
         val tab = source.mainPage.firstOrNull {
             it.data.startsWith("$basePath/") || it.data.startsWith("$basePath.json")
         }
         if (tab == null) {
-            CatalogSyncTrace.emit("SYNC_REJECT", "reason=NO_TAB target=${CatalogSyncTrace.target(target)}")
             return
         }
 
         // CloudStream HomeViewModel owns another page counter and displayed list.
         val model = ViewModelProvider(activity)[HomeViewModel::class.java]
         if (model.apiName.value != source.name || tab.name in model.lock) {
-            CatalogSyncTrace.emit("SYNC_REJECT",
-                "reason=${if (model.apiName.value != source.name) "API_MISMATCH" else "HOME_LOCK"} homeApi=${model.apiName.value} source=${source.name} tab=${tab.name} locks=${model.lock.size}")
             return
         }
         val success = model.page.value as? Resource.Success<*>
         if (success == null) {
-            CatalogSyncTrace.emit("SYNC_REJECT",
-                "reason=HOME_NOT_SUCCESS state=${model.page.value?.javaClass?.simpleName}")
             return
         }
         val record = (success.value as? Map<*, *>)?.get(tab.name)
             as? HomeViewModel.ExpandableHomepageList
         if (record == null) {
-            CatalogSyncTrace.emit("SYNC_REJECT", "reason=NO_MODEL_ROW tab=${tab.name}")
             return
         }
         val parent = activity.findViewById<RecyclerView>(R.id.home_master_recycler)
         val parentAdapter = parent?.adapter as? ParentItemAdapter
         if (parentAdapter == null) {
-            CatalogSyncTrace.emit("SYNC_REJECT",
-                "reason=NO_HOME_ADAPTER tab=${tab.name} parent=${parent != null} adapter=${parent?.adapter?.javaClass?.simpleName}")
             return
         }
         val displayed = parentAdapter.immutableCurrentList.firstOrNull { it.list.name == tab.name }
         if (displayed == null) {
-            CatalogSyncTrace.emit("SYNC_REJECT", "reason=NO_DISPLAYED_ROW tab=${tab.name} rows=${parentAdapter.immutableCurrentList.size}")
             return
         }
         val sameItems = record.list.list.map { it.url } == displayed.list.list.map { it.url }
         val cursor = source.homeCursorFor(target, record.list.list)
         if (record.currentPage != displayed.currentPage || !sameItems || cursor != requestedOffset) {
-            CatalogSyncTrace.emit("SYNC_REJECT",
-                "reason=${if (record.currentPage != displayed.currentPage) "PAGE_MISMATCH" else if (!sameItems) "ITEM_MISMATCH" else "CURSOR_MISMATCH"} tab=${tab.name} modelPage=${record.currentPage} uiPage=${displayed.currentPage} modelCount=${record.list.list.size} uiCount=${displayed.list.list.size} cursor=$cursor requested=$requestedOffset")
             return
         }
 
         // This checks the native page-flight and offset under the provider mutex.
         val accepted = source.adoptBrowserPage(target, requestedOffset, page, rawCount)
         if (accepted == null) {
-            CatalogSyncTrace.emit("SYNC_REJECT", "reason=PROVIDER_ADOPT_REJECT target=${CatalogSyncTrace.target(target)}")
             return
         }
         val urls = record.list.list.mapTo(HashSet<String>()) { it.url }
@@ -1323,8 +1266,6 @@ internal class CatalogBrowserDialog(
         displayed.list = displayed.list.copy(list = displayed.list.list + added)
         displayed.currentPage = record.currentPage
         displayed.hasNext = more
-        CatalogSyncTrace.emit("SYNC_OK",
-            "tab=${tab.name} added=${added.size} accepted=${accepted.size} homeCount=${record.list.list.size} newHomePage=${record.currentPage} nextRawSkip=${requestedOffset + rawCount} next=$more")
 
         for (i in 0 until parent.childCount) {
             val row = parent.getChildAt(i)
@@ -1350,18 +1291,14 @@ internal class CatalogBrowserDialog(
                 grid.doOnNextLayout { autoFillIfShort(ticket) }
             } else if (!grid.canScrollVertically(1)) {
                 autoFillCount++
-                CatalogSyncTrace.emit("BROWSER_AUTOFILL",
-                    "count=${items.size} skip=$offset height=${grid.height} page=$autoFillCount limit=$maxAutoFillPages")
-                requestPage("autoFill")
+                requestPage()
             }
         }
     }
 
-    private fun requestPage(reason: String = "scroll") {
+    private fun requestPage() {
         val selectedProvider = provider
         val selectedCatalog = catalog
-        CatalogSyncTrace.emit("BROWSER_REQUEST",
-            "reason=$reason provider=${CatalogSyncTrace.provider(selectedProvider)} catalog=${selectedCatalog?.type}/${selectedCatalog?.id} genre=${genre ?: "All"} offset=$offset items=${items.size} generation=$generation chosen=$chosen loading=$loading hasNext=$hasNext closed=$closed pendingHome=${pendingHome != null}")
         if (selectedProvider == null || selectedCatalog == null) return
         if (!chosen || loading || !hasNext || closed) return
         val ticket = generation
@@ -1377,7 +1314,6 @@ internal class CatalogBrowserDialog(
                     selectedProvider.browsePage(selectedCatalog, selectedGenre, requestedOffset)
                 }
                 if (ticket != generation) {
-                    CatalogSyncTrace.emit("BROWSER_STALE_RESULT", "requestGeneration=$ticket current=$generation requested=$requestedOffset raw=$rawCount")
                     return@launch
                 }
                 val fresh = page.filter { seen.add(it.url) }
@@ -1388,8 +1324,6 @@ internal class CatalogBrowserDialog(
                 adapter.submitList(items.toList()) {
                     if (ticket == generation && !closed && firstPage) initialProgress(false)
                 }
-                CatalogSyncTrace.emit("BROWSER_PAGE_RESULT",
-                    "catalog=${selectedCatalog.type}/${selectedCatalog.id} genre=${selectedGenre ?: "All"} requested=$requestedOffset raw=$rawCount parsed=${page.size} new=${fresh.size} repeated=$repeated visible=${items.size} nextSkip=$offset hasNext=$hasNext")
                 if (selectedGenre == null) {
                     try {
                         syncHomePage(selectedProvider, selectedCatalog, requestedOffset, page, rawCount, hasNext)
@@ -1401,10 +1335,8 @@ internal class CatalogBrowserDialog(
                 retry.visibility = View.GONE
                 autoFillIfShort(ticket)
             } catch (e: CancellationException) {
-                CatalogSyncTrace.emit("BROWSER_CANCEL", "generation=$ticket offset=$requestedOffset")
                 throw e
             } catch (e: Exception) {
-                CatalogSyncTrace.emit("BROWSER_ERROR", "generation=$ticket offset=$requestedOffset type=${e.javaClass.simpleName} msgHash=${e.message?.hashCode()?.toString(16)}")
                 if (ticket == generation) {
                     Toast.makeText(activity, "Unable to load catalog. Please retry.", Toast.LENGTH_SHORT).show()
                     retry.visibility = View.VISIBLE
@@ -1537,20 +1469,14 @@ internal class CatalogHomeEntryHook(
             val cards = adapter.immutableCurrentList
             val providers = APIHolder.allProviders.filterIsInstance<StremioC>()
             val provider = providers.firstOrNull { it.mainUrl == target.addonUrl }
-            CatalogSyncTrace.emit("ROW_OPEN",
-                "target=${CatalogSyncTrace.target(target)} ${CatalogSyncTrace.list(cards)} uiHasNext=${adapter.hasNext} selected=${CatalogSyncTrace.provider(provider)} nameMatches=${providers.count { it.name == cards.firstOrNull()?.apiName }} urlMatches=${providers.count { it.mainUrl == target.addonUrl }}")
             val cursor = provider?.homeCursorFor(target, cards)
             val snapshot = cursor?.let {
                 CatalogHomeSnapshot(target, cards.toList(), it, adapter.hasNext)
             }
-            CatalogSyncTrace.emit("ROW_HANDOFF",
-                "target=${CatalogSyncTrace.target(target)} cursor=$cursor snapshot=${snapshot != null} visible=${cards.size}")
             open(target, snapshot)
         }
 
         fun install() {
-            CatalogSyncTrace.emit("ROW_INSTALL",
-                "titleId=${title?.id} rowItems=${adapter.immutableCurrentList.size} resolved=${CatalogSyncTrace.target(homeTarget())}")
             adapter.registerAdapterDataObserver(observer)
             refreshFocus()
             val control = title ?: return

@@ -286,8 +286,6 @@ class StremioCPlugin : Plugin() {
         snapshot: CatalogHomeSnapshot? = null,
         closeProviderPicker: Boolean = false
     ) {
-        CatalogSyncTrace.emit("ROUTE_OPEN",
-            "target=${CatalogSyncTrace.target(target)} snapshot=${snapshot != null} snapshotCount=${snapshot?.items?.size} snapshotSkip=${snapshot?.nextSkip} hostFinishing=${host.isFinishing} hostDestroyed=${host.isDestroyed}")
         if (host.isFinishing || host.isDestroyed) return
         val pluginResources = resources ?: return
         activeBrowser?.dismiss()
@@ -299,8 +297,6 @@ class StremioCPlugin : Plugin() {
         val catalogTarget = if (target?.catalogId == "top" && !target.genre.isNullOrBlank())
             target.copy(addonUrl = "https://v3-cinemeta.strem.io/manifest.json")
         else target
-        if (catalogTarget != target)
-            CatalogSyncTrace.emit("ROUTE_REMAP", "from=${CatalogSyncTrace.target(target)} to=${CatalogSyncTrace.target(catalogTarget)}")
         browser = CatalogBrowserDialog(host, pluginResources, prefs, { url ->
             APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull {
                 stremioManifestUrl(it.mainUrl.fixSourceUrl()) == stremioManifestUrl(url.fixSourceUrl())
