@@ -21,6 +21,8 @@ import android.graphics.drawable.LayerDrawable
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
+import android.text.Editable
+import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -29,6 +31,7 @@ import android.view.ViewTreeObserver
 import android.os.SystemClock
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import kotlinx.coroutines.*
 import kotlin.math.*
@@ -325,6 +328,93 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private var artworkRevealStart = 0L
     private var portraitTitleOnly = false
     private var forcedPortraitTitle = false
+
+    // The core bindLogo() switches result_title between GONE and VISIBLE even
+    // after the metadata row has been measured. Keep its measured slot stable
+    // without intercepting Coil callbacks or changing native animations.
+    private var titleSlot: FrameLayout? = null
+    private var titleSlotParent: LinearLayout? = null
+    private var titleSlotIndex = -1
+    private var titleOriginalParams: ViewGroup.LayoutParams? = null
+    private var titleTextListener: TextWatcher? = null
+
+    private fun installTitleSlot() {
+        if (titleSlot != null) return
+        val native = title ?: return
+        val parent = native.parent as? LinearLayout ?: return
+        val index = parent.indexOfChild(native)
+        if (index < 0) return
+        val original = native.layoutParams as? LinearLayout.LayoutParams ?: return
+        val portraitForeign = portraitMode() &&
+            detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true
+        // In split/TV layouts the logo and title have their own independent
+        // overlay; the native title is never part of the visible detail column.
+        if (!portraitForeign && !splitMode()) return
+        val lp = LinearLayout.LayoutParams(original)
+        if (!portraitForeign) {
+            lp.height = 0
+            lp.topMargin = 0
+            lp.bottomMargin = 0
+        }
+        val slot = FrameLayout(native.context)
+        slot.clipChildren = true
+        var listener: TextWatcher? = null
+        val proxy = if (portraitForeign) TextView(native.context).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, native.textSize)
+            typeface = native.typeface
+            maxLines = native.maxLines
+            ellipsize = native.ellipsize
+            includeFontPadding = native.includeFontPadding
+            letterSpacing = native.letterSpacing
+            gravity = native.gravity
+            textDirection = native.textDirection
+            textAlignment = native.textAlignment
+            breakStrategy = native.breakStrategy
+            hyphenationFrequency = native.hyphenationFrequency
+            setLineSpacing(native.lineSpacingExtra, native.lineSpacingMultiplier)
+            setPadding(native.paddingLeft, native.paddingTop, native.paddingRight, native.paddingBottom)
+            text = native.text
+            visibility = View.INVISIBLE // Measured but never painted.
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        } else null
+        // Preserve the host's original title TextView, text handlers and font.
+        parent.removeViewAt(index)
+        parent.addView(slot, index, lp)
+        proxy?.let {
+            slot.addView(it, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            listener = object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    if (it.text.toString() != s?.toString()) it.text = s
+                }
+                override fun afterTextChanged(s: Editable?) {}
+            }.also(native::addTextChangedListener)
+        }
+        slot.addView(native, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        titleSlot = slot
+        titleSlotParent = parent
+        titleSlotIndex = index
+        titleOriginalParams = original
+        titleTextListener = listener
+    }
+
+    private fun restoreTitleSlot() {
+        val slot = titleSlot ?: return
+        val parent = titleSlotParent ?: return
+        val native = title ?: return
+        titleTextListener?.let(native::removeTextChangedListener)
+        titleTextListener = null
+        val original = titleOriginalParams ?: return
+        slot.removeView(native)
+        parent.removeView(slot)
+        parent.addView(native, titleSlotIndex.coerceIn(0, parent.childCount), original)
+        titleSlot = null
+        titleSlotParent = null
+        titleOriginalParams = null
+        titleSlotIndex = -1
+    }
     // If an image is still missing at the existing six-second fallback, hold
     // its reserved geometry so a late Coil success cannot move visible artwork.
     private var reservedLateLogoSlot = false
@@ -444,10 +534,15 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         }
     }
     private val preDraw = ViewTreeObserver.OnPreDrawListener {
+        val oldSlot = titleSlot
+        val oldTitleVisibility = title?.visibility
         runCatching { suppressNativePreview(); update() }.onFailure {
             android.util.Log.e("StremioCBackdrop", "Split layout update failed", it)
             recoverOriginalLayout()
-        }; true
+        }
+        // A new slot or a native-title restoration requires another measure.
+        // Do not draw the intermediate layout where the metadata row overlaps.
+        titleSlot === oldSlot && title?.visibility == oldTitleVisibility
     }
     private fun splitMode() = phoneHero == null ||
         root.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE ||
@@ -537,6 +632,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     }
     private fun updatePortraitTitle() {
         if (!portraitMode()) return
+        if (titleSlot == null &&
+            detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true) installTitleSlot()
         if (portraitTitleOnly && detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true) {
             val alpha = if (maskPortraitTitle()) 0f else originalTitleAlpha
             if (title?.alpha != alpha) title?.alpha = alpha
@@ -572,6 +669,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         } else if (tablet || root.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT) {
             height(phoneHero, if (tablet) dp(400) else dp(260))
         }
+        installTitleSlot()
         if (portraitMode() && maskPortraitTitle()) title?.alpha = 0f
         started = true
         reservedLateLogoSlot = false
@@ -820,12 +918,18 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             title?.visibility = View.GONE
         forcedPortraitTitle = false
         topScrim?.let { (it.parent as? ViewGroup)?.removeView(it) }; topScrim = null
-        if (portraitTitleOnly) { portraitTitleOnly = false; title?.alpha = originalTitleAlpha; return }
+        if (portraitTitleOnly) {
+            portraitTitleOnly = false
+            title?.alpha = originalTitleAlpha
+            restoreTitleSlot()
+            return
+        }
         showTitle(false)
         titleOverlay?.let { holder?.removeView(it) }; titleOverlay = null
         baseTitlePaint = null
         edge?.let { holder?.removeView(it) }; edge = null
         restoreOriginalGeometry()
         visibility(true)
+        restoreTitleSlot()
     }
 }
