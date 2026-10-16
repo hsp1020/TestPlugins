@@ -1624,8 +1624,13 @@ open class StremioC(
             val now = System.currentTimeMillis()
             val cached = if (prefKey == "mdblist_enabled") null else settingsCache[prefKey]
             if (cached != null && (now - cached.second) < 60000L) {
+                StremioCCacheAudit.log("settings_flag", "RAM_HIT", prefKey,
+                    "ageMs=${now - cached.second} enabled=${cached.first}")
                 return cached.first
             }
+            StremioCCacheAudit.log("settings_flag",
+                if (cached == null) "RAM_MISS_OR_BYPASS" else "RAM_EXPIRED",
+                prefKey, "cacheable=${prefKey != "mdblist_enabled"}")
 
             val context = CloudStreamApp.context ?: return default
             val possibleNames = listOf("StremioC", "StremioC_preferences", "stremio_preferences", "com.hsp1020_preferences", context.packageName + "_preferences")
@@ -1640,6 +1645,8 @@ open class StremioC(
             }
             
             if (prefKey != "mdblist_enabled") settingsCache[prefKey] = Pair(isEnabled, now)
+            StremioCCacheAudit.log("settings_flag", "PREFS_READ", prefKey,
+                "enabled=$isEnabled cached=${prefKey != "mdblist_enabled"}")
             return isEnabled
         }
 
@@ -2333,9 +2340,12 @@ open class StremioC(
             val existing = activePageRequests[key]
             if (existing != null) {
                 existing.waiters++
+                StremioCCacheAudit.log("catalog_page", "INFLIGHT_JOIN", key,
+                    "page=$page waiters=${existing.waiters}")
                 existing
             } else {
                 owner = true
+                StremioCCacheAudit.log("catalog_page", "INFLIGHT_NEW", key, "page=$page")
                 val generation = if (page <= 1) {
                     catalogSentIds.remove(stateKey)
                     catalogSkipState.remove(stateKey)
@@ -2352,6 +2362,9 @@ open class StremioC(
 
         try {
             val response = flight.deferred.await()
+            StremioCCacheAudit.log("catalog_page",
+                if (owner) "PAGE_LOADED" else "PAGE_SHARED", key,
+                "page=$page owner=$owner lists=${response.items.size}")
             return if (!owner && page > 1) newHomePageResponse(emptyList(), hasNext = true) else response
         } finally {
             withContext(NonCancellable) {
@@ -3016,8 +3029,12 @@ open class StremioC(
         val customHosts = withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
             if (cachedCustomHosts != null && now - cachedCustomHostsTime < SETTINGS_CACHE_TTL) {
+                StremioCCacheAudit.log("custom_hosts", "RAM_HIT", "hosts",
+                    "count=${cachedCustomHosts?.size ?: 0} ageMs=${now - cachedCustomHostsTime}")
                 return@withContext cachedCustomHosts!!
             }
+            StremioCCacheAudit.log("custom_hosts",
+                if (cachedCustomHosts == null) "RAM_MISS" else "RAM_EXPIRED", "hosts")
             
             val context = CloudStreamApp.context
             
@@ -3054,6 +3071,8 @@ open class StremioC(
                 
             cachedCustomHosts = hosts
             cachedCustomHostsTime = now
+            StremioCCacheAudit.log("custom_hosts", "RAM_WRITE_OK", "hosts",
+                "count=${hosts.size} ttlMs=$SETTINGS_CACHE_TTL")
             hosts
         }
         val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
