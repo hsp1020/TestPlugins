@@ -153,6 +153,21 @@ internal fun stremioManifestCachePolicy(
     return StremioManifestCachePolicy(ttl, false)
 }
 
+// Temporary end-to-end cache audit: all keys are SHA-256 fingerprints, never
+// full URLs, API keys or JSON payloads. Remains visible in ordinary Logcat.
+internal object StremioCCacheAudit {
+    private const val TAG = "StremioCCacheAudit"
+    fun id(key: String): String = runCatching {
+        MessageDigest.getInstance("SHA-256")
+            .digest(key.toByteArray(Charsets.UTF_8))
+            .take(6).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    }.getOrDefault("unknown")
+
+    fun log(group: String, action: String, key: String, info: String = "") {
+        Log.i(TAG, "group=$group event=$action key=${id(key)} $info")
+    }
+}
+
 private object MetadataDiskCache {
     private const val TTL_MS = 24L * 60 * 60 * 1000
     private const val SEASON_TTL_MS = 12L * 60 * 60 * 1000
@@ -188,9 +203,14 @@ private object MetadataDiskCache {
 
     suspend fun read(kind: String, key: String): Pair<String, Long>? = withContext(Dispatchers.IO) {
         synchronized(lock) {
-            val file = directory()?.let { target(it, kind, key) } ?: return@synchronized null
+            val file = directory()?.let { target(it, kind, key) }
+            if (file == null) {
+                StremioCCacheAudit.log(kind, "DISK_UNAVAILABLE", key)
+                return@synchronized null
+            }
             if (!file.isFile) {
                 diskMisses.incrementAndGet()
+                StremioCCacheAudit.log(kind, "DISK_MISS", key)
                 return@synchronized null
             }
             try {
@@ -210,27 +230,43 @@ private object MetadataDiskCache {
                     now - stamp >= ttl || firstNewline < 0 || (kind == "meta" && secondNewline < 0)) {
                     file.delete()
                     diskMisses.incrementAndGet()
+                    StremioCCacheAudit.log(kind, "DISK_EXPIRED_OR_INVALID", key,
+                        "ageMs=${stamp?.let { now - it } ?: -1} ttlMs=$ttl bytes=${file.length()}")
                     null
                 } else {
                     diskHits.incrementAndGet()
+                    StremioCCacheAudit.log(kind, "DISK_HIT", key,
+                        "ageMs=${now - stamp} ttlMs=$ttl jsonChars=${body.length} compressedBytes=${file.length()}")
                     file.setLastModified(now) // Disk LRU; TTL stays in the file header.
                     body.substring(if (kind == "meta") secondNewline + 1 else firstNewline + 1) to stamp
                 }
-            } catch (_: Exception) {
+            } catch (error: Exception) {
                 file.delete()
                 diskMisses.incrementAndGet()
+                StremioCCacheAudit.log(kind, "DISK_READ_ERROR", key,
+                    "error=${error.javaClass.simpleName}")
                 null
             }
         }
     }
 
     suspend fun write(kind: String, key: String, json: String, ttlMs: Long = TTL_MS) {
-        if (kind == "meta" && ttlMs <= 0L) return
+        if (kind == "meta" && ttlMs <= 0L) {
+            StremioCCacheAudit.log(kind, "DISK_SKIP", key, "reason=nonpositive_ttl")
+            return
+        }
+        val rawBytes = json.toByteArray(Charsets.UTF_8).size
         if (json.contains("data:image/", ignoreCase = true) ||
-            json.toByteArray(Charsets.UTF_8).size > MAX_RAW_BYTES) return
+            rawBytes > MAX_RAW_BYTES) {
+            StremioCCacheAudit.log(kind, "DISK_SKIP", key, "reason=image_or_oversize rawBytes=$rawBytes")
+            return
+        }
         withContext(Dispatchers.IO) {
             synchronized(lock) {
-                val dir = directory() ?: return@synchronized
+                val dir = directory() ?: run {
+                    StremioCCacheAudit.log(kind, "DISK_WRITE_UNAVAILABLE", key)
+                    return@synchronized
+                }
                 // Reserve the maximum entry size before writing a temporary file.
                 // Old abandoned temporaries are removed under the same lock.
                 dir.listFiles()?.filter { it.isFile && it.name.endsWith(".tmp") }
@@ -249,15 +285,24 @@ private object MetadataDiskCache {
                         it.write(json)
                     }
                     if (temp.length() > MAX_ENTRY_BYTES) {
+                        StremioCCacheAudit.log(kind, "DISK_SKIP", key,
+                            "reason=compressed_oversize bytes=${temp.length()}")
                         temp.delete()
                         return@synchronized
                     }
                     if (!temp.renameTo(file)) {
+                        StremioCCacheAudit.log(kind, "DISK_WRITE_ERROR", key, "reason=rename")
                         temp.delete()
                     } else {
+                        StremioCCacheAudit.log(kind, "DISK_WRITE_OK", key,
+                            "rawBytes=$rawBytes compressedBytes=${file.length()} ttlMs=$ttlMs")
                         trim(dir) // Enforce the 50 MiB budget on every successful write.
+                        StremioCCacheAudit.log(kind, "DISK_BUDGET", key,
+                            "totalBytes=${dir.listFiles()?.filter { it.isFile }?.sumOf { it.length() } ?: -1}")
                     }
-                } catch (_: Exception) {
+                } catch (error: Exception) {
+                    StremioCCacheAudit.log(kind, "DISK_WRITE_ERROR", key,
+                        "error=${error.javaClass.simpleName}")
                     temp.delete()
                 }
             }
@@ -268,14 +313,22 @@ private object MetadataDiskCache {
         val files = dir.listFiles()?.filter { it.isFile && it.name.endsWith(".gz") } ?: return
         for ((kind, limit) in entryLimits) {
             files.filter { it.name.startsWith("${kind}_") }
-                .sortedByDescending { it.lastModified() }.drop(limit).forEach { it.delete() }
+                .sortedByDescending { it.lastModified() }.drop(limit).forEach {
+                    val bytes = it.length()
+                    if (it.delete()) StremioCCacheAudit.log(kind, "DISK_EVICT",
+                        it.name, "reason=entry_limit bytes=$bytes")
+                }
         }
         val remaining = files.filter { it.exists() }.sortedBy { it.lastModified() }
         var total = remaining.sumOf { it.length() }
         for (file in remaining) {
             if (total <= limitBytes) break
             val length = file.length()
-            if (file.delete()) total -= length
+            if (file.delete()) {
+                total -= length
+                StremioCCacheAudit.log("gzip", "DISK_EVICT", file.name,
+                    "reason=byte_limit bytes=$length remainingBytes=$total")
+            }
         }
     }
 }
