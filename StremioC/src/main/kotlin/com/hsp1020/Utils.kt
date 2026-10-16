@@ -709,6 +709,92 @@ internal class RatingPlotImageHook(
         private val actorInformation = ActorInformation.Controller(fragment, detailUrl)
         private val genreGroup = root.findViewById<ChipGroup>(R.id.result_tag)
         private val boundGenreChips = mutableMapOf<View, CatalogShortcutTarget>()
+        private val diagStartedAt = android.os.SystemClock.elapsedRealtime()
+        private var diagTopLast = ""
+        private var diagTopLastAt = 0L
+        private var diagTopLastScan = 0L
+        private var diagTopRecords = 0
+        private var diagTopFrames = 0
+        private val diagIdCache = mutableMapOf<Int, String>()
+        private fun diagId(v: View): String {
+            if (v.id == View.NO_ID) return "-"
+            return diagIdCache.getOrPut(v.id) {
+                runCatching { v.resources.getResourceEntryName(v.id) }.getOrDefault("id:${v.id}")
+            }
+        }
+        private fun topViewSnapshot(): String {
+            val out = StringBuilder(3600)
+            var visited = 0
+            var recorded = 0
+            val limit = (root.resources.displayMetrics.density * 450f).toInt()
+            fun walk(v: View, x: Int, y: Int, depth: Int) {
+                if (visited++ >= 900 || depth > 11 || recorded >= 95) return
+                val xx = x + v.left
+                val yy = y + v.top
+                val id = diagId(v)
+                val cls = v.javaClass.simpleName
+                val important = id.contains("top", true) || id.contains("bar", true) ||
+                    id.contains("menu", true) || id.contains("action", true) ||
+                    id.contains("sync", true) || id.contains("title", true) ||
+                    id.contains("search", true) || id.contains("share", true) ||
+                    id.contains("favorite", true) || id.contains("bookmark", true) ||
+                    id.contains("watch", true) || id.contains("back", true) ||
+                    id.contains("notify", true) || id.contains("heart", true) ||
+                    v is android.widget.ImageButton || v is android.widget.CheckBox
+                val clickable = v.isClickable || v.isFocusable
+                if ((important || clickable) && yy <= limit && yy + v.height >= -limit &&
+                    (important || v.width <= limit) && recorded++ < 95) {
+                    if (out.isNotEmpty()) out.append(" ; ")
+                    out.append(id).append('/').append(cls)
+                        .append("#").append(System.identityHashCode(v))
+                        .append('@').append(xx).append(',').append(yy)
+                        .append(':').append(v.width).append('x').append(v.height)
+                        .append(":vis=").append(v.visibility)
+                        .append(":shown=").append(v.isShown)
+                        .append(":alpha=").append(v.alpha)
+                        .append(":trans=").append(v.translationX).append(',').append(v.translationY)
+                        .append(":req=").append(v.isLayoutRequested)
+                        .append(":measured=").append(v.measuredWidth).append('x').append(v.measuredHeight)
+                        .append(":lp=").append(v.layoutParams?.width).append('x').append(v.layoutParams?.height)
+                        .append(":z=").append(v.elevation)
+                        .append(":click=").append(v.isClickable)
+                        .append(":enabled=").append(v.isEnabled)
+                        .append(":child=").append((v as? ViewGroup)?.childCount ?: 0)
+                        .append(":parent=").append((v.parent as? View)?.let { diagId(it) })
+                        .append(":desc=").append(v.contentDescription?.take(32)?.toString())
+                }
+                if (v is ViewGroup && depth < 11) {
+                    for (i in 0 until v.childCount) walk(v.getChildAt(i), xx, yy, depth + 1)
+                }
+            }
+            walk(root, 0, 0, 0)
+            return "nodes=$visited matched=$recorded root=${root.width}x${root.height}" +
+                " rootReq=${root.isLayoutRequested} views=" + out.toString()
+        }
+        private fun traceTop(reason: String, force: Boolean = false) {
+            if (!fragment.isAdded) return
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (!force && (now - diagStartedAt > 25000 || diagTopRecords >= 180)) return
+            if (!force && reason == "DRAW" && now - diagTopLastScan < 32) return
+            diagTopLastScan = now
+            diagTopFrames++
+            val snapshot = runCatching { topViewSnapshot() }.onFailure {
+                StremioDetailDiag.emit("TOP_SNAPSHOT_ERROR", detailUrl,
+                    "error=${it.javaClass.simpleName} message=${it.message?.take(100)}")
+            }.getOrNull() ?: return
+            if (force || snapshot != diagTopLast || now - diagTopLastAt > 1800L) {
+                diagTopLast = snapshot
+                diagTopLastAt = now
+                diagTopRecords++
+                StremioDetailDiag.emit("TOP_$reason", detailUrl,
+                    "age=${now - diagStartedAt} frame=$diagTopFrames serial=$diagTopRecords " +
+                    "fragment=${fragment.javaClass.simpleName} $snapshot")
+            }
+        }
+        private val diagGlobalLayout = ViewTreeObserver.OnGlobalLayoutListener {
+            traceTop("GLOBAL_LAYOUT")
+        }
+
         private val actorCardForegrounds = mutableMapOf<View, Drawable?>()
 
         private fun bindActorCardRipple(card: View) {
@@ -810,10 +896,17 @@ internal class RatingPlotImageHook(
                     }
                 }
                 bindGenreClicks()
+                traceTop("DRAW")
             }
             true
         }
         fun start() {
+            StremioDetailDiag.emit("FRAGMENT_ATTACH", detailUrl,
+                "fragment=${fragment.javaClass.simpleName} api=${fragment.arguments?.getString("apiName")}" +
+                " root=${root.width}x${root.height} " +
+                "flags=${StremioDetailDiag.flags(detailUrl)}")
+            root.viewTreeObserver.addOnGlobalLayoutListener(diagGlobalLayout)
+            traceTop("START", true)
             actorInformation.start()
             view.addTextChangedListener(this)
             searchButton?.setOnClickListener(searchClick)
@@ -822,6 +915,11 @@ internal class RatingPlotImageHook(
             runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() }
         }
         fun detach() {
+            traceTop("DETACH", true)
+            StremioDetailDiag.emit("FRAGMENT_DETACH", detailUrl,
+                "fragment=${fragment.javaClass.simpleName} topSamples=$diagTopRecords")
+            if (root.viewTreeObserver.isAlive)
+                root.viewTreeObserver.removeOnGlobalLayoutListener(diagGlobalLayout)
             actorInformation.stop()
             view.removeTextChangedListener(this)
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(detailPreDraw)
@@ -855,7 +953,14 @@ internal class RatingPlotImageHook(
         }
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
         override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-        override fun afterTextChanged(s: Editable?) { if (!changing) { runCatching { trailers.refresh() }; runCatching { render() } } }
+        override fun afterTextChanged(s: Editable?) {
+            if (!changing) {
+                StremioDetailDiag.emit("DESCRIPTION_CHANGE", detailUrl,
+                    "length=${s?.length} titleLen=${searchTitle?.text?.length} " +
+                    "rootLayoutRequested=${root.isLayoutRequested}")
+                runCatching { trailers.refresh() }; runCatching { render() }
+            }
+        }
 
         fun render() {
             if (!prefs.getBoolean("mdblist_enabled", false)) { restore(); return }

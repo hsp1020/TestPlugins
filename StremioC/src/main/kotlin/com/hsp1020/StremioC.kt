@@ -471,6 +471,9 @@ open class StremioC(
             else -> null
         } }
         DetailLoadPerf.event("LIBRARY_CACHE", "service=$name format=$cachedType hit=${animeLibraryType(cachedType) != null}")
+        StremioDetailDiag.emit("LIBRARY_TYPE_CACHE", "$name:$itemId",
+            "service=$name source=${if (auth != null) "auth-cache" else "no-auth"}" +
+            " rawFormat=$cachedType type=${animeLibraryType(cachedType)}")
         animeLibraryType(cachedType)?.let { return it }
 
         // A library URL carries no movie/series type. Resolve it only when the
@@ -511,6 +514,8 @@ open class StremioC(
             } }
         }.onFailure { DetailLoadPerf.event("LIBRARY_TYPE_ERROR", "service=$name error=${it.javaClass.simpleName}") }.getOrNull()
         DetailLoadPerf.event("LIBRARY_TYPE", "service=$name remoteType=$remoteType resolved=${animeLibraryType(remoteType)}")
+        StremioDetailDiag.emit("LIBRARY_TYPE_REMOTE", "$name:$itemId",
+            "service=$name remoteFormat=$remoteType type=${animeLibraryType(remoteType)}")
         return animeLibraryType(remoteType)
     }
 
@@ -518,8 +523,13 @@ open class StremioC(
         val trace = DetailLoadPerf.current.get() ?: DetailLoadPerf.Session()
         return withContext(DetailLoadPerf.current.asContextElement(trace)) {
             DetailLoadPerf.event("GET_LOAD_URL_ENTER", "service=$name")
+            StremioDetailDiag.emit("LIBRARY_RESOLVE_ENTER", id,
+                "service=$name provider=${if (mainUrl.isBlank()) "library" else "addon"}")
             val resolved = DetailLoadPerf.step("getLoadUrl.total") { getLoadUrlInternal(name, id) }
             DetailLoadPerf.event("GET_LOAD_URL_RESULT", "service=$name resolved=${resolved != null} type=${resolved?.substringAfter("/meta/")?.substringBefore('/')}")
+            StremioDetailDiag.emit("LIBRARY_RESOLVE_RESULT", id,
+                "service=$name resolved=${resolved != null} resolvedKey=${StremioDetailDiag.key(resolved)}" +
+                " resolvedType=${resolved?.substringAfter("/meta/")?.substringBefore('/')}")
             resolved
         }
     }
@@ -1877,11 +1887,20 @@ open class StremioC(
                 else -> "other"
             }
             DetailLoadPerf.event("LOAD_ENTER", "source=$source provider=${if (mainUrl.isBlank()) "library" else "addon"}")
+            StremioDetailDiag.emit("LOAD_ENTER", url,
+                "source=$source provider=${if (mainUrl.isBlank()) "library" else "addon"}")
             try {
                 val result = DetailLoadPerf.step("load.coroutineScope") { loadInternal(url) }
                 DetailLoadPerf.event("LOAD_RETURN", "type=${result.type} poster=${!result.posterUrl.isNullOrBlank()} backdrop=${!result.backgroundPosterUrl.isNullOrBlank()}")
+                StremioDetailDiag.emit("LOAD_RETURN", url,
+                    "resultKey=${StremioDetailDiag.key(result.url)} type=${result.type} " +
+                    "titleChars=${result.name?.length ?: 0} background=${!result.backgroundPosterUrl.isNullOrBlank()}" +
+                    " logo=${!result.logoUrl.isNullOrBlank()} inputFlags=${StremioDetailDiag.flags(url)}" +
+                    " resultFlags=${StremioDetailDiag.flags(result.url)}")
                 result
             } catch (error: Throwable) {
+                StremioDetailDiag.emit("LOAD_ERROR", url,
+                    "source=$source error=${error.javaClass.simpleName} message=${error.message?.take(120)}")
                 DetailLoadPerf.event("LOAD_THROW", "error=${error.javaClass.simpleName}")
                 throw error
             }
@@ -1907,15 +1926,26 @@ open class StremioC(
                 } ?: throw IllegalStateException("Unable to resolve the library item with the configured addon.")
                 val hint = parseDetailUrlHint(metaUrl)
                 DetailLoadPerf.event("LIBRARY_MAPPED", "type=${hint?.type} id=${hint?.id}")
+                StremioDetailDiag.emit("LIBRARY_MAP", url,
+                    "service=$libraryService mappedKey=${StremioDetailDiag.key(metaUrl)}" +
+                    " mappedId=${hint?.id} mappedType=${hint?.type}" +
+                    " beforeInputFlags=${StremioDetailDiag.flags(url)}" +
+                    " beforeMetaFlags=${StremioDetailDiag.flags(metaUrl)}")
                 return@coroutineScope DetailLoadPerf.step("library.delegateLoad") {
                     StremioC(base, name).load(metaUrl).also { response ->
                         // Library details may retain their original URL, not the delegated meta URL.
                         // Copy artwork/title visibility state to that original URL as well.
                         for (source in listOf(metaUrl, response.url)) {
+                            StremioDetailDiag.emit("LIBRARY_ALIAS_BEFORE", url,
+                                "from=${StremioDetailDiag.key(source)} sourceFlags=${StremioDetailDiag.flags(source)}" +
+                                " toFlags=${StremioDetailDiag.flags(url)}")
                             fallbackLogoTitles[source]?.let { fallbackLogoTitles[url] = it }
                             expectedLogoByUrl[source]?.let { expectedLogoByUrl[url] = it }
                             trailerChoicesByUrl[source]?.let { trailerChoicesByUrl[url] = it }
                             genreCatalogsByUrl[source]?.let { genreCatalogsByUrl[url] = it }
+                            StremioDetailDiag.emit("LIBRARY_ALIAS_AFTER", url,
+                                "from=${StremioDetailDiag.key(source)} result=${StremioDetailDiag.key(response.url)}" +
+                                " flags=${StremioDetailDiag.flags(url)}")
                         }
                     }
                 }
@@ -2215,11 +2245,16 @@ open class StremioC(
         // while the returned metadata may use the mapped IMDb URL. Share the same
         // logo visibility decisions under both exact keys without another request.
         if (url != loadRes.url) {
+            StremioDetailDiag.emit("META_ALIAS_BEFORE", url,
+                "resultKey=${StremioDetailDiag.key(loadRes.url)} " +
+                "resultFlags=${StremioDetailDiag.flags(loadRes.url)} inputFlags=${StremioDetailDiag.flags(url)}")
             fallbackLogoTitles[loadRes.url]?.let { fallbackLogoTitles[url] = it }
             expectedLogoByUrl[loadRes.url]?.let { expectedLogoByUrl[url] = it }
             trailerChoicesByUrl[loadRes.url]?.let { trailerChoicesByUrl[url] = it }
             genreCatalogsByUrl[loadRes.url]?.let { genreCatalogsByUrl[url] = it }
             ActorInformation.alias(this@StremioC, url, loadRes.url)
+            StremioDetailDiag.emit("META_ALIAS_AFTER", url,
+                "resultKey=${StremioDetailDiag.key(loadRes.url)} flags=${StremioDetailDiag.flags(url)}")
         }
         collectionDeferred?.cancel() // No remaining prefetch when the final media type differs.
 
@@ -3775,6 +3810,13 @@ open class StremioC(
                 .maxWithOrNull(compareBy<TmdbLogo> {
                     when (it.iso_639_1?.lowercase()) { preferred -> 3; "en" -> 2; else -> 1 }
                 }.thenBy { it.vote_average ?: 0.0 })
+            StremioDetailDiag.emit("TMDB_LOGO_SELECT", "tmdb:$tmdbMediaType:$tmdbIdStr",
+                "id=$tmdbIdStr media=$tmdbMediaType preference=$langCode prefix=$preferred " +
+                "allowed=${tmdbLogoLanguages()} logos=${detailRes.images?.logos?.size ?: 0} " +
+                "languageCounts=${detailRes.images?.logos.orEmpty().groupingBy { it.iso_639_1 ?: "null" }.eachCount()} " +
+                "chosen=${selectedLogo?.iso_639_1} selected=${selectedLogo != null} " +
+                "fallback=${selectedLogo != null && selectedLogo.iso_639_1?.lowercase() != preferred} " +
+                "titleLength=${detailRes.title?.length ?: detailRes.name?.length ?: 0}")
 
             return FetchedTmdbData(
                 if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
@@ -4123,6 +4165,16 @@ open class StremioC(
             // The addon does not expose the logo's language: keep the text title alongside it.
             val finalLogoFallback = if (tmdbData?.fetchedLogo.isNullOrBlank())
                 finalLogo != null else tmdbData?.fetchedLogoFallback == true
+            StremioDetailDiag.emit("LOGO_DECISION", "meta:${this@CatalogEntry.id}",
+                "mediaType=$finalType originalAnimeId=$originalAnimeId" +
+                " imdb=$finalImdbId tmdb=$tmdbIdStr" +
+                " tmdbLogo=${!tmdbData?.fetchedLogo.isNullOrBlank()}" +
+                " addonLogo=${!addonLogo.isNullOrBlank()}" +
+                " selectedLogo=${!finalLogo.isNullOrBlank()}" +
+                " fallback=$finalLogoFallback" +
+                " preferred=${CloudStreamApp.context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)?.getString("tmdb_language_code", "en-US")}" +
+                " nameLength=${finalName.length} initialNameLength=${originalName?.length}" +
+                " originalLang=${this@CatalogEntry.original_language}")
 
             fun LoadResponse.attachMappedIds() {
                 val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
@@ -4143,6 +4195,9 @@ open class StremioC(
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
+                StremioDetailDiag.emit("LOGO_FLAGS_REGISTER", metaUrl,
+                    "type=$finalType id=${this@CatalogEntry.id} flags=${StremioDetailDiag.flags(metaUrl)}" +
+                    " logoPresent=${!finalLogo.isNullOrBlank()} titleLength=${finalName.length}")
                 StremioC.trailerChoicesByUrl[metaUrl] = finalTrailers
                 StremioC.genreCatalogsByUrl[metaUrl] = genreTargets
                 val resolvedMovieId = if (finalType == "other" && finalVideos?.size == 1) {
@@ -4217,6 +4272,9 @@ open class StremioC(
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
+                StremioDetailDiag.emit("LOGO_FLAGS_REGISTER", metaUrl,
+                    "type=$finalType id=${this@CatalogEntry.id} flags=${StremioDetailDiag.flags(metaUrl)}" +
+                    " logoPresent=${!finalLogo.isNullOrBlank()} titleLength=${finalName.length}")
                 StremioC.trailerChoicesByUrl[metaUrl] = finalTrailers
                 StremioC.genreCatalogsByUrl[metaUrl] = genreTargets
                 val response = DetailLoadPerf.step("response.series.build") { provider.newTvSeriesLoadResponse(

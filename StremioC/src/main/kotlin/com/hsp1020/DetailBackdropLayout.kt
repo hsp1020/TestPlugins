@@ -33,6 +33,29 @@ import android.widget.TextView
 import kotlinx.coroutines.*
 import kotlin.math.*
 
+internal object StremioDetailDiag {
+    const val TAG = "SC_DETAIL_DIAG"
+    fun key(url: String?): String {
+        if (url.isNullOrEmpty()) return "none"
+        val bytes = java.security.MessageDigest.getInstance("SHA-256").digest(url.toByteArray(Charsets.UTF_8))
+        return bytes.take(6).joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
+    }
+    fun emit(phase: String, url: String?, message: String) {
+        val prefix = "t=${SystemClock.elapsedRealtime()} key=${key(url)} phase=$phase "
+        val value = prefix + message
+        if (value.length <= 2500) android.util.Log.i(TAG, value)
+        else {
+            val total = (value.length + 2499) / 2500
+            for (i in 0 until total) {
+                android.util.Log.i(TAG, "part=${i+1}/$total " +
+                    value.substring(i * 2500, minOf((i+1) * 2500, value.length)))
+            }
+        }
+    }
+    fun flags(url: String?): String = if (url == null) "expected=null fallback=null" else
+        "expected=${StremioC.expectedLogoByUrl[url]} fallback=${StremioC.fallbackLogoTitles[url]}"
+}
+
 /** StremioC detail backdrop and native preview suppression; standalone player is untouched. */
 internal class DetailBackdropLayout(private val root: View, private val detailUrl: String? = null) {
     private fun find(name: String): View? {
@@ -322,6 +345,41 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private var lastFitWidth = -1
     private var lastFitHeight = -1
     private var started = false
+    private var diagFirst = 0L
+    private var diagLast = ""
+    private var diagLastAt = 0L
+    private var diagCount = 0
+    private var diagFrames = 0
+    private fun traceHero(reason: String, force: Boolean = false) {
+        if (!started) return
+        val now = SystemClock.elapsedRealtime()
+        if (!force && (now - diagFirst > 25000L || diagCount >= 180)) return
+        fun v(view: View?): String = if (view == null) "null" else
+            "${view.visibility},${view.alpha},${view.left},${view.top},${view.width},${view.height}," +
+            "${view.translationX},${view.translationY},${view.scaleX},${view.scaleY}," +
+            "req=${view.isLayoutRequested}"
+        val state = "mode=${if (portraitMode()) "portrait" else "split"}" +
+            " ${StremioDetailDiag.flags(detailUrl)}" +
+            " root=[${v(root)}] holder=[${v(holder)}]" +
+            " picture=[${v(picture)}] pictureDrawable=${picture?.drawable?.javaClass?.simpleName}:" +
+            "drawableRef=${picture?.drawable?.let { System.identityHashCode(it) }}:" +
+            "${picture?.drawable?.intrinsicWidth}x${picture?.drawable?.intrinsicHeight}" +
+            " logo=[${v(logo)}] logoDrawable=${logo?.drawable?.javaClass?.simpleName}:" +
+            "drawableRef=${logo?.drawable?.let { System.identityHashCode(it) }}:" +
+            "${logo?.drawable?.intrinsicWidth}x${logo?.drawable?.intrinsicHeight}" +
+            " title=[${v(title)}] textLength=${title?.text?.length}" +
+            " textHash=${title?.text?.toString()?.hashCode()}" +
+            " overlay=[${v(titleOverlay)}] overlayLength=${titleOverlay?.text?.length}" +
+            " overlayTextHash=${titleOverlay?.text?.toString()?.hashCode()}" +
+            " forced=$forcedPortraitTitle layoutCached=${lastLayout != null} ready=${artworkReady()}"
+        if (force || state != diagLast || now - diagLastAt >= 1200) {
+            diagLast = state
+            diagLastAt = now
+            diagCount++
+            StremioDetailDiag.emit("HERO_$reason", detailUrl,
+                "age=${now - diagFirst} frames=$diagFrames serial=$diagCount $state")
+        }
+    }
     private var artworkRevealStart = 0L
     private var portraitTitleOnly = false
     private var forcedPortraitTitle = false
@@ -440,7 +498,13 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         }
     }
     private val preDraw = ViewTreeObserver.OnPreDrawListener {
-        runCatching { suppressNativePreview(); update() }.onFailure {
+        runCatching {
+            suppressNativePreview()
+            traceHero("BEFORE_DRAW")
+            update()
+            diagFrames++
+            traceHero("AFTER_DRAW")
+        }.onFailure {
             android.util.Log.e("StremioCBackdrop", "Split layout update failed", it)
             recoverOriginalLayout()
         }; true
@@ -538,8 +602,12 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true &&
             logo?.visibility == View.VISIBLE && logo.drawable != null &&
             !title?.text.isNullOrBlank() && title?.visibility != View.VISIBLE) {
+            StremioDetailDiag.emit("TITLE_RESTORE_BEFORE", detailUrl,
+                "logoLoaded=${logo?.drawable != null} titleVisibility=${title?.visibility} " +
+                "titleChars=${title?.text?.length} rootLayoutRequested=${root.isLayoutRequested}")
             title?.visibility = View.VISIBLE
             forcedPortraitTitle = true
+            traceHero("TITLE_RESTORE_AFTER", true)
         }
     }
     fun start() {
@@ -550,10 +618,19 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (portraitMode() && maskPortraitTitle()) title?.alpha = 0f
         started = true
         artworkRevealStart = SystemClock.uptimeMillis()
+        diagFirst = SystemClock.elapsedRealtime()
+        diagLast = ""
+        diagLastAt = 0L
+        diagCount = 0
+        diagFrames = 0
+        StremioDetailDiag.emit("HERO_START", detailUrl,
+            "${StremioDetailDiag.flags(detailUrl)} orientation=${root.resources.configuration.orientation} " +
+            "smallestWidthDp=${root.resources.configuration.smallestScreenWidthDp} tv=$tv")
         suppressNativePreview()
         splitFallback = false
         nativeRecoveryFrames = 0
         stage() // Hide native title, logo and backdrop until the entire hero is ready.
+        traceHero("STAGED", true)
         root.postDelayed({ if (started) root.invalidate() }, 6050L)
         // Use the host app's active theme color so the edge fade also matches light themes.
         val colorAttr = context.resources.getIdentifier("primaryBlackBackground", "attr", context.packageName)
@@ -588,6 +665,13 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     }
     private fun showTitle(show: Boolean, hideOriginal: Boolean = false) {
         val visibility = if (show) View.VISIBLE else View.GONE
+        if (titleOverlay?.visibility != visibility ||
+            title?.alpha != (if (show || hideOriginal) 0f else originalTitleAlpha)) {
+            StremioDetailDiag.emit("TITLE_SHOW_CHANGE", detailUrl,
+                "show=$show hideOriginal=$hideOriginal titleVis=${title?.visibility} " +
+                "titleAlpha=${title?.alpha} overlayVis=${titleOverlay?.visibility} " +
+                "rootLayoutRequested=${root.isLayoutRequested}")
+        }
         if (titleOverlay?.visibility != visibility) titleOverlay?.visibility = visibility
         val alpha = if (show || hideOriginal) 0f else originalTitleAlpha
         if (title?.alpha != alpha) title?.alpha = alpha
@@ -777,6 +861,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     }
     fun stop() {
         if (!started) return
+        traceHero("STOP", true)
         started = false
         paletteJob?.cancel()
         paletteScope.cancel()
