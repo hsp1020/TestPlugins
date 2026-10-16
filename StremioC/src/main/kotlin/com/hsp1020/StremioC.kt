@@ -1465,7 +1465,9 @@ open class StremioC(
 
         val attempt = runSuspendCatching {
             DetailLoadPerf.step("mdb.httpAndParse") {
-                fetchMdbListRatings(target.id, target.isTmdb, target.mediaType)
+                mdbFetchSemaphore.withPermit {
+                    fetchMdbListRatings(target.id, target.isTmdb, target.mediaType)
+                }
             }
         }.onFailure { DetailLoadPerf.event("MDB_ERROR", "error=${it.javaClass.simpleName}") }
         val ratings = attempt.getOrDefault(emptyList())
@@ -1482,9 +1484,7 @@ open class StremioC(
         target?.let { requested ->
             synchronized(mdbInflight) {
                 mdbInflight[requested] ?: mdbFetchScope.async(start = CoroutineStart.LAZY) {
-                    mdbFetchSemaphore.withPermit {
-                        DetailLoadPerf.step("task.mdbPrefetch") { fetchMdbAttempt(requested) }
-                    }
+                    DetailLoadPerf.step("task.mdbPrefetch") { fetchMdbAttempt(requested) }
                 }.also { job ->
                     mdbInflight[requested] = job
                     job.invokeOnCompletion {
