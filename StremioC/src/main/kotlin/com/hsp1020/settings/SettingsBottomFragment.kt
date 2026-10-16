@@ -2190,13 +2190,13 @@ private fun showLanguageSelectDialog() {
         request = uiScope.launch {
             val currentUrl = stremioManifestUrl(item.link)
 
-            val manifestText = withContext(Dispatchers.IO) {
-                try { 
-                    // 실제 manifest URL로 요청
-                    com.lagradost.cloudstream3.app.get(currentUrl, timeout = 10L).text 
+            val manifestResponse = withContext(Dispatchers.IO) {
+                try {
+                    com.lagradost.cloudstream3.app.get(currentUrl, timeout = 10L)
                 } catch (cancelled: CancellationException) { throw cancelled
                 } catch (_: Exception) { null }
             }
+            val manifestText = manifestResponse?.text
             if (!isActive || !alive(owner) || !progressDialog.isShowing) return@launch
             delivered = true
             progressDialog.dismiss()
@@ -2213,7 +2213,20 @@ private fun showLanguageSelectDialog() {
             try {
                 val manifest = parseJson<StremioC.Manifest>(manifestText)
                 val catalogs = manifest.catalogs
-                manifestPrefs.edit().putString(stremioCatalogKey(item.link), manifestText).apply()
+                val key = stremioCatalogKey(item.link)
+                val cachePolicy = manifestResponse?.headers?.entries
+                    ?.firstOrNull { it.key.equals("Cache-Control", ignoreCase = true) }
+                    ?.value.orEmpty()
+                val noStore = cachePolicy.split(',').any { it.trim().equals("no-store", ignoreCase = true) }
+                manifestPrefs.edit().apply {
+                    if (noStore) {
+                        remove(key)
+                        remove("manifest_saved_at_" + key)
+                    } else {
+                        putString(key, manifestText)
+                        putLong("manifest_saved_at_" + key, System.currentTimeMillis())
+                    }
+                }.apply()
 
                 if (catalogs != null) {
                     for (cat in catalogs) {
