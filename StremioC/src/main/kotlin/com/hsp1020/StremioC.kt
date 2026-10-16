@@ -1746,9 +1746,11 @@ open class StremioC(
                     lastCacheTime = now
                     stored?.edit()?.apply {
                         if (directives.any { it == "no-store" }) {
+                            putBoolean("manifest_no_store_" + manifestKey, true)
                             remove(manifestKey)
                             remove("manifest_saved_at_" + manifestKey)
                         } else {
+                            putBoolean("manifest_no_store_" + manifestKey, false)
                             putString(manifestKey, resText)
                             putLong("manifest_saved_at_" + manifestKey, now)
                         }
@@ -4982,6 +4984,7 @@ internal fun migrateStremioCatalogSettings(prefs: SharedPreferences, source: Str
 
 internal fun stremioReadManifest(prefs: SharedPreferences, source: String): String? {
     val key = stremioCatalogKey(source)
+    if (prefs.getBoolean("manifest_no_store_" + key, false)) return null
     val raw = prefs.getString(key, null) ?: stremioOldCatalogKeys(source)
         .firstNotNullOfOrNull { prefs.getString(it, null) } ?: return null
     val now = System.currentTimeMillis()
