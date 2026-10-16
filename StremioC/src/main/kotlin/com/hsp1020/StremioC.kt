@@ -991,36 +991,70 @@ open class StremioC(
         // Stream/subtitle endpoints are deliberately excluded.
         private suspend fun fetchSharedMetadataText(url: String): String {
             val task = synchronized(metadataTextFlights) {
-                metadataTextFlights[url] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
+                metadataTextFlights[url]?.also {
+                    StremioCCacheAudit.log("tmdb_http", "INFLIGHT_JOIN", url)
+                } ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
+                    val start = SystemClock.elapsedRealtime()
+                    StremioCCacheAudit.log("tmdb_http", "HTTP_START", url)
                     try {
-                        customSession.get(url).text
+                        val text = customSession.get(url).text
+                        StremioCCacheAudit.log("tmdb_http", "HTTP_DONE", url,
+                            "durationMs=${SystemClock.elapsedRealtime() - start} chars=${text.length}")
+                        text
+                    } catch (error: Throwable) {
+                        StremioCCacheAudit.log("tmdb_http", "HTTP_ERROR", url,
+                            "durationMs=${SystemClock.elapsedRealtime() - start} error=${error.javaClass.simpleName}")
+                        throw error
                     } finally {
                         synchronized(metadataTextFlights) { metadataTextFlights.remove(url) }
                     }
-                }.also { metadataTextFlights[url] = it; it.start() }
+                }.also {
+                    StremioCCacheAudit.log("tmdb_http", "INFLIGHT_NEW", url)
+                    metadataTextFlights[url] = it
+                    it.start()
+                }
             }
             return task.await()
         }
 
         private suspend fun fetchSharedAnimeText(url: String): String {
             val task = synchronized(animeHttpFlights) {
-                animeHttpFlights[url] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
+                animeHttpFlights[url]?.also {
+                    StremioCCacheAudit.log("anime_http", "INFLIGHT_JOIN", url)
+                } ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
+                    val start = SystemClock.elapsedRealtime()
+                    StremioCCacheAudit.log("anime_http", "HTTP_START", url)
                     try {
-                        aioAnimeSession.get(url, headers = mapOf(
+                        val text = aioAnimeSession.get(url, headers = mapOf(
                             "Cache-Control" to "no-cache, no-store",
                             "Pragma" to "no-cache"
                         )).text
+                        StremioCCacheAudit.log("anime_http", "HTTP_DONE", url,
+                            "durationMs=${SystemClock.elapsedRealtime() - start} chars=${text.length}")
+                        text
+                    } catch (error: Throwable) {
+                        StremioCCacheAudit.log("anime_http", "HTTP_ERROR", url,
+                            "error=${error.javaClass.simpleName}")
+                        throw error
                     } finally {
                         synchronized(animeHttpFlights) { animeHttpFlights.remove(url) }
                     }
-                }.also { animeHttpFlights[url] = it; it.start() }
+                }.also {
+                    StremioCCacheAudit.log("anime_http", "INFLIGHT_NEW", url)
+                    animeHttpFlights[url] = it
+                    it.start()
+                }
             }
             return task.await()
         }
 
         private fun cacheAddonMetaInRam(url: String, text: String, ttlMs: Long) {
             val bytes = text.toByteArray(Charsets.UTF_8)
-            if (ttlMs <= 0L || bytes.size > ADDON_META_MAX_RAW) return
+            if (ttlMs <= 0L || bytes.size > ADDON_META_MAX_RAW) {
+                StremioCCacheAudit.log("meta", "RAM_SKIP", url,
+                    "bytes=${bytes.size} ttlMs=$ttlMs")
+                return
+            }
             synchronized(addonMetaCache) {
                 addonMetaCache.remove(url)?.let { addonMetaCacheBytes -= it.bytes.size.toLong() }
                 addonMetaCache[url] = AddonMetaEntry(bytes, System.currentTimeMillis(), ttlMs)
@@ -1030,8 +1064,12 @@ open class StremioC(
                         addonMetaCacheBytes > ADDON_META_RAM_LIMIT) && cursor.hasNext()) {
                     val removed = cursor.next()
                     addonMetaCacheBytes -= removed.value.bytes.size.toLong()
+                    StremioCCacheAudit.log("meta", "RAM_EVICT", removed.key,
+                        "bytes=${removed.value.bytes.size}")
                     cursor.remove()
                 }
+                StremioCCacheAudit.log("meta", "RAM_WRITE_OK", url,
+                    "bytes=${bytes.size} entries=${addonMetaCache.size} totalBytes=$addonMetaCacheBytes ttlMs=$ttlMs")
             }
         }
 
@@ -1039,8 +1077,13 @@ open class StremioC(
             val bytes = synchronized(addonMetaCache) {
                 val held = addonMetaCache[url]
                 if (held != null && System.currentTimeMillis() - held.at < held.ttlMs) {
+                    StremioCCacheAudit.log("meta", "RAM_HIT", url,
+                        "ageMs=${System.currentTimeMillis() - held.at} ttlMs=${held.ttlMs} bytes=${held.bytes.size}")
                     held.bytes
                 } else {
+                    if (held != null) StremioCCacheAudit.log("meta", "RAM_EXPIRED", url,
+                        "ageMs=${System.currentTimeMillis() - held.at} ttlMs=${held.ttlMs}")
+                    else StremioCCacheAudit.log("meta", "RAM_MISS", url)
                     addonMetaCache.remove(url)?.let { addonMetaCacheBytes -= it.bytes.size.toLong() }
                     null
                 }
@@ -1162,18 +1205,30 @@ open class StremioC(
                     mapOf("Cache-Control" to "no-cache") else emptyMap()).text
             }
             val storageKey = addonMetaStorageKey(url)
+            StremioCCacheAudit.log("meta", "READ_BEGIN", storageKey, "force=$forceRefresh")
             val previous = if (forceRefresh) {
                 cachedAddonMetaInRam(storageKey)
                     ?: MetadataDiskCache.read("meta", storageKey)?.first
             } else null
             if (!forceRefresh) {
-                cachedAddonMetaInRam(storageKey)?.let { return it }
-                MetadataDiskCache.read("meta", storageKey)?.let { return it.first }
+                cachedAddonMetaInRam(storageKey)?.let {
+                    StremioCCacheAudit.log("meta", "REUSE_RAM", storageKey, "chars=${it.length}")
+                    return it
+                }
+                MetadataDiskCache.read("meta", storageKey)?.let {
+                    StremioCCacheAudit.log("meta", "REUSE_DISK", storageKey,
+                        "chars=${it.first.length}")
+                    return it.first
+                }
             }
 
             val flightKey = (if (forceRefresh) "force|" else "normal|") + storageKey
             val flight = synchronized(addonMetaFlights) {
-                addonMetaFlights[flightKey] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
+                addonMetaFlights[flightKey]?.also {
+                    StremioCCacheAudit.log("meta", "INFLIGHT_JOIN", storageKey, "force=$forceRefresh")
+                } ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
+                    val started = SystemClock.elapsedRealtime()
+                    StremioCCacheAudit.log("meta", "HTTP_START", storageKey, "force=$forceRefresh")
                     try {
                         addonMetaNetworkFetches.incrementAndGet()
                         val response = customSession.get(url, headers = if (forceRefresh)
@@ -1182,6 +1237,8 @@ open class StremioC(
                             throw IllegalStateException("Stremio meta HTTP " + response.code)
                         }
                         val body = response.text
+                        StremioCCacheAudit.log("meta", "HTTP_DONE", storageKey,
+                            "code=${response.code} durationMs=${SystemClock.elapsedRealtime() - started} chars=${body.length}")
                         val root = parseJson<JsonNode>(body)
                         fun header(name: String): String? = response.headers
                             .firstOrNull { it.first.equals(name, ignoreCase = true) }?.second
@@ -1195,10 +1252,12 @@ open class StremioC(
                         val safeVary = vary.orEmpty().split(',').all {
                             it.trim().isEmpty() || it.trim().equals("Accept-Encoding", true)
                         }
-                        if (isCacheableAddonMeta(url, root) && ttlMs > 0L &&
-                            safeVary &&
-                            !containsTransientMetaLinks(root) &&
-                            !body.contains("data:image/", ignoreCase = true)) {
+                        val valid = isCacheableAddonMeta(url, root)
+                        val transient = containsTransientMetaLinks(root)
+                        val image = body.contains("data:image/", ignoreCase = true)
+                        StremioCCacheAudit.log("meta", "CACHE_DECISION", storageKey,
+                            "valid=$valid ttlMs=$ttlMs safeVary=$safeVary transient=$transient inlineImage=$image")
+                        if (valid && ttlMs > 0L && safeVary && !transient && !image) {
                             cacheAddonMetaInRam(storageKey, body, ttlMs)
                             // Never delay the first detail paint on GZIP or disk trimming.
                             addonMetaScope.launch {
@@ -1206,10 +1265,15 @@ open class StremioC(
                             }
                         }
                         body
+                    } catch (error: Throwable) {
+                        StremioCCacheAudit.log("meta", "HTTP_OR_PARSE_ERROR", storageKey,
+                            "durationMs=${SystemClock.elapsedRealtime() - started} error=${error.javaClass.simpleName}")
+                        throw error
                     } finally {
                         synchronized(addonMetaFlights) { addonMetaFlights.remove(flightKey) }
                     }
                 }.also { deferred ->
+                    StremioCCacheAudit.log("meta", "INFLIGHT_NEW", storageKey, "force=$forceRefresh")
                     addonMetaFlights[flightKey] = deferred
                     deferred.start()
                 }
@@ -1219,7 +1283,11 @@ open class StremioC(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
-                if (forceRefresh && previous != null) previous else throw error
+                if (forceRefresh && previous != null) {
+                    StremioCCacheAudit.log("meta", "REFRESH_STALE_FALLBACK", storageKey,
+                        "error=${error.javaClass.simpleName} chars=${previous.length}")
+                    previous
+                } else throw error
             }
         }
         internal val genreCatalogsByUrl = lruCacheMap<String, Map<String, CatalogShortcutTarget>>(200)
