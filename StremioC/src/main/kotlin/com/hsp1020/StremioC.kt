@@ -220,7 +220,8 @@ open class StremioC(
 
     private suspend fun simklLibraryMetaUrl(url: String, base: String): String? {
         val simklId = libraryItemId(url, "simkl.com", "tv", "movies", "anime") ?: return null
-        val auth = AccountManager.simklApi.authData() ?: return null
+        val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
+            ?.authData() ?: return null
 
         // CloudStream persists the complete, account-scoped Simkl library, including external IDs.
         val cached = getKey<JsonNode>(SimklApi.SIMKL_CACHED_LIST, auth.user.id.toString())
