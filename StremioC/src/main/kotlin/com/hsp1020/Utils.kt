@@ -22,6 +22,7 @@ import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.view.MotionEvent
+import android.view.Gravity
 import androidx.cardview.widget.CardView
 import com.google.android.material.chip.Chip
 import android.os.Bundle
@@ -36,6 +37,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.TextView
+import android.widget.FrameLayout
 import com.google.android.material.chip.ChipGroup
 import androidx.core.content.ContextCompat
 import androidx.appcompat.widget.SearchView
@@ -763,6 +765,36 @@ internal class RatingPlotImageHook(
             .takeIf { it != 0 }?.let { root.findViewById<TextView>(it) }
         private val castItems = root.resources.getIdentifier("result_cast_items", "id", root.context.packageName)
             .takeIf { it != 0 }?.let { root.findViewById<RecyclerView>(it) }
+        private val episodeList = root.findViewById<RecyclerView>(R.id.result_episodes)
+        private val episodeIndicatorOriginals = mutableMapOf<View, Pair<FrameLayout.LayoutParams, Float>>()
+        private val episodeChildListener = object : RecyclerView.OnChildAttachStateChangeListener {
+            override fun onChildViewAttachedToWindow(view: View) = positionEpisodeIndicator(view)
+            override fun onChildViewDetachedFromWindow(view: View) = restoreEpisodeIndicator(view)
+        }
+
+        private fun positionEpisodeIndicator(row: View) {
+            // The compact text-only episode row has no thumbnail and must remain native.
+            if (row.findViewById<View>(R.id.episode_poster) == null) return
+            val indicator = row.findViewById<View>(R.id.watch_progress_container) ?: return
+            if (episodeIndicatorOriginals.containsKey(indicator)) return
+            val original = indicator.layoutParams as? FrameLayout.LayoutParams ?: return
+            val inset = (4f * indicator.resources.displayMetrics.density + 0.5f).toInt()
+            val positioned = FrameLayout.LayoutParams(original).apply {
+                gravity = Gravity.BOTTOM or Gravity.START
+                marginStart = inset
+                bottomMargin = inset
+            }
+            episodeIndicatorOriginals[indicator] = original to indicator.alpha
+            indicator.layoutParams = positioned
+            indicator.alpha = 0.8f
+        }
+
+        private fun restoreEpisodeIndicator(row: View) {
+            val indicator = row.findViewById<View>(R.id.watch_progress_container) ?: return
+            val (original, alpha) = episodeIndicatorOriginals.remove(indicator) ?: return
+            indicator.layoutParams = original
+            indicator.alpha = alpha
+        }
         private val actorNameId = root.resources.getIdentifier("actor_name", "id", root.context.packageName)
         private val actorInformation = ActorInformation.Controller(fragment, detailUrl)
         private val genreGroup = root.findViewById<ChipGroup>(R.id.result_tag)
@@ -870,6 +902,10 @@ internal class RatingPlotImageHook(
             true
         }
         fun start() {
+            episodeList?.let { list ->
+                list.addOnChildAttachStateChangeListener(episodeChildListener)
+                for (i in 0 until list.childCount) positionEpisodeIndicator(list.getChildAt(i))
+            }
             actorInformation.start()
             view.addTextChangedListener(this)
             searchButton?.setOnClickListener(searchClick)
@@ -878,6 +914,12 @@ internal class RatingPlotImageHook(
             runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() }
         }
         fun detach() {
+            episodeList?.removeOnChildAttachStateChangeListener(episodeChildListener)
+            episodeIndicatorOriginals.toMap().forEach { (indicator, original) ->
+                indicator.layoutParams = original.first
+                indicator.alpha = original.second
+            }
+            episodeIndicatorOriginals.clear()
             actorInformation.stop()
             view.removeTextChangedListener(this)
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(detailPreDraw)
