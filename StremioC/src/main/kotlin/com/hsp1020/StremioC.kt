@@ -303,17 +303,83 @@ open class StremioC(
         return simklMetaUrl(base, type, detail.get("ids"))
     }
 
+    private fun animeLibraryType(format: String?): String? = when (format?.trim()?.lowercase()) {
+        "movie" -> "movie"
+        "tv", "tv_short", "ona", "ova", "special", "music" -> "series"
+        else -> null
+    }
+
+    private suspend fun animeLibraryMetaType(name: SyncIdName, itemId: String): String? {
+        val auth = AccountManager.syncApis.firstOrNull { it.syncIdName == name }?.authData()
+        val cachedType = when (name) {
+            SyncIdName.MyAnimeList -> auth?.let {
+                getKey<JsonNode>("mal_cached_list", it.user.id.toString())
+            }?.firstOrNull { it.get("node")?.get("id")?.asText() == itemId }
+                ?.get("node")?.get("media_type").textOrNull()
+            SyncIdName.Anilist -> auth?.let {
+                getKey<JsonNode>("anilist_cached_list", it.user.id.toString())
+            }?.firstNotNullOfOrNull { group ->
+                group.get("entries")?.firstOrNull {
+                    it.get("media")?.get("id")?.asText() == itemId
+                }?.get("media")?.get("format").textOrNull()
+            }
+            // CloudStream's Kitsu library cache does not request the anime subtype.
+            else -> null
+        }
+        animeLibraryType(cachedType)?.let { return it }
+
+        // A library URL carries no movie/series type. Resolve it only when the
+        // existing MAL/AniList cache cannot answer (or for Kitsu).
+        val remoteType = runSuspendCatching {
+            when (name) {
+                SyncIdName.MyAnimeList -> {
+                    val token = auth?.token?.accessToken ?: return@runSuspendCatching null
+                    val item = parseJson<JsonNode>(customSession.get(
+                        "https://api.myanimelist.net/v2/anime/$itemId",
+                        params = mapOf("fields" to "media_type"),
+                        headers = mapOf("Authorization" to "Bearer $token"),
+                        timeout = 10L
+                    ).text)
+                    item.takeIf { it.get("id")?.asText() == itemId }
+                        ?.get("media_type").textOrNull()
+                }
+                SyncIdName.Anilist -> {
+                    val query = "query { Media(id: $itemId, type: ANIME) { id format } }"
+                    val data = parseJson<JsonNode>(customSession.post(
+                        "https://graphql.anilist.co/",
+                        json = mapOf("query" to query),
+                        timeout = 10L
+                    ).text).get("data")?.get("Media")
+                    data?.takeIf { it.get("id")?.asText() == itemId }
+                        ?.get("format").textOrNull()
+                }
+                SyncIdName.Kitsu -> {
+                    val data = parseJson<JsonNode>(customSession.get(
+                        "https://kitsu.app/api/edge/anime/$itemId",
+                        params = mapOf("fields[anime]" to "subtype"),
+                        timeout = 10L
+                    ).text).get("data")
+                    data?.takeIf { it.get("id")?.asText() == itemId }
+                        ?.get("attributes")?.get("subtype").textOrNull()
+                }
+                else -> null
+            }
+        }.getOrNull()
+        return animeLibraryType(remoteType)
+    }
+
     override suspend fun getLoadUrl(name: SyncIdName, id: String): String? {
         if (mainUrl.isNotBlank()) return null
         val base = libraryMetadataBase() ?: return null
-        val directId = when (name) {
-            SyncIdName.MyAnimeList -> libraryItemId(id, "myanimelist.net", "anime")?.let { "mal:$it" }
-            SyncIdName.Kitsu -> libraryItemId(id, "kitsu.app", "anime")?.let { "kitsu:$it" }
-            SyncIdName.Anilist -> libraryItemId(id, "anilist.co", "anime")?.let { "anilist:$it" }
-            SyncIdName.Simkl -> return simklLibraryMetaUrl(id, base)
-            else -> return null
+        if (name == SyncIdName.Simkl) return simklLibraryMetaUrl(id, base)
+        val (directId, itemId) = when (name) {
+            SyncIdName.MyAnimeList -> libraryItemId(id, "myanimelist.net", "anime")?.let { "mal:$it" to it }
+            SyncIdName.Kitsu -> libraryItemId(id, "kitsu.app", "anime")?.let { "kitsu:$it" to it }
+            SyncIdName.Anilist -> libraryItemId(id, "anilist.co", "anime")?.let { "anilist:$it" to it }
+            else -> null
         } ?: return null
-        return "$base/meta/series/${directId.urlEncode()}.json"
+        val type = animeLibraryMetaType(name, itemId) ?: return null
+        return "$base/meta/$type/${directId.urlEncode()}.json"
     }
 
     // 주소가 있는 실제 애드온만 홈 화면 탭 목록에 표시되도록 설정
