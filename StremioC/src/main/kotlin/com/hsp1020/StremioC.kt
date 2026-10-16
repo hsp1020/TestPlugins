@@ -108,6 +108,13 @@ private inline fun <K, V> lruCacheMap(maxSize: Int): MutableMap<K, V> {
 }
 
 
+private fun canonicalDetailType(type: String?): String? = when (type?.lowercase()) {
+    "movie" -> "movie"
+    "series", "tv" -> "series"
+    null -> null
+    else -> type.lowercase()
+}
+
 private fun mdbCredentialFingerprint(): String {
     val key = CloudStreamApp.context
         ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
@@ -1517,13 +1524,6 @@ open class StremioC(
         val requestSucceeded: Boolean
     ) {
         fun matches(other: MdbTarget): Boolean = target == other && requestSucceeded
-    }
-
-    private fun canonicalDetailType(type: String?): String? = when (type?.lowercase()) {
-        "movie" -> "movie"
-        "series", "tv" -> "series"
-        null -> null
-        else -> type.lowercase()
     }
 
     private fun detailMediaType(type: String?): String =
