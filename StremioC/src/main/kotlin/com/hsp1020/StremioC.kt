@@ -204,6 +204,8 @@ private object MetadataDiskCache {
     private var quotaChecked = false
     private var cleanedOldTemps = false
 
+    data class Entry(val json: String, val timestamp: Long, val ttlMs: Long)
+
     private fun directory(): File? = CloudStreamApp.context?.filesDir
         ?.let { File(it, "stremioc-metadata-v1").apply { mkdirs() }.takeIf { dir -> dir.isDirectory } }
 
