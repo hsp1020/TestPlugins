@@ -281,12 +281,16 @@ open class StremioC(
         )
 
         // CloudStream persists the complete, account-scoped Simkl library, including external IDs.
-        val cached = getKey<JsonNode>(SimklApi.SIMKL_CACHED_LIST, auth.user.id.toString())
+        val cached = DetailLoadPerf.stepNow("library.simkl.cache.read") {
+            getKey<JsonNode>(SimklApi.SIMKL_CACHED_LIST, auth.user.id.toString())
+        }
+        DetailLoadPerf.event("LIBRARY_CACHE", "service=simkl cachePresent=${cached != null} movies=${cached?.get("movies")?.size() ?: 0} shows=${cached?.get("shows")?.size() ?: 0} anime=${cached?.get("anime")?.size() ?: 0}")
         for ((section, type) in listOf("movies" to "movie", "shows" to "series", "anime" to "series")) {
             val item = cached?.get(section)?.firstOrNull {
                 val content = if (section == "movies") it.get("movie") else it.get("show")
                 content?.get("ids")?.get("simkl")?.asText() == simklId
             } ?: continue
+            DetailLoadPerf.event("LIBRARY_CACHE_MATCH", "service=simkl section=$section")
             val ids = (if (section == "movies") item.get("movie") else item.get("show"))?.get("ids")
             if (section != "anime") {
                 simklMetaUrl(base, type, ids)?.let { return it }
@@ -298,12 +302,14 @@ open class StremioC(
             val animeType = item.get("anime_type").textOrNull()
                 ?: item.get("show")?.get("anime_type").textOrNull()
             val detail = if (animeType == null) runSuspendCatching {
-                parseJson<JsonNode>(customSession.get(
-                    "https://api.simkl.com/anime/$simklId",
-                    params = params,
-                    headers = headers,
-                    timeout = 15L
-                ).text)
+                DetailLoadPerf.step("library.simkl.animeType.http") {
+                    parseJson<JsonNode>(customSession.get(
+                        "https://api.simkl.com/anime/$simklId",
+                        params = params,
+                        headers = headers,
+                        timeout = 15L
+                    ).text)
+                }
             }.getOrNull()?.takeIf {
                 it.get("ids")?.get("simkl")?.asText() == simklId
             } else null
@@ -312,19 +318,23 @@ open class StremioC(
                 "tv", "ova", "ona", "special", "music video" -> "series"
                 else -> return null
             }
+            DetailLoadPerf.event("LIBRARY_TYPE", "service=simkl from=anime type=$resolvedType")
             return simklMetaUrl(base, resolvedType, ids)
                 ?: simklMetaUrl(base, resolvedType, detail?.get("ids"))
         }
 
         // Cache miss (or no external ID): first identify the media type, then fetch full IDs.
+        DetailLoadPerf.event("LIBRARY_CACHE_MISS", "service=simkl startingFallback=true")
         val matches = runSuspendCatching {
-            parseJson<JsonNode>(customSession.get(
-                "https://api.simkl.com/search/id",
-                params = params + ("simkl" to simklId),
-                headers = headers,
-                timeout = 15L
-            ).text)
-        }.getOrNull()
+            DetailLoadPerf.step("library.simkl.searchId.http") {
+                parseJson<JsonNode>(customSession.get(
+                    "https://api.simkl.com/search/id",
+                    params = params + ("simkl" to simklId),
+                    headers = headers,
+                    timeout = 15L
+                ).text)
+            }
+        }.onFailure { DetailLoadPerf.event("LIBRARY_FALLBACK_ERROR", "service=simkl op=search error=${it.javaClass.simpleName}") }.getOrNull()
         val match = matches?.takeIf { it.isArray }?.firstOrNull {
             it.get("ids")?.get("simkl")?.asText() == simklId
         } ?: return null
@@ -335,13 +345,15 @@ open class StremioC(
             else -> return null
         }
         val detail = runSuspendCatching {
-            parseJson<JsonNode>(customSession.get(
-                "https://api.simkl.com/$endpoint/$simklId",
-                params = params,
-                headers = headers,
-                timeout = 15L
-            ).text)
-        }.getOrNull() ?: return null
+            DetailLoadPerf.step("library.simkl.$endpoint.detail.http") {
+                parseJson<JsonNode>(customSession.get(
+                    "https://api.simkl.com/$endpoint/$simklId",
+                    params = params,
+                    headers = headers,
+                    timeout = 15L
+                ).text)
+            }
+        }.onFailure { DetailLoadPerf.event("LIBRARY_FALLBACK_ERROR", "service=simkl op=detail error=${it.javaClass.simpleName}") }.getOrNull() ?: return null
         if (detail.get("ids")?.get("simkl")?.asText() != simklId) return null
         val type = if (endpoint == "anime") {
             when (detail.get("anime_type").textOrNull()?.lowercase()) {
@@ -350,6 +362,7 @@ open class StremioC(
                 else -> return null
             }
         } else if (endpoint == "movies") "movie" else "series"
+        DetailLoadPerf.event("LIBRARY_TYPE", "service=simkl from=fallback type=$type")
         return simklMetaUrl(base, type, detail.get("ids"))
     }
 
@@ -361,7 +374,7 @@ open class StremioC(
 
     private suspend fun animeLibraryMetaType(name: SyncIdName, itemId: String): String? {
         val auth = AccountManager.syncApis.firstOrNull { it.syncIdName == name }?.authData()
-        val cachedType = when (name) {
+        val cachedType = DetailLoadPerf.stepNow("library.anime.cache.read") { when (name) {
             SyncIdName.MyAnimeList -> auth?.let {
                 getKey<JsonNode>("mal_cached_list", it.user.id.toString())
             }?.firstOrNull { it.get("node")?.get("id")?.asText() == itemId }
@@ -375,13 +388,14 @@ open class StremioC(
             }
             // CloudStream's Kitsu library cache does not request the anime subtype.
             else -> null
-        }
+        } }
+        DetailLoadPerf.event("LIBRARY_CACHE", "service=$name format=$cachedType hit=${animeLibraryType(cachedType) != null}")
         animeLibraryType(cachedType)?.let { return it }
 
         // A library URL carries no movie/series type. Resolve it only when the
         // existing MAL/AniList cache cannot answer (or for Kitsu).
         val remoteType = runSuspendCatching {
-            when (name) {
+            DetailLoadPerf.step("library.anime.typeRemote.$name") { when (name) {
                 SyncIdName.MyAnimeList -> {
                     val token = auth?.token?.accessToken ?: return@runSuspendCatching null
                     val item = parseJson<JsonNode>(customSession.get(
@@ -413,8 +427,9 @@ open class StremioC(
                         ?.get("attributes")?.get("subtype").textOrNull()
                 }
                 else -> null
-            }
-        }.getOrNull()
+            } }
+        }.onFailure { DetailLoadPerf.event("LIBRARY_TYPE_ERROR", "service=$name error=${it.javaClass.simpleName}") }.getOrNull()
+        DetailLoadPerf.event("LIBRARY_TYPE", "service=$name remoteType=$remoteType resolved=${animeLibraryType(remoteType)}")
         return animeLibraryType(remoteType)
     }
 
@@ -1043,7 +1058,12 @@ open class StremioC(
     }
 
     private suspend fun fetchMdbAttempt(target: MdbTarget): SpeculativeMdbResult {
-        val attempt = runSuspendCatching { fetchMdbListRatings(target.id, target.isTmdb, target.mediaType) }
+        val attempt = runSuspendCatching {
+            DetailLoadPerf.step("mdb.httpAndParse") {
+                fetchMdbListRatings(target.id, target.isTmdb, target.mediaType)
+            }
+        }.onFailure { DetailLoadPerf.event("MDB_ERROR", "error=${it.javaClass.simpleName}") }
+        DetailLoadPerf.event("MDB_RESULT", "success=${attempt.isSuccess} ratings=${attempt.getOrNull()?.size ?: 0} type=${target.mediaType}")
         return SpeculativeMdbResult(
             target = target,
             ratings = attempt.getOrDefault(emptyList<String>()),
@@ -1109,12 +1129,17 @@ open class StremioC(
         imdbId: String
     ): Pair<String, String>? {
         val cachedFind = tmdbFindCache[imdbId]
+        DetailLoadPerf.event("TMDB_FIND_CACHE", "hit=${cachedFind != null && System.currentTimeMillis() - cachedFind.second < METADATA_CACHE_TTL}")
         val result: Pair<String, String>? = if (cachedFind != null && System.currentTimeMillis() - cachedFind.second < METADATA_CACHE_TTL) {
             cachedFind.first
         } else {
             val fetchedFind = runSuspendCatching {
-                val text = customSession.get(buildTmdbUrl("/find/$imdbId", "external_source" to "imdb_id")).text
-                val findRes = if (text.isNotBlank()) parseJson<TmdbFindResponse>(text) else null
+                val text = DetailLoadPerf.step("tmdb.find.http") {
+                    customSession.get(buildTmdbUrl("/find/$imdbId", "external_source" to "imdb_id")).text
+                }
+                val findRes = DetailLoadPerf.stepNow("tmdb.find.parse") {
+                    if (text.isNotBlank()) parseJson<TmdbFindResponse>(text) else null
+                }
                 val movieMatch = findRes?.movie_results?.firstOrNull()
                 if (movieMatch?.id != null) {
                     Pair(movieMatch.id.toString(), "movie")
@@ -1146,12 +1171,15 @@ open class StremioC(
             "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages(),
             *videoLanguages)
         val cached = tmdbDetailsCache[detailUrl]
+        DetailLoadPerf.event("TMDB_DETAIL_CACHE", "hit=${cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL} media=$mediaType")
         val result: TmdbDetailResponse? = if (cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL) {
             cached.first
         } else {
             runSuspendCatching {
-                val text = customSession.get(detailUrl).text
-                val fetched = if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
+                val text = DetailLoadPerf.step("tmdb.detail.http") { customSession.get(detailUrl).text }
+                val fetched = DetailLoadPerf.stepNow("tmdb.detail.parse") {
+                    if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
+                }
                 if (fetched != null) {
                     tmdbDetailsCache[detailUrl] = Pair(fetched, System.currentTimeMillis())
                 }
