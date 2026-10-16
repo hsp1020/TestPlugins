@@ -2217,17 +2217,31 @@ private fun showLanguageSelectDialog() {
                 val cachePolicy = manifestResponse?.headers?.entries
                     ?.firstOrNull { it.key.equals("Cache-Control", ignoreCase = true) }
                     ?.value.orEmpty()
-                val noStore = cachePolicy.split(',').any { it.trim().equals("no-store", ignoreCase = true) }
+                val directives = cachePolicy.lowercase(java.util.Locale.ROOT)
+                    .split(',').map { it.trim() }
+                val noStore = "no-store" in directives
+                val maxAge = directives.firstOrNull { it.startsWith("max-age=") }
+                    ?.substringAfter('=')?.trim('"', ' ')?.toLongOrNull()
+                val ttl = when {
+                    noStore || "no-cache" in directives -> 0L
+                    maxAge != null -> maxAge.coerceIn(0L, 72L * 3600L) * 1000L
+                    else -> 3_600_000L
+                }
+                val version = runCatching { JSONObject(manifestText).optString("version") }
+                    .getOrNull()?.takeIf { it.isNotBlank() }
                 manifestPrefs.edit().apply {
                     if (noStore) {
                         putBoolean("manifest_no_store_" + key, true)
                         remove(key)
                         remove("manifest_saved_at_" + key)
+                        remove("manifest_ttl_ms_" + key)
                     } else {
                         putBoolean("manifest_no_store_" + key, false)
                         putString(key, manifestText)
                         putLong("manifest_saved_at_" + key, System.currentTimeMillis())
+                        putLong("manifest_ttl_ms_" + key, ttl)
                     }
+                    if (version != null) putString("manifest_version_" + key, version)
                 }.apply()
 
                 if (catalogs != null) {
