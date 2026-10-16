@@ -2706,12 +2706,9 @@ open class StremioC(
                     SpeculativeTmdbChain(urlHint?.id?.takeIf { it.startsWith("tt") }, hintedTmdbId, hintMediaType, false, detail)
                 }
             }
-            urlHint?.id?.startsWith("tt") == true -> async(Dispatchers.IO) {
-                val hintId = urlHint?.id ?: return@async null
-                val find = DetailLoadPerf.step("task.speculativeTmdbFind") { fetchTmdbFindForLoad(hintId) } ?: return@async null
-                val detail = DetailLoadPerf.step("task.speculativeTmdbFromFind") { fetchTmdbDetailForLoad(find.first, find.second) }
-                SpeculativeTmdbChain(hintId, find.first, find.second, true, detail)
-            }
+            // Wait for the addon /meta response before considering an IMDb -> TMDB
+            // find: most addons already return the TMDB ID, and the fallback
+            // below handles genuine omissions without a wasted speculative call.
             urlHint?.id?.startsWith("tmdb:") == true -> {
                 val tmdbId = urlHint.id.removePrefix("tmdb:")
                 async(Dispatchers.IO) {
