@@ -434,6 +434,16 @@ open class StremioC(
     }
 
     override suspend fun getLoadUrl(name: SyncIdName, id: String): String? {
+        val trace = DetailLoadPerf.current.get() ?: DetailLoadPerf.Session()
+        return withContext(DetailLoadPerf.current.asContextElement(trace)) {
+            DetailLoadPerf.event("GET_LOAD_URL_ENTER", "service=$name")
+            val resolved = DetailLoadPerf.step("getLoadUrl.total") { getLoadUrlInternal(name, id) }
+            DetailLoadPerf.event("GET_LOAD_URL_RESULT", "service=$name resolved=${resolved != null} type=${resolved?.substringAfter("/meta/")?.substringBefore('/')}")
+            resolved
+        }
+    }
+
+    private suspend fun getLoadUrlInternal(name: SyncIdName, id: String): String? {
         if (mainUrl.isNotBlank()) return null
         val base = libraryMetadataBase() ?: return null
         if (name == SyncIdName.Simkl) return simklLibraryMetaUrl(id, base)
@@ -2018,7 +2028,9 @@ open class StremioC(
             preFetchedTmdbDetail?.belongs_to_collection?.id?.let { collectionId ->
                 async(Dispatchers.IO) {
                     runSuspendCatching {
-                        val text = customSession.get(buildTmdbUrl("/collection/$collectionId")).text
+                        val text = DetailLoadPerf.step("tmdb.collection.prefetch.http") {
+                            customSession.get(buildTmdbUrl("/collection/$collectionId")).text
+                        }
                         if (text.isNotBlank()) parseJson<TmdbCollectionDetail>(text).parts
                             ?: emptyList() else emptyList()
                     }.getOrDefault(emptyList())
@@ -3381,11 +3393,14 @@ open class StremioC(
                 *videoLanguages)
             val cacheKey = detailUrl
             val cached = tmdbDetailsCache[cacheKey]
+            DetailLoadPerf.event("TMDB_ENRICH_CACHE", "prefetch=${preFetchedDetail != null} cacheHit=${cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL} media=$tmdbMediaType")
             val detailRes = preFetchedDetail ?: if (cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL) {
                 cached.first
             } else {
-                val text = StremioC.customSession.get(detailUrl).text
-                val fetched = if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
+                val text = DetailLoadPerf.step("tmdb.enrich.detail.http") { StremioC.customSession.get(detailUrl).text }
+                val fetched = DetailLoadPerf.stepNow("tmdb.enrich.detail.parse") {
+                    if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
+                }
                 if (fetched != null) {
                     tmdbDetailsCache[cacheKey] = Pair(fetched, System.currentTimeMillis())
                 }
@@ -3406,6 +3421,7 @@ open class StremioC(
             coroutineScope {
                 val shouldFocusEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType != "movie" && stremioType != "series" && !isMovie)
                 
+                DetailLoadPerf.event("TMDB_EPISODE_PLAN", "required=$shouldFocusEpisodes knownVideos=${targetVideos?.size ?: 0} totalSeasons=${detailRes.number_of_seasons ?: 0}")
                 val episodeDeferred = if (shouldFocusEpisodes) {
                     var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
                     if (requiredSeasons.isEmpty()) {
@@ -3413,27 +3429,42 @@ open class StremioC(
                         requiredSeasons = if (totalSeasons > 0) (1..totalSeasons).toList() else listOf(1)
                     }
                     
+                    DetailLoadPerf.event("TMDB_EPISODE_SCHEDULE", "count=${requiredSeasons.size} seasons=${requiredSeasons.joinToString(",")}")
                     requiredSeasons.map { seasonNum ->
                         async(Dispatchers.IO) {
+                            DetailLoadPerf.step("tmdb.season.$seasonNum.total") {
+                            DetailLoadPerf.step("tmdb.season.$seasonNum.semaphore") {
                             StremioC.networkSemaphore.withPermit {
-                                withTimeoutOrNull(10000L) {
+                                val completed = withTimeoutOrNull(10000L) {
                                     runSuspendCatching {
                                         val seasonUrl = provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")
                                         val seasonCacheKey = seasonUrl
                                         val cachedSeason = tmdbSeasonCache[seasonCacheKey]
+                                        DetailLoadPerf.event("TMDB_SEASON_CACHE", "season=$seasonNum hit=${cachedSeason != null && System.currentTimeMillis() - cachedSeason.second < METADATA_CACHE_TTL}")
                                         val seasonRes = if (cachedSeason != null && System.currentTimeMillis() - cachedSeason.second < METADATA_CACHE_TTL) {
                                             cachedSeason.first
                                         } else {
-                                            val fetchedSeasonText = StremioC.customSession.get(seasonUrl).text
-                                            val fetchedSeason = if (fetchedSeasonText.isNotBlank()) parseJson<TmdbSeasonDetail>(fetchedSeasonText) else null
+                                            val fetchedSeasonText = DetailLoadPerf.step("tmdb.season.$seasonNum.http") {
+                                                StremioC.customSession.get(seasonUrl).text
+                                            }
+                                            val fetchedSeason = DetailLoadPerf.stepNow("tmdb.season.$seasonNum.parse") {
+                                                if (fetchedSeasonText.isNotBlank()) parseJson<TmdbSeasonDetail>(fetchedSeasonText) else null
+                                            }
                                             if (fetchedSeason != null) {
                                                 tmdbSeasonCache[seasonCacheKey] = Pair(fetchedSeason, System.currentTimeMillis())
                                             }
                                             fetchedSeason
                                         }
                                         seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
-                                    }.onFailure { it.printStackTrace() }
+                                    }.onFailure {
+                                        DetailLoadPerf.event("TMDB_SEASON_ERROR", "season=$seasonNum error=${it.javaClass.simpleName}")
+                                        it.printStackTrace()
+                                    }
+                                    true
                                 }
+                                if (completed == null) DetailLoadPerf.event("TMDB_SEASON_TIMEOUT", "season=$seasonNum timeoutMs=10000")
+                            }
+                            }
                             }
                         }
                     }
@@ -3445,22 +3476,27 @@ open class StremioC(
                     val parts: List<TmdbMedia> = if (active) {
                         runSuspendCatching {
                             val colUrl = provider.buildTmdbUrl("/collection/$collectionId")
-                            val colText = StremioC.customSession.get(colUrl).text
-                            if (colText.isNotBlank()) parseJson<TmdbCollectionDetail>(colText).parts ?: emptyList() else emptyList()
+                            val colText = DetailLoadPerf.step("tmdb.collection.http") {
+                                StremioC.customSession.get(colUrl).text
+                            }
+                            DetailLoadPerf.stepNow("tmdb.collection.parse") {
+                                if (colText.isNotBlank()) parseJson<TmdbCollectionDetail>(colText).parts ?: emptyList() else emptyList()
+                            }
                         }.getOrDefault(emptyList())
                     } else emptyList()
                     parts
                 }
 
-                val collectionParts = collectionDeferred.await()
-                episodeDeferred?.awaitAll()
+                val collectionParts = DetailLoadPerf.step("await.tmdbCollection") { collectionDeferred.await() }
+                DetailLoadPerf.step("await.tmdbEpisodesAll") { episodeDeferred?.awaitAll() }
+                DetailLoadPerf.event("TMDB_SUBREQUESTS_DONE", "collectionCount=${collectionParts.size} episodeCount=${episodeTmdbMeta.size}")
 
                 val tmdbRecs: List<TmdbMedia> = detailRes.recommendations?.results ?: emptyList()
                 val finalCombinedMedia = (collectionParts + tmdbRecs)
                     .distinctBy { it.id }
                     .filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
 
-                fetchedRecommendations = finalCombinedMedia.take(50).map { rec ->
+                fetchedRecommendations = DetailLoadPerf.stepNow("tmdb.recommendations.build") { finalCombinedMedia.take(50).map { rec ->
                     val recTitle = rec.title ?: rec.name ?: ""
                     val isRecMovie = rec.mediaType == "movie" || rec.title != null
                     val recTypeStr = if (isRecMovie) "movie" else "series"
@@ -3476,7 +3512,8 @@ open class StremioC(
                     provider.newMovieSearchResponse(recTitle, thinData.toJson(), recType) {
                         this.posterUrl = recPoster
                     }
-                }
+                } }
+                DetailLoadPerf.event("TMDB_RECS_RESULT", "total=${fetchedRecommendations?.size ?: 0} posterOverride=${recommendationPoster != null}")
             }
             
             val countryCode = langCode.substringAfter("-", "KR").uppercase()
