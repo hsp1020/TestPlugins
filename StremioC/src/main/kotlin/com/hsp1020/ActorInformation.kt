@@ -160,7 +160,12 @@ internal object ActorInformation {
         val url = android.net.Uri.parse("https://api.themoviedb.org/3/person/" + personId + endpoint)
             .buildUpon().appendQueryParameter("language", language)
             .appendQueryParameter("api_key", apiKey).build().toString()
+        val started = android.os.SystemClock.elapsedRealtime()
+        StremioCCacheAudit.log("actor_http", "HTTP_START", url,
+            "endpoint=${endpoint.substringBefore('?')}")
         val response = StremioC.customSession.get(url, timeout = 15L)
+        StremioCCacheAudit.log("actor_http", "HTTP_DONE", url,
+            "code=${response.code} durationMs=${android.os.SystemClock.elapsedRealtime() - started}")
         if (response.code !in 200..299) {
             throw IllegalStateException(when (response.code) {
                 401 -> "TMDB API key was rejected (401)"
@@ -176,22 +181,36 @@ internal object ActorInformation {
         val hit = synchronized(cache) {
             val entry = cache[cacheKey]
             if (entry != null && System.currentTimeMillis() - entry.time < TTL) {
+                StremioCCacheAudit.log("actor", "RAM_HIT", cacheKey,
+                    "ageMs=${System.currentTimeMillis() - entry.time} bytes=${entry.bytes.size}")
                 entry.bytes
             } else {
+                StremioCCacheAudit.log("actor", if (entry == null) "RAM_MISS" else "RAM_EXPIRED",
+                    cacheKey, "endpoint=${endpoint.substringBefore('?')}")
                 cache.remove(cacheKey)?.let { cacheBytes -= it.bytes.size.toLong() }
                 null
             }
         }
         if (hit != null) {
-            runCatching { JSONObject(String(hit, Charsets.UTF_8)) }.getOrNull()?.let { return it }
+            runCatching { JSONObject(String(hit, Charsets.UTF_8)) }.getOrNull()?.let {
+                StremioCCacheAudit.log("actor", "REUSE_RAM", cacheKey, "bytes=${hit.size}")
+                return it
+            }
+            StremioCCacheAudit.log("actor", "RAM_INVALID_JSON", cacheKey)
             synchronized(cache) {
                 cache.remove(cacheKey)?.let { cacheBytes -= it.bytes.size.toLong() }
             }
         }
         val task = synchronized(flights) {
-            flights[cacheKey] ?: sharedScope.async {
+            flights[cacheKey]?.also {
+                StremioCCacheAudit.log("actor", "INFLIGHT_JOIN", cacheKey)
+            } ?: sharedScope.async {
+                StremioCCacheAudit.log("actor", "INFLIGHT_HTTP", cacheKey)
                 request(personId, endpoint, lang, apiKey)
-            }.also { flights[cacheKey] = it }
+            }.also {
+                StremioCCacheAudit.log("actor", "INFLIGHT_NEW", cacheKey)
+                flights[cacheKey] = it
+            }
         }
         try {
             val result = task.await()
@@ -201,16 +220,27 @@ internal object ActorInformation {
                     cache.remove(cacheKey)?.let { cacheBytes -= it.bytes.size.toLong() }
                     cache[cacheKey] = CacheEntry(bytes, System.currentTimeMillis())
                     cacheBytes += bytes.size.toLong()
+                    StremioCCacheAudit.log("actor", "RAM_WRITE_OK", cacheKey,
+                        "bytes=${bytes.size} items=${cache.size} totalBytes=$cacheBytes")
                     val iterator = cache.entries.iterator()
                     while ((cache.size > MAX_CACHE_ENTRIES || cacheBytes > MAX_CACHE_BYTES) &&
                         iterator.hasNext()) {
                         val evicted = iterator.next()
                         cacheBytes -= evicted.value.bytes.size.toLong()
+                        StremioCCacheAudit.log("actor", "RAM_EVICT", evicted.key,
+                            "bytes=${evicted.value.bytes.size} remainingBytes=$cacheBytes")
                         iterator.remove()
                     }
                 }
+            } else {
+                StremioCCacheAudit.log("actor", "RAM_SKIP_TOO_LARGE", cacheKey,
+                    "bytes=${bytes.size} limit=$MAX_CACHE_BYTES")
             }
             return result
+        } catch (error: Throwable) {
+            StremioCCacheAudit.log("actor", "FETCH_ERROR", cacheKey,
+                "error=${error.javaClass.simpleName}")
+            throw error
         } finally {
             if (task.isCompleted) synchronized(flights) {
                 if (flights[cacheKey] === task) flights.remove(cacheKey)
