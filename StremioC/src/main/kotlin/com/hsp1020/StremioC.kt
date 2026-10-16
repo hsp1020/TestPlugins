@@ -209,31 +209,67 @@ open class StremioC(
             }
         }.getOrNull()
 
-    private suspend fun simklLibraryMetaUrl(url: String, base: String): String? {
-        val simklId = libraryItemId(url, "simkl.com", "tv", "movies", "anime") ?: return null
-        val token = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
-            ?.authToken() ?: return null
-        val response = customSession.get(
-            "https://api.simkl.com/search/id",
-            params = mapOf("simkl" to simklId),
-            headers = SimklApi.getHeaders(token),
-            timeout = 15L
-        ).text
-        val results = parseJson<JsonNode>(response)
-        val item = results.takeIf { it.isArray }?.firstOrNull {
-            it.get("ids")?.get("simkl")?.asText() == simklId
-        } ?: return null
-        val ids = item.get("ids") ?: return null
-        val imdbId = ids.get("imdb").textOrNull()?.takeIf { IMDB_ID_REGEX.matches(it) }
-        val tmdbId = ids.get("tmdb").textOrNull()
-            ?.takeIf { it.all(Char::isDigit) && it.toLongOrNull()?.let { n -> n > 0 } == true }
-        val mediaType = when (item.get("type").textOrNull()?.lowercase()) {
-            "movie", "movies" -> "movie"
-            "tv", "show", "shows", "anime" -> "series"
-            else -> return null
+    private fun simklMetaUrl(base: String, type: String, ids: JsonNode?): String? {
+        val imdbId = ids?.get("imdb").textOrNull()?.takeIf { IMDB_ID_REGEX.matches(it) }
+        val tmdbId = ids?.get("tmdb").textOrNull()?.takeIf {
+            it.all(Char::isDigit) && it.toLongOrNull()?.let { n -> n > 0L } == true
         }
         val id = imdbId ?: tmdbId?.let { "tmdb:$it" } ?: return null
-        return "$base/meta/$mediaType/${id.urlEncode()}.json"
+        return "$base/meta/$type/${id.urlEncode()}.json"
+    }
+
+    private suspend fun simklLibraryMetaUrl(url: String, base: String): String? {
+        val simklId = libraryItemId(url, "simkl.com", "tv", "movies", "anime") ?: return null
+        val auth = AccountManager.simklApi.authData() ?: return null
+
+        // CloudStream persists the complete, account-scoped Simkl library, including external IDs.
+        val cached = getKey<JsonNode>(SimklApi.SIMKL_CACHED_LIST, auth.user.id.toString())
+        for ((section, type) in listOf("movies" to "movie", "shows" to "series", "anime" to "series")) {
+            val item = cached?.get(section)?.firstOrNull {
+                val content = if (section == "movies") it.get("movie") else it.get("show")
+                content?.get("ids")?.get("simkl")?.asText() == simklId
+            } ?: continue
+            val ids = (if (section == "movies") item.get("movie") else item.get("show"))?.get("ids")
+            simklMetaUrl(base, type, ids)?.let { return it }
+        }
+
+        // Cache miss (or no external ID): first identify the media type, then fetch full IDs.
+        val headers = SimklApi.getHeaders(auth.token) + ("User-Agent" to "StremioC/1.0")
+        val params = mapOf(
+            "client_id" to (headers["simkl-api-key"] ?: return null),
+            "app-name" to "stremioc",
+            "app-version" to "1.0"
+        )
+        val matches = runSuspendCatching {
+            parseJson<JsonNode>(customSession.get(
+                "https://api.simkl.com/search/id",
+                params = params + ("simkl" to simklId),
+                headers = headers,
+                timeout = 15L
+            ).text)
+        }.getOrNull()
+        val match = matches?.takeIf { it.isArray }?.firstOrNull {
+            it.get("ids")?.get("simkl")?.asText() == simklId
+        } ?: return null
+        val endpoint = when (match.get("type").textOrNull()?.lowercase()) {
+            "movie" -> "movies"
+            "tv" -> "tv"
+            "anime" -> "anime"
+            else -> return null
+        }
+        val detail = runSuspendCatching {
+            parseJson<JsonNode>(customSession.get(
+                "https://api.simkl.com/$endpoint/$simklId",
+                params = params,
+                headers = headers,
+                timeout = 15L
+            ).text)
+        }.getOrNull() ?: return null
+        if (detail.get("ids")?.get("simkl")?.asText() != simklId) return null
+        val type = if (endpoint == "movies" ||
+            (endpoint == "anime" && detail.get("anime_type").textOrNull()?.lowercase() == "movie")
+        ) "movie" else "series"
+        return simklMetaUrl(base, type, detail.get("ids"))
     }
 
     override suspend fun getLoadUrl(name: SyncIdName, id: String): String? {
