@@ -2477,6 +2477,9 @@ open class StremioC(
     )
 
     private suspend fun fetchAnimeSeasonMapping(loadData: LoadData): AnimeSeasonMapping? {
+        val mapStarted = SystemClock.elapsedRealtimeNanos()
+        DetailLoadPerf.event("ANIME_MAP_ENTER", "source=${loadData.originalAnimeId?.substringBefore(':') ?: if (loadData.imdbId != null) "imdb" else "other"} season=${loadData.season ?: loadData.imdbSeason} episode=${loadData.episode ?: loadData.imdbEpisode}")
+        try {
         val kitsuId = (loadData.originalAnimeId?.takeIf { it.startsWith("kitsu:") } ?: loadData.kitsuId
             ?: loadData.id?.takeIf { it.startsWith("kitsu:") })
             ?.removePrefix("kitsu:")?.substringBefore(':')
@@ -2518,11 +2521,13 @@ open class StremioC(
         for (host in hosts) {
             var noMapping = false
             val mapping = runSuspendCatching {
-            val response = aioAnimeSession.get(
-                "https://$host/api/v1/anime?$query",
-                headers = mapOf("Cache-Control" to "no-cache, no-store", "Pragma" to "no-cache")
-            ).text
-            val root = parseJson<JsonNode>(response)
+            val response = DetailLoadPerf.step("anime.host.$host.http") {
+                aioAnimeSession.get(
+                    "https://$host/api/v1/anime?$query",
+                    headers = mapOf("Cache-Control" to "no-cache, no-store", "Pragma" to "no-cache")
+                ).text
+            }
+            val root = DetailLoadPerf.stepNow("anime.host.$host.parse") { parseJson<JsonNode>(response) }
             if (root.get("success")?.asBoolean() != true) return@runSuspendCatching null
             if (root.get("data")?.isNull == true) {
                 noMapping = true
@@ -2571,11 +2576,15 @@ open class StremioC(
                 imdbSeason = data.get("imdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 },
                 traktSeason = data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
             )
-            }.getOrNull()
+            }.onFailure { DetailLoadPerf.event("ANIME_HOST_ERROR", "host=$host error=${it.javaClass.simpleName}") }.getOrNull()
+            DetailLoadPerf.event("ANIME_HOST_RESULT", "host=$host dataNull=$noMapping mapped=${mapping != null}")
             if (noMapping) return null
             if (mapping != null) return mapping
         }
         return null
+        } finally {
+            DetailLoadPerf.event("ANIME_MAP_EXIT", "tookMs=${(SystemClock.elapsedRealtimeNanos() - mapStarted) / 1_000_000L}")
+        }
     }
 
     private data class IntegrationData(
@@ -3680,8 +3689,9 @@ open class StremioC(
             prefetchedAnimeMapping: Deferred<AnimeSeasonMapping?>? = null,
             prefetchedAnimeImdbId: String? = null
         ): LoadResponse = coroutineScope {
-            val syncedEntry = addonDeferred?.await()
+            val syncedEntry = DetailLoadPerf.step("await.secondaryAddonMeta") { addonDeferred?.await() }
             val detailedEntry = syncedEntry ?: this@CatalogEntry
+            DetailLoadPerf.event("DETAIL_META_CHOICE", "secondaryUsed=${syncedEntry != null} requestedId=${this@CatalogEntry.id} type=${this@CatalogEntry.type}")
             val recommendationPoster = if (provider.metadataPosterAddonBaseUrl() != null &&
                 (addonDeferred == null || syncedEntry != null)) detailedEntry.poster else null
             val originalAnimeId = requestedAnimeId
@@ -3768,7 +3778,7 @@ open class StremioC(
             }
 
             if (findApiDeferred != null) {
-                val findResult = findApiDeferred.await()
+                val findResult = DetailLoadPerf.step("await.tmdbFindInResponse") { findApiDeferred.await() }
                 if (findResult != null) { tmdbIdStr = findResult.first; foundMediaType = findResult.second }
             }
 
@@ -3779,10 +3789,12 @@ open class StremioC(
                     val safePrefetchedDetail = preFetchedDetail?.takeIf {
                         preFetchedDetailTmdbId == tmdbIdStr && preFetchedDetailMediaType == refinedMediaType
                     }
-                    tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!,
-                        refinedMediaType == "movie", finalImdbId, finalType, finalVideos,
-                        safePrefetchedDetail, if (safePrefetchedDetail != null) preFetchedCollection else null,
-                        recommendationPoster)
+                    tmdbData = DetailLoadPerf.step("response.tmdbEnrichment") {
+                        fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!,
+                            refinedMediaType == "movie", finalImdbId, finalType, finalVideos,
+                            safePrefetchedDetail, if (safePrefetchedDetail != null) preFetchedCollection else null,
+                            recommendationPoster)
+                    }
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -3845,7 +3857,8 @@ open class StremioC(
             val isCartoon = tmdbData?.fetchedGenreIds?.contains(16) == true ||
                 finalGenre?.any { it.contains("Animation", true) } == true
             val isAnimeFromMetadata = originalAnimeId != null || fetchedMalId != null || finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
-            val imdbSyncMapping = detailSyncMapping?.await()
+            val imdbSyncMapping = DetailLoadPerf.step("await.detailSyncMapping") { detailSyncMapping?.await() }
+            DetailLoadPerf.event("ANIME_SYNC_RESULT", "requested=${detailSyncMapping != null} matched=${imdbSyncMapping != null} eligible=$canSyncAnimeTrackers")
             val isAnimeMedia = isAnimeFromMetadata || imdbSyncMapping != null
 
             val originalTrackerId = originalAnimeId?.substringAfter(':')?.substringBefore(':')
@@ -3913,7 +3926,7 @@ open class StremioC(
                     movieId
                 }
 
-                val response = provider.newMovieLoadResponse(
+                val response = DetailLoadPerf.stepNow("response.movie.build") { provider.newMovieLoadResponse(
                     finalName, metaUrl, finalMovieType, 
                     LoadData(
                         type = finalType, 
@@ -3946,15 +3959,17 @@ open class StremioC(
                     finalLogo?.let { this.logoUrl = it }
 
 
+                } }
+                DetailLoadPerf.stepNow("response.movie.actorRegister") {
+                    ActorInformation.register(
+                        provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty(),
+                        recommendationPoster, provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host
+                    )
                 }
-                ActorInformation.register(
-                    provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty(),
-                    recommendationPoster, provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host
-                )
-                return@coroutineScope response.apply { attachMappedIds() }
+                return@coroutineScope DetailLoadPerf.stepNow("response.movie.attachSync") { response.apply { attachMappedIds() } }
 
             } else {
-                val finalEpisodes = processEpisodes(
+                val finalEpisodes = DetailLoadPerf.step("response.series.processEpisodes") { processEpisodes(
                     provider, 
                     cleanImdbId, 
                     tmdbData?.episodeTmdbMeta ?: emptyMap(), 
@@ -3973,13 +3988,13 @@ open class StremioC(
                     finalKitsuId?.toString() ?: this@CatalogEntry.kitsuIdExt,
                     tmdbData?.fetchedYear, // ★ 수집된 출시 연도(year) 인자 전달 추가
                     originalAnimeId
-                )
+                ) }
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
                 StremioC.trailerChoicesByUrl[metaUrl] = finalTrailers
                 StremioC.genreCatalogsByUrl[metaUrl] = genreTargets
-                val response = provider.newTvSeriesLoadResponse(
+                val response = DetailLoadPerf.stepNow("response.series.build") { provider.newTvSeriesLoadResponse(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
@@ -3992,12 +4007,14 @@ open class StremioC(
                     finalLogo?.let { this.logoUrl = it }
                     
 
+                } }
+                DetailLoadPerf.stepNow("response.series.actorRegister") {
+                    ActorInformation.register(
+                        provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty(),
+                        recommendationPoster, provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host
+                    )
                 }
-                ActorInformation.register(
-                    provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty(),
-                    recommendationPoster, provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host
-                )
-                return@coroutineScope response.apply { attachMappedIds() }
+                return@coroutineScope DetailLoadPerf.stepNow("response.series.attachSync") { response.apply { attachMappedIds() } }
             }           
         }
     }
