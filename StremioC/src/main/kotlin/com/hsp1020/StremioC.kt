@@ -852,6 +852,39 @@ open class StremioC(
         private const val ADDON_META_MAX_TTL_MS = 7L * 24 * 60 * 60 * 1000
         private val addonMetaScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val addonMetaFlights = mutableMapOf<String, Deferred<String>>()
+        private val metadataTextFlights = mutableMapOf<String, Deferred<String>>()
+        private val animeHttpFlights = mutableMapOf<String, Deferred<String>>()
+
+        // Share only metadata GETs with identical URLs and request headers.
+        // Stream/subtitle endpoints are deliberately excluded.
+        private suspend fun fetchSharedMetadataText(url: String): String {
+            val task = synchronized(metadataTextFlights) {
+                metadataTextFlights[url] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
+                    try {
+                        customSession.get(url).text
+                    } finally {
+                        synchronized(metadataTextFlights) { metadataTextFlights.remove(url) }
+                    }
+                }.also { metadataTextFlights[url] = it; it.start() }
+            }
+            return task.await()
+        }
+
+        private suspend fun fetchSharedAnimeText(url: String): String {
+            val task = synchronized(animeHttpFlights) {
+                animeHttpFlights[url] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
+                    try {
+                        aioAnimeSession.get(url, headers = mapOf(
+                            "Cache-Control" to "no-cache, no-store",
+                            "Pragma" to "no-cache"
+                        )).text
+                    } finally {
+                        synchronized(animeHttpFlights) { animeHttpFlights.remove(url) }
+                    }
+                }.also { animeHttpFlights[url] = it; it.start() }
+            }
+            return task.await()
+        }
 
         private fun cacheAddonMetaInRam(url: String, text: String, ttlMs: Long) {
             val bytes = text.toByteArray(Charsets.UTF_8)
@@ -1143,8 +1176,24 @@ open class StremioC(
                 .build()
         }
         private val homeHostBackoff = ConcurrentHashMap<String, Long>()
+        private val homeJsonFlights = mutableMapOf<String, Deferred<String>>()
 
+        // Home and Genre may request the same exact page at the same time.
+        // Share transport without sharing either caller's pagination state.
         private suspend fun fetchHomeJson(url: String): String {
+            val task = synchronized(homeJsonFlights) {
+                homeJsonFlights[url] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
+                    try {
+                        fetchHomeJsonUnshared(url)
+                    } finally {
+                        synchronized(homeJsonFlights) { homeJsonFlights.remove(url) }
+                    }
+                }.also { homeJsonFlights[url] = it; it.start() }
+            }
+            return task.await()
+        }
+
+        private suspend fun fetchHomeJsonUnshared(url: String): String {
             currentCoroutineContext().ensureActive()
             val host = url.toHttpUrlOrNull()?.host ?: throw IllegalArgumentException("Invalid catalog URL")
             val now = System.currentTimeMillis()
@@ -1471,7 +1520,7 @@ open class StremioC(
         } else {
             val fetchedFind = runSuspendCatching {
                 val text = DetailLoadPerf.step("tmdb.find.http") {
-                    customSession.get(buildTmdbUrl("/find/$imdbId", "external_source" to "imdb_id")).text
+                    fetchSharedMetadataText(buildTmdbUrl("/find/$imdbId", "external_source" to "imdb_id"))
                 }
                 val findRes = DetailLoadPerf.stepNow("tmdb.find.parse") {
                     if (text.isNotBlank()) parseJson<TmdbFindResponse>(text) else null
@@ -1519,7 +1568,7 @@ open class StremioC(
             cached.first
         } else {
             runSuspendCatching {
-                val text = DetailLoadPerf.step("tmdb.detail.http") { customSession.get(detailUrl).text }
+                val text = DetailLoadPerf.step("tmdb.detail.http") { fetchSharedMetadataText(detailUrl) }
                 val fetched = DetailLoadPerf.stepNow("tmdb.detail.parse") {
                     if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
                 }
@@ -2384,7 +2433,7 @@ open class StremioC(
                 async(Dispatchers.IO) {
                     runSuspendCatching {
                         val text = DetailLoadPerf.step("tmdb.collection.prefetch.http") {
-                            customSession.get(buildTmdbUrl("/collection/$collectionId")).text
+                            fetchSharedMetadataText(buildTmdbUrl("/collection/$collectionId"))
                         }
                         if (text.isNotBlank()) parseJson<TmdbCollectionDetail>(text).parts
                             ?: emptyList() else emptyList()
@@ -2917,10 +2966,7 @@ open class StremioC(
             var noMapping = false
             val mapping = runSuspendCatching {
             val response = DetailLoadPerf.step("anime.host.$host.http") {
-                aioAnimeSession.get(
-                    "https://$host/api/v1/anime?$query",
-                    headers = mapOf("Cache-Control" to "no-cache, no-store", "Pragma" to "no-cache")
-                ).text
+                fetchSharedAnimeText("https://$host/api/v1/anime?$query")
             }
             val root = DetailLoadPerf.stepNow("anime.host.$host.parse") { parseJson<JsonNode>(response) }
             if (root.get("success")?.asBoolean() != true) return@runSuspendCatching null
@@ -3791,7 +3837,7 @@ open class StremioC(
             val detailRes = preFetchedDetail ?: if (cached != null) {
                 cached.first
             } else {
-                val text = DetailLoadPerf.step("tmdb.enrich.detail.http") { StremioC.customSession.get(detailUrl).text }
+                val text = DetailLoadPerf.step("tmdb.enrich.detail.http") { fetchSharedMetadataText(detailUrl) }
                 val fetched = DetailLoadPerf.stepNow("tmdb.enrich.detail.parse") {
                     if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
                 }
@@ -3846,7 +3892,7 @@ open class StremioC(
                                             cachedSeason.first
                                         } else {
                                             val fetchedSeasonText = DetailLoadPerf.step("tmdb.season.$seasonNum.http") {
-                                                StremioC.customSession.get(seasonUrl).text
+                                                fetchSharedMetadataText(seasonUrl)
                                             }
                                             val fetchedSeason = DetailLoadPerf.stepNow("tmdb.season.$seasonNum.parse") {
                                                 if (fetchedSeasonText.isNotBlank()) parseJson<TmdbSeasonDetail>(fetchedSeasonText) else null
@@ -3879,7 +3925,7 @@ open class StremioC(
                         runSuspendCatching {
                             val colUrl = provider.buildTmdbUrl("/collection/$collectionId")
                             val colText = DetailLoadPerf.step("tmdb.collection.http") {
-                                StremioC.customSession.get(colUrl).text
+                                fetchSharedMetadataText(colUrl)
                             }
                             DetailLoadPerf.stepNow("tmdb.collection.parse") {
                                 if (colText.isNotBlank()) parseJson<TmdbCollectionDetail>(colText).parts ?: emptyList() else emptyList()
