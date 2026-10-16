@@ -1449,10 +1449,18 @@ open class StremioC(
         fun asFindResult(): Pair<String, String>? = if (viaFind) tmdbId to mediaType else null
     }
 
+    private fun mdbCredentialFingerprint(): String {
+        val key = CloudStreamApp.context
+            ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+            ?.getString("mdblist_api_key", "").orEmpty()
+        return key.toUniqueKey()
+    }
+
     private data class MdbTarget(
         val id: String,
         val isTmdb: Boolean,
-        val mediaType: String
+        val mediaType: String,
+        val credentialFingerprint: String = mdbCredentialFingerprint()
     )
 
     private data class SpeculativeMdbResult(
@@ -1501,7 +1509,7 @@ open class StremioC(
     }
 
     private suspend fun fetchMdbAttempt(target: MdbTarget): SpeculativeMdbResult {
-        val cacheKey = "${target.isTmdb}:${target.mediaType}:${target.id}"
+        val cacheKey = "${target.credentialFingerprint}:${target.isTmdb}:${target.mediaType}:${target.id}"
         val cached = mdbRatingsCache[cacheKey]?.takeIf {
             System.currentTimeMillis() - it.second < METADATA_CACHE_TTL
         } ?: MetadataDiskCache.read("mdb", cacheKey)?.let { (json, stamp) ->
