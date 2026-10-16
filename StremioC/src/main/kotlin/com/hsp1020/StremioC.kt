@@ -954,11 +954,17 @@ open class StremioC(
                             ?: response.headers["cache-control"]
                         val vary = response.headers["Vary"] ?: response.headers["vary"]
                         val ttlMs = addonMetaTtlMs(url, policy, root)
-                        if (ttlMs > 0L && vary?.trim() != "*" &&
+                        val usableMeta = root.get("meta")?.isObject == true ||
+                            root.get("metas")?.takeIf { it.isArray && it.size() > 0 } != null ||
+                            root.get("id")?.asText()?.isNotBlank() == true
+                        if (usableMeta && ttlMs > 0L && vary?.trim() != "*" &&
                             !containsTransientMetaLinks(root) &&
                             !body.contains("data:image/", ignoreCase = true)) {
                             cacheAddonMetaInRam(storageKey, body, ttlMs)
-                            MetadataDiskCache.write("meta", storageKey, body, ttlMs)
+                            // Never delay the first detail paint on GZIP or disk trimming.
+                            addonMetaScope.launch {
+                                MetadataDiskCache.write("meta", storageKey, body, ttlMs)
+                            }
                         }
                         body
                     } finally {
