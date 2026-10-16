@@ -537,7 +537,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val oldSlot = titleSlot
         val oldTitleVisibility = title?.visibility
         runCatching { suppressNativePreview(); update() }.onFailure {
-            android.util.Log.e("StremioCBackdrop", "Split layout update failed", it)
             recoverOriginalLayout()
         }
         // A new slot or a native-title restoration requires another measure.
@@ -707,7 +706,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         installTopScrim(context)
         root.viewTreeObserver.addOnPreDrawListener(preDraw)
         runCatching { update() }.onFailure {
-            android.util.Log.e("StremioCBackdrop", "Split layout start failed", it)
             recoverOriginalLayout()
         }
     }

@@ -2,9 +2,6 @@ package com.hsp1020
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.os.SystemClock
-import android.util.Log
-import java.util.concurrent.atomic.AtomicLong
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonAlias
 import com.fasterxml.jackson.databind.JsonNode
@@ -95,8 +92,6 @@ private inline fun <T> lruSet(maxSize: Int): MutableSet<T> {
     return Collections.synchronizedSet(Collections.newSetFromMap(object : java.util.LinkedHashMap<T, Boolean>(maxSize, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<T, Boolean>): Boolean {
             val evicted = size > maxSize
-            if (evicted) StremioCCacheAudit.log("lru_set", "RAM_EVICT",
-                eldest.key.toString(), "limit=$maxSize")
             return evicted
         }
     }))
@@ -106,8 +101,6 @@ private inline fun <K, V> lruCacheMap(maxSize: Int): MutableMap<K, V> {
     return Collections.synchronizedMap(object : java.util.LinkedHashMap<K, V>(maxSize, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>): Boolean {
             val evicted = size > maxSize
-            if (evicted) StremioCCacheAudit.log("lru_map", "RAM_EVICT",
-                eldest.key.toString(), "limit=$maxSize")
             return evicted
         }
     })
@@ -128,8 +121,6 @@ private fun mdbCredentialFingerprint(): String {
     return key.toUniqueKey()
 }
 
-internal fun stremioMdbAuditKey(id: String, isTmdb: Boolean, mediaType: String): String =
-    "${mdbCredentialFingerprint()}:$isTmdb:$mediaType:$id"
 
 internal data class StremioManifestCachePolicy(val ttlMs: Long, val noStore: Boolean)
 
@@ -162,20 +153,6 @@ internal fun stremioManifestCachePolicy(
     return StremioManifestCachePolicy(ttl, false)
 }
 
-// Temporary end-to-end cache audit: all keys are SHA-256 fingerprints, never
-// full URLs, API keys or JSON payloads. Remains visible in ordinary Logcat.
-internal object StremioCCacheAudit {
-    private const val TAG = "StremioCCacheAudit"
-    fun id(key: String): String = runCatching {
-        MessageDigest.getInstance("SHA-256")
-            .digest(key.toByteArray(Charsets.UTF_8))
-            .take(6).joinToString("") { "%02x".format(it.toInt() and 0xff) }
-    }.getOrDefault("unknown")
-
-    fun log(group: String, action: String, key: String, info: String = "") {
-        Log.i(TAG, "group=$group event=$action key=${id(key)} $info")
-    }
-}
 
 /** Connect a completed MDBList fetch to an already rendered StremioC detail, without reloading it. */
 internal object StremioCMdbUiBridge {
@@ -193,14 +170,12 @@ internal object StremioCMdbUiBridge {
                 count++
             }
         }
-        StremioCCacheAudit.log("mdb_ui", "DETAIL_BOUND", cacheKey, "urls=$count")
     }
 
     fun keyFor(url: String?): String? = url?.let { urls[it] }
     fun listen(callback: ((String) -> Unit)?) { listener = callback }
 
     fun publish(cacheKey: String) {
-        StremioCCacheAudit.log("mdb_ui", "RATINGS_READY", cacheKey)
         main.post { listener?.invoke(cacheKey) }
     }
 }
@@ -209,13 +184,10 @@ internal fun <T> stremioCacheMemoryRead(
     group: String, key: String, cached: Pair<T, Long>?, ttlMs: Long
 ): Pair<T, Long>? {
     if (cached == null) {
-        StremioCCacheAudit.log(group, "RAM_MISS", key)
         return null
     }
     val age = System.currentTimeMillis() - cached.second
     val valid = age >= 0L && age < ttlMs
-    StremioCCacheAudit.log(group, if (valid) "RAM_HIT" else "RAM_EXPIRED",
-        key, "ageMs=$age ttlMs=$ttlMs")
     return cached.takeIf { valid }
 }
 
@@ -231,21 +203,6 @@ private object MetadataDiskCache {
     private val lock = Any()
     private var quotaChecked = false
     private var cleanedOldTemps = false
-    private val diskHits = AtomicLong()
-    private val diskMisses = AtomicLong()
-
-    data class Usage(val items: Int, val bytes: Long, val tempBytes: Long, val hits: Long, val misses: Long)
-    data class Entry(val json: String, val timestamp: Long, val ttlMs: Long)
-
-    suspend fun usage(): Usage = withContext(Dispatchers.IO) {
-        synchronized(lock) {
-            val all = directory()?.listFiles()?.filter { it.isFile }.orEmpty()
-            val files = all.filter { it.name.endsWith(".gz") }
-            Usage(files.size, files.sumOf { it.length() },
-                all.filter { it.name.endsWith(".tmp") }.sumOf { it.length() },
-                diskHits.get(), diskMisses.get())
-        }
-    }
 
     private fun directory(): File? = CloudStreamApp.context?.filesDir
         ?.let { File(it, "stremioc-metadata-v1").apply { mkdirs() }.takeIf { dir -> dir.isDirectory } }
@@ -263,12 +220,9 @@ private object MetadataDiskCache {
         synchronized(lock) {
             val file = directory()?.let { target(it, kind, key) }
             if (file == null) {
-                StremioCCacheAudit.log(kind, "DISK_UNAVAILABLE", key)
                 return@synchronized null
             }
             if (!file.isFile) {
-                diskMisses.incrementAndGet()
-                StremioCCacheAudit.log(kind, "DISK_MISS", key)
                 return@synchronized null
             }
             try {
@@ -288,22 +242,13 @@ private object MetadataDiskCache {
                 if (stamp == null || stamp > now || ttl <= 0L ||
                     now - stamp >= ttl || firstNewline < 0 || (kind == "meta" && secondNewline < 0)) {
                     file.delete()
-                    diskMisses.incrementAndGet()
-                    StremioCCacheAudit.log(kind, "DISK_EXPIRED_OR_INVALID", key,
-                        "ageMs=${stamp?.let { now - it } ?: -1} ttlMs=$ttl bytes=${file.length()}")
                     null
                 } else {
-                    diskHits.incrementAndGet()
-                    StremioCCacheAudit.log(kind, "DISK_HIT", key,
-                        "ageMs=${now - stamp} ttlMs=$ttl jsonChars=${body.length} compressedBytes=${file.length()}")
                     file.setLastModified(now) // Disk LRU; TTL stays in the file header.
                     Entry(body.substring(if (kind == "meta") secondNewline + 1 else firstNewline + 1), stamp, ttl)
                 }
             } catch (error: Exception) {
                 file.delete()
-                diskMisses.incrementAndGet()
-                StremioCCacheAudit.log(kind, "DISK_READ_ERROR", key,
-                    "error=${error.javaClass.simpleName}")
                 null
             }
         }
@@ -311,22 +256,18 @@ private object MetadataDiskCache {
 
     suspend fun write(kind: String, key: String, json: String, ttlMs: Long = TTL_MS) {
         if (kind == "meta" && ttlMs <= 0L) {
-            StremioCCacheAudit.log(kind, "DISK_SKIP", key, "reason=nonpositive_ttl")
             return
         }
         val rawBytes = json.toByteArray(Charsets.UTF_8).size
         if (json.contains("data:image/", ignoreCase = true) || rawBytes > MAX_RAW_BYTES) {
-            StremioCCacheAudit.log(kind, "DISK_SKIP", key, "reason=image_or_oversize rawBytes=$rawBytes")
             return
         }
         withContext(Dispatchers.IO) {
             val dir = directory() ?: run {
-                StremioCCacheAudit.log(kind, "DISK_WRITE_UNAVAILABLE", key)
                 return@withContext
             }
             // Compress outside the global cache lock. Unique temp names allow concurrent writers.
             val temp = try { File.createTempFile("stremioc_${kind}_", ".tmp", dir) } catch (error: Exception) {
-                StremioCCacheAudit.log(kind, "DISK_WRITE_ERROR", key, "error=${error.javaClass.simpleName}")
                 return@withContext
             }
             try {
@@ -340,8 +281,6 @@ private object MetadataDiskCache {
                     it.write(json)
                 }
                 if (temp.length() > MAX_ENTRY_BYTES) {
-                    StremioCCacheAudit.log(kind, "DISK_SKIP", key,
-                        "reason=compressed_oversize bytes=${temp.length()}")
                     return@withContext
                 }
                 synchronized(lock) {
@@ -353,10 +292,7 @@ private object MetadataDiskCache {
                     }
                     val file = target(dir, kind, key)
                     if (!temp.renameTo(file)) {
-                        StremioCCacheAudit.log(kind, "DISK_WRITE_ERROR", key, "reason=rename")
                     } else {
-                        StremioCCacheAudit.log(kind, "DISK_WRITE_OK", key,
-                            "rawBytes=$rawBytes compressedBytes=${file.length()} ttlMs=$ttlMs")
                         val files = dir.listFiles()?.filter { it.isFile && it.name.endsWith(".gz") }.orEmpty()
                         val totalBytes = files.sumOf { it.length() }
                         val kindCount = files.count { it.name.startsWith("${kind}_") }
@@ -365,15 +301,9 @@ private object MetadataDiskCache {
                             trim(dir)
                             quotaChecked = true
                         }
-                        StremioCCacheAudit.log(kind, "DISK_BUDGET", key,
-                            "totalBytes=${if (totalBytes > MAX_BYTES || kindCount > (entryLimits[kind] ?: Int.MAX_VALUE))
-                                dir.listFiles()?.filter { it.isFile && it.name.endsWith(".gz") }?.sumOf { it.length() } ?: 0L
-                            else totalBytes}")
                     }
                 }
             } catch (error: Exception) {
-                StremioCCacheAudit.log(kind, "DISK_WRITE_ERROR", key,
-                    "error=${error.javaClass.simpleName}")
             } finally {
                 temp.delete()
             }
@@ -385,9 +315,7 @@ private object MetadataDiskCache {
         for ((kind, limit) in entryLimits) {
             files.filter { it.name.startsWith("${kind}_") }
                 .sortedByDescending { it.lastModified() }.drop(limit).forEach {
-                    val bytes = it.length()
-                    if (it.delete()) StremioCCacheAudit.log(kind, "DISK_EVICT",
-                        it.name, "reason=entry_limit bytes=$bytes")
+                    it.delete()
                 }
         }
         val remaining = files.filter { it.exists() }.sortedBy { it.lastModified() }
@@ -397,55 +325,7 @@ private object MetadataDiskCache {
             val length = file.length()
             if (file.delete()) {
                 total -= length
-                StremioCCacheAudit.log("gzip", "DISK_EVICT", file.name,
-                    "reason=byte_limit bytes=$length remainingBytes=$total")
             }
-        }
-    }
-}
-
-private object DetailLoadPerf {
-    private val sequence = AtomicLong()
-    val current = ThreadLocal<Session?>()
-    private const val TAG = "StremioCLoadPerf"
-
-    class Session {
-        val id = sequence.incrementAndGet()
-        private val origin = SystemClock.elapsedRealtimeNanos()
-        fun event(stage: String, detail: String = "") {
-            val totalMs = (SystemClock.elapsedRealtimeNanos() - origin) / 1_000_000L
-            Log.i(TAG, "run=$id totalMs=$totalMs stage=$stage $detail")
-        }
-    }
-
-    fun event(stage: String, detail: String = "") = current.get()?.event(stage, detail)
-
-    suspend fun <T> step(stage: String, block: suspend () -> T): T {
-        val trace = current.get() ?: return block()
-        val start = SystemClock.elapsedRealtimeNanos()
-        trace.event("BEGIN", "op=$stage")
-        try {
-            val result = block()
-            trace.event("END", "op=$stage tookMs=${(SystemClock.elapsedRealtimeNanos() - start) / 1_000_000L}")
-            return result
-        } catch (error: Throwable) {
-            trace.event(if (error is CancellationException) "CANCEL" else "FAIL",
-                "op=$stage tookMs=${(SystemClock.elapsedRealtimeNanos() - start) / 1_000_000L} error=${error.javaClass.simpleName}")
-            throw error
-        }
-    }
-
-    fun <T> stepNow(stage: String, block: () -> T): T {
-        val trace = current.get() ?: return block()
-        val start = SystemClock.elapsedRealtimeNanos()
-        trace.event("BEGIN", "op=$stage")
-        try {
-            val result = block()
-            trace.event("END", "op=$stage tookMs=${(SystemClock.elapsedRealtimeNanos() - start) / 1_000_000L}")
-            return result
-        } catch (error: Throwable) {
-            trace.event("FAIL", "op=$stage tookMs=${(SystemClock.elapsedRealtimeNanos() - start) / 1_000_000L} error=${error.javaClass.simpleName}")
-            throw error
         }
     }
 }
@@ -581,16 +461,14 @@ open class StremioC(
         )
 
         // CloudStream persists the complete, account-scoped Simkl library, including external IDs.
-        val cached = DetailLoadPerf.stepNow("library.simkl.cache.read") {
+        val cached = run {
             getKey<JsonNode>(SimklApi.SIMKL_CACHED_LIST, auth.user.id.toString())
         }
-        DetailLoadPerf.event("LIBRARY_CACHE", "service=simkl cachePresent=${cached != null} movies=${cached?.get("movies")?.size() ?: 0} shows=${cached?.get("shows")?.size() ?: 0} anime=${cached?.get("anime")?.size() ?: 0}")
         for ((section, type) in listOf("movies" to "movie", "shows" to "series", "anime" to "series")) {
             val item = cached?.get(section)?.firstOrNull {
                 val content = if (section == "movies") it.get("movie") else it.get("show")
                 content?.get("ids")?.get("simkl")?.asText() == simklId
             } ?: continue
-            DetailLoadPerf.event("LIBRARY_CACHE_MATCH", "service=simkl section=$section")
             val ids = (if (section == "movies") item.get("movie") else item.get("show"))?.get("ids")
             if (section != "anime") {
                 simklMetaUrl(base, type, ids)?.let { return it }
@@ -602,7 +480,7 @@ open class StremioC(
             val animeType = item.get("anime_type").textOrNull()
                 ?: item.get("show")?.get("anime_type").textOrNull()
             val detail = if (animeType == null) runSuspendCatching {
-                DetailLoadPerf.step("library.simkl.animeType.http") {
+                run {
                     parseJson<JsonNode>(customSession.get(
                         "https://api.simkl.com/anime/$simklId",
                         params = params,
@@ -618,15 +496,13 @@ open class StremioC(
                 "tv", "ova", "ona", "special", "music video" -> "series"
                 else -> return null
             }
-            DetailLoadPerf.event("LIBRARY_TYPE", "service=simkl from=anime type=$resolvedType")
             return simklMetaUrl(base, resolvedType, ids)
                 ?: simklMetaUrl(base, resolvedType, detail?.get("ids"))
         }
 
         // Cache miss (or no external ID): first identify the media type, then fetch full IDs.
-        DetailLoadPerf.event("LIBRARY_CACHE_MISS", "service=simkl startingFallback=true")
         val matches = runSuspendCatching {
-            DetailLoadPerf.step("library.simkl.searchId.http") {
+            run {
                 parseJson<JsonNode>(customSession.get(
                     "https://api.simkl.com/search/id",
                     params = params + ("simkl" to simklId),
@@ -634,7 +510,7 @@ open class StremioC(
                     timeout = 15L
                 ).text)
             }
-        }.onFailure { DetailLoadPerf.event("LIBRARY_FALLBACK_ERROR", "service=simkl op=search error=${it.javaClass.simpleName}") }.getOrNull()
+        }.getOrNull()
         val match = matches?.takeIf { it.isArray }?.firstOrNull {
             it.get("ids")?.get("simkl")?.asText() == simklId
         } ?: return null
@@ -645,7 +521,7 @@ open class StremioC(
             else -> return null
         }
         val detail = runSuspendCatching {
-            DetailLoadPerf.step("library.simkl.$endpoint.detail.http") {
+            run {
                 parseJson<JsonNode>(customSession.get(
                     "https://api.simkl.com/$endpoint/$simklId",
                     params = params,
@@ -653,7 +529,7 @@ open class StremioC(
                     timeout = 15L
                 ).text)
             }
-        }.onFailure { DetailLoadPerf.event("LIBRARY_FALLBACK_ERROR", "service=simkl op=detail error=${it.javaClass.simpleName}") }.getOrNull() ?: return null
+        }.getOrNull() ?: return null
         if (detail.get("ids")?.get("simkl")?.asText() != simklId) return null
         val type = if (endpoint == "anime") {
             when (detail.get("anime_type").textOrNull()?.lowercase()) {
@@ -662,7 +538,6 @@ open class StremioC(
                 else -> return null
             }
         } else if (endpoint == "movies") "movie" else "series"
-        DetailLoadPerf.event("LIBRARY_TYPE", "service=simkl from=fallback type=$type")
         return simklMetaUrl(base, type, detail.get("ids"))
     }
 
@@ -674,7 +549,7 @@ open class StremioC(
 
     private suspend fun animeLibraryMetaType(name: SyncIdName, itemId: String): String? {
         val auth = AccountManager.syncApis.firstOrNull { it.syncIdName == name }?.authData()
-        val cachedType = DetailLoadPerf.stepNow("library.anime.cache.read") { when (name) {
+        val cachedType = run { when (name) {
             SyncIdName.MyAnimeList -> auth?.let {
                 getKey<JsonNode>("mal_cached_list", it.user.id.toString())
             }?.firstOrNull { it.get("node")?.get("id")?.asText() == itemId }
@@ -689,15 +564,14 @@ open class StremioC(
             // CloudStream's Kitsu library cache does not request the anime subtype.
             else -> null
         } }
-        DetailLoadPerf.event("LIBRARY_CACHE", "service=$name format=$cachedType hit=${animeLibraryType(cachedType) != null}")
         animeLibraryType(cachedType)?.let { return it }
 
         // A library URL carries no movie/series type. Resolve it only when the
         // existing MAL/AniList cache cannot answer (or for Kitsu).
         val remoteType = runSuspendCatching {
-            DetailLoadPerf.step("library.anime.typeRemote.$name") { when (name) {
+            run { when (name) {
                 SyncIdName.MyAnimeList -> {
-                    val token = auth?.token?.accessToken ?: return@step null
+                    val token = auth?.token?.accessToken ?: return@run null
                     val item = parseJson<JsonNode>(customSession.get(
                         "https://api.myanimelist.net/v2/anime/$itemId",
                         params = mapOf("fields" to "media_type"),
@@ -728,8 +602,7 @@ open class StremioC(
                 }
                 else -> null
             } }
-        }.onFailure { DetailLoadPerf.event("LIBRARY_TYPE_ERROR", "service=$name error=${it.javaClass.simpleName}") }.getOrNull()
-        DetailLoadPerf.event("LIBRARY_TYPE", "service=$name remoteType=$remoteType resolved=${animeLibraryType(remoteType)}")
+        }.getOrNull()
         return animeLibraryType(remoteType)
     }
 
@@ -930,7 +803,6 @@ open class StremioC(
         fun invalidateSyncSettingsCache() = synchronized(StremioC::class.java) {
             cachedSyncSettings = null
             cachedSyncSettingsTime = 0L
-            StremioCCacheAudit.log("settings", "CACHE_INVALIDATE", "sync_settings")
             // Metadata keys already include the exact addon URL, locale and
             // manifest version. Unrelated settings must not flush other addons.
         }
@@ -945,16 +817,11 @@ open class StremioC(
             val now = System.currentTimeMillis()
             val cached = cachedSyncSettings
             if (cached != null && (now - cachedSyncSettingsTime) < SYNC_SETTINGS_TTL) {
-                StremioCCacheAudit.log("settings", "RAM_HIT", "sync_settings",
-                    "ageMs=${now - cachedSyncSettingsTime} ttlMs=$SYNC_SETTINGS_TTL")
                 return cached
             }
-            StremioCCacheAudit.log("settings", if (cached == null) "RAM_MISS" else "RAM_EXPIRED",
-                "sync_settings", "ageMs=${now - cachedSyncSettingsTime}")
             synchronized(StremioC::class.java) {
                 val doubleCached = cachedSyncSettings
                 if (doubleCached != null && (now - cachedSyncSettingsTime) < SYNC_SETTINGS_TTL) {
-                    StremioCCacheAudit.log("settings", "RAM_REUSE_AFTER_LOCK", "sync_settings")
                     return doubleCached
                 }
                 val context = CloudStreamApp.context ?: return SyncSettings("", emptyMap(), emptyMap(), emptyMap(), emptyList())
@@ -987,7 +854,6 @@ open class StremioC(
                             }
                         }
                     } catch (e: Exception) {
-                        e.printStackTrace()
                     }
                 }
                 val extraUrls = runCatching {
@@ -1005,8 +871,6 @@ open class StremioC(
                     catalogEnabled.filterValues { !it }.keys.toSet(), catalogEnabledIds)
                 cachedSyncSettings = result
                 cachedSyncSettingsTime = System.currentTimeMillis()
-                StremioCCacheAudit.log("settings", "RAM_WRITE_OK", "sync_settings",
-                    "links=${map.size} extraAddons=${extraUrls.size} disabled=${result.disabledCatalogUrls.size}")
                 return result
             }
         }
@@ -1046,23 +910,6 @@ open class StremioC(
         private const val ADDON_META_MAX_TTL_MS = 7L * 24 * 60 * 60 * 1000
         private val addonMetaScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val addonMetaFlights = mutableMapOf<String, Deferred<String>>()
-        private val addonMetaMemoryHits = AtomicLong()
-        private val addonMetaMemoryMisses = AtomicLong()
-        private val addonMetaNetworkFetches = AtomicLong()
-
-        // Optional on-demand diagnostics: no permanent high-volume logging.
-        internal suspend fun metadataCacheDiagnostics(): String {
-            val disk = MetadataDiskCache.usage()
-            val ram = synchronized(addonMetaCache) {
-                addonMetaCache.size to addonMetaCacheBytes
-            }
-            return "diskItems=${disk.items} diskBytes=${disk.bytes} tempBytes=${disk.tempBytes} " +
-                "diskHits=${disk.hits} diskMisses=${disk.misses} " +
-                "metaRamItems=${ram.first} metaRamBytes=${ram.second} " +
-                "metaRamHits=${addonMetaMemoryHits.get()} " +
-                "metaRamMisses=${addonMetaMemoryMisses.get()} " +
-                "metaHttpFetches=${addonMetaNetworkFetches.get()}"
-        }
         private val metadataTextFlights = mutableMapOf<String, Deferred<String>>()
         private val animeHttpFlights = mutableMapOf<String, Deferred<String>>()
 
@@ -1070,25 +917,16 @@ open class StremioC(
         // Stream/subtitle endpoints are deliberately excluded.
         private suspend fun fetchSharedMetadataText(url: String): String {
             val task = synchronized(metadataTextFlights) {
-                metadataTextFlights[url]?.also {
-                    StremioCCacheAudit.log("tmdb_http", "INFLIGHT_JOIN", url)
-                } ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
-                    val start = SystemClock.elapsedRealtime()
-                    StremioCCacheAudit.log("tmdb_http", "HTTP_START", url)
+                metadataTextFlights[url] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
                     try {
                         val text = customSession.get(url).text
-                        StremioCCacheAudit.log("tmdb_http", "HTTP_DONE", url,
-                            "durationMs=${SystemClock.elapsedRealtime() - start} chars=${text.length}")
                         text
                     } catch (error: Throwable) {
-                        StremioCCacheAudit.log("tmdb_http", "HTTP_ERROR", url,
-                            "durationMs=${SystemClock.elapsedRealtime() - start} error=${error.javaClass.simpleName}")
                         throw error
                     } finally {
                         synchronized(metadataTextFlights) { metadataTextFlights.remove(url) }
                     }
                 }.also {
-                    StremioCCacheAudit.log("tmdb_http", "INFLIGHT_NEW", url)
                     metadataTextFlights[url] = it
                     it.start()
                 }
@@ -1098,28 +936,19 @@ open class StremioC(
 
         private suspend fun fetchSharedAnimeText(url: String): String {
             val task = synchronized(animeHttpFlights) {
-                animeHttpFlights[url]?.also {
-                    StremioCCacheAudit.log("anime_http", "INFLIGHT_JOIN", url)
-                } ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
-                    val start = SystemClock.elapsedRealtime()
-                    StremioCCacheAudit.log("anime_http", "HTTP_START", url)
+                animeHttpFlights[url] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
                     try {
                         val text = aioAnimeSession.get(url, headers = mapOf(
                             "Cache-Control" to "no-cache, no-store",
                             "Pragma" to "no-cache"
                         )).text
-                        StremioCCacheAudit.log("anime_http", "HTTP_DONE", url,
-                            "durationMs=${SystemClock.elapsedRealtime() - start} chars=${text.length}")
                         text
                     } catch (error: Throwable) {
-                        StremioCCacheAudit.log("anime_http", "HTTP_ERROR", url,
-                            "error=${error.javaClass.simpleName}")
                         throw error
                     } finally {
                         synchronized(animeHttpFlights) { animeHttpFlights.remove(url) }
                     }
                 }.also {
-                    StremioCCacheAudit.log("anime_http", "INFLIGHT_NEW", url)
                     animeHttpFlights[url] = it
                     it.start()
                 }
@@ -1130,8 +959,6 @@ open class StremioC(
         private fun cacheAddonMetaInRam(url: String, text: String, ttlMs: Long, stamp: Long = System.currentTimeMillis()) {
             val bytes = text.toByteArray(Charsets.UTF_8)
             if (ttlMs <= 0L || bytes.size > ADDON_META_MAX_RAW) {
-                StremioCCacheAudit.log("meta", "RAM_SKIP", url,
-                    "bytes=${bytes.size} ttlMs=$ttlMs")
                 return
             }
             synchronized(addonMetaCache) {
@@ -1143,12 +970,8 @@ open class StremioC(
                         addonMetaCacheBytes > ADDON_META_RAM_LIMIT) && cursor.hasNext()) {
                     val removed = cursor.next()
                     addonMetaCacheBytes -= removed.value.bytes.size.toLong()
-                    StremioCCacheAudit.log("meta", "RAM_EVICT", removed.key,
-                        "bytes=${removed.value.bytes.size}")
                     cursor.remove()
                 }
-                StremioCCacheAudit.log("meta", "RAM_WRITE_OK", url,
-                    "bytes=${bytes.size} entries=${addonMetaCache.size} totalBytes=$addonMetaCacheBytes ttlMs=$ttlMs")
             }
         }
 
@@ -1156,19 +979,12 @@ open class StremioC(
             val bytes = synchronized(addonMetaCache) {
                 val held = addonMetaCache[url]
                 if (held != null && System.currentTimeMillis() - held.at < held.ttlMs) {
-                    StremioCCacheAudit.log("meta", "RAM_HIT", url,
-                        "ageMs=${System.currentTimeMillis() - held.at} ttlMs=${held.ttlMs} bytes=${held.bytes.size}")
                     held.bytes
                 } else {
-                    if (held != null) StremioCCacheAudit.log("meta", "RAM_EXPIRED", url,
-                        "ageMs=${System.currentTimeMillis() - held.at} ttlMs=${held.ttlMs}")
-                    else StremioCCacheAudit.log("meta", "RAM_MISS", url)
                     addonMetaCache.remove(url)?.let { addonMetaCacheBytes -= it.bytes.size.toLong() }
                     null
                 }
             }
-            if (bytes != null) addonMetaMemoryHits.incrementAndGet()
-            else addonMetaMemoryMisses.incrementAndGet()
             return bytes?.let { String(it, Charsets.UTF_8) }
         }
 
@@ -1227,8 +1043,7 @@ open class StremioC(
         // Validate the metadata against the requested URL before allowing persistence.
         // An addon may legitimately remap anime IDs: display those results, but
         // never keep a mismatched or incomplete response across page loads.
-        // Report why a /meta response was not persisted. Only fingerprint IDs:
-        // full addon URLs can include tokens and must never appear in Logcat.
+        // Reject malformed /meta responses before caching them.
         private fun addonMetaRejectReason(url: String, root: JsonNode): String? {
             if (root.get("success")?.asBoolean() == false) return "server_success_false"
             val meta = root.get("meta") ?: root
@@ -1261,18 +1076,7 @@ open class StremioC(
                     returnedId.removePrefix("tmdb:").toIntOrNull()?.let { it > 0 } == true)
             if (returnedId != expectedId && !(expectedAnime && mappedExternal &&
                     !entry.name.isNullOrBlank())) {
-                fun idKind(id: String) = when {
-                    id.startsWith("tt") -> "imdb"
-                    id.startsWith("mal:") -> "mal"
-                    id.startsWith("kitsu:") -> "kitsu"
-                    id.startsWith("anilist:") -> "anilist"
-                    id.startsWith("tmdb:") -> "tmdb"
-                    else -> "other"
-                }
-                return "id_mismatch expectedKind=${idKind(expectedId)} " +
-                    "actualKind=${idKind(returnedId)} " +
-                    "expectedHash=${StremioCCacheAudit.id(expectedId)} " +
-                    "actualHash=${StremioCCacheAudit.id(returnedId)}"
+                return "id_mismatch"
             }
             return null
         }
@@ -1315,43 +1119,30 @@ open class StremioC(
                     mapOf("Cache-Control" to "no-cache") else emptyMap()).text
             }
             val storageKey = addonMetaStorageKey(url)
-            StremioCCacheAudit.log("meta", "READ_BEGIN", storageKey, "force=$forceRefresh")
             val previous = if (forceRefresh) {
                 cachedAddonMetaInRam(storageKey)
                     ?: MetadataDiskCache.read("meta", storageKey)?.first
             } else null
             if (!forceRefresh) {
                 cachedAddonMetaInRam(storageKey)?.let {
-                    StremioCCacheAudit.log("meta", "REUSE_RAM", storageKey, "chars=${it.length}")
                     return it
                 }
                 MetadataDiskCache.readWithTtl("meta", storageKey)?.let {
                     cacheAddonMetaInRam(storageKey, it.json, it.ttlMs, it.timestamp)
-                    StremioCCacheAudit.log("meta", "RAM_RESTORE_DISK", storageKey,
-                        "ageMs=${System.currentTimeMillis() - it.timestamp} ttlMs=${it.ttlMs}")
-                    StremioCCacheAudit.log("meta", "REUSE_DISK", storageKey,
-                        "chars=${it.json.length}")
                     return it.json
                 }
             }
 
             val flightKey = (if (forceRefresh) "force|" else "normal|") + storageKey
             val flight = synchronized(addonMetaFlights) {
-                addonMetaFlights[flightKey]?.also {
-                    StremioCCacheAudit.log("meta", "INFLIGHT_JOIN", storageKey, "force=$forceRefresh")
-                } ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
-                    val started = SystemClock.elapsedRealtime()
-                    StremioCCacheAudit.log("meta", "HTTP_START", storageKey, "force=$forceRefresh")
+                addonMetaFlights[flightKey] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
                     try {
-                        addonMetaNetworkFetches.incrementAndGet()
                         val response = customSession.get(url, headers = if (forceRefresh)
                             mapOf("Cache-Control" to "no-cache") else emptyMap())
                         if (response.code !in 200..299) {
                             throw IllegalStateException("Stremio meta HTTP " + response.code)
                         }
                         val body = response.text
-                        StremioCCacheAudit.log("meta", "HTTP_DONE", storageKey,
-                            "code=${response.code} durationMs=${SystemClock.elapsedRealtime() - started} chars=${body.length}")
                         val root = parseJson<JsonNode>(body)
                         fun header(name: String): String? = response.headers
                             .firstOrNull { it.first.equals(name, ignoreCase = true) }?.second
@@ -1369,9 +1160,6 @@ open class StremioC(
                         val valid = rejectReason == null
                         val transient = containsTransientMetaLinks(root)
                         val image = body.contains("data:image/", ignoreCase = true)
-                        StremioCCacheAudit.log("meta", "CACHE_DECISION", storageKey,
-                            "valid=$valid reason=${rejectReason ?: "accepted"} " +
-                                "ttlMs=$ttlMs safeVary=$safeVary transient=$transient inlineImage=$image")
                         if (valid && ttlMs > 0L && safeVary && !transient && !image) {
                             cacheAddonMetaInRam(storageKey, body, ttlMs)
                             // Never delay the first detail paint on GZIP or disk trimming.
@@ -1381,14 +1169,11 @@ open class StremioC(
                         }
                         body
                     } catch (error: Throwable) {
-                        StremioCCacheAudit.log("meta", "HTTP_OR_PARSE_ERROR", storageKey,
-                            "durationMs=${SystemClock.elapsedRealtime() - started} error=${error.javaClass.simpleName}")
                         throw error
                     } finally {
                         synchronized(addonMetaFlights) { addonMetaFlights.remove(flightKey) }
                     }
                 }.also { deferred ->
-                    StremioCCacheAudit.log("meta", "INFLIGHT_NEW", storageKey, "force=$forceRefresh")
                     addonMetaFlights[flightKey] = deferred
                     deferred.start()
                 }
@@ -1399,8 +1184,6 @@ open class StremioC(
                 throw cancelled
             } catch (error: Exception) {
                 if (forceRefresh && previous != null) {
-                    StremioCCacheAudit.log("meta", "REFRESH_STALE_FALLBACK", storageKey,
-                        "error=${error.javaClass.simpleName} chars=${previous.length}")
                     previous
                 } else throw error
             }
@@ -1583,25 +1366,16 @@ open class StremioC(
         // Share transport without sharing either caller's pagination state.
         private suspend fun fetchHomeJson(url: String): String {
             val task = synchronized(homeJsonFlights) {
-                homeJsonFlights[url]?.also {
-                    StremioCCacheAudit.log("catalog", "INFLIGHT_JOIN", url)
-                } ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
-                    val started = SystemClock.elapsedRealtime()
-                    StremioCCacheAudit.log("catalog", "HTTP_START", url)
+                homeJsonFlights[url] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
                     try {
                         val body = fetchHomeJsonUnshared(url)
-                        StremioCCacheAudit.log("catalog", "HTTP_DONE", url,
-                            "chars=${body.length} durationMs=${SystemClock.elapsedRealtime() - started}")
                         body
                     } catch (error: Throwable) {
-                        StremioCCacheAudit.log("catalog", "HTTP_ERROR", url,
-                            "error=${error.javaClass.simpleName}")
                         throw error
                     } finally {
                         synchronized(homeJsonFlights) { homeJsonFlights.remove(url) }
                     }
                 }.also {
-                    StremioCCacheAudit.log("catalog", "INFLIGHT_NEW", url)
                     homeJsonFlights[url] = it
                     it.start()
                 }
@@ -1680,7 +1454,7 @@ open class StremioC(
                 try {
                     val clazz = loader.loadClass(className)
                     return instantiate(clazz)
-                } catch (e: Exception) { e.printStackTrace() }
+                } catch (e: Exception) {}
             }
             try {
                 val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
@@ -1688,7 +1462,7 @@ open class StremioC(
 
                 for (field in pmClass.declaredFields) {
                     field.isAccessible = true
-                    val obj = runSuspendCatching { field.get(pmInstance) }.onFailure { it.printStackTrace() }.getOrNull()
+                    val obj = runSuspendCatching { field.get(pmInstance) }.getOrNull()
                     val items = when (obj) {
                         is Map<*, *> -> obj.values
                         is java.util.Collection<*> -> obj
@@ -1714,7 +1488,7 @@ open class StremioC(
                         }
                     }
                 }
-            } catch (e: Exception) { e.printStackTrace() }
+            } catch (e: Exception) {}
             return null
         }
 
@@ -1722,14 +1496,8 @@ open class StremioC(
             val now = System.currentTimeMillis()
             val cached = if (prefKey == "mdblist_enabled") null else settingsCache[prefKey]
             if (cached != null && (now - cached.second) < 60000L) {
-                StremioCCacheAudit.log("settings_flag", "RAM_HIT", prefKey,
-                    "ageMs=${now - cached.second} enabled=${cached.first}")
                 return cached.first
             }
-            StremioCCacheAudit.log("settings_flag",
-                if (cached == null) "RAM_MISS_OR_BYPASS" else "RAM_EXPIRED",
-                prefKey, "cacheable=${prefKey != "mdblist_enabled"}")
-
             val context = CloudStreamApp.context ?: return default
             val possibleNames = listOf("StremioC", "StremioC_preferences", "stremio_preferences", "com.hsp1020_preferences", context.packageName + "_preferences")
             
@@ -1743,8 +1511,6 @@ open class StremioC(
             }
             
             if (prefKey != "mdblist_enabled") settingsCache[prefKey] = Pair(isEnabled, now)
-            StremioCCacheAudit.log("settings_flag", "PREFS_READ", prefKey,
-                "enabled=$isEnabled cached=${prefKey != "mdblist_enabled"}")
             return isEnabled
         }
 
@@ -1754,7 +1520,6 @@ open class StremioC(
         return try {
             JSON_ID_EXTRACT_REGEX.find(this.url)?.groupValues?.get(1) ?: this.url
         } catch (e: Exception) {
-            e.printStackTrace()
             this.url
         }
     }
@@ -1824,56 +1589,33 @@ open class StremioC(
 
     private suspend fun fetchMdbAttempt(target: MdbTarget): SpeculativeMdbResult {
         val cacheKey = "${target.credentialFingerprint}:${target.isTmdb}:${target.mediaType}:${target.id}"
-        StremioCCacheAudit.log("mdb", "FETCH_ENTER", cacheKey,
-            "source=${if (target.isTmdb) "tmdb" else "imdb"} media=${target.mediaType}")
         val cached = stremioCacheMemoryRead("mdb", cacheKey, mdbRatingsCache[cacheKey], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("mdb", cacheKey)?.let { (json, stamp) ->
             runCatching { parseJson<List<String>>(json) }.getOrNull()
                 ?.takeIf { it.isNotEmpty() }?.let { ratings ->
                     Pair(ratings, stamp).also {
                         mdbRatingsCache[cacheKey] = it
-                        StremioCCacheAudit.log("mdb", "RAM_RESTORE_DISK", cacheKey,
-                            "ratings=${ratings.size}")
                     }
                 }
         }
-        DetailLoadPerf.event("MDB_CACHE", "hit=${cached != null}")
         if (cached != null) {
-            StremioCCacheAudit.log("mdb", "REUSE_CACHE", cacheKey,
-                "ratings=${cached.first.size} ageMs=${System.currentTimeMillis() - cached.second}")
             // Disk-restored ratings need the same UI notification as fresh HTTP results.
             StremioCMdbUiBridge.publish(cacheKey)
             return SpeculativeMdbResult(target, cached.first, true)
         }
-        StremioCCacheAudit.log("mdb", "HTTP_PENDING", cacheKey)
-
         val attempt = runSuspendCatching {
-            DetailLoadPerf.step("mdb.httpAndParse") {
+            run {
                 mdbFetchSemaphore.withPermit {
-                    val started = SystemClock.elapsedRealtime()
-                    StremioCCacheAudit.log("mdb", "HTTP_START", cacheKey)
-                    val values = fetchMdbListRatings(target.id, target.isTmdb, target.mediaType)
-                    StremioCCacheAudit.log("mdb", "HTTP_DONE", cacheKey,
-                        "durationMs=${SystemClock.elapsedRealtime() - started} ratings=${values.size}")
-                    values
+                    fetchMdbListRatings(target.id, target.isTmdb, target.mediaType)
                 }
             }
-        }.onFailure {
-            DetailLoadPerf.event("MDB_ERROR", "error=${it.javaClass.simpleName}")
-            StremioCCacheAudit.log("mdb", "HTTP_ERROR", cacheKey,
-                "error=${it.javaClass.simpleName}")
         }
         val ratings = attempt.getOrDefault(emptyList())
         if (ratings.isNotEmpty()) {
             mdbRatingsCache[cacheKey] = ratings to System.currentTimeMillis()
-            StremioCCacheAudit.log("mdb", "RAM_WRITE_OK", cacheKey, "ratings=${ratings.size}")
             // Notify the visible detail immediately; the disk write must not delay the UI.
             StremioCMdbUiBridge.publish(cacheKey)
             MetadataDiskCache.write("mdb", cacheKey, ratings.toJson())
         }
-        DetailLoadPerf.event("MDB_RESULT", "callReturned=${attempt.isSuccess} usableRatings=${ratings.isNotEmpty()} ratings=${ratings.size} type=${target.mediaType}")
-        StremioCCacheAudit.log("mdb", "FETCH_RESULT", cacheKey,
-            "callReturned=${attempt.isSuccess} usableRatings=${ratings.isNotEmpty()} " +
-                "ratings=${ratings.size} stored=${ratings.isNotEmpty()}")
         return SpeculativeMdbResult(target, ratings, attempt.isSuccess)
     }
 
@@ -1881,18 +1623,11 @@ open class StremioC(
     private fun CoroutineScope.launchMdbAttempt(target: MdbTarget?): Deferred<SpeculativeMdbResult?>? =
         target?.let { requested ->
             synchronized(mdbInflight) {
-                val auditKey = "${requested.credentialFingerprint}:${requested.isTmdb}:${requested.mediaType}:${requested.id}"
-                mdbInflight[requested]?.also {
-                    StremioCCacheAudit.log("mdb", "INFLIGHT_JOIN", auditKey)
-                } ?: mdbFetchScope.async(start = CoroutineStart.LAZY) {
-                    StremioCCacheAudit.log("mdb", "JOB_START", auditKey)
-                    DetailLoadPerf.step("task.mdbPrefetch") { fetchMdbAttempt(requested) }
+                mdbInflight[requested] ?: mdbFetchScope.async(start = CoroutineStart.LAZY) {
+                    fetchMdbAttempt(requested)
                 }.also { job ->
-                    StremioCCacheAudit.log("mdb", "INFLIGHT_NEW", auditKey)
                     mdbInflight[requested] = job
-                    job.invokeOnCompletion { error ->
-                        StremioCCacheAudit.log("mdb", "JOB_COMPLETE", auditKey,
-                            "cancelled=${job.isCancelled} failure=${error?.javaClass?.simpleName ?: "none"}")
+                    job.invokeOnCompletion {
                         synchronized(mdbInflight) {
                             if (mdbInflight[requested] === job) mdbInflight.remove(requested)
                         }
@@ -1961,19 +1696,17 @@ open class StremioC(
             if (parts.size == 2 && parts[0].toIntOrNull() != null && parts[1] in listOf("tv", "movie")) {
                 Pair(Pair(parts[0], parts[1]), stamp).also {
                     tmdbFindCache[imdbId] = it
-                    StremioCCacheAudit.log("find", "RAM_RESTORE_DISK", imdbId)
                 }
             } else null
         }
-        DetailLoadPerf.event("TMDB_FIND_CACHE", "hit=${cachedFind != null}")
         val result: Pair<String, String>? = if (cachedFind != null) {
             cachedFind.first
         } else {
             val fetchedFind = runSuspendCatching {
-                val text = DetailLoadPerf.step("tmdb.find.http") {
+                val text = run {
                     fetchSharedMetadataText(buildTmdbUrl("/find/$imdbId", "external_source" to "imdb_id"))
                 }
-                val findRes = DetailLoadPerf.stepNow("tmdb.find.parse") {
+                val findRes = run {
                     if (text.isNotBlank()) parseJson<TmdbFindResponse>(text) else null
                 }
                 val movieMatch = findRes?.movie_results?.firstOrNull()
@@ -1985,10 +1718,8 @@ open class StremioC(
             }.getOrNull()
             if (fetchedFind != null) {
                 tmdbFindCache[imdbId] = Pair(fetchedFind, System.currentTimeMillis())
-                StremioCCacheAudit.log("find", "RAM_WRITE_OK", imdbId, "type=${fetchedFind.second}")
                 MetadataDiskCache.write("find", imdbId, "${fetchedFind.first}|${fetchedFind.second}")
             } else {
-                StremioCCacheAudit.log("find", "CACHE_SKIP_EMPTY_RESULT", imdbId)
             }
             fetchedFind
         }
@@ -2014,28 +1745,24 @@ open class StremioC(
             runCatching { parseJson<TmdbDetailResponse>(json) }.getOrNull()?.let { value ->
                 Pair(value, stamp).also {
                     tmdbDetailsCache[detailUrl] = it
-                    StremioCCacheAudit.log("detail", "RAM_RESTORE_DISK", detailUrl)
                 }
             }
         }
-        DetailLoadPerf.event("TMDB_DETAIL_CACHE", "hit=${cached != null} media=$mediaType")
         val result: TmdbDetailResponse? = if (cached != null) {
             cached.first
         } else {
             runSuspendCatching {
-                val text = DetailLoadPerf.step("tmdb.detail.http") { fetchSharedMetadataText(detailUrl) }
-                val fetched = DetailLoadPerf.stepNow("tmdb.detail.parse") {
+                val text = run { fetchSharedMetadataText(detailUrl) }
+                val fetched = run {
                     if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
                 }
                 if (fetched != null) {
                     tmdbDetailsCache[detailUrl] = Pair(fetched, System.currentTimeMillis())
-                    StremioCCacheAudit.log("detail", "RAM_WRITE_OK", detailUrl)
                     MetadataDiskCache.write("detail", detailUrl, text)
                 } else {
-                    StremioCCacheAudit.log("detail", "CACHE_SKIP_PARSE_EMPTY", detailUrl)
                 }
                 fetched
-            }.onFailure { it.printStackTrace() }.getOrNull()
+            }.getOrNull()
         }
         return result
     }
@@ -2060,7 +1787,7 @@ open class StremioC(
 
     private fun extractImdbId(url: String?): String? {
         if (url.isNullOrBlank() || !url.contains("tt")) return null
-        return runSuspendCatching { IMDB_ID_REGEX.find(url)?.value }.onFailure { it.printStackTrace() }.getOrNull()
+        return runSuspendCatching { IMDB_ID_REGEX.find(url)?.value }.getOrNull()
     }
 
     private fun buildStremioId(type: String?, id: String?, season: Int?, episode: Int?): String? {
@@ -2109,23 +1836,11 @@ open class StremioC(
         val isExpired = (now - lastCacheTime) > manifestCacheTtlMs
 
         if (cachedManifest != null && lastManifestUrl == currentUrl && !isExpired && !cachedManifest?.catalogs.isNullOrEmpty()) {
-            StremioCCacheAudit.log("manifest", "REUSE_RAM", currentUrl,
-                "ageMs=${now - lastCacheTime} ttlMs=$manifestCacheTtlMs catalogs=${cachedManifest?.catalogs?.size ?: 0}")
             return cachedManifest
         }
-        StremioCCacheAudit.log("manifest", if (cachedManifest == null) "RAM_MISS" else "RAM_EXPIRED_OR_CHANGED",
-            currentUrl, "ageMs=${now - lastCacheTime} ttlMs=$manifestCacheTtlMs")
-
         val manifestResponse = runSuspendCatching {
-            StremioCCacheAudit.log("manifest", "HTTP_START", currentUrl)
             customSession.get(currentUrl, timeout = 15L)
-        }.onFailure {
-            StremioCCacheAudit.log("manifest", "HTTP_ERROR", currentUrl,
-                "error=${it.javaClass.simpleName}")
-            it.printStackTrace()
         }.getOrNull()
-        if (manifestResponse != null) StremioCCacheAudit.log("manifest", "HTTP_DONE", currentUrl,
-            "code=${manifestResponse.code}")
         val resText = manifestResponse?.text
 
         if (!resText.isNullOrBlank()) {
@@ -2145,8 +1860,6 @@ open class StremioC(
                     if (oldVersion != null && newVersion != null && oldVersion != newVersion) {
                         invalidateAddonVersionCache(currentUrl)
                     }
-                    StremioCCacheAudit.log("manifest", "RAM_WRITE_OK", currentUrl,
-                        "catalogs=${parsed.catalogs.size} ttlMs=${cachePolicy.ttlMs} noStore=${cachePolicy.noStore} versionChanged=${oldVersion != null && oldVersion != newVersion}")
                     cachedManifest = parsed
                     preparedMainPageManifest = PreparedMainPageManifest(currentUrl, resText.toUniqueKey(), parsed)
                     lastManifestUrl = currentUrl
@@ -2165,19 +1878,14 @@ open class StremioC(
                         }
                         if (newVersion != null) putString("manifest_version_" + manifestKey, newVersion)
                     }?.apply()
-                    StremioCCacheAudit.log("manifest", if (cachePolicy.noStore) "STORE_SKIPPED_NO_STORE" else "PREFS_WRITE_OK",
-                        currentUrl, "chars=${resText.length} ttlMs=${cachePolicy.ttlMs}")
                     return parsed
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
             }
         }
 
         if (manifestCacheTtlMs > 0L && lastManifestUrl == currentUrl &&
             now - lastCacheTime <= 72L * 60 * 60 * 1000) {
-            StremioCCacheAudit.log("manifest", "REUSE_STALE_RAM_ON_ERROR", currentUrl,
-                "ageMs=${now - lastCacheTime}")
             return cachedManifest
         }
         val saved = CloudStreamApp.context
@@ -2185,8 +1893,6 @@ open class StremioC(
             ?: return null
         val key = stremioCatalogKey(mainUrl)
         val raw = stremioReadManifest(saved, mainUrl) ?: return null
-        StremioCCacheAudit.log("manifest", "READ_SAVED_FALLBACK", currentUrl,
-            "chars=${raw.length}")
         val savedAt = saved.getLong("manifest_saved_at_" + key, 0L)
         // Legacy stored manifests had no timestamp; preserve them during migration.
         val effectiveAt = if (savedAt > 0L) savedAt else now.also {
@@ -2199,8 +1905,6 @@ open class StremioC(
                 cachedManifest = it
                 lastManifestUrl = currentUrl
                 lastCacheTime = effectiveAt
-                StremioCCacheAudit.log("manifest", "REUSE_SAVED_FALLBACK", currentUrl,
-                    "catalogs=${it.catalogs.size} ageMs=${now - effectiveAt}")
             }
     }
 
@@ -2281,7 +1985,7 @@ open class StremioC(
             try {
                 val arr = org.json.JSONArray(orderJson)
                 for (i in 0 until arr.length()) orderedKeys.add(arr.getString(i))
-            } catch (e: Exception) { e.printStackTrace() }
+            } catch (e: Exception) {}
         }
 
         val rank = orderedKeys.withIndex().associate { it.value to it.index }
@@ -2331,9 +2035,7 @@ open class StremioC(
     }
 
     internal fun homeCursorFor(target: CatalogShortcutTarget, visible: List<SearchResponse>): Int? {
-        val cursorAuditKey = "$mainUrl|${target.type}|${target.catalogId}"
         if (visible.isEmpty()) {
-            StremioCCacheAudit.log("catalog_cursor", "SNAPSHOT_MISS", cursorAuditKey, "reason=empty")
             return null
         }
         val path = "/catalog/${target.type.urlEncodeLocal()}/${target.catalogId.urlEncodeLocal()}"
@@ -2360,12 +2062,8 @@ open class StremioC(
             last = next
         }
         if (last <= 0) {
-            StremioCCacheAudit.log("catalog_cursor", "SNAPSHOT_MISS", cursorAuditKey,
-                "reason=invalid_cursor visible=${visible.size}")
             return null
         }
-        StremioCCacheAudit.log("catalog_cursor", "SNAPSHOT_HIT", cursorAuditKey,
-            "visible=${visible.size} cursor=$last")
         return last
     }
 
@@ -2391,8 +2089,6 @@ open class StremioC(
             val currentSkip = catalogSkipState[stateKey]
             val active = activePageRequests.keys.count { it.startsWith("$stateKey|page=") }
             if (currentSkip != offset || active != 0) {
-                StremioCCacheAudit.log("catalog_cursor", "ADOPT_REJECT", stateKey,
-                    "currentSkip=$currentSkip requested=$offset active=$active")
                 return@withLock null
             }
 
@@ -2402,19 +2098,10 @@ open class StremioC(
             catalogSkipState[stateKey] = nextSkip
             val cursors = catalogHomeCursors.getOrPut(stateKey) { ConcurrentHashMap() }
             accepted.forEach { cursors[it.url] = nextSkip }
-            StremioCCacheAudit.log("catalog_cursor", "ADOPT_OK", stateKey,
-                "requested=$offset raw=$rawCount accepted=${accepted.size} nextSkip=$nextSkip")
             accepted
         }
     }
 
-    private fun getCatalogLogIdentity(request: MainPageRequest): Pair<String, String> {
-        val parts = request.data.substringBefore('?').split('/').filter { it.isNotBlank() }
-        val catalogIndex = parts.indexOf("catalog")
-        val type = parts.getOrNull(catalogIndex + 1) ?: "unknown"
-        val id = parts.getOrNull(catalogIndex + 2) ?: "unknown"
-        return type to id
-    }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (!isAddonEnabled()) return newHomePageResponse(
@@ -2425,12 +2112,6 @@ open class StremioC(
             // Navigation/provider switches must still cancel promptly.
             throw e
         } catch (t: Throwable) {
-            val status = (t as? CatalogHttpException)?.statusCode?.toString() ?: "none"
-            val (catalogType, catalogId) = getCatalogLogIdentity(request)
-            com.lagradost.api.Log.w(
-                "StremioC",
-                "home row isolated provider=$name tab=${request.name} page=$page status=$status errorClass=${t.javaClass.simpleName} catalogType=$catalogType catalogId=$catalogId"
-            )
             newHomePageResponse(listOf(HomePageList(request.name, emptyList<SearchResponse>())), hasNext = false)
         }
     }
@@ -2447,12 +2128,9 @@ open class StremioC(
             val existing = activePageRequests[key]
             if (existing != null) {
                 existing.waiters++
-                StremioCCacheAudit.log("catalog_page", "INFLIGHT_JOIN", key,
-                    "page=$page waiters=${existing.waiters}")
                 existing
             } else {
                 owner = true
-                StremioCCacheAudit.log("catalog_page", "INFLIGHT_NEW", key, "page=$page")
                 val generation = if (page <= 1) {
                     catalogSentIds.remove(stateKey)
                     catalogSkipState.remove(stateKey)
@@ -2469,9 +2147,6 @@ open class StremioC(
 
         try {
             val response = flight.deferred.await()
-            StremioCCacheAudit.log("catalog_page",
-                if (owner) "PAGE_LOADED" else "PAGE_SHARED", key,
-                "page=$page owner=$owner lists=${response.items.size}")
             return if (!owner && page > 1) newHomePageResponse(emptyList(), hasNext = true) else response
         } finally {
             withContext(NonCancellable) {
@@ -2608,7 +2283,7 @@ open class StremioC(
         val searchResults = coroutineScope {
             supportedCatalogs.map { catalog ->
                 async(Dispatchers.IO) {
-                    try { catalog.search(query, this@StremioC) } catch (e: CancellationException) { throw e } catch (e: Exception) { e.printStackTrace(); emptyList() }
+                    try { catalog.search(query, this@StremioC) } catch (e: CancellationException) { throw e } catch (e: Exception) { emptyList() }
                 }
             }.awaitAll().flatten()
         }
@@ -2622,44 +2297,14 @@ open class StremioC(
     
 
     override suspend fun load(url: String): LoadResponse {
-        // Explicit refresh requests bypass only StremioC's own /meta cache.
-        // The marker is stripped before any addon URL, hint or artwork lookup.
+        // Strip the internal refresh marker before addon, hint and artwork lookups.
         val requested = url.toHttpUrlOrNull()
         val forceRefresh = requested?.queryParameter("__stremioc_refresh") == "1"
         val effectiveUrl = if (forceRefresh) requested!!.newBuilder()
             .removeAllQueryParameters("__stremioc_refresh").build().toString() else url
-        StremioCCacheAudit.log("detail_load", "PROVIDER_LOAD_ENTER", effectiveUrl,
-            "force=$forceRefresh")
-        val trace = DetailLoadPerf.current.get() ?: DetailLoadPerf.Session()
-        return withContext(DetailLoadPerf.current.asContextElement(trace)) {
-            val source = when {
-                url.contains("simkl.com/") -> "simkl"
-                url.contains("myanimelist.net/") -> "mal"
-                url.contains("anilist.co/") -> "anilist"
-                url.contains("kitsu.app/") -> "kitsu"
-                url.contains("/meta/") -> "addon-meta"
-                else -> "other"
-            }
-            DetailLoadPerf.event("LOAD_ENTER", "source=$source provider=${if (mainUrl.isBlank()) "library" else "addon"}")
-            try {
-                val result = DetailLoadPerf.step("load.coroutineScope") { loadInternal(effectiveUrl, forceRefresh) }
-                DetailLoadPerf.event("LOAD_RETURN", "type=${result.type} poster=${!result.posterUrl.isNullOrBlank()} backdrop=${!result.backgroundPosterUrl.isNullOrBlank()}")
-                StremioCCacheAudit.log("detail_load", "PROVIDER_LOAD_RETURN", effectiveUrl,
-                    "type=${result.type} plotChars=${result.plot?.length ?: 0}")
-                addonMetaScope.launch {
-                    StremioCCacheAudit.log("summary", "USAGE_AFTER_LOAD", effectiveUrl,
-                        metadataCacheDiagnostics())
-                }
-                if (Log.isLoggable("StremioCCache", Log.DEBUG)) {
-                    Log.d("StremioCCache", metadataCacheDiagnostics())
-                }
-                result
-            } catch (error: Throwable) {
-                DetailLoadPerf.event("LOAD_THROW", "error=${error.javaClass.simpleName}")
-                throw error
-            }
-        }
+        return loadInternal(effectiveUrl, forceRefresh)
     }
+
 
     private suspend fun loadInternal(url: String, forceRefresh: Boolean = false): LoadResponse = coroutineScope {
         if (!isAddonEnabled()) throw IllegalStateException("This addon is disabled.")
@@ -2674,13 +2319,10 @@ open class StremioC(
             if (libraryService != null) {
                 val base = libraryMetadataBase()
                     ?: throw IllegalStateException("Configure a metadata/history addon before opening a library item.")
-                DetailLoadPerf.event("LIBRARY_SOURCE", "service=$libraryService")
-                val metaUrl = DetailLoadPerf.step("library.resolveUrl.$libraryService") {
+                val metaUrl = run {
                     getLoadUrl(libraryService, url)
                 } ?: throw IllegalStateException("Unable to resolve the library item with the configured addon.")
-                val hint = parseDetailUrlHint(metaUrl)
-                DetailLoadPerf.event("LIBRARY_MAPPED", "type=${hint?.type} id=${hint?.id}")
-                return@coroutineScope DetailLoadPerf.step("library.delegateLoad") {
+                return@coroutineScope run {
                     StremioC(base, name).load(metaUrl).also { response ->
                         StremioCMdbUiBridge.keyFor(metaUrl)?.let { key ->
                             StremioCMdbUiBridge.bind(key, listOf(url))
@@ -2707,16 +2349,15 @@ open class StremioC(
             }
         }
         suspend fun fetchSecondaryMeta(metaUrl: String, expectedId: String): CatalogEntry? =
-            DetailLoadPerf.step("meta.secondary.total") {
+            run {
                 runSuspendCatching {
-                    val text = DetailLoadPerf.step("meta.secondary.http") { fetchAddonMetaText(metaUrl, forceRefresh) }
-                    val response = DetailLoadPerf.stepNow("meta.secondary.parse") {
+                    val text = run { fetchAddonMetaText(metaUrl, forceRefresh) }
+                    val response = run {
                         if (text.isNotBlank()) parseJson<CatalogResponse>(text) else null
                     }
-                    DetailLoadPerf.event("META_SECONDARY_RESULT", "bytes=${text.length} meta=${response?.meta != null} items=${response?.metas?.size ?: 0}")
                     response?.meta ?: response?.metas?.firstOrNull { it.id == expectedId }
                         ?: response?.metas?.firstOrNull()
-                }.onFailure { DetailLoadPerf.event("META_SECONDARY_ERROR", "error=${it.javaClass.simpleName}"); it.printStackTrace() }.getOrNull()
+                }.getOrNull()
             }
 
         val parsedUrlHint = parseDetailUrlHint(url)
@@ -2732,14 +2373,14 @@ open class StremioC(
         val hintedMetaUrl = urlHint?.let { getUnifiedMetaUrl(it.type, it.id) }
             ?.takeUnless { it == url }
         val hintedMetaDeferred = hintedMetaUrl?.let { metaUrl ->
-            async(Dispatchers.IO) { DetailLoadPerf.step("task.secondaryPrefetch") { fetchSecondaryMeta(metaUrl, urlHint!!.id) } }
+            async(Dispatchers.IO) { run { fetchSecondaryMeta(metaUrl, urlHint!!.id) } }
         }
         val hintedImdbId = (urlHint?.id ?: if (url.startsWith("{"))
             runCatching { parseJson<CatalogEntry>(url)?.id }.getOrNull() else null)
             ?.takeIf { IMDB_ID_REGEX.matches(it) }
         val speculativeImdbAnimeDeferred = hintedImdbId?.let { id ->
             async(Dispatchers.IO) {
-                DetailLoadPerf.step("task.speculativeImdbAnime") { fetchAnimeSeasonMapping(LoadData(id = id, imdbId = id, isAnime = true)) }
+                run { fetchAnimeSeasonMapping(LoadData(id = id, imdbId = id, isAnime = true)) }
             }
         }
         val hintMediaType = detailMediaType(urlHint?.type)
@@ -2748,14 +2389,14 @@ open class StremioC(
 
         val hintedAnimeId = urlHint?.id?.takeIf { isLibraryAnimeId(it) }
         val speculativeAnimeDeferred: Deferred<AnimeSeasonMapping?>? = hintedAnimeId?.let { id ->
-            async(Dispatchers.IO) { DetailLoadPerf.step("task.speculativeAnime") { resolveAnimeIdForLoad(id) } }
+            async(Dispatchers.IO) { run { resolveAnimeIdForLoad(id) } }
         }
 
         val speculativeMdbDeferred: Deferred<SpeculativeMdbResult?>? = when {
             !mdbEnabled || urlHint == null -> null
             directMdbHint != null -> launchMdbAttempt(directMdbHint)
             speculativeAnimeDeferred != null -> mdbFetchScope.async {
-                val resolved = DetailLoadPerf.step("await.speculativeAnimeForMdb") { speculativeAnimeDeferred.await() } ?: return@async null
+                val resolved = run { speculativeAnimeDeferred.await() } ?: return@async null
                 val target = resolved.tmdbId?.toString()?.let { MdbTarget(it, true, hintMediaType) }
                     ?: resolved.imdbId?.let { MdbTarget(it, false, hintMediaType) }
                     ?: return@async null
@@ -2768,7 +2409,7 @@ open class StremioC(
             !urlHint?.tmdbId.isNullOrBlank() -> {
                 val hintedTmdbId = urlHint?.tmdbId ?: ""
                 async(Dispatchers.IO) {
-                    val detail = DetailLoadPerf.step("task.speculativeTmdbDirect") { fetchTmdbDetailForLoad(hintedTmdbId, hintMediaType) }
+                    val detail = run { fetchTmdbDetailForLoad(hintedTmdbId, hintMediaType) }
                     SpeculativeTmdbChain(urlHint?.id?.takeIf { it.startsWith("tt") }, hintedTmdbId, hintMediaType, false, detail)
                 }
             }
@@ -2778,12 +2419,12 @@ open class StremioC(
             urlHint?.id?.startsWith("tmdb:") == true -> {
                 val tmdbId = urlHint.id.removePrefix("tmdb:")
                 async(Dispatchers.IO) {
-                    val detail = DetailLoadPerf.step("task.speculativeTmdbPrefixed") { fetchTmdbDetailForLoad(tmdbId, hintMediaType) }
+                    val detail = run { fetchTmdbDetailForLoad(tmdbId, hintMediaType) }
                     SpeculativeTmdbChain(null, tmdbId, hintMediaType, false, detail)
                 }
             }
             speculativeAnimeDeferred != null -> async(Dispatchers.IO) {
-                val resolved = DetailLoadPerf.step("await.speculativeAnimeForTmdb") { speculativeAnimeDeferred.await() } ?: return@async null
+                val resolved = run { speculativeAnimeDeferred.await() } ?: return@async null
                 val tmdbId = resolved.tmdbId?.toString()
                 if (!tmdbId.isNullOrBlank()) {
                     val detail = fetchTmdbDetailForLoad(tmdbId, hintMediaType)
@@ -2801,11 +2442,11 @@ open class StremioC(
 
         var initialMetaFromResponse: CatalogEntry? = null
         val res: CatalogEntry = if (url.startsWith("{")) {
-            DetailLoadPerf.stepNow("meta.embedded.parse") { parseJson<CatalogEntry>(url) }
+            run { parseJson<CatalogEntry>(url) }
         } else {
-            val responseText = DetailLoadPerf.step("meta.primary.http") { fetchAddonMetaText(url, forceRefresh) }
+            val responseText = run { fetchAddonMetaText(url, forceRefresh) }
             try {
-                DetailLoadPerf.stepNow("meta.primary.parse") {
+                run {
                     val rootNode = parseJson<JsonNode>(responseText)
                     val metaNode = if (rootNode.has("meta")) rootNode.get("meta") else rootNode
                     val parsedEntry = parseJson<CatalogEntry>(metaNode.toString())
@@ -2813,16 +2454,12 @@ open class StremioC(
                     if (rootNode.has("meta") && metaNode.isObject) {
                         initialMetaFromResponse = parsedEntry
                     }
-                    DetailLoadPerf.event("META_PRIMARY_RESULT", "bytes=${responseText.length} type=${parsedEntry.type} id=${parsedEntry.id} videos=${parsedEntry.videos?.size ?: 0}")
                     parsedEntry
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
                 throw IllegalStateException("Metadata not found or parsing failed: $url", e)
             }
         }
-
-        DetailLoadPerf.event("PREFETCH_STATE", "hasHint=${urlHint != null} secondary=${hintedMetaDeferred != null} imdbAnime=${speculativeImdbAnimeDeferred != null} anime=${speculativeAnimeDeferred != null} mdb=${speculativeMdbDeferred != null} tmdb=${speculativeTmdbDeferred != null}")
         val hintMatchesAuthoritative = urlHint != null &&
             urlHint.id == res.id &&
             canonicalDetailType(urlHint.type) == canonicalDetailType(res.type)
@@ -2836,7 +2473,7 @@ open class StremioC(
             if (hintedImdbId != res.id) speculativeImdbAnimeDeferred?.cancel()
         }
 
-        val normalizedId = try { normalizeId(res.id ?: "") } catch (e: Exception) { e.printStackTrace(); res.id ?: "" }
+        val normalizedId = try { normalizeId(res.id ?: "") } catch (e: Exception) { res.id ?: "" }
         val encodedId = normalizedId.urlEncode()
 
         val authoritativeMetaUrl = getUnifiedMetaUrl(res.type ?: "movie", res.id ?: "")
@@ -2860,7 +2497,7 @@ open class StremioC(
         var resolvedTmdbId: String? = null
 
         if (originalMappingId != null) {
-            val candidate = DetailLoadPerf.step("await.originalAnimeMapping") {
+            val candidate = run {
                 if (hintedAnimeId == originalMappingId && speculativeAnimeDeferred != null) {
                     speculativeAnimeDeferred.await()
                 } else {
@@ -2904,7 +2541,7 @@ open class StremioC(
                 cachedFindMatches(hintedImdb, directTmdbFromRes, authoritativeMediaType)
 
             if (directTmdbFromRes == null || authoritativeHint || reuseFind || speculativeTmdbDeferred.isCompleted) {
-                DetailLoadPerf.step("await.speculativeTmdb") { speculativeTmdbDeferred.await() }?.let { spec ->
+                run { speculativeTmdbDeferred.await() }?.let { spec ->
                     val valid = directTmdbFromRes?.let { spec.matchesDirect(it, authoritativeMediaType) }
                         ?: spec.matchesFind(hintedImdb)
                     if (valid) acceptedTmdbSpec = spec
@@ -2934,7 +2571,7 @@ open class StremioC(
             targetTmdbId != null && speculativeTmdbDetail == null
         ) {
             async(Dispatchers.IO) {
-                DetailLoadPerf.step("task.normalTmdbDetail") {
+                run {
                     fetchTmdbDetailForLoad(targetTmdbId, targetTmdbMediaType)
                 }
             }
@@ -2942,16 +2579,14 @@ open class StremioC(
             null
         }
 
-        val preFetchedTmdbDetail = speculativeTmdbDetail ?: DetailLoadPerf.step("await.normalTmdbDetail") { normalTmdbDeferred?.await() }
-        DetailLoadPerf.event("TMDB_PREFETCH_RESULT", "spec=${speculativeTmdbDetail != null} hasDetail=${preFetchedTmdbDetail != null} media=$targetTmdbMediaType")
+        val preFetchedTmdbDetail = speculativeTmdbDetail ?: run { normalTmdbDeferred?.await() }
         // Movie collections are independent of the second metadata addon's response.
         // Fetch them as soon as an authoritative movie detail exposes a collection ID.
-        DetailLoadPerf.event("LOAD_ENRICH_PLAN", "tmdb=${targetTmdbId != null} imdb=${!resolvedImdbId.isNullOrBlank() || !preFetchedTmdbDetail?.external_ids?.imdb_id.isNullOrBlank()} mdb=$mdbEnabled")
         val collectionDeferred: Deferred<List<TmdbMedia>>? = if (targetTmdbMediaType == "movie") {
             preFetchedTmdbDetail?.belongs_to_collection?.id?.let { collectionId ->
                 async(Dispatchers.IO) {
                     runSuspendCatching {
-                        val text = DetailLoadPerf.step("tmdb.collection.prefetch.http") {
+                        val text = run {
                             fetchSharedMetadataText(buildTmdbUrl("/collection/$collectionId"))
                         }
                         if (text.isNotBlank()) parseJson<TmdbCollectionDetail>(text).parts
@@ -2969,7 +2604,7 @@ open class StremioC(
 
         val resolvedIdHolder = arrayOf<String?>(null, null)
 
-        val loadRes = DetailLoadPerf.step("toLoadResponse.total") { res.toLoadResponse(
+        val loadRes = run { res.toLoadResponse(
             provider = this@StremioC,
             imdbId = finalProcessedId,
             addonDeferred = addonDeferred,
@@ -3030,11 +2665,7 @@ open class StremioC(
                 if (postMetaMdbTarget != finalMdbTarget || postMetaMdbDeferred == null) {
                     launchMdbAttempt(finalMdbTarget)
                 }
-                StremioCCacheAudit.log("mdb", "DISPLAY_ASYNC", mdbAuditKey,
-                    "source=cache_or_http blockMs=0")
             } else {
-                StremioCCacheAudit.log("mdb", "DISPLAY_RAM_HIT", mdbAuditKey,
-                    "ratings=${mdbRatings.size} blockMs=0")
             }
             mdbRatings?.takeIf { it.isNotEmpty() }?.let { ratings ->
                 val ratingStr = "\u2063" + ratings.joinToString("  ")
@@ -3043,14 +2674,12 @@ open class StremioC(
                 loadRes.score = Score.from10(0)
             }
         }
-
-        DetailLoadPerf.event("LOAD_RESULT_READY", "type=${loadRes.type} mdbEnabled=$mdbEnabled")
         return@coroutineScope loadRes
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         if (!isAddonEnabled()) return false
-        val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { e.printStackTrace(); null } ?: return false
+        val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { null } ?: return false
         
         val legacyPrimaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
             loadData.imdbId
@@ -3139,13 +2768,8 @@ open class StremioC(
         val customHosts = withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
             if (cachedCustomHosts != null && now - cachedCustomHostsTime < SETTINGS_CACHE_TTL) {
-                StremioCCacheAudit.log("custom_hosts", "RAM_HIT", "hosts",
-                    "count=${cachedCustomHosts?.size ?: 0} ageMs=${now - cachedCustomHostsTime}")
                 return@withContext cachedCustomHosts!!
             }
-            StremioCCacheAudit.log("custom_hosts",
-                if (cachedCustomHosts == null) "RAM_MISS" else "RAM_EXPIRED", "hosts")
-            
             val context = CloudStreamApp.context
             
             val raw = try { 
@@ -3163,26 +2787,22 @@ open class StremioC(
                     rawValue
                 }
             } catch (t: Throwable) {
-                t.printStackTrace()
                 try {
                     val prefs = CloudStreamApp.context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
                     val v = prefs?.getString("stremio_addons", "") ?: ""
                     if (v.startsWith("\"") && v.endsWith("\"") && v.length >= 2) v.substring(1, v.length - 1) else v
                 } catch (e: Exception) {
-                    e.printStackTrace()
                     ""
                 }
             }
             
             val hosts = raw.lines()
                 .filter { it.isNotBlank() }
-                .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.onFailure { it.printStackTrace() }.getOrNull() }
+                .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.getOrNull() }
                 .toSet() 
                 
             cachedCustomHosts = hosts
             cachedCustomHostsTime = now
-            StremioCCacheAudit.log("custom_hosts", "RAM_WRITE_OK", "hosts",
-                "count=${hosts.size} ttlMs=$SETTINGS_CACHE_TTL")
             hosts
         }
         val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
@@ -3270,7 +2890,7 @@ open class StremioC(
                 res?.subtitles?.forEach { sub ->
                     sub.toCloudStreamSubtitle(addonSource, preferredName)?.let(stremioSubtitleCallback)
                 }
-            }.onFailure { it.printStackTrace() }
+            }
         }
 
         coroutineScope {
@@ -3309,7 +2929,7 @@ open class StremioC(
                             named.runCallback(this@StremioC, name,
                                 stremioSubtitleCallback, subtitleCallback, wrappedCallback)
                         }
-                    }.onFailure { it.printStackTrace() }
+                    }
                 }
             },
             {
@@ -3328,7 +2948,7 @@ open class StremioC(
                                 wrappedCallback
                             )
                         }
-                    }.onFailure { it.printStackTrace() }
+                    }
                 }
             },
             {
@@ -3382,7 +3002,7 @@ open class StremioC(
                                                 stremioSubtitleCallback, subtitleCallback, wrappedCallback,
                                                 preferredName = addon.name)
                                         }
-                                    }.onFailure { it.printStackTrace() }
+                                    }
                                 }, {
                                     val mappedId = mappedAnimeStremioId()
                                     if (mappedId != null) {
@@ -3433,9 +3053,6 @@ open class StremioC(
     )
 
     private suspend fun fetchAnimeSeasonMapping(loadData: LoadData): AnimeSeasonMapping? {
-        val mapStarted = SystemClock.elapsedRealtimeNanos()
-        DetailLoadPerf.event("ANIME_MAP_ENTER", "source=${loadData.originalAnimeId?.substringBefore(':') ?: if (loadData.imdbId != null) "imdb" else "other"} season=${loadData.season ?: loadData.imdbSeason} episode=${loadData.episode ?: loadData.imdbEpisode}")
-        try {
         val aniListLookupId = loadData.originalAnimeId?.takeIf { it.startsWith("anilist:") }
             ?.removePrefix("anilist:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
             ?: loadData.anilistId?.takeIf { it > 0 }
@@ -3475,39 +3092,28 @@ open class StremioC(
                 (if (season != null) "&season=$season" else "") +
                 (if (episode != null) "&episode=$episode" else "")
         }
-        StremioCCacheAudit.log("anime", "LOOKUP_BEGIN", query,
-            "season=${season ?: -1} episode=${episode ?: -1}")
         val cachedAnime = stremioCacheMemoryRead("anime", query, animeMappingCache[query], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("anime", query)?.let { (json, stamp) ->
             runCatching { parseJson<AnimeSeasonMapping>(json) }.getOrNull()?.let { value ->
                 Pair(value, stamp).also {
                     animeMappingCache[query] = it
-                    StremioCCacheAudit.log("anime", "RAM_RESTORE_DISK", query)
                 }
             }
         }
-        DetailLoadPerf.event("ANIME_MAP_CACHE", "hit=${cachedAnime != null}")
         if (cachedAnime != null) {
-            StremioCCacheAudit.log("anime", "REUSE_CACHE", query,
-                "ageMs=${System.currentTimeMillis() - cachedAnime.second}")
             return cachedAnime.first
         }
         val noMappingStamp = animeNoMappingCache[query]
         if (noMappingStamp != null) {
             val age = System.currentTimeMillis() - noMappingStamp
             if (age >= 0L && age < 15L * 60 * 1000) {
-                StremioCCacheAudit.log("anime", "REUSE_NEGATIVE_RAM", query, "ageMs=$age")
                 return null
             }
             animeNoMappingCache.remove(query)
         }
         MetadataDiskCache.read("missing_anime", query)?.takeIf { it.first == "null" }?.let {
             animeNoMappingCache[query] = it.second
-            StremioCCacheAudit.log("anime", "REUSE_NEGATIVE_DISK", query,
-                "ageMs=${System.currentTimeMillis() - it.second}")
             return null
         }
-        StremioCCacheAudit.log("anime", "CACHE_MISS_ALL", query)
-
         val hosts = listOf(
             "aiostreams.elfhosted.com",
             "aiostreams.fortheweak.cloud",
@@ -3519,10 +3125,10 @@ open class StremioC(
         for (host in hosts) {
             var noMapping = false
             val mapping = runSuspendCatching {
-            val response = DetailLoadPerf.step("anime.host.$host.http") {
+            val response = run {
                 fetchSharedAnimeText("https://$host/api/v1/anime?$query")
             }
-            val root = DetailLoadPerf.stepNow("anime.host.$host.parse") { parseJson<JsonNode>(response) }
+            val root = run { parseJson<JsonNode>(response) }
             if (root.get("success")?.asBoolean() != true) return@runSuspendCatching null
             if (root.get("data")?.isNull == true) {
                 noMapping = true
@@ -3573,35 +3179,22 @@ open class StremioC(
                 imdbSeason = data.get("imdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 },
                 traktSeason = data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
             )
-            }.onFailure {
-                DetailLoadPerf.event("ANIME_HOST_ERROR", "host=$host error=${it.javaClass.simpleName}")
-                StremioCCacheAudit.log("anime", "HOST_ERROR", query,
-                    "host=$host error=${it.javaClass.simpleName}")
             }.getOrNull()
-            DetailLoadPerf.event("ANIME_HOST_RESULT", "host=$host dataNull=$noMapping mapped=${mapping != null}")
-            StremioCCacheAudit.log("anime", "HOST_RESULT", query,
-                "host=$host noData=$noMapping validMapping=${mapping != null}")
             if (noMapping) {
                 // Cache only an authoritative success=true/data=null response, never host errors.
                 animeNoMappingCache[query] = System.currentTimeMillis()
                 addonMetaScope.launch {
                     MetadataDiskCache.write("missing_anime", query, "null", 15L * 60 * 1000)
                 }
-                StremioCCacheAudit.log("anime", "NO_MAPPING_CACHED", query, "ttlMs=900000")
                 return null
             }
             if (mapping != null) {
                 animeMappingCache[query] = mapping to System.currentTimeMillis()
-                StremioCCacheAudit.log("anime", "RAM_WRITE_OK", query)
                 MetadataDiskCache.write("anime", query, mapping.toJson())
                 return mapping
             }
         }
-        StremioCCacheAudit.log("anime", "ALL_HOSTS_EXHAUSTED", query)
         return null
-        } finally {
-            DetailLoadPerf.event("ANIME_MAP_EXIT", "tookMs=${(SystemClock.elapsedRealtimeNanos() - mapStarted) / 1_000_000L}")
-        }
     }
 
     private data class IntegrationData(
@@ -3842,7 +3435,7 @@ open class StremioC(
                         )
                     }
                 }
-            }.onFailure { it.printStackTrace() }
+            }
         }
 
         return addons.values.filter { isCatalogAddonEnabled(it.url) }
@@ -3911,7 +3504,6 @@ open class StremioC(
                         }
                     }.onFailure { error ->
                         if (error is CancellationException) throw error
-                        error.printStackTrace()
                     }
                 }
             }.awaitAll()
@@ -3960,7 +3552,6 @@ open class StremioC(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    e.printStackTrace()
                 }
             }
 
@@ -4000,7 +3591,6 @@ open class StremioC(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
 
@@ -4072,7 +3662,6 @@ open class StremioC(
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
-                            e.printStackTrace()
                         }
                     }
                 }
@@ -4088,7 +3677,6 @@ open class StremioC(
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
-                            e.printStackTrace()
                         }
                     }
                     val general = if (media.hasSeasonMapping && media.tmdbSeason != null && media.tmdbEpisode != null && media.tmdbId != null ||
@@ -4107,7 +3695,6 @@ open class StremioC(
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Exception) {
-                                e.printStackTrace()
                             }
                         }
                     } else null
@@ -4135,7 +3722,6 @@ open class StremioC(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
 
@@ -4248,7 +3834,7 @@ open class StremioC(
             return try {
                 val text = StremioC.customSession.get(provider.buildUrl(path), timeout = 120L).text
                 if (text.isNotBlank()) parseJson<CatalogResponse>(text).metas ?: emptyList() else emptyList()
-            } catch (e: Throwable) { e.printStackTrace(); emptyList() }
+            } catch (e: Throwable) { emptyList() }
         }
 
         suspend fun search(query: String, provider: StremioC): List<SearchResponse> {
@@ -4400,27 +3986,20 @@ open class StremioC(
                 runCatching { parseJson<TmdbDetailResponse>(json) }.getOrNull()?.let { value ->
                     Pair(value, stamp).also {
                     tmdbDetailsCache[cacheKey] = it
-                    StremioCCacheAudit.log("detail", "RAM_RESTORE_DISK", cacheKey)
                 }
                 }
             }
-            DetailLoadPerf.event("TMDB_ENRICH_CACHE", "prefetch=${preFetchedDetail != null} cacheHit=${cached != null} media=$tmdbMediaType")
-            if (preFetchedDetail != null) StremioCCacheAudit.log("detail", "REUSE_PREFETCH", cacheKey,
-                "media=$tmdbMediaType")
-            else if (cached != null) StremioCCacheAudit.log("detail", "REUSE_CACHED", cacheKey)
             val detailRes = preFetchedDetail ?: if (cached != null) {
                 cached.first
             } else {
-                val text = DetailLoadPerf.step("tmdb.enrich.detail.http") { fetchSharedMetadataText(detailUrl) }
-                val fetched = DetailLoadPerf.stepNow("tmdb.enrich.detail.parse") {
+                val text = run { fetchSharedMetadataText(detailUrl) }
+                val fetched = run {
                     if (text.isNotBlank()) parseJson<TmdbDetailResponse>(text) else null
                 }
                 if (fetched != null) {
                     tmdbDetailsCache[cacheKey] = Pair(fetched, System.currentTimeMillis())
-                    StremioCCacheAudit.log("detail", "RAM_WRITE_OK", cacheKey)
                     MetadataDiskCache.write("detail", cacheKey, text)
                 } else {
-                    StremioCCacheAudit.log("detail", "CACHE_SKIP_PARSE_EMPTY", cacheKey)
                 }
                 fetched
             }
@@ -4438,20 +4017,16 @@ open class StremioC(
             
             coroutineScope {
                 val shouldFocusEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType != "movie" && stremioType != "series" && !isMovie)
-                
-                DetailLoadPerf.event("TMDB_EPISODE_PLAN", "required=$shouldFocusEpisodes knownVideos=${targetVideos?.size ?: 0} totalSeasons=${detailRes.number_of_seasons ?: 0}")
                 val episodeDeferred = if (shouldFocusEpisodes) {
                     var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
                     if (requiredSeasons.isEmpty()) {
                         val totalSeasons = detailRes.number_of_seasons ?: 1
                         requiredSeasons = if (totalSeasons > 0) (1..totalSeasons).toList() else listOf(1)
                     }
-                    
-                    DetailLoadPerf.event("TMDB_EPISODE_SCHEDULE", "count=${requiredSeasons.size} seasons=${requiredSeasons.joinToString(",")}")
                     requiredSeasons.map { seasonNum ->
                         async(Dispatchers.IO) {
-                            DetailLoadPerf.step("tmdb.season.$seasonNum.total") {
-                            DetailLoadPerf.step("tmdb.season.$seasonNum.semaphore") {
+                            run {
+                            run {
                             StremioC.networkSemaphore.withPermit {
                                 val completed = withTimeoutOrNull(10000L) {
                                     runSuspendCatching {
@@ -4461,39 +4036,29 @@ open class StremioC(
                                             runCatching { parseJson<TmdbSeasonDetail>(json) }.getOrNull()?.let { value ->
                                                 Pair(value, stamp).also {
                                                     tmdbSeasonCache[seasonCacheKey] = it
-                                                    StremioCCacheAudit.log("season", "RAM_RESTORE_DISK", seasonCacheKey)
                                                 }
                                             }
                                         }
-                                        DetailLoadPerf.event("TMDB_SEASON_CACHE", "season=$seasonNum hit=${cachedSeason != null}")
                                         val seasonRes = if (cachedSeason != null) {
                                             cachedSeason.first
                                         } else {
-                                            val fetchedSeasonText = DetailLoadPerf.step("tmdb.season.$seasonNum.http") {
+                                            val fetchedSeasonText = run {
                                                 fetchSharedMetadataText(seasonUrl)
                                             }
-                                            val fetchedSeason = DetailLoadPerf.stepNow("tmdb.season.$seasonNum.parse") {
+                                            val fetchedSeason = run {
                                                 if (fetchedSeasonText.isNotBlank()) parseJson<TmdbSeasonDetail>(fetchedSeasonText) else null
                                             }
                                             if (fetchedSeason != null) {
                                                 tmdbSeasonCache[seasonCacheKey] = Pair(fetchedSeason, System.currentTimeMillis())
-                                                StremioCCacheAudit.log("season", "RAM_WRITE_OK", seasonCacheKey,
-                                                    "season=$seasonNum")
                                                 MetadataDiskCache.write("season", seasonCacheKey, fetchedSeasonText)
                                             } else {
-                                                StremioCCacheAudit.log("season", "CACHE_SKIP_PARSE_EMPTY", seasonCacheKey,
-                                                    "season=$seasonNum")
                                             }
                                             fetchedSeason
                                         }
                                         seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
-                                    }.onFailure {
-                                        DetailLoadPerf.event("TMDB_SEASON_ERROR", "season=$seasonNum error=${it.javaClass.simpleName}")
-                                        it.printStackTrace()
                                     }
                                     true
                                 }
-                                if (completed == null) DetailLoadPerf.event("TMDB_SEASON_TIMEOUT", "season=$seasonNum timeoutMs=10000")
                             }
                             }
                             }
@@ -4507,10 +4072,10 @@ open class StremioC(
                     val parts: List<TmdbMedia> = if (active) {
                         runSuspendCatching {
                             val colUrl = provider.buildTmdbUrl("/collection/$collectionId")
-                            val colText = DetailLoadPerf.step("tmdb.collection.http") {
+                            val colText = run {
                                 fetchSharedMetadataText(colUrl)
                             }
-                            DetailLoadPerf.stepNow("tmdb.collection.parse") {
+                            run {
                                 if (colText.isNotBlank()) parseJson<TmdbCollectionDetail>(colText).parts ?: emptyList() else emptyList()
                             }
                         }.getOrDefault(emptyList())
@@ -4518,16 +4083,14 @@ open class StremioC(
                     parts
                 }
 
-                val collectionParts = DetailLoadPerf.step("await.tmdbCollection") { collectionDeferred.await() }
-                DetailLoadPerf.step("await.tmdbEpisodesAll") { episodeDeferred?.awaitAll() }
-                DetailLoadPerf.event("TMDB_SUBREQUESTS_DONE", "collectionCount=${collectionParts.size} episodeCount=${episodeTmdbMeta.size}")
-
+                val collectionParts = run { collectionDeferred.await() }
+                run { episodeDeferred?.awaitAll() }
                 val tmdbRecs: List<TmdbMedia> = detailRes.recommendations?.results ?: emptyList()
                 val finalCombinedMedia = (collectionParts + tmdbRecs)
                     .distinctBy { it.id }
                     .filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
 
-                fetchedRecommendations = DetailLoadPerf.stepNow("tmdb.recommendations.build") { finalCombinedMedia.take(50).map { rec ->
+                fetchedRecommendations = run { finalCombinedMedia.take(50).map { rec ->
                     val recTitle = rec.title ?: rec.name ?: ""
                     val isRecMovie = rec.mediaType == "movie" || rec.title != null
                     val recTypeStr = if (isRecMovie) "movie" else "series"
@@ -4544,7 +4107,6 @@ open class StremioC(
                         this.posterUrl = recPoster
                     }
                 } }
-                DetailLoadPerf.event("TMDB_RECS_RESULT", "total=${fetchedRecommendations?.size ?: 0} posterOverride=${recommendationPoster != null}")
             }
             
             val countryCode = langCode.substringAfter("-", "KR").uppercase()
@@ -4757,9 +4319,8 @@ open class StremioC(
             prefetchedAnimeMapping: Deferred<AnimeSeasonMapping?>? = null,
             prefetchedAnimeImdbId: String? = null
         ): LoadResponse = coroutineScope {
-            val syncedEntry = DetailLoadPerf.step("await.secondaryAddonMeta") { addonDeferred?.await() }
+            val syncedEntry = run { addonDeferred?.await() }
             val detailedEntry = syncedEntry ?: this@CatalogEntry
-            DetailLoadPerf.event("DETAIL_META_CHOICE", "secondaryUsed=${syncedEntry != null} requestedId=${this@CatalogEntry.id} type=${this@CatalogEntry.type}")
             val recommendationPoster = if (provider.metadataPosterAddonBaseUrl() != null &&
                 (addonDeferred == null || syncedEntry != null)) detailedEntry.poster else null
             val originalAnimeId = requestedAnimeId
@@ -4782,8 +4343,6 @@ open class StremioC(
                 tmdbIdStr = preFetchedFind.first
                 foundMediaType = preFetchedFind.second
             }
-
-            DetailLoadPerf.event("RESPONSE_PLAN", "entryType=${this@CatalogEntry.type} imdb=${finalImdbId != null} tmdb=${tmdbIdStr != null} secondary=${syncedEntry != null} videos=${this@CatalogEntry.videos?.size ?: 0}")
             val findApiDeferred: Deferred<Pair<String, String>?>? = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
                 async(Dispatchers.IO) {
                     provider.fetchTmdbFindForLoad(finalImdbId)
@@ -4835,7 +4394,6 @@ open class StremioC(
                 (originalAnimeId.startsWith("anilist:") &&
                     fetchedAniListId == null && fetchedMalId == null && fetchedKitsuId == null)) &&
                 finalImdbId?.let { IMDB_ID_REGEX.matches(it) } == true && canSyncAnimeTrackers
-            DetailLoadPerf.event("SYNC_MAPPING_PLAN", "enabled=$useImdbSyncMapping movie=$isMovieForSync seasons=${videoSeasons.joinToString(",")}")
             val detailSyncMapping = if (useImdbSyncMapping) {
                 if (prefetchedAnimeImdbId != finalImdbId) prefetchedAnimeMapping?.cancel()
                 prefetchedAnimeMapping?.takeIf { prefetchedAnimeImdbId == finalImdbId }
@@ -4850,7 +4408,7 @@ open class StremioC(
             }
 
             if (findApiDeferred != null) {
-                val findResult = DetailLoadPerf.step("await.tmdbFindInResponse") { findApiDeferred.await() }
+                val findResult = run { findApiDeferred.await() }
                 if (findResult != null) { tmdbIdStr = findResult.first; foundMediaType = findResult.second }
             }
 
@@ -4861,14 +4419,13 @@ open class StremioC(
                     val safePrefetchedDetail = preFetchedDetail?.takeIf {
                         preFetchedDetailTmdbId == tmdbIdStr && preFetchedDetailMediaType == refinedMediaType
                     }
-                    tmdbData = DetailLoadPerf.step("response.tmdbEnrichment") {
+                    tmdbData = run {
                         fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!,
                             refinedMediaType == "movie", finalImdbId, finalType, finalVideos,
                             safePrefetchedDetail, if (safePrefetchedDetail != null) preFetchedCollection else null,
                             recommendationPoster)
                     }
                 } catch (e: Exception) {
-                    e.printStackTrace()
                 }
             }
 
@@ -4929,11 +4486,8 @@ open class StremioC(
             val isCartoon = tmdbData?.fetchedGenreIds?.contains(16) == true ||
                 finalGenre?.any { it.contains("Animation", true) } == true
             val isAnimeFromMetadata = originalAnimeId != null || fetchedMalId != null || provider.isLibraryAnimeId(finalImdbId) || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
-            val imdbSyncMapping = DetailLoadPerf.step("await.detailSyncMapping") { detailSyncMapping?.await() }
-            DetailLoadPerf.event("ANIME_SYNC_RESULT", "requested=${detailSyncMapping != null} matched=${imdbSyncMapping != null} eligible=$canSyncAnimeTrackers")
+            val imdbSyncMapping = run { detailSyncMapping?.await() }
             val isAnimeMedia = isAnimeFromMetadata || imdbSyncMapping != null
-            DetailLoadPerf.event("RESPONSE_ASSET_PLAN", "poster=${!finalPoster.isNullOrBlank()} backdrop=${!finalBackground.isNullOrBlank()} tmdbActors=${tmdbData?.fetchedActors?.size ?: 0} recs=${tmdbData?.fetchedRecommendations?.size ?: 0} trailers=${finalTrailers.size}")
-
             val originalTrackerId = originalAnimeId?.substringAfter(':')?.substringBefore(':')
                 ?.toIntOrNull()?.takeIf { it > 0 }
             val finalMalId = imdbSyncMapping?.malId ?: fetchedMalId
@@ -5000,7 +4554,7 @@ open class StremioC(
                     movieId
                 }
 
-                val response = DetailLoadPerf.step("response.movie.build") { provider.newMovieLoadResponse(
+                val response = run { provider.newMovieLoadResponse(
                     finalName, metaUrl, finalMovieType, 
                     LoadData(
                         type = finalType, 
@@ -5034,16 +4588,16 @@ open class StremioC(
 
 
                 } }
-                DetailLoadPerf.stepNow("response.movie.actorRegister") {
+                run {
                     ActorInformation.register(
                         provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty(),
                         recommendationPoster, provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host
                     )
                 }
-                return@coroutineScope DetailLoadPerf.stepNow("response.movie.attachSync") { response.apply { attachMappedIds() } }
+                return@coroutineScope run { response.apply { attachMappedIds() } }
 
             } else {
-                val finalEpisodes = DetailLoadPerf.step("response.series.processEpisodes") { processEpisodes(
+                val finalEpisodes = run { processEpisodes(
                     provider, 
                     cleanImdbId, 
                     tmdbData?.episodeTmdbMeta ?: emptyMap(), 
@@ -5068,7 +4622,7 @@ open class StremioC(
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
                 StremioC.trailerChoicesByUrl[metaUrl] = finalTrailers
                 StremioC.genreCatalogsByUrl[metaUrl] = genreTargets
-                val response = DetailLoadPerf.step("response.series.build") { provider.newTvSeriesLoadResponse(
+                val response = run { provider.newTvSeriesLoadResponse(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
@@ -5082,13 +4636,13 @@ open class StremioC(
                     
 
                 } }
-                DetailLoadPerf.stepNow("response.series.actorRegister") {
+                run {
                     ActorInformation.register(
                         provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty(),
                         recommendationPoster, provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host
                     )
                 }
-                return@coroutineScope DetailLoadPerf.stepNow("response.series.attachSync") { response.apply { attachMappedIds() } }
+                return@coroutineScope run { response.apply { attachMappedIds() } }
             }           
         }
     }
@@ -5441,7 +4995,6 @@ fun getSafeAllProviders(): List<MainAPI> {
             else -> emptyList()
         }
     } catch (e: Exception) {
-        e.printStackTrace()
         emptyList()
     }
 }
@@ -5500,14 +5053,11 @@ internal fun stremioReadManifest(
 ): String? {
     val key = stremioCatalogKey(source)
     if (prefs.getBoolean("manifest_no_store_" + key, false)) {
-        StremioCCacheAudit.log("manifest", "PREFS_BLOCKED_NO_STORE", source)
         return null
     }
     val raw = prefs.getString(key, null) ?: stremioOldCatalogKeys(source)
         .firstNotNullOfOrNull { prefs.getString(it, null) }
     if (raw == null) {
-        StremioCCacheAudit.log("manifest", "PREFS_MISS", source,
-            "requireFresh=$requireFresh")
         return null
     }
     val now = System.currentTimeMillis()
@@ -5516,15 +5066,11 @@ internal fun stremioReadManifest(
     // One-time migration for manifests stored before timestamp tracking.
     if (savedAt == 0L) {
         prefs.edit().putString(key, raw).putLong(stampKey, now).apply()
-        StremioCCacheAudit.log("manifest", "PREFS_MIGRATE_AND_REUSE", source,
-            "chars=${raw.length} requireFresh=$requireFresh")
         return raw
     }
     val maxAge = if (requireFresh) prefs.getLong(
         "manifest_ttl_ms_" + key, 3_600_000L
     ).coerceIn(0L, 72L * 60 * 60 * 1000) else 72L * 60 * 60 * 1000
     val valid = savedAt <= now && now - savedAt <= maxAge
-    StremioCCacheAudit.log("manifest", if (valid) "PREFS_HIT" else "PREFS_EXPIRED",
-        source, "ageMs=${now - savedAt} ttlMs=$maxAge requireFresh=$requireFresh chars=${raw.length}")
     return raw.takeIf { valid }
 }

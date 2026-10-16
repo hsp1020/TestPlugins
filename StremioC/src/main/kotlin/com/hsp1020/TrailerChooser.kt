@@ -572,7 +572,6 @@ internal class TrailerChooser(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
-                android.util.Log.e("StremioCTrailers", "Trailer playback failed", error)
                 if (fragment.isAdded) toast(fragment.requireContext().getString(R.string.error))
             } finally {
                 opening = false

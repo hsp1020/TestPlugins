@@ -114,43 +114,26 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false, mediaType:
     
     val mdbListEnabled = prefs.getBoolean("mdblist_enabled", false)
     val mdbListApiKey = prefs.getString("mdblist_api_key", "") ?: ""
-    
-    val auditKey = stremioMdbAuditKey(id, isTmdb, mediaType)
     if (!mdbListEnabled || mdbListApiKey.isBlank()) {
-        StremioCCacheAudit.log("mdb", "HTTP_DISABLED", auditKey,
-            "enabled=$mdbListEnabled keyConfigured=${mdbListApiKey.isNotBlank()}")
         return emptyList()
     }
-    StremioCCacheAudit.log("mdb", "QUERY_BEGIN", auditKey)
     return try {
         val provider = if (isTmdb) "tmdb" else "imdb"
         val type = if (mediaType == "movie") "movie" else "show"
         val modernUrl = "https://api.mdblist.com/$provider/$type/$id/?apikey=$mdbListApiKey&append_to_response=keyword"
         val json = try {
-            val start = android.os.SystemClock.elapsedRealtime()
-            StremioCCacheAudit.log("mdb", "MODERN_HTTP_START", auditKey)
             val response = app.get(modernUrl, timeout = 15L)
-            StremioCCacheAudit.log("mdb", "MODERN_HTTP_DONE", auditKey,
-                "code=${response.code} chars=${response.text.length} durationMs=${android.os.SystemClock.elapsedRealtime() - start}")
             JSONObject(response.text).also {
                 if (it.optJSONArray("ratings") == null) error("MDBList missing ratings")
             }
         } catch (e: CancellationException) {
-            StremioCCacheAudit.log("mdb", "MODERN_HTTP_CANCEL", auditKey)
             throw e
         } catch (error: Exception) {
-            StremioCCacheAudit.log("mdb", "MODERN_HTTP_FALLBACK", auditKey,
-                "reason=${error.javaClass.simpleName}")
             val idParam = if (isTmdb) "tm" else "i"
-            val start = android.os.SystemClock.elapsedRealtime()
-            StremioCCacheAudit.log("mdb", "LEGACY_HTTP_START", auditKey)
             val response = app.get("https://mdblist.com/api/?apikey=$mdbListApiKey&$idParam=$id", timeout = 15L)
-            StremioCCacheAudit.log("mdb", "LEGACY_HTTP_DONE", auditKey,
-                "code=${response.code} chars=${response.text.length} durationMs=${android.os.SystemClock.elapsedRealtime() - start}")
             JSONObject(response.text)
         }
         val ratingsArray = json.optJSONArray("ratings") ?: run {
-            StremioCCacheAudit.log("mdb", "RESPONSE_MISSING_RATINGS", auditKey)
             return emptyList()
         }
         val keywords = json.optJSONArray("keywords")
@@ -199,18 +182,12 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false, mediaType:
         }
         
         results.sortBy { it.first.sortOrder }
-        StremioCCacheAudit.log("mdb", "PARSE_RESULT", auditKey,
-            "rawRatings=${ratingsArray.length()} acceptedRatings=${results.size}")
         results.map { (meta, score) ->
             "${meta.icon} ${String.format(Locale.US, "%.1f", score)}"
         }
     } catch (e: CancellationException) {
-        StremioCCacheAudit.log("mdb", "QUERY_CANCEL", auditKey)
         throw e
     } catch (e: Exception) {
-        StremioCCacheAudit.log("mdb", "QUERY_ERROR", auditKey,
-            "error=${e.javaClass.simpleName}")
-        e.printStackTrace()
         emptyList()
     }
 }
@@ -283,8 +260,6 @@ internal class RatingPlotImageHook(
     private val mdbUpdate: (String) -> Unit = { cacheKey ->
         val matched = watchers.values.filter { it.matchesMdbKey(cacheKey) }
         val applied = matched.count { it.refreshLateMdb() }
-        StremioCCacheAudit.log("mdb_ui", "DELIVERY_RESULT", cacheKey,
-            "matched=${matched.size} applied=$applied")
     }
     private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview, ::bindPhoneHero)
     private var phoneHero: PhoneHeroHook? = null
@@ -439,7 +414,6 @@ internal class RatingPlotImageHook(
                             }
                             true
                         }.getOrElse { e ->
-                            android.util.Log.e("StremioCNavMenu", "HOME navigation failed", e)
                             false
                         }
                     }
@@ -645,7 +619,7 @@ internal class RatingPlotImageHook(
                     if (query != null) lastSearchQuery = query.takeIf { it.isNotBlank() }
                 }
                 runCatching { holdDetailReveal(f) }
-                    .onFailure { android.util.Log.e("StremioCNavBack", "detail reveal error", it) }
+                    
             }
         }
 
@@ -746,15 +720,11 @@ internal class RatingPlotImageHook(
 
         fun auditReentry() {
             val key = StremioCMdbUiBridge.keyFor(detailUrl) ?: return
-            StremioCCacheAudit.log("mdb_ui", "FRAGMENT_RESUMED", key,
-                "visible=${fragment.isVisible} hasRatings=${StremioC.mdbRatingsForUi(key) != null} " +
-                    "rendered=${view.text?.startsWith('\u2063') == true}")
         }
 
         fun refreshLateMdb(): Boolean {
             val key = StremioCMdbUiBridge.keyFor(detailUrl) ?: return false
             if (!fragment.isVisible || fragment.view !== root) {
-                StremioCCacheAudit.log("mdb_ui", "SKIP_INACTIVE_FRAGMENT", key)
                 return false
             }
             return injectCachedRatings("late")
@@ -765,13 +735,10 @@ internal class RatingPlotImageHook(
             val key = StremioCMdbUiBridge.keyFor(detailUrl) ?: return false
             val ratings = StremioC.mdbRatingsForUi(key)
             if (ratings == null) {
-                StremioCCacheAudit.log("mdb_ui", "SKIP_CACHE_UNAVAILABLE", key, "reason=$reason")
                 return false
             }
             val old = view.text ?: return false
             if (old.isEmpty() || old.startsWith('\u2063')) {
-                StremioCCacheAudit.log("mdb_ui", "SKIP_ALREADY_RENDERED_OR_EMPTY", key,
-                    "reason=$reason empty=${old.isEmpty()} alreadyRendered=${old.startsWith('\u2063')}")
                 return false
             }
             val combined = SpannableStringBuilder("\u2063${ratings.joinToString("  ")}\n").append(old)
@@ -779,8 +746,6 @@ internal class RatingPlotImageHook(
             changing = true
             try { view.setText(decorated, TextView.BufferType.SPANNABLE) }
             finally { changing = false }
-            StremioCCacheAudit.log("mdb_ui", "UI_APPLIED", key,
-                "reason=$reason ratings=${ratings.size}")
             return true
         }
 

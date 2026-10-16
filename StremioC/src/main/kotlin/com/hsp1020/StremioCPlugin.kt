@@ -10,7 +10,6 @@ import android.view.View
 import android.view.inspector.WindowInspector
 import com.lagradost.cloudstream3.R
 import androidx.appcompat.app.AppCompatActivity
-import com.lagradost.api.Log
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
@@ -126,7 +125,7 @@ class StremioCPlugin : Plugin() {
                     root.findViewById<View>(R.id.listview1) != null &&
                     root.findViewById<View>(R.id.tvtypes_chips_scroll) != null
             }?.findViewById<View>(R.id.cancel_btt)?.performClick()
-        }.onFailure { Log.w("StremioCPlugin", "Provider picker dismissal failed: ${it.message}") }
+        }
     }
 
     override fun load(context: Context) {
@@ -161,7 +160,6 @@ class StremioCPlugin : Plugin() {
                 }
             }
         } catch (e: Throwable) {
-            e.printStackTrace()
         }
 
         // --- 2. StreamPlay 대리 부팅 복원 엔진 (Read-Only 플러그인 기생 복구) ---
@@ -188,7 +186,6 @@ class StremioCPlugin : Plugin() {
                 }
             }
         } catch (e: Throwable) {
-            e.printStackTrace()
         }
 
         // --- 3. Restore only missing manifests in the background. No catalog rows are prefetched. ---
@@ -229,21 +226,18 @@ class StremioCPlugin : Plugin() {
                                         }
                                     }
                                 } catch (e: Throwable) {
-                                    Log.w("StremioCPlugin", "boot manifest fetch failed: ${e.message}")
                                 }
                             }
                         }
                     }.joinAll()
                 }
             } catch (e: Throwable) {
-                e.printStackTrace()
             }
         }
 
         try {
             registerMainAPI(StremioC("", "StremioC"))
         } catch (e: Throwable) {
-            e.printStackTrace()
         }
         reload(appContext)
         watchPinnedProviders(appContext)
@@ -259,7 +253,7 @@ class StremioCPlugin : Plugin() {
                             openCatalogBrowser(host, target, snapshot)
                         }
                     }.also { it.start() }
-                }.onFailure { Log.w("StremioCPlugin", "Rating image hook unavailable: ${it.message}") }.getOrNull()
+                }.getOrNull()
             }
         }
         
@@ -381,8 +375,6 @@ class StremioCPlugin : Plugin() {
                             PluginManager.unloadPlugin(found.filePath)
                             delay(250) 
                         } catch (e: Throwable) {
-                            Log.e("StremioCPlugin", "unload failed ${e.message}")
-                            e.printStackTrace()
                         }
                     } 
                     
@@ -390,19 +382,12 @@ class StremioCPlugin : Plugin() {
                         val rawManifest = withContext(Dispatchers.IO) {
                             stremioReadManifest(manifestPrefs, item.link, requireFresh = true)
                                 ?: (runCatching {
-                                    StremioCCacheAudit.log("manifest", "REGISTER_HTTP_START", item.link)
                                     StremioC.customSession.get(stremioManifestUrl(item.link), timeout = 15L)
                                 }.onFailure { error ->
-                                    StremioCCacheAudit.log("manifest", "REGISTER_HTTP_ERROR", item.link,
-                                        "error=${error.javaClass.simpleName}")
                                 }.getOrNull()?.let { response ->
-                                    StremioCCacheAudit.log("manifest", "REGISTER_HTTP_DONE", item.link,
-                                        "code=${response.code}")
                                     val raw = response.text.takeIf { it.isNotBlank() }
                                         ?: return@let null
                                     if (!runCatching { JSONObject(raw).has("catalogs") }.getOrDefault(false)) {
-                                        StremioCCacheAudit.log("manifest", "REGISTER_SKIP_INVALID", item.link,
-                                            "chars=${raw.length}")
                                         return@let null
                                     }
                                     val key = stremioCatalogKey(item.link)
@@ -425,10 +410,6 @@ class StremioCPlugin : Plugin() {
                                         }
                                         if (newVersion != null) putString("manifest_version_" + key, newVersion)
                                     }.apply()
-                                    StremioCCacheAudit.log("manifest",
-                                        if (noStore) "REGISTER_SKIP_NO_STORE" else "REGISTER_PREFS_WRITE_OK",
-                                        item.link,
-                                        "chars=${raw.length} ttlMs=$ttl versionPresent=${newVersion != null}")
                                     raw
                                 })
                                 ?: stremioReadManifest(manifestPrefs, item.link)
@@ -475,8 +456,6 @@ class StremioCPlugin : Plugin() {
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Throwable) {
-                        Log.e("StremioCPlugin", "register failed ${e.message}")
-                        e.printStackTrace()
                     }
                 }
                 currentCoroutineContext().ensureActive()
@@ -485,14 +464,10 @@ class StremioCPlugin : Plugin() {
                 try {
                     MainActivity.afterPluginsLoadedEvent.invoke(true)
                 } catch (e: Throwable) {
-                    Log.w("StremioCPlugin", "afterPluginsLoaded invoke failed ${e.message}")
-                    e.printStackTrace()
                 }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Throwable) {
-                    Log.e("StremioCPlugin", "reload error ${e.message}")
-                    e.printStackTrace()
                 }
             }
         }

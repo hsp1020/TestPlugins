@@ -129,7 +129,6 @@ object SettingsRepository {
             }
             list
         } catch (e: Exception) {
-            e.printStackTrace()
             mutableListOf()
         }
     }
@@ -261,7 +260,7 @@ class SettingsBottomFragment(
                     }
                 }
             }
-        } catch (e: Exception) { e.printStackTrace() }
+        } catch (e: Exception) {}
         return null
     }
 
@@ -318,7 +317,7 @@ class SettingsBottomFragment(
         editor.commit()
         try {
             CloudStreamApp.setKey(backupKey, json)
-        } catch (t: Throwable) { t.printStackTrace() }
+        } catch (t: Throwable) {}
     }
 
 
@@ -1255,7 +1254,6 @@ class SettingsBottomFragment(
                                     }
                                 }
                             } catch (e: Exception) {
-                                e.printStackTrace()
                             }
                             json.put("cine_stream_data", cineStreamJson)
                         }                        
@@ -1304,7 +1302,6 @@ class SettingsBottomFragment(
                     okBtn.setOnClickListener { dlg.dismiss() } 
                     dlg.show()
                 } catch (e: Exception) {
-                    e.printStackTrace()
                     Toast.makeText(appContext, "Failed to export settings", Toast.LENGTH_SHORT).show()
                 }
             }
@@ -1492,7 +1489,6 @@ class SettingsBottomFragment(
                     dlg.show()
 
                 } catch (e: Exception) {
-                    e.printStackTrace()
                     showSavedPopup(ctx, "Invalid Backup Data",
                         "No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again.")
                 }
@@ -2189,24 +2185,17 @@ private fun showLanguageSelectDialog() {
         onClose(progressDialog) { if (!delivered) request?.cancel() }
         request = uiScope.launch {
             val currentUrl = stremioManifestUrl(item.link)
-
-            StremioCCacheAudit.log("manifest", "CONFIG_HTTP_START", currentUrl)
             val manifestResponse = withContext(Dispatchers.IO) {
                 try {
                     com.lagradost.cloudstream3.app.get(currentUrl, timeout = 10L)
                 } catch (cancelled: CancellationException) {
-                    StremioCCacheAudit.log("manifest", "CONFIG_HTTP_CANCEL", currentUrl)
                     throw cancelled
                 } catch (error: Exception) {
-                    StremioCCacheAudit.log("manifest", "CONFIG_HTTP_ERROR", currentUrl,
-                        "error=${error.javaClass.simpleName}")
                     null
                 }
             }
             val manifestText = manifestResponse?.text
             if (manifestResponse != null) {
-                StremioCCacheAudit.log("manifest", "CONFIG_HTTP_DONE", currentUrl,
-                    "code=${manifestResponse.code} chars=${manifestText?.length ?: 0}")
             }
             if (!isActive || !alive(owner) || !progressDialog.isShowing) return@launch
             delivered = true
@@ -2245,10 +2234,6 @@ private fun showLanguageSelectDialog() {
                     }
                     if (version != null) putString("manifest_version_" + key, version)
                 }.apply()
-                StremioCCacheAudit.log("manifest",
-                    if (noStore) "CONFIG_SKIP_NO_STORE" else "CONFIG_PREFS_WRITE_OK",
-                    currentUrl, "chars=${manifestText.length} ttlMs=$ttl versionPresent=${version != null}")
-
                 if (catalogs != null) {
                     for (cat in catalogs) {
                         val id = cat.id ?: ""
@@ -2263,7 +2248,7 @@ private fun showLanguageSelectDialog() {
                         ))
                     }
                 }
-            } catch (e: Exception) { e.printStackTrace() }
+            } catch (e: Exception) {}
 
             if (flatTabs.isEmpty()) { 
                 // 3. 토스트 대신 기존 테마 맞춤형 팝업(showSavedPopup) 표시
@@ -2288,7 +2273,7 @@ private fun showLanguageSelectDialog() {
             try {
                 val arr = JSONArray(orderJson)
                 for (i in 0 until arr.length()) orderedKeys.add(arr.getString(i))
-            } catch (e: Exception) { e.printStackTrace() }
+            } catch (e: Exception) {}
         }
 
         val sortedTabs = flatTabs.sortedBy { tab ->
@@ -2616,7 +2601,7 @@ private fun showLanguageSelectDialog() {
             switchView.setOnCheckedChangeListener { _, isChecked ->
                 showToast("$displayName Integration " + if (isChecked) "Enabled" else "Disabled")
             }
-        } catch (e: Throwable) { e.printStackTrace() }
+        } catch (e: Throwable) {}
     }
 
     private fun restartApp(appContext: Context) {
