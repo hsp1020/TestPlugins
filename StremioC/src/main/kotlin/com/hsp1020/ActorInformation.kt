@@ -464,7 +464,13 @@ internal object ActorInformation {
                     actor.photo?.let { loadImage(it) }
                 }, ViewGroup.LayoutParams(-1, -1))
             }
-            profileRow.addView(portraitHolder, LinearLayout.LayoutParams(dp(70), dp(70)))
+            // Align the portrait top with the padded name and Popular heading.
+            profileRow.addView(portraitHolder, LinearLayout.LayoutParams(dp(70), dp(70)).apply {
+                topMargin = dp(6)
+            })
+            fun fact(text: String) = label(text, 13f).apply {
+                setPadding(dp(8), dp(3), dp(8), dp(3))
+            }
             val details = column()
             details.addView(label(actor.name, 20f, true))
             profileRow.addView(details, LinearLayout.LayoutParams(0, -2, 1f))
@@ -589,6 +595,7 @@ internal object ActorInformation {
                 requestJob?.cancel()
                 ticket++
                 val generation = ticket
+                var creditsInsertAt = 1
                 profileLoaded = false
                 skeleton.loading(true)
                 body.visibility = View.INVISIBLE
@@ -625,10 +632,11 @@ internal object ActorInformation {
                         val death = info.optString("deathday").takeIf { it.isNotBlank() && it != "null" }
                         val place = info.optString("place_of_birth").takeIf { it.isNotBlank() && it != "null" }
                         val known = info.optString("known_for_department").takeIf { it.isNotBlank() }
+                        creditsInsertAt = if (known != null) 2 else 1
                         listOfNotNull(known?.let { "Known for: " + it },
                             birth?.let { "Born: " + it + ageText(it, death) },
                             death?.let { "Died: " + it },
-                            place).forEach { details.addView(label(it, 13f)) }
+                            place).forEach { details.addView(fact(it)) }
                         profileLoaded = true
                         val about = info.optString("biography").ifBlank { "No biography available." }
                         biography.text = about
@@ -653,6 +661,17 @@ internal object ActorInformation {
                     filmArea.removeAllViews()
                     workResult.onSuccess {
                         val all = credits(it, actor.preferCrew)
+                        if (all.isNotEmpty()) {
+                            // As in Nuvio Mobile, count distinct TMDB IDs and use the
+                            // earliest available release/first-air year among credits.
+                            val counted = all.distinctBy(Credit::id)
+                            val firstYear = counted.mapNotNull { credit ->
+                                credit.date?.take(4)?.toIntOrNull()
+                            }.minOrNull()
+                            val summary = "${counted.size} ${if (counted.size == 1) "title" else "titles"}" +
+                                (firstYear?.let { " · since $it" } ?: "")
+                            details.addView(fact(summary), creditsInsertAt)
+                        }
                         val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
                         val popular = all.sortedByDescending(Credit::popularity)
                         val latest = all.filter { item -> item.date != null && item.date <= today }
