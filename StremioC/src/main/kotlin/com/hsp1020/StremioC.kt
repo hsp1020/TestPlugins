@@ -1220,7 +1220,7 @@ open class StremioC(
         resolvedImdbId: String?
     ): Boolean = when {
         directMdbTarget(hint?.id) != null -> true
-        isKitsuOrMalId(hint?.id) -> !resolvedTmdbId.isNullOrBlank() || !resolvedImdbId.isNullOrBlank()
+        isLibraryAnimeId(hint?.id) -> !resolvedTmdbId.isNullOrBlank() || !resolvedImdbId.isNullOrBlank()
         else -> false
     }
 
@@ -1359,8 +1359,8 @@ open class StremioC(
     private fun buildStremioId(type: String?, id: String?, season: Int?, episode: Int?, isSubtitle: Boolean = false): String? {
         if (type == "series" && season != null && episode != null) {
             return when {
-                id?.startsWith("kitsu:") == true || id?.startsWith("mal:") == true -> {
-                    val parts = id.split(":")
+                isLibraryAnimeId(id) -> {
+                    val parts = id!!.split(":")
                     val baseId = if (parts.size >= 2) "${parts[0]}:${parts[1]}" else id
                     if (isSubtitle && id.startsWith("mal:")) "$baseId:$season:$episode" else "$baseId:$episode"
                 }
@@ -1908,7 +1908,16 @@ open class StremioC(
                 val hint = parseDetailUrlHint(metaUrl)
                 DetailLoadPerf.event("LIBRARY_MAPPED", "type=${hint?.type} id=${hint?.id}")
                 return@coroutineScope DetailLoadPerf.step("library.delegateLoad") {
-                    StremioC(base, name).load(metaUrl)
+                    StremioC(base, name).load(metaUrl).also { response ->
+                        // Library details may retain their original URL, not the delegated meta URL.
+                        // Copy artwork/title visibility state to that original URL as well.
+                        for (source in listOf(metaUrl, response.url)) {
+                            fallbackLogoTitles[source]?.let { fallbackLogoTitles[url] = it }
+                            expectedLogoByUrl[source]?.let { expectedLogoByUrl[url] = it }
+                            trailerChoicesByUrl[source]?.let { trailerChoicesByUrl[url] = it }
+                            genreCatalogsByUrl[source]?.let { genreCatalogsByUrl[url] = it }
+                        }
+                    }
                 }
             }
         }
@@ -2177,7 +2186,7 @@ open class StremioC(
 
         var finalProcessedId = res.id
         val imdbId = resolvedImdbId ?: preFetchedTmdbDetail?.external_ids?.imdb_id
-        if (!imdbId.isNullOrBlank() && (imdbId.startsWith("tt") || isKitsuOrMalId(imdbId))) {
+        if (!imdbId.isNullOrBlank() && (imdbId.startsWith("tt") || isLibraryAnimeId(imdbId))) {
             finalProcessedId = imdbId
         }
 
@@ -2229,7 +2238,7 @@ open class StremioC(
             val authoritativeMdb = if (postMetaMdbTarget == finalMdbTarget) {
                 postMetaMdbDeferred ?: launchMdbAttempt(finalMdbTarget)
             } else launchMdbAttempt(finalMdbTarget)
-            val mdbRatings = withTimeoutOrNull(400L) {
+            val mdbRatings = withTimeoutOrNull(4000L) {
                 DetailLoadPerf.step("await.mdbForFinalTarget") { authoritativeMdb?.await() }
                     ?.takeIf { it.matches(finalMdbTarget) }?.ratings
             }
@@ -2473,7 +2482,7 @@ open class StremioC(
         // One mapping response is shared within this loadLinks call; it is never cached.
         suspend fun mappedAnimeStremioId(): String? {
             if (actualIsMovie || !(loadData.isAnime || loadData.originalAnimeId != null ||
-                    loadData.kitsuId != null || isKitsuOrMalId(loadData.id) ||
+                    loadData.kitsuId != null || isLibraryAnimeId(loadData.id) ||
                     loadData.malId != null || loadData.anilistId != null ||
                     (loadData.isCartoon && loadData.isAsian))) return null
             val mapped = mappingDeferred.await() ?: return null
@@ -2484,7 +2493,7 @@ open class StremioC(
         }
         suspend fun streamRequest(type: String, id: String, season: Int?, episode: Int?): Pair<String, String>? {
             mappedAnimeStremioId()?.let { return "series" to it }
-            if (id.startsWith("kitsu:") || id.startsWith("mal:")) {
+            if (isLibraryAnimeId(id)) {
                 return if (actualIsMovie) integrationImdbId?.let { "movie" to it } else null
             }
             if (id.isBlank()) return null
@@ -2529,7 +2538,7 @@ open class StremioC(
                 val mappedId = mappedAnimeStremioId()
                 if (mappedId != null) {
                     fetchStremioSubtitles(currentMainUrl, mappedId, null, null, "series")
-                } else if (!isKitsuOrMalId(primaryId) || actualIsMovie) {
+                } else if (!isLibraryAnimeId(primaryId) || actualIsMovie) {
                     fetchStremioSubtitles(currentMainUrl, primaryId, loadData.season, loadData.episode)
                 }
             },
@@ -2579,7 +2588,7 @@ open class StremioC(
                                     val mappedId = mappedAnimeStremioId()
                                     if (mappedId != null) {
                                         fetchStremioSubtitles(addonUrl, mappedId, null, null, "series", addon.name)
-                                    } else if (!isKitsuOrMalId(reqId) || actualIsMovie) {
+                                    } else if (!isLibraryAnimeId(reqId) || actualIsMovie) {
                                         fetchStremioSubtitles(addonUrl, reqId, season, episode, extraType, addon.name)
                                     }
                                 })
@@ -2714,7 +2723,7 @@ open class StremioC(
                 ids.get("anilistId").intOrNull() == null) return@runSuspendCatching null
             // AIOStreams may return its first record if season matching fails.
             // Do not silently accept a different season for an IMDb episode.
-            if (!byKitsu && !byMal && season != null && season > 1) {
+            if (!byKitsu && !byMal && !byAniList && season != null && season > 1) {
                 val mappedSeason = data.get("imdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
                     ?: data.get("tvdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
                     ?: data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
@@ -2727,9 +2736,9 @@ open class StremioC(
             val localEpisode = loadData.episode?.takeIf { it > 0 }
             val tmdbEpisode = when {
                 tmdbSeason == null || localEpisode == null -> null
-                first != null -> if (!byKitsu && !byMal && season == tmdbSeason && localEpisode >= first)
+                first != null -> if (!byKitsu && !byMal && !byAniList && season == tmdbSeason && localEpisode >= first)
                     localEpisode else first + localEpisode - 1
-                !byKitsu && !byMal && season == tmdbSeason -> localEpisode
+                !byKitsu && !byMal && !byAniList && season == tmdbSeason -> localEpisode
                 else -> null // No proven offset between these coordinate systems.
             }
             AnimeSeasonMapping(
@@ -2800,8 +2809,7 @@ open class StremioC(
             ?.removePrefix("kitsu:")?.substringBefore(':')
             ?.takeIf { it.isNotBlank() && it.all { digit -> digit.isDigit() } }
         val isAnime = loadData.isAnime ||
-            loadData.id?.startsWith("kitsu:") == true ||
-            loadData.id?.startsWith("mal:") == true ||
+            isLibraryAnimeId(loadData.id) || isLibraryAnimeId(loadData.originalAnimeId) ||
             kitsuId != null || loadData.anilistId != null || loadData.malId != null ||
             (loadData.isCartoon && loadData.isAsian)
         val isMovie = targetType == "movie" ||
@@ -3319,7 +3327,7 @@ open class StremioC(
         @JsonProperty("malId") val malId: Int? = null,
         @JsonProperty("kitsuId") val kitsuId: String? = null,
         @JsonProperty("addonUrl") val addonUrl: String? = null,
-        @JsonProperty("originalAnimeId") @JsonAlias("originalKitsuId") val originalAnimeId: String? = null, // Original kitsu: or mal: ID
+        @JsonProperty("originalAnimeId") @JsonAlias("originalKitsuId") val originalAnimeId: String? = null, // Original kitsu:, mal:, or anilist: ID
         @JsonProperty("embeddedStreams") val embeddedStreams: String? = null,
         @JsonProperty("embeddedStreamTitle") val embeddedStreamTitle: String? = null
     )
@@ -3858,7 +3866,7 @@ open class StremioC(
                     val rawEpImdbId = video.imdb_id ?: finalImdbId
                     val epImdbId = rawEpImdbId?.let { idStr ->
                         val parts = idStr.split(":")
-                        if (idStr.startsWith("kitsu:") || idStr.startsWith("mal:") || idStr.startsWith("tmdb:")) {
+                        if (provider.isLibraryAnimeId(idStr) || idStr.startsWith("tmdb:")) {
                             if (parts.size >= 2) "${parts[0]}:${parts[1]}" else idStr
                         } else {
                             parts[0]
@@ -3910,7 +3918,7 @@ open class StremioC(
                 ?: this@CatalogEntry.id?.takeIf { provider.isLibraryAnimeId(it) }
 
             var finalImdbId = if (this@CatalogEntry.id?.startsWith("tt") == true) this@CatalogEntry.id 
-                              else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
+                              else imdbId?.takeIf { it.startsWith("tt") || provider.isLibraryAnimeId(it) }
             
             if (finalImdbId == null && detailedEntry.links?.isNotEmpty() == true) {
                 finalImdbId = detailedEntry.links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/")?.takeIf { it.startsWith("tt") }
@@ -4072,7 +4080,7 @@ open class StremioC(
             val isAsian = countries.any { it.contains("KR", true) || it.contains("JP", true) || it.contains("CN", true) || it.contains("TH", true) || it.contains("TW", true) }
             val isCartoon = tmdbData?.fetchedGenreIds?.contains(16) == true ||
                 finalGenre?.any { it.contains("Animation", true) } == true
-            val isAnimeFromMetadata = originalAnimeId != null || fetchedMalId != null || finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
+            val isAnimeFromMetadata = originalAnimeId != null || fetchedMalId != null || provider.isLibraryAnimeId(finalImdbId) || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
             val imdbSyncMapping = DetailLoadPerf.step("await.detailSyncMapping") { detailSyncMapping?.await() }
             DetailLoadPerf.event("ANIME_SYNC_RESULT", "requested=${detailSyncMapping != null} matched=${imdbSyncMapping != null} eligible=$canSyncAnimeTrackers")
             val isAnimeMedia = isAnimeFromMetadata || imdbSyncMapping != null
@@ -4083,13 +4091,13 @@ open class StremioC(
             val finalMalId = imdbSyncMapping?.malId ?: fetchedMalId
                 ?: originalTrackerId?.takeIf { originalAnimeId?.startsWith("mal:") == true }
             val finalAniId = imdbSyncMapping?.aniListId ?: fetchedAniListId
-                ?: originalTrackerId?.takeIf { originalAnimeId?.startsWith("anilist:") == true && this@CatalogEntry.id == originalAnimeId }
+                ?: originalTrackerId?.takeIf { originalAnimeId?.startsWith("anilist:") == true }
             val finalKitsuId = imdbSyncMapping?.kitsuId?.toIntOrNull()?.takeIf { it > 0 }
                 ?: fetchedKitsuId?.toIntOrNull()?.takeIf { it > 0 }
                 ?: originalTrackerId?.takeIf { originalAnimeId?.startsWith("kitsu:") == true }
             val cleanImdbId = finalImdbId?.let { idStr ->
                 val parts = idStr.split(":")
-                if (idStr.startsWith("kitsu:") || idStr.startsWith("mal:") || idStr.startsWith("tmdb:")) {
+                if (provider.isLibraryAnimeId(idStr) || idStr.startsWith("tmdb:")) {
                     if (parts.size >= 2) "${parts[0]}:${parts[1]}" else idStr
                 } else {
                     parts[0]
