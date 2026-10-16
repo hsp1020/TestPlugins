@@ -799,16 +799,8 @@ open class StremioC(
         fun invalidateSyncSettingsCache() = synchronized(StremioC::class.java) {
             cachedSyncSettings = null
             cachedSyncSettingsTime = 0L
-            // Change the persistent namespace instead of deleting many GZIP files
-            // on the UI thread. Old entries are retired by the existing LRU trim.
-            CloudStreamApp.context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)?.let { prefs ->
-                val next = prefs.getLong("addon_meta_epoch", 0L) + 1L
-                prefs.edit().putLong("addon_meta_epoch", next).apply()
-            }
-            synchronized(addonMetaCache) {
-                addonMetaCache.clear()
-                addonMetaCacheBytes = 0L
-            }
+            // Metadata keys already include the exact addon URL, locale and
+            // manifest version. Unrelated settings must not flush other addons.
         }
 
         internal fun isCatalogAddonEnabled(url: String, id: Long? = null): Boolean {
@@ -1080,14 +1072,14 @@ open class StremioC(
 
         private fun addonMetaStorageKey(url: String): String {
             val context = CloudStreamApp.context
-            val generation = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-                ?.getLong("addon_meta_epoch", 0L) ?: 0L
+            val prefs = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+            val language = prefs?.getString("tmdb_language_code", "en-US").orEmpty()
             val addonBase = url.substringBefore("/meta/")
             val version = context
                 ?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
                 ?.getString("manifest_version_" + stremioCatalogKey(addonBase), "").orEmpty()
-            // A change in one manifest's version does not invalidate other addons.
-            return "$generation|$version|$url"
+            // Only this language + addon configuration + addon version shares /meta.
+            return "$language|$version|$url"
         }
 
         private fun invalidateAddonVersionCache(manifestUrl: String) {
