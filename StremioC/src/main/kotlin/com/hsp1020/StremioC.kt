@@ -1356,13 +1356,13 @@ open class StremioC(
         return runSuspendCatching { IMDB_ID_REGEX.find(url)?.value }.onFailure { it.printStackTrace() }.getOrNull()
     }
 
-    private fun buildStremioId(type: String?, id: String?, season: Int?, episode: Int?, isSubtitle: Boolean = false): String? {
+    private fun buildStremioId(type: String?, id: String?, season: Int?, episode: Int?): String? {
         if (type == "series" && season != null && episode != null) {
             return when {
                 isLibraryAnimeId(id) -> {
                     val parts = id!!.split(":")
                     val baseId = if (parts.size >= 2) "${parts[0]}:${parts[1]}" else id
-                    if (isSubtitle && id.startsWith("mal:")) "$baseId:$season:$episode" else "$baseId:$episode"
+                    "$baseId:$episode"
                 }
                 id?.endsWith(":$season:$episode") == true -> id
                 else -> "$id:$season:$episode"
@@ -2445,8 +2445,7 @@ open class StremioC(
                 requestType,
                 id,
                 season,
-                episode,
-                isSubtitle = true
+                episode
             ) ?: id
             if (subId.isBlank()) return
 
