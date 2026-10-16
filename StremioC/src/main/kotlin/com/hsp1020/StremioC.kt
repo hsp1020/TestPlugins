@@ -69,6 +69,10 @@ import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.lang.ref.WeakReference
+import java.io.File
+import java.security.MessageDigest
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
 
 inline fun <T> runSuspendCatching(block: () -> T): Result<T> {
     return try {
@@ -103,6 +107,83 @@ private inline fun <K, V> lruCacheMap(maxSize: Int): MutableMap<K, V> {
     })
 }
 
+
+private object MetadataDiskCache {
+    private const val TTL_MS = 24L * 60 * 60 * 1000
+    private const val MAX_BYTES = 50L * 1024 * 1024
+    private val entryLimits = mapOf("detail" to 200, "season" to 300, "find" to 5000,
+        "anime" to 5000, "mdb" to 1000)
+    private val lock = Any()
+    private var writes = 0
+
+    private fun directory(): File? = CloudStreamApp.context?.filesDir
+        ?.let { File(it, "stremioc-metadata-v1").apply { mkdirs() }.takeIf { dir -> dir.isDirectory } }
+
+    private fun target(dir: File, kind: String, key: String): File {
+        val hash = MessageDigest.getInstance("SHA-256").digest("${kind}:${key}".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return File(dir, "${kind}_${hash}.gz")
+    }
+
+    suspend fun read(kind: String, key: String): Pair<String, Long>? = withContext(Dispatchers.IO) {
+        synchronized(lock) {
+            val file = directory()?.let { target(it, kind, key) } ?: return@synchronized null
+            if (!file.isFile) return@synchronized null
+            try {
+                val body = GZIPInputStream(file.inputStream()).bufferedReader(Charsets.UTF_8).use { it.readText() }
+                val stamp = body.substringBefore('\n').toLongOrNull()
+                val now = System.currentTimeMillis()
+                if (stamp == null || stamp > now || now - stamp >= TTL_MS || !body.contains('\n')) {
+                    file.delete()
+                    null
+                } else {
+                    file.setLastModified(now) // Disk LRU; TTL stays in the file header.
+                    body.substringAfter('\n') to stamp
+                }
+            } catch (_: Exception) {
+                file.delete()
+                null
+            }
+        }
+    }
+
+    suspend fun write(kind: String, key: String, json: String) {
+        if (json.length > 2_000_000) return
+        withContext(Dispatchers.IO) {
+            synchronized(lock) {
+                val dir = directory() ?: return@synchronized
+                val file = target(dir, kind, key)
+                val temp = File(dir, file.name + ".tmp")
+                try {
+                    GZIPOutputStream(temp.outputStream()).bufferedWriter(Charsets.UTF_8).use {
+                        it.write(System.currentTimeMillis().toString())
+                        it.newLine()
+                        it.write(json)
+                    }
+                    if (!temp.renameTo(file)) temp.delete()
+                    if (++writes % 32 == 0) trim(dir)
+                } catch (_: Exception) {
+                    temp.delete()
+                }
+            }
+        }
+    }
+
+    private fun trim(dir: File) {
+        val files = dir.listFiles()?.filter { it.isFile && it.name.endsWith(".gz") } ?: return
+        for ((kind, limit) in entryLimits) {
+            files.filter { it.name.startsWith("${kind}_") }
+                .sortedByDescending { it.lastModified() }.drop(limit).forEach { it.delete() }
+        }
+        val remaining = files.filter { it.exists() }.sortedBy { it.lastModified() }
+        var total = remaining.sumOf { it.length() }
+        for (file in remaining) {
+            if (total <= MAX_BYTES) break
+            val length = file.length()
+            if (file.delete()) total -= length
+        }
+    }
+}
 
 private object DetailLoadPerf {
     private val sequence = AtomicLong()
@@ -700,11 +781,16 @@ open class StremioC(
         internal val expectedLogoByUrl = lruCacheMap<String, Boolean>(200)
         internal val trailerChoicesByUrl = lruCacheMap<String, List<TrailerChoice>>(200)
         internal val genreCatalogsByUrl = lruCacheMap<String, Map<String, CatalogShortcutTarget>>(200)
-        private val tmdbDetailsCache = lruCacheMap<String, Pair<TmdbDetailResponse, Long>>(100)
-        private val tmdbSeasonCache = lruCacheMap<String, Pair<TmdbSeasonDetail, Long>>(150)
-        private val tmdbFindCache = lruCacheMap<String, Pair<Pair<String, String>?, Long>>(100)
+        private val tmdbDetailsCache = lruCacheMap<String, Pair<TmdbDetailResponse, Long>>(200)
+        private val tmdbSeasonCache = lruCacheMap<String, Pair<TmdbSeasonDetail, Long>>(300)
+        private val tmdbFindCache = lruCacheMap<String, Pair<Pair<String, String>?, Long>>(5000)
+        private val animeMappingCache = lruCacheMap<String, Pair<AnimeSeasonMapping, Long>>(5000)
+        private val mdbRatingsCache = lruCacheMap<String, Pair<List<String>, Long>>(1000)
+        private val mdbFetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val mdbFetchSemaphore = Semaphore(5)
+        private val mdbInflight = mutableMapOf<MdbTarget, Deferred<SpeculativeMdbResult?>>()
         private val detailLoadHints = lruCacheMap<String, DetailUrlHint>(500)
-        private const val METADATA_CACHE_TTL = 12 * 60 * 60 * 1000L
+        private const val METADATA_CACHE_TTL = 24 * 60 * 60 * 1000L
 
         // Rebuild supported poster-service URLs using IDs already in TMDB recommendations.
         // Never guess arbitrary custom patterns or reuse a per-item image signature.
@@ -1046,6 +1132,9 @@ open class StremioC(
     private fun isKitsuOrMalId(id: String?): Boolean =
         id?.startsWith("kitsu:") == true || id?.startsWith("mal:") == true
 
+    private fun isLibraryAnimeId(id: String?): Boolean =
+        isKitsuOrMalId(id) || id?.startsWith("anilist:") == true
+
     private fun directMdbTarget(id: String?, mediaType: String = "tv"): MdbTarget? = when {
         id?.startsWith("tt") == true -> MdbTarget(id, false, mediaType)
         id?.startsWith("tmdb:") == true -> MdbTarget(id.removePrefix("tmdb:"), true, mediaType)
@@ -1068,21 +1157,51 @@ open class StremioC(
     }
 
     private suspend fun fetchMdbAttempt(target: MdbTarget): SpeculativeMdbResult {
+        val cacheKey = "${target.isTmdb}:${target.mediaType}:${target.id}"
+        val cached = mdbRatingsCache[cacheKey]?.takeIf {
+            System.currentTimeMillis() - it.second < METADATA_CACHE_TTL
+        } ?: MetadataDiskCache.read("mdb", cacheKey)?.let { (json, stamp) ->
+            runCatching { parseJson<List<String>>(json) }.getOrNull()
+                ?.takeIf { it.isNotEmpty() }?.let { ratings ->
+                    Pair(ratings, stamp).also { mdbRatingsCache[cacheKey] = it }
+                }
+        }
+        DetailLoadPerf.event("MDB_CACHE", "hit=${cached != null}")
+        if (cached != null) return SpeculativeMdbResult(target, cached.first, true)
+
         val attempt = runSuspendCatching {
             DetailLoadPerf.step("mdb.httpAndParse") {
                 fetchMdbListRatings(target.id, target.isTmdb, target.mediaType)
             }
         }.onFailure { DetailLoadPerf.event("MDB_ERROR", "error=${it.javaClass.simpleName}") }
-        DetailLoadPerf.event("MDB_RESULT", "success=${attempt.isSuccess} ratings=${attempt.getOrNull()?.size ?: 0} type=${target.mediaType}")
-        return SpeculativeMdbResult(
-            target = target,
-            ratings = attempt.getOrDefault(emptyList<String>()),
-            requestSucceeded = attempt.isSuccess
-        )
+        val ratings = attempt.getOrDefault(emptyList())
+        if (ratings.isNotEmpty()) {
+            mdbRatingsCache[cacheKey] = ratings to System.currentTimeMillis()
+            MetadataDiskCache.write("mdb", cacheKey, ratings.toJson())
+        }
+        DetailLoadPerf.event("MDB_RESULT", "success=${attempt.isSuccess} ratings=${ratings.size} type=${target.mediaType}")
+        return SpeculativeMdbResult(target, ratings, attempt.isSuccess)
     }
 
+    // Requests are detached so a slow rating endpoint cannot hold the detail coroutineScope open.
     private fun CoroutineScope.launchMdbAttempt(target: MdbTarget?): Deferred<SpeculativeMdbResult?>? =
-        target?.let { async(Dispatchers.IO) { DetailLoadPerf.step("task.mdbPrefetch") { fetchMdbAttempt(it) } } }
+        target?.let { requested ->
+            synchronized(mdbInflight) {
+                mdbInflight[requested] ?: mdbFetchScope.async(start = CoroutineStart.LAZY) {
+                    mdbFetchSemaphore.withPermit {
+                        DetailLoadPerf.step("task.mdbPrefetch") { fetchMdbAttempt(requested) }
+                    }
+                }.also { job ->
+                    mdbInflight[requested] = job
+                    job.invokeOnCompletion {
+                        synchronized(mdbInflight) {
+                            if (mdbInflight[requested] === job) mdbInflight.remove(requested)
+                        }
+                    }
+                    job.start()
+                }
+            }
+        }
 
     private fun cachedFindMatches(
         imdbId: String?,
@@ -1127,7 +1246,7 @@ open class StremioC(
         val kind = id.substringBefore(':')
         val value = id.substringAfter(':', "").substringBefore(':').toIntOrNull()
             ?.takeIf { it > 0 } ?: return null
-        if (kind != "kitsu" && kind != "mal") return null
+        if (kind != "kitsu" && kind != "mal" && kind != "anilist") return null
         return fetchAnimeSeasonMapping(LoadData(
             id = "$kind:$value",
             originalAnimeId = "$kind:$value",
@@ -1138,9 +1257,16 @@ open class StremioC(
     private suspend fun fetchTmdbFindForLoad(
         imdbId: String
     ): Pair<String, String>? {
-        val cachedFind = tmdbFindCache[imdbId]
-        DetailLoadPerf.event("TMDB_FIND_CACHE", "hit=${cachedFind != null && System.currentTimeMillis() - cachedFind.second < METADATA_CACHE_TTL}")
-        val result: Pair<String, String>? = if (cachedFind != null && System.currentTimeMillis() - cachedFind.second < METADATA_CACHE_TTL) {
+        val cachedFind = tmdbFindCache[imdbId]?.takeIf {
+            System.currentTimeMillis() - it.second < METADATA_CACHE_TTL
+        } ?: MetadataDiskCache.read("find", imdbId)?.let { (encoded, stamp) ->
+            val parts = encoded.split('|')
+            if (parts.size == 2 && parts[0].toIntOrNull() != null && parts[1] in listOf("tv", "movie")) {
+                Pair(Pair(parts[0], parts[1]), stamp).also { tmdbFindCache[imdbId] = it }
+            } else null
+        }
+        DetailLoadPerf.event("TMDB_FIND_CACHE", "hit=${cachedFind != null}")
+        val result: Pair<String, String>? = if (cachedFind != null) {
             cachedFind.first
         } else {
             val fetchedFind = runSuspendCatching {
@@ -1159,6 +1285,7 @@ open class StremioC(
             }.getOrNull()
             if (fetchedFind != null) {
                 tmdbFindCache[imdbId] = Pair(fetchedFind, System.currentTimeMillis())
+                MetadataDiskCache.write("find", imdbId, "${fetchedFind.first}|${fetchedFind.second}")
             }
             fetchedFind
         }
@@ -1180,9 +1307,15 @@ open class StremioC(
         val detailUrl = buildTmdbUrl("/$mediaType/$tmdbId",
             "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages(),
             *videoLanguages)
-        val cached = tmdbDetailsCache[detailUrl]
-        DetailLoadPerf.event("TMDB_DETAIL_CACHE", "hit=${cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL} media=$mediaType")
-        val result: TmdbDetailResponse? = if (cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL) {
+        val cached = tmdbDetailsCache[detailUrl]?.takeIf {
+            System.currentTimeMillis() - it.second < METADATA_CACHE_TTL
+        } ?: MetadataDiskCache.read("detail", detailUrl)?.let { (json, stamp) ->
+            runCatching { parseJson<TmdbDetailResponse>(json) }.getOrNull()?.let { value ->
+                Pair(value, stamp).also { tmdbDetailsCache[detailUrl] = it }
+            }
+        }
+        DetailLoadPerf.event("TMDB_DETAIL_CACHE", "hit=${cached != null} media=$mediaType")
+        val result: TmdbDetailResponse? = if (cached != null) {
             cached.first
         } else {
             runSuspendCatching {
@@ -1192,6 +1325,7 @@ open class StremioC(
                 }
                 if (fetched != null) {
                     tmdbDetailsCache[detailUrl] = Pair(fetched, System.currentTimeMillis())
+                    MetadataDiskCache.write("detail", detailUrl, text)
                 }
                 fetched
             }.onFailure { it.printStackTrace() }.getOrNull()
@@ -1797,7 +1931,7 @@ open class StremioC(
             }
 
         val parsedUrlHint = parseDetailUrlHint(url)
-        val requestedAnimeId = parsedUrlHint?.id?.takeIf { isKitsuOrMalId(it) }
+        val requestedAnimeId = parsedUrlHint?.id?.takeIf { isLibraryAnimeId(it) }
         val rememberedHint = detailLoadHints[url]?.takeIf { cached ->
             parsedUrlHint != null &&
                 cached.id == parsedUrlHint.id &&
@@ -1823,7 +1957,7 @@ open class StremioC(
         val mdbEnabled = isIntegrationEnabled("mdblist_enabled", default = false)
         val directMdbHint = directMdbTarget(urlHint?.id, hintMediaType)
 
-        val hintedAnimeId = urlHint?.id?.takeIf { isKitsuOrMalId(it) }
+        val hintedAnimeId = urlHint?.id?.takeIf { isLibraryAnimeId(it) }
         val speculativeAnimeDeferred: Deferred<AnimeSeasonMapping?>? = hintedAnimeId?.let { id ->
             async(Dispatchers.IO) { DetailLoadPerf.step("task.speculativeAnime") { resolveAnimeIdForLoad(id) } }
         }
@@ -1831,12 +1965,12 @@ open class StremioC(
         val speculativeMdbDeferred: Deferred<SpeculativeMdbResult?>? = when {
             !mdbEnabled || urlHint == null -> null
             directMdbHint != null -> launchMdbAttempt(directMdbHint)
-            speculativeAnimeDeferred != null -> async(Dispatchers.IO) {
+            speculativeAnimeDeferred != null -> mdbFetchScope.async {
                 val resolved = DetailLoadPerf.step("await.speculativeAnimeForMdb") { speculativeAnimeDeferred.await() } ?: return@async null
                 val target = resolved.tmdbId?.toString()?.let { MdbTarget(it, true, hintMediaType) }
                     ?: resolved.imdbId?.let { MdbTarget(it, false, hintMediaType) }
                     ?: return@async null
-                fetchMdbAttempt(target)
+                launchMdbAttempt(target)?.await()
             }
             else -> null
         }
@@ -1908,8 +2042,8 @@ open class StremioC(
             canonicalDetailType(urlHint.type) == canonicalDetailType(res.type)
 
         if (!hintMatchesAuthoritative && urlHint != null) {
-            speculativeMdbDeferred?.cancel()
-            speculativeTmdbDeferred?.cancel()
+            // MDB work is detached and keyed by its original ID; it can still populate the cache.
+            if (requestedAnimeId == null) speculativeTmdbDeferred?.cancel()
             // A rewritten IMDb meta ID does not invalidate the original anime ID lookup.
             if (hintedAnimeId != requestedAnimeId) speculativeAnimeDeferred?.cancel()
             // This lookup only depends on the IMDb ID, not movie/series type.
@@ -1932,7 +2066,7 @@ open class StremioC(
             }
         }
 
-        val originalMappingId = requestedAnimeId ?: res.id?.takeIf { isKitsuOrMalId(it) }
+        val originalMappingId = requestedAnimeId ?: res.id?.takeIf { isLibraryAnimeId(it) }
         var fetchedAniListId: Int? = null
         var fetchedMalId: Int? = null
         var fetchedKitsuId: String? = null
@@ -1975,7 +2109,7 @@ open class StremioC(
 
         var acceptedTmdbSpec: SpeculativeTmdbChain? = null
 
-        if (hintMatchesAuthoritative && speculativeTmdbDeferred != null) {
+        if ((hintMatchesAuthoritative || (originalMappingId != null && !resolvedTmdbId.isNullOrBlank())) && speculativeTmdbDeferred != null) {
             val hintedImdb = resolvedImdbId ?: urlHint?.id?.takeIf { it.startsWith("tt") }
             val authoritativeHint = !urlHint?.tmdbId.isNullOrBlank() &&
                 directTmdbFromRes != null && urlHint?.tmdbId == directTmdbFromRes &&
@@ -2090,20 +2224,19 @@ open class StremioC(
 
         val finalMdbTarget = actualMdbTarget
         if (finalMdbTarget != null && mdbEnabled) {
-            var mdbRatings: List<String>? = if (hintMatchesAuthoritative) {
-                DetailLoadPerf.step("await.speculativeMdb") { speculativeMdbDeferred?.await() }?.takeIf { it.matches(finalMdbTarget) }?.ratings
-            } else null
-            if (mdbRatings == null) {
-                mdbRatings = DetailLoadPerf.step("await.postMetaMdb") { postMetaMdbDeferred?.await() }?.takeIf { it.matches(finalMdbTarget) }?.ratings
+            // Always await the authoritative ID, not a speculative request for a different ID.
+            // The detached request keeps populating the cache after the display budget expires.
+            val authoritativeMdb = if (postMetaMdbTarget == finalMdbTarget) {
+                postMetaMdbDeferred ?: launchMdbAttempt(finalMdbTarget)
+            } else launchMdbAttempt(finalMdbTarget)
+            val mdbRatings = withTimeoutOrNull(400L) {
+                DetailLoadPerf.step("await.mdbForFinalTarget") { authoritativeMdb?.await() }
+                    ?.takeIf { it.matches(finalMdbTarget) }?.ratings
             }
-            if (mdbRatings == null) {
-                mdbRatings = DetailLoadPerf.step("fallback.mdb") { fetchMdbAttempt(finalMdbTarget).ratings }
-            }
-
-            if (mdbRatings.isNotEmpty()) {
-                val ratingStr = "\u2063" + mdbRatings.joinToString("  ")
+            mdbRatings?.takeIf { it.isNotEmpty() }?.let { ratings ->
+                val ratingStr = "\u2063" + ratings.joinToString("  ")
                 val currentPlot = loadRes.plot
-                loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr<br>$currentPlot" else ratingStr
+                loadRes.plot = if (!currentPlot.isNullOrBlank()) "${ratingStr}<br>${currentPlot}" else ratingStr
                 loadRes.score = Score.from10(0)
             }
         }
@@ -2495,6 +2628,11 @@ open class StremioC(
         val mapStarted = SystemClock.elapsedRealtimeNanos()
         DetailLoadPerf.event("ANIME_MAP_ENTER", "source=${loadData.originalAnimeId?.substringBefore(':') ?: if (loadData.imdbId != null) "imdb" else "other"} season=${loadData.season ?: loadData.imdbSeason} episode=${loadData.episode ?: loadData.imdbEpisode}")
         try {
+        val aniListLookupId = loadData.originalAnimeId?.takeIf { it.startsWith("anilist:") }
+            ?.removePrefix("anilist:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
+            ?: loadData.anilistId?.takeIf { it > 0 }
+            ?: loadData.id?.takeIf { it.startsWith("anilist:") }
+                ?.removePrefix("anilist:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
         val kitsuId = (loadData.originalAnimeId?.takeIf { it.startsWith("kitsu:") } ?: loadData.kitsuId
             ?: loadData.id?.takeIf { it.startsWith("kitsu:") })
             ?.removePrefix("kitsu:")?.substringBefore(':')
@@ -2502,7 +2640,7 @@ open class StremioC(
         val imdbId = (loadData.imdbId ?: loadData.id)
             ?.substringBefore(':')?.takeIf { IMDB_ID_REGEX.matches(it) }
         if (!loadData.isAnime && kitsuId == null && loadData.malId == null &&
-            loadData.anilistId == null && !(loadData.isCartoon && loadData.isAsian)) return null
+            loadData.anilistId == null && aniListLookupId == null && !(loadData.isCartoon && loadData.isAsian)) return null
         val byKitsu = loadData.originalAnimeId?.startsWith("kitsu:") == true && kitsuId != null
         val malLookupId = loadData.originalAnimeId?.takeIf { it.startsWith("mal:") }
             ?.removePrefix("mal:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
@@ -2510,21 +2648,35 @@ open class StremioC(
             ?: loadData.id?.takeIf { it.startsWith("mal:") }
                 ?.removePrefix("mal:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
         val byMal = loadData.originalAnimeId?.startsWith("mal:") == true && malLookupId != null
+        val byAniList = loadData.originalAnimeId?.startsWith("anilist:") == true && aniListLookupId != null && imdbId == null
         val id = when {
             byKitsu -> kitsuId
             byMal -> malLookupId.toString()
-            else -> imdbId ?: kitsuId ?: malLookupId?.toString() ?: return null
+            byAniList -> aniListLookupId.toString()
+            else -> imdbId ?: kitsuId ?: malLookupId?.toString() ?: aniListLookupId?.toString() ?: return null
         }
         val season = loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 }
         val episode = loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 }
         val query = when {
             byMal -> "idType=malId&idValue=$id"
+            byAniList -> "idType=anilistId&idValue=$id"
             byKitsu || (id == kitsuId && imdbId == null) -> "idType=kitsuId&idValue=$id"
             imdbId == null && malLookupId != null -> "idType=malId&idValue=$id"
+            imdbId == null && aniListLookupId != null -> "idType=anilistId&idValue=$id"
             else -> "idType=imdbId&idValue=$id" +
                 (if (season != null) "&season=$season" else "") +
                 (if (episode != null) "&episode=$episode" else "")
         }
+        val cachedAnime = animeMappingCache[query]?.takeIf {
+            System.currentTimeMillis() - it.second < METADATA_CACHE_TTL
+        } ?: MetadataDiskCache.read("anime", query)?.let { (json, stamp) ->
+            runCatching { parseJson<AnimeSeasonMapping>(json) }.getOrNull()?.let { value ->
+                Pair(value, stamp).also { animeMappingCache[query] = it }
+            }
+        }
+        DetailLoadPerf.event("ANIME_MAP_CACHE", "hit=${cachedAnime != null}")
+        if (cachedAnime != null) return cachedAnime.first
+
         val hosts = listOf(
             "aiostreams.elfhosted.com",
             "aiostreams.fortheweak.cloud",
@@ -2553,8 +2705,10 @@ open class StremioC(
             val resolvedKitsu = ids.get("kitsuId").intOrNull()?.takeIf { it > 0 }?.toString()
             val resolvedImdb = ids.get("imdbId").textOrNull()
             if (byKitsu && resolvedKitsu != kitsuId) return@runSuspendCatching null
-            if ((byMal || imdbId == null && kitsuId == null && malLookupId != null) &&
+            if ((byMal || imdbId == null && kitsuId == null && malLookupId != null && !byAniList) &&
                 ids.get("malId").intOrNull() != malLookupId) return@runSuspendCatching null
+            if (byAniList && ids.get("anilistId").intOrNull() != aniListLookupId)
+                return@runSuspendCatching null
             if (imdbId != null && resolvedImdb != imdbId) return@runSuspendCatching null
             if (resolvedKitsu == null && ids.get("malId").intOrNull() == null &&
                 ids.get("anilistId").intOrNull() == null) return@runSuspendCatching null
@@ -2594,7 +2748,11 @@ open class StremioC(
             }.onFailure { DetailLoadPerf.event("ANIME_HOST_ERROR", "host=$host error=${it.javaClass.simpleName}") }.getOrNull()
             DetailLoadPerf.event("ANIME_HOST_RESULT", "host=$host dataNull=$noMapping mapped=${mapping != null}")
             if (noMapping) return null
-            if (mapping != null) return mapping
+            if (mapping != null) {
+                animeMappingCache[query] = mapping to System.currentTimeMillis()
+                MetadataDiskCache.write("anime", query, mapping.toJson())
+                return mapping
+            }
         }
         return null
         } finally {
@@ -3395,9 +3553,15 @@ open class StremioC(
                 "append_to_response" to detailAppend, "include_image_language" to tmdbLogoLanguages(),
                 *videoLanguages)
             val cacheKey = detailUrl
-            val cached = tmdbDetailsCache[cacheKey]
-            DetailLoadPerf.event("TMDB_ENRICH_CACHE", "prefetch=${preFetchedDetail != null} cacheHit=${cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL} media=$tmdbMediaType")
-            val detailRes = preFetchedDetail ?: if (cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL) {
+            val cached = tmdbDetailsCache[cacheKey]?.takeIf {
+                System.currentTimeMillis() - it.second < METADATA_CACHE_TTL
+            } ?: MetadataDiskCache.read("detail", cacheKey)?.let { (json, stamp) ->
+                runCatching { parseJson<TmdbDetailResponse>(json) }.getOrNull()?.let { value ->
+                    Pair(value, stamp).also { tmdbDetailsCache[cacheKey] = it }
+                }
+            }
+            DetailLoadPerf.event("TMDB_ENRICH_CACHE", "prefetch=${preFetchedDetail != null} cacheHit=${cached != null} media=$tmdbMediaType")
+            val detailRes = preFetchedDetail ?: if (cached != null) {
                 cached.first
             } else {
                 val text = DetailLoadPerf.step("tmdb.enrich.detail.http") { StremioC.customSession.get(detailUrl).text }
@@ -3406,6 +3570,7 @@ open class StremioC(
                 }
                 if (fetched != null) {
                     tmdbDetailsCache[cacheKey] = Pair(fetched, System.currentTimeMillis())
+                    MetadataDiskCache.write("detail", cacheKey, text)
                 }
                 fetched
             }
@@ -3442,9 +3607,15 @@ open class StremioC(
                                     runSuspendCatching {
                                         val seasonUrl = provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")
                                         val seasonCacheKey = seasonUrl
-                                        val cachedSeason = tmdbSeasonCache[seasonCacheKey]
-                                        DetailLoadPerf.event("TMDB_SEASON_CACHE", "season=$seasonNum hit=${cachedSeason != null && System.currentTimeMillis() - cachedSeason.second < METADATA_CACHE_TTL}")
-                                        val seasonRes = if (cachedSeason != null && System.currentTimeMillis() - cachedSeason.second < METADATA_CACHE_TTL) {
+                                        val cachedSeason = tmdbSeasonCache[seasonCacheKey]?.takeIf {
+                                            System.currentTimeMillis() - it.second < METADATA_CACHE_TTL
+                                        } ?: MetadataDiskCache.read("season", seasonCacheKey)?.let { (json, stamp) ->
+                                            runCatching { parseJson<TmdbSeasonDetail>(json) }.getOrNull()?.let { value ->
+                                                Pair(value, stamp).also { tmdbSeasonCache[seasonCacheKey] = it }
+                                            }
+                                        }
+                                        DetailLoadPerf.event("TMDB_SEASON_CACHE", "season=$seasonNum hit=${cachedSeason != null}")
+                                        val seasonRes = if (cachedSeason != null) {
                                             cachedSeason.first
                                         } else {
                                             val fetchedSeasonText = DetailLoadPerf.step("tmdb.season.$seasonNum.http") {
@@ -3455,6 +3626,7 @@ open class StremioC(
                                             }
                                             if (fetchedSeason != null) {
                                                 tmdbSeasonCache[seasonCacheKey] = Pair(fetchedSeason, System.currentTimeMillis())
+                                                MetadataDiskCache.write("season", seasonCacheKey, fetchedSeasonText)
                                             }
                                             fetchedSeason
                                         }
@@ -3735,7 +3907,7 @@ open class StremioC(
             val recommendationPoster = if (provider.metadataPosterAddonBaseUrl() != null &&
                 (addonDeferred == null || syncedEntry != null)) detailedEntry.poster else null
             val originalAnimeId = requestedAnimeId
-                ?: this@CatalogEntry.id?.takeIf { it.startsWith("kitsu:") || it.startsWith("mal:") }
+                ?: this@CatalogEntry.id?.takeIf { provider.isLibraryAnimeId(it) }
 
             var finalImdbId = if (this@CatalogEntry.id?.startsWith("tt") == true) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
@@ -3803,7 +3975,9 @@ open class StremioC(
             // A single listed IMDb season 3 is not a single-season series.
             val canSyncAnimeTrackers = isMovieForSync ||
                 ((finalType == "series" || finalType == "tv") && videoSeasons.singleOrNull() == 1)
-            val useImdbSyncMapping = originalAnimeId == null &&
+            val useImdbSyncMapping = (originalAnimeId == null ||
+                (originalAnimeId.startsWith("anilist:") &&
+                    fetchedAniListId == null && fetchedMalId == null && fetchedKitsuId == null)) &&
                 finalImdbId?.let { IMDB_ID_REGEX.matches(it) } == true && canSyncAnimeTrackers
             DetailLoadPerf.event("SYNC_MAPPING_PLAN", "enabled=$useImdbSyncMapping movie=$isMovieForSync seasons=${videoSeasons.joinToString(",")}")
             val detailSyncMapping = if (useImdbSyncMapping) {
@@ -3909,6 +4083,7 @@ open class StremioC(
             val finalMalId = imdbSyncMapping?.malId ?: fetchedMalId
                 ?: originalTrackerId?.takeIf { originalAnimeId?.startsWith("mal:") == true }
             val finalAniId = imdbSyncMapping?.aniListId ?: fetchedAniListId
+                ?: originalTrackerId?.takeIf { originalAnimeId?.startsWith("anilist:") == true && this@CatalogEntry.id == originalAnimeId }
             val finalKitsuId = imdbSyncMapping?.kitsuId?.toIntOrNull()?.takeIf { it > 0 }
                 ?: fetchedKitsuId?.toIntOrNull()?.takeIf { it > 0 }
                 ?: originalTrackerId?.takeIf { originalAnimeId?.startsWith("kitsu:") == true }
