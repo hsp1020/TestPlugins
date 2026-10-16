@@ -1474,13 +1474,28 @@ open class StremioC(
         // Share transport without sharing either caller's pagination state.
         private suspend fun fetchHomeJson(url: String): String {
             val task = synchronized(homeJsonFlights) {
-                homeJsonFlights[url] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
+                homeJsonFlights[url]?.also {
+                    StremioCCacheAudit.log("catalog", "INFLIGHT_JOIN", url)
+                } ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
+                    val started = SystemClock.elapsedRealtime()
+                    StremioCCacheAudit.log("catalog", "HTTP_START", url)
                     try {
-                        fetchHomeJsonUnshared(url)
+                        val body = fetchHomeJsonUnshared(url)
+                        StremioCCacheAudit.log("catalog", "HTTP_DONE", url,
+                            "chars=${body.length} durationMs=${SystemClock.elapsedRealtime() - started}")
+                        body
+                    } catch (error: Throwable) {
+                        StremioCCacheAudit.log("catalog", "HTTP_ERROR", url,
+                            "error=${error.javaClass.simpleName}")
+                        throw error
                     } finally {
                         synchronized(homeJsonFlights) { homeJsonFlights.remove(url) }
                     }
-                }.also { homeJsonFlights[url] = it; it.start() }
+                }.also {
+                    StremioCCacheAudit.log("catalog", "INFLIGHT_NEW", url)
+                    homeJsonFlights[url] = it
+                    it.start()
+                }
             }
             return task.await()
         }
@@ -1969,14 +1984,23 @@ open class StremioC(
         val isExpired = (now - lastCacheTime) > manifestCacheTtlMs
 
         if (cachedManifest != null && lastManifestUrl == currentUrl && !isExpired && !cachedManifest?.catalogs.isNullOrEmpty()) {
+            StremioCCacheAudit.log("manifest", "REUSE_RAM", currentUrl,
+                "ageMs=${now - lastCacheTime} ttlMs=$manifestCacheTtlMs catalogs=${cachedManifest?.catalogs?.size ?: 0}")
             return cachedManifest
         }
+        StremioCCacheAudit.log("manifest", if (cachedManifest == null) "RAM_MISS" else "RAM_EXPIRED_OR_CHANGED",
+            currentUrl, "ageMs=${now - lastCacheTime} ttlMs=$manifestCacheTtlMs")
 
         val manifestResponse = runSuspendCatching {
+            StremioCCacheAudit.log("manifest", "HTTP_START", currentUrl)
             customSession.get(currentUrl, timeout = 15L)
         }.onFailure {
+            StremioCCacheAudit.log("manifest", "HTTP_ERROR", currentUrl,
+                "error=${it.javaClass.simpleName}")
             it.printStackTrace()
         }.getOrNull()
+        if (manifestResponse != null) StremioCCacheAudit.log("manifest", "HTTP_DONE", currentUrl,
+            "code=${manifestResponse.code}")
         val resText = manifestResponse?.text
 
         if (!resText.isNullOrBlank()) {
@@ -1996,6 +2020,8 @@ open class StremioC(
                     if (oldVersion != null && newVersion != null && oldVersion != newVersion) {
                         invalidateAddonVersionCache(currentUrl)
                     }
+                    StremioCCacheAudit.log("manifest", "RAM_WRITE_OK", currentUrl,
+                        "catalogs=${parsed.catalogs.size} ttlMs=${cachePolicy.ttlMs} noStore=${cachePolicy.noStore} versionChanged=${oldVersion != null && oldVersion != newVersion}")
                     cachedManifest = parsed
                     preparedMainPageManifest = PreparedMainPageManifest(currentUrl, resText.toUniqueKey(), parsed)
                     lastManifestUrl = currentUrl
@@ -2014,6 +2040,8 @@ open class StremioC(
                         }
                         if (newVersion != null) putString("manifest_version_" + manifestKey, newVersion)
                     }?.apply()
+                    StremioCCacheAudit.log("manifest", if (cachePolicy.noStore) "STORE_SKIPPED_NO_STORE" else "PREFS_WRITE_OK",
+                        currentUrl, "chars=${resText.length} ttlMs=${cachePolicy.ttlMs}")
                     return parsed
                 }
             } catch (e: Exception) {
@@ -2023,6 +2051,8 @@ open class StremioC(
 
         if (manifestCacheTtlMs > 0L && lastManifestUrl == currentUrl &&
             now - lastCacheTime <= 72L * 60 * 60 * 1000) {
+            StremioCCacheAudit.log("manifest", "REUSE_STALE_RAM_ON_ERROR", currentUrl,
+                "ageMs=${now - lastCacheTime}")
             return cachedManifest
         }
         val saved = CloudStreamApp.context
@@ -2030,6 +2060,8 @@ open class StremioC(
             ?: return null
         val key = stremioCatalogKey(mainUrl)
         val raw = stremioReadManifest(saved, mainUrl) ?: return null
+        StremioCCacheAudit.log("manifest", "READ_SAVED_FALLBACK", currentUrl,
+            "chars=${raw.length}")
         val savedAt = saved.getLong("manifest_saved_at_" + key, 0L)
         // Legacy stored manifests had no timestamp; preserve them during migration.
         val effectiveAt = if (savedAt > 0L) savedAt else now.also {
@@ -2038,7 +2070,13 @@ open class StremioC(
         if (effectiveAt > now || now - effectiveAt > 72L * 60 * 60 * 1000) return null
         return runCatching { parseJson<Manifest>(raw) }.getOrNull()
             ?.takeIf { it.catalogs.isNotEmpty() }
-            ?.also { cachedManifest = it; lastManifestUrl = currentUrl; lastCacheTime = effectiveAt }
+            ?.also {
+                cachedManifest = it
+                lastManifestUrl = currentUrl
+                lastCacheTime = effectiveAt
+                StremioCCacheAudit.log("manifest", "REUSE_SAVED_FALLBACK", currentUrl,
+                    "catalogs=${it.catalogs.size} ageMs=${now - effectiveAt}")
+            }
     }
 
 
@@ -2168,7 +2206,9 @@ open class StremioC(
     }
 
     internal fun homeCursorFor(target: CatalogShortcutTarget, visible: List<SearchResponse>): Int? {
+        val cursorAuditKey = "$mainUrl|${target.type}|${target.catalogId}"
         if (visible.isEmpty()) {
+            StremioCCacheAudit.log("catalog_cursor", "SNAPSHOT_MISS", cursorAuditKey, "reason=empty")
             return null
         }
         val path = "/catalog/${target.type.urlEncodeLocal()}/${target.catalogId.urlEncodeLocal()}"
@@ -2195,8 +2235,12 @@ open class StremioC(
             last = next
         }
         if (last <= 0) {
+            StremioCCacheAudit.log("catalog_cursor", "SNAPSHOT_MISS", cursorAuditKey,
+                "reason=invalid_cursor visible=${visible.size}")
             return null
         }
+        StremioCCacheAudit.log("catalog_cursor", "SNAPSHOT_HIT", cursorAuditKey,
+            "visible=${visible.size} cursor=$last")
         return last
     }
 
@@ -2222,6 +2266,8 @@ open class StremioC(
             val currentSkip = catalogSkipState[stateKey]
             val active = activePageRequests.keys.count { it.startsWith("$stateKey|page=") }
             if (currentSkip != offset || active != 0) {
+                StremioCCacheAudit.log("catalog_cursor", "ADOPT_REJECT", stateKey,
+                    "currentSkip=$currentSkip requested=$offset active=$active")
                 return@withLock null
             }
 
@@ -2231,6 +2277,8 @@ open class StremioC(
             catalogSkipState[stateKey] = nextSkip
             val cursors = catalogHomeCursors.getOrPut(stateKey) { ConcurrentHashMap() }
             accepted.forEach { cursors[it.url] = nextSkip }
+            StremioCCacheAudit.log("catalog_cursor", "ADOPT_OK", stateKey,
+                "requested=$offset raw=$rawCount accepted=${accepted.size} nextSkip=$nextSkip")
             accepted
         }
     }
