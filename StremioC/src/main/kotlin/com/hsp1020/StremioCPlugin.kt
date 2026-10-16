@@ -397,19 +397,9 @@ class StremioCPlugin : Plugin() {
                                     if (!runCatching { JSONObject(raw).has("catalogs") }.getOrDefault(false))
                                         return@let null
                                     val key = stremioCatalogKey(item.link)
-                                    val cacheControl = response.headers.entries
-                                        .firstOrNull { it.key.equals("Cache-Control", ignoreCase = true) }
-                                        ?.value.orEmpty()
-                                    val directives = cacheControl.lowercase(java.util.Locale.ROOT)
-                                        .split(',').map { it.trim() }
-                                    val noStore = "no-store" in directives
-                                    val maxAge = directives.firstOrNull { it.startsWith("max-age=") }
-                                        ?.substringAfter('=')?.trim('"', ' ')?.toLongOrNull()
-                                    val ttl = when {
-                                        noStore || "no-cache" in directives -> 0L
-                                        maxAge != null -> maxAge.coerceIn(0L, 72L * 3600L) * 1000L
-                                        else -> 3_600_000L
-                                    }
+                                    val cachePolicy = stremioManifestCachePolicy(response.headers)
+                                    val noStore = cachePolicy.noStore
+                                    val ttl = cachePolicy.ttlMs
                                     val newVersion = runCatching { JSONObject(raw).optString("version") }
                                         .getOrNull()?.takeIf { it.isNotBlank() }
                                     manifestPrefs.edit().apply {
