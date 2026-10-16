@@ -927,27 +927,64 @@ open class StremioC(
         }
 
         private fun addonMetaTtlMs(
-            url: String, cacheControl: String?, root: JsonNode
+            url: String, cacheControl: String?, age: String?, expires: String?,
+            date: String?, root: JsonNode
         ): Long {
             val policy = cacheControl.orEmpty().lowercase(java.util.Locale.ROOT)
-            if (policy.split(',').any { directive ->
-                    val trimmed = directive.trim()
-                    trimmed == "no-store" || trimmed == "no-cache" || trimmed == "private"
-                }) return 0L
-            val maxAgePart = policy.split(',').map { it.trim() }
-                .firstOrNull { it.startsWith("max-age=") }
-                ?.substringAfter('=')
-                ?.trim('"', ' ')
-            val headerSeconds = maxAgePart?.toLongOrNull()
+            val directives = policy.split(',').map { it.trim() }
+            if (directives.any {
+                it == "no-store" || it == "no-cache" || it == "private" ||
+                    it == "max-age=0" || it == "s-maxage=0"
+            }) return 0L
+            val headerSeconds = directives.firstOrNull { it.startsWith("max-age=") }
+                ?.substringAfter('=')?.trim('"', ' ')?.toLongOrNull()
+            val ageSeconds = age?.trim()?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
             if (headerSeconds != null) {
-                return headerSeconds.coerceIn(0L, ADDON_META_MAX_TTL_MS / 1000L) * 1000L
+                return (headerSeconds - ageSeconds)
+                    .coerceIn(0L, ADDON_META_MAX_TTL_MS / 1000L) * 1000L
+            }
+            if (!expires.isNullOrBlank()) {
+                fun parseHttpDate(value: String?): Long? = runCatching {
+                    java.text.SimpleDateFormat(
+                        "EEE, dd MMM yyyy HH:mm:ss zzz", java.util.Locale.US
+                    ).parse(value ?: "")?.time
+                }.getOrNull()
+                val expiryTime = parseHttpDate(expires)
+                if (expiryTime != null) {
+                    val referenceTime = parseHttpDate(date) ?: System.currentTimeMillis()
+                    return (expiryTime - referenceTime - ageSeconds * 1000L)
+                        .coerceIn(0L, ADDON_META_MAX_TTL_MS)
+                }
             }
             val addonSeconds = root.get("cacheMaxAge")?.takeIf { it.isNumber }?.asLong()
             if (addonSeconds != null) {
-                return addonSeconds.coerceIn(0L, ADDON_META_MAX_TTL_MS / 1000L) * 1000L
+                return (addonSeconds - ageSeconds)
+                    .coerceIn(0L, ADDON_META_MAX_TTL_MS / 1000L) * 1000L
             }
             return if (url.contains("/meta/movie/", ignoreCase = true))
                 ADDON_META_MOVIE_TTL_MS else ADDON_META_SERIES_TTL_MS
+        }
+
+        // Validate the metadata against the requested URL before allowing persistence.
+        // An addon may legitimately remap anime IDs: display those results, but
+        // never keep a mismatched or incomplete response across page loads.
+        private fun isCacheableAddonMeta(url: String, root: JsonNode): Boolean {
+            if (root.get("success")?.asBoolean() == false) return false
+            val meta = root.get("meta") ?: root
+            if (!meta.isObject) return false
+            val entry = runCatching { parseJson<CatalogEntry>(meta.toString()) }.getOrNull()
+                ?: return false
+            val returnedId = entry.id?.trim()?.takeIf { it.isNotEmpty() } ?: return false
+            val returnedType = canonicalDetailType(entry.type) ?: return false
+            val encodedId = url.substringBefore('?').substringAfterLast('/')
+                .removeSuffix(".json")
+            val expectedId = runCatching {
+                URLDecoder.decode(encodedId, "UTF-8")
+            }.getOrDefault(encodedId)
+            val expectedType = url.substringBefore("/meta/")
+                .let { url.substringAfter("/meta/").substringBefore('/') }
+            return returnedId == expectedId &&
+                returnedType == canonicalDetailType(expectedType)
         }
 
         private fun isAddonMetaUrl(url: String): Boolean {
@@ -985,14 +1022,17 @@ open class StremioC(
                         }
                         val body = response.text
                         val root = parseJson<JsonNode>(body)
-                        val policy = response.headers["Cache-Control"]
-                            ?: response.headers["cache-control"]
-                        val vary = response.headers["Vary"] ?: response.headers["vary"]
-                        val ttlMs = addonMetaTtlMs(url, policy, root)
-                        val usableMeta = root.get("meta")?.isObject == true ||
-                            root.get("metas")?.takeIf { it.isArray && it.size() > 0 } != null ||
-                            root.get("id")?.asText()?.isNotBlank() == true
-                        if (usableMeta && ttlMs > 0L && vary?.trim() != "*" &&
+                        fun header(name: String): String? = response.headers.entries
+                            .firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+                        val policy = header("Cache-Control")
+                        val vary = header("Vary")
+                        val ttlMs = addonMetaTtlMs(
+                            url, policy, header("Age"), header("Expires"), header("Date"), root
+                        )
+                        // Non-empty Vary requires header-aware cache keys. Delegate such
+                        // responses to the host HTTP client rather than miskeying here.
+                        if (isCacheableAddonMeta(url, root) && ttlMs > 0L &&
+                            vary.isNullOrBlank() &&
                             !containsTransientMetaLinks(root) &&
                             !body.contains("data:image/", ignoreCase = true)) {
                             cacheAddonMetaInRam(storageKey, body, ttlMs)
