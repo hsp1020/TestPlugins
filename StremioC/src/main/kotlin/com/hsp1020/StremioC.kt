@@ -117,6 +117,20 @@ private object MetadataDiskCache {
     private val entryLimits = mapOf("detail" to 200, "season" to 300, "find" to 5000,
         "anime" to 5000, "mdb" to 1000, "meta" to 200)
     private val lock = Any()
+    private val diskHits = AtomicLong()
+    private val diskMisses = AtomicLong()
+
+    data class Usage(val items: Int, val bytes: Long, val tempBytes: Long, val hits: Long, val misses: Long)
+
+    suspend fun usage(): Usage = withContext(Dispatchers.IO) {
+        synchronized(lock) {
+            val all = directory()?.listFiles()?.filter { it.isFile }.orEmpty()
+            val files = all.filter { it.name.endsWith(".gz") }
+            Usage(files.size, files.sumOf { it.length() },
+                all.filter { it.name.endsWith(".tmp") }.sumOf { it.length() },
+                diskHits.get(), diskMisses.get())
+        }
+    }
 
     private fun directory(): File? = CloudStreamApp.context?.filesDir
         ?.let { File(it, "stremioc-metadata-v1").apply { mkdirs() }.takeIf { dir -> dir.isDirectory } }
@@ -130,7 +144,10 @@ private object MetadataDiskCache {
     suspend fun read(kind: String, key: String): Pair<String, Long>? = withContext(Dispatchers.IO) {
         synchronized(lock) {
             val file = directory()?.let { target(it, kind, key) } ?: return@synchronized null
-            if (!file.isFile) return@synchronized null
+            if (!file.isFile) {
+                diskMisses.incrementAndGet()
+                return@synchronized null
+            }
             try {
                 val body = GZIPInputStream(file.inputStream()).bufferedReader(Charsets.UTF_8).use { it.readText() }
                 val stamp = body.substringBefore('\n').toLongOrNull()
@@ -147,13 +164,16 @@ private object MetadataDiskCache {
                 if (stamp == null || stamp > now || ttl <= 0L ||
                     now - stamp >= ttl || firstNewline < 0 || (kind == "meta" && secondNewline < 0)) {
                     file.delete()
+                    diskMisses.incrementAndGet()
                     null
                 } else {
+                    diskHits.incrementAndGet()
                     file.setLastModified(now) // Disk LRU; TTL stays in the file header.
                     body.substring(if (kind == "meta") secondNewline + 1 else firstNewline + 1) to stamp
                 }
             } catch (_: Exception) {
                 file.delete()
+                diskMisses.incrementAndGet()
                 null
             }
         }
@@ -857,6 +877,23 @@ open class StremioC(
         private const val ADDON_META_MAX_TTL_MS = 7L * 24 * 60 * 60 * 1000
         private val addonMetaScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val addonMetaFlights = mutableMapOf<String, Deferred<String>>()
+        private val addonMetaMemoryHits = AtomicLong()
+        private val addonMetaMemoryMisses = AtomicLong()
+        private val addonMetaNetworkFetches = AtomicLong()
+
+        // Optional on-demand diagnostics: no permanent high-volume logging.
+        internal suspend fun metadataCacheDiagnostics(): String {
+            val disk = MetadataDiskCache.usage()
+            val ram = synchronized(addonMetaCache) {
+                addonMetaCache.size to addonMetaCacheBytes
+            }
+            return "diskItems=${disk.items} diskBytes=${disk.bytes} tempBytes=${disk.tempBytes} " +
+                "diskHits=${disk.hits} diskMisses=${disk.misses} " +
+                "metaRamItems=${ram.first} metaRamBytes=${ram.second} " +
+                "metaRamHits=${addonMetaMemoryHits.get()} " +
+                "metaRamMisses=${addonMetaMemoryMisses.get()} " +
+                "metaHttpFetches=${addonMetaNetworkFetches.get()}"
+        }
         private val metadataTextFlights = mutableMapOf<String, Deferred<String>>()
         private val animeHttpFlights = mutableMapOf<String, Deferred<String>>()
 
@@ -918,6 +955,8 @@ open class StremioC(
                     null
                 }
             }
+            if (bytes != null) addonMetaMemoryHits.incrementAndGet()
+            else addonMetaMemoryMisses.incrementAndGet()
             return bytes?.let { String(it, Charsets.UTF_8) }
         }
 
@@ -1024,6 +1063,7 @@ open class StremioC(
             val flight = synchronized(addonMetaFlights) {
                 addonMetaFlights[flightKey] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
                     try {
+                        addonMetaNetworkFetches.incrementAndGet()
                         val response = customSession.get(url, headers = if (forceRefresh)
                             mapOf("Cache-Control" to "no-cache") else emptyMap())
                         if (response.code !in 200..299) {
@@ -2204,6 +2244,9 @@ open class StremioC(
             try {
                 val result = DetailLoadPerf.step("load.coroutineScope") { loadInternal(effectiveUrl, forceRefresh) }
                 DetailLoadPerf.event("LOAD_RETURN", "type=${result.type} poster=${!result.posterUrl.isNullOrBlank()} backdrop=${!result.backgroundPosterUrl.isNullOrBlank()}")
+                if (Log.isLoggable("StremioCCache", Log.DEBUG)) {
+                    Log.d("StremioCCache", metadataCacheDiagnostics())
+                }
                 result
             } catch (error: Throwable) {
                 DetailLoadPerf.event("LOAD_THROW", "error=${error.javaClass.simpleName}")
