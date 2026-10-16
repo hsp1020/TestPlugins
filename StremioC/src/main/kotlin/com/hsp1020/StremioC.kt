@@ -122,6 +122,9 @@ private fun mdbCredentialFingerprint(): String {
     return key.toUniqueKey()
 }
 
+internal fun stremioMdbAuditKey(id: String, isTmdb: Boolean, mediaType: String): String =
+    "${mdbCredentialFingerprint()}:$isTmdb:$mediaType:$id"
+
 internal data class StremioManifestCachePolicy(val ttlMs: Long, val noStore: Boolean)
 
 internal fun stremioManifestCachePolicy(
