@@ -1746,12 +1746,17 @@ open class StremioC(
             if (origin != null) return@coroutineScope StremioC(origin, name).load(url)
         }
         suspend fun fetchSecondaryMeta(metaUrl: String, expectedId: String): CatalogEntry? =
-            runSuspendCatching {
-                val text = customSession.get(metaUrl).text
-                val response = if (text.isNotBlank()) parseJson<CatalogResponse>(text) else null
-                response?.meta ?: response?.metas?.firstOrNull { it.id == expectedId }
-                    ?: response?.metas?.firstOrNull()
-            }.onFailure { it.printStackTrace() }.getOrNull()
+            DetailLoadPerf.step("meta.secondary.total") {
+                runSuspendCatching {
+                    val text = DetailLoadPerf.step("meta.secondary.http") { customSession.get(metaUrl).text }
+                    val response = DetailLoadPerf.stepNow("meta.secondary.parse") {
+                        if (text.isNotBlank()) parseJson<CatalogResponse>(text) else null
+                    }
+                    DetailLoadPerf.event("META_SECONDARY_RESULT", "bytes=${text.length} meta=${response?.meta != null} items=${response?.metas?.size ?: 0}")
+                    response?.meta ?: response?.metas?.firstOrNull { it.id == expectedId }
+                        ?: response?.metas?.firstOrNull()
+                }.onFailure { DetailLoadPerf.event("META_SECONDARY_ERROR", "error=${it.javaClass.simpleName}"); it.printStackTrace() }.getOrNull()
+            }
 
         val parsedUrlHint = parseDetailUrlHint(url)
         val requestedAnimeId = parsedUrlHint?.id?.takeIf { isKitsuOrMalId(it) }
@@ -1766,14 +1771,14 @@ open class StremioC(
         val hintedMetaUrl = urlHint?.let { getUnifiedMetaUrl(it.type, it.id) }
             ?.takeUnless { it == url }
         val hintedMetaDeferred = hintedMetaUrl?.let { metaUrl ->
-            async(Dispatchers.IO) { fetchSecondaryMeta(metaUrl, urlHint!!.id) }
+            async(Dispatchers.IO) { DetailLoadPerf.step("task.secondaryPrefetch") { fetchSecondaryMeta(metaUrl, urlHint!!.id) } }
         }
         val hintedImdbId = (urlHint?.id ?: if (url.startsWith("{"))
             runCatching { parseJson<CatalogEntry>(url)?.id }.getOrNull() else null)
             ?.takeIf { IMDB_ID_REGEX.matches(it) }
         val speculativeImdbAnimeDeferred = hintedImdbId?.let { id ->
             async(Dispatchers.IO) {
-                fetchAnimeSeasonMapping(LoadData(id = id, imdbId = id, isAnime = true))
+                DetailLoadPerf.step("task.speculativeImdbAnime") { fetchAnimeSeasonMapping(LoadData(id = id, imdbId = id, isAnime = true)) }
             }
         }
         val hintMediaType = detailMediaType(urlHint?.type)
@@ -1782,14 +1787,14 @@ open class StremioC(
 
         val hintedAnimeId = urlHint?.id?.takeIf { isKitsuOrMalId(it) }
         val speculativeAnimeDeferred: Deferred<AnimeSeasonMapping?>? = hintedAnimeId?.let { id ->
-            async(Dispatchers.IO) { resolveAnimeIdForLoad(id) }
+            async(Dispatchers.IO) { DetailLoadPerf.step("task.speculativeAnime") { resolveAnimeIdForLoad(id) } }
         }
 
         val speculativeMdbDeferred: Deferred<SpeculativeMdbResult?>? = when {
             !mdbEnabled || urlHint == null -> null
             directMdbHint != null -> launchMdbAttempt(directMdbHint)
             speculativeAnimeDeferred != null -> async(Dispatchers.IO) {
-                val resolved = speculativeAnimeDeferred.await() ?: return@async null
+                val resolved = DetailLoadPerf.step("await.speculativeAnimeForMdb") { speculativeAnimeDeferred.await() } ?: return@async null
                 val target = resolved.tmdbId?.toString()?.let { MdbTarget(it, true, hintMediaType) }
                     ?: resolved.imdbId?.let { MdbTarget(it, false, hintMediaType) }
                     ?: return@async null
@@ -1802,25 +1807,25 @@ open class StremioC(
             !urlHint?.tmdbId.isNullOrBlank() -> {
                 val hintedTmdbId = urlHint?.tmdbId ?: ""
                 async(Dispatchers.IO) {
-                    val detail = fetchTmdbDetailForLoad(hintedTmdbId, hintMediaType)
+                    val detail = DetailLoadPerf.step("task.speculativeTmdbDirect") { fetchTmdbDetailForLoad(hintedTmdbId, hintMediaType) }
                     SpeculativeTmdbChain(urlHint?.id?.takeIf { it.startsWith("tt") }, hintedTmdbId, hintMediaType, false, detail)
                 }
             }
             urlHint?.id?.startsWith("tt") == true -> async(Dispatchers.IO) {
                 val hintId = urlHint?.id ?: return@async null
-                val find = fetchTmdbFindForLoad(hintId) ?: return@async null
-                val detail = fetchTmdbDetailForLoad(find.first, find.second)
+                val find = DetailLoadPerf.step("task.speculativeTmdbFind") { fetchTmdbFindForLoad(hintId) } ?: return@async null
+                val detail = DetailLoadPerf.step("task.speculativeTmdbFromFind") { fetchTmdbDetailForLoad(find.first, find.second) }
                 SpeculativeTmdbChain(hintId, find.first, find.second, true, detail)
             }
             urlHint?.id?.startsWith("tmdb:") == true -> {
                 val tmdbId = urlHint.id.removePrefix("tmdb:")
                 async(Dispatchers.IO) {
-                    val detail = fetchTmdbDetailForLoad(tmdbId, hintMediaType)
+                    val detail = DetailLoadPerf.step("task.speculativeTmdbPrefixed") { fetchTmdbDetailForLoad(tmdbId, hintMediaType) }
                     SpeculativeTmdbChain(null, tmdbId, hintMediaType, false, detail)
                 }
             }
             speculativeAnimeDeferred != null -> async(Dispatchers.IO) {
-                val resolved = speculativeAnimeDeferred.await() ?: return@async null
+                val resolved = DetailLoadPerf.step("await.speculativeAnimeForTmdb") { speculativeAnimeDeferred.await() } ?: return@async null
                 val tmdbId = resolved.tmdbId?.toString()
                 if (!tmdbId.isNullOrBlank()) {
                     val detail = fetchTmdbDetailForLoad(tmdbId, hintMediaType)
@@ -1859,6 +1864,7 @@ open class StremioC(
             }
         }
 
+        DetailLoadPerf.event("PREFETCH_STATE", "hasHint=${urlHint != null} secondary=${hintedMetaDeferred != null} imdbAnime=${speculativeImdbAnimeDeferred != null} anime=${speculativeAnimeDeferred != null} mdb=${speculativeMdbDeferred != null} tmdb=${speculativeTmdbDeferred != null}")
         val hintMatchesAuthoritative = urlHint != null &&
             urlHint.id == res.id &&
             canonicalDetailType(urlHint.type) == canonicalDetailType(res.type)
@@ -1896,10 +1902,12 @@ open class StremioC(
         var resolvedTmdbId: String? = null
 
         if (originalMappingId != null) {
-            val candidate = if (hintedAnimeId == originalMappingId && speculativeAnimeDeferred != null) {
-                speculativeAnimeDeferred.await()
-            } else {
-                resolveAnimeIdForLoad(originalMappingId)
+            val candidate = DetailLoadPerf.step("await.originalAnimeMapping") {
+                if (hintedAnimeId == originalMappingId && speculativeAnimeDeferred != null) {
+                    speculativeAnimeDeferred.await()
+                } else {
+                    resolveAnimeIdForLoad(originalMappingId)
+                }
             }
             val resolved = candidate?.takeIf { mapping ->
                 when {
@@ -1938,7 +1946,7 @@ open class StremioC(
                 cachedFindMatches(hintedImdb, directTmdbFromRes, authoritativeMediaType)
 
             if (directTmdbFromRes == null || authoritativeHint || reuseFind || speculativeTmdbDeferred.isCompleted) {
-                speculativeTmdbDeferred.await()?.let { spec ->
+                DetailLoadPerf.step("await.speculativeTmdb") { speculativeTmdbDeferred.await() }?.let { spec ->
                     val valid = directTmdbFromRes?.let { spec.matchesDirect(it, authoritativeMediaType) }
                         ?: spec.matchesFind(hintedImdb)
                     if (valid) acceptedTmdbSpec = spec
@@ -1974,7 +1982,8 @@ open class StremioC(
             null
         }
 
-        val preFetchedTmdbDetail = speculativeTmdbDetail ?: normalTmdbDeferred?.await()
+        val preFetchedTmdbDetail = speculativeTmdbDetail ?: DetailLoadPerf.step("await.normalTmdbDetail") { normalTmdbDeferred?.await() }
+        DetailLoadPerf.event("TMDB_PREFETCH_RESULT", "spec=${speculativeTmdbDetail != null} hasDetail=${preFetchedTmdbDetail != null} media=$targetTmdbMediaType")
         // Movie collections are independent of the second metadata addon's response.
         // Fetch them as soon as an authoritative movie detail exposes a collection ID.
         val collectionDeferred: Deferred<List<TmdbMedia>>? = if (targetTmdbMediaType == "movie") {
@@ -2039,13 +2048,13 @@ open class StremioC(
         val finalMdbTarget = actualMdbTarget
         if (finalMdbTarget != null && mdbEnabled) {
             var mdbRatings: List<String>? = if (hintMatchesAuthoritative) {
-                speculativeMdbDeferred?.await()?.takeIf { it.matches(finalMdbTarget) }?.ratings
+                DetailLoadPerf.step("await.speculativeMdb") { speculativeMdbDeferred?.await() }?.takeIf { it.matches(finalMdbTarget) }?.ratings
             } else null
             if (mdbRatings == null) {
-                mdbRatings = postMetaMdbDeferred?.await()?.takeIf { it.matches(finalMdbTarget) }?.ratings
+                mdbRatings = DetailLoadPerf.step("await.postMetaMdb") { postMetaMdbDeferred?.await() }?.takeIf { it.matches(finalMdbTarget) }?.ratings
             }
             if (mdbRatings == null) {
-                mdbRatings = fetchMdbAttempt(finalMdbTarget).ratings
+                mdbRatings = DetailLoadPerf.step("fallback.mdb") { fetchMdbAttempt(finalMdbTarget).ratings }
             }
 
             if (mdbRatings.isNotEmpty()) {
