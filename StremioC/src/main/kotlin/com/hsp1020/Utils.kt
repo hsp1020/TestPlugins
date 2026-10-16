@@ -115,23 +115,44 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false, mediaType:
     val mdbListEnabled = prefs.getBoolean("mdblist_enabled", false)
     val mdbListApiKey = prefs.getString("mdblist_api_key", "") ?: ""
     
-    if (!mdbListEnabled || mdbListApiKey.isBlank()) return emptyList()
-    
+    val auditKey = stremioMdbAuditKey(id, isTmdb, mediaType)
+    if (!mdbListEnabled || mdbListApiKey.isBlank()) {
+        StremioCCacheAudit.log("mdb", "HTTP_DISABLED", auditKey,
+            "enabled=$mdbListEnabled keyConfigured=${mdbListApiKey.isNotBlank()}")
+        return emptyList()
+    }
+    StremioCCacheAudit.log("mdb", "QUERY_BEGIN", auditKey)
     return try {
         val provider = if (isTmdb) "tmdb" else "imdb"
         val type = if (mediaType == "movie") "movie" else "show"
         val modernUrl = "https://api.mdblist.com/$provider/$type/$id/?apikey=$mdbListApiKey&append_to_response=keyword"
         val json = try {
-            JSONObject(app.get(modernUrl, timeout = 15L).text).also {
+            val start = android.os.SystemClock.elapsedRealtime()
+            StremioCCacheAudit.log("mdb", "MODERN_HTTP_START", auditKey)
+            val response = app.get(modernUrl, timeout = 15L)
+            StremioCCacheAudit.log("mdb", "MODERN_HTTP_DONE", auditKey,
+                "code=${response.code} chars=${response.text.length} durationMs=${android.os.SystemClock.elapsedRealtime() - start}")
+            JSONObject(response.text).also {
                 if (it.optJSONArray("ratings") == null) error("MDBList missing ratings")
             }
         } catch (e: CancellationException) {
+            StremioCCacheAudit.log("mdb", "MODERN_HTTP_CANCEL", auditKey)
             throw e
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            StremioCCacheAudit.log("mdb", "MODERN_HTTP_FALLBACK", auditKey,
+                "reason=${error.javaClass.simpleName}")
             val idParam = if (isTmdb) "tm" else "i"
-            JSONObject(app.get("https://mdblist.com/api/?apikey=$mdbListApiKey&$idParam=$id", timeout = 15L).text)
+            val start = android.os.SystemClock.elapsedRealtime()
+            StremioCCacheAudit.log("mdb", "LEGACY_HTTP_START", auditKey)
+            val response = app.get("https://mdblist.com/api/?apikey=$mdbListApiKey&$idParam=$id", timeout = 15L)
+            StremioCCacheAudit.log("mdb", "LEGACY_HTTP_DONE", auditKey,
+                "code=${response.code} chars=${response.text.length} durationMs=${android.os.SystemClock.elapsedRealtime() - start}")
+            JSONObject(response.text)
         }
-        val ratingsArray = json.optJSONArray("ratings") ?: return emptyList()
+        val ratingsArray = json.optJSONArray("ratings") ?: run {
+            StremioCCacheAudit.log("mdb", "RESPONSE_MISSING_RATINGS", auditKey)
+            return emptyList()
+        }
         val keywords = json.optJSONArray("keywords")
         val certifications = (0 until (keywords?.length() ?: 0)).mapNotNull { i ->
             val value = keywords?.opt(i)
@@ -178,12 +199,17 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false, mediaType:
         }
         
         results.sortBy { it.first.sortOrder }
+        StremioCCacheAudit.log("mdb", "PARSE_RESULT", auditKey,
+            "rawRatings=${ratingsArray.length()} acceptedRatings=${results.size}")
         results.map { (meta, score) ->
             "${meta.icon} ${String.format(Locale.US, "%.1f", score)}"
         }
     } catch (e: CancellationException) {
+        StremioCCacheAudit.log("mdb", "QUERY_CANCEL", auditKey)
         throw e
     } catch (e: Exception) {
+        StremioCCacheAudit.log("mdb", "QUERY_ERROR", auditKey,
+            "error=${e.javaClass.simpleName}")
         e.printStackTrace()
         emptyList()
     }
