@@ -1082,7 +1082,7 @@ open class StremioC(
     }
 
     private fun CoroutineScope.launchMdbAttempt(target: MdbTarget?): Deferred<SpeculativeMdbResult?>? =
-        target?.let { async(Dispatchers.IO) { fetchMdbAttempt(it) } }
+        target?.let { async(Dispatchers.IO) { DetailLoadPerf.step("task.mdbPrefetch") { fetchMdbAttempt(it) } } }
 
     private fun cachedFindMatches(
         imdbId: String?,
@@ -2014,7 +2014,9 @@ open class StremioC(
             targetTmdbId != null && speculativeTmdbDetail == null
         ) {
             async(Dispatchers.IO) {
-                fetchTmdbDetailForLoad(targetTmdbId, targetTmdbMediaType)
+                DetailLoadPerf.step("task.normalTmdbDetail") {
+                    fetchTmdbDetailForLoad(targetTmdbId, targetTmdbMediaType)
+                }
             }
         } else {
             null
@@ -2024,6 +2026,7 @@ open class StremioC(
         DetailLoadPerf.event("TMDB_PREFETCH_RESULT", "spec=${speculativeTmdbDetail != null} hasDetail=${preFetchedTmdbDetail != null} media=$targetTmdbMediaType")
         // Movie collections are independent of the second metadata addon's response.
         // Fetch them as soon as an authoritative movie detail exposes a collection ID.
+        DetailLoadPerf.event("LOAD_ENRICH_PLAN", "tmdb=${targetTmdbId != null} imdb=${!imdbId.isNullOrBlank()} mdb=$mdbEnabled")
         val collectionDeferred: Deferred<List<TmdbMedia>>? = if (targetTmdbMediaType == "movie") {
             preFetchedTmdbDetail?.belongs_to_collection?.id?.let { collectionId ->
                 async(Dispatchers.IO) {
@@ -3752,6 +3755,7 @@ open class StremioC(
                 foundMediaType = preFetchedFind.second
             }
 
+            DetailLoadPerf.event("RESPONSE_PLAN", "entryType=${this@CatalogEntry.type} imdb=${finalImdbId != null} tmdb=${tmdbIdStr != null} secondary=${syncedEntry != null} videos=${this@CatalogEntry.videos?.size ?: 0}")
             val findApiDeferred: Deferred<Pair<String, String>?>? = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
                 async(Dispatchers.IO) {
                     provider.fetchTmdbFindForLoad(finalImdbId)
@@ -3801,6 +3805,7 @@ open class StremioC(
                 ((finalType == "series" || finalType == "tv") && videoSeasons.singleOrNull() == 1)
             val useImdbSyncMapping = originalAnimeId == null &&
                 finalImdbId?.let { IMDB_ID_REGEX.matches(it) } == true && canSyncAnimeTrackers
+            DetailLoadPerf.event("SYNC_MAPPING_PLAN", "enabled=$useImdbSyncMapping movie=$isMovieForSync seasons=${videoSeasons.joinToString(",")}")
             val detailSyncMapping = if (useImdbSyncMapping) {
                 if (prefetchedAnimeImdbId != finalImdbId) prefetchedAnimeMapping?.cancel()
                 prefetchedAnimeMapping?.takeIf { prefetchedAnimeImdbId == finalImdbId }
@@ -3897,6 +3902,7 @@ open class StremioC(
             val imdbSyncMapping = DetailLoadPerf.step("await.detailSyncMapping") { detailSyncMapping?.await() }
             DetailLoadPerf.event("ANIME_SYNC_RESULT", "requested=${detailSyncMapping != null} matched=${imdbSyncMapping != null} eligible=$canSyncAnimeTrackers")
             val isAnimeMedia = isAnimeFromMetadata || imdbSyncMapping != null
+            DetailLoadPerf.event("RESPONSE_ASSET_PLAN", "poster=${!finalPoster.isNullOrBlank()} backdrop=${!finalBackground.isNullOrBlank()} tmdbActors=${tmdbData?.fetchedActors?.size ?: 0} recs=${tmdbData?.fetchedRecommendations?.size ?: 0} trailers=${finalTrailers.size}")
 
             val originalTrackerId = originalAnimeId?.substringAfter(':')?.substringBefore(':')
                 ?.toIntOrNull()?.takeIf { it > 0 }
