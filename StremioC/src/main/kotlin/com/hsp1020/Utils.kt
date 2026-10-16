@@ -280,6 +280,12 @@ internal class RatingPlotImageHook(
     private val main = Handler(Looper.getMainLooper())
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
+    private val mdbUpdate: (String) -> Unit = { cacheKey ->
+        val matched = watchers.values.filter { it.matchesMdbKey(cacheKey) }
+        val applied = matched.count { it.refreshLateMdb() }
+        StremioCCacheAudit.log("mdb_ui", "DELIVERY_RESULT", cacheKey,
+            "matched=${matched.size} applied=$applied")
+    }
     private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview, ::bindPhoneHero)
     private var phoneHero: PhoneHeroHook? = null
     private fun bindPhoneHero(parent: RecyclerView?) {
@@ -643,6 +649,10 @@ internal class RatingPlotImageHook(
             }
         }
 
+        override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
+            watchers[f]?.render() // CloudStream may reuse an old LoadResponse without calling load().
+        }
+
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
             if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
                 homeEntries.detach()
@@ -652,6 +662,7 @@ internal class RatingPlotImageHook(
     }
 
     fun start() {
+        StremioCMdbUiBridge.listen(mdbUpdate)
         prefs.registerOnSharedPreferenceChangeListener(prefListener)
         app.registerActivityLifecycleCallbacks(this)
         (CommonActivity.activity as? MainActivity)?.let(::use)
@@ -665,6 +676,7 @@ internal class RatingPlotImageHook(
     }
 
     fun stop() {
+        StremioCMdbUiBridge.listen(null)
         homeEntries.detach()
         detachPreview()
         detailRevealEnd?.invoke()
@@ -723,6 +735,41 @@ internal class RatingPlotImageHook(
         private val backdrop = DetailBackdropLayout(root, detailUrl)
         private val trailers = TrailerChooser(fragment, root, detailUrl)
         private var changing = false
+
+        fun matchesMdbKey(key: String): Boolean = StremioCMdbUiBridge.keyFor(detailUrl) == key
+
+        fun refreshLateMdb(): Boolean {
+            val key = StremioCMdbUiBridge.keyFor(detailUrl) ?: return false
+            if (!fragment.isVisible || fragment.view !== root) {
+                StremioCCacheAudit.log("mdb_ui", "SKIP_INACTIVE_FRAGMENT", key)
+                return false
+            }
+            return injectCachedRatings("late")
+        }
+
+        private fun injectCachedRatings(reason: String): Boolean {
+            if (!prefs.getBoolean("mdblist_enabled", false)) return false
+            val key = StremioCMdbUiBridge.keyFor(detailUrl) ?: return false
+            val ratings = StremioC.mdbRatingsForUi(key)
+            if (ratings == null) {
+                if (reason == "late") StremioCCacheAudit.log("mdb_ui", "SKIP_CACHE_UNAVAILABLE", key)
+                return false
+            }
+            val old = view.text ?: return false
+            if (old.isEmpty() || old.startsWith('\u2063')) {
+                if (reason == "late") StremioCCacheAudit.log("mdb_ui", "SKIP_ALREADY_RENDERED_OR_EMPTY", key)
+                return false
+            }
+            val combined = SpannableStringBuilder("\u2063${ratings.joinToString("  ")}\n").append(old)
+            val decorated = decoratedRatings(combined, view.textSize) ?: combined
+            changing = true
+            try { view.setText(decorated, TextView.BufferType.SPANNABLE) }
+            finally { changing = false }
+            StremioCCacheAudit.log("mdb_ui", "UI_APPLIED", key,
+                "reason=$reason ratings=${ratings.size}")
+            return true
+        }
+
         private val searchButton = listOf("result_search_Button", "result_search").firstNotNullOfOrNull {
             val id = root.resources.getIdentifier(it, "id", root.context.packageName)
             if (id == 0) null else root.findViewById<View>(id)
@@ -883,6 +930,7 @@ internal class RatingPlotImageHook(
 
         fun render() {
             if (!prefs.getBoolean("mdblist_enabled", false)) { restore(); return }
+            if (injectCachedRatings("render")) return
             val result = decoratedRatings(view.text ?: return, view.textSize) ?: return
             changing = true
             try { view.setText(result, TextView.BufferType.SPANNABLE) }

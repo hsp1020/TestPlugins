@@ -177,6 +177,34 @@ internal object StremioCCacheAudit {
     }
 }
 
+/** Connect a completed MDBList fetch to an already rendered StremioC detail, without reloading it. */
+internal object StremioCMdbUiBridge {
+    private val urls = Collections.synchronizedMap(object : java.util.LinkedHashMap<String, String>(256, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>) = size > 2000
+    })
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
+    @Volatile private var listener: ((String) -> Unit)? = null
+
+    fun bind(cacheKey: String, candidates: Iterable<String?>) {
+        var count = 0
+        candidates.forEach { url ->
+            if (!url.isNullOrBlank()) {
+                urls[url] = cacheKey
+                count++
+            }
+        }
+        StremioCCacheAudit.log("mdb_ui", "DETAIL_BOUND", cacheKey, "urls=$count")
+    }
+
+    fun keyFor(url: String?): String? = url?.let { urls[it] }
+    fun listen(callback: ((String) -> Unit)?) { listener = callback }
+
+    fun publish(cacheKey: String) {
+        StremioCCacheAudit.log("mdb_ui", "RATINGS_READY", cacheKey)
+        main.post { listener?.invoke(cacheKey) }
+    }
+}
+
 internal fun <T> stremioCacheMemoryRead(
     group: String, key: String, cached: Pair<T, Long>?, ttlMs: Long
 ): Pair<T, Long>? {
@@ -1365,6 +1393,13 @@ open class StremioC(
         private val mdbInflight = mutableMapOf<MdbTarget, Deferred<SpeculativeMdbResult?>>()
         private val detailLoadHints = lruCacheMap<String, DetailUrlHint>(2000)
         private const val METADATA_CACHE_TTL = 24 * 60 * 60 * 1000L
+
+        // The UI bridge reads the existing cache; it never keeps a duplicate rating store.
+        internal fun mdbRatingsForUi(cacheKey: String): List<String>? {
+            val cached = mdbRatingsCache[cacheKey] ?: return null
+            val age = System.currentTimeMillis() - cached.second
+            return cached.first.takeIf { age >= 0L && age < METADATA_CACHE_TTL && it.isNotEmpty() }
+        }
         private const val SEASON_CACHE_TTL = 12 * 60 * 60 * 1000L
 
         // Rebuild supported poster-service URLs using IDs already in TMDB recommendations.
@@ -1805,6 +1840,8 @@ open class StremioC(
         if (ratings.isNotEmpty()) {
             mdbRatingsCache[cacheKey] = ratings to System.currentTimeMillis()
             StremioCCacheAudit.log("mdb", "RAM_WRITE_OK", cacheKey, "ratings=${ratings.size}")
+            // Notify the visible detail immediately; the disk write must not delay the UI.
+            StremioCMdbUiBridge.publish(cacheKey)
             MetadataDiskCache.write("mdb", cacheKey, ratings.toJson())
         }
         DetailLoadPerf.event("MDB_RESULT", "callReturned=${attempt.isSuccess} usableRatings=${ratings.isNotEmpty()} ratings=${ratings.size} type=${target.mediaType}")
@@ -2619,6 +2656,9 @@ open class StremioC(
                 DetailLoadPerf.event("LIBRARY_MAPPED", "type=${hint?.type} id=${hint?.id}")
                 return@coroutineScope DetailLoadPerf.step("library.delegateLoad") {
                     StremioC(base, name).load(metaUrl).also { response ->
+                        StremioCMdbUiBridge.keyFor(metaUrl)?.let { key ->
+                            StremioCMdbUiBridge.bind(key, listOf(url))
+                        }
                         // Library details may retain their original URL, not the delegated meta URL.
                         // Copy artwork/title visibility state to that original URL as well.
                         for (source in listOf(metaUrl, response.url)) {
@@ -2957,6 +2997,8 @@ open class StremioC(
         if (finalMdbTarget != null && mdbEnabled) {
             // Always await the authoritative ID, not a speculative request for a different ID.
             // The detached request keeps populating the cache after the display budget expires.
+            val mdbAuditKey = "${finalMdbTarget.credentialFingerprint}:${finalMdbTarget.isTmdb}:${finalMdbTarget.mediaType}:${finalMdbTarget.id}"
+            StremioCMdbUiBridge.bind(mdbAuditKey, listOf(url, loadRes.url) + libraryOrigins)
             val authoritativeMdb = if (postMetaMdbTarget == finalMdbTarget) {
                 postMetaMdbDeferred ?: launchMdbAttempt(finalMdbTarget)
             } else launchMdbAttempt(finalMdbTarget)
@@ -2964,7 +3006,6 @@ open class StremioC(
                 DetailLoadPerf.step("await.mdbForFinalTarget") { authoritativeMdb?.await() }
                     ?.takeIf { it.matches(finalMdbTarget) }?.ratings
             }
-            val mdbAuditKey = "${finalMdbTarget.credentialFingerprint}:${finalMdbTarget.isTmdb}:${finalMdbTarget.mediaType}:${finalMdbTarget.id}"
             StremioCCacheAudit.log("mdb", if (mdbRatings == null) "DISPLAY_TIMEOUT_OR_NO_RESULT" else "DISPLAY_RESULT",
                 mdbAuditKey, "ratings=${mdbRatings?.size ?: 0} finished=${authoritativeMdb?.isCompleted}")
             mdbRatings?.takeIf { it.isNotEmpty() }?.let { ratings ->
