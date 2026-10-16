@@ -2151,7 +2151,9 @@ private fun showLanguageSelectDialog() {
 
             val editor = sharedPref.edit()
             editor.putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code)
-            editor.commit()
+            if (editor.commit() && currentSavedCode != code) {
+                StremioC.invalidateSyncSettingsCache()
+            }
 
             Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
             langDialog.dismiss()
