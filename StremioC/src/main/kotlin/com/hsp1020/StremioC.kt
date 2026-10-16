@@ -1045,10 +1045,29 @@ open class StremioC(
         }
 
         private fun addonMetaStorageKey(url: String): String {
-            val generation = CloudStreamApp.context
-                ?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
+            val context = CloudStreamApp.context
+            val generation = context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
                 ?.getLong("addon_meta_epoch", 0L) ?: 0L
-            return "$generation|$url"
+            val addonBase = url.substringBefore("/meta/")
+            val version = context
+                ?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
+                ?.getString("manifest_version_" + stremioCatalogKey(addonBase), "").orEmpty()
+            // A change in one manifest's version does not invalidate other addons.
+            return "$generation|$version|$url"
+        }
+
+        private fun invalidateAddonVersionCache(manifestUrl: String) {
+            val prefix = manifestUrl.substringBefore("/manifest.json") + "/meta/"
+            synchronized(addonMetaCache) {
+                val entries = addonMetaCache.entries.iterator()
+                while (entries.hasNext()) {
+                    val entry = entries.next()
+                    if (entry.key.contains("|$prefix")) {
+                        addonMetaCacheBytes -= entry.value.bytes.size.toLong()
+                        entries.remove()
+                    }
+                }
+            }
         }
 
         private suspend fun fetchAddonMetaText(url: String, forceRefresh: Boolean = false): String {
@@ -1786,7 +1805,7 @@ open class StremioC(
                     }.getOrNull()?.takeIf { it.isNotBlank() }
                     val oldVersion = stored?.getString("manifest_version_" + manifestKey, null)
                     if (oldVersion != null && newVersion != null && oldVersion != newVersion) {
-                        invalidateSyncSettingsCache()
+                        invalidateAddonVersionCache(currentUrl)
                     }
                     cachedManifest = parsed
                     preparedMainPageManifest = PreparedMainPageManifest(currentUrl, resText.toUniqueKey(), parsed)
