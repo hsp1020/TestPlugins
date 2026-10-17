@@ -1560,6 +1560,58 @@ internal class RatingPlotImageHook(
             return ids.map { statuses[it] ?: return null }.distinct().singleOrNull()
         }
 
+        /**
+         * Explicit None removes entire independent Simkl anime entries, including
+         * their history and ratings. Never send TVDB parent IDs: these would also
+         * remove other anime seasons belonging to the same show.
+         */
+        private suspend fun simklAnimeRemoveFromLibrary(
+            repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
+            ids: Set<Int>
+        ): Boolean {
+            if(ids.isEmpty())return false
+            val headers=SimklApi.getHeaders(repo.authToken() ?: return false)+
+                mapOf("content-type" to "application/json")
+            val payload=JSONObject().put("shows",JSONArray().also { shows ->
+                ids.forEach { id ->
+                    shows.put(JSONObject().put("ids",JSONObject().put("simkl",id)))
+                }
+            })
+            val response=try {
+                app.post("https://api.simkl.com/sync/history/remove",
+                    headers=headers,requestBody=payload.toString().toRequestBody())
+            }catch(e: CancellationException){throw e}
+             catch(e: Exception){return false}
+            if(response.code !in 200..299)return false
+            val result=runCatching { JSONObject(response.text) }.getOrNull()
+                ?: return false
+            val missing=result.optJSONObject("not_found")?.optJSONArray("shows")
+            if(missing!=null && missing.length()>0)return false
+            // Simkl returns {} when the entire anime library is empty.
+            // A successful remove still requires authoritative readback.
+            repeat(3){ attempt ->
+                if(attempt>0)kotlinx.coroutines.delay(if(attempt==1)350L else 900L)
+                val check=try {
+                    app.get("https://api.simkl.com/sync/all-items/anime",
+                        headers=headers,cacheTime=0)
+                }catch(e: CancellationException){throw e}
+                 catch(e: Exception){return@repeat}
+                if(check.code !in 200..299)return@repeat
+                val body=runCatching { JSONObject(check.text) }.getOrNull()
+                    ?: return@repeat
+                val anime=body.optJSONArray("anime")
+                if(body.has("anime") && anime==null)return@repeat
+                val present=linkedSetOf<Int>()
+                for(i in 0 until (anime?.length() ?: 0)){
+                    val item=anime?.optJSONObject(i) ?: continue
+                    val id=jsonInt(item.optJSONObject("show")?.optJSONObject("ids"),"simkl")
+                    if(id!=null)present+=id
+                }
+                if(ids.none { it in present })return true
+            }
+            return false
+        }
+
         private suspend fun simklAnimeRead(
             repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
             mapped: SeasonTrackerIds, targetSeason: Int
@@ -1690,6 +1742,13 @@ internal class RatingPlotImageHook(
         private suspend fun simklAnimeSave(tracker: Tracker, draft: Draft,
             initial: Draft, seasonNumber: Int): Boolean {
             val before=tracker.simklAnime ?: return false
+            if(draft.status==SyncWatchType.NONE && draft.explicitNone) {
+                if(!before.statusEditable)return false
+                val removed=simklAnimeRemoveFromLibrary(tracker.repo,before.sourceIds)
+                if(removed)tracker.simklAnime=before.copy(
+                    watched=emptySet(),outside=emptySet(),status=SyncWatchType.NONE)
+                return removed
+            }
             if(draft.score!=initial.score)return false
             if(draft.watched !in 0..before.mapped.size)return false
             val diff=draft.watched-before.watched.size
@@ -2292,7 +2351,8 @@ internal class RatingPlotImageHook(
                 !(before.status == SyncWatchType.NONE &&
                   draft.status == SyncWatchType.WATCHING && draft.watched > 0) &&
                 (tracker.simklAnime?.statusEditable != true ||
-                 simklWatchlistDestination(draft.status)==null)) return
+                 (draft.status != SyncWatchType.NONE &&
+                  simklWatchlistDestination(draft.status)==null))) return
             tracker.saving = true
             render()
             // Detached/changed screens do not receive this result, but the snapshot
