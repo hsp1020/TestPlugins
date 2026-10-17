@@ -1266,7 +1266,8 @@ internal class RatingPlotImageHook(
         private fun p1GuardClick() {
             // Replace only the Save action of the native panel, not its visuals or inputs.
             saveButton?.setOnClickListener { p1Save() }
-            trace("P1_SAVE_GUARD", "ready=${p1TrustedUser != null} primary=${p1Primary ?: "none"}")
+            trace("P1_SAVE_GUARD", "buttonPresent=${saveButton != null} " +
+                "ready=${p1TrustedUser != null} primary=${p1Primary ?: "none"}")
         }
 
         private fun p1Reset(reason: String) {
@@ -1521,10 +1522,10 @@ internal class RatingPlotImageHook(
                     }.awaitAll().toMap()
                     trace("P1_SAVE_COMPLETE", "targetSeason=$season token=$gen results=$results " +
                         "stillCurrent=${p1Valid(gen,season)}")
-                    if (p1Valid(gen, season)) {
-                        // Re-resolve account state on the next selection. Do not keep
-                        // mutated old service snapshots after partial saves.
+                    if (p1Valid(gen, season) && results.isNotEmpty() && results.values.all { it }) {
                         p1Initial = fields(readyUser)
+                    } else {
+                        trace("P1_SAVE_RETRYABLE", "reason=partial-failure-or-season-changed")
                     }
                 } catch (e: CancellationException) {
                     trace("P1_SAVE_CANCEL", "targetSeason=$season token=$gen")
@@ -1604,6 +1605,11 @@ internal class RatingPlotImageHook(
                     is Resource.Success -> {
                         val data = value.value
                         if (data.url != pageUrl) {
+                            if (p1Enabled) {
+                                p1Reset("page-changed")
+                                syncModel?.clear()
+                                p1Enabled = false
+                            }
                             val previous = pageUrl
                             generation++
                             pageUrl = data.url
