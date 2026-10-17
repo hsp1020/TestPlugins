@@ -2361,6 +2361,7 @@ open class StremioC(
                             fallbackLogoTitles[source]?.let { fallbackLogoTitles[url] = it }
                             expectedLogoByUrl[source]?.let { expectedLogoByUrl[url] = it }
                             animeAudioByUrl[source]?.let { animeAudioByUrl[url] = it }
+                            seasonEpisodeCountsByUrl[source]?.let { seasonEpisodeCountsByUrl[url] = it }
                             trailerChoicesByUrl[source]?.let { trailerChoicesByUrl[url] = it }
                             genreCatalogsByUrl[source]?.let { genreCatalogsByUrl[url] = it }
                         }
@@ -2661,6 +2662,7 @@ open class StremioC(
             fallbackLogoTitles[loadRes.url]?.let { fallbackLogoTitles[url] = it }
             expectedLogoByUrl[loadRes.url]?.let { expectedLogoByUrl[url] = it }
             animeAudioByUrl[loadRes.url]?.let { animeAudioByUrl[url] = it }
+                            seasonEpisodeCountsByUrl[loadRes.url]?.let { seasonEpisodeCountsByUrl[url] = it }
             trailerChoicesByUrl[loadRes.url]?.let { trailerChoicesByUrl[url] = it }
             genreCatalogsByUrl[loadRes.url]?.let { genreCatalogsByUrl[url] = it }
             ActorInformation.alias(this@StremioC, url, loadRes.url)
@@ -2674,6 +2676,7 @@ open class StremioC(
             fallbackLogoTitles[url]?.let { fallbackLogoTitles[originalUrl] = it }
             expectedLogoByUrl[url]?.let { expectedLogoByUrl[originalUrl] = it }
             animeAudioByUrl[url]?.let { animeAudioByUrl[originalUrl] = it }
+                            seasonEpisodeCountsByUrl[url]?.let { seasonEpisodeCountsByUrl[originalUrl] = it }
             trailerChoicesByUrl[url]?.let { trailerChoicesByUrl[originalUrl] = it }
             genreCatalogsByUrl[url]?.let { genreCatalogsByUrl[originalUrl] = it }
         }
