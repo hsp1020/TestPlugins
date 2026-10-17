@@ -462,6 +462,142 @@ internal class StremioDetailHandoff(
     }
 }
 
+/** Shared native CloudStream-styled catalog selector: used by Browse Genre and sync panel. */
+internal fun catalogStyledSelector(activity: FragmentActivity): AppCompatSpinner {
+    fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
+    return object : AppCompatSpinner(
+        activity, null, androidx.appcompat.R.attr.spinnerStyle, Spinner.MODE_DROPDOWN
+    ) {
+        private val touchSlop = ViewConfiguration.get(activity).scaledTouchSlop
+        private var downX = 0f
+        private var downY = 0f
+        private var downAt = 0L
+        private var moved = false
+
+        override fun performClick(): Boolean {
+            if (!isEnabled || (adapter?.count ?: 0) <= 1) return false
+            return super.performClick()
+        }
+
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            if (!isEnabled || (adapter?.count ?: 0) <= 1) {
+                isPressed = false
+                return true
+            }
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.x
+                    downY = event.y
+                    downAt = event.eventTime
+                    moved = false
+                    isPressed = true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (kotlin.math.abs(event.x - downX) > touchSlop ||
+                        kotlin.math.abs(event.y - downY) > touchSlop) moved = true
+                    if (moved) isPressed = false
+                }
+                MotionEvent.ACTION_UP -> {
+                    isPressed = false
+                    if (!moved && event.eventTime - downAt < ViewConfiguration.getLongPressTimeout())
+                        performClick()
+                }
+                MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_DOWN -> {
+                    moved = true
+                    isPressed = false
+                }
+            }
+            return true // Never forward a long press or a drag into the popup list.
+        }
+    }.apply {
+        id = View.generateViewId()
+        minimumHeight = dp(48)
+        isFocusable = true
+        setPopupBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryGrayBackground)))
+        val cardBg = androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, R.drawable.bg_color_both)?.mutate()
+        val ripple = TypedValue()
+        val overlay = if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) &&
+            ripple.resourceId != 0) {
+            androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, ripple.resourceId)
+        } else null
+        val selectorBackground = if (cardBg != null && overlay != null)
+            android.graphics.drawable.LayerDrawable(arrayOf(cardBg, overlay))
+        else cardBg ?: overlay
+        background = selectorBackground?.let {
+            android.graphics.drawable.InsetDrawable(it, 0, dp(4), 0, dp(4))
+        }
+    }
+}
+
+internal fun catalogStyledAdapter(
+    activity: FragmentActivity, labels: List<String>, spinner: AppCompatSpinner,
+    fontTypeface: Typeface?, textSize: Float, checkDrawable: android.graphics.drawable.Drawable?
+): ArrayAdapter<String> {
+    fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
+        return object : ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, labels) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup) =
+                super.getView(position, convertView, parent).also { row ->
+                    ((row as? TextView) ?: row.findViewById<TextView>(android.R.id.text1))?.apply {
+                        typeface = fontTypeface
+                        setTextSize(TypedValue.COMPLEX_UNIT_PX, textSize)
+                        setTextColor(activity.colorFromAttribute(R.attr.textColor))
+                        setSingleLine(true)
+                        ellipsize = TextUtils.TruncateAt.END
+                        setPadding(paddingLeft, paddingTop, dp(40), paddingBottom)
+                    }
+                }
+            override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val checked = position == spinner.selectedItemPosition
+                val color = activity.colorFromAttribute(if (checked) R.attr.colorPrimary else R.attr.textColor)
+                return object : LinearLayout(activity) {
+                    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+                        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                            background?.setHotspot(event.x, event.y)
+                            isPressed = true
+                        }
+                        // Keep ListView in control of selection, scrolling and dismissal.
+                        return super.dispatchTouchEvent(event)
+                    }
+
+                    override fun onDetachedFromWindow() {
+                        isPressed = false
+                        super.onDetachedFromWindow()
+                    }
+                }.apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    val rowColor = activity.colorFromAttribute(R.attr.primaryGrayBackground)
+                    setBackgroundColor(rowColor)
+                    val ripple = TypedValue()
+                    if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) &&
+                        ripple.resourceId != 0) {
+                        androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, ripple.resourceId)?.let { overlay ->
+                            background = android.graphics.drawable.LayerDrawable(arrayOf(ColorDrawable(rowColor), overlay))
+                        }
+                    }
+                    minimumHeight = dp(48)
+                    setPadding(dp(16), 0, dp(12), 0)
+                    addView(TextView(activity).apply {
+                        text = labels[position]
+                        typeface = fontTypeface
+                        setTextSize(TypedValue.COMPLEX_UNIT_PX, textSize)
+                        setTextColor(color)
+                        gravity = Gravity.CENTER_VERTICAL
+                        setSingleLine(true)
+                        ellipsize = TextUtils.TruncateAt.END
+                    }, LinearLayout.LayoutParams(0, dp(48), 1f))
+                    addView(ImageView(activity).apply {
+                        if (checked) setImageDrawable(checkDrawable)
+                        imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.colorPrimary))
+                        contentDescription = "Selected item"
+                        setPadding(dp(10), 0, dp(10), 0)
+                        visibility = if (checked) View.VISIBLE else View.INVISIBLE
+                    }, LinearLayout.LayoutParams(dp(40), dp(24)))
+                }
+            }
+        }
+
+}
+
 /** One dialog, one in-flight page; only All pages are shared with Home. */
 internal class CatalogBrowserDialog(
     private val activity: FragmentActivity,
@@ -677,68 +813,7 @@ internal class CatalogBrowserDialog(
         minHeight = dp(48)
     }
 
-    private fun selector() = object : AppCompatSpinner(
-        activity, null, androidx.appcompat.R.attr.spinnerStyle, Spinner.MODE_DROPDOWN
-    ) {
-        private val touchSlop = ViewConfiguration.get(activity).scaledTouchSlop
-        private var downX = 0f
-        private var downY = 0f
-        private var downAt = 0L
-        private var moved = false
-
-        override fun performClick(): Boolean {
-            if (!isEnabled || (adapter?.count ?: 0) <= 1) return false
-            return super.performClick()
-        }
-
-        override fun onTouchEvent(event: MotionEvent): Boolean {
-            if (!isEnabled || (adapter?.count ?: 0) <= 1) {
-                isPressed = false
-                return true
-            }
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    downX = event.x
-                    downY = event.y
-                    downAt = event.eventTime
-                    moved = false
-                    isPressed = true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    if (kotlin.math.abs(event.x - downX) > touchSlop ||
-                        kotlin.math.abs(event.y - downY) > touchSlop) moved = true
-                    if (moved) isPressed = false
-                }
-                MotionEvent.ACTION_UP -> {
-                    isPressed = false
-                    if (!moved && event.eventTime - downAt < ViewConfiguration.getLongPressTimeout())
-                        performClick()
-                }
-                MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_DOWN -> {
-                    moved = true
-                    isPressed = false
-                }
-            }
-            return true // Never forward a long press or a drag into the popup list.
-        }
-    }.apply {
-        id = View.generateViewId()
-        minimumHeight = dp(48)
-        isFocusable = true
-        setPopupBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryGrayBackground)))
-        val cardBg = androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, R.drawable.bg_color_both)?.mutate()
-        val ripple = TypedValue()
-        val overlay = if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) &&
-            ripple.resourceId != 0) {
-            androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, ripple.resourceId)
-        } else null
-        val selectorBackground = if (cardBg != null && overlay != null)
-            android.graphics.drawable.LayerDrawable(arrayOf(cardBg, overlay))
-        else cardBg ?: overlay
-        background = selectorBackground?.let {
-            android.graphics.drawable.InsetDrawable(it, 0, dp(4), 0, dp(4))
-        }
-    }
+    private fun selector() = catalogStyledSelector(activity)
 
     private fun selectorArrow() = TextView(activity).apply {
         text = "▼"
@@ -778,67 +853,9 @@ internal class CatalogBrowserDialog(
             genreSelector -> genreArrow
             else -> null
         }?.visibility = if (labels.size > 1) View.VISIBLE else View.GONE
-        adapter = object : ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, labels) {
-            override fun getView(position: Int, convertView: View?, parent: ViewGroup) =
-                super.getView(position, convertView, parent).also { row ->
-                    ((row as? TextView) ?: row.findViewById<TextView>(android.R.id.text1))?.apply {
-                        typeface = selectorLabelStyle.typeface
-                        setTextSize(TypedValue.COMPLEX_UNIT_PX, selectorLabelStyle.textSize)
-                        setTextColor(activity.colorFromAttribute(R.attr.textColor))
-                        setSingleLine(true)
-                        ellipsize = TextUtils.TruncateAt.END
-                        setPadding(paddingLeft, paddingTop, dp(40), paddingBottom)
-                    }
-                }
-            override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
-                val checked = position == this@choices.selectedItemPosition
-                val color = activity.colorFromAttribute(if (checked) R.attr.colorPrimary else R.attr.textColor)
-                return object : LinearLayout(activity) {
-                    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-                        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                            background?.setHotspot(event.x, event.y)
-                            isPressed = true
-                        }
-                        // Keep ListView in control of selection, scrolling and dismissal.
-                        return super.dispatchTouchEvent(event)
-                    }
-
-                    override fun onDetachedFromWindow() {
-                        isPressed = false
-                        super.onDetachedFromWindow()
-                    }
-                }.apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                    val rowColor = activity.colorFromAttribute(R.attr.primaryGrayBackground)
-                    setBackgroundColor(rowColor)
-                    val ripple = TypedValue()
-                    if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) &&
-                        ripple.resourceId != 0) {
-                        androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, ripple.resourceId)?.let { overlay ->
-                            background = android.graphics.drawable.LayerDrawable(arrayOf(ColorDrawable(rowColor), overlay))
-                        }
-                    }
-                    minimumHeight = dp(48)
-                    setPadding(dp(16), 0, dp(12), 0)
-                    addView(TextView(activity).apply {
-                        text = labels[position]
-                        typeface = selectorLabelStyle.typeface
-                        setTextSize(TypedValue.COMPLEX_UNIT_PX, selectorLabelStyle.textSize)
-                        setTextColor(color)
-                        gravity = Gravity.CENTER_VERTICAL
-                        setSingleLine(true)
-                        ellipsize = TextUtils.TruncateAt.END
-                    }, LinearLayout.LayoutParams(0, dp(48), 1f))
-                    addView(ImageView(activity).apply {
-                        if (checked) setImageDrawable(pluginResources.getDrawable(checkIconId, null))
-                        imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.colorPrimary))
-                        contentDescription = "Selected item"
-                        setPadding(dp(10), 0, dp(10), 0)
-                        visibility = if (checked) View.VISIBLE else View.INVISIBLE
-                    }, LinearLayout.LayoutParams(dp(40), dp(24)))
-                }
-            }
-        }
+        adapter = catalogStyledAdapter(activity, labels, this, selectorLabelStyle.typeface,
+            selectorLabelStyle.textSize,
+            if (checkIconId != 0) pluginResources.getDrawable(checkIconId, null) else null)
         if (selected in labels.indices) setSelection(selected)
         onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit

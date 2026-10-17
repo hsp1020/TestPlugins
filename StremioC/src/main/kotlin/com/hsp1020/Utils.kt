@@ -72,6 +72,7 @@ import com.google.android.material.chip.ChipGroup
 import com.google.android.material.progressindicator.CircularProgressIndicator
 import androidx.core.content.ContextCompat
 import androidx.appcompat.widget.SearchView
+import androidx.appcompat.widget.AppCompatSpinner
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.navigation.NavigationBarView
 import androidx.navigation.NavOptions
@@ -1218,7 +1219,8 @@ internal class RatingPlotImageHook(
 
     /** Plugin-owned independent tracker states. Native detail, episode selector and panel stay intact. */
     private class SeasonSyncProbe(
-        private val fragment: Fragment, private val root: View, private val detailUrl: String?
+        private val fragment: Fragment, private val root: View, private val detailUrl: String?,
+        private val pluginResources: Resources
     ) {
         private companion object {
             const val TAG = "STCSeasonSync"
@@ -1259,7 +1261,9 @@ internal class RatingPlotImageHook(
         private var statuses = linkedMapOf<String, Tracker>()
         private var fetchJob: Job? = null
         private var applying = false
-        private var combo: android.widget.Spinner? = null
+        private var combo: AppCompatSpinner? = null
+        private var comboContainer: View? = null
+        private var comboArrow: TextView? = null
         private var oldNames: TextView? = null
         private var syncModel: SyncViewModel? = null
         private val saveButton by lazy { root.findViewById<View>(R.id.result_sync_set_score) }
@@ -1441,12 +1445,37 @@ internal class RatingPlotImageHook(
                         // MAL's general load() parses unrelated statistics fields with
                         // unstable string/number types. Use the minimal num_episodes API
                         // below instead, avoiding a second failing full-document parse.
-                        val meta = if (repo.idPrefix == "mal") null else repo.load(id)
+                        val meta = if (repo.idPrefix == "mal" || repo.idPrefix == "kitsu")
+                            null else repo.load(id)
                         val remote = state.getOrNull()
                         var total = meta?.getOrNull()?.totalEpisodes?.takeIf { it > 0 }
                             ?: remote?.maxEpisodes?.takeIf { it > 0 }
                         var origin = if (meta?.getOrNull()?.totalEpisodes?.let { it > 0 } == true)
                             "provider-metadata" else if (total != null) "provider-status" else "unknown"
+                        if (repo.idPrefix == "kitsu") {
+                            for (host in listOf("https://kitsu.io/api/edge", "https://kitsu.app/api/edge")) {
+                                try {
+                                    val response = app.get(
+                                        "$host/anime/$id?fields[anime]=episodeCount",
+                                        cacheTime = 0)
+                                    val attributes = JSONObject(response.text)
+                                        .optJSONObject("data")?.optJSONObject("attributes")
+                                    val episodes = attributes?.opt("episodeCount")?.toString()
+                                        ?.toIntOrNull()?.takeIf { it > 0 }
+                                    Log.i(TAG, "event=KITSU_TOTAL session=$session gen=$gen " +
+                                        "season=$sn id=$id host=${host.substringAfter("https://")} " +
+                                        "http=${response.code} episodes=$episodes")
+                                    if (episodes != null) {
+                                        total = episodes
+                                        origin = "kitsu-episodeCount"
+                                        break
+                                    }
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "event=KITSU_TOTAL_FAIL session=$session gen=$gen " +
+                                        "season=$sn id=$id cause=${e.javaClass.simpleName}")
+                                }
+                            }
+                        }
                         if (total == null && repo.idPrefix == "mal") {
                             try {
                                 val token = repo.authToken()?.accessToken
@@ -1476,8 +1505,12 @@ internal class RatingPlotImageHook(
                     }
                 }.awaitAll()
                 if (!valid(gen, sn)) { log("STALE", "phase=fetch"); return@launch }
-                val commonTotal = if (!multi) replies.mapNotNull { it.third.first }
-                    .filter { it > 0 }.maxOrNull() else null
+                val providerTotals = replies.mapNotNull { it.third.first }.filter { it > 0 }
+                val commonTotal = if (!multi) providerTotals.maxOrNull()
+                    else providerTotals.distinct().singleOrNull()
+                if (multi && commonTotal != null)
+                    log("TOTAL_PEER", "season=$sn verifiedMappedIds=${statuses.keys} " +
+                        "providerKnownTotals=$providerTotals inferred=$commonTotal")
                 val offeredCount = StremioC.seasonEpisodeCountsByUrl[url]?.get(sn)
                 replies.forEach { (prefix, draft, count) ->
                     val target = statuses[prefix] ?: return@forEach
@@ -1487,11 +1520,15 @@ internal class RatingPlotImageHook(
                     val trackerTotal = count.first
                     target.total = trackerTotal ?: commonTotal
                     target.totalSource = if (trackerTotal != null) count.second
-                        else if (commonTotal != null) "single-season-peer" else "unknown"
+                        else if (commonTotal != null) {
+                            if (multi) "season-mapped-peer" else "single-season-peer"
+                        } else "unknown"
                     target.error = if (draft == null) "status-unavailable" else null
-                    target.writeBlocked = if (multi && offeredCount != null &&
-                        trackerTotal != null && offeredCount > trackerTotal)
-                        "source-more-episodes-than-tracker" else null
+                    // The catalog episode list may contain 24 entries while a verified
+                    // tracker season is a 12-episode anime entry. Never equate
+                    // catalog count with the service's actual episode total.
+                    // A missing/invalid season ID is excluded before reaching here.
+                    target.writeBlocked = null
                     log("PROVIDER_READY", "provider=$prefix status=${draft?.status} " +
                         "watched=${draft?.watched} total=${target.total} source=${target.totalSource} " +
                         "readOnly=${target.writeBlocked} offered=$offeredCount")
@@ -1507,17 +1544,34 @@ internal class RatingPlotImageHook(
             val parent = names.parent as? android.widget.LinearLayout ?: return
             val index = parent.indexOfChild(names)
             oldNames = names
-            val spinner = android.widget.Spinner(root.context)
+            val activity = fragment.requireActivity()
             val dp = root.resources.displayMetrics.density
-            spinner.minimumHeight = (40 * dp).toInt()
-            spinner.setPadding((8*dp).toInt(), 0, (6*dp).toInt(), 0)
-            spinner.layoutParams = android.widget.LinearLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
-                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = (10*dp).toInt() }
-            parent.addView(spinner, index)
+            // The exact selector and dropdown adapter are shared with Browse Genre.
+            val spinner = catalogStyledSelector(activity)
+            val width = (208 * dp).toInt()
+            spinner.dropDownWidth = width
+            spinner.contentDescription = "Sync provider"
+            val container = FrameLayout(activity).apply {
+                layoutParams = android.widget.LinearLayout.LayoutParams(
+                    width, (48 * dp).toInt()
+                ).apply { bottomMargin = (10 * dp).toInt() }
+                addView(spinner, FrameLayout.LayoutParams(-1, -1))
+            }
+            val arrow = TextView(activity).apply {
+                text = "▼"
+                setTextSize(TypedValue.COMPLEX_UNIT_PX, textSize * 0.7f)
+                setTextColor(activity.colorFromAttribute(R.attr.textColor))
+                gravity = Gravity.CENTER
+                isClickable = false
+                isFocusable = false
+            }
+            container.addView(arrow, FrameLayout.LayoutParams(
+                (40 * dp).toInt(), -1, Gravity.END))
+            parent.addView(container, index)
             names.visibility = View.GONE
             combo = spinner
+            comboContainer = container
+            comboArrow = arrow
             spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onNothingSelected(parent: AdapterView<*>?) {}
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
@@ -1565,9 +1619,10 @@ internal class RatingPlotImageHook(
                 }
                 override fun afterTextChanged(s: Editable?) {}
             })
-            log("UI_ATTACHED", "spinner=true save=${saveButton != null} plus=${plus != null} " +
-                "minus=${minus != null} rating=${slider != null} statusList=${checks != null} " +
-                "episodesInput=${current != null}")
+            log("UI_ATTACHED", "selector=BrowseGenre shared widthDp=208 " +
+                "save=${saveButton != null} plus=${plus != null} " +
+                "minus=${minus != null} rating=${slider != null} " +
+                "statusList=${checks != null} episodesInput=${current != null}")
         }
 
         private fun updateOptions() {
@@ -1575,13 +1630,22 @@ internal class RatingPlotImageHook(
             applying = true
             try {
                 val names = statuses.keys.map { titles[it] ?: it }
-                val adapter = ArrayAdapter(root.context, android.R.layout.simple_spinner_item, names)
-                adapter.setDropDownViewResource(R.layout.sort_bottom_single_choice)
-                spinner.adapter = adapter
+                val activity = fragment.requireActivity()
+                val checkId = pluginResources.getIdentifier(
+                    "addon_check_icon", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
+                spinner.adapter = catalogStyledAdapter(activity, names, spinner,
+                    android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT,
+                        android.graphics.Typeface.BOLD),
+                    android.widget.TextView(activity).textSize,
+                    if (checkId != 0) pluginResources.getDrawable(checkId, null) else null)
                 spinner.isEnabled = statuses.size > 1
+                spinner.isClickable = statuses.size > 1
+                spinner.isFocusable = statuses.size > 1
+                comboArrow?.visibility = if (statuses.size > 1) View.VISIBLE else View.GONE
                 val position = statuses.keys.indexOf(selected).coerceAtLeast(0)
                 if (names.isNotEmpty()) spinner.setSelection(position, false)
-                log("UI_OPTIONS", "items=${statuses.keys} selected=$selected enabled=${spinner.isEnabled}")
+                log("UI_OPTIONS", "items=${statuses.keys} selected=$selected enabled=${spinner.isEnabled} " +
+                    "popupWidth=${spinner.dropDownWidth}")
             } finally { applying = false }
         }
 
@@ -1813,7 +1877,9 @@ internal class RatingPlotImageHook(
 
         private fun teardownUi() {
             val spinner = combo ?: return
-            (spinner.parent as? android.view.ViewGroup)?.removeView(spinner)
+            (comboContainer?.parent as? android.view.ViewGroup)?.removeView(comboContainer)
+            comboContainer = null
+            comboArrow = null
             combo = null
             oldNames?.visibility = View.VISIBLE
             oldNames = null
@@ -1853,7 +1919,7 @@ internal class RatingPlotImageHook(
 
     private inner class Watcher(private val view: TextView, private val root: View, private val detailUrl: String?, private val fragment: Fragment) : TextWatcher {
         private val backdrop = DetailBackdropLayout(root, detailUrl)
-        private val seasonSyncProbe = SeasonSyncProbe(fragment, root, detailUrl)
+        private val seasonSyncProbe = SeasonSyncProbe(fragment, root, detailUrl, resources)
         private val trailers = TrailerChooser(fragment, root, detailUrl)
         private var changing = false
 
