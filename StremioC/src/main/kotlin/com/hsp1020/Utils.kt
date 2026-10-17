@@ -1636,9 +1636,8 @@ internal class RatingPlotImageHook(
                                 "total=${remote?.maxEpisodes}")
                         }
                         var total = if (generalSimkl && repo.idPrefix == "simkl")
-                            simklExact?.available?.size else
-                            meta?.getOrNull()?.totalEpisodes?.takeIf { it > 0 }
-                                ?: remote?.maxEpisodes?.takeIf { it > 0 }
+                            simklExact?.available?.size
+                        else meta?.getOrNull()?.totalEpisodes?.takeIf { it > 0 }
                             ?: remote?.maxEpisodes?.takeIf { it > 0 }
                         var origin = if (simklExact != null) "simkl-season-episode-keys"
                             else if (generalSimkl && repo.idPrefix == "simkl") "unverified"
