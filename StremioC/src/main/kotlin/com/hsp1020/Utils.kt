@@ -85,6 +85,11 @@ import android.widget.ArrayAdapter
 import android.widget.HeaderViewListAdapter
 import android.widget.ListView
 import com.lagradost.cloudstream3.ui.player.FullScreenPlayer
+import com.lagradost.cloudstream3.ui.player.CS3IPlayer
+import com.lagradost.cloudstream3.ui.player.PlayerSubtitleHelper
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.PREFERENCES_NAME
+import com.lagradost.cloudstream3.ui.subtitles.SUBTITLE_AUTO_SELECT_KEY
 import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
 import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment
@@ -281,7 +286,12 @@ internal class StremioSubtitleController {
     private var removeObserver: (() -> Unit)? = null
     private var lastInstance = -1
     private var lastPlayer: Media3Player? = null
+    private var lastLinkUrl: String? = null
     private var embeddedApplied = false
+    private var manualOverride = false
+    private var selectionDialog: Dialog? = null
+    private var selectionBeforeDialog: SubtitleData? = null
+    private var settings: SharedPreferences? = null
     private var sortedDialog: Dialog? = null
     private var pendingDialog: Dialog? = null
     private var isStremio = false
@@ -290,11 +300,74 @@ internal class StremioSubtitleController {
             isAccessible = true
         }
     }.getOrNull()
-    private val selectMethod = runCatching {
-        GeneratorPlayer::class.java.getDeclaredMethod(
-            "setSubtitles", SubtitleData::class.java, java.lang.Boolean.TYPE
-        ).apply { isAccessible = true }
+    private val selectedField = runCatching {
+        GeneratorPlayer::class.java.getDeclaredField("currentSelectedSubtitles")
+            .apply { isAccessible = true }
     }.getOrNull()
+    private val helperField = runCatching {
+        CS3IPlayer::class.java.getDeclaredField("subtitleHelper")
+            .apply { isAccessible = true }
+    }.getOrNull()
+    private val activeField = runCatching {
+        PlayerSubtitleHelper::class.java.getDeclaredField("activeSubtitles")
+            .apply { isAccessible = true }
+    }.getOrNull()
+    private val linkField = runCatching {
+        CS3IPlayer::class.java.getDeclaredField("currentLink")
+            .apply { isAccessible = true }
+    }.getOrNull()
+    private val subtitleListener = java.lang.reflect.Proxy.newProxyInstance(
+        Media3Player.Listener::class.java.classLoader,
+        arrayOf(Media3Player.Listener::class.java)
+    ) { proxy, method, args ->
+        when (method.name) {
+            "onTracksChanged" -> {
+                (args?.getOrNull(0) as? Tracks)?.let { selectEmbedded(it) }
+                null
+            }
+            "equals" -> proxy === args?.getOrNull(0)
+            "hashCode" -> System.identityHashCode(proxy)
+            "toString" -> "StremioSubtitleListener"
+            else -> null
+        }
+    } as Media3Player.Listener
+    private val settingsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == SUBTITLE_AUTO_SELECT_KEY && isStremio) manualOverride = true
+    }
+
+    private fun currentLinkUrl(f: GeneratorPlayer): String? =
+        runCatching { (linkField?.get(f.player) as? ExtractorLink)?.url }.getOrNull()
+
+    private fun selectedByHost(f: GeneratorPlayer): SubtitleData? =
+        runCatching { selectedField?.get(f) as? SubtitleData }.getOrNull()
+
+    private fun trackDialog(f: GeneratorPlayer, dialog: Dialog?) {
+        val shown = dialog?.takeIf { it.isShowing }
+        if (shown != null) {
+            if (shown !== selectionDialog) {
+                selectionDialog = shown
+                selectionBeforeDialog = selectedByHost(f)
+            } else if (selectedByHost(f) != selectionBeforeDialog) {
+                manualOverride = true
+            }
+        } else if (selectionDialog != null) {
+            if (selectedByHost(f) != selectionBeforeDialog) manualOverride = true
+            selectionDialog = null
+            selectionBeforeDialog = null
+        }
+    }
+
+    /** Mark only tracks that Media3 has actually exposed as active to the native picker. */
+    private fun markActive(f: GeneratorPlayer, embedded: SubtitleData): Boolean =
+        runCatching {
+            val helper = helperField?.get(f.player) as? PlayerSubtitleHelper
+                ?: return@runCatching false
+            @Suppress("UNCHECKED_CAST")
+            val existing = activeField?.get(helper) as? Set<SubtitleData>
+                ?: return@runCatching false
+            if (embedded !in existing) helper.setActiveSubtitles(existing + embedded)
+            true
+        }.getOrDefault(false)
 
     private fun checkStremio(): Boolean {
         val response = model?.state?.generatorState?.response ?: return false
@@ -308,24 +381,36 @@ internal class StremioSubtitleController {
         if (f != null && state != null) {
             if (lastInstance != state.instance) {
                 lastInstance = state.instance
+                lastPlayer?.removeListener(subtitleListener)
                 lastPlayer = null
+                lastLinkUrl = null
                 embeddedApplied = false
+                manualOverride = false
+                selectionDialog = null
                 sortedDialog = null
                 isStremio = checkStremio()
             }
             if (isStremio) {
                 val current = f.playerView?.player
-                if (lastPlayer != null && lastPlayer !== current) {
-                    // Embedded subtitle IDs are only valid for their source video.
-                    model?.modifyState {
-                        set(subtitles.filterNot { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO })
+                if (current != null && current !== lastPlayer) {
+                    lastPlayer?.removeListener(subtitleListener)
+                    val sourceUrl = currentLinkUrl(f)
+                    if (lastPlayer != null && (sourceUrl == null || sourceUrl != lastLinkUrl)) {
+                        // New source: old embedded IDs and the prior track override are invalid.
+                        model?.modifyState {
+                            set(subtitles.filterNot { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO })
+                        }
+                        manualOverride = false
                     }
+                    lastPlayer = current
+                    lastLinkUrl = sourceUrl
                     embeddedApplied = false
+                    current.addListener(subtitleListener)
                 }
-                lastPlayer = current
                 if (current != null) {
-                    selectEmbedded()
                     val popup = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
+                    trackDialog(f, popup)
+                    if (!embeddedApplied) selectEmbedded()
                     if (popup != null && popup.isShowing &&
                         popup !== sortedDialog && popup !== pendingDialog) {
                         pendingDialog = popup
@@ -353,24 +438,61 @@ internal class StremioSubtitleController {
         }
         model?.currentSubtitles?.observe(candidate.viewLifecycleOwner, observer)
         removeObserver = { model?.currentSubtitles?.removeObserver(observer) }
+        settings = candidate.context?.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+        settings?.registerOnSharedPreferenceChangeListener(settingsListener)
         candidate.view?.viewTreeObserver?.takeIf { it.isAlive }?.let {
             it.addOnPreDrawListener(onDraw)
             viewTree = it
         }
     }
 
-    private fun selectEmbedded() {
-        if (embeddedApplied || lastPlayer == null) return
+    private fun selectEmbedded(tracks: Tracks? = null) {
         val f = fragment ?: return
-        val preferred = SubtitlesFragment.getAutoSelectLanguageTagIETF()
-        if (preferred.isBlank()) return
-        val embedded = model?.state?.subtitles?.firstOrNull {
-            it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it.matchesLanguageCode(preferred)
+        if (model?.state?.instance != lastInstance || !isStremio) return
+        val current = lastPlayer ?: return
+        if (current !== f.playerView?.player) return
+        val available = tracks ?: current.currentTracks
+        val subtitles = model?.state?.subtitles ?: return
+        val embeddedTracks = available.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+        // Expose only tracks belonging to this actual video to the native picker.
+        for (subtitle in subtitles) {
+            if (subtitle.origin != SubtitleOrigin.EMBEDDED_IN_VIDEO) continue
+            val found = embeddedTracks.any { group ->
+                (0 until group.length).any { index ->
+                    group.getTrackFormat(index).id?.replace(Regex("^\\d+:"), "") == subtitle.url
+                }
+            }
+            if (found) markActive(f, subtitle)
+        }
+
+        val popup = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
+        trackDialog(f, popup)
+        if (manualOverride || popup?.isShowing == true) return
+        val language = SubtitlesFragment.getAutoSelectLanguageTagIETF()
+        if (language.isBlank()) return
+        val target = subtitles.firstOrNull {
+            it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it.matchesLanguageCode(language)
         } ?: return
-        // Preserve the host's selected subtitle and dialog state.
-        val method = selectMethod ?: return
-        if (runCatching { method.invoke(f, embedded, false) }.isSuccess)
+        val match = embeddedTracks.firstNotNullOfOrNull { group ->
+            (0 until group.length).firstOrNull { index ->
+                group.isTrackSupported(index) &&
+                    group.getTrackFormat(index).id?.replace(Regex("^\\d+:"), "") == target.url
+            }?.let { index -> group to index }
+        } ?: return
+        if (!markActive(f, target)) return
+        val (group, index) = match
+        if (group.isTrackSelected(index)) {
             embeddedApplied = true
+            return
+        }
+        // Direct Media3 track override, never GeneratorPlayer.setSubtitles/loadLink.
+        runCatching {
+            current.trackSelectionParameters = current.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, index))
+                .build()
+            embeddedApplied = true
+        }
     }
 
     private fun sortPopup(dialog: Dialog): Boolean {
@@ -425,13 +547,20 @@ internal class StremioSubtitleController {
         if (candidate != null && candidate !== fragment) return
         viewTree?.let { if (it.isAlive) it.removeOnPreDrawListener(onDraw) }
         viewTree = null
+        lastPlayer?.removeListener(subtitleListener)
+        settings?.unregisterOnSharedPreferenceChangeListener(settingsListener)
+        settings = null
         removeObserver?.invoke()
         removeObserver = null
         fragment = null
         model = null
         lastPlayer = null
+        lastLinkUrl = null
         lastInstance = -1
         embeddedApplied = false
+        manualOverride = false
+        selectionDialog = null
+        selectionBeforeDialog = null
         sortedDialog = null
         pendingDialog = null
         isStremio = false
