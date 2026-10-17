@@ -1398,12 +1398,35 @@ internal class RatingPlotImageHook(
         private data class AnimeSnapshot(
             val tvdbId: Int?, val tvdbSeason: Int?, val mapped: List<AnimeSlot>,
             val watched: Set<String>, val outside: Set<String>,
-            val mode: String, val sourceIds: Set<Int>
+            val mode: String, val sourceIds: Set<Int>,
+            val status: SyncWatchType?, val statusEditable: Boolean
+        )
+        private data class AnimeWatchGrid(
+            val watched: Set<String>, val statuses: Map<Int, SyncWatchType>
         )
         private val animeEpisodeCache = mutableMapOf<Int, List<AnimeSlot>>()
 
         private fun jsonInt(obj: JSONObject?, key: String): Int? =
             obj?.opt(key)?.toString()?.toIntOrNull()?.takeIf { it > 0 }
+
+        private fun simklWatchlistStatus(value: Any?): SyncWatchType? = when (value) {
+            null, JSONObject.NULL -> SyncWatchType.NONE
+            "watching" -> SyncWatchType.WATCHING
+            "plantowatch" -> SyncWatchType.PLANTOWATCH
+            "completed" -> SyncWatchType.COMPLETED
+            "hold" -> SyncWatchType.ONHOLD
+            "dropped" -> SyncWatchType.DROPPED
+            else -> null
+        }
+
+        private fun simklWatchlistDestination(status: SyncWatchType): String? = when (status) {
+            SyncWatchType.WATCHING, SyncWatchType.REWATCHING -> "watching"
+            SyncWatchType.PLANTOWATCH -> "plantowatch"
+            SyncWatchType.COMPLETED -> "completed"
+            SyncWatchType.ONHOLD -> "hold"
+            SyncWatchType.DROPPED -> "dropped"
+            else -> null
+        }
 
         /**
          * Query per-episode watched flags for the season's validated Simkl anime IDs.
@@ -1412,7 +1435,7 @@ internal class RatingPlotImageHook(
         private suspend fun simklAnimeWatched(
             repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
             ids: Set<Int>
-        ): Set<String>? {
+        ): AnimeWatchGrid? {
             if(ids.isEmpty())return null
             val headers=SimklApi.getHeaders(repo.authToken() ?: return null)+
                 mapOf("content-type" to "application/json")
@@ -1432,11 +1455,14 @@ internal class RatingPlotImageHook(
             val watched=linkedSetOf<String>()
             val observed=linkedSetOf<String>()
             val returned=linkedSetOf<Int>()
+            val statuses=linkedMapOf<Int, SyncWatchType>()
             for(i in 0 until rows.length()){
                 val row=rows.optJSONObject(i) ?: return null
                 val id=jsonInt(row.optJSONObject("ids"),"simkl") ?: return null
                 val rootId=jsonInt(row,"simkl")
                 if(id !in ids || (rootId!=null && rootId!=id) || !returned.add(id))return null
+                if(!row.has("list"))return null
+                statuses[id]=simklWatchlistStatus(row.opt("list")) ?: return null
                 val seasons=row.optJSONArray("seasons") ?: return null
                 for(j in 0 until seasons.length()){
                     val part=seasons.optJSONObject(j) ?: return null
@@ -1451,7 +1477,54 @@ internal class RatingPlotImageHook(
                     }
                 }
             }
-            return watched.takeIf { returned==ids }
+            return AnimeWatchGrid(watched,statuses).takeIf { returned==ids }
+        }
+
+        /**
+         * Change the watchlist state of native Simkl anime titles only.
+         * The API can normalize a requested state (e.g. completed -> watching);
+         * verify the returned destinations and then re-read the episode grid.
+         */
+        private suspend fun simklAnimeSetStatus(
+            repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
+            ids: Set<Int>, requested: SyncWatchType
+        ): SyncWatchType? {
+            val destination=simklWatchlistDestination(requested) ?: return null
+            if(ids.isEmpty())return null
+            val headers=SimklApi.getHeaders(repo.authToken() ?: return null)+
+                mapOf("content-type" to "application/json")
+            val body=JSONObject().put("anime",JSONArray().also { items ->
+                ids.forEach { id ->
+                    items.put(JSONObject().put("to",destination)
+                        .put("ids",JSONObject().put("simkl",id)))
+                }
+            })
+            val response=try {
+                app.post("https://api.simkl.com/sync/add-to-list",
+                    headers=headers,requestBody=body.toString().toRequestBody())
+            }catch(e: CancellationException){throw e}
+             catch(e: Exception){return null}
+            if(response.code !in 200..299)return null
+            val result=runCatching { JSONObject(response.text) }.getOrNull() ?: return null
+            val notFound=result.optJSONObject("not_found") ?: return null
+            if((notFound.optJSONArray("anime")?.length() ?: 0)>0 ||
+               (notFound.optJSONArray("shows")?.length() ?: 0)>0 ||
+               (notFound.optJSONArray("movies")?.length() ?: 0)>0)return null
+            val added=result.optJSONObject("added") ?: return null
+            val seen=linkedSetOf<Int>()
+            val actual=linkedSetOf<SyncWatchType>()
+            for(group in listOf("anime","shows")){
+                val rows=added.optJSONArray(group) ?: continue
+                for(i in 0 until rows.length()){
+                    val item=rows.optJSONObject(i) ?: return null
+                    val id=jsonInt(item.optJSONObject("ids"),"simkl") ?: return null
+                    if(id !in ids || !seen.add(id))return null
+                    val state=simklWatchlistStatus(item.opt("to")) ?: return null
+                    if(state==SyncWatchType.NONE)return null
+                    actual+=state
+                }
+            }
+            return actual.singleOrNull()?.takeIf { seen==ids }
         }
 
         private suspend fun simklAnimeRead(
@@ -1563,76 +1636,104 @@ internal class RatingPlotImageHook(
             if(sorted.isEmpty() || keys.distinct().size != keys.size){
                 return null
             }
-            val watchedAll=simklAnimeWatched(repo,validated)
-            if(watchedAll==null){
-                return null
-            }
+            val grid=simklAnimeWatched(repo,validated) ?: return null
             val targetKeys=sorted.mapTo(linkedSetOf()) { it.key }
+            val unifiedStatus=grid.statuses.values.distinct().singleOrNull()
+            // A single Simkl anime ID can span several TVDB seasons (e.g. One Piece).
+            // In that case the Simkl watchlist state is title-wide, not season-wide:
+            // keep progress editing, but never write a season-local status to it.
+            val seasonLocalTitles=validated.all { id ->
+                val episodes=animeEpisodeCache[id].orEmpty()
+                episodes.isNotEmpty() && (tvdbSeason==null ||
+                    episodes.all { it.tvdbSeason==tvdbSeason })
+            }
             val result=AnimeSnapshot(tvdbId,tvdbSeason,sorted,
-                watchedAll.intersect(targetKeys),watchedAll-targetKeys,
-                if(tvdbId!=null && tvdbSeason!=null)"tvdb" else "native",validated)
+                grid.watched.intersect(targetKeys),grid.watched-targetKeys,
+                if(tvdbId!=null && tvdbSeason!=null)"tvdb" else "native",validated,
+                unifiedStatus,unifiedStatus!=null && seasonLocalTitles)
             return result
         }
 
         private suspend fun simklAnimeSave(tracker: Tracker, draft: Draft,
             initial: Draft, seasonNumber: Int): Boolean {
-            val before=tracker.simklAnime ?:return false
-            if(draft.score!=initial.score ||
-               (draft.status!=initial.status && !(
-                   initial.status==SyncWatchType.NONE &&
-                   draft.status==SyncWatchType.WATCHING && draft.watched>0)))return false
-            val diff=draft.watched-before.watched.size
-            if(diff==0)return true
+            val before=tracker.simklAnime ?: return false
+            if(draft.score!=initial.score)return false
             if(draft.watched !in 0..before.mapped.size)return false
-            val changes=if(diff>0)before.mapped.filterNot { it.key in before.watched }.take(diff)
+            val diff=draft.watched-before.watched.size
+            val autoWatching=initial.status==SyncWatchType.NONE &&
+                draft.status==SyncWatchType.WATCHING && diff>0
+            val statusChanged=draft.status!=initial.status && !autoWatching
+            if(statusChanged && (!before.statusEditable ||
+                simklWatchlistDestination(draft.status)==null))return false
+            if(diff==0 && !statusChanged)return true
+
+            val expected=if(diff>0) {
+                val changes=before.mapped.filterNot { it.key in before.watched }.take(diff)
+                if(changes.size!=diff)return false
+                before.watched+changes.map { it.key }
+            } else if(diff<0) {
+                val changes=before.mapped.filter { it.key in before.watched }.takeLast(-diff)
+                if(changes.size!=-diff)return false
+                before.watched-changes.map { it.key }.toSet()
+            } else before.watched
+
+            if(diff!=0) {
+                val changes=if(diff>0)
+                    before.mapped.filterNot { it.key in before.watched }.take(diff)
                 else before.mapped.filter { it.key in before.watched }.takeLast(-diff)
-            if(changes.size != kotlin.math.abs(diff))return false
-            val body=if(before.mode=="tvdb"){
-                val episodes=JSONArray().also { a ->
-                    changes.forEach { a.put(JSONObject().put("number",it.tvdbEpisode)) }
+                val body=if(before.mode=="tvdb"){
+                    val episodes=JSONArray().also { a ->
+                        changes.forEach { a.put(JSONObject().put("number",it.tvdbEpisode)) }
+                    }
+                    JSONObject().put("shows",JSONArray().put(JSONObject()
+                        .put("ids",JSONObject().put("tvdb",before.tvdbId))
+                        .put("use_tvdb_anime_seasons",true)
+                        .put("seasons",JSONArray().put(JSONObject()
+                            .put("number",before.tvdbSeason)
+                            .put("episodes",episodes)))))
+                }else{
+                    val id=before.sourceIds.singleOrNull() ?: return false
+                    JSONObject().put("anime",JSONArray().put(JSONObject()
+                        .put("ids",JSONObject().put("simkl",id))
+                        .put("episodes",JSONArray().also { a ->
+                            changes.forEach { a.put(JSONObject().put("number",it.native)) }
+                        })))
                 }
-                JSONObject().put("shows",JSONArray().put(JSONObject()
-                    .put("ids",JSONObject().put("tvdb",before.tvdbId))
-                    .put("use_tvdb_anime_seasons",true)
-                    .put("seasons",JSONArray().put(JSONObject()
-                        .put("number",before.tvdbSeason)
-                        .put("episodes",episodes)))))
-            }else{
-                val id=before.sourceIds.singleOrNull()?:return false
-                JSONObject().put("anime",JSONArray().put(JSONObject()
-                    .put("ids",JSONObject().put("simkl",id))
-                    .put("episodes",JSONArray().also { a ->
-                        changes.forEach { a.put(JSONObject().put("number",it.native)) }
-                    })))
+                val endpoint=if(diff>0)"history" else "history/remove"
+                val headers=SimklApi.getHeaders(tracker.repo.authToken() ?: return false)+
+                    mapOf("content-type" to "application/json")
+                val response=try {
+                    app.post("https://api.simkl.com/sync/$endpoint",
+                        headers=headers,requestBody=body.toString().toRequestBody())
+                }catch(e: CancellationException){throw e}
+                 catch(e: Exception){return false}
+                val failures=runCatching {
+                    val obj=JSONObject(response.text)
+                    val notFound=obj.optJSONObject("not_found")
+                    (notFound?.optJSONArray("shows")?.length() ?: 0)+
+                        (notFound?.optJSONArray("anime")?.length() ?: 0)
+                }.getOrNull()
+                if(response.code !in 200..299 || failures==null || failures>0)return false
             }
-            val endpoint=if(diff>0)"history" else "history/remove"
-            val headers=SimklApi.getHeaders(tracker.repo.authToken()?:return false)+
-                mapOf("content-type" to "application/json")
-            val response=try {
-                app.post("https://api.simkl.com/sync/$endpoint",
-                    headers=headers,requestBody=body.toString().toRequestBody())
-            } catch(e: CancellationException){ throw e }
-              catch(e: Exception){
-                  throw e
-              }
-            val failed=runCatching{
-                val obj=JSONObject(response.text)
-                val notFound=obj.optJSONObject("not_found")
-                (notFound?.optJSONArray("shows")?.length()?:0)+
-                    (notFound?.optJSONArray("anime")?.length()?:0)
-            }.getOrNull()
-            if(response.code !in 200..299 || failed==null || failed>0){
-                return false
-            }
-            val expected=if(diff>0)before.watched+changes.map{it.key}
-                else before.watched-changes.map{it.key}.toSet()
-            for(attempt in 1..3){
+
+            // Explicit status edits must be directed at each validated native anime
+            // title, never at the common TVDB/IMDb parent shared by other seasons.
+            val acceptedStatus=if(statusChanged)
+                simklAnimeSetStatus(tracker.repo,before.sourceIds,draft.status)
+                    ?: return false
+            else null
+
+            for(attempt in 1..3) {
                 if(attempt>1)kotlinx.coroutines.delay(if(attempt==2)350L else 900L)
                 val mapped=tracker.seasonMapping ?: return false
                 val after=simklAnimeRead(tracker.repo,mapped,seasonNumber)
-                val same=after?.watched==expected
-                val preserved=after?.outside==before.outside
-                if(same && preserved){tracker.simklAnime=after;return true}
+                val watchedMatches=after?.watched==expected
+                val outsidePreserved=after?.outside==before.outside
+                val statusMatches=!statusChanged || after?.status==acceptedStatus
+                if(watchedMatches && outsidePreserved && statusMatches) {
+                    tracker.simklAnime=after
+                    return true
+                }
             }
             return false
         }
@@ -1889,7 +1990,7 @@ internal class RatingPlotImageHook(
                         val fields = if (multi && isAnime == true &&
                             repo.idPrefix == "simkl") animeExact?.let {
                             val watched=it.watched.size
-                            Draft(if (watched==0) SyncWatchType.NONE
+                            Draft(it.status ?: if(watched==0) SyncWatchType.NONE
                                   else if (watched==it.mapped.size) SyncWatchType.COMPLETED
                                   else SyncWatchType.WATCHING, watched, null)
                         } else remote?.let {
@@ -2084,10 +2185,11 @@ internal class RatingPlotImageHook(
                     current?.setSelection(newText.length)
                 }
                 checks?.setItemChecked(data.status.internalId + 1, true)
-                // A Simkl show has one global status/rating. Never disguise it as
-                // a season-local edit; only per-episode history is writable.
+                // Simkl anime titles dedicated to the selected season have an
+                // independent watchlist status. Shared multi-season titles do not.
                 checks?.isEnabled = target.writeBlocked == null &&
-                    target.simklSeason == null && target.simklAnime == null
+                    target.simklSeason == null &&
+                    (target.simklAnime == null || target.simklAnime?.statusEditable == true)
                 slider?.isEnabled = target.writeBlocked == null &&
                     target.simklSeason == null && target.simklAnime == null
                 val valScore = data.score?.toFloat(10) ?: 0f
@@ -2125,13 +2227,19 @@ internal class RatingPlotImageHook(
             if (draft.watched < 0 || tracker.total?.let { it > 0 && draft.watched > it } == true) {
                 return
             }
-            if ((tracker.simklSeason != null || tracker.simklAnime != null) &&
+            if (tracker.simklSeason != null &&
                 (draft.score != before.score ||
                     (draft.status != before.status &&
                      !(before.status == SyncWatchType.NONE &&
                        draft.status == SyncWatchType.WATCHING && draft.watched > 0)))) {
                 return
             }
+            if (tracker.simklAnime != null && draft.score != before.score) return
+            if (tracker.simklAnime != null && draft.status != before.status &&
+                !(before.status == SyncWatchType.NONE &&
+                  draft.status == SyncWatchType.WATCHING && draft.watched > 0) &&
+                (tracker.simklAnime?.statusEditable != true ||
+                 simklWatchlistDestination(draft.status)==null)) return
             tracker.saving = true
             render()
             // Detached/changed screens do not receive this result, but the snapshot
@@ -2188,7 +2296,7 @@ internal class RatingPlotImageHook(
                         val anime = tracker.simklAnime
                         if (anime != null) {
                             val count=anime.watched.size
-                            val actual=when {
+                            val actual=anime.status ?: when {
                                 count == 0 -> SyncWatchType.NONE
                                 count == anime.mapped.size -> SyncWatchType.COMPLETED
                                 else -> SyncWatchType.WATCHING
