@@ -527,7 +527,9 @@ internal class StremioSubtitleController {
         val names = grouped.indices.map { index ->
             val group = grouped[index]
             if (group.isNotEmpty() && group.all { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }) {
-                android.text.SpannedString("${group.first().originalName} (Embedded)")
+                val embeddedName = fragment?.context?.getString(R.string.subtitles_from_embedded)
+                    ?: return false
+                android.text.SpannedString("${group.first().originalName} ($embeddedName)")
             } else texts[index + 1]
         }
         if (order.indices.all { order[it] == it } &&

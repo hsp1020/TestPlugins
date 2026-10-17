@@ -521,7 +521,11 @@ class SettingsBottomFragment(
             base.height() else metrics.heightPixels
         var heightCap = (baseHeight * 0.88f).toInt().coerceAtLeast(1)
         val initialPadding = intArrayOf(root.paddingLeft, root.paddingTop, root.paddingRight, root.paddingBottom)
-        val title = root.getChildAt(0)?.takeIf { it !== body }
+        // RecyclerView is nested in catalogListBody. Exclude its direct child of
+        // root from chrome(), otherwise the list height is counted twice.
+        val bodySlot = generateSequence(body) { it.parent as? View }
+            .firstOrNull { it.parent === root } ?: body
+        val title = root.getChildAt(0)?.takeIf { it !== bodySlot }
         val footer = root.getChildAt(root.childCount - 1)?.takeIf { it !== body && it is LinearLayout }
         var keyboardShown = false
         var windowInsets: WindowInsetsCompat? = null
@@ -693,7 +697,7 @@ class SettingsBottomFragment(
                     var total = paddingTop + paddingBottom
                     for (i in 0 until root.childCount) {
                         val child = root.getChildAt(i)
-                        if (child === body || (child === title && !showTitle) ||
+                        if (child === bodySlot || (child === title && !showTitle) ||
                             (child === footer && !showFooter) ||
                             (child !== title && child !== footer && child.visibility == View.GONE)) continue
                         child.measure(View.MeasureSpec.makeMeasureSpec(bodyWidth, View.MeasureSpec.EXACTLY),
@@ -967,8 +971,7 @@ class SettingsBottomFragment(
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-            setSoftInputMode(if (android.os.Build.VERSION.SDK_INT >= 30)
-                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING else WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
             attributes = attributes.apply {
                 gravity = Gravity.CENTER
                 x = 0; y = 0
@@ -1762,8 +1765,7 @@ class SettingsBottomFragment(
         settingsDialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setGravity(Gravity.CENTER)
-            setSoftInputMode(if (android.os.Build.VERSION.SDK_INT >= 30)
-                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING else WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
         showPage(SettingsPage.HUB)
         fitDialog(settingsDialog, view, viewport, 800)
