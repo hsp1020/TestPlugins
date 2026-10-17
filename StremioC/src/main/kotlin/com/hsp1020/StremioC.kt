@@ -2827,16 +2827,25 @@ open class StremioC(
         }.onFailure { error ->
             android.util.Log.w("StremioCStreams", "TRACE $traceId SAVED extras-parse-failed ${error.javaClass.simpleName}")
         }
-        val extraUrls = if (syncSettings.streamSubtitleMap[currentCleanUrl] == true) {
+        // Library items can come directly from the metadata/history addon, which
+        // need not appear in Catalogs. Preserve explicit catalog-level OFF settings.
+        val savedStreamSync = syncSettings.streamSubtitleMap[currentCleanUrl]
+        val libraryHistoryStreamSync = savedStreamSync == null && mainUrl.isBlank() &&
+            syncUrl.isNotBlank() && currentCleanUrl == syncUrl.cleanBaseUrl().lowercase() &&
+            stremioManifestUrl(currentMainUrl) !in syncSettings.disabledCatalogUrls
+        val streamSyncEnabled = savedStreamSync ?: libraryHistoryStreamSync
+        android.util.Log.i("StremioCStreams",
+            "TRACE $traceId STREAM_SYNC saved=$savedStreamSync libraryHistoryFallback=$libraryHistoryStreamSync effective=$streamSyncEnabled")
+        val extraUrls = if (streamSyncEnabled) {
             syncSettings.streamSubtitleUrls.filter { addon ->
                 val parsed = addon.url.toHttpUrlOrNull()
                 parsed != null && (parsed.scheme == "http" || parsed.scheme == "https")
             }.filterNot { stremioManifestUrl(it.url) == stremioManifestUrl(currentMainUrl) }
         } else emptyList()
         android.util.Log.i("StremioCStreams",
-            "TRACE $traceId DECISION type=$targetType primaryId=$primaryId globalId=$globalId integrationId=$integrationImdbId integrationType=$integrationTargetType actualMovie=$actualIsMovie globalSeason=$globalSeason globalEpisode=$globalEpisode extraEnabled=${syncSettings.streamSubtitleMap[currentCleanUrl] == true} extraCount=${extraUrls.size} registered=${syncSettings.streamSubtitleUrls.size} historySync=$isHistorySyncEnabled")
+            "TRACE $traceId DECISION type=$targetType primaryId=$primaryId globalId=$globalId integrationId=$integrationImdbId integrationType=$integrationTargetType actualMovie=$actualIsMovie globalSeason=$globalSeason globalEpisode=$globalEpisode extraEnabled=$streamSyncEnabled extraCount=${extraUrls.size} registered=${syncSettings.streamSubtitleUrls.size} historySync=$isHistorySyncEnabled")
         android.util.Log.i("StremioCStreams",
-            "request type=$targetType id=$primaryId provider=${name.take(40)} extraEnabled=${syncSettings.streamSubtitleMap[currentCleanUrl] == true} extraCount=${extraUrls.size}")
+            "request type=$targetType id=$primaryId provider=${name.take(40)} extraEnabled=$streamSyncEnabled extraCount=${extraUrls.size}")
 
         val customHosts = withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
@@ -3196,7 +3205,7 @@ open class StremioC(
                         }
                     } }.awaitAll()
                 } else {
-                    android.util.Log.i("StremioCStreams", "TRACE $traceId EXTRA_SKIP all reason=${if (syncSettings.streamSubtitleMap[currentCleanUrl] != true) "sync-flag-disabled-or-unmatched" else "no-enabled-valid-addons"}")
+                    android.util.Log.i("StremioCStreams", "TRACE $traceId EXTRA_SKIP all reason=${if (!streamSyncEnabled) "sync-flag-disabled-or-unmatched" else "no-enabled-valid-addons"}")
                 }
             },
             {
