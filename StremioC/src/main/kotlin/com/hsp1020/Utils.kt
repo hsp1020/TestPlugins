@@ -1028,8 +1028,8 @@ internal class RatingPlotImageHook(
 }
 
 /**
- * StremioC-only PiP subtitles, based on Next Player's Media3 fractional sizing.
- * The CloudStream player keeps ownership of subtitle positioning and rendering.
+ * StremioC-only PiP subtitles, following Dantotsu's Media3 size and bottom positioning.
+ * CloudStream retains ownership of normal playback subtitle styles and layout.
  */
 @OptIn(UnstableApi::class)
 private class PipSubtitleScaler {
@@ -1038,6 +1038,7 @@ private class PipSubtitleScaler {
     private var attached: Fragment? = null
     private var activity: FragmentActivity? = null
     private var subtitle: SubtitleView? = null
+    private var originalBottomMargin: Int? = null
     private var inPip = false
 
     private val pipListener = Consumer<PictureInPictureModeChangedInfo> { event ->
@@ -1084,20 +1085,41 @@ private class PipSubtitleScaler {
         attached = candidate
         activity = host
         subtitle = view
+        originalBottomMargin = (view.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin
         host.addOnPictureInPictureModeChangedListener(pipListener)
         SubtitlesFragment.applyStyleEvent += subtitleStyleListener
         if (host.isInPictureInPictureMode) enterPip()
     }
 
     private fun applyPipStyle(view: SubtitleView) {
-        // Next Player uses a full-size SubtitleView with Media3's default 8% bottom inset.
-        // CloudStream's fixed elevation (paddingTop + translationY) must not remain in PiP.
+        // Dantotsu sizes PiP subtitles in sp from the user's size and video aspect ratio.
+        val ratio = runCatching {
+            (attached as? GeneratorPlayer)?.player?.getAspectRatio()?.toFloat()
+        }.getOrNull()?.takeIf { it.isFinite() && it > 0f } ?: (16f / 9f)
+        val pipScale = when {
+            ratio > 1.5f -> 0.45f
+            ratio < 1f -> 0.65f
+            else -> 0.55f
+        }
+        val fontSize = SubtitlesFragment.getCurrentSavedStyle().fixedTextSize ?: 25f
+
+        // Drop CloudStream's full-screen elevation only while in PiP.
         if (view.paddingTop != 0) {
             view.setPadding(view.paddingLeft, 0, view.paddingRight, view.paddingBottom)
         }
         if (view.translationY != 0f) view.translationY = 0f
-        view.setBottomPaddingFraction(SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
-        view.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION)
+        // Dantotsu: no Media3 fractional bottom inset; 16dp layout margin instead.
+        view.setBottomPaddingFraction(0f)
+        (view.layoutParams as? ViewGroup.MarginLayoutParams)?.let { params ->
+            val bottomMargin = TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_DIP, 16f, view.resources.displayMetrics
+            ).toInt()
+            if (params.bottomMargin != bottomMargin) {
+                params.bottomMargin = bottomMargin
+                view.layoutParams = params
+            }
+        }
+        view.setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, fontSize * pipScale)
     }
 
     private fun enterPip() {
@@ -1112,8 +1134,15 @@ private class PipSubtitleScaler {
         inPip = false
         subtitle?.let { view ->
             val style = SubtitlesFragment.getCurrentSavedStyle()
-            // Restore all of CloudStream's normal subtitle layout (0% bottom inset,
-            // fixed font size, saved top padding) and its elevation translation.
+            // Restore both the original parent margin and CloudStream's saved style.
+            originalBottomMargin?.let { bottomMargin ->
+                (view.layoutParams as? ViewGroup.MarginLayoutParams)?.let { params ->
+                    if (params.bottomMargin != bottomMargin) {
+                        params.bottomMargin = bottomMargin
+                        view.layoutParams = params
+                    }
+                }
+            }
             SubtitlesFragment.setSubtitleViewStyle(view, style, true)
             view.translationY = -TypedValue.applyDimension(
                 TypedValue.COMPLEX_UNIT_DIP,
@@ -1130,6 +1159,7 @@ private class PipSubtitleScaler {
         attached = null
         activity = null
         subtitle = null
+        originalBottomMargin = null
     }
 
     fun detach(candidate: Fragment? = null) {
