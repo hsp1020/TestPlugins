@@ -1309,11 +1309,12 @@ internal class RatingPlotImageHook(
                     for (i in 0 until episodes.length()) {
                         val episode = episodes.optJSONObject(i)
                         val ep = episode?.optInt("number") ?: 0
-                        if (ep <= 0 || episode?.has("watched") != true) {
+                        val watchedFlag = episode?.opt("watched")
+                        if (ep <= 0 || watchedFlag !is Boolean) {
                             malformed = true; break
                         }
                         all += ep
-                        if (episode?.optBoolean("watched") == true) viewed += ep
+                        if (watchedFlag) viewed += ep
                     }
                     if (malformed || all.size != all.distinct().size || parsed.containsKey(n)) {
                         malformed = true; break
@@ -1908,8 +1909,8 @@ internal class RatingPlotImageHook(
                 checks?.setItemChecked(data.status.internalId + 1, true)
                 // A Simkl show has one global status/rating. Never disguise it as
                 // a season-local edit; only per-episode history is writable.
-                checks?.isEnabled = target.simklSeason == null
-                slider?.isEnabled = target.simklSeason == null
+                checks?.isEnabled = target.writeBlocked == null && target.simklSeason == null
+                slider?.isEnabled = target.writeBlocked == null && target.simklSeason == null
                 val valScore = data.score?.toFloat(10) ?: 0f
                 slider?.value = valScore.coerceIn(0f,10f).toInt().toFloat()
                 scoreLabel?.text = data.score?.toInt(10)?.toString()?.plus("/10") ?: "?"
