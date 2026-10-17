@@ -2998,7 +2998,7 @@ open class StremioC(
             {
                 // Embedded streams add sources without suppressing regular /stream requests.
                 loadData.embeddedStreams?.let { json ->
-                    val embeddedResult = runSuspendCatching {
+                    runSuspendCatching {
                         val streams = parseJson<List<Stream>>(json)
                         streams.forEach { stream ->
                             val named = if (stream.name == null && stream.title == null && stream.description == null)
@@ -3007,14 +3007,12 @@ open class StremioC(
                                 stremioSubtitleFrom(currentMainUrl), extractorSubtitleFrom(currentMainUrl), wrappedCallback)
                         }
                     }
-                    embeddedResult.onFailure { error ->
-                    }
                 }
             },
             {
                 val request = streamRequest(targetType, primaryId, loadData.season, loadData.episode)
                 if (cleanBaseUrl.isNotBlank() && request != null) {
-                    val outcome = runSuspendCatching {
+                    runSuspendCatching {
                         val streamRequestUrl = "$cleanBaseUrl/stream/${request.first}/${request.second.urlEncode()}.json$querySuffix"
                         val response = customSession.get(streamRequestUrl, timeout = 25L)
                         val text = response.text
@@ -3030,7 +3028,6 @@ open class StremioC(
                         }
                     }
 
-                } else {
                 }
             },
             {
@@ -3076,7 +3073,7 @@ open class StremioC(
                                 if (source.isNotBlank()) stremioSourceNames.add(source.lowercase())
                                 runAllAsync({
                                     if (streamRequest != null && base.isNotBlank()) {
-                                        val outcome = runSuspendCatching {
+                                        runSuspendCatching {
                                             val requestUrl = "$base/stream/${streamRequest.first}/${streamRequest.second.urlEncode()}.json$suffix"
                                             val response = customSession.get(requestUrl, timeout = 25L)
                                             val text = response.text
@@ -3088,7 +3085,6 @@ open class StremioC(
                                             }
                                         }
 
-                                    } else {
                                     }
                                 }, {
                                     val mappedId = mappedAnimeStremioId()
@@ -3098,11 +3094,9 @@ open class StremioC(
                                         fetchStremioSubtitles(addonUrl, reqId, season, episode, extraType, addon.name)
                                     }
                                 })
-                            } else {
                             }
                         }
                     } }.awaitAll()
-                } else {
                 }
             },
             {

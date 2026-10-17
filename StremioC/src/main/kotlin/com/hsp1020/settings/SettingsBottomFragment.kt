@@ -1764,8 +1764,6 @@ class SettingsBottomFragment(
             editor.putBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, switchStreamPlay.isChecked)
             editor.putBoolean(SettingsRepository.PREF_KEY_VIXSRC_ENABLED, switchVixSrc.isChecked)
             editor.commit()
-            extraUrlList.forEachIndexed { index, item ->
-            }
             StremioC.invalidateSyncSettingsCache()
 
             recordBackupSnapshot(sharedPref, "stremio_c_restore_complete", "stremio_c_last_applied_backup_hash", "native_backup_stremioc")

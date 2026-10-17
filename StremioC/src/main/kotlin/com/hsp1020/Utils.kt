@@ -2036,7 +2036,6 @@ internal class RatingPlotImageHook(
             val tracker = statuses[selected] ?: return
             val draft = tracker.draft ?: return
             val upper = tracker.total?.takeIf { it > 0 } ?: Int.MAX_VALUE
-            val before = draft.watched
             draft.watched = (draft.watched.toLong() + delta).coerceIn(0L, upper.toLong()).toInt()
             render()
         }
