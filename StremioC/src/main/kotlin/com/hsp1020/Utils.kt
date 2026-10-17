@@ -1493,7 +1493,9 @@ internal class RatingPlotImageHook(
             if(ids.isEmpty())return null
             val headers=SimklApi.getHeaders(repo.authToken() ?: return null)+
                 mapOf("content-type" to "application/json")
-            val body=JSONObject().put("anime",JSONArray().also { items ->
+            // Simkl accepts anime under both arrays, but normalizes the
+            // /sync/add-to-list response under "added.shows".
+            val body=JSONObject().put("shows",JSONArray().also { items ->
                 ids.forEach { id ->
                     items.put(JSONObject().put("to",destination)
                         .put("ids",JSONObject().put("simkl",id)))
@@ -1506,25 +1508,25 @@ internal class RatingPlotImageHook(
              catch(e: Exception){return null}
             if(response.code !in 200..299)return null
             val result=runCatching { JSONObject(response.text) }.getOrNull() ?: return null
-            val notFound=result.optJSONObject("not_found") ?: return null
-            if((notFound.optJSONArray("anime")?.length() ?: 0)>0 ||
-               (notFound.optJSONArray("shows")?.length() ?: 0)>0 ||
-               (notFound.optJSONArray("movies")?.length() ?: 0)>0)return null
+            val notFound=result.optJSONObject("not_found")
+            if((notFound?.optJSONArray("anime")?.length() ?: 0)>0 ||
+               (notFound?.optJSONArray("shows")?.length() ?: 0)>0 ||
+               (notFound?.optJSONArray("movies")?.length() ?: 0)>0)return null
             val added=result.optJSONObject("added") ?: return null
-            val seen=linkedSetOf<Int>()
+            val echoed=linkedSetOf<Int>()
             val actual=linkedSetOf<SyncWatchType>()
-            for(group in listOf("anime","shows")){
+            for(group in listOf("shows","anime")){
                 val rows=added.optJSONArray(group) ?: continue
                 for(i in 0 until rows.length()){
                     val item=rows.optJSONObject(i) ?: return null
                     val id=jsonInt(item.optJSONObject("ids"),"simkl") ?: return null
-                    if(id !in ids || !seen.add(id))return null
+                    if(id !in ids || !echoed.add(id))return null
                     val state=simklWatchlistStatus(item.opt("to")) ?: return null
                     if(state==SyncWatchType.NONE)return null
                     actual+=state
                 }
             }
-            return actual.singleOrNull()?.takeIf { seen==ids }
+            return actual.singleOrNull()?.takeIf { echoed==ids }
         }
 
         private suspend fun simklAnimeRead(
@@ -1727,10 +1729,14 @@ internal class RatingPlotImageHook(
                 if(attempt>1)kotlinx.coroutines.delay(if(attempt==2)350L else 900L)
                 val mapped=tracker.seasonMapping ?: return false
                 val after=simklAnimeRead(tracker.repo,mapped,seasonNumber)
-                val watchedMatches=after?.watched==expected
+                // A Completed status may legitimately update the underlying
+                // watch history. Honor that server-side change on status-only
+                // writes; keep strict episode verification for +/- edits.
+                val watchedMatches=diff==0 && statusChanged ||
+                    after?.watched==expected
                 val outsidePreserved=after?.outside==before.outside
                 val statusMatches=!statusChanged || after?.status==acceptedStatus
-                if(watchedMatches && outsidePreserved && statusMatches) {
+                if(after!=null && watchedMatches && outsidePreserved && statusMatches) {
                     tracker.simklAnime=after
                     return true
                 }
@@ -2246,7 +2252,10 @@ internal class RatingPlotImageHook(
             // keeps writes directed to the user's original chosen service/season.
             scope.launch {
                 val result = withContext(Dispatchers.IO) {
-                    if (tracker.simklSeason != null) {
+                    if(prefix=="mal" && draft.status==SyncWatchType.NONE &&
+                        draft.explicitNone) {
+                        malRemoveFromLibrary(tracker.repo,id)
+                    } else if (tracker.simklSeason != null) {
                         simklSeasonSave(tracker, draft, before, sn)
                     } else if (tracker.simklAnime != null) {
                         simklAnimeSave(tracker, draft, before, sn)
@@ -2309,6 +2318,10 @@ internal class RatingPlotImageHook(
                                     current.explicitNone=false
                                 }
                             }
+                        } else if(prefix=="mal" && draft.status==SyncWatchType.NONE &&
+                            draft.explicitNone) {
+                            tracker.baseline=Draft(SyncWatchType.NONE,0,null)
+                            tracker.draft=tracker.baseline?.snapshot()
                         } else {
                             tracker.baseline = draft.snapshot()
                             tracker.draft?.let { if (it == draft) it.explicitNone = false }
@@ -2318,6 +2331,41 @@ internal class RatingPlotImageHook(
                 } else {
                 }
             }
+        }
+
+        /**
+         * MAL's NONE is not a watchlist status. Explicitly remove the anime
+         * entry, then check the authoritative per-title list_status field.
+         * A successful DELETE may return [] rather than a JSON object.
+         */
+        private suspend fun malRemoveFromLibrary(
+            repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
+            id: String
+        ): Boolean {
+            val animeId=id.toIntOrNull()?.takeIf { it>0 } ?: return false
+            val token=repo.authToken()?.accessToken ?: return false
+            val headers=mapOf("Authorization" to "Bearer $token")
+            val url="https://api.myanimelist.net/v2/anime/$animeId/my_list_status"
+            val deleted=try {
+                app.delete(url,headers=headers)
+            }catch(e: CancellationException){throw e}
+             catch(e: Exception){return false}
+            if(deleted.code !in 200..299 && deleted.code!=404)return false
+            repeat(3){ attempt ->
+                if(attempt>0)kotlinx.coroutines.delay(if(attempt==1)350L else 900L)
+                val response=try {
+                    app.get("https://api.myanimelist.net/v2/anime/$animeId",
+                        headers=headers,params=mapOf("fields" to "my_list_status"),
+                        cacheTime=0)
+                }catch(e: CancellationException){throw e}
+                 catch(e: Exception){return@repeat}
+                if(response.code in 200..299) {
+                    val data=runCatching { JSONObject(response.text) }.getOrNull()
+                    if(data!=null && (data.isNull("my_list_status") ||
+                        !data.has("my_list_status")))return true
+                }
+            }
+            return false
         }
 
         private suspend fun kitsuFallback(
