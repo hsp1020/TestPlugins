@@ -1216,722 +1216,611 @@ internal class RatingPlotImageHook(
         }
     }
 
-    /**
-     * P0-only season synchronization trace. It never modifies the core season picker,
-     * SyncViewModel IDs or tracking accounts. Observers are explicitly removed on detach.
-     */
-    private class SeasonSyncProbe(private val fragment: Fragment, private val root: View, private val detailUrl: String?) {
+    /** Plugin-owned independent tracker states. Native detail, episode selector and panel stay intact. */
+    private class SeasonSyncProbe(
+        private val fragment: Fragment, private val root: View, private val detailUrl: String?
+    ) {
         private companion object {
             const val TAG = "STCSeasonSync"
-            val IMDB = Regex("tt\\d+")
+            val IMDb = Regex("tt\\d+")
+            val allowed = setOf("mal", "anilist", "kitsu", "simkl")
+            val titles = mapOf("mal" to "MAL", "anilist" to "AniList",
+                "kitsu" to "Kitsu", "simkl" to "Simkl")
         }
 
-        private val instance = Integer.toHexString(System.identityHashCode(fragment))
-        private val cleanup = mutableListOf<() -> Unit>()
+        private data class Draft(
+            var status: SyncWatchType, var watched: Int, var score: Score?,
+            var explicitNone: Boolean = false
+        ) {
+            fun snapshot() = copy()
+        }
+
+        private data class Tracker(
+            val prefix: String, val id: String, val repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
+            var baseline: Draft? = null, var draft: Draft? = null,
+            var total: Int? = null, var totalSource: String = "unknown",
+            var error: String? = null, var loading: Boolean = true, var saving: Boolean = false,
+            var writeBlocked: String? = null
+        )
+
+        private val session = Integer.toHexString(System.identityHashCode(fragment))
+        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        private val observers = mutableListOf<() -> Unit>()
         private var active = false
         private var generation = 0L
         private var pageUrl: String? = null
-        private var seasons = emptyList<Int>()
-        private var index: Int? = null
-        private var selectedSeason: Int? = null
-        private var lastPending: String? = null
+        private var rawSyncs: Map<String,String> = emptyMap()
+        private var seasonNumbers: List<Int> = emptyList()
+        private var selectionIndex: Int? = null
+        private var season: Int? = null
+        private var startedFor: String? = null
+        private var selected: String? = null
+        private var preferred: String? = null
+        private var statuses = linkedMapOf<String, Tracker>()
+        private var fetchJob: Job? = null
+        private var applying = false
+        private var combo: android.widget.Spinner? = null
+        private var oldNames: TextView? = null
         private var syncModel: SyncViewModel? = null
-        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-        private var lookupJob: Job? = null
-        private var saveJob: Job? = null
-        private var p1Enabled = false
-        private var p1Target: Map<String, String> = emptyMap()
-        private var p1Statuses: Map<String, SyncAPI.AbstractSyncStatus> = emptyMap()
-        private var p1Totals: Map<String, Int?> = emptyMap()
-        private var p1Primary: String? = null
-        private var p1Initial: Fields? = null
-        private var p1TrustedUser: SyncAPI.AbstractSyncStatus? = null
-        private var p1Saving = false
-        private var p1SourceCount: Int? = null
-        private var p1ReadOnly = emptySet<String>()
-        private var p1Single = false
-        private var p1SingleBaseline: Fields? = null
-        private var p1RecoveryCount = 0
-        private val addEpisode by lazy(LazyThreadSafetyMode.NONE) {
-            root.findViewById<View>(R.id.result_sync_add_episode)
-        }
-        private val subEpisode by lazy(LazyThreadSafetyMode.NONE) {
-            root.findViewById<View>(R.id.result_sync_sub_episode)
-        }
-        private val saveButton by lazy(LazyThreadSafetyMode.NONE) {
-            root.findViewById<View>(R.id.result_sync_set_score)
-        }
+        private val saveButton by lazy { root.findViewById<View>(R.id.result_sync_set_score) }
+        private val minus by lazy { root.findViewById<View>(R.id.result_sync_sub_episode) }
+        private val plus by lazy { root.findViewById<View>(R.id.result_sync_add_episode) }
+        private val current by lazy { root.findViewById<android.widget.EditText>(R.id.result_sync_current_episodes) }
+        private val maximum by lazy { root.findViewById<TextView>(R.id.result_sync_max_episodes) }
+        private val bar by lazy { root.findViewById<android.widget.ProgressBar>(R.id.result_sync_episodes) }
+        private val slider by lazy { root.findViewById<com.google.android.material.slider.Slider>(R.id.result_sync_rating) }
+        private val scoreLabel by lazy { root.findViewById<TextView>(R.id.result_sync_score_text) }
+        private val checks by lazy { root.findViewById<ListView>(R.id.result_sync_check) }
+        private val holder by lazy { root.findViewById<View>(R.id.result_sync_holder) }
+        private val shimmer by lazy { root.findViewById<View>(R.id.result_sync_loading_shimmer) }
 
-        private data class Fields(
-            val status: SyncWatchType,
-            val watched: Int?,
-            val rating: Int?
-        )
-        private fun fields(item: SyncAPI.AbstractSyncStatus) =
-            Fields(item.status, item.watchedEpisodes ?: 0, item.score?.toInt(100))
+        private fun log(event: String, info: String = "") {
+            Log.i(TAG, "event=$event session=$session gen=$generation season=${season ?: "none"} " +
+                "chosen=${selected ?: "none"} $info")
+        }
+        private fun valid(g: Long, n: Int?): Boolean =
+            active && generation == g && season == n
 
-        private fun p1Valid(gen: Long, target: Int): Boolean =
-            active && generation == gen && selectedSeason == target && p1Enabled
-
-        private fun p1GuardClick() {
-            saveButton?.setOnClickListener { p1Save() }
-            addEpisode?.setOnClickListener { p1Adjust(1) }
-            subEpisode?.setOnClickListener { p1Adjust(-1) }
-            trace("P1_SAVE_GUARD", "save=${saveButton != null} plus=${addEpisode != null} " +
-                "minus=${subEpisode != null} single=$p1Single " +
-                "ready=${p1TrustedUser != null || p1SingleBaseline != null}")
+        private fun <T> observe(
+            data: androidx.lifecycle.LiveData<T>, owner: androidx.lifecycle.LifecycleOwner,
+            handler: (T) -> Unit
+        ) {
+            val observer = Observer<T> { if (active) handler(it) }
+            data.observe(owner, observer)
+            observers += { data.removeObserver(observer) }
         }
 
-        private fun p1RestoreNative() {
-            val model = syncModel ?: return
-            saveButton?.setOnClickListener { model.publishUserData() }
-            addEpisode?.setOnClickListener { model.setEpisodesDelta(1) }
-            subEpisode?.setOnClickListener { model.setEpisodesDelta(-1) }
-        }
-
-        private fun p1Limit(user: SyncAPI.AbstractSyncStatus): Int? {
-            val total = if (p1Single) {
-                p1SourceCount ?: user.maxEpisodes
-            } else {
-                val trackerTotal = p1Totals[p1Primary]
-                val sourceTotal = p1SourceCount
-                if (sourceTotal != null && sourceTotal > 0 &&
-                    trackerTotal != null && sourceTotal != trackerTotal) null
-                else trackerTotal ?: sourceTotal
+        fun start() {
+            if (active) return
+            active = true
+            val vm = ViewModelProvider(fragment)[ResultViewModel2::class.java]
+            syncModel = if (fragment is com.lagradost.cloudstream3.ui.result.ResultFragmentPhone)
+                ViewModelProvider(fragment)[SyncViewModel::class.java] else null
+            val owner = fragment.viewLifecycleOwner
+            log("ATTACH", "screen=${fragment.javaClass.simpleName} syncModel=${syncModel != null}")
+            observe(vm.page, owner) { value ->
+                when(value) {
+                    is Resource.Success -> {
+                        val data = value.value
+                        if (pageUrl != data.url) {
+                            generation++
+                            pageUrl = data.url
+                            rawSyncs = data.syncData.toMap()
+                            seasonNumbers = emptyList()
+                            selectionIndex = null
+                            season = null
+                            reset("page-change")
+                            log("PAGE", "name=${data.title.take(80)} imdb=${IMDb.find(data.url)?.value} " +
+                                "services=${rawSyncs.keys}")
+                        } else {
+                            rawSyncs = data.syncData.toMap()
+                        }
+                        resolve("page")
+                    }
+                    is Resource.Failure -> log("PAGE_FAILURE")
+                    else -> {}
+                }
             }
-            return total?.takeIf { it > 0 }
-        }
-
-        private fun p1Adjust(delta: Int) {
-            val sync = syncModel
-            val user = (sync?.userData?.value as? Resource.Success)?.value
-            val ready = (p1Single && p1SingleBaseline != null) ||
-                (p1Enabled && p1TrustedUser === user)
-            val cap = user?.let(::p1Limit)
-            val from = user?.watchedEpisodes ?: 0
-            trace("P1_EPISODE_CLICK", "delta=$delta ready=$ready old=$from limit=${cap ?: "unknown"}")
-            if (!ready || sync == null || user == null || cap == null) {
-                trace("P1_EPISODE_BLOCK", "reason=unresolved-or-missing-total")
-                return
+            observe(vm.seasonSelections, owner) { items ->
+                seasonNumbers = items.map { it.second }
+                log("SEASON_LIST", "numbers=$seasonNumbers")
+                resolve("list")
             }
-            val to = (from + delta).coerceIn(0, cap)
-            if (to != from || user.watchedEpisodes == null) sync.setEpisodes(to)
-            trace("P1_EPISODE_APPLY", "old=$from new=$to max=$cap")
+            observe(vm.selectedSeasonIndex, owner) { index ->
+                selectionIndex = index
+                log("SEASON_INDEX", "index=$index resolved=${seasonNumbers.getOrNull(index)}")
+                resolve("index")
+            }
+            syncModel?.let { model ->
+                observe(model.userData, owner) { result ->
+                    if (combo != null) {
+                        log("CORE_USER_IGNORED", "resource=${result?.javaClass?.simpleName} " +
+                            "coreIds=${model.getSyncs().keys} panelOwner=StremioC")
+                        root.post { if (active) render("core-user") }
+                    }
+                }
+                observe(model.metadata, owner) { result ->
+                    if (combo != null) {
+                        log("CORE_META_IGNORED", "resource=${result?.javaClass?.simpleName}")
+                        root.post { if (active) render("core-metadata") }
+                    }
+                }
+                observe(model.synced, owner) {
+                    if (combo != null) root.post { if (active) render("core-synced") }
+                }
+            }
         }
 
-        private fun p1Reset(reason: String) {
-            lookupJob?.cancel()
-            lookupJob = null
-            p1Target = emptyMap()
-            p1Statuses = emptyMap()
-            p1Totals = emptyMap()
-            p1Primary = null
-            p1Initial = null
-            p1TrustedUser = null
-            p1SourceCount = null
-            p1ReadOnly = emptySet()
-            p1RecoveryCount = 0
-            trace("P1_RESET", "reason=$reason")
+        private fun resolve(origin: String) {
+            val chosen = selectionIndex?.let { seasonNumbers.getOrNull(it) }
+            if (pageUrl == null || chosen == null || chosen <= 0) return
+            if (chosen == season) return
+            season = chosen
+            generation++
+            log("SEASON_CHANGED", "origin=$origin index=$selectionIndex seasonList=$seasonNumbers " +
+                "imdb=${IMDb.find(pageUrl.orEmpty())?.value}")
+            begin()
         }
 
-        private fun p1SelectionChanged() {
-            val season = selectedSeason ?: return
+        private fun reset(reason: String) {
+            fetchJob?.cancel()
+            fetchJob = null
+            statuses.clear()
+            selected = null
+            startedFor = null
+            log("TARGET_RESET", "reason=$reason")
+        }
+
+        private fun begin() {
             val url = pageUrl ?: return
+            val sn = season ?: return
             val isAnime = StremioC.animeAudioByUrl[url]
                 ?: detailUrl?.let { StremioC.animeAudioByUrl[it] }
-            if (seasons.size < 2 || isAnime != true || syncModel == null) {
-                if (p1Enabled) {
-                    p1Reset("ineligible")
-                    syncModel?.clear()
-                }
-                val single = isAnime == true && seasons.size == 1 && syncModel != null
-                p1Single = single
-                p1SingleBaseline = null
-                p1Enabled = false
-                p1SourceCount = if (single)
-                    StremioC.seasonEpisodeCountsByUrl[url]?.get(season) else null
-                if (single) p1GuardClick() else p1RestoreNative()
-                trace("P1_ELIGIBILITY", "enabled=false singleGuard=$single seasons=${seasons.size} " +
-                    "anime=$isAnime sourceCount=$p1SourceCount syncModel=${syncModel != null}")
+            val multi = seasonNumbers.size > 1
+            if (isAnime != true || syncModel == null) {
+                reset("non-anime-or-tv")
+                teardownUi()
+                log("ELIGIBILITY", "enabled=false anime=$isAnime multi=$multi")
                 return
             }
-            p1Single = false
-            p1SingleBaseline = null
-            p1Enabled = true
-            val imdb = IMDB.find(url)?.value ?: IMDB.find(detailUrl.orEmpty())?.value
-            p1Reset("season-selection")
-            p1GuardClick()
-            p1SourceCount = StremioC.seasonEpisodeCountsByUrl[url]?.get(season)
-            trace("P1_SOURCE_SEASON", "selected=$season episodes=${p1SourceCount ?: "unknown"} " +
-                "all=${StremioC.seasonEpisodeCountsByUrl[url] ?: "unavailable"}")
-            // While a mapping is unresolved, remove the unscoped IMDb/Simkl sync
-            // target. Never allow native Save to write a different season.
-            syncModel?.clear()
-            val providerName = fragment.arguments?.getString("apiName")
-            val provider = APIHolder.allProviders.filterIsInstance<StremioC>()
-                .firstOrNull { it.name == providerName }
-                ?: APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull()
-            trace("P1_ELIGIBILITY", "enabled=true imdb=${imdb ?: "none"} " +
-                "provider=${provider?.name ?: "none"} anime=$isAnime")
-            if (imdb == null || provider == null || p1SourceCount == null || p1SourceCount == 0) {
-                trace("P1_ABORT", "reason=${if (p1SourceCount == null || p1SourceCount == 0)
-                    "no-source-episodes-for-season" else "missing-imdb-or-provider"}")
-                return
-            }
+            reset("season-selection")
             val gen = generation
-            lookupJob = scope.launch {
-                val started = SystemClock.elapsedRealtime()
-                trace("P1_MAPPING_START", "imdb=$imdb targetSeason=$season")
-                val mapped = try {
-                    withContext(Dispatchers.IO) { provider.seasonTrackerIds(imdb, season) }
-                } catch (e: CancellationException) {
-                    trace("P1_MAPPING_CANCEL", "targetSeason=$season")
-                    throw e
-                } catch (e: Exception) {
-                    trace("P1_MAPPING_ERROR", "error=${e.javaClass.simpleName}")
-                    null
+            ensureUi()
+            log("ELIGIBILITY", "enabled=true multi=$multi raw=${rawSyncs.keys} " +
+                "sourceEpisodes=${StremioC.seasonEpisodeCountsByUrl[url]?.get(sn)}")
+            fetchJob = scope.launch {
+                val ids = if (!multi) rawSyncs.filterKeys { it in allowed } else {
+                    val imdb = IMDb.find(url)?.value ?: IMDb.find(detailUrl.orEmpty())?.value
+                    val provider = APIHolder.allProviders.filterIsInstance<StremioC>()
+                        .firstOrNull { it.name == fragment.arguments?.getString("apiName") }
+                        ?: APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull()
+                    if (imdb == null || provider == null) {
+                        log("MAPPING_BLOCK", "reason=missing-imdb-or-provider")
+                        emptyMap()
+                    } else {
+                        log("MAPPING_START", "imdb=$imdb target=$sn")
+                        val mapping = try { withContext(Dispatchers.IO) {
+                            provider.seasonTrackerIds(imdb, sn)
+                        } } catch (e: CancellationException) { throw e }
+                          catch (e: Exception) {
+                            log("MAPPING_ERROR", "cause=${e.javaClass.simpleName}")
+                            null
+                        }
+                        log("MAPPING_RESULT", "target=$sn MAL=${mapping?.mal} " +
+                            "AniList=${mapping?.aniList} Kitsu=${mapping?.kitsu} excludedSimkl=true")
+                        linkedMapOf<String,String>().apply {
+                            mapping?.mal?.let { put("mal", it.toString()) }
+                            mapping?.aniList?.let { put("anilist", it.toString()) }
+                            mapping?.kitsu?.let { put("kitsu", it.toString()) }
+                        }
+                    }
                 }
-                if (!p1Valid(gen, season)) {
-                    trace("P1_STALE_SKIP", "phase=mapping targetSeason=$season token=$gen")
+                if (!valid(gen, sn)) { log("STALE", "phase=map"); return@launch }
+                val matched = AccountManager.syncApis.filter { ids.containsKey(it.idPrefix) }
+                    .filter { it.authUser() != null }
+                log("TARGETS", "ids=${ids.keys} connected=${matched.map { it.idPrefix }} " +
+                    "omitted=${ids.keys - matched.map { it.idPrefix }.toSet()}")
+                if (matched.isEmpty()) {
+                    log("TARGET_EMPTY", "reason=unmapped-or-no-account")
+                    render("empty")
                     return@launch
                 }
-                trace("P1_MAPPING_RESULT", "imdb=$imdb targetSeason=$season " +
-                    "mal=${mapped?.mal} anilist=${mapped?.aniList} kitsu=${mapped?.kitsu} " +
-                    "elapsedMs=${SystemClock.elapsedRealtime()-started}")
-                if (mapped == null) {
-                    trace("P1_ABORT", "reason=no-verified-season-mapping targetSeason=$season")
-                    return@launch
+                statuses = linkedMapOf<String,Tracker>().apply {
+                    matched.forEach { repo ->
+                        put(repo.idPrefix, Tracker(repo.idPrefix, ids.getValue(repo.idPrefix), repo))
+                    }
                 }
-                val requested = linkedMapOf<String, String>().apply {
-                    mapped.mal?.let { put(AccountManager.malApi.idPrefix, it.toString()) }
-                    mapped.aniList?.let { put(AccountManager.aniListApi.idPrefix, it.toString()) }
-                    mapped.kitsu?.let { put(AccountManager.kitsuApi.idPrefix, it.toString()) }
-                }
-                // Never use the generic IMDb-based Simkl ID for P1 seasonal anime sync.
-                val repos = AccountManager.syncApis.filter { requested.containsKey(it.idPrefix) }
-                val activeRepos = repos.filter { it.authUser() != null }
-                trace("P1_SERVICE_PLAN", "mapped=$requested accountReady=${activeRepos.map { it.idPrefix }} " +
-                    "excludedSimkl=true")
-                if (activeRepos.isEmpty()) {
-                    trace("P1_ABORT", "reason=no-connected-mapped-trackers")
-                    return@launch
-                }
-                data class Reply(val prefix: String, val id: String,
-                    val status: SyncAPI.AbstractSyncStatus?, val total: Int?,
-                    val error: String?, val nativeAvailable: Boolean)
-                val replies = activeRepos.map { repo ->
+                selected = preferred?.takeIf { it in statuses } ?: statuses.keys.firstOrNull()
+                updateOptions()
+                render("fetch-start")
+                val replies = matched.map { repo ->
                     async(Dispatchers.IO) {
-                        val id = requested.getValue(repo.idPrefix)
-                        val began = SystemClock.elapsedRealtime()
-                        val result = repo.status(id)
+                        val id = ids.getValue(repo.idPrefix)
+                        val started = SystemClock.elapsedRealtime()
+                        val state = repo.status(id)
                         val meta = repo.load(id)
-                        // A null status can mean the title is not yet in the user's list.
-                        // Create a new, empty state only when the title ID itself is valid.
-                        val total = meta.getOrNull()?.totalEpisodes
-                        val status = result.getOrNull() ?: if (result.isSuccess && meta.getOrNull() != null)
-                            SyncAPI.SyncStatus(SyncWatchType.NONE, null, 0, maxEpisodes = total)
-                            else null
-                        val error = result.exceptionOrNull()?.javaClass?.simpleName
-                            ?: meta.exceptionOrNull()?.javaClass?.simpleName
-                        android.util.Log.i(TAG, "event=P1_SERVICE_LOOKUP session=$instance gen=$gen " +
-                            "season=$season provider=${repo.idPrefix} id=$id " +
-                            "status=${status?.status} progress=${status?.watchedEpisodes} " +
-                            "total=$total statusOk=${result.isSuccess} metaOk=${meta.isSuccess} " +
-                            "error=$error elapsedMs=${SystemClock.elapsedRealtime()-began}")
-                        Reply(repo.idPrefix, id, status, total, error, result.getOrNull() != null)
+                        val remote = state.getOrNull()
+                        var total = meta.getOrNull()?.totalEpisodes?.takeIf { it > 0 }
+                            ?: remote?.maxEpisodes?.takeIf { it > 0 }
+                        var origin = if (meta.getOrNull()?.totalEpisodes?.let { it > 0 } == true)
+                            "provider-metadata" else if (total != null) "provider-status" else "unknown"
+                        if (total == null && repo.idPrefix == "mal") {
+                            try {
+                                val token = repo.authToken()?.accessToken
+                                if (token != null) {
+                                    val response = app.get(
+                                        "https://api.myanimelist.net/v2/anime/$id?fields=num_episodes",
+                                        headers = mapOf("Authorization" to "Bearer $token"), cacheTime = 0)
+                                    total = JSONObject(response.text).optInt("num_episodes").takeIf { it > 0 }
+                                    if (total != null) origin = "mal-lightweight"
+                                    Log.i(TAG, "event=MAL_LIGHT session=$session gen=$gen id=$id " +
+                                        "http=${response.code} total=$total")
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG,"event=MAL_LIGHT_FAILED session=$session gen=$gen " +
+                                    "id=$id cause=${e.javaClass.simpleName}")
+                            }
+                        }
+                        val fields = remote?.let { Draft(it.status, it.watchedEpisodes ?: 0, it.score) }
+                        Log.i(TAG, "event=PROVIDER_FETCH session=$session gen=$gen season=$sn " +
+                            "provider=${repo.idPrefix} id=$id stateOk=${state.isSuccess} " +
+                            "metaOk=${meta.isSuccess} status=${fields?.status} " +
+                            "watched=${fields?.watched} total=$total origin=$origin " +
+                            "stateError=${state.exceptionOrNull()?.javaClass?.simpleName} " +
+                            "metaError=${meta.exceptionOrNull()?.javaClass?.simpleName} " +
+                            "elapsedMs=${SystemClock.elapsedRealtime()-started}")
+                        Triple(repo.idPrefix, fields, Pair(total, origin))
                     }
                 }.awaitAll()
-                if (!p1Valid(gen, season)) {
-                    trace("P1_STALE_SKIP", "phase=status targetSeason=$season token=$gen")
-                    return@launch
+                if (!valid(gen, sn)) { log("STALE", "phase=fetch"); return@launch }
+                val commonTotal = if (!multi) replies.mapNotNull { it.third.first }
+                    .filter { it > 0 }.maxOrNull() else null
+                val offeredCount = StremioC.seasonEpisodeCountsByUrl[url]?.get(sn)
+                replies.forEach { (prefix, draft, count) ->
+                    val target = statuses[prefix] ?: return@forEach
+                    target.loading = false
+                    target.baseline = draft?.snapshot()
+                    target.draft = draft?.snapshot()
+                    target.total = count.first ?: commonTotal
+                    target.totalSource = if (count.first != null) count.second
+                        else if (commonTotal != null) "single-season-peer" else "unknown"
+                    target.error = if (draft == null) "status-unavailable" else null
+                    target.writeBlocked = if (multi && offeredCount != null &&
+                        count.first != null && offeredCount > count.first)
+                        "source-more-episodes-than-tracker" else null
+                    log("PROVIDER_READY", "provider=$prefix status=${draft?.status} " +
+                        "watched=${draft?.watched} total=${target.total} source=${target.totalSource} " +
+                        "readOnly=${target.writeBlocked} offered=$offeredCount")
                 }
-                val usable = replies.filter { it.status != null }
-                if (usable.isEmpty()) {
-                    trace("P1_ABORT", "reason=no-tracker-status-or-metadata")
-                    return@launch
-                }
-                val primary = usable.firstOrNull { it.nativeAvailable }
-                if (primary == null) {
-                    trace("P1_ABORT", "reason=no-native-compatible-tracker-status")
-                    return@launch
-                }
-                // Core selects the first successful provider for its single panel.
-                val ordered = listOf(primary) + usable.filter { it.prefix != primary.prefix }
-                p1Target = ordered.associate { it.prefix to it.id }
-                p1Statuses = ordered.associate { it.prefix to it.status!! }
-                p1Totals = ordered.associate { it.prefix to it.total }
-                p1ReadOnly = usable.filter { row ->
-                    val source = p1SourceCount
-                    source == null || source <= 0 || row.total == null ||
-                        row.total <= 0 || row.total != source
-                }.map { it.prefix }.toSet()
-                trace("P1_TOTAL_VALIDATION", "sourceEpisodes=${p1SourceCount ?: "unknown"} " +
-                    "providerTotals=$p1Totals readOnly=$p1ReadOnly " +
-                    "rule=source-and-tracker-totals-must-match-if-known")
-                p1Primary = primary.prefix
-                val snapshot = primary.status!!
-                p1Initial = fields(snapshot)
-                trace("P1_NATIVE_TARGET", "primary=${primary.prefix} id=${primary.id} " +
-                    "all=$p1Target baseline=$p1Initial before=${idSummary(syncModel?.getSyncs().orEmpty())}")
-                syncModel?.clear()
-                syncModel?.addSyncs(p1Target)
-                syncModel?.updateSynced()
-                syncModel?.updateUserData()
-                p1GuardClick()
+                updateOptions()
+                render("fetch-complete")
             }
         }
 
-        private fun p1OnUser(value: Resource<SyncAPI.AbstractSyncStatus>?) {
-            val item = (value as? Resource.Success)?.value ?: return
-            val sync = syncModel ?: return
-            if (p1Single) {
-                if (p1SingleBaseline == null) {
-                    p1SingleBaseline = fields(item)
-                    trace("P1_SINGLE_READY", "baseline=$p1SingleBaseline " +
-                        "target=${idSummary(sync.getSyncs())} total=$p1SourceCount")
+        private fun ensureUi() {
+            if (combo != null) return
+            val names = root.findViewById<TextView>(R.id.result_sync_names) ?: return
+            val parent = names.parent as? android.widget.LinearLayout ?: return
+            val index = parent.indexOfChild(names)
+            oldNames = names
+            val spinner = android.widget.Spinner(root.context)
+            val dp = root.resources.displayMetrics.density
+            spinner.minimumHeight = (40 * dp).toInt()
+            spinner.setPadding((8*dp).toInt(), 0, (6*dp).toInt(), 0)
+            spinner.layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = (10*dp).toInt() }
+            parent.addView(spinner, index)
+            names.visibility = View.GONE
+            combo = spinner
+            spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onNothingSelected(parent: AdapterView<*>?) {}
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    if (applying) return
+                    val key = statuses.keys.toList().getOrNull(position) ?: return
+                    if (key == selected) return
+                    selected = key
+                    preferred = key
+                    log("PROVIDER_SELECT", "provider=$key list=${statuses.keys}")
+                    render("provider-selected")
                 }
-                p1NormalizeAndClamp(item)
+            }
+            plus?.setOnClickListener { adjust(1) }
+            minus?.setOnClickListener { adjust(-1) }
+            saveButton?.setOnClickListener { save() }
+            checks?.setOnItemClickListener { _, _, pos, _ ->
+                val tracker = statuses[selected] ?: return@setOnItemClickListener
+                val edit = tracker.draft ?: return@setOnItemClickListener
+                edit.status = SyncWatchType.fromInternalId(pos - 1)
+                edit.explicitNone = edit.status == SyncWatchType.NONE
+                log("FIELD_EDIT", "provider=${tracker.prefix} field=status value=${edit.status}")
+                render("status-edit")
+            }
+            slider?.clearOnChangeListeners()
+            slider?.addOnChangeListener { _, value, fromUser ->
+                if (!fromUser || applying) return@addOnChangeListener
+                val tracker = statuses[selected] ?: return@addOnChangeListener
+                val draft = tracker.draft ?: return@addOnChangeListener
+                draft.score = Score.from(value, 10)
+                log("FIELD_EDIT", "provider=${tracker.prefix} field=rating value=$value")
+                render("rating-edit")
+            }
+            current?.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    if (applying || current?.hasFocus() != true) return
+                    val tracker = statuses[selected] ?: return
+                    val draft = tracker.draft ?: return
+                    val entered = s?.toString()?.toIntOrNull() ?: return
+                    val clamped = entered.coerceIn(0, tracker.total?.takeIf { it > 0 } ?: Int.MAX_VALUE)
+                    draft.watched = clamped
+                    log("FIELD_EDIT", "provider=${tracker.prefix} field=episodes entered=$entered " +
+                        "applied=$clamped max=${tracker.total} source=${tracker.totalSource}")
+                    root.post { if (active && selected == tracker.prefix) render("text-edit") }
+                }
+                override fun afterTextChanged(s: Editable?) {}
+            })
+            log("UI_ATTACHED", "spinner=true save=${saveButton != null} plus=${plus != null} " +
+                "minus=${minus != null} rating=${slider != null} statusList=${checks != null} " +
+                "episodesInput=${current != null}")
+        }
+
+        private fun updateOptions() {
+            val spinner = combo ?: return
+            applying = true
+            try {
+                val names = statuses.keys.map { titles[it] ?: it }
+                val adapter = ArrayAdapter(root.context, android.R.layout.simple_spinner_item, names)
+                adapter.setDropDownViewResource(R.layout.sort_bottom_single_choice)
+                spinner.adapter = adapter
+                spinner.isEnabled = statuses.size > 1
+                val position = statuses.keys.indexOf(selected).coerceAtLeast(0)
+                if (names.isNotEmpty()) spinner.setSelection(position, false)
+                log("UI_OPTIONS", "items=${statuses.keys} selected=$selected enabled=${spinner.isEnabled}")
+            } finally { applying = false }
+        }
+
+        private fun adjust(delta: Int) {
+            val tracker = statuses[selected] ?: return
+            val draft = tracker.draft ?: return
+            val upper = tracker.total?.takeIf { it > 0 } ?: Int.MAX_VALUE
+            val before = draft.watched
+            draft.watched = (draft.watched.toLong() + delta).coerceIn(0L, upper.toLong()).toInt()
+            log("FIELD_EDIT", "provider=${tracker.prefix} field=episodes-delta " +
+                "before=$before delta=$delta after=${draft.watched} total=${tracker.total}")
+            render("episode-button")
+        }
+
+        private fun render(reason: String) {
+            if (!active || combo == null) return
+            val target = statuses[selected]
+            if (target == null || target.loading || target.draft == null) {
+                saveButton?.isEnabled = false
+                if (target == null) {
+                    log("UI_UNAVAILABLE", "reason=$reason count=${statuses.size}")
+                } else if (!target.loading) {
+                    log("UI_UNAVAILABLE", "reason=$reason provider=${target.prefix} error=${target.error}")
+                }
                 return
             }
-            if (!p1Enabled) return
-            val expected = p1Initial
-            if (p1Primary == null || expected == null) {
-                trace("P1_STALE_UI", "phase=unresolved type=${item.javaClass.simpleName} " +
-                    "actual=${fields(item)}")
-                sync.clear()
+            val data = target.draft!!
+            applying = true
+            try {
+                holder?.visibility = View.VISIBLE
+                shimmer?.visibility = View.GONE
+                val max = target.total?.takeIf { it > 0 }
+                maximum?.text = if (max == null) "/ ?" else "/ $max"
+                bar?.max = (max ?: maxOf(1, data.watched)).coerceAtMost(1000000) * 1000
+                bar?.progress = data.watched.coerceAtMost(1000000) * 1000
+                val newText = data.watched.toString()
+                if (current?.text?.toString() != newText) {
+                    current?.setText(newText)
+                    current?.setSelection(newText.length)
+                }
+                checks?.setItemChecked(data.status.internalId + 1, true)
+                val valScore = data.score?.toFloat(10) ?: 0f
+                slider?.value = valScore.coerceIn(0f,10f).toInt().toFloat()
+                scoreLabel?.text = data.score?.toInt(10)?.toString()?.plus("/10") ?: "?"
+                saveButton?.isEnabled = !target.saving && target.writeBlocked == null
+                plus?.isEnabled = target.writeBlocked == null
+                minus?.isEnabled = target.writeBlocked == null
+            } catch (e: Exception) {
+                log("UI_ERROR", "phase=$reason cause=${e.javaClass.simpleName}")
+            } finally { applying = false }
+            log("UI_RENDER", "reason=$reason provider=${target.prefix} status=${data.status} " +
+                "watched=${data.watched} total=${target.total} totalSource=${target.totalSource} " +
+                "readOnly=${target.writeBlocked} dirty=${data != target.baseline}")
+        }
+
+        private fun save() {
+            val tracker = statuses[selected] ?: return
+            val draft = tracker.draft?.snapshot() ?: return
+            val initial = tracker.baseline ?: return
+            val gen = generation
+            val sn = season ?: return
+            val prefix = tracker.prefix
+            val id = tracker.id
+            val before = initial.snapshot()
+            if (tracker.writeBlocked != null || tracker.saving) {
+                log("SAVE_BLOCK", "provider=$prefix cause=${tracker.writeBlocked ?: "already-saving"}")
                 return
             }
-            if (p1TrustedUser == null) {
-                if (fields(item) != expected ||
-                    item is com.lagradost.cloudstream3.syncproviders.providers.SimklApi.SimklSyncStatus) {
-                    trace("P1_STALE_UI", "phase=wrong-status actual=${fields(item)} " +
-                        "expected=$expected type=${item.javaClass.simpleName}")
-                    if (p1RecoveryCount < 2 && sync.getSyncs() == p1Target) {
-                        p1RecoveryCount++
-                        trace("P1_STALE_RECOVER", "attempt=$p1RecoveryCount target=$p1Target")
-                        sync.clear()
-                        sync.addSyncs(p1Target)
-                        sync.updateSynced()
-                        sync.updateUserData()
+            if (draft.status == SyncWatchType.NONE && draft.watched > 0 && !draft.explicitNone) {
+                draft.status = SyncWatchType.WATCHING
+                tracker.draft?.status = SyncWatchType.WATCHING
+                log("AUTO_WATCHING", "provider=$prefix reason=progress-positive")
+            }
+            val updated = draft != before
+            if (!updated) { log("SAVE_NOOP", "provider=$prefix"); return }
+            if (draft.status == SyncWatchType.NONE && !draft.explicitNone &&
+                (draft.score != before.score || draft.watched != before.watched)) {
+                log("SAVE_BLOCK", "provider=$prefix cause=none-would-delete")
+                return
+            }
+            if (draft.watched < 0 || tracker.total?.let { it > 0 && draft.watched > it } == true) {
+                log("SAVE_BLOCK", "provider=$prefix cause=progress-limit total=${tracker.total}")
+                return
+            }
+            tracker.saving = true
+            render("save-start")
+            log("SAVE_REQUEST", "provider=$prefix id=$id season=$sn gen=$gen " +
+                "before=$before after=$draft total=${tracker.total} origin=${tracker.totalSource}")
+            // Detached/changed screens do not receive this result, but the snapshot
+            // keeps writes directed to the user's original chosen service/season.
+            scope.launch {
+                val started = SystemClock.elapsedRealtime()
+                val result = withContext(Dispatchers.IO) {
+                    val fresh = tracker.repo.status(id)
+                    val remote = fresh.getOrNull()
+                    if (remote == null) {
+                        Log.w(TAG, "event=SAVE_REMOTE_MISSING session=$session gen=$gen season=$sn " +
+                            "provider=$prefix id=$id error=${fresh.exceptionOrNull()?.javaClass?.simpleName}")
+                        false
+                    } else {
+                        if (draft.status != before.status) remote.status = draft.status
+                        if (draft.watched != before.watched) remote.watchedEpisodes = draft.watched
+                        if (draft.score != before.score) remote.score = draft.score
+                        if (remote.status == SyncWatchType.NONE && (remote.watchedEpisodes ?: 0) > 0
+                            && !draft.explicitNone) remote.status = SyncWatchType.WATCHING
+                        if (remote.status != SyncWatchType.NONE && remote.watchedEpisodes == null)
+                            remote.watchedEpisodes = 0
+                        val issued = tracker.repo.updateStatus(id, remote)
+                        Log.i(TAG, "event=SAVE_HTTP session=$session gen=$gen season=$sn provider=$prefix " +
+                            "id=$id ok=${issued.getOrNull()} error=${issued.exceptionOrNull()?.javaClass?.simpleName}")
+                        var verified = false
+                        for (attempt in 1..3) {
+                            if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
+                            val read = tracker.repo.status(id)
+                            val got = read.getOrNull()
+                            verified = got != null &&
+                                (draft.status == before.status || got.status == remote.status) &&
+                                (draft.watched == before.watched || (got.watchedEpisodes ?: 0) == (remote.watchedEpisodes ?: 0)) &&
+                                (draft.score == before.score || got.score == remote.score)
+                            Log.i(TAG,"event=SAVE_READBACK session=$session gen=$gen season=$sn " +
+                                "provider=$prefix attempt=$attempt request=${issued.getOrNull()} " +
+                                "verified=$verified gotStatus=${got?.status} gotEpisodes=${got?.watchedEpisodes} " +
+                                "expectedStatus=${remote.status} expectedEpisodes=${remote.watchedEpisodes} " +
+                                "exception=${read.exceptionOrNull()?.javaClass?.simpleName}")
+                            if (verified) break
+                        }
+                        if (!verified && prefix == "kitsu" && remote.status != SyncWatchType.NONE) {
+                            val fallback = kitsuFallback(id, remote, gen, sn, tracker.repo)
+                            if (fallback) {
+                                val after = tracker.repo.status(id).getOrNull()
+                                verified = after != null &&
+                                    (draft.status == before.status || after.status == remote.status) &&
+                                    (draft.watched == before.watched ||
+                                        (after.watchedEpisodes ?: 0) == (remote.watchedEpisodes ?: 0)) &&
+                                    (draft.score == before.score || after.score == remote.score)
+                                Log.i(TAG, "event=KITSU_RECHECK session=$session gen=$gen season=$sn " +
+                                    "verified=$verified status=${after?.status} progress=${after?.watchedEpisodes}")
+                            }
+                        }
+                        verified
                     }
-                    return
                 }
-                p1TrustedUser = item
-                trace("P1_NATIVE_READY", "primary=$p1Primary initial=$expected")
-            } else if (p1TrustedUser !== item) {
-                trace("P1_STALE_UI", "phase=replaced-object old=${System.identityHashCode(p1TrustedUser)} " +
-                    "new=${System.identityHashCode(item)}")
-                return
-            }
-            p1NormalizeAndClamp(item)
-        }
-
-        private fun p1NormalizeAndClamp(item: SyncAPI.AbstractSyncStatus) {
-            val sync = syncModel ?: return
-            val before = item.watchedEpisodes
-            val limit = p1Limit(item)
-            val safe = (before ?: 0).coerceAtLeast(0).let { value ->
-                if (limit != null) value.coerceAtMost(limit) else value
-            }
-            if (before != safe) {
-                trace("P1_PROGRESS_NORMALIZE", "from=$before to=$safe total=$limit " +
-                    "status=${item.status} single=$p1Single")
-                sync.setEpisodes(safe)
-            }
-            if (limit != null && item.maxEpisodes != limit) {
-                item.maxEpisodes = limit
-                trace("P1_TOTAL_APPLY", "total=$limit watched=${item.watchedEpisodes} " +
-                    "metadataTotal=${(sync.metadata.value as? Resource.Success)?.value?.totalEpisodes}")
-                sync.setStatus(item.status.internalId)
+                if (valid(gen, sn) && statuses[prefix] === tracker) {
+                    tracker.saving = false
+                    if (result) {
+                        tracker.baseline = draft.snapshot()
+                        tracker.draft?.let { if (it == draft) it.explicitNone = false }
+                    } else tracker.error = "save-or-readback-failed"
+                    log("SAVE_COMPLETE", "provider=$prefix id=$id verified=$result " +
+                        "elapsedMs=${SystemClock.elapsedRealtime()-started}")
+                    render("save-done")
+                } else {
+                    log("STALE", "phase=save-complete provider=$prefix origSeason=$sn verified=$result")
+                }
             }
         }
 
-        /** Fallback only after Kitsu's core adapter returned false and readback disagreed.
-         * No access tokens or raw server bodies are ever included in logcat.
-         */
-        private suspend fun p1KitsuFallback(
-            id: String, desired: SyncAPI.AbstractSyncStatus, season: Int, gen: Long
+        private suspend fun kitsuFallback(
+            id: String, expected: SyncAPI.AbstractSyncStatus, gen: Long, sn: Int,
+            repo: com.lagradost.cloudstream3.syncproviders.SyncRepo
         ): Boolean {
-            val status = when (desired.status) {
+            val status = when (expected.status) {
                 SyncWatchType.WATCHING, SyncWatchType.REWATCHING -> "current"
                 SyncWatchType.COMPLETED -> "completed"
+                SyncWatchType.PLANTOWATCH -> "planned"
                 SyncWatchType.ONHOLD -> "on_hold"
                 SyncWatchType.DROPPED -> "dropped"
-                SyncWatchType.PLANTOWATCH -> "planned"
-                else -> null
-            } ?: return false
-            val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == AccountManager.kitsuApi.idPrefix }?.authData() ?: return false
-            val headers = mapOf(
-                "Authorization" to "Bearer ${auth.token.accessToken}",
-                "content-type" to "application/vnd.api+json"
-            )
-            val attrs = JSONObject().put("status", status)
-                .put("progress", desired.watchedEpisodes ?: 0)
-            desired.score?.let { attrs.put("ratingTwenty", it.toInt(20)) }
+                else -> return false
+            }
+            val user = repo.authData() ?: return false
+            val headers = mapOf("Authorization" to "Bearer ${user.token.accessToken}",
+                "content-type" to "application/vnd.api+json")
+            val payload = JSONObject().put("status", status)
+                .put("progress", expected.watchedEpisodes ?: 0)
+            expected.score?.let { payload.put("ratingTwenty", it.toInt(20)) }
             for (host in listOf("https://kitsu.io/api/edge", "https://kitsu.app/api/edge")) {
                 try {
-                    val url = "$host/library-entries?filter[userId]=${auth.user.id}&filter[animeId]=$id"
-                    val found = app.get(url, headers = headers, cacheTime = 0)
-                    val entryId = if (found.code in 200..299)
-                        JSONObject(found.text).optJSONArray("data")?.optJSONObject(0)
-                            ?.optString("id")?.takeIf { it.isNotBlank() }
+                    val find = app.get(
+                        "$host/library-entries?filter[userId]=${user.user.id}&filter[animeId]=$id",
+                        headers = headers, cacheTime = 0)
+                    val entry = if (find.code in 200..299)
+                        JSONObject(find.text).optJSONArray("data")?.optJSONObject(0)
+                            ?.optString("id")?.takeIf { it.isNotBlank() } else null
+                    Log.i(TAG, "event=KITSU_HTTP session=$session gen=$gen season=$sn " +
+                        "host=${host.substringAfter("https://")} step=find code=${find.code} " +
+                        "existing=${entry != null}")
+                    if (find.code !in 200..299) continue
+                    val data = JSONObject().put("type","libraryEntries").put("attributes",payload)
+                    if (entry != null) data.put("id",entry)
+                    else data.put("relationships", JSONObject()
+                        .put("anime", JSONObject().put("data",
+                            JSONObject().put("type","anime").put("id",id)))
+                        .put("user", JSONObject().put("data",
+                            JSONObject().put("type","users").put("id",user.user.id.toString()))))
+                    val body = JSONObject().put("data",data).toString().toRequestBody()
+                    val response = if (entry == null)
+                        app.post("$host/library-entries", headers=headers, requestBody=body)
+                    else app.patch("$host/library-entries/$entry", headers=headers, requestBody=body)
+                    val errors = if (response.code !in 200..299)
+                        runCatching { JSONObject(response.text).optJSONArray("errors")?.length() }.getOrNull()
                     else null
-                    trace("P1_KITSU_DIAG", "stage=lookup host=${host.substringAfter("https://")} " +
-                        "season=$season gen=$gen id=$id http=${found.code} entry=${entryId != null}")
-                    if (found.code !in 200..299) continue
-                    val data = JSONObject().put("type", "libraryEntries")
-                        .put("attributes", attrs)
-                    if (entryId != null) {
-                        data.put("id", entryId)
-                    } else {
-                        data.put("relationships", JSONObject()
-                            .put("anime", JSONObject().put("data",
-                                JSONObject().put("type", "anime").put("id", id)))
-                            .put("user", JSONObject().put("data",
-                                JSONObject().put("type", "users").put("id", auth.user.id.toString()))))
-                    }
-                    val payload = JSONObject().put("data", data)
-                    val writeUrl = if (entryId == null) "$host/library-entries"
-                        else "$host/library-entries/$entryId"
-                    val sent = if (entryId == null) app.post(writeUrl,
-                        headers = headers, requestBody = payload.toString().toRequestBody())
-                    else app.patch(writeUrl,
-                        headers = headers, requestBody = payload.toString().toRequestBody())
-                    val errors = if (sent.code !in 200..299)
-                        runCatching { JSONObject(sent.text).optJSONArray("errors")?.length() }.getOrNull()
-                    else null
-                    trace("P1_KITSU_DIAG", "stage=${if (entryId == null) "create" else "update"} " +
-                        "host=${host.substringAfter("https://")} season=$season id=$id " +
-                        "http=${sent.code} errors=$errors success=${sent.code in 200..299}")
-                    if (sent.code in 200..299) return true
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    trace("P1_KITSU_DIAG", "stage=exception host=${host.substringAfter("https://")} " +
-                        "id=$id cause=${e.javaClass.simpleName}")
+                    Log.i(TAG, "event=KITSU_HTTP session=$session gen=$gen season=$sn " +
+                        "host=${host.substringAfter("https://")} step=${if(entry == null) "create" else "update"} " +
+                        "code=${response.code} errors=$errors")
+                    if (response.code in 200..299) return true
+                } catch(e: CancellationException) { throw e }
+                catch(e: Exception) {
+                    Log.e(TAG, "event=KITSU_HTTP session=$session gen=$gen season=$sn " +
+                        "failure=${e.javaClass.simpleName}")
                 }
             }
             return false
         }
 
-        private fun p1Save() {
-            val sync = syncModel ?: return
-            val gen = generation
-            val season = selectedSeason ?: return
-            val single = p1Single
-            val user = (sync.userData.value as? Resource.Success)?.value
-            val baseline = if (single) p1SingleBaseline else p1Initial
-            val allowed = setOf(AccountManager.malApi.idPrefix,
-                AccountManager.aniListApi.idPrefix, AccountManager.kitsuApi.idPrefix,
-                AccountManager.simklApi.idPrefix)
-            val targets = if (single) sync.getSyncs().filterKeys { it in allowed }.toMap()
-                else p1Target.toMap()
-            val ready = active && (if (single) p1SingleBaseline != null else
-                p1Valid(gen, season) && p1TrustedUser === user &&
-                    sync.getSyncs() == p1Target && p1Statuses.isNotEmpty())
-            trace("P1_SAVE_ATTEMPT", "single=$single ready=$ready season=$season " +
-                "targets=${idSummary(targets)} saving=$p1Saving baseline=$baseline")
-            if (!ready || user == null || baseline == null || targets.isEmpty() || p1Saving) {
-                trace("P1_SAVE_BLOCK", "reason=unresolved-stale-busy-or-no-target")
-                return
+        private fun teardownUi() {
+            val spinner = combo ?: return
+            (spinner.parent as? android.view.ViewGroup)?.removeView(spinner)
+            combo = null
+            oldNames?.visibility = View.VISIBLE
+            oldNames = null
+            syncModel?.let { model ->
+                saveButton?.setOnClickListener { model.publishUserData() }
+                plus?.setOnClickListener { model.setEpisodesDelta(1) }
+                minus?.setOnClickListener { model.setEpisodesDelta(-1) }
             }
-            val initialEdit = fields(user)
-            if (initialEdit.status == SyncWatchType.NONE && (initialEdit.watched ?: 0) > 0) {
-                trace("P1_AUTO_WATCHING", "reason=NONE-with-progress " +
-                    "originalStatus=${initialEdit.status} progress=${initialEdit.watched}")
-                sync.setStatus(SyncWatchType.WATCHING.internalId)
-            }
-            val edited = fields(user)
-            val changeStatus = edited.status != baseline.status
-            val changeProgress = edited.watched != baseline.watched
-            val changeRating = edited.rating != baseline.rating
-            trace("P1_SAVE_DIFF", "single=$single previous=$baseline requested=$edited " +
-                "status=$changeStatus progress=$changeProgress rating=$changeRating")
-            if (!changeStatus && !changeProgress && !changeRating) {
-                trace("P1_SAVE_NOOP", "reason=no-changed-fields")
-                return
-            }
-            val sourceCount = p1SourceCount
-            val totals = p1Totals.toMap()
-            val blocked = p1ReadOnly.toSet()
-            val desiredScore = user.score
-            p1Saving = true
-            saveButton?.isEnabled = false
-            saveJob = scope.launch {
-                try {
-                    val results = targets.map { (name, id) ->
-                        async(Dispatchers.IO) {
-                            val started = SystemClock.elapsedRealtime()
-                            val repo = AccountManager.syncApis.firstOrNull { it.idPrefix == name }
-                            if (repo == null || repo.authUser() == null) {
-                                Log.i(TAG, "event=P1_SAVE_SKIP session=$instance gen=$gen " +
-                                    "season=$season provider=$name id=$id reason=not-connected")
-                                return@async name to false
-                            }
-                            val remoteResult = repo.status(id)
-                            val remote = remoteResult.getOrNull()
-                            if (remote == null) {
-                                Log.w(TAG, "event=P1_SAVE_SKIP session=$instance gen=$gen " +
-                                    "season=$season provider=$name id=$id reason=no-remote-status " +
-                                    "exception=${remoteResult.exceptionOrNull()?.javaClass?.simpleName}")
-                                return@async name to false
-                            }
-                            val beforeStatus = remote.status
-                            val beforeProgress = remote.watchedEpisodes
-                            val total = if (single) {
-                                val metadata = repo.load(id)
-                                val known = metadata.getOrNull()?.totalEpisodes ?: remote.maxEpisodes
-                                Log.i(TAG, "event=P1_SERVICE_TOTAL session=$instance gen=$gen " +
-                                    "season=$season provider=$name id=$id source=$sourceCount " +
-                                    "provider=$known metaOk=${metadata.isSuccess}")
-                                known
-                            } else totals[name] ?: remote.maxEpisodes
-                            val desiredProgress = edited.watched ?: 0
-                            val progressValid = desiredProgress >= 0 &&
-                                (total == null || total <= 0 || desiredProgress <= total) &&
-                                (single && (!changeProgress || total != null && total > 0) ||
-                                    !single && sourceCount != null && sourceCount > 0 &&
-                                        total != null && total == sourceCount)
-                            if (name in blocked || !progressValid ||
-                                single && sourceCount != null && sourceCount > 0 &&
-                                    total != null && total > 0 && sourceCount != total) {
-                                Log.w(TAG, "event=P1_SAVE_SKIP session=$instance gen=$gen " +
-                                    "season=$season provider=$name id=$id reason=total-unverified " +
-                                    "source=$sourceCount service=$total progress=$desiredProgress " +
-                                    "readOnly=${name in blocked}")
-                                return@async name to false
-                            }
-                            if (changeStatus) remote.status = edited.status
-                            if (changeProgress) remote.watchedEpisodes = desiredProgress
-                            if (changeRating) remote.score = desiredScore
-                            // None with progress means a user intends to watch, not
-                            // delete an AniList/Kitsu/MAL library entry.
-                            if (remote.status == SyncWatchType.NONE &&
-                                (remote.watchedEpisodes ?: 0) > 0) {
-                                remote.status = SyncWatchType.WATCHING
-                            }
-                            if (remote.status != SyncWatchType.NONE &&
-                                remote.watchedEpisodes == null) {
-                                remote.watchedEpisodes = 0
-                            }
-                            Log.i(TAG, "event=P1_SAVE_REQUEST session=$instance gen=$gen " +
-                                "season=$season provider=$name id=$id single=$single " +
-                                "beforeStatus=$beforeStatus beforeProgress=$beforeProgress " +
-                                "afterStatus=${remote.status} afterProgress=${remote.watchedEpisodes} " +
-                                "total=$total")
-                            val wrote = repo.updateStatus(id, remote)
-                            var accepted = wrote.getOrNull() == true
-                            var checked = repo.status(id)
-                            var got = checked.getOrNull()
-                            fun matches(): Boolean {
-                                val value = got ?: return false
-                                return (!changeStatus || value.status == remote.status) &&
-                                    (!changeProgress ||
-                                        (value.watchedEpisodes ?: 0) == (remote.watchedEpisodes ?: 0)) &&
-                                    (!changeRating || value.score?.toInt(100) == edited.rating)
-                            }
-                            var verified = matches()
-                            if (!verified && name == AccountManager.kitsuApi.idPrefix &&
-                                remote.status != SyncWatchType.NONE) {
-                                Log.w(TAG, "event=P1_KITSU_RETRY session=$instance gen=$gen " +
-                                    "season=$season id=$id accepted=$accepted " +
-                                    "readStatus=${got?.status} readProgress=${got?.watchedEpisodes}")
-                                if (p1KitsuFallback(id, remote, season, gen)) {
-                                    accepted = true
-                                    checked = repo.status(id)
-                                    got = checked.getOrNull()
-                                    verified = matches()
-                                }
-                            }
-                            Log.i(TAG, "event=P1_SAVE_VERIFY session=$instance gen=$gen " +
-                                "season=$season provider=$name id=$id nativeAccepted=$accepted " +
-                                "verified=$verified gotStatus=${got?.status} " +
-                                "gotProgress=${got?.watchedEpisodes} expectedStatus=${remote.status} " +
-                                "expectedProgress=${remote.watchedEpisodes} " +
-                                "exception=${checked.exceptionOrNull()?.javaClass?.simpleName} " +
-                                "elapsedMs=${SystemClock.elapsedRealtime() - started}")
-                            name to verified
-                        }
-                    }.awaitAll().toMap()
-                    val allVerified = results.isNotEmpty() && results.values.all { it }
-                    trace("P1_SAVE_COMPLETE", "single=$single verified=$allVerified results=$results " +
-                        "samePage=${active && generation == gen && selectedSeason == season}")
-                    if (active && generation == gen && selectedSeason == season && allVerified) {
-                        if (single) p1SingleBaseline = fields(user)
-                        else p1Initial = fields(user)
-                    } else {
-                        trace("P1_SAVE_RETRYABLE", "reason=partial-failure-or-season-switch " +
-                            "results=$results")
-                    }
-                } catch (e: CancellationException) {
-                    trace("P1_SAVE_CANCEL", "season=$season gen=$gen")
-                    throw e
-                } catch (e: Exception) {
-                    trace("P1_SAVE_FAILURE", "season=$season exception=${e.javaClass.simpleName}")
-                } finally {
-                    p1Saving = false
-                    if (active) saveButton?.isEnabled = true
-                }
-            }
-        }
-
-        private fun key(url: String?): String =
-            url?.let { Integer.toHexString(it.hashCode()) } ?: "null"
-
-        private fun idSummary(ids: Map<String, String>): String =
-            ids.toSortedMap().entries.joinToString(",", "[", "]") { (name, id) ->
-                // Sync identifiers are media IDs, not addon URLs or authorization credentials.
-                "$name=${id.take(110)}"
-            }
-
-        private fun trace(event: String, info: String = "") {
-            Log.i(TAG, "event=$event session=$instance gen=$generation page=${key(pageUrl)} " +
-                "season=${selectedSeason ?: "none"} $info")
-        }
-
-        private fun <T> listen(
-            data: androidx.lifecycle.LiveData<T>,
-            owner: androidx.lifecycle.LifecycleOwner,
-            callback: (T) -> Unit
-        ) {
-            val observer = Observer<T> { if (active) callback(it) }
-            data.observe(owner, observer)
-            cleanup += { data.removeObserver(observer) }
-        }
-
-        private fun resolveSelection(origin: String) {
-            val selected = index?.let { seasons.getOrNull(it) }
-            if (pageUrl == null || selected == null || selected <= 0) {
-                val reason = "origin=$origin index=${index ?: "null"} size=${seasons.size} " +
-                    "pageReady=${pageUrl != null}"
-                if (reason != lastPending) {
-                    lastPending = reason
-                    trace("SELECTION_PENDING", reason)
-                }
-                return
-            }
-            lastPending = null
-            if (selected == selectedSeason) return
-            val previous = selectedSeason
-            generation++ // Future P1 requests must match this token before applying results.
-            selectedSeason = selected
-            val imdb = IMDB.find(pageUrl.orEmpty())?.value ?: IMDB.find(detailUrl.orEmpty())?.value
-            trace(if (previous == null) "SEASON_INITIAL" else "SEASON_CHANGED",
-                "origin=$origin previous=${previous ?: "none"} index=$index " +
-                "seasonList=$seasons imdb=${imdb ?: "unknown"} sourceHash=${key(detailUrl)}")
-            trace("P1_SEASON_TARGET", "imdb=${imdb ?: "unknown"} selected=$selected " +
-                "ids=${syncModel?.getSyncs()?.let(::idSummary) ?: "tv-or-unavailable"}")
-            p1SelectionChanged()
-        }
-
-        fun start() {
-            if (active) return
-            val model = ViewModelProvider(fragment)[ResultViewModel2::class.java]
-            // The TV result fragment does not own the phone's sync panel/model.
-            val sync = if (fragment is com.lagradost.cloudstream3.ui.result.ResultFragmentPhone)
-                ViewModelProvider(fragment)[SyncViewModel::class.java] else null
-            syncModel = sync
-            val owner = fragment.viewLifecycleOwner
-            active = true
-            trace("ATTACH", "screen=${fragment.javaClass.simpleName} " +
-                "sourceHash=${key(detailUrl)} sourceImdb=${IMDB.find(detailUrl.orEmpty())?.value} " +
-                "syncModel=${sync != null} viewLifecycle=${owner.lifecycle.currentState}")
-            listen(model.page, owner) { value ->
-                when (value) {
-                    is Resource.Success -> {
-                        val data = value.value
-                        if (data.url != pageUrl) {
-                            if (p1Enabled || p1Single) {
-                                p1Reset("page-changed")
-                                if (p1Enabled) syncModel?.clear()
-                                p1Enabled = false
-                                p1Single = false
-                                p1SingleBaseline = null
-                                p1RestoreNative()
-                            }
-                            val previous = pageUrl
-                            generation++
-                            pageUrl = data.url
-                            seasons = emptyList()
-                            index = null
-                            selectedSeason = null
-                            lastPending = null
-                            trace("PAGE_CHANGED", "previousHash=${key(previous)} " +
-                                "title=${data.title.take(75)} ids=${idSummary(data.syncData)} " +
-                                "imdb=${IMDB.find(data.url)?.value ?: "unknown"}")
-                        } else {
-                            trace("PAGE_REEMITTED", "ids=${idSummary(data.syncData)}")
-                        }
-                        resolveSelection("page")
-                    }
-                    is Resource.Loading -> trace("PAGE_LOADING")
-                    is Resource.Failure -> trace("PAGE_FAILURE")
-                    else -> trace("PAGE_EMPTY")
-                }
-            }
-            listen(model.seasonSelections, owner) { list ->
-                seasons = list.map { it.second }
-                trace("SEASON_LIST", "numbers=$seasons labels=${list.size} " +
-                    "duplicates=${seasons.size != seasons.distinct().size}")
-                resolveSelection("list")
-            }
-            listen(model.selectedSeasonIndex, owner) { selected ->
-                index = selected
-                trace("SEASON_INDEX", "index=$selected count=${seasons.size} " +
-                    "resolved=${seasons.getOrNull(selected)}")
-                resolveSelection("index")
-            }
-            listen(model.watchStatus, owner) {
-                trace("LOCAL_WATCH", "state=$it (CloudStream bookmark, not external sync)")
-            }
-            if (sync != null) {
-                trace("SYNC_MODEL_INITIAL", "ids=${idSummary(sync.getSyncs())}")
-                listen(sync.synced, owner) { providers ->
-                    trace("SYNC_PROVIDERS", "ids=${idSummary(sync.getSyncs())} " +
-                        "providers=${providers.joinToString(",") { "${it.idPrefix}:${it.isSynced}:${it.hasAccount}" }}")
-                }
-                listen(sync.userData, owner) { value ->
-                    val detail = when (value) {
-                        is Resource.Success -> "status=${value.value.status} " +
-                            "watched=${value.value.watchedEpisodes} max=${value.value.maxEpisodes}"
-                        is Resource.Loading -> "loading"
-                        is Resource.Failure -> "failure"
-                        else -> "empty"
-                    }
-                    trace("SYNC_USER", "result=$detail ids=${idSummary(sync.getSyncs())}")
-                    p1OnUser(value)
-                }
-                listen(sync.metadata, owner) { value ->
-                    val detail = when (value) {
-                        is Resource.Success -> "total=${value.value.totalEpisodes}"
-                        is Resource.Loading -> "loading"
-                        is Resource.Failure -> "failure"
-                        else -> "empty"
-                    }
-                    trace("SYNC_METADATA", "result=$detail")
-                }
-            }
+            log("UI_DETACH")
         }
 
         fun resume() {
-            if (active) trace("RESUME", "index=${index ?: "null"} numbers=$seasons " +
-                "ids=${syncModel?.getSyncs()?.let(::idSummary) ?: "unavailable"}")
+            if (active) log("RESUME", "page=${pageUrl?.hashCode()} season=$season")
         }
 
         fun stop() {
             if (!active) return
+            log("DETACH", "observers=${observers.size} statuses=${statuses.keys} " +
+                "running=${fetchJob?.isActive}")
             active = false
-            generation++ // Invalidate any in-flight future season-mapping work.
-            trace("P1_DETACH", "managed=$p1Enabled single=$p1Single targets=$p1Target " +
-                "mappingActive=${lookupJob?.isActive} savingActive=${saveJob?.isActive}")
-            lookupJob?.cancel()
-            saveJob?.cancel()
+            generation++
+            fetchJob?.cancel()
             scope.cancel()
-            if (p1Enabled) syncModel?.clear()
-            p1RestoreNative()
-            trace("DETACH", "observers=${cleanup.size} index=${index ?: "null"} numbers=$seasons")
-            cleanup.forEach { it() }
-            cleanup.clear()
+            observers.forEach { it() }
+            observers.clear()
+            teardownUi()
             syncModel = null
         }
     }
