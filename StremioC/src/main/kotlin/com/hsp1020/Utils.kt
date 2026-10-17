@@ -1438,11 +1438,14 @@ internal class RatingPlotImageHook(
                         val id = ids.getValue(repo.idPrefix)
                         val started = SystemClock.elapsedRealtime()
                         val state = repo.status(id)
-                        val meta = repo.load(id)
+                        // MAL's general load() parses unrelated statistics fields with
+                        // unstable string/number types. Use the minimal num_episodes API
+                        // below instead, avoiding a second failing full-document parse.
+                        val meta = if (repo.idPrefix == "mal") null else repo.load(id)
                         val remote = state.getOrNull()
-                        var total = meta.getOrNull()?.totalEpisodes?.takeIf { it > 0 }
+                        var total = meta?.getOrNull()?.totalEpisodes?.takeIf { it > 0 }
                             ?: remote?.maxEpisodes?.takeIf { it > 0 }
-                        var origin = if (meta.getOrNull()?.totalEpisodes?.let { it > 0 } == true)
+                        var origin = if (meta?.getOrNull()?.totalEpisodes?.let { it > 0 } == true)
                             "provider-metadata" else if (total != null) "provider-status" else "unknown"
                         if (total == null && repo.idPrefix == "mal") {
                             try {
@@ -1464,10 +1467,10 @@ internal class RatingPlotImageHook(
                         val fields = remote?.let { Draft(it.status, it.watchedEpisodes ?: 0, it.score) }
                         Log.i(TAG, "event=PROVIDER_FETCH session=$session gen=$gen season=$sn " +
                             "provider=${repo.idPrefix} id=$id stateOk=${state.isSuccess} " +
-                            "metaOk=${meta.isSuccess} status=${fields?.status} " +
+                            "metaOk=${meta?.isSuccess ?: "skipped"} status=${fields?.status} " +
                             "watched=${fields?.watched} total=$total origin=$origin " +
                             "stateError=${state.exceptionOrNull()?.javaClass?.simpleName} " +
-                            "metaError=${meta.exceptionOrNull()?.javaClass?.simpleName} " +
+                            "metaError=${meta?.exceptionOrNull()?.javaClass?.simpleName} " +
                             "elapsedMs=${SystemClock.elapsedRealtime()-started}")
                         Triple(repo.idPrefix, fields, Pair(total, origin))
                     }
