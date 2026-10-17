@@ -1024,15 +1024,15 @@ class SettingsBottomFragment(
                 x = 0; y = 0
                 if (!nativeIme) windowAnimations = 0
             }
-        }
-        // Like CineStream, input dialogs use the system's IME resize and a
-        // scrollable view; do not also animate their window coordinates.
-        if (root != null && !nativeIme) fitDialog(dialog, root, body, capDp)
-        dialog.setOnShowListener {
-            if (nativeIme) dialog.window?.setLayout(
+            // Override the theme's initial window width before show()/first draw.
+            if (nativeIme) setLayout(
                 minOf(dp(capDp), (hostContext.resources.displayMetrics.widthPixels * 0.9f).toInt()),
                 WindowManager.LayoutParams.WRAP_CONTENT
             )
+        }
+        // Input dialogs rely on Android's native IME resize, not fitDialog().
+        if (root != null && !nativeIme) fitDialog(dialog, root, body, capDp)
+        dialog.setOnShowListener {
             if (isLayout(TV) || initialFocus != null) {
                 val focus = initialFocus?.invoke() ?: body?.getFocusables(View.FOCUS_FORWARD)?.firstOrNull { usable(it) }
                     ?: contentView.getFocusables(View.FOCUS_FORWARD).firstOrNull { usable(it) }
