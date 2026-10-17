@@ -967,72 +967,6 @@ class SettingsBottomFragment(
         }
     }
 
-    /**
-     * Phone floating windows do not reliably shrink their WRAP_CONTENT bounds
-     * with ADJUST_RESIZE (especially when another settings dialog owns focus).
-     * Use one IME-driven bounds owner; keep the existing footer outside the scroll body.
-     */
-    private fun fitNativeImeDialog(dialog: AlertDialog, contentView: View, capDp: Int) {
-        val scrolling = contentView.parent as? NestedScrollView ?: return
-        val wrapper = scrolling.parent as? LinearLayout ?: return
-        val window = dialog.window ?: return
-        val decor = window.decorView
-        val activityDecor = (hostContext as? Activity)?.window?.decorView
-        val normalHeight = wrapper.height.takeIf { it > 0 } ?: dp(500)
-        val width = minOf(dp(capDp),
-            (hostContext.resources.displayMetrics.widthPixels * 0.9f).toInt())
-        var previousHeight = Int.MIN_VALUE
-        var previousTop = Int.MIN_VALUE
-        var wasIme = false
-        fun adjust() {
-            if (!dialog.isShowing || closing || topDialog() !== dialog) return
-            val metrics = hostContext.resources.displayMetrics
-            val windowInsets = ViewCompat.getRootWindowInsets(decor)
-            val activityInsets = activityDecor?.let { ViewCompat.getRootWindowInsets(it) }
-            fun imeSize(i: WindowInsetsCompat?): Int =
-                if (i?.isVisible(WindowInsetsCompat.Type.ime()) == true)
-                    i.getInsets(WindowInsetsCompat.Type.ime()).bottom else 0
-            val imeBottom = maxOf(imeSize(windowInsets), imeSize(activityInsets))
-            val frame = Rect().also { decor.getWindowVisibleDisplayFrame(it) }
-            val top = maxOf(frame.top, dp(8))
-            val visibleBottom = if (imeBottom > dp(80))
-                minOf(frame.bottom.takeIf { it > 0 } ?: metrics.heightPixels,
-                    metrics.heightPixels - imeBottom)
-            else frame.bottom.takeIf { it > 0 } ?: metrics.heightPixels
-            val keyboard = imeBottom > dp(80) ||
-                metrics.heightPixels - visibleBottom > dp(150)
-            val available = (visibleBottom - top - dp(12)).coerceAtLeast(dp(80))
-            val height = if (keyboard) minOf(normalHeight, available)
-                else WindowManager.LayoutParams.WRAP_CONTENT
-            val y = if (keyboard) top +
-                ((available - height).coerceAtLeast(0) / 2) else 0
-            if (previousHeight == height && previousTop == y && wasIme == keyboard) return
-            previousHeight = height; previousTop = y; wasIme = keyboard
-            val params = window.attributes
-            params.width = width
-            params.height = height
-            params.gravity = if (keyboard) Gravity.TOP or Gravity.CENTER_HORIZONTAL else Gravity.CENTER
-            params.y = y
-            window.attributes = params
-            android.util.Log.i("StremioCSettingsIME",
-                "event=IME_BOUNDS active=$keyboard imeBottom=$imeBottom visibleBottom=$visibleBottom " +
-                "height=$height y=$y viewport=$available dialog=${contentView.javaClass.simpleName}")
-            if (keyboard) scrolling.post {
-                (contentView.findFocus() as? EditText)?.let { field ->
-                    field.requestRectangleOnScreen(Rect(0, 0, field.width, field.height), true)
-                }
-            }
-        }
-        val layout = ViewTreeObserver.OnGlobalLayoutListener { adjust() }
-        decor.viewTreeObserver.addOnGlobalLayoutListener(layout)
-        val remove = {
-            if (decor.viewTreeObserver.isAlive)
-                decor.viewTreeObserver.removeOnGlobalLayoutListener(layout)
-        }
-        onClose(dialog, remove)
-        decor.post { adjust() }
-    }
-
     private fun setupCustomDialog(
         dialog: AlertDialog, contentView: View, bodyView: View? = null, capDp: Int = 480,
         owner: Dialog = topDialog(), initialFocus: (() -> View?)? = null,
@@ -1103,7 +1037,6 @@ class SettingsBottomFragment(
         // Input dialogs rely on Android's native IME resize, not fitDialog().
         if (root != null && !nativeIme) fitDialog(dialog, root, body, capDp)
         dialog.setOnShowListener {
-            if (nativeIme) fitNativeImeDialog(dialog, contentView, capDp)
             if (isLayout(TV) || initialFocus != null) {
                 val focus = initialFocus?.invoke() ?: body?.getFocusables(View.FOCUS_FORWARD)?.firstOrNull { usable(it) }
                     ?: contentView.getFocusables(View.FOCUS_FORWARD).firstOrNull { usable(it) }
@@ -1908,7 +1841,6 @@ class SettingsBottomFragment(
     private fun showAddonListDialog(sourceDraft: MutableList<LinkItem>? = null,
         onDraftChanged: () -> Unit = {}, invalidId: Long? = null) {
         if (!alive(settingsDialog) || topDialog() !== settingsDialog) return
-        topDialog().currentFocus?.let { hideKeyboard(it) }
         val ctx = hostContext
         val inflater = LayoutInflater.from(ctx)
         val content = runCatching { getLayout("dialog_list_links", inflater, null) as? LinearLayout }.getOrNull()
@@ -2051,9 +1983,6 @@ class SettingsBottomFragment(
             initialFocus = { if (adapter.itemCount == 0) add else rv }, nativeIme = nativeIme)
         add.setOnClickListener { edit(null, 0) }
         close.setOnClickListener { dialog.dismiss() }
-        if (nativeIme) dialog.window?.setSoftInputMode(
-            WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN or
-                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         dialog.show()
         if (invalidId != null) {
             val index = adapter.positionOf(invalidId)
