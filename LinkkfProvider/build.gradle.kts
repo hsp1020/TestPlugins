@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "애니메이션 한글 자막 제공"
@@ -11,4 +11,13 @@ cloudstream {
     )
     
     iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/LinkkfProvider/linktv.png"
+}
+
+android {
+    sourceSets.getByName("main").java.srcDir(rootProject.file("SharedPiP/src/main/kotlin"))
+}
+
+dependencies {
+    // Provided at runtime by CloudStream; do not bundle another copy.
+    compileOnly("androidx.media3:media3-ui:1.9.3")
 }
