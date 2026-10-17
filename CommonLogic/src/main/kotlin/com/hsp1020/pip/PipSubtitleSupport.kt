@@ -103,8 +103,7 @@ class PipSubtitleScaler(private val acceptsProvider: (String) -> Boolean) {
     private fun updatePipBottomPadding(view: SubtitleView) {
         if (view.height <= 0) return
         // Fractional bottom padding is ignored for cues with an explicit line position.
-        val bottom = normalBottomPadding +
-            (view.height * SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION).roundToInt()
+        val bottom = (view.height * SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION).roundToInt()
         if (view.paddingTop != 0 || view.paddingBottom != bottom) {
             view.setPadding(view.paddingLeft, 0, view.paddingRight, bottom)
         }
