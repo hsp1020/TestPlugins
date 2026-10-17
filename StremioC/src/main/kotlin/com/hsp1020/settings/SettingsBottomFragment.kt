@@ -150,7 +150,11 @@ object SettingsRepository {
         }
         val editor = sharedPref.edit()
         editor.putString(PREF_KEY_LINKS, arr.toString())
-        editor.commit()
+        val saved = editor.commit()
+        android.util.Log.i("StremioCStreams", "CONFIG_UI catalog-save committed=$saved count=${list.size} " +
+            list.mapIndexed { i, item ->
+                "[$i id=${item.id} name=${item.name.take(40)} enabled=${item.enabled} streamSync=${item.isStreamSubtitleSyncEnabled} historySync=${item.isHistorySyncEnabled} metadataSync=${item.isSyncEnabled} url=${stremioStreamDebugUrl(item.link)}]"
+            }.joinToString(" "))
         StremioC.invalidateSyncSettingsCache()
     }
 
@@ -1763,7 +1767,13 @@ class SettingsBottomFragment(
             editor.putBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, switchCineStream.isChecked)
             editor.putBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, switchStreamPlay.isChecked)
             editor.putBoolean(SettingsRepository.PREF_KEY_VIXSRC_ENABLED, switchVixSrc.isChecked)
-            editor.commit()
+            val saved = editor.commit()
+            android.util.Log.i("StremioCStreams",
+                "CONFIG_UI main-save committed=$saved extraCount=${extraUrlList.size} enabledExtras=${extraUrlList.count { it.enabled }} history=${stremioStreamDebugUrl(etHistorySyncUrl.text.toString().trim())} cine=${switchCineStream.isChecked} streamPlay=${switchStreamPlay.isChecked} vix=${switchVixSrc.isChecked}")
+            extraUrlList.forEachIndexed { index, item ->
+                android.util.Log.i("StremioCStreams",
+                    "CONFIG_UI extra-saved[$index] name=${item.name.take(40)} enabled=${item.enabled} url=${stremioStreamDebugUrl(item.link)}")
+            }
             StremioC.invalidateSyncSettingsCache()
 
             recordBackupSnapshot(sharedPref, "stremio_c_restore_complete", "stremio_c_last_applied_backup_hash", "native_backup_stremioc")
@@ -1902,6 +1912,8 @@ class SettingsBottomFragment(
         }
         lateinit var reorderTouchHelper: ItemTouchHelper
         fun persistOrder(ordered: List<LinkItem>) {
+            android.util.Log.i("StremioCStreams",
+                "CONFIG_UI reorder kind=${if (sourceDraft != null) "extra" else "catalog"} ids=${ordered.joinToString(",") { it.id.toString() }}")
             if (sourceDraft != null) {
                 sourceDraft.clear()
                 sourceDraft.addAll(ordered)
@@ -1933,6 +1945,8 @@ class SettingsBottomFragment(
                     val index = values.indexOfFirst { it.id == item.id }
                     if (index >= 0) {
                         values[index] = values[index].copy(enabled = enabled)
+                        android.util.Log.i("StremioCStreams",
+                            "CONFIG_UI list-toggle kind=${if (sourceDraft != null) "extra" else "catalog"} id=${item.id} enabled=$enabled url=${stremioStreamDebugUrl(item.link)}")
                         if (sourceDraft != null) { sourceDraft.clear(); sourceDraft.addAll(values) }
                         else SettingsRepository.saveLinks(sharedPref, values)
                         adapter.updateItem(values[index], notify = false)
@@ -2044,6 +2058,8 @@ class SettingsBottomFragment(
             }
             save.isEnabled = false
             if (isEdit) values[index] = changed else values.add(changed)
+            android.util.Log.i("StremioCStreams",
+                "CONFIG_UI edit-save kind=${if (sources) "extra" else "catalog"} edited=$isEdit id=${changed.id} name=${changed.name.take(40)} enabled=${changed.enabled} streamSync=${changed.isStreamSubtitleSyncEnabled} historySync=${changed.isHistorySyncEnabled} metadataSync=${changed.isSyncEnabled} url=${stremioStreamDebugUrl(changed.link)} pendingMainSave=$sources")
             if (sourceDraft == null) SettingsRepository.saveLinks(sharedPref, values)
             if (onLinksChanged != null) onLinksChanged(changed.id)
             else (rv?.adapter as? LinksAdapter)?.updateItem(changed)

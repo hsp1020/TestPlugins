@@ -161,13 +161,17 @@ class StremioCPlugin : Plugin() {
                 val localHash = stremioCPrefs.getString("stremio_c_last_applied_backup_hash", "") ?: ""
                 val incomingHash = stremioCBackupStr.hashCode().toString()
 
+                android.util.Log.i("StremioCStreams",
+                    "CONFIG_BOOT backupFound=true complete=$localComplete hashMatched=${localHash == incomingHash} willRestore=${!localComplete || localHash != incomingHash} catalogsBefore=${stremioCPrefs.getString(PREF_KEY_LINKS, null)?.length ?: -1}")
                 if (!localComplete || localHash != incomingHash) {
                     val editor = stremioCPrefs.edit()
                     editor.clear() 
                     jsonToPrefs(JSONObject(stremioCBackupStr), editor)
                     editor.putBoolean("stremio_c_restore_complete", true)
                     editor.putString("stremio_c_last_applied_backup_hash", incomingHash)
-                    editor.commit()
+                    val restored = editor.commit()
+                    android.util.Log.i("StremioCStreams",
+                        "CONFIG_BOOT restore-applied committed=$restored catalogsAfter=${stremioCPrefs.getString(PREF_KEY_LINKS, null)?.length ?: -1}")
                 }
             }
         } catch (e: Throwable) {
@@ -350,6 +354,13 @@ class StremioCPlugin : Plugin() {
                 val json = prefs.getString(PREF_KEY_LINKS, null) ?: "[]"
                 
                 val arr = JSONArray(json)
+                android.util.Log.i("StremioCStreams",
+                    "CONFIG_BOOT reload generation=$requestGeneration storedCount=${arr.length()} jsonBytes=${json.length}")
+                for (index in 0 until arr.length()) {
+                    val saved = arr.optJSONObject(index) ?: continue
+                    android.util.Log.i("StremioCStreams",
+                        "CONFIG_BOOT reloadCatalog[$index] id=${saved.optLong("id", -1L)} name=${saved.optString("name", "").take(40)} enabled=${saved.optBoolean("enabled", true)} streamSync=${saved.optBoolean("isStreamSubtitleSyncEnabled", false)} historySync=${saved.optBoolean("isHistorySyncEnabled", true)} url=${stremioStreamDebugUrl(saved.optString("link", ""))}")
+                }
                 val links = mutableListOf<LinkEntry>()
                 for (i in 0 until arr.length()) {
                     val obj = arr.optJSONObject(i) ?: continue
@@ -444,6 +455,8 @@ class StremioCPlugin : Plugin() {
                         }
                         registerMainAPI(homeProvider)
                         registeredProviders.add(homeProvider)
+                        android.util.Log.i("StremioCStreams",
+                            "CONFIG_BOOT provider-registered id=${item.id} name=${item.name.take(40)} url=${stremioStreamDebugUrl(item.link)} searchCatalogs=${searchCatalogs.size}")
 
                         searchCatalogs.forEach { catalog ->
                             val catalogName = catalog.name?.trim().orEmpty()
@@ -467,8 +480,11 @@ class StremioCPlugin : Plugin() {
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Throwable) {
+                        android.util.Log.w("StremioCStreams",
+                            "CONFIG_BOOT registration-failed id=${item.id} name=${item.name.take(40)} type=${e.javaClass.simpleName}")
                     }
                 }
+                android.util.Log.i("StremioCStreams", "CONFIG_BOOT reload-finished generation=$requestGeneration activeProviders=${registeredProviders.size} activeCatalogs=${links.size}")
                 currentCoroutineContext().ensureActive()
                 pinSourcesReady = true
                 syncPinnedSearchOrder()
