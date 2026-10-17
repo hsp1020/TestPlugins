@@ -395,6 +395,7 @@ internal class RatingPlotImageHook(
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
     private val audioSelector = StremioAudioSelector()
+    private val subtitleController = StremioSubtitleController()
     private val pipSubtitles = PipSubtitleScaler { apiName ->
         apiName == "StremioC" || APIHolder.allProviders.any {
             it is StremioC && it.name.equals(apiName, ignoreCase = true)
@@ -753,6 +754,7 @@ internal class RatingPlotImageHook(
                 } else attach(f, v)
                 pipSubtitles.watch(f)
                 audioSelector.watch(f)
+                subtitleController.watch(f)
             }
         }
 
@@ -771,6 +773,7 @@ internal class RatingPlotImageHook(
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
             pipSubtitles.watch(f)
             audioSelector.watch(f)
+            subtitleController.watch(f)
             watchers[f]?.let { watcher ->
                 watcher.render() // CloudStream may reuse an old LoadResponse without calling load().
                 watcher.auditReentry()
@@ -783,6 +786,7 @@ internal class RatingPlotImageHook(
             releaseHomeMenu(f)
             pipSubtitles.detach(f)
             audioSelector.detach(f)
+            subtitleController.detach(f)
             watchers.remove(f)?.detach()
         }
     }
@@ -803,6 +807,7 @@ internal class RatingPlotImageHook(
 
     fun stop() {
         audioSelector.detach()
+        subtitleController.detach()
         pipSubtitles.detach()
         StremioCMdbUiBridge.listen(null)
         homeEntries.detach()
@@ -821,6 +826,7 @@ internal class RatingPlotImageHook(
         if (host === activity) return
         pipSubtitles.detach()
         audioSelector.detach()
+        subtitleController.detach()
         homeEntries.detach()
         detachPreview()
         detailRevealEnd?.invoke()
@@ -839,6 +845,7 @@ internal class RatingPlotImageHook(
                     attach(f, it)
                     pipSubtitles.watch(f)
                     audioSelector.watch(f)
+                    subtitleController.watch(f)
                 }
                 if (f.isAdded) scan(f.childFragmentManager)
             }
@@ -1151,6 +1158,7 @@ internal class RatingPlotImageHook(
         resetSearchState()
         pipSubtitles.detach()
         audioSelector.detach()
+        subtitleController.detach()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
         watchers.clear(); host = null

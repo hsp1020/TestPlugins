@@ -899,6 +899,7 @@ open class StremioC(
         private val libraryOriginalUrlsByMeta = lruCacheMap<String, MutableSet<String>>(200)
         internal val expectedLogoByUrl = lruCacheMap<String, Boolean>(200)
         internal val animeAudioByUrl = lruCacheMap<String, Boolean>(200)
+        internal val subtitleOrderByUrl = Collections.synchronizedMap(lruCacheMap<String, Int>(1200))
         internal val trailerChoicesByUrl = lruCacheMap<String, List<TrailerChoice>>(200)
         // A /meta response is shared by detail and episode loading. Keep a bounded
         // byte cache and join concurrent fetches for the identical exact URL.
@@ -2813,10 +2814,37 @@ open class StremioC(
         }
         val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
 
+        // Source order comes from existing addon registrations, not async response order.
+        val stremioSubtitleNames = (listOf(name) + extraUrls.map { it.name })
+            .filter { it.isNotBlank() }
+        val integratedSubtitleNames = getIntegrationStremioAddons().map { it.name }
+        fun rankSubtitle(sub: SubtitleFile, fromIntegration: Boolean) {
+            if (sub.url.isBlank()) return
+            val raw = sub.lang.trim()
+            val plainCode = SubtitleHelper.fromLanguageToTagIETF(raw)
+            val plain = plainCode != null &&
+                SubtitleHelper.fromTagToEnglishLanguageName(plainCode)?.equals(raw, true) == true
+            val label = sub.lang.substringAfterLast(" — ", "").trim()
+            val inner = stremioSubtitleNames.indexOfFirst { it.equals(label, true) }
+            val outer = integratedSubtitleNames.indexOfFirst { it.equals(label, true) }
+            val priority = when {
+                plain -> 0
+                outer >= 0 -> 20_000 + outer
+                fromIntegration -> 20_000 + integratedSubtitleNames.size
+                inner >= 0 -> 10_000 + inner
+                else -> 10_000 + stremioSubtitleNames.size
+            }
+            synchronized(subtitleOrderByUrl) {
+                val prev = subtitleOrderByUrl[sub.url]
+                if (prev == null || priority < prev) subtitleOrderByUrl[sub.url] = priority
+            }
+        }
+
         // Keep the original URL-based label handling for subtitles returned by
         // CineStream, StreamPlay and VixSrc. These providers can also return
         // CloudStream subtitles, so do not deduplicate them here.
         val integrationSubtitleCallback: (SubtitleFile) -> Unit = { sub ->
+            rankSubtitle(sub, true)
             val subtitleUrl = sub.url
             try {
                 val start = subtitleUrl.indexOf("://")
@@ -2847,6 +2875,7 @@ open class StremioC(
 
         val stremioSubtitleCallback: (SubtitleFile) -> Unit = { sub ->
             if (sub.url.isNotBlank() && seenStremioSubtitles.add(sub.url)) {
+                rankSubtitle(sub, false)
                 // These subtitles originated in StremioC, not external integrations.
                 // Do not re-append the legacy (Stremio) marker.
                 subtitleCallback.invoke(sub)
