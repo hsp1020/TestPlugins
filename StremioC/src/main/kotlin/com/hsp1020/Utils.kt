@@ -1560,7 +1560,7 @@ internal class RatingPlotImageHook(
                 SyncWatchType.PLANTOWATCH -> "planned"
                 else -> null
             } ?: return false
-            val auth = AccountManager.kitsuApi.authData() ?: return false
+            val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == AccountManager.kitsuApi.idPrefix }?.authData() ?: return false
             val headers = mapOf(
                 "Authorization" to "Bearer ${auth.token.accessToken}",
                 "content-type" to "application/vnd.api+json"
