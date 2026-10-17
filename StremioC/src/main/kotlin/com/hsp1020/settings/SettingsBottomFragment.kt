@@ -52,7 +52,6 @@ import android.widget.Toast
 import android.widget.CheckBox
 import android.widget.Switch
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.util.Base64
@@ -890,64 +889,6 @@ class SettingsBottomFragment(
         }
         dialog.show()
     }
-    // CineStream SettingsProviders pattern: edit numeric position in a small
-    // child dialog instead of giving the parent RecyclerView keyboard focus.
-    private fun showMovePositionDialog(
-        owner: Dialog, label: String, current: Int, minPosition: Int, maxPosition: Int,
-        onMove: (Int) -> Unit
-    ) {
-        if (!alive(owner) || topDialog() !== owner || minPosition > maxPosition) return
-        val content = popupContent("Move position")
-        content.addView(popupMessage(label).apply { setPadding(0, 0, 0, dp(8)) })
-        val input = EditText(hostContext).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER
-            imeOptions = EditorInfo.IME_ACTION_DONE
-            isSingleLine = true
-            textSize = 14f
-            setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-            setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
-            setPadding(dp(12), 0, dp(12), 0)
-            background = getCardBg()
-            minHeight = dp(48)
-            hint = "$minPosition – $maxPosition"
-            setText(current.toString())
-            selectAll()
-        }
-        content.addView(input, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        val cancel = simpleButton("Cancel")
-        val move = simpleButton("Move")
-        content.addView(popupButtons(cancel, move))
-        val dialog = AlertDialog.Builder(hostContext).setView(content).create()
-        setupCustomDialog(dialog, content, owner = owner)
-        cancel.setOnClickListener { dialog.dismiss() }
-        fun applyPosition() {
-            val position = input.text.toString().toIntOrNull()
-            if (position == null || position !in minPosition..maxPosition) {
-                input.error = "Enter a number from $minPosition to $maxPosition"
-                input.requestFocus()
-                return
-            }
-            dialog.dismiss()
-            if (alive(owner)) onMove(position)
-        }
-        move.setOnClickListener { applyPosition() }
-        input.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == EditorInfo.IME_ACTION_DONE) {
-                applyPosition()
-                true
-            } else false
-        }
-        dialog.show()
-        input.requestFocus()
-        input.post {
-            if (dialog.isShowing && input.isAttachedToWindow && input.hasFocus()) {
-                (hostContext.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
-                    .showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
-            }
-        }
-    }
-
     private fun deleteCatalogById(id: Long): Boolean {
         val links = catalogLinks()
         if (!links.removeAll { it.id == id }) {
@@ -988,11 +929,48 @@ class SettingsBottomFragment(
         }
     }
 
-
+    // CineStream-style native IME resize. Keep the existing footer visible;
+    // only the dialog body scrolls if the keyboard reduces the available height.
+    private fun nativeImeView(content: LinearLayout): View {
+        if (isLayout(TV)) return content
+        val footer = content.getChildAt(content.childCount - 1) as? LinearLayout ?: return content
+        content.removeView(footer)
+        footer.setPadding(dp(20), footer.paddingTop, dp(20), dp(20))
+        val scrolling = object : NestedScrollView(hostContext) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                if (View.MeasureSpec.getMode(heightMeasureSpec) == View.MeasureSpec.UNSPECIFIED) {
+                    super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+                    return
+                }
+                footer.measure(
+                    View.MeasureSpec.makeMeasureSpec(
+                        View.MeasureSpec.getSize(widthMeasureSpec), View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+                )
+                val available = (View.MeasureSpec.getSize(heightMeasureSpec) -
+                    footer.measuredHeight).coerceAtLeast(0)
+                super.onMeasure(widthMeasureSpec,
+                    View.MeasureSpec.makeMeasureSpec(available, View.MeasureSpec.AT_MOST))
+            }
+        }.apply {
+            isFillViewport = false
+            isVerticalScrollBarEnabled = false
+            addView(content)
+        }
+        return LinearLayout(hostContext).apply {
+            orientation = LinearLayout.VERTICAL
+            background = getDarkThemeBg()
+            addView(scrolling, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(footer, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+    }
 
     private fun setupCustomDialog(
         dialog: AlertDialog, contentView: View, bodyView: View? = null, capDp: Int = 480,
-        owner: Dialog = topDialog(), initialFocus: (() -> View?)? = null
+        owner: Dialog = topDialog(), initialFocus: (() -> View?)? = null,
+        nativeIme: Boolean = false
     ) {
         val parents = generateSequence(owner) { dialogOwners[it] }.toList()
         val origin = owner.currentFocus
@@ -1001,7 +979,7 @@ class SettingsBottomFragment(
         var body = bodyView
         if (root != null) {
             root.setPadding(dp(20), dp(20), dp(20), dp(20))
-            if (isLayout(TV) && body == null && root.childCount > 1) {
+            if (body == null && root.childCount > 1) {
                 body = (0 until root.childCount).map { root.getChildAt(it) }
                     .firstOrNull { it is RecyclerView || it is NestedScrollView }
                 if (body == null) {
@@ -1033,42 +1011,36 @@ class SettingsBottomFragment(
         dialog.setCanceledOnTouchOutside(false)
         val ownerWindow = owner.window
         val ownerInputMode = ownerWindow?.attributes?.softInputMode
-        if (isLayout(TV) && ownerInputMode != null) {
+        if (ownerInputMode != null) {
             ownerWindow.setSoftInputMode((ownerInputMode and WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST.inv()) or
                 WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
             onClose(dialog) {
                 if (!closing && owner.isShowing) ownerWindow.setSoftInputMode(ownerInputMode)
             }
         }
-        // A neutral initial focus avoids automatic IME requests without suppressing
-        // the explicit request generated by the user's tap on an EditText.
-        if (!isLayout(TV)) {
-            contentView.isFocusableInTouchMode = true
-            (contentView as? ViewGroup)?.descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS
-            contentView.requestFocus()
-        }
         dialog.create()
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-            setGravity(Gravity.CENTER)
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-            if (isLayout(TV)) attributes = attributes.apply { windowAnimations = 0 }
-        }
-        // Keep the old manual layout only for TV; the phone uses the platform.
-        if (isLayout(TV) && root != null) fitDialog(dialog, root, body, capDp)
-        dialog.setOnShowListener {
-            if (!isLayout(TV)) dialog.window?.setLayout(
+            attributes = attributes.apply {
+                gravity = Gravity.CENTER
+                x = 0; y = 0
+                if (!nativeIme) windowAnimations = 0
+            }
+            // Override the theme's initial window width before show()/first draw.
+            if (nativeIme) setLayout(
                 minOf(dp(capDp), (hostContext.resources.displayMetrics.widthPixels * 0.9f).toInt()),
-                WindowManager.LayoutParams.WRAP_CONTENT)
-            if (isLayout(TV)) {
-                val focus = initialFocus?.invoke()
-                    ?: body?.getFocusables(View.FOCUS_FORWARD)?.firstOrNull { usable(it) }
+                WindowManager.LayoutParams.WRAP_CONTENT
+            )
+        }
+        // Input dialogs rely on Android's native IME resize, not fitDialog().
+        if (root != null && !nativeIme) fitDialog(dialog, root, body, capDp)
+        dialog.setOnShowListener {
+            if (isLayout(TV) || initialFocus != null) {
+                val focus = initialFocus?.invoke() ?: body?.getFocusables(View.FOCUS_FORWARD)?.firstOrNull { usable(it) }
                     ?: contentView.getFocusables(View.FOCUS_FORWARD).firstOrNull { usable(it) }
                 focus?.requestFocus()
-            } else {
-                // Keep first focus off the numeric/text inputs until they are tapped.
-                contentView.requestFocus()
             }
         }
         dialog.setOnDismissListener {
@@ -1081,12 +1053,9 @@ class SettingsBottomFragment(
                 val parent = parents.firstOrNull { it.isShowing }
                 if (parent != null) parent.window?.decorView?.post {
                     if (alive(parent) && topDialog() === parent) {
-                        val restore = focusPlans.remove(parent)
-                        if (restore != null) restore()
-                        else if (usable(origin) && (isLayout(TV) || origin !is EditText))
-                            origin?.requestFocus()
-                        else if (isLayout(TV)) parent.window?.decorView
-                            ?.getFocusables(View.FOCUS_FORWARD)?.firstOrNull { usable(it) }?.requestFocus()
+                        focusPlans.remove(parent)?.invoke()
+                            ?: if (usable(origin)) origin?.requestFocus() else parent.window?.decorView
+                                ?.getFocusables(View.FOCUS_FORWARD)?.firstOrNull { usable(it) }?.requestFocus()
                         refreshSummaries?.invoke()
                     }
                 }
@@ -1216,7 +1185,7 @@ class SettingsBottomFragment(
         settingsDialog.setCanceledOnTouchOutside(false)
         val hostWindow = (hostContext as? Activity)?.window
         val hostInputMode = hostWindow?.attributes?.softInputMode
-        if (isLayout(TV) && hostInputMode != null) {
+        if (hostInputMode != null) {
             hostWindow.setSoftInputMode((hostInputMode and WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST.inv()) or
                 WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
             onClose(settingsDialog) { hostWindow.setSoftInputMode(hostInputMode) }
@@ -1860,18 +1829,10 @@ class SettingsBottomFragment(
             setGravity(Gravity.CENTER)
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
-        if (!isLayout(TV)) {
-            view.isFocusableInTouchMode = true
-            view.descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS
-            view.requestFocus()
-        }
         showPage(SettingsPage.HUB)
-        if (isLayout(TV)) fitDialog(settingsDialog, view, viewport, 800)
+        fitDialog(settingsDialog, view, viewport, 800)
         settingsDialog.show()
         if (isLayout(TV)) (view.optional("rowCatalogs") ?: showlinks).requestFocus()
-        else settingsDialog.window?.setLayout(
-            minOf(dp(800), (ctx.resources.displayMetrics.widthPixels * 0.9f).toInt()),
-            WindowManager.LayoutParams.WRAP_CONTENT)
     }
 
 
@@ -1905,7 +1866,8 @@ class SettingsBottomFragment(
         val close = simpleButton("Close")
         val add = simpleButton("Add")
         content.addView(popupButtons(close, add))
-        val dialog = AlertDialog.Builder(ctx).setView(content).create()
+        val nativeIme = !isLayout(TV)
+        val dialog = AlertDialog.Builder(ctx).setView(nativeImeView(content)).create()
         lateinit var adapter: LinksAdapter
         fun records() = sourceDraft?.toMutableList() ?: catalogLinks()
         fun resizeList() {
@@ -2018,7 +1980,7 @@ class SettingsBottomFragment(
         rv.addOnLayoutChangeListener(listener)
         onClose(dialog) { rv.removeOnLayoutChangeListener(listener) }
         setupCustomDialog(dialog, content, content.optional("catalogListBody") ?: rv, 600,
-            initialFocus = { if (adapter.itemCount == 0) add else rv })
+            initialFocus = { if (adapter.itemCount == 0) add else rv }, nativeIme = nativeIme)
         add.setOnClickListener { edit(null, 0) }
         close.setOnClickListener { dialog.dismiss() }
         dialog.show()
@@ -2066,9 +2028,9 @@ class SettingsBottomFragment(
         val close = simpleButton("Close")
         val save = simpleButton("Save")
         dialogView.addView(popupButtons(close, save))
-        val dlg = AlertDialog.Builder(ctx).setView(dialogView).create()
+        val dlg = AlertDialog.Builder(ctx).setView(nativeImeView(dialogView)).create()
         setupCustomDialog(dlg, dialogView, dialogView.optional("catalogEditorScroll"), 600, owner,
-            initialFocus = { if (urlError != null) url else name })
+            initialFocus = { if (urlError != null) url else name }, nativeIme = !isLayout(TV))
         save.setOnClickListener {
             if (!alive(dlg) || !save.isEnabled) return@setOnClickListener
             val raw = url.text.toString().trim()
@@ -2519,12 +2481,10 @@ private fun showLanguageSelectDialog() {
                     gravity = android.view.Gravity.CENTER
                     isSingleLine = true
 
-                    if (!isLayout(TV)) {
-                        showSoftInputOnFocus = false
-                        isFocusable = false
-                        isFocusableInTouchMode = false
-                        isCursorVisible = false
-                        isClickable = true
+                    setOnClickListener {
+                        requestFocus()
+                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                        imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
                     }
                 }
                 
@@ -2536,7 +2496,6 @@ private fun showLanguageSelectDialog() {
                 layout.addView(dragHandle)
                 layout.addView(inputSlot(etOrder).apply {
                     layoutParams = LinearLayout.LayoutParams(dp(56), dp(48)).apply { marginEnd = dp(8) }
-                    if (!isLayout(TV)) setOnClickListener { etOrder.performClick() }
                 })
                 layout.addView(checkbox)
                 checkbox.maxLines = 2
@@ -2585,18 +2544,7 @@ private fun showLanguageSelectDialog() {
                 holder.displayedOrder = position + 1
                 holder.etOrder.setText(holder.displayedOrder.toString())
                 
-                if (!isLayout(TV)) holder.etOrder.setOnClickListener {
-                    val index = holder.adapterPosition
-                    val target = visibleTabs.getOrNull(index) ?: return@setOnClickListener
-                    val enabledCount = visibleTabs.count { it.isChecked }
-                    val first = if (target.isChecked) 1 else enabledCount + 1
-                    val last = if (target.isChecked) enabledCount else visibleTabs.size
-                    val owner = activeDialog ?: return@setOnClickListener
-                    showMovePositionDialog(owner, target.displayName, index + 1, first, last) { requested ->
-                        shiftItemInRecyclerView(target.key, requested)
-                    }
-                }
-                if (isLayout(TV)) holder.etOrder.setOnFocusChangeListener { _, hasFocus ->
+                holder.etOrder.setOnFocusChangeListener { _, hasFocus ->
                     if (hasFocus) {
                         rv.postDelayed({
                             if (activeDialog?.isShowing == true && !closing) {
@@ -2732,10 +2680,10 @@ private fun showLanguageSelectDialog() {
         footer.addView(saveBtn)
         dialogContainer.addView(footer)
 
-        val dialog = AlertDialog.Builder(context).setView(dialogContainer).create()
+        val dialog = AlertDialog.Builder(context).setView(nativeImeView(dialogContainer)).create()
         activeDialog = dialog
         setupCustomDialog(dialog, dialogContainer, rv, 800,
-            initialFocus = { rv })
+            initialFocus = { rv }, nativeIme = !isLayout(TV))
 
         saveBtn.isFocusableInTouchMode = true
         saveBtn.setOnClickListener {
@@ -2861,26 +2809,9 @@ private fun showLanguageSelectDialog() {
                 contentDescription = "Addon position"
             }
             wrapper.addView(dragHandle)
-            if (isLayout(TV)) {
-                wrapper.addView(etOrder, LinearLayout.LayoutParams(dp(56), dp(24)).apply {
-                    marginEnd = dp(8)
-                })
-            } else {
-                // Same 24dp visual, expanded 48dp touch target on phone.
-                etOrder.showSoftInputOnFocus = false
-                etOrder.isFocusable = false
-                etOrder.isFocusableInTouchMode = false
-                etOrder.isCursorVisible = false
-                val orderTouch = FrameLayout(parent.context).apply {
-                    addView(etOrder, FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, dp(24), Gravity.TOP))
-                    isClickable = true
-                    setOnClickListener { etOrder.performClick() }
-                }
-                wrapper.addView(orderTouch, LinearLayout.LayoutParams(dp(56), dp(48)).apply {
-                    marginEnd = dp(8)
-                })
-            }
+            wrapper.addView(etOrder, LinearLayout.LayoutParams(dp(56), dp(24)).apply {
+                marginEnd = dp(8)
+            })
             wrapper.addView(view, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             normalizeTypeface(wrapper)
             // Keep native addon controls prepared without stretching the compact order
@@ -2932,17 +2863,7 @@ private fun showLanguageSelectDialog() {
                 holder.etOrder.clearFocus()
             holder.displayedOrder = position + 1
             holder.etOrder.setText(holder.displayedOrder.toString())
-            if (!isLayout(TV)) holder.etOrder.setOnClickListener {
-                val index = holder.adapterPosition
-                val selected = items.getOrNull(index) ?: return@setOnClickListener
-                val owner = topDialog()
-                showMovePositionDialog(owner, selected.name.ifBlank { "Addon" },
-                    index + 1, 1, items.size) { requested ->
-                    val from = positionOf(selected.id)
-                    if (from >= 0) moveTo(from, requested - 1)
-                }
-            }
-            if (isLayout(TV)) holder.etOrder.setOnFocusChangeListener { _, focused ->
+            holder.etOrder.setOnFocusChangeListener { _, focused ->
                 if (!focused) {
                     val wanted = holder.etOrder.text.toString().toIntOrNull()
                     if (wanted != null && wanted != holder.displayedOrder) {
