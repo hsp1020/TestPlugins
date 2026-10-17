@@ -332,7 +332,14 @@ class SettingsBottomFragment(
     private val legacyLinkIds = mutableMapOf<String, Long>()
 
     private fun catalogLinks(): MutableList<LinkItem> {
-        val links = SettingsRepository.loadLinks(sharedPref)
+        var links = SettingsRepository.loadLinks(sharedPref)
+        // Older builds inserted new registrations at index 0. Migrate that legacy
+        // display order once; never reverse user-defined order on subsequent opens.
+        if (!sharedPref.getBoolean("catalog_oldest_first_v1", false)) {
+            links.reverse()
+            if (links.isNotEmpty()) SettingsRepository.saveLinks(sharedPref, links)
+            sharedPref.edit().putBoolean("catalog_oldest_first_v1", true).apply()
+        }
         val json = runCatching { JSONArray(sharedPref.getString("stremio_saved_links", "[]")) }.getOrNull()
             ?: return links
         if (json.length() != links.size) return links
@@ -1496,11 +1503,27 @@ class SettingsBottomFragment(
         }
 
         val sourceDraft = mutableListOf<LinkItem>()
+        val sourceOrderKey = "stream_addons_oldest_first_v1"
         val extraUrls = runCatching {
             JSONArray(sharedPref.getString(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_URLS, "[]"))
         }.getOrNull()
-        if (extraUrls != null) for (i in 0 until extraUrls.length()) {
-            val entry = extraUrls.opt(i)
+        if (!sharedPref.getBoolean(sourceOrderKey, false)) {
+            val original = extraUrls
+            if (original != null && original.length() > 1) {
+                val reversed = JSONArray()
+                for (i in original.length() - 1 downTo 0) reversed.put(original.get(i))
+                sharedPref.edit().putString(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_URLS,
+                    reversed.toString()).putBoolean(sourceOrderKey, true).commit()
+                StremioC.invalidateSyncSettingsCache()
+            } else {
+                sharedPref.edit().putBoolean(sourceOrderKey, true).apply()
+            }
+        }
+        val orderedExtraUrls = runCatching {
+            JSONArray(sharedPref.getString(SettingsRepository.PREF_KEY_STREAM_SUBTITLE_URLS, "[]"))
+        }.getOrNull()
+        if (orderedExtraUrls != null) for (i in 0 until orderedExtraUrls.length()) {
+            val entry = orderedExtraUrls.opt(i)
             val name = (entry as? JSONObject)?.optString("name").orEmpty()
             val url = if (entry is String) entry else (entry as? JSONObject)?.optString("url").orEmpty()
             if (url.isNotBlank()) sourceDraft.add(LinkItem(id = i.toLong(), name = name, link = url,
@@ -1822,8 +1845,20 @@ class SettingsBottomFragment(
                 refreshList(changed, position.coerceAtLeast(0))
             }
         }
+        lateinit var reorderTouchHelper: ItemTouchHelper
+        fun persistOrder(ordered: List<LinkItem>) {
+            if (sourceDraft != null) {
+                sourceDraft.clear()
+                sourceDraft.addAll(ordered)
+            } else {
+                SettingsRepository.saveLinks(sharedPref, ordered)
+            }
+            onDraftChanged()
+        }
         adapter = LinksAdapter(records(),
             showCatalogs = !sources,
+            onReorder = ::persistOrder,
+            onStartDrag = { holder -> reorderTouchHelper.startDrag(holder) },
             onDelete = { item ->
                 val position = adapter.positionOf(item.id).coerceAtLeast(0)
                 showDeleteConfirmation(dialog, item.name,
@@ -1852,6 +1887,22 @@ class SettingsBottomFragment(
             }
         )
         rv.adapter = adapter
+        reorderTouchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(
+            ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0
+        ) {
+            override fun isLongPressDragEnabled() = false
+            override fun onMove(
+                recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder,
+                target: RecyclerView.ViewHolder
+            ): Boolean {
+                val from = viewHolder.adapterPosition
+                val to = target.adapterPosition
+                return from != RecyclerView.NO_POSITION && to != RecyclerView.NO_POSITION &&
+                    adapter.moveTo(from, to)
+            }
+            override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
+        })
+        reorderTouchHelper.attachToRecyclerView(rv)
         resizeList()
         var measuredWidth = 0
         val listener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
@@ -1937,7 +1988,7 @@ class SettingsBottomFragment(
                 return@setOnClickListener
             }
             save.isEnabled = false
-            if (isEdit) values[index] = changed else values.add(0, changed)
+            if (isEdit) values[index] = changed else values.add(changed)
             if (sourceDraft == null) SettingsRepository.saveLinks(sharedPref, values)
             if (onLinksChanged != null) onLinksChanged(changed.id)
             else (rv?.adapter as? LinksAdapter)?.updateItem(changed)
@@ -2387,7 +2438,7 @@ private fun showLanguageSelectDialog() {
                 holder.checkbox.text = tab.displayName
                 val itemColor = hostContext.colorFromAttribute(if (tab.isChecked) HostR.attr.colorPrimary else HostR.attr.textColor)
                 holder.checkbox.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-                holder.etOrder.setTextColor(itemColor)
+                holder.etOrder.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                 holder.checkbox.buttonTintList = ColorStateList.valueOf(itemColor)
                 holder.checkbox.setOnCheckedChangeListener { _, isChecked ->
                     (rv.findFocus() as? EditText)?.clearFocus()
@@ -2623,9 +2674,12 @@ private fun showLanguageSelectDialog() {
         private val onEdit: (LinkItem, Int) -> Unit,
         private val onCatalogs: (LinkItem) -> Unit,
         private val onConfigure: (LinkItem) -> Unit,
-        private val onToggle: (LinkItem, Boolean) -> Unit
+        private val onToggle: (LinkItem, Boolean) -> Unit,
+        private val onReorder: (List<LinkItem>) -> Unit,
+        private val onStartDrag: (RecyclerView.ViewHolder) -> Unit
     ) : RecyclerView.Adapter<LinksAdapter.VH>() {
-        inner class VH(val view: View) : RecyclerView.ViewHolder(view) {
+        inner class VH(val view: View, val etOrder: EditText, val dragHandle: ImageView) : RecyclerView.ViewHolder(view) {
+            var displayedOrder = 0
             val body: View = view.optional("addonRowBody") ?: view
             val tvName: TextView = view.findView("tvName")
             val tvLink: TextView = view.findView("tvLink")
@@ -2644,8 +2698,37 @@ private fun showLanguageSelectDialog() {
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
             val view = getLayout("item_saved_link", LayoutInflater.from(parent.context), parent)
             view.background = null
-            prepareControls(view)
-            return VH(view).also {
+            val wrapper = LinearLayout(parent.context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = RecyclerView.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            }
+            val dragHandle = ImageView(parent.context).apply {
+                setImageResource(android.R.drawable.ic_menu_sort_by_size)
+                layoutParams = LinearLayout.LayoutParams(dp(24), dp(24))
+                contentDescription = "Drag to reorder addon"
+                isFocusable = false
+            }
+            val etOrder = EditText(parent.context).apply {
+                inputType = InputType.TYPE_CLASS_NUMBER
+                imeOptions = EditorInfo.IME_ACTION_DONE
+                textSize = 14f
+                setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
+                setPadding(dp(8), 0, dp(8), 0)
+                background = getCardBg()
+                gravity = Gravity.CENTER
+                isSingleLine = true
+                contentDescription = "Addon position"
+            }
+            wrapper.addView(dragHandle)
+            wrapper.addView(inputSlot(etOrder).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(56), dp(48)).apply { marginEnd = dp(8) }
+            })
+            wrapper.addView(view, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            normalizeTypeface(wrapper)
+            prepareControls(wrapper)
+            return VH(wrapper, etOrder, dragHandle).also {
                 it.body.background = null
                 it.body.isClickable = false
                 it.body.isLongClickable = false
@@ -2663,6 +2746,11 @@ private fun showLanguageSelectDialog() {
                 else { it.catalogs.visibility = View.GONE; it.catalogs.isFocusable = false }
                 styleAddonIcon(it.gear, "settings_icon")
                 styleAddonIcon(it.trash, "delete_icon")
+                it.dragHandle.setOnTouchListener { _, event ->
+                    if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN &&
+                        it.adapterPosition != RecyclerView.NO_POSITION) onStartDrag(it)
+                    false
+                }
                 val actions = it.edit.parent as LinearLayout
                 fun alignActions() {
                     val gravity = if (isLayout(TV) ||
@@ -2676,6 +2764,31 @@ private fun showLanguageSelectDialog() {
         }
         override fun onBindViewHolder(holder: VH, position: Int) {
             val item = items[position]
+            holder.etOrder.setOnFocusChangeListener(null)
+            if (holder.etOrder.hasFocus() && holder.etOrder.text.toString().toIntOrNull() != position + 1)
+                holder.etOrder.clearFocus()
+            holder.displayedOrder = position + 1
+            holder.etOrder.setText(holder.displayedOrder.toString())
+            holder.etOrder.setOnFocusChangeListener { _, focused ->
+                if (!focused) {
+                    val wanted = holder.etOrder.text.toString().toIntOrNull()
+                    if (wanted != null && wanted != holder.displayedOrder) {
+                        (holder.itemView.parent as? RecyclerView)?.post {
+                            val old = positionOf(item.id)
+                            if (old >= 0) moveTo(old, (wanted - 1).coerceIn(0, items.lastIndex))
+                        }
+                    } else if (wanted == null) {
+                        holder.etOrder.setText((positionOf(item.id) + 1).toString())
+                    }
+                }
+            }
+            holder.etOrder.setOnEditorActionListener { _, action, _ ->
+                if (action == EditorInfo.IME_ACTION_DONE || action == EditorInfo.IME_ACTION_NEXT) {
+                    holder.etOrder.clearFocus()
+                    hideKeyboard(holder.etOrder)
+                    true
+                } else false
+            }
             holder.tvName.text = item.name.ifBlank { "Addon" }
             holder.tvLink.text = item.link
             holder.tvType.text = item.type
@@ -2749,6 +2862,15 @@ private fun showLanguageSelectDialog() {
         }
         override fun getItemCount() = items.size
         fun positionOf(id: Long?) = items.indexOfFirst { it.id == id }
+        fun moveTo(from: Int, to: Int): Boolean {
+            if (from !in items.indices || to !in items.indices || from == to) return false
+            val moved = items.removeAt(from)
+            items.add(to, moved)
+            notifyItemMoved(from, to)
+            notifyItemRangeChanged(minOf(from, to), kotlin.math.abs(from - to) + 1)
+            onReorder(items.toList())
+            return true
+        }
         fun linkFor(id: Long) = items.firstOrNull { it.id == id }?.link
         @SuppressLint("NotifyDataSetChanged")
         fun replaceAll(links: List<LinkItem>) {
