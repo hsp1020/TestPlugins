@@ -1028,7 +1028,7 @@ internal class RatingPlotImageHook(
 }
 
 /**
- * StremioC-only PiP subtitles, following Dantotsu's Media3 size and bottom positioning.
+ * StremioC-only PiP subtitles: Dantotsu font sizing with Media3's relative bottom inset.
  * CloudStream retains ownership of normal playback subtitle styles and layout.
  */
 @OptIn(UnstableApi::class)
@@ -1038,7 +1038,6 @@ private class PipSubtitleScaler {
     private var attached: Fragment? = null
     private var activity: FragmentActivity? = null
     private var subtitle: SubtitleView? = null
-    private var originalBottomMargin: Int? = null
     private var inPip = false
 
     private val pipListener = Consumer<PictureInPictureModeChangedInfo> { event ->
@@ -1085,7 +1084,6 @@ private class PipSubtitleScaler {
         attached = candidate
         activity = host
         subtitle = view
-        originalBottomMargin = (view.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin
         host.addOnPictureInPictureModeChangedListener(pipListener)
         SubtitlesFragment.applyStyleEvent += subtitleStyleListener
         if (host.isInPictureInPictureMode) enterPip()
@@ -1108,17 +1106,9 @@ private class PipSubtitleScaler {
             view.setPadding(view.paddingLeft, 0, view.paddingRight, view.paddingBottom)
         }
         if (view.translationY != 0f) view.translationY = 0f
-        // Dantotsu: no Media3 fractional bottom inset; 16dp layout margin instead.
-        view.setBottomPaddingFraction(0f)
-        (view.layoutParams as? ViewGroup.MarginLayoutParams)?.let { params ->
-            val bottomMargin = TypedValue.applyDimension(
-                TypedValue.COMPLEX_UNIT_DIP, 16f, view.resources.displayMetrics
-            ).toInt()
-            if (params.bottomMargin != bottomMargin) {
-                params.bottomMargin = bottomMargin
-                view.layoutParams = params
-            }
-        }
+        // Media3 keeps the subtitle 8% above the resized PiP window's bottom.
+        // Do not change the CloudStream view's layout margins when entering PiP.
+        view.setBottomPaddingFraction(SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
         view.setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, fontSize * pipScale)
     }
 
@@ -1134,15 +1124,7 @@ private class PipSubtitleScaler {
         inPip = false
         subtitle?.let { view ->
             val style = SubtitlesFragment.getCurrentSavedStyle()
-            // Restore both the original parent margin and CloudStream's saved style.
-            originalBottomMargin?.let { bottomMargin ->
-                (view.layoutParams as? ViewGroup.MarginLayoutParams)?.let { params ->
-                    if (params.bottomMargin != bottomMargin) {
-                        params.bottomMargin = bottomMargin
-                        view.layoutParams = params
-                    }
-                }
-            }
+            // Restore CloudStream's original font size, padding and elevation.
             SubtitlesFragment.setSubtitleViewStyle(view, style, true)
             view.translationY = -TypedValue.applyDimension(
                 TypedValue.COMPLEX_UNIT_DIP,
@@ -1159,7 +1141,6 @@ private class PipSubtitleScaler {
         attached = null
         activity = null
         subtitle = null
-        originalBottomMargin = null
     }
 
     fun detach(candidate: Fragment? = null) {
