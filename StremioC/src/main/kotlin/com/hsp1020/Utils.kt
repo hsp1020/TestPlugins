@@ -1352,53 +1352,16 @@ internal class RatingPlotImageHook(
             val headers = SimklApi.getHeaders(tracker.repo.authToken() ?: return false) +
                 mapOf("content-type" to "application/json")
             val url = "https://api.simkl.com/sync/"
-            if (draft.status == SyncWatchType.NONE && draft.explicitNone) {
-                // None removes the entire show, not just the selected season.
-                val body = JSONObject().put("shows", JSONArray().put(
-                    JSONObject().put("ids", initial.ids)))
-                val response = try {
-                    app.post(url + "history/remove", headers = headers,
-                        requestBody = body.toString().toRequestBody())
-                } catch (e: CancellationException) { throw e }
-                  catch (e: Exception) { return false }
-                if (response.code !in 200..299) return false
-                val removed = runCatching { JSONObject(response.text) }.getOrNull()
-                    ?: return false
-                if ((removed.optJSONObject("not_found")?.optJSONArray("shows")?.length() ?: 0) > 0)
-                    return false
-                for (attempt in 1..3) {
-                    if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
-                    val check = try {
-                        app.get(url + "all-items/shows", headers = headers, cacheTime = 0)
-                    } catch (e: CancellationException) { throw e }
-                      catch (e: Exception) { continue }
-                    if (check.code !in 200..299) continue
-                    val bodyJson = runCatching { JSONObject(check.text) }.getOrNull()
-                        ?: continue
-                    val shows = bodyJson.optJSONArray("shows")
-                    if (bodyJson.has("shows") && shows == null) continue
-                    val present = (0 until (shows?.length() ?: 0)).any { i ->
-                        val itemIds = shows?.optJSONObject(i)?.optJSONObject("show")
-                            ?.optJSONObject("ids") ?: return@any false
-                        initial.ids.keys().asSequence().any { key ->
-                            itemIds.has(key) &&
-                                itemIds.optString(key) == initial.ids.optString(key)
-                        }
-                    }
-                    if (!present) {
-                        tracker.simklSeason = initial.copy(
-                            watched = emptySet(), otherSeasons = emptyMap(),
-                            listStatus = SyncWatchType.NONE)
-                        return true
-                    }
-                }
-                return false
-            }
-
-            val countDiff = draft.watched - initial.watched.size
+            // Simkl has one watchlist status for a full TV show.
+            // Explicit NONE must never remove that show or other seasons.
+            // It only clears watched episodes in the selected season.
+            val clearSelectedSeason = draft.status == SyncWatchType.NONE && draft.explicitNone
+            val countDiff = if (clearSelectedSeason) -initial.watched.size
+                else draft.watched - initial.watched.size
             val autoWatching = baseline.status == SyncWatchType.NONE &&
                 draft.status == SyncWatchType.WATCHING && countDiff > 0
-            val statusChanged = draft.status != baseline.status && !autoWatching
+            val statusChanged = !clearSelectedSeason &&
+                draft.status != baseline.status && !autoWatching
             if (statusChanged && (initial.listStatus == null ||
                     simklWatchlistDestination(draft.status) == null)) return false
             if (countDiff == 0 && !statusChanged) return true
@@ -1445,8 +1408,8 @@ internal class RatingPlotImageHook(
 
             if (statusChanged) {
                 val destination = simklWatchlistDestination(draft.status) ?: return false
-                val payload = JSONObject().put("to", destination).put("shows",
-                    JSONArray().put(JSONObject().put("ids", initial.ids)))
+                val payload = JSONObject().put("shows", JSONArray().put(
+                    JSONObject().put("ids", initial.ids).put("to", destination)))
                 val response = try {
                     app.post(url + "add-to-list", headers = headers,
                         requestBody = payload.toString().toRequestBody())
