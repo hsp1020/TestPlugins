@@ -274,9 +274,22 @@ internal class StremioAudioSelector {
     private var anime = false
     private var selected = false
 
-    private val audioListener = object : Media3Player.Listener {
-        override fun onTracksChanged(tracks: Tracks) { select(tracks) }
-    }
+    // Avoid Kotlin default-interface bridges: the host Media3 listener ABI can differ.
+    private val audioListener = java.lang.reflect.Proxy.newProxyInstance(
+        Media3Player.Listener::class.java.classLoader,
+        arrayOf(Media3Player.Listener::class.java)
+    ) { proxy, method, args ->
+        when (method.name) {
+            "onTracksChanged" -> {
+                (args?.getOrNull(0) as? Tracks)?.let(::select)
+                null
+            }
+            "equals" -> proxy === args?.getOrNull(0)
+            "hashCode" -> System.identityHashCode(proxy)
+            "toString" -> "StremioAudioSelectorListener"
+            else -> null
+        }
+    } as Media3Player.Listener
     private val onDraw = ViewTreeObserver.OnPreDrawListener {
         val current = fragment?.playerView?.player
         if (current != null && current !== previousPlayer) {
