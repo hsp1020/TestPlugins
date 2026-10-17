@@ -1600,9 +1600,21 @@ internal class RatingPlotImageHook(
             if (!active || combo == null) return
             val target = statuses[selected]
             if (target == null || target.loading || target.draft == null) {
-                saveButton?.isEnabled = false
-                holder?.visibility = View.GONE
-                shimmer?.visibility = if (target?.loading == true) View.VISIBLE else View.GONE
+                // The selector lives inside the native holder. Never hide it when
+                // an individual provider fails or is still loading.
+                applying = true
+                try {
+                    holder?.visibility = View.VISIBLE
+                    shimmer?.visibility = View.GONE
+                    saveButton?.isEnabled = false
+                    plus?.isEnabled = false
+                    minus?.isEnabled = false
+                    maximum?.text = "/ ?"
+                    bar?.progress = 0
+                    current?.setText("")
+                    checks?.clearChoices()
+                    scoreLabel?.text = "?"
+                } finally { applying = false }
                 if (target == null) {
                     log("UI_UNAVAILABLE", "reason=$reason count=${statuses.size}")
                 } else if (!target.loading) {
@@ -1615,6 +1627,7 @@ internal class RatingPlotImageHook(
             try {
                 holder?.visibility = View.VISIBLE
                 shimmer?.visibility = View.GONE
+                (shimmer as? com.facebook.shimmer.ShimmerFrameLayout)?.stopShimmer()
                 val max = target.total?.takeIf { it > 0 }
                 maximum?.text = if (max == null) "/ ?" else "/ $max"
                 bar?.max = (max ?: maxOf(1, data.watched)).coerceAtMost(1000000) * 1000
@@ -1808,6 +1821,13 @@ internal class RatingPlotImageHook(
                 saveButton?.setOnClickListener { model.publishUserData() }
                 plus?.setOnClickListener { model.setEpisodesDelta(1) }
                 minus?.setOnClickListener { model.setEpisodesDelta(-1) }
+                checks?.setOnItemClickListener { _, _, index, _ ->
+                    model.setStatus(index - 1)
+                }
+                slider?.clearOnChangeListeners()
+                slider?.addOnChangeListener { view, value, fromUser ->
+                    if (fromUser) model.setScore(Score.from(value, view.valueTo.toInt()))
+                }
             }
             log("UI_DETACH")
         }
