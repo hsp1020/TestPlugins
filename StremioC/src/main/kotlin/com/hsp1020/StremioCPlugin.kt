@@ -205,6 +205,151 @@ class StremioCPlugin : Plugin() {
                 val prefs = appContext.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
                 val json = prefs.getString("stremio_saved_links", null) ?: "[]"
                 val arr = JSONArray(json)
+                val links = mutableListOf<String>()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    if (!obj.optBoolean("enabled", true)) continue
+                    val link = obj.optString("link", "")
+                    if (link.isNotBlank()) {
+                        links.add(link)
+                    }
+                }
+
+                val manifestPrefs = appContext.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
+                
+                val manifestFetchSemaphore = Semaphore(4)
+                coroutineScope {
+                    links.distinct().map { link ->
+                        launch {
+                            val currentUrl = stremioManifestUrl(link)
+                            val uniqueKey = stremioCatalogKey(link)
+                            if (manifestPrefs.contains(uniqueKey)) return@launch
+
+                            manifestFetchSemaphore.withPermit {
+                                try {
+                                    val responseText = com.lagradost.cloudstream3.app.get(currentUrl, timeout = 15L).text
+                                    if (responseText.isNotBlank()) {
+                                        val parsed = JSONObject(responseText)
+                                        if (parsed.has("catalogs")) {
+                                            synchronized(manifestPrefs) {
+                                                manifestPrefs.edit().putString(uniqueKey, responseText).commit()
+                                            }
+                                        }
+                                    }
+                                } catch (e: Throwable) {
+                                }
+                            }
+                        }
+                    }.joinAll()
+                }
+            } catch (e: Throwable) {
+            }
+        }
+
+        try {
+            registerMainAPI(StremioC("", "StremioC"))
+        } catch (e: Throwable) {
+        }
+        reload(appContext)
+        watchPinnedProviders(appContext)
+
+        // Only overlays existing MDBList emojis with bundled logos.
+        // No changes to MDBList fetching, metadata, stream URLs, subtitles or ranking.
+        ratingUiHandler.post {
+            runCatching { ratingPlotHook?.stop() }
+            ratingPlotHook = resources?.let { pluginResources ->
+                runCatching {
+                    RatingPlotImageHook(appContext, pluginResources) { target, snapshot ->
+                        (CommonActivity.activity as? AppCompatActivity)?.let { host ->
+                            openCatalogBrowser(host, target, snapshot)
+                        }
+                    }.also { it.start() }
+                }.getOrNull()
+            }
+        }
+        
+        openSettings = { currentContext ->
+            (currentContext.getActivity() as? AppCompatActivity)?.let { host ->
+                if (host.isFinishing || host.isDestroyed) return@let
+                activeBrowser?.dismiss()
+                activeSettingsDialog?.dismiss()
+                dismissProviderPicker(host)
+                val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
+                lateinit var settings: SettingsBottomFragment
+                settings = SettingsBottomFragment(this, prefs, host)
+                activeSettingsDialog = settings
+                settings.show {
+                    if (activeSettingsDialog === settings) activeSettingsDialog = null
+                }
+            }
+        }
+    }
+
+    private fun openCatalogBrowser(
+        host: AppCompatActivity,
+        target: CatalogShortcutTarget? = null,
+        snapshot: CatalogHomeSnapshot? = null,
+        closeProviderPicker: Boolean = false
+    ) {
+        if (host.isFinishing || host.isDestroyed) return
+        val pluginResources = resources ?: return
+        activeBrowser?.dismiss()
+        activeSettingsDialog?.dismiss()
+        if (closeProviderPicker) dismissProviderPicker(host)
+        val prefs = host.applicationContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
+        lateinit var browser: CatalogBrowserDialog
+        // Cinemeta's built-in "top" catalog is not an AIOMetadata catalog.
+        val catalogTarget = if (target?.catalogId == "top" && !target.genre.isNullOrBlank())
+            target.copy(addonUrl = "https://v3-cinemeta.strem.io/manifest.json")
+        else target
+        browser = CatalogBrowserDialog(host, pluginResources, prefs, { url ->
+            APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull {
+                stremioManifestUrl(it.mainUrl.fixSourceUrl()) == stremioManifestUrl(url.fixSourceUrl())
+            }
+        }, catalogTarget, snapshot)
+        activeBrowser = browser
+        browser.show {
+            if (activeBrowser === browser) {
+                activeBrowser = null
+                activeSettingsDialog?.dismiss()
+                activeSettingsDialog = null
+            }
+        }
+    }
+
+    override fun beforeUnload() {
+        isUnloaded = true
+        reloadGeneration++
+        reloadScope.cancel()
+        pluginIoScope.cancel()
+        pinSourcesReady = false
+        pinSourcePrefs?.unregisterOnSharedPreferenceChangeListener(pinnedProviderListener)
+        pinSourcePrefs = null
+        pinStatePrefs = null
+        ratingUiHandler.post {
+            activeBrowser?.dismiss()
+            activeBrowser = null
+            activeSettingsDialog?.dismiss()
+            activeSettingsDialog = null
+            runCatching { ratingPlotHook?.stop() }
+            ratingPlotHook = null
+        }
+        super.beforeUnload()
+    }
+
+    fun reload(context: Context) {
+        if (isUnloaded) return
+        val appContext = context.applicationContext
+        val requestGeneration = ++reloadGeneration
+        reloadScope.launch {
+            reloadMutex.withLock {
+                if (isUnloaded || requestGeneration != reloadGeneration) return@withLock
+                pinSourcesReady = false
+                try {
+                val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
+                val json = prefs.getString(PREF_KEY_LINKS, null) ?: "[]"
+                
+                val arr = JSONArray(json)
                 val links = mutableListOf<LinkEntry>()
                 for (i in 0 until arr.length()) {
                     val obj = arr.optJSONObject(i) ?: continue
