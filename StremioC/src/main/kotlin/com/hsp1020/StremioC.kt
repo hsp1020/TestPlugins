@@ -3372,21 +3372,38 @@ open class StremioC(
                 noMapping = true
                 return@runSuspendCatching null
             }
-            val data = root.get("data") ?: return@runSuspendCatching null
-            val ids = data.get("mappings") ?: return@runSuspendCatching null
+            val data = root.get("data") ?: run {
+                p1("HOST_REJECT", "host=$host reason=missing-data")
+                return@runSuspendCatching null
+            }
+            val ids = data.get("mappings") ?: run {
+                p1("HOST_REJECT", "host=$host reason=missing-mappings")
+                return@runSuspendCatching null
+            }
             val resolvedKitsu = ids.get("kitsuId").intOrNull()?.takeIf { it > 0 }?.toString()
             val resolvedImdb = ids.get("imdbId").textOrNull()
-            if (byKitsu && resolvedKitsu != kitsuId) return@runSuspendCatching null
-            if ((byMal || imdbId == null && kitsuId == null && malLookupId != null && !byAniList) &&
-                ids.get("malId").intOrNull() != malLookupId) return@runSuspendCatching null
-            if (byAniList && ids.get("anilistId").intOrNull() != aniListLookupId)
+            if (byKitsu && resolvedKitsu != kitsuId) {
+                p1("HOST_REJECT", "host=$host reason=kitsu-id-mismatch")
                 return@runSuspendCatching null
+            }
+            if ((byMal || imdbId == null && kitsuId == null && malLookupId != null && !byAniList) &&
+                ids.get("malId").intOrNull() != malLookupId) {
+                p1("HOST_REJECT", "host=$host reason=mal-id-mismatch")
+                return@runSuspendCatching null
+            }
+            if (byAniList && ids.get("anilistId").intOrNull() != aniListLookupId) {
+                p1("HOST_REJECT", "host=$host reason=anilist-id-mismatch")
+                return@runSuspendCatching null
+            }
             if (imdbId != null && resolvedImdb != imdbId) {
                 p1("HOST_REJECT", "host=$host reason=imdb-mismatch response=$resolvedImdb")
                 return@runSuspendCatching null
             }
             if (resolvedKitsu == null && ids.get("malId").intOrNull() == null &&
-                ids.get("anilistId").intOrNull() == null) return@runSuspendCatching null
+                ids.get("anilistId").intOrNull() == null) {
+                p1("HOST_REJECT", "host=$host reason=no-anime-tracker-ids")
+                return@runSuspendCatching null
+            }
             // AIOStreams may return its first record if season matching fails.
             // Do not silently accept a different season for an IMDb episode.
             if (!byKitsu && !byMal && !byAniList && season != null && season > 1) {
