@@ -396,12 +396,20 @@ class SettingsBottomFragment(
 
     private fun EditText.activateTvInput(key: Int, event: KeyEvent): Boolean {
         if (key != KeyEvent.KEYCODE_DPAD_CENTER && key != KeyEvent.KEYCODE_ENTER &&
-            key != KeyEvent.KEYCODE_NUMPAD_ENTER || imeVisible(this)) return false
-        if (event.action == KeyEvent.ACTION_UP && !event.isCanceled && !performClick()) {
-            (hostContext.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
-                .showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+            key != KeyEvent.KEYCODE_NUMPAD_ENTER && key != KeyEvent.KEYCODE_BUTTON_A ||
+            imeVisible(this)) return false
+        if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) {
+            requestFocus()
+            performClick()
+            // CineStream opens its number editor explicitly. Do the same for TV:
+            // focusing alone must not pop up the keyboard on every D-pad movement.
+            post {
+                if (isAttachedToWindow && hasFocus() && !imeVisible(this))
+                    (hostContext.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                        .showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+            }
         }
-        return true
+        return event.action == KeyEvent.ACTION_UP || event.action == KeyEvent.ACTION_DOWN
     }
 
     private fun prepareInput(field: EditText) {
@@ -2410,6 +2418,7 @@ private fun showLanguageSelectDialog() {
         }
         dialogContainer.addView(rv)
 
+        lateinit var touchHelper: ItemTouchHelper
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.VH>() {
             var visibleTabs = mutableListOf<ConfigFlatTab>()
             
@@ -2439,8 +2448,11 @@ private fun showLanguageSelectDialog() {
                 }
                 val dragHandle = ImageView(context).apply {
                     setImageResource(android.R.drawable.ic_menu_sort_by_size)
+                    contentDescription = "Drag to reorder catalog"
+                    isClickable = true
                     isFocusable = false
                     layoutParams = LinearLayout.LayoutParams(dp(24), dp(24))
+                    makeTvCompatible()
                 }
                 
                 val etOrder = EditText(context).apply {
@@ -2474,7 +2486,14 @@ private fun showLanguageSelectDialog() {
                 normalizeTypeface(layout)
                 prepareControls(layout)
                 horizontalFocus(etOrder, checkbox)
-                return VH(layout, checkbox, etOrder, dragHandle)
+                return VH(layout, checkbox, etOrder, dragHandle).also { holder ->
+                    holder.dragHandle.setOnTouchListener { _, event ->
+                        if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN &&
+                            holder.adapterPosition != RecyclerView.NO_POSITION)
+                            touchHelper.startDrag(holder)
+                        false
+                    }
+                }
             }
 
             override fun onBindViewHolder(holder: VH, position: Int) {
@@ -2602,7 +2621,7 @@ private fun showLanguageSelectDialog() {
         rv.adapter = adapter
 
 
-        val touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
+        touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
             override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
                 val fromPos = viewHolder.adapterPosition
                 val toPos = target.adapterPosition
@@ -2757,7 +2776,9 @@ private fun showLanguageSelectDialog() {
                 setImageResource(android.R.drawable.ic_menu_sort_by_size)
                 layoutParams = LinearLayout.LayoutParams(dp(24), dp(24))
                 contentDescription = "Drag to reorder addon"
+                isClickable = true
                 isFocusable = false
+                makeTvCompatible()
             }
             val etOrder = EditText(parent.context).apply {
                 inputType = InputType.TYPE_CLASS_NUMBER
@@ -2886,6 +2907,37 @@ private fun showLanguageSelectDialog() {
                     listOf("btnEditAddon", "btnCatalogs", "btnConfigureAddon", "btnDelete", "switchAddonEnabled")
                 else listOf("btnEditAddon", "btnConfigureAddon", "btnDelete", "switchAddonEnabled")
                 val peers = peerIds.map { holder.itemView.findView<View>(it) }
+                holder.etOrder.setOnKeyListener { _, key, event ->
+                    if (imeVisible(holder.etOrder)) false
+                    else {
+                        val direction = when (key) {
+                            KeyEvent.KEYCODE_DPAD_UP -> -1
+                            KeyEvent.KEYCODE_DPAD_DOWN -> 1
+                            else -> 0
+                        }
+                        when {
+                            direction != 0 -> {
+                                val target = holder.adapterPosition + direction
+                                val recycler = holder.itemView.parent as? RecyclerView
+                                if (recycler == null || target !in items.indices) false else {
+                                    if (event.action == KeyEvent.ACTION_DOWN)
+                                        restoreRow(recycler, target) { row ->
+                                            (row as ViewGroup).getChildAt(1)
+                                        }
+                                    true
+                                }
+                            }
+                            key == KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                                val first = peers.firstOrNull { usable(it) }
+                                if (first == null) false else {
+                                    if (event.action == KeyEvent.ACTION_DOWN) first.requestFocus()
+                                    true
+                                }
+                            }
+                            else -> holder.etOrder.activateTvInput(key, event)
+                        }
+                    }
+                }
                 peers.forEachIndexed { column, control ->
                     control.setOnKeyListener { _, key, event ->
                         if (holder.adapterPosition == RecyclerView.NO_POSITION) return@setOnKeyListener false
@@ -2906,10 +2958,11 @@ private fun showLanguageSelectDialog() {
                             }
                         } else if (key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT) {
                             val step = if (key == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
-                            val target = generateSequence(column + step) { it + step }.takeWhile { it in peers.indices }
-                                .map { peers[it] }.firstOrNull { usable(it) }
-                            if (target == null) false else {
-                                if (event.action == KeyEvent.ACTION_DOWN) target.requestFocus()
+                            val target = if (key == KeyEvent.KEYCODE_DPAD_LEFT && column == 0)
+                                holder.etOrder else generateSequence(column + step) { it + step }
+                                .takeWhile { it in peers.indices }.map { peers[it] }.firstOrNull { usable(it) }
+                            if (!usable(target)) false else {
+                                if (event.action == KeyEvent.ACTION_DOWN) target?.requestFocus()
                                 true
                             }
                         } else false
