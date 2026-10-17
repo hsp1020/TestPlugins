@@ -342,12 +342,17 @@ internal class StremioAudioSelector {
         val languages = listOfNotNull(appLanguage, if (anime) "ja" else "en",
             "en".takeIf { anime }).map { it.lowercase(Locale.ROOT) }.distinct()
         val match = languages.firstNotNullOfOrNull { language ->
+            val iso3 = runCatching { Locale.forLanguageTag(language).getISO3Language() }.getOrNull()
             groups.firstNotNullOfOrNull { group ->
                 (0 until group.length).firstOrNull { i ->
-                    group.isTrackSupported(i) &&
-                        Locale.forLanguageTag(
-                            group.getTrackFormat(i).language.orEmpty().replace('_', '-')
-                        ).language.equals(language, ignoreCase = true)
+                    val trackLocale = Locale.forLanguageTag(
+                        group.getTrackFormat(i).language.orEmpty().replace('_', '-')
+                    )
+                    group.isTrackSupported(i) && (
+                        trackLocale.language.equals(language, ignoreCase = true) ||
+                            (iso3 != null &&
+                                runCatching { trackLocale.getISO3Language() }.getOrNull() == iso3)
+                    )
                 }?.let { group to it }
             }
         }
