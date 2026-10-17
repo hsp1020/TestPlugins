@@ -522,13 +522,22 @@ internal class StremioSubtitleController {
         val order = grouped.indices.sortedWith(
             compareBy<Int> { starts[langs[it]] ?: it }.thenBy { ranks[it] }.thenBy { it }
         )
-        if (order.indices.all { order[it] == it }) return true
+        // Change the displayed label only. Keep originalName and URL unchanged so
+        // CloudStream's grouping, selection and embedded track matching still work.
+        val names = grouped.indices.map { index ->
+            val group = grouped[index]
+            if (group.isNotEmpty() && group.all { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }) {
+                android.text.SpannedString("${group.first().originalName} (Embedded)")
+            } else texts[index + 1]
+        }
+        if (order.indices.all { order[it] == it } &&
+            names.indices.all { names[it] == texts[it + 1] }) return true
         val originalClick = list.onItemClickListener ?: return false
         val previouslySelected = list.checkedItemPosition
         @Suppress("UNCHECKED_CAST")
         val editable = adapter as ArrayAdapter<Spanned>
         editable.clear()
-        editable.addAll(listOf(texts.first()) + order.map { texts[it + 1] })
+        editable.addAll(listOf(texts.first()) + order.map { names[it] })
         list.onItemClickListener = AdapterView.OnItemClickListener { parent, view, position, id ->
             val originalPosition = if (position in 1..order.size) order[position - 1] + 1 else position
             originalClick.onItemClick(parent, view, originalPosition, id)
