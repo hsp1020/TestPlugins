@@ -1275,7 +1275,7 @@ internal class RatingPlotImageHook(
             if (active) return
             val model = ViewModelProvider(fragment)[ResultViewModel2::class.java]
             // The TV result fragment does not own the phone's sync panel/model.
-            val sync = if (fragment.javaClass.name.endsWith("ResultFragmentPhone"))
+            val sync = if (fragment is com.lagradost.cloudstream3.ui.result.ResultFragmentPhone)
                 ViewModelProvider(fragment)[SyncViewModel::class.java] else null
             syncModel = sync
             val owner = fragment.viewLifecycleOwner
