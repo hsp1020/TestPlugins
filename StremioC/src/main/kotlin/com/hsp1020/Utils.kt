@@ -1287,7 +1287,7 @@ internal class RatingPlotImageHook(
             val season = selectedSeason ?: return
             val url = pageUrl ?: return
             val isAnime = StremioC.animeAudioByUrl[url]
-                ?: StremioC.animeAudioByUrl[detailUrl]
+                ?: detailUrl?.let { StremioC.animeAudioByUrl[it] }
             if (seasons.size < 2 || isAnime != true || syncModel == null) {
                 if (p1Enabled) {
                     p1Reset("ineligible")
@@ -1358,7 +1358,7 @@ internal class RatingPlotImageHook(
                 }
                 data class Reply(val prefix: String, val id: String,
                     val status: SyncAPI.AbstractSyncStatus?, val total: Int?,
-                    val error: String?)
+                    val error: String?, val nativeAvailable: Boolean)
                 val replies = activeRepos.map { repo ->
                     async(Dispatchers.IO) {
                         val id = requested.getValue(repo.idPrefix)
@@ -1378,7 +1378,7 @@ internal class RatingPlotImageHook(
                             "status=${status?.status} progress=${status?.watchedEpisodes} " +
                             "total=$total statusOk=${result.isSuccess} metaOk=${meta.isSuccess} " +
                             "error=$error elapsedMs=${SystemClock.elapsedRealtime()-began}")
-                        Reply(repo.idPrefix, id, status, total, error)
+                        Reply(repo.idPrefix, id, status, total, error, result.getOrNull() != null)
                     }
                 }.awaitAll()
                 if (!p1Valid(gen, season)) {
@@ -1390,9 +1390,16 @@ internal class RatingPlotImageHook(
                     trace("P1_ABORT", "reason=no-tracker-status-or-metadata")
                     return@launch
                 }
-                p1Target = usable.associate { it.prefix to it.id }
-                p1Statuses = usable.associate { it.prefix to it.status!! }
-                p1Totals = usable.associate { it.prefix to it.total }
+                val primary = usable.firstOrNull { it.nativeAvailable }
+                if (primary == null) {
+                    trace("P1_ABORT", "reason=no-native-compatible-tracker-status")
+                    return@launch
+                }
+                // Core selects the first successful provider for its single panel.
+                val ordered = listOf(primary) + usable.filter { it.prefix != primary.prefix }
+                p1Target = ordered.associate { it.prefix to it.id }
+                p1Statuses = ordered.associate { it.prefix to it.status!! }
+                p1Totals = ordered.associate { it.prefix to it.total }
                 p1ReadOnly = usable.filter { row ->
                     val source = p1SourceCount
                     source != null && source > 0 && row.total != null &&
@@ -1401,7 +1408,6 @@ internal class RatingPlotImageHook(
                 trace("P1_TOTAL_VALIDATION", "sourceEpisodes=${p1SourceCount ?: "unknown"} " +
                     "providerTotals=$p1Totals readOnly=$p1ReadOnly " +
                     "rule=source-and-tracker-totals-must-match-if-known")
-                val primary = usable.first()
                 p1Primary = primary.prefix
                 val snapshot = primary.status!!
                 p1Initial = fields(snapshot)
@@ -1477,6 +1483,10 @@ internal class RatingPlotImageHook(
             // never redirect a write to a different season's anime entry.
             val targets = p1Target.toMap()
             val states = p1Statuses.toMap()
+            val totals = p1Totals.toMap()
+            val readOnly = p1ReadOnly.toSet()
+            val sourceCount = p1SourceCount
+            val editedScore = readyUser.score
             p1Saving = true
             saveButton?.isEnabled = false
             saveJob = scope.launch {
@@ -1492,11 +1502,11 @@ internal class RatingPlotImageHook(
                             val state = now.getOrNull() ?: if (now.isSuccess) item else null
                             if (state == null) return@async name to false
                             if (changedStatus) state.status = edited.status
-                            if (changedScore) state.score = readyUser.score
+                            if (changedScore) state.score = editedScore
                             if (changedProgress) state.watchedEpisodes = edited.watched
-                            val total = p1Totals[name] ?: state.maxEpisodes
-                            val source = p1SourceCount
-                            val valid = name !in p1ReadOnly &&
+                            val total = totals[name] ?: state.maxEpisodes
+                            val source = sourceCount
+                            val valid = name !in readOnly &&
                                 (source == null || source <= 0 || (total != null && total == source)) &&
                                 (state.watchedEpisodes ?: 0) >= 0 &&
                                 (total == null || total <= 0 || (state.watchedEpisodes ?: 0) <= total)
@@ -1504,7 +1514,7 @@ internal class RatingPlotImageHook(
                             android.util.Log.i(TAG, "event=P1_SAVE_RESULT session=$instance gen=$gen " +
                                 "season=$season provider=$name id=$id valid=$valid " +
                                 "success=${result?.getOrNull() == true} " +
-                                "readOnly=${name in p1ReadOnly} source=$source total=$total " +
+                                "readOnly=${name in readOnly} source=$source total=$total " +
                                 "error=${result?.exceptionOrNull()?.javaClass?.simpleName}")
                             name to (result?.getOrNull() == true)
                         }
