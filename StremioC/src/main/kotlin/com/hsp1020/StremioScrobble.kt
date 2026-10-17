@@ -121,11 +121,11 @@ internal class StremioScrobble(context: Context) {
 
 
     /** A single 15-second progress timer, independent of view drawing. */
-    private fun emit(event: String, item: Item, current: Media3Player? = player, played: Boolean? = null) {
+    private fun emit(event: String, item: Item, current: Media3Player? = player, played: Boolean? = null, refresh: Boolean = false) {
         if (lastEvent == "stop" ||
-            (event == "start" && (current?.isPlaying != true || lastEvent == "start")) ||
+            (event == "start" && (current?.isPlaying != true || !refresh && lastEvent == "start")) ||
             (event != "start" && lastEvent == null) ||
-            (event != "progress" && lastEvent == event)) return
+            (!refresh && event != "progress" && lastEvent == event)) return
 
         val (pos, duration) = progress(item, current)
         lastPosition = pos
@@ -176,9 +176,22 @@ internal class StremioScrobble(context: Context) {
         val current = player ?: return
         if (!current.isPlaying || lastEvent != "start") return
         val now = SystemClock.elapsedRealtime()
-        if (now - lastProgressAtMs < 15_000L) return
+        val elapsed = now - lastProgressAtMs
+        if (elapsed < 15_000L) return
         lastProgressAtMs = now
         val (pos, duration) = progress(item, current)
+        // Recover a seek if a host-specific player did not dispatch Media3 discontinuity.
+        // Normal playback, including high speed and stalls, stays on the progress path.
+        if (pos + 15_000L < lastPosition ||
+            pos - lastPosition > elapsed * 3 + 30_000L) {
+            seekPending = true
+            seekPosition = pos
+            seekAtMs = now
+            // AIOMetadata ignores progress for tracker scrobbles, but start updates
+            // Simkl's active session at the current position without pausing it.
+            emit("start", item, current, refresh = true)
+            return
+        }
         if (seekPending) {
             val elapsed = (SystemClock.elapsedRealtime() - seekAtMs).coerceAtLeast(0L)
             // Moving the seekbar past 80% is not continuous playback.
@@ -245,8 +258,15 @@ internal class StremioScrobble(context: Context) {
                         seekAtMs = SystemClock.elapsedRealtime()
                         seekPending = true
                         seekReport?.let(main::removeCallbacks)
-                        seekReport = Runnable { active?.let { emit("progress", it) } }
-                            .also { main.postDelayed(it, 750L) }
+                        seekReport = Runnable {
+                            seekReport = null
+                            if (active?.key == item.key && lastEvent != null && lastEvent != "stop") {
+                                // A seek during playback refreshes "watching now"; a paused
+                                // seek refreshes the saved resume position.
+                                val action = if (player?.isPlaying == true) "start" else "pause"
+                                emit(action, item, refresh = true)
+                            }
+                        }.also { main.postDelayed(it, 750L) }
                     }
                 }
                 null
