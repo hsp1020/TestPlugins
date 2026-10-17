@@ -1901,8 +1901,6 @@ internal class RatingPlotImageHook(
                 val providerTotals = replies.mapNotNull { it.third.first }.filter { it > 0 }
                 val commonTotal = if (!multi) providerTotals.maxOrNull()
                     else providerTotals.distinct().singleOrNull()
-                if (multi && commonTotal != null)
-                val offeredCount = StremioC.seasonEpisodeCountsByUrl[url]?.get(sn)
                 replies.forEach { (prefix, draft, count) ->
                     val target = statuses[prefix] ?: return@forEach
                     target.loading = false
