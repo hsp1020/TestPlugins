@@ -999,10 +999,75 @@ class SettingsBottomFragment(
         }
     }
 
+
+    // Temporary, passive IME diagnostics. Geometry and focus only; never log input text.
+    private fun tracePhoneIme(dialog: AlertDialog, content: View, kind: String) {
+        val decor = dialog.window?.decorView ?: return
+        val observer = decor.viewTreeObserver
+        val traceId = Integer.toHexString(System.identityHashCode(dialog))
+        var previous = ""
+        var emitted = 0
+        fun geometry(view: View?): String {
+            if (view == null || !view.isAttachedToWindow) return "na"
+            val p = IntArray(2)
+            view.getLocationOnScreen(p)
+            return p[0].toString() + "," + p[1] + "," + view.width + "," + view.height
+        }
+        fun capture(event: String) {
+            if (emitted >= 240 || !dialog.isShowing) return
+            val insets = ViewCompat.getRootWindowInsets(decor)
+            val ime = insets?.isVisible(WindowInsetsCompat.Type.ime())
+            val imeBottom = insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: -1
+            val frame = Rect()
+            decor.getWindowVisibleDisplayFrame(frame)
+            val focused = dialog.currentFocus
+            val scroll = content.parent as? View
+            val outer = scroll?.parent as? ViewGroup
+            val footer = outer?.takeIf { it.childCount > 1 }?.getChildAt(outer.childCount - 1)
+            val body = content.optional("catalogEditorScroll") ?: content.optional("catalogListBody")
+            val list = content.optional("rvLinks")
+            val owner = dialogOwners[dialog]
+            val details = "ime=" + ime + " inset=" + imeBottom +
+                " visible=" + frame.left + "," + frame.top + "," + frame.right + "," + frame.bottom +
+                " decor=" + geometry(decor) + " content=" + geometry(content) +
+                " outer=" + geometry(outer) + " body=" + geometry(body) +
+                " list=" + geometry(list) + " footer=" + geometry(footer) +
+                " outerScroll=" + (scroll?.scrollY ?: -1) +
+                " listScroll=" + ((list as? RecyclerView)?.computeVerticalScrollOffset() ?: -1) +
+                " focus=" + (focused?.javaClass?.simpleName ?: "none") + ":" + (focused?.id ?: -1) +
+                " focusRect=" + geometry(focused) +
+                " inputType=" + ((focused as? EditText)?.inputType ?: -1) +
+                " adjust=" + (dialog.window?.attributes?.softInputMode ?: -1) +
+                " owner=" + geometry(owner?.window?.decorView) +
+                " ownerFocus=" + (owner?.currentFocus?.javaClass?.simpleName ?: "none")
+            if (event == "LAYOUT" && details == previous) return
+            previous = details
+            emitted++
+            android.util.Log.i("StremioCSettingsIME",
+                "event=IME_TRACE kind=" + kind + " trace=" + traceId +
+                " stage=" + event + " seq=" + emitted + " " + details)
+        }
+        val layout = android.view.ViewTreeObserver.OnGlobalLayoutListener { capture("LAYOUT") }
+        val focus = android.view.ViewTreeObserver.OnGlobalFocusChangeListener { _, _ -> capture("FOCUS") }
+        val scrolling = android.view.ViewTreeObserver.OnScrollChangedListener { capture("SCROLL") }
+        observer.addOnGlobalLayoutListener(layout)
+        observer.addOnGlobalFocusChangeListener(focus)
+        observer.addOnScrollChangedListener(scrolling)
+        onClose(dialog) {
+            if (observer.isAlive) {
+                observer.removeOnGlobalLayoutListener(layout)
+                observer.removeOnGlobalFocusChangeListener(focus)
+                observer.removeOnScrollChangedListener(scrolling)
+            }
+        }
+        capture("SHOW")
+        decor.post { if (dialog.isShowing) capture("FIRST_FRAME") }
+    }
+
     private fun setupCustomDialog(
         dialog: AlertDialog, contentView: View, bodyView: View? = null, capDp: Int = 480,
         owner: Dialog = topDialog(), initialFocus: (() -> View?)? = null,
-        nativeIme: Boolean = false
+        nativeIme: Boolean = false, traceKind: String? = null
     ) {
         val parents = generateSequence(owner) { dialogOwners[it] }.toList()
         val origin = owner.currentFocus
@@ -1064,6 +1129,7 @@ class SettingsBottomFragment(
         // Input dialogs rely on Android's native IME resize, not fitDialog().
         if (root != null && !nativeIme) fitDialog(dialog, root, body, capDp)
         dialog.setOnShowListener {
+            if (nativeIme && traceKind != null) tracePhoneIme(dialog, contentView, traceKind)
             if (nativeIme) {
                 dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
                 dialog.window?.setLayout(
@@ -1897,6 +1963,11 @@ class SettingsBottomFragment(
         content.background = getDarkThemeBg()
         val rv = content.findView<RecyclerView>("rvLinks")
         rv.layoutManager = LinearLayoutManager(ctx)
+        // List itself receives initial phone focus; number fields open the IME only on tap.
+        if (!isLayout(TV)) {
+            rv.isFocusableInTouchMode = true
+            rv.descendantFocusability = ViewGroup.FOCUS_BEFORE_DESCENDANTS
+        }
         val empty = content.findView<TextView>("tvNoLinks").apply {
             text = if (sources) "No stream / subtitle addons" else "No saved catalogs"
         }
@@ -2017,7 +2088,8 @@ class SettingsBottomFragment(
         rv.addOnLayoutChangeListener(listener)
         onClose(dialog) { rv.removeOnLayoutChangeListener(listener) }
         setupCustomDialog(dialog, content, content.optional("catalogListBody") ?: rv, 600,
-            initialFocus = { if (adapter.itemCount == 0) add else rv }, nativeIme = nativeIme)
+            initialFocus = { if (adapter.itemCount == 0) add else rv }, nativeIme = nativeIme,
+            traceKind = if (sources) "source-list" else "catalog-list")
         add.setOnClickListener { edit(null, 0) }
         close.setOnClickListener { dialog.dismiss() }
         dialog.show()
@@ -2067,7 +2139,8 @@ class SettingsBottomFragment(
         dialogView.addView(popupButtons(close, save))
         val dlg = AlertDialog.Builder(ctx).setView(nativeEditorImeView(dialogView)).create()
         setupCustomDialog(dlg, dialogView, dialogView.optional("catalogEditorScroll"), 600, owner,
-            initialFocus = { if (urlError != null) url else name }, nativeIme = !isLayout(TV))
+            initialFocus = { if (urlError != null) url else name }, nativeIme = !isLayout(TV),
+            traceKind = if (sources) "source-editor" else "catalog-editor")
         save.setOnClickListener {
             if (!alive(dlg) || !save.isEnabled) return@setOnClickListener
             val raw = url.text.toString().trim()

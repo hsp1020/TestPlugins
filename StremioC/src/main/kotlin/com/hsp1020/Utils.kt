@@ -1409,7 +1409,7 @@ internal class RatingPlotImageHook(
         }
 
         /** Season-exact TVDB episode map; never inferred from a title's total count. */
-        private data class AnimeSlot(val simkl: Int, val native: Int, val tvdbEpisode: Int) {
+        private data class AnimeSlot(val simkl: Int, val native: Int, val tvdbSeason: Int, val tvdbEpisode: Int) {
             val key get() = "$simkl:$native"
         }
         private data class AnimeSnapshot(
@@ -1517,7 +1517,7 @@ internal class RatingPlotImageHook(
                             val tvdb=ep?.optJSONObject("tvdb")
                             val season=jsonInt(tvdb,"season") ?: 0
                             val episode=jsonInt(tvdb,"episode") ?: 0
-                            AnimeSlot(id,native,if(season==tvdbSeason)episode else 0)
+                            AnimeSlot(id,native,season,episode)
                         }
                         if(found.map { it.native }.distinct().size != found.size)
                             throw IllegalStateException("duplicate-native-episodes")
@@ -1528,7 +1528,7 @@ internal class RatingPlotImageHook(
                         val correctParent=jsonInt(ids,"tvdb")==tvdbId ||
                             id in tvdbSearchMatches || (direct && malMatched)
                         if(!correctParent)continue
-                        val subset=row.filter { it.tvdbEpisode > 0 }
+                        val subset=row.filter { it.tvdbSeason == tvdbSeason && it.tvdbEpisode > 0 }
                         if(subset.isNotEmpty()){
                             slots+=subset
                             validated+=id
