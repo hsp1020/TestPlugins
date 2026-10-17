@@ -54,6 +54,7 @@ import androidx.fragment.app.FragmentManager
 import androidx.appcompat.app.AlertDialog
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
+import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.ui.result.ActorAdaptor
