@@ -23,6 +23,20 @@ import org.json.JSONObject
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.SubtitleHelper
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import android.os.SystemClock
+import com.lagradost.cloudstream3.Score
+import com.lagradost.cloudstream3.syncproviders.AccountManager
+import com.lagradost.cloudstream3.syncproviders.SyncAPI
+import com.lagradost.cloudstream3.ui.SyncWatchType
 import java.util.Locale
 import kotlin.math.round
 import android.app.Activity
@@ -1205,7 +1219,7 @@ internal class RatingPlotImageHook(
      * P0-only season synchronization trace. It never modifies the core season picker,
      * SyncViewModel IDs or tracking accounts. Observers are explicitly removed on detach.
      */
-    private class SeasonSyncProbe(private val fragment: Fragment, private val detailUrl: String?) {
+    private class SeasonSyncProbe(private val fragment: Fragment, private val root: View, private val detailUrl: String?) {
         private companion object {
             const val TAG = "STCSeasonSync"
             val IMDB = Regex("tt\\d+")
@@ -1221,6 +1235,277 @@ internal class RatingPlotImageHook(
         private var selectedSeason: Int? = null
         private var lastPending: String? = null
         private var syncModel: SyncViewModel? = null
+        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        private var lookupJob: Job? = null
+        private var saveJob: Job? = null
+        private var p1Enabled = false
+        private var p1Target: Map<String, String> = emptyMap()
+        private var p1Statuses: Map<String, SyncAPI.AbstractSyncStatus> = emptyMap()
+        private var p1Totals: Map<String, Int?> = emptyMap()
+        private var p1Primary: String? = null
+        private var p1Initial: Fields? = null
+        private var p1TrustedUser: SyncAPI.AbstractSyncStatus? = null
+        private var p1Saving = false
+        private val saveButton by lazy(LazyThreadSafetyMode.NONE) {
+            root.findViewById<View>(R.id.result_sync_set_score)
+        }
+
+        private data class Fields(
+            val status: SyncWatchType,
+            val watched: Int?,
+            val rating: Int?
+        )
+        private fun fields(item: SyncAPI.AbstractSyncStatus) =
+            Fields(item.status, item.watchedEpisodes, item.score?.toInt(100))
+
+        private fun p1Valid(gen: Long, target: Int): Boolean =
+            active && generation == gen && selectedSeason == target && p1Enabled
+
+        private fun p1GuardClick() {
+            // Replace only the Save action of the native panel, not its visuals or inputs.
+            saveButton?.setOnClickListener { p1Save() }
+            trace("P1_SAVE_GUARD", "ready=${p1TrustedUser != null} primary=${p1Primary ?: "none"}")
+        }
+
+        private fun p1Reset(reason: String) {
+            lookupJob?.cancel()
+            lookupJob = null
+            p1Target = emptyMap()
+            p1Statuses = emptyMap()
+            p1Totals = emptyMap()
+            p1Primary = null
+            p1Initial = null
+            p1TrustedUser = null
+            trace("P1_RESET", "reason=$reason")
+        }
+
+        private fun p1SelectionChanged() {
+            val season = selectedSeason ?: return
+            val url = pageUrl ?: return
+            val isAnime = StremioC.animeAudioByUrl[url]
+                ?: StremioC.animeAudioByUrl[detailUrl]
+            if (seasons.size < 2 || isAnime != true || syncModel == null) {
+                if (p1Enabled) {
+                    p1Reset("ineligible")
+                    syncModel?.clear()
+                }
+                p1Enabled = false
+                trace("P1_ELIGIBILITY", "enabled=false seasons=${seasons.size} anime=$isAnime " +
+                    "syncModel=${syncModel != null}")
+                return
+            }
+            p1Enabled = true
+            val imdb = IMDB.find(url)?.value ?: IMDB.find(detailUrl.orEmpty())?.value
+            p1Reset("season-selection")
+            p1GuardClick()
+            // While a mapping is unresolved, remove the unscoped IMDb/Simkl sync
+            // target. Never allow native Save to write a different season.
+            syncModel?.clear()
+            val providerName = fragment.arguments?.getString("apiName")
+            val provider = APIHolder.allProviders.filterIsInstance<StremioC>()
+                .firstOrNull { it.name == providerName }
+                ?: APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull()
+            trace("P1_ELIGIBILITY", "enabled=true imdb=${imdb ?: "none"} " +
+                "provider=${provider?.name ?: "none"} anime=$isAnime")
+            if (imdb == null || provider == null) {
+                trace("P1_ABORT", "reason=missing-imdb-or-provider")
+                return
+            }
+            val gen = generation
+            lookupJob = scope.launch {
+                val started = SystemClock.elapsedRealtime()
+                trace("P1_MAPPING_START", "imdb=$imdb targetSeason=$season")
+                val mapped = try {
+                    withContext(Dispatchers.IO) { provider.seasonTrackerIds(imdb, season) }
+                } catch (e: CancellationException) {
+                    trace("P1_MAPPING_CANCEL", "targetSeason=$season")
+                    throw e
+                } catch (e: Exception) {
+                    trace("P1_MAPPING_ERROR", "error=${e.javaClass.simpleName}")
+                    null
+                }
+                if (!p1Valid(gen, season)) {
+                    trace("P1_STALE_SKIP", "phase=mapping targetSeason=$season token=$gen")
+                    return@launch
+                }
+                trace("P1_MAPPING_RESULT", "imdb=$imdb targetSeason=$season " +
+                    "mal=${mapped?.mal} anilist=${mapped?.aniList} kitsu=${mapped?.kitsu} " +
+                    "elapsedMs=${SystemClock.elapsedRealtime()-started}")
+                if (mapped == null) {
+                    trace("P1_ABORT", "reason=no-verified-season-mapping targetSeason=$season")
+                    return@launch
+                }
+                val requested = linkedMapOf<String, String>().apply {
+                    mapped.mal?.let { put(AccountManager.malApi.idPrefix, it.toString()) }
+                    mapped.aniList?.let { put(AccountManager.aniListApi.idPrefix, it.toString()) }
+                    mapped.kitsu?.let { put(AccountManager.kitsuApi.idPrefix, it.toString()) }
+                }
+                // Never use the generic IMDb-based Simkl ID for P1 seasonal anime sync.
+                val repos = AccountManager.syncApis.filter { requested.containsKey(it.idPrefix) }
+                val activeRepos = repos.filter { it.authUser() != null }
+                trace("P1_SERVICE_PLAN", "mapped=$requested accountReady=${activeRepos.map { it.idPrefix }} " +
+                    "excludedSimkl=true")
+                if (activeRepos.isEmpty()) {
+                    trace("P1_ABORT", "reason=no-connected-mapped-trackers")
+                    return@launch
+                }
+                data class Reply(val prefix: String, val id: String,
+                    val status: SyncAPI.AbstractSyncStatus?, val total: Int?,
+                    val error: String?)
+                val replies = activeRepos.map { repo ->
+                    async(Dispatchers.IO) {
+                        val id = requested.getValue(repo.idPrefix)
+                        val began = SystemClock.elapsedRealtime()
+                        val result = repo.status(id)
+                        val meta = repo.load(id)
+                        // A null status can mean the title is not yet in the user's list.
+                        // Create a new, empty state only when the title ID itself is valid.
+                        val total = meta.getOrNull()?.totalEpisodes
+                        val status = result.getOrNull() ?: if (result.isSuccess && meta.getOrNull() != null)
+                            SyncAPI.SyncStatus(SyncWatchType.NONE, null, 0, maxEpisodes = total)
+                            else null
+                        val error = result.exceptionOrNull()?.javaClass?.simpleName
+                            ?: meta.exceptionOrNull()?.javaClass?.simpleName
+                        android.util.Log.i(TAG, "event=P1_SERVICE_LOOKUP session=$instance gen=$gen " +
+                            "season=$season provider=${repo.idPrefix} id=$id " +
+                            "status=${status?.status} progress=${status?.watchedEpisodes} " +
+                            "total=$total statusOk=${result.isSuccess} metaOk=${meta.isSuccess} " +
+                            "error=$error elapsedMs=${SystemClock.elapsedRealtime()-began}")
+                        Reply(repo.idPrefix, id, status, total, error)
+                    }
+                }.awaitAll()
+                if (!p1Valid(gen, season)) {
+                    trace("P1_STALE_SKIP", "phase=status targetSeason=$season token=$gen")
+                    return@launch
+                }
+                val usable = replies.filter { it.status != null }
+                if (usable.isEmpty()) {
+                    trace("P1_ABORT", "reason=no-tracker-status-or-metadata")
+                    return@launch
+                }
+                p1Target = usable.associate { it.prefix to it.id }
+                p1Statuses = usable.associate { it.prefix to it.status!! }
+                p1Totals = usable.associate { it.prefix to it.total }
+                val primary = usable.first()
+                p1Primary = primary.prefix
+                val snapshot = primary.status!!
+                p1Initial = fields(snapshot)
+                trace("P1_NATIVE_TARGET", "primary=${primary.prefix} id=${primary.id} " +
+                    "all=$p1Target baseline=$p1Initial before=${idSummary(syncModel?.getSyncs().orEmpty())}")
+                syncModel?.setSync(primary.prefix, primary.id)
+                syncModel?.updateSynced()
+                syncModel?.updateUserData()
+                p1GuardClick()
+            }
+        }
+
+        private fun p1OnUser(value: Resource<SyncAPI.AbstractSyncStatus>?) {
+            if (!p1Enabled || p1Primary == null) return
+            val item = (value as? Resource.Success)?.value ?: return
+            val expected = p1Initial ?: return
+            if (p1TrustedUser == null) {
+                // Existing host requests can complete after a season change.
+                if (fields(item) != expected || item is com.lagradost.cloudstream3.syncproviders.providers.SimklApi.SimklSyncStatus) {
+                    trace("P1_NATIVE_UNTRUSTED", "actual=${fields(item)} expected=$expected " +
+                        "type=${item.javaClass.simpleName}")
+                    return
+                }
+                p1TrustedUser = item
+                trace("P1_NATIVE_READY", "primary=$p1Primary initial=$expected")
+            } else if (p1TrustedUser !== item) {
+                trace("P1_NATIVE_REPLACED", "reason=unexpected-new-status-instance " +
+                    "old=${System.identityHashCode(p1TrustedUser)} new=${System.identityHashCode(item)}")
+                p1TrustedUser = null
+                return
+            }
+            val wantedTotal = p1Totals[p1Primary]
+            if (wantedTotal != null && wantedTotal > 0 && item.maxEpisodes != wantedTotal) {
+                item.maxEpisodes = wantedTotal
+                trace("P1_TOTAL_APPLY", "service=$p1Primary total=$wantedTotal " +
+                    "watched=${item.watchedEpisodes}")
+                // Host observes the result; republish through its public mutation API
+                // without modifying any external account.
+                syncModel?.setEpisodes(item.watchedEpisodes ?: 0)
+            }
+        }
+
+        private fun p1Save() {
+            val sync = syncModel ?: return
+            val gen = generation
+            val season = selectedSeason ?: return
+            val prefix = p1Primary
+            val trusted = p1TrustedUser
+            val live = (sync.userData.value as? Resource.Success)?.value
+            val base = p1Initial
+            val correctTarget = prefix != null && sync.getSyncs() == mapOf(prefix to p1Target[prefix])
+            trace("P1_SAVE_ATTEMPT", "primary=$prefix mapped=$p1Target " +
+                "ready=${trusted != null} identical=${live === trusted} " +
+                "correctTarget=$correctTarget saving=$p1Saving")
+            if (!p1Valid(gen, season) || p1Saving || !correctTarget || base == null ||
+                trusted == null || live !== trusted || p1Statuses.isEmpty()) {
+                trace("P1_SAVE_BLOCK", "reason=unresolved-stale-or-busy")
+                return
+            }
+            val edited = fields(live!!)
+            val changedStatus = edited.status != base.status
+            val changedScore = edited.rating != base.rating
+            val changedProgress = edited.watched != base.watched
+            trace("P1_SAVE_DIFF", "before=$base after=$edited status=$changedStatus " +
+                "score=$changedScore progress=$changedProgress")
+            if (!changedStatus && !changedScore && !changedProgress) {
+                trace("P1_SAVE_NOOP", "reason=no-changed-fields")
+                return
+            }
+            // Capture immutable ids before asynchronous work. Changing season must
+            // never redirect a write to a different season's anime entry.
+            val targets = p1Target.toMap()
+            val states = p1Statuses.toMap()
+            p1Saving = true
+            saveButton?.isEnabled = false
+            saveJob = scope.launch {
+                try {
+                    val results = targets.map { (name, id) ->
+                        async(Dispatchers.IO) {
+                            val repo = AccountManager.syncApis.firstOrNull { it.idPrefix == name }
+                            val item = states[name]
+                            if (repo == null || item == null) return@async name to false
+                            // Each provider has its own original status object. Never pass
+                            // one service's status instance to another provider.
+                            val now = repo.status(id)
+                            val state = now.getOrNull() ?: if (now.isSuccess) item else null
+                            if (state == null) return@async name to false
+                            if (changedStatus) state.status = edited.status
+                            if (changedScore) state.score = live.score
+                            if (changedProgress) state.watchedEpisodes = edited.watched
+                            val total = p1Totals[name] ?: state.maxEpisodes
+                            val valid = (state.watchedEpisodes ?: 0) >= 0 &&
+                                (total == null || total <= 0 || (state.watchedEpisodes ?: 0) <= total)
+                            val result = if (valid) repo.updateStatus(id, state) else null
+                            android.util.Log.i(TAG, "event=P1_SAVE_RESULT session=$instance gen=$gen " +
+                                "season=$season provider=$name id=$id valid=$valid " +
+                                "success=${result?.getOrNull() == true} " +
+                                "error=${result?.exceptionOrNull()?.javaClass?.simpleName}")
+                            name to (result?.getOrNull() == true)
+                        }
+                    }.awaitAll().toMap()
+                    trace("P1_SAVE_COMPLETE", "targetSeason=$season token=$gen results=$results " +
+                        "stillCurrent=${p1Valid(gen,season)}")
+                    if (p1Valid(gen, season)) {
+                        // Re-resolve account state on the next selection. Do not keep
+                        // mutated old service snapshots after partial saves.
+                        p1Initial = fields(live)
+                    }
+                } catch (e: CancellationException) {
+                    trace("P1_SAVE_CANCEL", "targetSeason=$season token=$gen")
+                    throw e
+                } catch (e: Exception) {
+                    trace("P1_SAVE_FAILURE", "error=${e.javaClass.simpleName}")
+                } finally {
+                    p1Saving = false
+                    saveButton?.isEnabled = true
+                }
+            }
+        }
 
         private fun key(url: String?): String =
             url?.let { Integer.toHexString(it.hashCode()) } ?: "null"
@@ -1266,9 +1551,9 @@ internal class RatingPlotImageHook(
             trace(if (previous == null) "SEASON_INITIAL" else "SEASON_CHANGED",
                 "origin=$origin previous=${previous ?: "none"} index=$index " +
                 "seasonList=$seasons imdb=${imdb ?: "unknown"} sourceHash=${key(detailUrl)}")
-            trace("SYNC_TARGET_P0", "imdb=${imdb ?: "unknown"} selected=$selected " +
-                "ids=${syncModel?.getSyncs()?.let(::idSummary) ?: "tv-or-unavailable"} " +
-                "lookup=not_started write=disabled")
+            trace("P1_SEASON_TARGET", "imdb=${imdb ?: "unknown"} selected=$selected " +
+                "ids=${syncModel?.getSyncs()?.let(::idSummary) ?: "tv-or-unavailable"}")
+            p1SelectionChanged()
         }
 
         fun start() {
@@ -1338,6 +1623,7 @@ internal class RatingPlotImageHook(
                         else -> "empty"
                     }
                     trace("SYNC_USER", "result=$detail ids=${idSummary(sync.getSyncs())}")
+                    p1OnUser(value)
                 }
                 listen(sync.metadata, owner) { value ->
                     val detail = when (value) {
@@ -1360,6 +1646,12 @@ internal class RatingPlotImageHook(
             if (!active) return
             active = false
             generation++ // Invalidate any in-flight future season-mapping work.
+            trace("P1_DETACH", "managed=$p1Enabled targets=$p1Target " +
+                "mappingActive=${lookupJob?.isActive} savingActive=${saveJob?.isActive}")
+            lookupJob?.cancel()
+            saveJob?.cancel()
+            scope.cancel()
+            if (p1Enabled) syncModel?.clear()
             trace("DETACH", "observers=${cleanup.size} index=${index ?: "null"} numbers=$seasons")
             cleanup.forEach { it() }
             cleanup.clear()
@@ -1369,7 +1661,7 @@ internal class RatingPlotImageHook(
 
     private inner class Watcher(private val view: TextView, private val root: View, private val detailUrl: String?, private val fragment: Fragment) : TextWatcher {
         private val backdrop = DetailBackdropLayout(root, detailUrl)
-        private val seasonSyncProbe = SeasonSyncProbe(fragment, detailUrl)
+        private val seasonSyncProbe = SeasonSyncProbe(fragment, root, detailUrl)
         private val trailers = TrailerChooser(fragment, root, detailUrl)
         private var changing = false
 
