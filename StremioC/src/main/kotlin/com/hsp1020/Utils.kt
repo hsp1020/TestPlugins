@@ -1623,9 +1623,35 @@ internal class RatingPlotImageHook(
                             statuses["simkl"]?.simklSeason = simklExact
                         val verifiedAnime = if (multi && isAnime == true &&
                             repo.idPrefix == "simkl") {
-                            val exactEpisodes = (remote as? SimklApi.SimklSyncStatus)
-                                ?.episodeConstructor?.getEpisodes()
-                            exactEpisodes != null && exactEpisodes.isNotEmpty() &&
+                            // A matching episode count alone does not prove that two
+                            // IMDb seasons have different Simkl anime entries.
+                            // Require the returned Simkl anime to carry the exact
+                            // season-specific MAL ID, not a broad IMDb match.
+                            val mal = simklIds(id)?.optString("mal")
+                            val exactMalEntry = if (mal.isNullOrBlank()) false else try {
+                                val headers = SimklApi.getHeaders(repo.authToken()
+                                    ?: throw IllegalStateException("no-account"))
+                                val search = app.get("https://api.simkl.com/search/id",
+                                    params = mapOf("mal" to mal),
+                                    headers = headers)
+                                val records = JSONArray(search.text)
+                                val matching = (0 until records.length())
+                                    .mapNotNull { records.optJSONObject(it) }
+                                    .filter { it.optString("type") == "anime" &&
+                                        it.optJSONObject("ids")?.optString("mal") == mal }
+                                Log.i(TAG, "event=SIMKL_P4_ID session=$session gen=$gen " +
+                                    "season=$sn mal=$mal http=${search.code} exact=${matching.size}")
+                                search.code in 200..299 && matching.size == 1
+                            } catch (e: CancellationException) { throw e }
+                              catch (e: Exception) {
+                                Log.w(TAG,"event=SIMKL_P4_ID_FAIL session=$session gen=$gen " +
+                                    "season=$sn mal=$mal cause=${e.javaClass.simpleName}")
+                                false
+                              }
+                            val exactEpisodes = if (exactMalEntry)
+                                (remote as? SimklApi.SimklSyncStatus)
+                                    ?.episodeConstructor?.getEpisodes() else null
+                            exactMalEntry && exactEpisodes != null && exactEpisodes.isNotEmpty() &&
                                 exactEpisodes.all { it.season == null } &&
                                 remote?.maxEpisodes == exactEpisodes.size
                         } else false
