@@ -1260,7 +1260,8 @@ internal class RatingPlotImageHook(
             val seasonNumber: Int,
             val available: List<Int>,
             val watched: Set<Int>,
-            val otherSeasons: Map<Int, Set<Int>>
+            val otherSeasons: Map<Int, Set<Int>>,
+            val listStatus: SyncWatchType?
         )
 
         private fun simklIds(id: String): JSONObject? {
@@ -1325,9 +1326,11 @@ internal class RatingPlotImageHook(
                     parsed[n] = all.sorted() to viewed
                 }
                 val chosen = parsed[requested]
+                val listStatus = record?.takeIf { it.has("list") }
+                    ?.let { simklWatchlistStatus(it.opt("list")) }
                 val result = if (!malformed && chosen != null && chosen.first.isNotEmpty())
                     SimklSeasonSnapshot(ids, requested, chosen.first, chosen.second,
-                        parsed.filterKeys { it != requested }.mapValues { it.value.second })
+                        parsed.filterKeys { it != requested }.mapValues { it.value.second }, listStatus)
                 else null
                 result
             } catch (e: CancellationException) { throw e }
@@ -1336,59 +1339,138 @@ internal class RatingPlotImageHook(
               }
         }
 
+        /**
+         * A regular TV show has one watchlist status for the whole Simkl title.
+         * Only +/- applies to the selected season; neither path remaps its ID.
+         */
         private suspend fun simklSeasonSave(
             tracker: Tracker, draft: Draft, baseline: Draft, sn: Int
         ): Boolean {
             val initial = tracker.simklSeason ?: return false
-            if (draft.score != baseline.score ||
-                (draft.status != baseline.status &&
-                    !(baseline.status == SyncWatchType.NONE &&
-                      draft.status == SyncWatchType.WATCHING && draft.watched > 0))) {
+            if (draft.score != baseline.score || draft.watched !in 0..initial.available.size)
                 return false
-            }
-            if (draft.watched !in 0..initial.available.size) return false
-            val countDiff = draft.watched - initial.watched.size
-            if (countDiff == 0) return true
-            val delta = if (countDiff > 0)
-                initial.available.filterNot { it in initial.watched }.take(countDiff)
-            else initial.available.filter { it in initial.watched }.takeLast(-countDiff)
-            if (delta.size != kotlin.math.abs(countDiff)) return false
-            val expected = if (countDiff > 0) initial.watched + delta
-                else initial.watched - delta.toSet()
-            val scope = JSONObject().put("ids", initial.ids)
-                .put("seasons", JSONArray().put(JSONObject()
-                    .put("number",sn).put("episodes", JSONArray().also { arr ->
-                        delta.forEach { arr.put(JSONObject().put("number",it)) }
-                    })))
-            val body = JSONObject().put("shows",JSONArray().put(scope)).toString()
-            val api = if (countDiff > 0) "history" else "history/remove"
             val headers = SimklApi.getHeaders(tracker.repo.authToken() ?: return false) +
                 mapOf("content-type" to "application/json")
-            val response = try { app.post("https://api.simkl.com/sync/$api",
-                headers=headers, requestBody=body.toRequestBody()) }
-                catch (e: Exception) {
+            val url = "https://api.simkl.com/sync/"
+            if (draft.status == SyncWatchType.NONE && draft.explicitNone) {
+                // None removes the entire show, not just the selected season.
+                val body = JSONObject().put("shows", JSONArray().put(
+                    JSONObject().put("ids", initial.ids)))
+                val response = try {
+                    app.post(url + "history/remove", headers = headers,
+                        requestBody = body.toString().toRequestBody())
+                } catch (e: CancellationException) { throw e }
+                  catch (e: Exception) { return false }
+                if (response.code !in 200..299) return false
+                val removed = runCatching { JSONObject(response.text) }.getOrNull()
+                    ?: return false
+                if ((removed.optJSONObject("not_found")?.optJSONArray("shows")?.length() ?: 0) > 0)
                     return false
+                for (attempt in 1..3) {
+                    if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
+                    val check = try {
+                        app.get(url + "all-items/shows", headers = headers, cacheTime = 0)
+                    } catch (e: CancellationException) { throw e }
+                      catch (e: Exception) { continue }
+                    if (check.code !in 200..299) continue
+                    val bodyJson = runCatching { JSONObject(check.text) }.getOrNull()
+                        ?: continue
+                    val shows = bodyJson.optJSONArray("shows")
+                    if (bodyJson.has("shows") && shows == null) continue
+                    val present = (0 until (shows?.length() ?: 0)).any { i ->
+                        val itemIds = shows?.optJSONObject(i)?.optJSONObject("show")
+                            ?.optJSONObject("ids") ?: return@any false
+                        initial.ids.keys().asSequence().any { key ->
+                            itemIds.has(key) &&
+                                itemIds.optString(key) == initial.ids.optString(key)
+                        }
+                    }
+                    if (!present) {
+                        tracker.simklSeason = initial.copy(
+                            watched = emptySet(), otherSeasons = emptyMap(),
+                            listStatus = SyncWatchType.NONE)
+                        return true
+                    }
                 }
-            val missing = runCatching { JSONObject(response.text)
-                .optJSONObject("not_found")?.optJSONArray("shows")?.length() ?: 0
-                }.getOrDefault(-1)
-            if (response.code !in 200..299 || missing != 0) {
                 return false
             }
-            for (attempt in 1..3) {
-                if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
-                val current = simklSeasonRead(tracker.repo, tracker.id, sn)
-                val sameOther = current != null &&
-                    initial.otherSeasons.all { (key, seen) ->
-                        current.otherSeasons[key] == seen
+
+            val countDiff = draft.watched - initial.watched.size
+            val autoWatching = baseline.status == SyncWatchType.NONE &&
+                draft.status == SyncWatchType.WATCHING && countDiff > 0
+            val statusChanged = draft.status != baseline.status && !autoWatching
+            if (statusChanged && (initial.listStatus == null ||
+                    simklWatchlistDestination(draft.status) == null)) return false
+            if (countDiff == 0 && !statusChanged) return true
+
+            if (countDiff != 0) {
+                val delta = if (countDiff > 0)
+                    initial.available.filterNot { it in initial.watched }.take(countDiff)
+                else initial.available.filter { it in initial.watched }.takeLast(-countDiff)
+                if (delta.size != kotlin.math.abs(countDiff)) return false
+                val expected = if (countDiff > 0) initial.watched + delta
+                    else initial.watched - delta.toSet()
+                val scope = JSONObject().put("ids", initial.ids)
+                    .put("seasons", JSONArray().put(JSONObject()
+                        .put("number", sn).put("episodes", JSONArray().also { arr ->
+                            delta.forEach { arr.put(JSONObject().put("number", it)) }
+                        })))
+                val endpoint = if (countDiff > 0) "history" else "history/remove"
+                val response = try {
+                    app.post(url + endpoint, headers = headers,
+                        requestBody = JSONObject().put("shows", JSONArray().put(scope))
+                            .toString().toRequestBody())
+                } catch (e: CancellationException) { throw e }
+                  catch (e: Exception) { return false }
+                val missing = runCatching {
+                    JSONObject(response.text).optJSONObject("not_found")
+                        ?.optJSONArray("shows")?.length() ?: 0
+                }.getOrDefault(-1)
+                if (response.code !in 200..299 || missing != 0) return false
+                var confirmed = false
+                for (attempt in 1..3) {
+                    if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
+                    val current = simklSeasonRead(tracker.repo, tracker.id, sn)
+                    confirmed = current?.watched == expected &&
+                        initial.otherSeasons.all { (key, seen) ->
+                            current.otherSeasons[key] == seen
+                        }
+                    if (confirmed) {
+                        tracker.simklSeason = current
+                        break
                     }
-                val exact = current?.watched == expected
-                if (exact && sameOther) {
-                    tracker.simklSeason = current
-                    return true
                 }
+                if (!confirmed) return false
             }
-            return false
+
+            if (statusChanged) {
+                val destination = simklWatchlistDestination(draft.status) ?: return false
+                val payload = JSONObject().put("to", destination).put("shows",
+                    JSONArray().put(JSONObject().put("ids", initial.ids)))
+                val response = try {
+                    app.post(url + "add-to-list", headers = headers,
+                        requestBody = payload.toString().toRequestBody())
+                } catch (e: CancellationException) { throw e }
+                  catch (e: Exception) { return false }
+                if (response.code !in 200..299) return false
+                val result = runCatching { JSONObject(response.text) }.getOrNull()
+                    ?: return false
+                if ((result.optJSONObject("not_found")?.optJSONArray("shows")?.length() ?: 0) > 0)
+                    return false
+                val accepted = result.optJSONObject("added")?.optJSONArray("shows")
+                    ?.optJSONObject(0)?.opt("to")?.let { simklWatchlistStatus(it) }
+                    ?.takeIf { it != SyncWatchType.NONE } ?: draft.status
+                for (attempt in 1..3) {
+                    if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
+                    val current = simklSeasonRead(tracker.repo, tracker.id, sn)
+                    if (current?.listStatus == accepted) {
+                        tracker.simklSeason = current
+                        return true
+                    }
+                }
+                return false
+            }
+            return true
         }
 
         /** Season-exact TVDB episode map; never inferred from a title's total count. */
@@ -2106,8 +2188,10 @@ internal class RatingPlotImageHook(
                                   else if (watched==it.mapped.size) SyncWatchType.COMPLETED
                                   else SyncWatchType.WATCHING, watched, null)
                         } else remote?.let {
-                            Draft(it.status, if (generalSimkl && repo.idPrefix == "simkl")
-                                simklExact?.watched?.size ?: 0
+                            Draft(if (generalSimkl && repo.idPrefix == "simkl")
+                                simklExact?.listStatus ?: it.status else it.status,
+                                if (generalSimkl && repo.idPrefix == "simkl")
+                                    simklExact?.watched?.size ?: 0
                                 else it.watchedEpisodes ?: 0, it.score)
                         }
                         Triple(repo.idPrefix, fields, Pair(total, origin))
@@ -2300,7 +2384,7 @@ internal class RatingPlotImageHook(
                 // Simkl anime titles dedicated to the selected season have an
                 // independent watchlist status. Shared multi-season titles do not.
                 checks?.isEnabled = target.writeBlocked == null &&
-                    target.simklSeason == null &&
+                    (target.simklSeason == null || target.simklSeason?.listStatus != null) &&
                     (target.simklAnime == null || target.simklAnime?.statusEditable == true)
                 slider?.isEnabled = target.writeBlocked == null &&
                     target.simklSeason == null && target.simklAnime == null
@@ -2339,13 +2423,7 @@ internal class RatingPlotImageHook(
             if (draft.watched < 0 || tracker.total?.let { it > 0 && draft.watched > it } == true) {
                 return
             }
-            if (tracker.simklSeason != null &&
-                (draft.score != before.score ||
-                    (draft.status != before.status &&
-                     !(before.status == SyncWatchType.NONE &&
-                       draft.status == SyncWatchType.WATCHING && draft.watched > 0)))) {
-                return
-            }
+            if (tracker.simklSeason != null && draft.score != before.score) return
             if (tracker.simklAnime != null && draft.score != before.score) return
             if (tracker.simklAnime != null && draft.status != before.status &&
                 !(before.status == SyncWatchType.NONE &&
@@ -2425,6 +2503,11 @@ internal class RatingPlotImageHook(
                                     current.explicitNone=false
                                 }
                             }
+                        } else if (tracker.simklSeason != null) {
+                            val actual = tracker.simklSeason!!
+                            tracker.baseline = Draft(actual.listStatus ?: draft.status,
+                                actual.watched.size, draft.score)
+                            tracker.draft = tracker.baseline?.snapshot()
                         } else if(prefix=="mal" && draft.status==SyncWatchType.NONE &&
                             draft.explicitNone) {
                             tracker.baseline=Draft(SyncWatchType.NONE,0,null)
