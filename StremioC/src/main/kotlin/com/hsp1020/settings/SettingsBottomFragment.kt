@@ -980,6 +980,22 @@ class SettingsBottomFragment(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
+            // Passive diagnostics only: never resize, move or consume IME insets.
+            var lastImeState = ""
+            ViewCompat.setOnApplyWindowInsetsListener(this) { view, insets ->
+                val visible = insets.isVisible(WindowInsetsCompat.Type.ime())
+                val bottom = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+                val frame = Rect().also { view.getWindowVisibleDisplayFrame(it) }
+                val state = "$visible:$bottom:${view.height}:${frame.top}:${frame.bottom}"
+                if (lastImeState != state) {
+                    lastImeState = state
+                    android.util.Log.i("StremioCSettingsIME",
+                        "event=EDITOR_INSETS ime=$visible insetBottom=$bottom " +
+                        "scrollHeight=${view.height} visibleTop=${frame.top} " +
+                        "visibleBottom=${frame.bottom} screenHeight=${resources.displayMetrics.heightPixels}")
+                }
+                insets
+            }
         }
     }
 

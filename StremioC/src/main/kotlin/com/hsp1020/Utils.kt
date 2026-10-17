@@ -1427,7 +1427,7 @@ internal class RatingPlotImageHook(
             gen: Long, force: Boolean = false): JSONObject? {
             val now = SystemClock.elapsedRealtime()
             if (!force) animeLibraryCache?.let {
-                if (now - it.first in 0..20000) {
+                if (now - it.first in 0L..20_000L) {
                     Log.i(TAG,"event=SIMKL_P4_LIBRARY_CACHE session=$session gen=$gen age=${now-it.first}")
                     return it.second
                 }
@@ -1871,6 +1871,10 @@ internal class RatingPlotImageHook(
                 selected = preferred?.takeIf { it in statuses } ?: statuses.keys.firstOrNull()
                 updateOptions()
                 render("fetch-start")
+                val simklSeasonReplies =
+                    java.util.concurrent.ConcurrentHashMap<String, SimklSeasonSnapshot>()
+                val simklAnimeReplies =
+                    java.util.concurrent.ConcurrentHashMap<String, AnimeSnapshot>()
                 val replies = matched.map { repo ->
                     async(Dispatchers.IO) {
                         val id = ids.getValue(repo.idPrefix)
@@ -1884,17 +1888,15 @@ internal class RatingPlotImageHook(
                         val remote = state.getOrNull()
                         val simklExact = if (generalSimkl && repo.idPrefix == "simkl")
                             simklSeasonRead(repo, id, sn, gen) else null
-                        if (generalSimkl && repo.idPrefix == "simkl")
-                            statuses["simkl"]?.simklSeason = simklExact
+                        if (generalSimkl && repo.idPrefix == "simkl" && simklExact != null)
+                            simklSeasonReplies["simkl"] = simklExact
                         val animeExact = if (multi && isAnime == true &&
                             repo.idPrefix == "simkl" && mappedSeason != null) {
                             simklAnimeRead(repo, mappedSeason!!, sn,
                                 StremioC.seasonEpisodeCountsByUrl[url]?.get(sn), gen)
                         } else null
-                        if (multi && isAnime == true && repo.idPrefix == "simkl") {
-                            statuses["simkl"]?.simklAnime = animeExact
-                            statuses["simkl"]?.seasonMapping = mappedSeason
-                        }
+                        if (multi && isAnime == true && repo.idPrefix == "simkl" &&
+                            animeExact != null) simklAnimeReplies["simkl"] = animeExact
                         if (multi && isAnime == true && repo.idPrefix == "simkl") {
                             Log.i(TAG, "event=SIMKL_P4_VALIDATE session=$session gen=$gen " +
                                 "season=$sn verified=${animeExact != null} " +
@@ -1977,6 +1979,11 @@ internal class RatingPlotImageHook(
                     }
                 }.awaitAll()
                 if (!valid(gen, sn)) { log("STALE", "phase=fetch"); return@launch }
+                statuses["simkl"]?.let { simkl ->
+                    simkl.simklSeason = simklSeasonReplies["simkl"]
+                    simkl.simklAnime = simklAnimeReplies["simkl"]
+                    simkl.seasonMapping = mappedSeason
+                }
                 val providerTotals = replies.mapNotNull { it.third.first }.filter { it > 0 }
                 val commonTotal = if (!multi) providerTotals.maxOrNull()
                     else providerTotals.distinct().singleOrNull()
@@ -2304,8 +2311,28 @@ internal class RatingPlotImageHook(
                 if (valid(gen, sn) && statuses[prefix] === tracker) {
                     tracker.saving = false
                     if (result) {
-                        tracker.baseline = draft.snapshot()
-                        tracker.draft?.let { if (it == draft) it.explicitNone = false }
+                        val anime = tracker.simklAnime
+                        if (anime != null) {
+                            val count=anime.watched.size
+                            val actual=when {
+                                count == 0 -> SyncWatchType.NONE
+                                count == anime.mapped.size -> SyncWatchType.COMPLETED
+                                else -> SyncWatchType.WATCHING
+                            }
+                            tracker.baseline=Draft(actual,count,null)
+                            tracker.draft?.let { current ->
+                                if(current == draft) {
+                                    current.status=actual
+                                    current.watched=count
+                                    current.explicitNone=false
+                                }
+                            }
+                            log("SIMKL_P4_UI_RECONCILE",
+                                "provider=$prefix actual=$actual watched=$count total=${anime.mapped.size}")
+                        } else {
+                            tracker.baseline = draft.snapshot()
+                            tracker.draft?.let { if (it == draft) it.explicitNone = false }
+                        }
                     } else tracker.error = "save-or-readback-failed"
                     log("SAVE_COMPLETE", "provider=$prefix id=$id verified=$result " +
                         "elapsedMs=${SystemClock.elapsedRealtime()-started}")
