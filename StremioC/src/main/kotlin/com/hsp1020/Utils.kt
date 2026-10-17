@@ -1440,7 +1440,8 @@ internal class RatingPlotImageHook(
                 return null
             }
             val obj = runCatching { JSONObject(resp.text) }.getOrNull()
-            if (obj == null || !obj.has("anime")) {
+            if (obj == null || obj.keys().asSequence().any { it != "anime" } ||
+                (obj.has("anime") && obj.optJSONArray("anime") == null)) {
                 Log.w(TAG,"event=SIMKL_P4_LIBRARY_INVALID session=$session gen=$gen")
                 return null
             }
@@ -1452,7 +1453,7 @@ internal class RatingPlotImageHook(
 
         private suspend fun simklAnimeRead(
             repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
-            mapped: SeasonTrackerIds, targetSeason: Int, sourceCount: Int?, gen: Long,
+            mapped: SeasonTrackerIds, targetSeason: Int, gen: Long,
             force: Boolean = false
         ): AnimeSnapshot? {
             val headers = SimklApi.getHeaders(repo.authToken() ?: return null)
@@ -1549,12 +1550,12 @@ internal class RatingPlotImageHook(
             }
             val sorted=slots.sortedWith(compareBy<AnimeSlot> { it.tvdbEpisode }.thenBy { it.simkl })
             val keys=sorted.map { it.tvdbEpisode }
-            if(sorted.isEmpty() || keys.distinct().size != keys.size ||
-                keys != (1..keys.size).toList() ||
-                (sourceCount != null && sourceCount > sorted.size)){
+            // Different providers may expose different episode counts and TVDB ranges.
+            // Only accept episode slots with an unambiguous, unique mapping.
+            if(sorted.isEmpty() || keys.distinct().size != keys.size){
                 Log.w(TAG,"event=SIMKL_P4_COVERAGE session=$session gen=$gen season=$targetSeason " +
                     "candidates=$candidates mapped=$validated slots=${sorted.size} " +
-                    "source=$sourceCount duplicates=${keys.size!=keys.distinct().size} valid=false")
+                    "duplicates=${keys.size!=keys.distinct().size} valid=false")
                 return null
             }
             val library=animeLibrary(repo,gen,force) ?: return null
@@ -1562,9 +1563,14 @@ internal class RatingPlotImageHook(
             val claimedWatched=mutableMapOf<Int,Int>()
             val anime=library.optJSONArray("anime")
             for(i in 0 until (anime?.length() ?: 0)){
-                val entry=anime?.optJSONObject(i) ?: continue
-                val id=jsonInt(entry.optJSONObject("anime")?.optJSONObject("ids"),"simkl")
-                    ?:continue
+                val entry=anime?.optJSONObject(i) ?: return null
+                val media=entry.optJSONObject("show") ?: entry.optJSONObject("anime")
+                val id=jsonInt(media?.optJSONObject("ids"),"simkl")
+                if(id == null){
+                    Log.w(TAG,"event=SIMKL_P4_LIBRARY_INVALID session=$session gen=$gen " +
+                        "season=$targetSeason reason=missing-item-id")
+                    return null
+                }
                 val claimed=entry.optInt("watched_episodes_count",-1)
                 if(claimed>=0)claimedWatched[id]=claimed
                 val seasons=entry?.optJSONArray("seasons")
@@ -1653,9 +1659,7 @@ internal class RatingPlotImageHook(
             for(attempt in 1..3){
                 if(attempt>1)kotlinx.coroutines.delay(if(attempt==2)350L else 900L)
                 val mapped=tracker.seasonMapping ?: return false
-                val after=simklAnimeRead(tracker.repo,mapped,seasonNumber,
-                    StremioC.seasonEpisodeCountsByUrl[pageUrl.orEmpty()]?.get(seasonNumber),
-                    gen,force=true)
+                val after=simklAnimeRead(tracker.repo,mapped,seasonNumber,gen,force=true)
                 val same=after?.watched==expected
                 val preserved=after?.outside==before.outside
                 Log.i(TAG,"event=SIMKL_P4_VERIFY session=$session gen=$gen season=$seasonNumber " +
@@ -1846,9 +1850,9 @@ internal class RatingPlotImageHook(
                             // Prefer the authoritative season Simkl ID supplied by
                             // AIOStreams; Simkl's native search is the fallback.
                             if (mapping?.simkl != null) {
-                                put("simkl", JSONObject().put("Simkl",mapping.simkl).toString())
+                                put("simkl", JSONObject().put("Simkl",mapping.simkl.toString()).toString())
                             } else mapping?.mal?.let { mal ->
-                                put("simkl", JSONObject().put("Mal",mal).toString())
+                                put("simkl", JSONObject().put("Mal",mal.toString()).toString())
                             }
                         }
                     }
@@ -1892,8 +1896,7 @@ internal class RatingPlotImageHook(
                             simklSeasonReplies["simkl"] = simklExact
                         val animeExact = if (multi && isAnime == true &&
                             repo.idPrefix == "simkl" && mappedSeason != null) {
-                            simklAnimeRead(repo, mappedSeason!!, sn,
-                                StremioC.seasonEpisodeCountsByUrl[url]?.get(sn), gen)
+                            simklAnimeRead(repo, mappedSeason!!, sn, gen)
                         } else null
                         if (multi && isAnime == true && repo.idPrefix == "simkl" &&
                             animeExact != null) simklAnimeReplies["simkl"] = animeExact
