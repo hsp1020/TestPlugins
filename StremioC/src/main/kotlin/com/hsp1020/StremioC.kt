@@ -3254,17 +3254,24 @@ open class StremioC(
         if (!IMDB_ID_REGEX.matches(imdbId) || season <= 0) return null
         val mapped = fetchAnimeSeasonMapping(LoadData(
             id = imdbId, imdbId = imdbId, imdbSeason = season, isAnime = true
-        )) ?: return null
-        if (mapped.imdbId != imdbId) return null
+        ), p1Trace = true) ?: return null
+        if (mapped.imdbId != imdbId) {
+            android.util.Log.w("STCSeasonSync", "event=P1_MAP_REJECT imdb=$imdbId season=$season reason=imdb-mismatch returned=${mapped.imdbId}")
+            return null
+        }
         // A multi-season IMDb page must never attach a different season's tracker ID.
         if (season > 1 && mapped.imdbSeason != season &&
             mapped.tvdbSeason != season && mapped.traktSeason != season &&
-            mapped.tmdbSeason != season) return null
+            mapped.tmdbSeason != season) {
+            android.util.Log.w("STCSeasonSync", "event=P1_MAP_REJECT imdb=$imdbId season=$season reason=season-mismatch " +
+                "imdbSeason=${mapped.imdbSeason} tvdb=${mapped.tvdbSeason} trakt=${mapped.traktSeason} tmdb=${mapped.tmdbSeason}")
+            return null
+        }
         return SeasonTrackerIds(mapped.malId, mapped.aniListId, mapped.kitsuId?.toIntOrNull())
             .takeIf { it.mal != null || it.aniList != null || it.kitsu != null }
     }
 
-    private suspend fun fetchAnimeSeasonMapping(loadData: LoadData): AnimeSeasonMapping? {
+    private suspend fun fetchAnimeSeasonMapping(loadData: LoadData, p1Trace: Boolean = false): AnimeSeasonMapping? {
         val aniListLookupId = loadData.originalAnimeId?.takeIf { it.startsWith("anilist:") }
             ?.removePrefix("anilist:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
             ?: loadData.anilistId?.takeIf { it > 0 }
@@ -3304,7 +3311,11 @@ open class StremioC(
                 (if (season != null) "&season=$season" else "") +
                 (if (episode != null) "&episode=$episode" else "")
         }
-        val cachedAnime = stremioCacheMemoryRead("anime", query, animeMappingCache[query], METADATA_CACHE_TTL) ?: MetadataDiskCache.read("anime", query)?.let { (json, stamp) ->
+        fun p1(event: String, details: String = "") {
+            if (p1Trace) android.util.Log.i("STCSeasonSync", "event=P1_MAP_$event query=$query $details")
+        }
+        val memoryAnime = stremioCacheMemoryRead("anime", query, animeMappingCache[query], METADATA_CACHE_TTL)
+        val cachedAnime = memoryAnime ?: MetadataDiskCache.read("anime", query)?.let { (json, stamp) ->
             runCatching { parseJson<AnimeSeasonMapping>(json) }.getOrNull()?.let { value ->
                 Pair(value, stamp).also {
                     animeMappingCache[query] = it
@@ -3312,18 +3323,24 @@ open class StremioC(
             }
         }
         if (cachedAnime != null) {
+            p1("CACHE_HIT", "origin=${if (memoryAnime != null) "RAM" else "disk"} " +
+                "imdb=${cachedAnime.first.imdbId} mappedSeason=${cachedAnime.first.imdbSeason} " +
+                "mal=${cachedAnime.first.malId} anilist=${cachedAnime.first.aniListId} kitsu=${cachedAnime.first.kitsuId}")
             return cachedAnime.first
         }
+        p1("CACHE_MISS")
         val noMappingStamp = animeNoMappingCache[query]
         if (noMappingStamp != null) {
             val age = System.currentTimeMillis() - noMappingStamp
             if (age >= 0L && age < 15L * 60 * 1000) {
+                p1("NEGATIVE_CACHE", "origin=RAM ageMs=$age")
                 return null
             }
             animeNoMappingCache.remove(query)
         }
         MetadataDiskCache.read("missing_anime", query)?.takeIf { it.first == "null" }?.let {
             animeNoMappingCache[query] = it.second
+            p1("NEGATIVE_CACHE", "origin=disk")
             return null
         }
         val hosts = listOf(
@@ -3336,13 +3353,19 @@ open class StremioC(
         )
         for (host in hosts) {
             var noMapping = false
-            val mapping = runSuspendCatching {
+            p1("HOST_START", "host=$host")
+            val attemptedAt = android.os.SystemClock.elapsedRealtime()
+            val outcome = runSuspendCatching {
             val response = run {
                 fetchSharedAnimeText("https://$host/api/v1/anime?$query")
             }
             val root = run { parseJson<JsonNode>(response) }
-            if (root.get("success")?.asBoolean() != true) return@runSuspendCatching null
+            if (root.get("success")?.asBoolean() != true) {
+                p1("HOST_REJECT", "host=$host reason=success-false")
+                return@runSuspendCatching null
+            }
             if (root.get("data")?.isNull == true) {
+                p1("HOST_REJECT", "host=$host reason=authoritative-null")
                 noMapping = true
                 return@runSuspendCatching null
             }
@@ -3355,7 +3378,10 @@ open class StremioC(
                 ids.get("malId").intOrNull() != malLookupId) return@runSuspendCatching null
             if (byAniList && ids.get("anilistId").intOrNull() != aniListLookupId)
                 return@runSuspendCatching null
-            if (imdbId != null && resolvedImdb != imdbId) return@runSuspendCatching null
+            if (imdbId != null && resolvedImdb != imdbId) {
+                p1("HOST_REJECT", "host=$host reason=imdb-mismatch response=$resolvedImdb")
+                return@runSuspendCatching null
+            }
             if (resolvedKitsu == null && ids.get("malId").intOrNull() == null &&
                 ids.get("anilistId").intOrNull() == null) return@runSuspendCatching null
             // AIOStreams may return its first record if season matching fails.
@@ -3365,7 +3391,10 @@ open class StremioC(
                     ?: data.get("tvdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
                     ?: data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
                     ?: data.get("tmdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
-                if (mappedSeason != season) return@runSuspendCatching null
+                if (mappedSeason != season) {
+                    p1("HOST_REJECT", "host=$host reason=season-mismatch expected=$season got=$mappedSeason")
+                    return@runSuspendCatching null
+                }
             }
             val tmdb = data.get("tmdb")
             val first = tmdb?.get("fromEpisode").intOrNull()?.takeIf { it > 0 }
@@ -3391,7 +3420,11 @@ open class StremioC(
                 imdbSeason = data.get("imdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 },
                 traktSeason = data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
             )
-            }.getOrNull()
+            }
+            val mapping = outcome.getOrNull()
+            p1("HOST_FINISH", "host=$host outcome=${if (mapping != null) "mapped" else "empty"} " +
+                "error=${outcome.exceptionOrNull()?.javaClass?.simpleName ?: "none"} " +
+                "elapsedMs=${android.os.SystemClock.elapsedRealtime()-attemptedAt}")
             if (noMapping) {
                 // Cache only an authoritative success=true/data=null response, never host errors.
                 animeNoMappingCache[query] = System.currentTimeMillis()
@@ -3401,11 +3434,14 @@ open class StremioC(
                 return null
             }
             if (mapping != null) {
+                p1("HOST_MATCH", "host=$host mappedSeason=${mapping.imdbSeason} " +
+                    "mal=${mapping.malId} anilist=${mapping.aniListId} kitsu=${mapping.kitsuId}")
                 animeMappingCache[query] = mapping to System.currentTimeMillis()
                 MetadataDiskCache.write("anime", query, mapping.toJson())
                 return mapping
             }
         }
+        p1("EXHAUSTED", "reason=all-hosts-unavailable-or-unmatched")
         return null
     }
 
