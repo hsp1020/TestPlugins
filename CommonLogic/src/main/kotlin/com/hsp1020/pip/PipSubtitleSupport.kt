@@ -9,7 +9,6 @@ import android.os.Looper
 import android.util.TypedValue
 import android.view.View
 import android.view.ViewTreeObserver
-import kotlin.math.roundToInt
 import androidx.annotation.OptIn
 import androidx.core.app.PictureInPictureModeChangedInfo
 import androidx.core.util.Consumer
@@ -41,10 +40,6 @@ class PipSubtitleScaler(private val acceptsProvider: (String) -> Boolean) {
     private var activity: FragmentActivity? = null
     private var subtitle: SubtitleView? = null
     private var inPip = false
-    private var normalBottomPadding = 0
-    private val pipSizeListener = View.OnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
-        if (inPip) updatePipBottomPadding(view as SubtitleView)
-    }
     private var pipPositionObserver: ViewTreeObserver? = null
     private val pipPositionGuard = ViewTreeObserver.OnPreDrawListener {
         // CloudStream's independently started ObjectAnimator can change this after PiP entry.
@@ -100,22 +95,15 @@ class PipSubtitleScaler(private val acceptsProvider: (String) -> Boolean) {
         if (host.isInPictureInPictureMode) enterPip()
     }
 
-    private fun updatePipBottomPadding(view: SubtitleView) {
-        if (view.height <= 0) return
-        // Fractional bottom padding is ignored for cues with an explicit line position.
-        val bottom = (view.height * SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION).roundToInt()
-        if (view.paddingTop != 0 || view.paddingBottom != bottom) {
-            view.setPadding(view.paddingLeft, 0, view.paddingRight, bottom)
-        }
-    }
-
     private fun applyPipStyle(view: SubtitleView) {
-        // Use view padding for both positioned and unpositioned cues, without doubling it.
-        updatePipBottomPadding(view)
+        // Next Player uses a full-size SubtitleView with Media3's default 8% bottom inset.
+        // CloudStream's fixed elevation (paddingTop + translationY) must not remain in PiP.
+        if (view.paddingTop != 0) {
+            view.setPadding(view.paddingLeft, 0, view.paddingRight, view.paddingBottom)
+        }
         if (view.translationY != 0f) view.translationY = 0f
-        view.setBottomPaddingFraction(0f)
-        // Keep the same 1.5x text size even after reserving bottom space.
-        view.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * 1.5f, true)
+        view.setBottomPaddingFraction(SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
+        view.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * 1.5f)
     }
 
     private fun startPositionGuard(view: SubtitleView) {
@@ -136,9 +124,7 @@ class PipSubtitleScaler(private val acceptsProvider: (String) -> Boolean) {
     private fun enterPip() {
         val view = subtitle ?: return
         if (inPip) return
-        normalBottomPadding = view.paddingBottom
         inPip = true
-        view.addOnLayoutChangeListener(pipSizeListener)
         applyPipStyle(view)
         startPositionGuard(view)
     }
@@ -148,9 +134,6 @@ class PipSubtitleScaler(private val acceptsProvider: (String) -> Boolean) {
         inPip = false
         stopPositionGuard()
         subtitle?.let { view ->
-            view.removeOnLayoutChangeListener(pipSizeListener)
-            view.setPadding(view.paddingLeft, view.paddingTop, view.paddingRight, normalBottomPadding)
-            view.setBottomPaddingFraction(SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
             val style = SubtitlesFragment.getCurrentSavedStyle()
             // Restore CloudStream's original font size, padding and elevation.
             SubtitlesFragment.setSubtitleViewStyle(view, style, true)
