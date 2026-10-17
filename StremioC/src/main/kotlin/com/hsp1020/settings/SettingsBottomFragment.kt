@@ -930,35 +930,38 @@ class SettingsBottomFragment(
         }
     }
 
-    // CineStream-style native IME resize. Keep the existing footer visible;
-    // only the dialog body scrolls if the keyboard reduces the available height.
-    private fun nativeImeView(content: LinearLayout): View {
+
+    // One full-screen, inset-aware host owns the keyboard viewport on phones.
+    // The dialog card stays centered; only its body scrolls, with a fixed footer.
+    private fun nativeImeView(content: LinearLayout, capDp: Int): View {
         if (isLayout(TV)) return content
         val footer = content.getChildAt(content.childCount - 1) as? LinearLayout ?: return content
         content.removeView(footer)
         footer.setPadding(dp(20), footer.paddingTop, dp(20), dp(20))
+        val host = FrameLayout(hostContext).apply { setPadding(0, dp(12), 0, dp(12)) }
         val scrolling = object : NestedScrollView(hostContext) {
             override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-                if (View.MeasureSpec.getMode(heightMeasureSpec) == View.MeasureSpec.UNSPECIFIED) {
-                    super.onMeasure(widthMeasureSpec, heightMeasureSpec)
-                    return
-                }
                 footer.measure(
                     View.MeasureSpec.makeMeasureSpec(
                         View.MeasureSpec.getSize(widthMeasureSpec), View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
                 )
-                val available = (View.MeasureSpec.getSize(heightMeasureSpec) -
-                    footer.measuredHeight).coerceAtLeast(0)
+                val available = (resources.displayMetrics.heightPixels -
+                    host.paddingTop - host.paddingBottom - footer.measuredHeight - dp(12))
+                    .coerceAtLeast(dp(48))
+                val limit = if (View.MeasureSpec.getMode(heightMeasureSpec) == View.MeasureSpec.UNSPECIFIED)
+                    available else minOf(available, View.MeasureSpec.getSize(heightMeasureSpec))
                 super.onMeasure(widthMeasureSpec,
-                    View.MeasureSpec.makeMeasureSpec(available, View.MeasureSpec.AT_MOST))
+                    View.MeasureSpec.makeMeasureSpec(limit, View.MeasureSpec.AT_MOST))
             }
         }.apply {
             isFillViewport = false
             isVerticalScrollBarEnabled = false
-            addView(content)
+            clipToPadding = false
+            addView(content, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
-        return LinearLayout(hostContext).apply {
+        val panel = LinearLayout(hostContext).apply {
             orientation = LinearLayout.VERTICAL
             background = getDarkThemeBg()
             addView(scrolling, LinearLayout.LayoutParams(
@@ -966,108 +969,27 @@ class SettingsBottomFragment(
             addView(footer, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
-    }
-
-    // CineStream-style editor: one scrollable dialog body, without custom window
-    // movement, footer measurement, or IME frame listeners.
-    private fun nativeEditorImeView(content: LinearLayout): View {
-        if (isLayout(TV)) return content
-        return ScrollView(hostContext).apply {
-            isFillViewport = false
-            isVerticalScrollBarEnabled = false
-            clipToPadding = false
-            addView(content, ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            // Passive diagnostics only: never resize, move or consume IME insets.
-            var lastImeState = ""
-            ViewCompat.setOnApplyWindowInsetsListener(this) { view, insets ->
-                val visible = insets.isVisible(WindowInsetsCompat.Type.ime())
-                val bottom = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
-                val frame = Rect().also { view.getWindowVisibleDisplayFrame(it) }
-                val state = "$visible:$bottom:${view.height}:${frame.top}:${frame.bottom}"
-                if (lastImeState != state) {
-                    lastImeState = state
-                    android.util.Log.i("StremioCSettingsIME",
-                        "event=EDITOR_INSETS ime=$visible insetBottom=$bottom " +
-                        "scrollHeight=${view.height} visibleTop=${frame.top} " +
-                        "visibleBottom=${frame.bottom} screenHeight=${resources.displayMetrics.heightPixels}")
-                }
-                insets
-            }
+        val width = minOf(dp(capDp),
+            (hostContext.resources.displayMetrics.widthPixels * 0.9f).toInt())
+        host.addView(panel, FrameLayout.LayoutParams(width,
+            ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        ViewCompat.setOnApplyWindowInsetsListener(host) { view, insets ->
+            val top = maxOf(dp(12),
+                insets.getInsets(WindowInsetsCompat.Type.statusBars()).top)
+            val bottom = dp(12) + maxOf(
+                insets.getInsets(WindowInsetsCompat.Type.ime()).bottom,
+                insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom)
+            if (view.paddingTop != top || view.paddingBottom != bottom)
+                view.setPadding(0, top, 0, bottom)
+            insets
         }
-    }
-
-
-    // Temporary, passive IME diagnostics. Geometry and focus only; never log input text.
-    private fun tracePhoneIme(dialog: AlertDialog, content: View, kind: String) {
-        val decor = dialog.window?.decorView ?: return
-        val observer = decor.viewTreeObserver
-        val traceId = Integer.toHexString(System.identityHashCode(dialog))
-        var previous = ""
-        var emitted = 0
-        fun geometry(view: View?): String {
-            if (view == null || !view.isAttachedToWindow) return "na"
-            val p = IntArray(2)
-            view.getLocationOnScreen(p)
-            return p[0].toString() + "," + p[1] + "," + view.width + "," + view.height
-        }
-        fun capture(event: String) {
-            if (emitted >= 240 || !dialog.isShowing) return
-            val insets = ViewCompat.getRootWindowInsets(decor)
-            val ime = insets?.isVisible(WindowInsetsCompat.Type.ime())
-            val imeBottom = insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: -1
-            val frame = Rect()
-            decor.getWindowVisibleDisplayFrame(frame)
-            val focused = dialog.currentFocus
-            val scroll = content.parent as? View
-            val outer = scroll?.parent as? ViewGroup
-            val footer = outer?.takeIf { it.childCount > 1 }?.getChildAt(outer.childCount - 1)
-            val body = content.optional("catalogEditorScroll") ?: content.optional("catalogListBody")
-            val list = content.optional("rvLinks")
-            val owner = dialogOwners[dialog]
-            val details = "ime=" + ime + " inset=" + imeBottom +
-                " visible=" + frame.left + "," + frame.top + "," + frame.right + "," + frame.bottom +
-                " decor=" + geometry(decor) + " content=" + geometry(content) +
-                " outer=" + geometry(outer) + " body=" + geometry(body) +
-                " list=" + geometry(list) + " footer=" + geometry(footer) +
-                " outerScroll=" + (scroll?.scrollY ?: -1) +
-                " listScroll=" + ((list as? RecyclerView)?.computeVerticalScrollOffset() ?: -1) +
-                " focus=" + (focused?.javaClass?.simpleName ?: "none") + ":" + (focused?.id ?: -1) +
-                " focusRect=" + geometry(focused) +
-                " inputType=" + ((focused as? EditText)?.inputType ?: -1) +
-                " adjust=" + (dialog.window?.attributes?.softInputMode ?: -1) +
-                " owner=" + geometry(owner?.window?.decorView) +
-                " ownerFocus=" + (owner?.currentFocus?.javaClass?.simpleName ?: "none")
-            if (event == "LAYOUT" && details == previous) return
-            previous = details
-            emitted++
-            android.util.Log.i("StremioCSettingsIME",
-                "event=IME_TRACE kind=" + kind + " trace=" + traceId +
-                " stage=" + event + " seq=" + emitted + " " + details)
-        }
-        val layout = android.view.ViewTreeObserver.OnGlobalLayoutListener { capture("LAYOUT") }
-        val focus = android.view.ViewTreeObserver.OnGlobalFocusChangeListener { _, _ -> capture("FOCUS") }
-        val scrolling = android.view.ViewTreeObserver.OnScrollChangedListener { capture("SCROLL") }
-        observer.addOnGlobalLayoutListener(layout)
-        observer.addOnGlobalFocusChangeListener(focus)
-        observer.addOnScrollChangedListener(scrolling)
-        onClose(dialog) {
-            if (observer.isAlive) {
-                observer.removeOnGlobalLayoutListener(layout)
-                observer.removeOnGlobalFocusChangeListener(focus)
-                observer.removeOnScrollChangedListener(scrolling)
-            }
-        }
-        capture("SHOW")
-        decor.post { if (dialog.isShowing) capture("FIRST_FRAME") }
+        return host
     }
 
     private fun setupCustomDialog(
         dialog: AlertDialog, contentView: View, bodyView: View? = null, capDp: Int = 480,
         owner: Dialog = topDialog(), initialFocus: (() -> View?)? = null,
-        nativeIme: Boolean = false, traceKind: String? = null
+        nativeIme: Boolean = false
     ) {
         val parents = generateSequence(owner) { dialogOwners[it] }.toList()
         val origin = owner.currentFocus
@@ -1119,7 +1041,9 @@ class SettingsBottomFragment(
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            setSoftInputMode(if (nativeIme) WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+                else WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            if (nativeIme) androidx.core.view.WindowCompat.setDecorFitsSystemWindows(this, false)
             attributes = attributes.apply {
                 gravity = Gravity.CENTER
                 x = 0; y = 0
@@ -1129,16 +1053,9 @@ class SettingsBottomFragment(
         // Input dialogs rely on Android's native IME resize, not fitDialog().
         if (root != null && !nativeIme) fitDialog(dialog, root, body, capDp)
         dialog.setOnShowListener {
-            if (nativeIme && traceKind != null) tracePhoneIme(dialog, contentView, traceKind)
             if (nativeIme) {
-                dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-                dialog.window?.setLayout(
-                    minOf(dp(capDp), (hostContext.resources.displayMetrics.widthPixels * 0.9f).toInt()),
-                    WindowManager.LayoutParams.WRAP_CONTENT
-                )
-                android.util.Log.i("StremioCSettingsIME",
-                    "event=NATIVE_EDITOR_SHOW width=${dialog.window?.attributes?.width} " +
-                    "height=${dialog.window?.attributes?.height} mode=adjustResize")
+                dialog.window?.setLayout(WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT)
             }
             if (isLayout(TV) || initialFocus != null) {
                 val focus = initialFocus?.invoke() ?: body?.getFocusables(View.FOCUS_FORWARD)?.firstOrNull { usable(it) }
@@ -1975,7 +1892,7 @@ class SettingsBottomFragment(
         val add = simpleButton("Add")
         content.addView(popupButtons(close, add))
         val nativeIme = !isLayout(TV)
-        val dialog = AlertDialog.Builder(ctx).setView(nativeImeView(content)).create()
+        val dialog = AlertDialog.Builder(ctx).setView(nativeImeView(content, 600)).create()
         lateinit var adapter: LinksAdapter
         fun records() = sourceDraft?.toMutableList() ?: catalogLinks()
         fun resizeList() {
@@ -2088,8 +2005,7 @@ class SettingsBottomFragment(
         rv.addOnLayoutChangeListener(listener)
         onClose(dialog) { rv.removeOnLayoutChangeListener(listener) }
         setupCustomDialog(dialog, content, content.optional("catalogListBody") ?: rv, 600,
-            initialFocus = { if (adapter.itemCount == 0) add else rv }, nativeIme = nativeIme,
-            traceKind = if (sources) "source-list" else "catalog-list")
+            initialFocus = { if (adapter.itemCount == 0) add else rv }, nativeIme = nativeIme)
         add.setOnClickListener { edit(null, 0) }
         close.setOnClickListener { dialog.dismiss() }
         dialog.show()
@@ -2137,10 +2053,9 @@ class SettingsBottomFragment(
         val close = simpleButton("Close")
         val save = simpleButton("Save")
         dialogView.addView(popupButtons(close, save))
-        val dlg = AlertDialog.Builder(ctx).setView(nativeEditorImeView(dialogView)).create()
+        val dlg = AlertDialog.Builder(ctx).setView(nativeImeView(dialogView, 600)).create()
         setupCustomDialog(dlg, dialogView, dialogView.optional("catalogEditorScroll"), 600, owner,
-            initialFocus = { if (urlError != null) url else name }, nativeIme = !isLayout(TV),
-            traceKind = if (sources) "source-editor" else "catalog-editor")
+            initialFocus = { if (urlError != null) url else name }, nativeIme = !isLayout(TV))
         save.setOnClickListener {
             if (!alive(dlg) || !save.isEnabled) return@setOnClickListener
             val raw = url.text.toString().trim()
@@ -2790,7 +2705,7 @@ private fun showLanguageSelectDialog() {
         footer.addView(saveBtn)
         dialogContainer.addView(footer)
 
-        val dialog = AlertDialog.Builder(context).setView(nativeImeView(dialogContainer)).create()
+        val dialog = AlertDialog.Builder(context).setView(nativeImeView(dialogContainer, 800)).create()
         activeDialog = dialog
         setupCustomDialog(dialog, dialogContainer, rv, 800,
             initialFocus = { rv }, nativeIme = !isLayout(TV))
