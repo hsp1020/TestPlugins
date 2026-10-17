@@ -2700,7 +2700,8 @@ private fun showLanguageSelectDialog() {
             view.background = null
             val wrapper = LinearLayout(parent.context).apply {
                 orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
+                // Match the reorder controls to the first (addon-name) line, not the full row.
+                gravity = Gravity.TOP
                 layoutParams = RecyclerView.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             }
@@ -2718,16 +2719,24 @@ private fun showLanguageSelectDialog() {
                 setPadding(dp(8), 0, dp(8), 0)
                 background = getCardBg()
                 gravity = Gravity.CENTER
+                minHeight = 0
                 isSingleLine = true
                 contentDescription = "Addon position"
             }
             wrapper.addView(dragHandle)
-            wrapper.addView(inputSlot(etOrder).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(56), dp(48)).apply { marginEnd = dp(8) }
+            wrapper.addView(etOrder, LinearLayout.LayoutParams(dp(56), dp(24)).apply {
+                marginEnd = dp(8)
             })
             wrapper.addView(view, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             normalizeTypeface(wrapper)
-            prepareControls(wrapper)
+            // Keep native addon controls prepared without stretching the compact order
+            // input to 48dp: its center must line up with the addon name.
+            prepareControls(view)
+            etOrder.makeTvCompatible()
+            if (isLayout(TV)) {
+                etOrder.showSoftInputOnFocus = false
+                etOrder.setOnKeyListener { _, key, event -> etOrder.activateTvInput(key, event) }
+            }
             return VH(wrapper, etOrder, dragHandle).also {
                 it.body.background = null
                 it.body.isClickable = false
