@@ -1626,7 +1626,7 @@ internal class RatingPlotImageHook(
                                 ?.episodeConstructor?.getEpisodes()
                             exactEpisodes != null && exactEpisodes.isNotEmpty() &&
                                 exactEpisodes.all { it.season == null } &&
-                                remote.maxEpisodes == exactEpisodes.size
+                                remote?.maxEpisodes == exactEpisodes.size
                         } else false
                         if (multi && isAnime == true && repo.idPrefix == "simkl") {
                             statuses["simkl"]?.simklAnimeVerified = verifiedAnime
