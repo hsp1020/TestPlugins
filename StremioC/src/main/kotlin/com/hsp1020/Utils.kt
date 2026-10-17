@@ -1028,7 +1028,7 @@ internal class RatingPlotImageHook(
 }
 
 /**
- * StremioC-only PiP subtitles: Dantotsu font sizing with Media3's relative bottom inset.
+ * StremioC-only PiP subtitles, using Media3's default fractional sizing and inset.
  * CloudStream retains ownership of normal playback subtitle styles and layout.
  */
 @OptIn(UnstableApi::class)
@@ -1098,26 +1098,14 @@ private class PipSubtitleScaler {
     }
 
     private fun applyPipStyle(view: SubtitleView) {
-        // Dantotsu sizes PiP subtitles in sp from the user's size and video aspect ratio.
-        val ratio = runCatching {
-            (attached as? GeneratorPlayer)?.player?.getAspectRatio()?.toFloat()
-        }.getOrNull()?.takeIf { it.isFinite() && it > 0f } ?: (16f / 9f)
-        val pipScale = when {
-            ratio > 1.5f -> 0.45f
-            ratio < 1f -> 0.65f
-            else -> 0.55f
-        }
-        val fontSize = SubtitlesFragment.getCurrentSavedStyle().fixedTextSize ?: 25f
-
-        // Drop CloudStream's full-screen elevation only while in PiP.
+        // Next Player uses a full-size SubtitleView with Media3's default 8% bottom inset.
+        // CloudStream's fixed elevation (paddingTop + translationY) must not remain in PiP.
         if (view.paddingTop != 0) {
             view.setPadding(view.paddingLeft, 0, view.paddingRight, view.paddingBottom)
         }
         if (view.translationY != 0f) view.translationY = 0f
-        // Media3 keeps the subtitle 8% above the resized PiP window's bottom.
-        // Do not change the CloudStream view's layout margins when entering PiP.
         view.setBottomPaddingFraction(SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
-        view.setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, fontSize * pipScale)
+        view.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION)
     }
 
     private fun startPositionGuard(view: SubtitleView) {
