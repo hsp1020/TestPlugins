@@ -94,18 +94,6 @@ private fun String.cleanBaseUrl(): String {
     return this.substringBefore("?").replace("/manifest.json", "").trimEnd('/')
 }
 
-// Temporary source-routing instrumentation: URL fingerprints, never auth tokens.
-internal fun stremioStreamDebugUrl(url: String?): String {
-    if (url.isNullOrBlank()) return "none"
-    val raw = url.trim()
-    fun digest(value: String): String = runCatching {
-        MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
-            .take(8).joinToString("") { "%02x".format(it.toInt() and 255) }
-    }.getOrDefault("hash-error")
-    val http = raw.toHttpUrlOrNull()
-    return "raw#${digest(raw)} key#${digest(raw.cleanBaseUrl().lowercase())} manifest#${digest(stremioManifestUrl(raw))} host#${digest(http?.host.orEmpty())} scheme=${http?.scheme ?: "unknown"} query=${'?' in raw} length=${raw.length}"
-}
-
 private inline fun <T> lruSet(maxSize: Int): MutableSet<T> {
     return Collections.synchronizedSet(Collections.newSetFromMap(object : java.util.LinkedHashMap<T, Boolean>(maxSize, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<T, Boolean>): Boolean {
@@ -628,8 +616,6 @@ open class StremioC(
 
     override suspend fun getLoadUrl(name: SyncIdName, id: String): String? {
         val resolved = getLoadUrlInternal(name, id)
-        android.util.Log.i("StremioCStreams",
-            "ROUTE getLoadUrl service=$name provider=${stremioStreamDebugUrl(mainUrl)} original=${stremioStreamDebugUrl(id)} meta=${stremioStreamDebugUrl(resolved)} history=${stremioStreamDebugUrl(libraryMetadataBase())}")
         // The sync provider's lookup URL is not necessarily the URL kept in
         // ResultFragment arguments. MAL and AniList can differ from the host's
         // canonical URL even for the same anime ID; Kitsu often does not.
@@ -823,7 +809,6 @@ open class StremioC(
         private const val SYNC_SETTINGS_TTL = 3000L
 
         fun invalidateSyncSettingsCache() = synchronized(StremioC::class.java) {
-            android.util.Log.i("StremioCStreams", "CONFIG cache-invalidate ageMs=${System.currentTimeMillis() - cachedSyncSettingsTime}")
             cachedSyncSettings = null
             cachedSyncSettingsTime = 0L
             // Metadata keys already include the exact addon URL, locale and
@@ -877,7 +862,6 @@ open class StremioC(
                             }
                         }
                     } catch (e: Exception) {
-                        android.util.Log.w("StremioCStreams", "CONFIG savedCatalogs-parse-failed error=${e.javaClass.simpleName}")
                     }
                 }
                 val extraUrls = runCatching {
@@ -891,11 +875,9 @@ open class StremioC(
                         }?.takeIf { it.url.isNotBlank() }
                     }
                 }.onFailure { error ->
-                    android.util.Log.w("StremioCStreams", "CONFIG extraAddons-parse-failed error=${error.javaClass.simpleName}")
                 }.getOrDefault(emptyList()).distinctBy { stremioManifestUrl(it.url) }
                 val result = SyncSettings(syncUrl, map, historyMap, extraMap, extraUrls,
                     catalogEnabled.filterValues { !it }.keys.toSet(), catalogEnabledIds)
-                android.util.Log.i("StremioCStreams", "CONFIG cache-rebuild savedCatalogKeys=${extraMap.size} trueFlags=${extraMap.count { it.value }} registeredExtras=${extraUrls.size} history=${stremioStreamDebugUrl(syncUrl)}")
                 cachedSyncSettings = result
                 cachedSyncSettingsTime = System.currentTimeMillis()
                 return result
@@ -2337,7 +2319,6 @@ open class StremioC(
 
 
     private suspend fun loadInternal(url: String, forceRefresh: Boolean = false): LoadResponse = coroutineScope {
-        android.util.Log.i("StremioCStreams", "ROUTE load start provider=${name.take(40)} main=${stremioStreamDebugUrl(mainUrl)} detail=${stremioStreamDebugUrl(url)} refresh=$forceRefresh")
         if (!isAddonEnabled()) throw IllegalStateException("This addon is disabled.")
         if (mainUrl.isBlank()) {
             val libraryService = when {
@@ -2353,7 +2334,6 @@ open class StremioC(
                 val metaUrl = run {
                     getLoadUrl(libraryService, url)
                 } ?: throw IllegalStateException("Unable to resolve the library item with the configured addon.")
-                android.util.Log.i("StremioCStreams", "ROUTE library-delegate service=$libraryService base=${stremioStreamDebugUrl(base)} meta=${stremioStreamDebugUrl(metaUrl)} original=${stremioStreamDebugUrl(url)}")
                 return@coroutineScope run {
                     StremioC(base, name).load(metaUrl).also { response ->
                         StremioCMdbUiBridge.keyFor(metaUrl)?.let { key ->
@@ -2377,7 +2357,6 @@ open class StremioC(
         if (mainUrl.isBlank() && (url.startsWith("https://") || url.startsWith("http://"))) {
             val origin = url.substringBefore("/meta/", "").takeIf { it.isNotBlank() }
             if (origin != null) {
-                android.util.Log.i("StremioCStreams", "ROUTE discover-delegate origin=${stremioStreamDebugUrl(origin)} detail=${stremioStreamDebugUrl(url)}")
                 val delegatedUrl = if (forceRefresh) url.toHttpUrlOrNull()?.newBuilder()
                     ?.addQueryParameter("__stremioc_refresh", "1")?.build()?.toString() ?: url else url
                 return@coroutineScope StremioC(origin, name).load(delegatedUrl)
@@ -2639,7 +2618,6 @@ open class StremioC(
 
         val resolvedIdHolder = arrayOf<String?>(null, null)
 
-        android.util.Log.i("StremioCStreams", "ROUTE meta-ready source=${stremioStreamDebugUrl(mainUrl)} id=${res.id} type=${res.type} mappedImdb=$resolvedImdbId mappedTmdb=$resolvedTmdbId originalAnime=$originalMappingId finalId=$finalProcessedId")
         val loadRes = run { res.toLoadResponse(
             provider = this@StremioC,
             imdbId = finalProcessedId,
@@ -2719,16 +2697,11 @@ open class StremioC(
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         if (!isAddonEnabled()) {
-            android.util.Log.w("StremioCStreams", "TRACE blocked: provider-disabled provider=${stremioStreamDebugUrl(mainUrl)}")
             return false
         }
         val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) {
-            android.util.Log.w("StremioCStreams", "TRACE loadData-parse-failed ${e.javaClass.simpleName}")
             null
         } ?: return false
-        val traceId = android.os.SystemClock.elapsedRealtime().toString() + "-" + System.identityHashCode(this)
-        android.util.Log.i("StremioCStreams",
-            "TRACE $traceId BEGIN provider=${name.take(40)} main=${stremioStreamDebugUrl(mainUrl)} payloadAddon=${stremioStreamDebugUrl(loadData.addonUrl)} rawId=${loadData.id} imdb=${loadData.imdbId} originalAnime=${loadData.originalAnimeId} type=${loadData.type} season=${loadData.season} episode=${loadData.episode} imdbSeason=${loadData.imdbSeason} imdbEpisode=${loadData.imdbEpisode} isAnime=${loadData.isAnime} isCartoon=${loadData.isCartoon} isAsian=${loadData.isAsian} embedded=${!loadData.embeddedStreams.isNullOrBlank()}")
         
         val legacyPrimaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
             loadData.imdbId
@@ -2760,10 +2733,6 @@ open class StremioC(
         val globalSeason = if (actualIsMovie) null else loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 } ?: 1
         val globalEpisode = if (actualIsMovie) null else loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 } ?: 1
 
-        val traceStart = android.os.SystemClock.elapsedRealtime()
-        val linksOffered = java.util.concurrent.atomic.AtomicInteger()
-        val linksAccepted = java.util.concurrent.atomic.AtomicInteger()
-        val linksDuplicate = java.util.concurrent.atomic.AtomicInteger()
         val seenLinks = Collections.synchronizedSet(mutableSetOf<Triple<String, String, Map<String, String>>>())
         // Only deduplicate subtitles supplied directly by Stremio addons.
         // CloudStream extractors/integrations must keep using the original callback.
@@ -2775,7 +2744,6 @@ open class StremioC(
             }
         }
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
-            linksOffered.incrementAndGet()
             val sourceKey = link.source
                 .removeSuffix("🧲")
                 .removeSuffix(" Magnet")
@@ -2785,10 +2753,7 @@ open class StremioC(
                 link.quality = Qualities.Unknown.value
             }
             if (seenLinks.add(Triple(link.url, link.referer, link.headers.toMap()))) {
-                linksAccepted.incrementAndGet()
                 callback(link)
-            } else {
-                linksDuplicate.incrementAndGet()
             }
         }
 
@@ -2798,45 +2763,10 @@ open class StremioC(
         val cleanBaseUrl = currentMainUrl.fixSourceUrl().cleanBaseUrl()
         val querySuffix = currentMainUrl.substringAfter("?", "").takeIf { it.isNotEmpty() }?.let { "?$it" } ?: ""
 
-        val syncCacheAgeBefore = if (cachedSyncSettings == null) -1L
-            else System.currentTimeMillis() - cachedSyncSettingsTime
         val syncSettings = getSyncSettings()
         val (syncUrl, _, historySyncMap) = syncSettings
         val currentCleanUrl = currentMainUrl.cleanBaseUrl().lowercase()
         val isHistorySyncEnabled = historySyncMap[currentCleanUrl] ?: false
-        val diagnosticPrefs = CloudStreamApp.context?.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
-        val rawCatalogSettings = diagnosticPrefs?.getString("stremio_saved_links", null)
-        val rawExtraSettings = diagnosticPrefs?.getString("stream_subtitle_addon_urls", null)
-        android.util.Log.i("StremioCStreams",
-            "TRACE $traceId KEY selected=${stremioStreamDebugUrl(currentMainUrl)} source=${if (!loadData.addonUrl.isNullOrBlank()) "payload" else "provider"} provider=${stremioStreamDebugUrl(mainUrl)} history=${stremioStreamDebugUrl(syncUrl)} cacheAgeBeforeMs=$syncCacheAgeBefore cacheWasFresh=${syncCacheAgeBefore >= 0L && syncCacheAgeBefore < SYNC_SETTINGS_TTL} cacheAgeAfterMs=${System.currentTimeMillis() - cachedSyncSettingsTime} keyPresent=${syncSettings.streamSubtitleMap.containsKey(currentCleanUrl)} streamSync=${syncSettings.streamSubtitleMap[currentCleanUrl]} historySync=${historySyncMap[currentCleanUrl]} metaSync=${syncSettings.syncMap[currentCleanUrl]} cachedCatalogKeys=${syncSettings.streamSubtitleMap.size} cachedExtraAddons=${syncSettings.streamSubtitleUrls.size} savedCatalogBytes=${rawCatalogSettings?.length ?: -1} savedExtraBytes=${rawExtraSettings?.length ?: -1}")
-        runCatching {
-            val entries = org.json.JSONArray(rawCatalogSettings ?: "[]")
-            android.util.Log.i("StremioCStreams", "TRACE $traceId SAVED catalogCount=${entries.length()}")
-            for (index in 0 until entries.length()) {
-                val item = entries.optJSONObject(index) ?: continue
-                val raw = item.optString("link", "")
-                val key = raw.cleanBaseUrl().lowercase()
-                android.util.Log.i("StremioCStreams",
-                    "TRACE $traceId CATALOG[$index] id=${item.optLong("id", -1L)} name=${item.optString("name", "").take(40)} enabled=${item.optBoolean("enabled", true)} streamSync=${item.optBoolean("isStreamSubtitleSyncEnabled", false)} metaSync=${item.optBoolean("isSyncEnabled", true)} historySync=${item.optBoolean("isHistorySyncEnabled", true)} exactKeyMatch=${key == currentCleanUrl} manifestMatch=${stremioManifestUrl(raw) == stremioManifestUrl(currentMainUrl)} noQueryManifestMatch=${stremioManifestUrl(raw).substringBefore('?').equals(stremioManifestUrl(currentMainUrl).substringBefore('?'), true)} url=${stremioStreamDebugUrl(raw)}")
-            }
-        }.onFailure { error ->
-            android.util.Log.w("StremioCStreams", "TRACE $traceId SAVED catalogs-parse-failed ${error.javaClass.simpleName}")
-        }
-        runCatching {
-            val entries = org.json.JSONArray(rawExtraSettings ?: "[]")
-            android.util.Log.i("StremioCStreams", "TRACE $traceId SAVED extraCount=${entries.length()}")
-            for (index in 0 until entries.length()) {
-                val item = entries.opt(index)
-                val raw = if (item is org.json.JSONObject) item.optString("url", "") else (item as? String).orEmpty()
-                val label = (item as? org.json.JSONObject)?.optString("name", "").orEmpty()
-                val enabled = (item as? org.json.JSONObject)?.optBoolean("enabled", true) ?: true
-                val valid = raw.toHttpUrlOrNull() != null
-                android.util.Log.i("StremioCStreams",
-                    "TRACE $traceId EXTRA[$index] name=${label.take(40)} enabled=$enabled validHttp=$valid self=${stremioManifestUrl(raw) == stremioManifestUrl(currentMainUrl)} url=${stremioStreamDebugUrl(raw)}")
-            }
-        }.onFailure { error ->
-            android.util.Log.w("StremioCStreams", "TRACE $traceId SAVED extras-parse-failed ${error.javaClass.simpleName}")
-        }
         // Library items can come directly from the metadata/history addon, which
         // need not appear in Catalogs. Preserve explicit catalog-level OFF settings.
         val savedStreamSync = syncSettings.streamSubtitleMap[currentCleanUrl]
@@ -2844,18 +2774,12 @@ open class StremioC(
             syncUrl.isNotBlank() && currentCleanUrl == syncUrl.cleanBaseUrl().lowercase() &&
             stremioManifestUrl(currentMainUrl) !in syncSettings.disabledCatalogUrls
         val streamSyncEnabled = savedStreamSync ?: libraryHistoryStreamSync
-        android.util.Log.i("StremioCStreams",
-            "TRACE $traceId STREAM_SYNC saved=$savedStreamSync libraryHistoryFallback=$libraryHistoryStreamSync effective=$streamSyncEnabled")
         val extraUrls = if (streamSyncEnabled) {
             syncSettings.streamSubtitleUrls.filter { addon ->
                 val parsed = addon.url.toHttpUrlOrNull()
                 parsed != null && (parsed.scheme == "http" || parsed.scheme == "https")
             }.filterNot { stremioManifestUrl(it.url) == stremioManifestUrl(currentMainUrl) }
         } else emptyList()
-        android.util.Log.i("StremioCStreams",
-            "TRACE $traceId DECISION type=$targetType primaryId=$primaryId globalId=$globalId integrationId=$integrationImdbId integrationType=$integrationTargetType actualMovie=$actualIsMovie globalSeason=$globalSeason globalEpisode=$globalEpisode extraEnabled=$streamSyncEnabled extraCount=${extraUrls.size} registered=${syncSettings.streamSubtitleUrls.size} historySync=$isHistorySyncEnabled")
-        android.util.Log.i("StremioCStreams",
-            "request type=$targetType id=$primaryId provider=${name.take(40)} extraEnabled=$streamSyncEnabled extraCount=${extraUrls.size}")
 
         val customHosts = withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
@@ -2903,8 +2827,6 @@ open class StremioC(
         // and subtitle labels must not determine which provider comes first.
         val stremioAddons = syncSettings.streamSubtitleUrls
         val integrationAddons = getIntegrationStremioAddons()
-        android.util.Log.i("StremioCStreams",
-            "TRACE $traceId INTEGRATIONS cineEnabled=${isIntegrationEnabled("cinestream_integration_enabled")} cineProvider=${getCineStreamProvider() != null} streamPlayEnabled=${isIntegrationEnabled("streamplay_integration_enabled")} streamPlayProvider=${getStreamPlayProvider() != null} vixEnabled=${isIntegrationEnabled("vixsrc_integration_enabled")} addons=${integrationAddons.size}")
         val cineAddons = integrationAddons.filter { it.fromCineStream }
         val streamPlayAddons = integrationAddons.filterNot { it.fromCineStream }
         fun rankSubtitle(sub: SubtitleFile, group: Int, addonUrl: String? = null) {
@@ -3002,7 +2924,6 @@ open class StremioC(
             preferredName: String? = null
         ) {
             if (addonUrl.isBlank() || id.isNullOrBlank()) {
-                android.util.Log.i("StremioCStreams", "TRACE $traceId SUBTITLE_SKIP reason=blank-url-or-id addon=${stremioStreamDebugUrl(addonUrl)} id=$id")
                 return
             }
 
@@ -3013,13 +2934,11 @@ open class StremioC(
                 episode
             ) ?: id
             if (subId.isBlank()) {
-                android.util.Log.i("StremioCStreams", "TRACE $traceId SUBTITLE_SKIP reason=blank-built-id")
                 return
             }
 
             val cleanSubtitleBase = addonUrl.fixSourceUrl().cleanBaseUrl()
             if (cleanSubtitleBase.isBlank()) {
-                android.util.Log.i("StremioCStreams", "TRACE $traceId SUBTITLE_SKIP reason=blank-base")
                 return
             }
 
@@ -3031,15 +2950,12 @@ open class StremioC(
                 "$cleanSubtitleBase/subtitles/$requestType/${subId.urlEncode()}.json$subtitleSuffix"
 
             if (!requestedSubtitleUrls.add(subtitleRequestUrl)) {
-                android.util.Log.i("StremioCStreams", "TRACE $traceId SUBTITLE_SKIP reason=duplicate-request type=$requestType id=$subId addon=${stremioStreamDebugUrl(addonUrl)}")
                 return
             }
-            val subtitleStarted = android.os.SystemClock.elapsedRealtime()
-            val subtitleResult = runSuspendCatching {
+            runSuspendCatching {
                 val response = customSession.get(subtitleRequestUrl, timeout = 15L)
                 val text = response.text
                 val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
-                android.util.Log.i("StremioCStreams", "TRACE $traceId SUBTITLE_RESPONSE type=$requestType id=$subId addon=${stremioStreamDebugUrl(addonUrl)} http=${response.code} bytes=${text.length} subtitles=${res?.subtitles?.size ?: 0} elapsedMs=${android.os.SystemClock.elapsedRealtime() - subtitleStarted}")
                 val addonSource = preferredName?.takeIf { it.isNotBlank() }
                     ?: getActualStremioAddonName(addonUrl)
                     ?: name.takeIf { addonUrl == currentMainUrl && !it.equals("StremioC", true) }
@@ -3047,16 +2963,12 @@ open class StremioC(
                     sub.toCloudStreamSubtitle(addonSource, preferredName)?.let(stremioSubtitleFrom(addonUrl))
                 }
             }
-            subtitleResult.onFailure { error ->
-                android.util.Log.w("StremioCStreams", "TRACE $traceId SUBTITLE_ERROR type=$requestType id=$subId addon=${stremioStreamDebugUrl(addonUrl)} error=${error.javaClass.simpleName} elapsedMs=${android.os.SystemClock.elapsedRealtime() - subtitleStarted}")
-            }
+
         }
 
         coroutineScope {
         val mappingDeferred = async(Dispatchers.IO, start = CoroutineStart.LAZY) {
-            android.util.Log.i("StremioCStreams", "TRACE $traceId MAPPING start actualMovie=$actualIsMovie id=${loadData.id} imdb=${loadData.imdbId} originalAnime=${loadData.originalAnimeId} isAnime=${loadData.isAnime} anilist=${loadData.anilistId} mal=${loadData.malId} kitsu=${loadData.kitsuId}")
             val mapped = if (!actualIsMovie) fetchAnimeSeasonMapping(loadData) else null
-            android.util.Log.i("StremioCStreams", "TRACE $traceId MAPPING result present=${mapped != null} imdb=${mapped?.imdbId} seasonImdb=${mapped?.imdbSeason} seasonTvdb=${mapped?.tvdbSeason} seasonTrakt=${mapped?.traktSeason} seasonTmdb=${mapped?.tmdbSeason} tmdbId=${mapped?.tmdbId} anilist=${mapped?.aniListId} mal=${mapped?.malId} kitsu=${mapped?.kitsuId}")
             mapped
         }
         // Use one IMDb ID and season for direct streams, extra streams and subtitles.
@@ -3080,8 +2992,6 @@ open class StremioC(
                 id.isBlank() -> null
                 else -> type to (buildStremioId(type, id, season, episode) ?: id)
             }
-            android.util.Log.i("StremioCStreams",
-                "TRACE $traceId REQUEST_ID requested=$type/$id season=$season episode=$episode originalAnime=${loadData.originalAnimeId} mapped=$mappedId resultType=${result?.first} resultId=${result?.second} reason=${when { mappedId != null -> "anime-mapped"; isLibraryAnimeId(id) -> "library-anime-id"; id.isBlank() -> "blank-id"; else -> "direct" }}")
             return result
         }
         runAllAsync(
@@ -3090,7 +3000,6 @@ open class StremioC(
                 loadData.embeddedStreams?.let { json ->
                     val embeddedResult = runSuspendCatching {
                         val streams = parseJson<List<Stream>>(json)
-                        android.util.Log.i("StremioCStreams", "TRACE $traceId EMBEDDED streams=${streams.size}")
                         streams.forEach { stream ->
                             val named = if (stream.name == null && stream.title == null && stream.description == null)
                                 stream.copy(title = loadData.embeddedStreamTitle) else stream
@@ -3099,22 +3008,17 @@ open class StremioC(
                         }
                     }
                     embeddedResult.onFailure { error ->
-                        android.util.Log.w("StremioCStreams", "TRACE $traceId EMBEDDED error=${error.javaClass.simpleName}")
                     }
                 }
             },
             {
                 val request = streamRequest(targetType, primaryId, loadData.season, loadData.episode)
                 if (cleanBaseUrl.isNotBlank() && request != null) {
-                    val started = android.os.SystemClock.elapsedRealtime()
-                    android.util.Log.i("StremioCStreams", "TRACE $traceId MAIN start source=${stremioStreamDebugUrl(currentMainUrl)} type=${request.first} id=${request.second}")
                     val outcome = runSuspendCatching {
                         val streamRequestUrl = "$cleanBaseUrl/stream/${request.first}/${request.second.urlEncode()}.json$querySuffix"
                         val response = customSession.get(streamRequestUrl, timeout = 25L)
                         val text = response.text
                         val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
-                        android.util.Log.i("StremioCStreams",
-                            "TRACE $traceId source=main type=${request.first} id=${request.second} http=${response.code} bytes=${text.length} streams=${res?.streams?.size ?: 0} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
                         res?.streams?.forEach { stream ->
                             stream.runCallback(
                                 this@StremioC,
@@ -3125,13 +3029,8 @@ open class StremioC(
                             )
                         }
                     }
-                    outcome.onFailure { error ->
-                        android.util.Log.w("StremioCStreams",
-                            "TRACE $traceId source=main type=${request.first} id=${request.second} error=${error.javaClass.simpleName} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
-                    }
+
                 } else {
-                    android.util.Log.i("StremioCStreams",
-                        "TRACE $traceId source=main skipped type=$targetType id=$primaryId reason=${if (request == null) "missing-id" else "missing-base"}")
                 }
             },
             {
@@ -3159,7 +3058,6 @@ open class StremioC(
                 if (extraUrls.isNotEmpty()) coroutineScope {
                     val limiter = Semaphore(4)
                     val reqId = loadData.originalAnimeId ?: integrationImdbId ?: globalId.takeIf { it.isNotBlank() }
-                    android.util.Log.i("StremioCStreams", "TRACE $traceId EXTRA_DISPATCH count=${extraUrls.size} reqId=$reqId precedence=${if (loadData.originalAnimeId != null) "originalAnimeId" else if (integrationImdbId != null) "integrationImdbId" else "globalId"}")
                     extraUrls.map { addon -> async(Dispatchers.IO) {
                         limiter.withPermit {
                             if (!reqId.isNullOrBlank()) {
@@ -3176,30 +3074,21 @@ open class StremioC(
                                     ?: getActualStremioAddonName(addonUrl)
                                     ?: base.toHttpUrlOrNull()?.host.orEmpty()
                                 if (source.isNotBlank()) stremioSourceNames.add(source.lowercase())
-                                android.util.Log.i("StremioCStreams", "TRACE $traceId EXTRA_PLAN addon=${addon.name.take(40)} url=${stremioStreamDebugUrl(addonUrl)} reqType=$extraType reqId=$reqId season=$season episode=$episode request=${streamRequest?.first}/${streamRequest?.second}")
                                 runAllAsync({
                                     if (streamRequest != null && base.isNotBlank()) {
-                                        val started = android.os.SystemClock.elapsedRealtime()
                                         val outcome = runSuspendCatching {
                                             val requestUrl = "$base/stream/${streamRequest.first}/${streamRequest.second.urlEncode()}.json$suffix"
                                             val response = customSession.get(requestUrl, timeout = 25L)
                                             val text = response.text
                                             val streams = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
-                                            android.util.Log.i("StremioCStreams",
-                                                "TRACE $traceId source=extra addon=${source.take(40)} type=${streamRequest.first} id=${streamRequest.second} http=${response.code} bytes=${text.length} streams=${streams?.streams?.size ?: 0} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
                                             streams?.streams?.forEach { stream ->
                                                 stream.runCallback(this@StremioC, source,
                                                     stremioSubtitleFrom(addonUrl), extractorSubtitleFrom(addonUrl), wrappedCallback,
                                                     preferredName = addon.name)
                                             }
                                         }
-                                        outcome.onFailure { error ->
-                                            android.util.Log.w("StremioCStreams",
-                                                "TRACE $traceId source=extra addon=${source.take(40)} type=${streamRequest.first} id=${streamRequest.second} error=${error.javaClass.simpleName} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
-                                        }
+
                                     } else {
-                                        android.util.Log.i("StremioCStreams",
-                                            "TRACE $traceId source=extra addon=${source.take(40)} skipped reason=${if (streamRequest == null) "missing-id" else "missing-base"}")
                                     }
                                 }, {
                                     val mappedId = mappedAnimeStremioId()
@@ -3210,12 +3099,10 @@ open class StremioC(
                                     }
                                 })
                             } else {
-                                android.util.Log.i("StremioCStreams", "TRACE $traceId EXTRA_SKIP addon=${addon.name.take(40)} reason=blank-global-id")
                             }
                         }
                     } }.awaitAll()
                 } else {
-                    android.util.Log.i("StremioCStreams", "TRACE $traceId EXTRA_SKIP all reason=${if (!streamSyncEnabled) "sync-flag-disabled-or-unmatched" else "no-enabled-valid-addons"}")
                 }
             },
             {
@@ -3242,8 +3129,6 @@ open class StremioC(
                 }
             }
         )
-        android.util.Log.i("StremioCStreams",
-            "TRACE $traceId DONE offered=${linksOffered.get()} accepted=${linksAccepted.get()} duplicate=${linksDuplicate.get()} elapsedMs=${android.os.SystemClock.elapsedRealtime() - traceStart} extraCount=${extraUrls.size} mappingStarted=${mappingDeferred.isActive || mappingDeferred.isCompleted}")
         mappingDeferred.cancel() // LAZY deferred must not keep the scope open when no integration uses it.
         }
         return true
@@ -3262,17 +3147,14 @@ open class StremioC(
         if (!IMDB_ID_REGEX.matches(imdbId) || season <= 0) return null
         val mapped = fetchAnimeSeasonMapping(LoadData(
             id = imdbId, imdbId = imdbId, imdbSeason = season, isAnime = true
-        ), p1Trace = true) ?: return null
+        )) ?: return null
         if (mapped.imdbId != imdbId) {
-            android.util.Log.w("STCSeasonSync", "event=P1_MAP_REJECT imdb=$imdbId season=$season reason=imdb-mismatch returned=${mapped.imdbId}")
             return null
         }
         // A multi-season IMDb page must never attach a different season's tracker ID.
         if (season > 1 && mapped.imdbSeason != season &&
             mapped.tvdbSeason != season && mapped.traktSeason != season &&
             mapped.tmdbSeason != season) {
-            android.util.Log.w("STCSeasonSync", "event=P1_MAP_REJECT imdb=$imdbId season=$season reason=season-mismatch " +
-                "imdbSeason=${mapped.imdbSeason} tvdb=${mapped.tvdbSeason} trakt=${mapped.traktSeason} tmdb=${mapped.tmdbSeason}")
             return null
         }
         return SeasonTrackerIds(mapped.malId, mapped.aniListId,
@@ -3282,7 +3164,7 @@ open class StremioC(
                 it.simkl != null }
     }
 
-    private suspend fun fetchAnimeSeasonMapping(loadData: LoadData, p1Trace: Boolean = false): AnimeSeasonMapping? {
+    private suspend fun fetchAnimeSeasonMapping(loadData: LoadData): AnimeSeasonMapping? {
         val aniListLookupId = loadData.originalAnimeId?.takeIf { it.startsWith("anilist:") }
             ?.removePrefix("anilist:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
             ?: loadData.anilistId?.takeIf { it > 0 }
@@ -3322,9 +3204,6 @@ open class StremioC(
                 (if (season != null) "&season=$season" else "") +
                 (if (episode != null) "&episode=$episode" else "")
         }
-        fun p1(event: String, details: String = "") {
-            if (p1Trace) android.util.Log.i("STCSeasonSync", "event=P1_MAP_$event query=$query $details")
-        }
         val memoryAnime = stremioCacheMemoryRead("anime", query, animeMappingCache[query], METADATA_CACHE_TTL)
         val cachedAnime = memoryAnime ?: MetadataDiskCache.read("anime", query)?.let { (json, stamp) ->
             runCatching { parseJson<AnimeSeasonMapping>(json) }.getOrNull()?.let { value ->
@@ -3334,26 +3213,18 @@ open class StremioC(
             }
         }
         if (cachedAnime != null) {
-            p1("CACHE_HIT", "origin=${if (memoryAnime != null) "RAM" else "disk"} " +
-                "imdb=${cachedAnime.first.imdbId} mappedSeason=${cachedAnime.first.imdbSeason} " +
-                "mal=${cachedAnime.first.malId} anilist=${cachedAnime.first.aniListId} " +
-                "kitsu=${cachedAnime.first.kitsuId} simkl=${cachedAnime.first.simklId} " +
-                "tvdb=${cachedAnime.first.tvdbId}")
             return cachedAnime.first
         }
-        p1("CACHE_MISS")
         val noMappingStamp = animeNoMappingCache[query]
         if (noMappingStamp != null) {
             val age = System.currentTimeMillis() - noMappingStamp
             if (age >= 0L && age < 15L * 60 * 1000) {
-                p1("NEGATIVE_CACHE", "origin=RAM ageMs=$age")
                 return null
             }
             animeNoMappingCache.remove(query)
         }
         MetadataDiskCache.read("missing_anime", query)?.takeIf { it.first == "null" }?.let {
             animeNoMappingCache[query] = it.second
-            p1("NEGATIVE_CACHE", "origin=disk")
             return null
         }
         val hosts = listOf(
@@ -3366,52 +3237,41 @@ open class StremioC(
         )
         for (host in hosts) {
             var noMapping = false
-            p1("HOST_START", "host=$host")
-            val attemptedAt = android.os.SystemClock.elapsedRealtime()
             val outcome = runSuspendCatching {
             val response = run {
                 fetchSharedAnimeText("https://$host/api/v1/anime?$query")
             }
             val root = run { parseJson<JsonNode>(response) }
             if (root.get("success")?.asBoolean() != true) {
-                p1("HOST_REJECT", "host=$host reason=success-false")
                 return@runSuspendCatching null
             }
             if (root.get("data")?.isNull == true) {
-                p1("HOST_REJECT", "host=$host reason=authoritative-null")
                 noMapping = true
                 return@runSuspendCatching null
             }
             val data = root.get("data") ?: run {
-                p1("HOST_REJECT", "host=$host reason=missing-data")
                 return@runSuspendCatching null
             }
             val ids = data.get("mappings") ?: run {
-                p1("HOST_REJECT", "host=$host reason=missing-mappings")
                 return@runSuspendCatching null
             }
             val resolvedKitsu = ids.get("kitsuId").intOrNull()?.takeIf { it > 0 }?.toString()
             val resolvedImdb = ids.get("imdbId").textOrNull()
             if (byKitsu && resolvedKitsu != kitsuId) {
-                p1("HOST_REJECT", "host=$host reason=kitsu-id-mismatch")
                 return@runSuspendCatching null
             }
             if ((byMal || imdbId == null && kitsuId == null && malLookupId != null && !byAniList) &&
                 ids.get("malId").intOrNull() != malLookupId) {
-                p1("HOST_REJECT", "host=$host reason=mal-id-mismatch")
                 return@runSuspendCatching null
             }
             if (byAniList && ids.get("anilistId").intOrNull() != aniListLookupId) {
-                p1("HOST_REJECT", "host=$host reason=anilist-id-mismatch")
                 return@runSuspendCatching null
             }
             if (imdbId != null && resolvedImdb != imdbId) {
-                p1("HOST_REJECT", "host=$host reason=imdb-mismatch response=$resolvedImdb")
                 return@runSuspendCatching null
             }
             if (resolvedKitsu == null && ids.get("malId").intOrNull() == null &&
                 ids.get("anilistId").intOrNull() == null) {
-                p1("HOST_REJECT", "host=$host reason=no-anime-tracker-ids")
                 return@runSuspendCatching null
             }
             // AIOStreams may return its first record if season matching fails.
@@ -3422,7 +3282,6 @@ open class StremioC(
                     ?: data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
                     ?: data.get("tmdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
                 if (mappedSeason != season) {
-                    p1("HOST_REJECT", "host=$host reason=season-mismatch expected=$season got=$mappedSeason")
                     return@runSuspendCatching null
                 }
             }
@@ -3454,9 +3313,6 @@ open class StremioC(
             )
             }
             val mapping = outcome.getOrNull()
-            p1("HOST_FINISH", "host=$host outcome=${if (mapping != null) "mapped" else "empty"} " +
-                "error=${outcome.exceptionOrNull()?.javaClass?.simpleName ?: "none"} " +
-                "elapsedMs=${android.os.SystemClock.elapsedRealtime()-attemptedAt}")
             if (noMapping) {
                 // Cache only an authoritative success=true/data=null response, never host errors.
                 animeNoMappingCache[query] = System.currentTimeMillis()
@@ -3466,15 +3322,11 @@ open class StremioC(
                 return null
             }
             if (mapping != null) {
-                p1("HOST_MATCH", "host=$host mappedSeason=${mapping.imdbSeason} " +
-                    "mal=${mapping.malId} anilist=${mapping.aniListId} kitsu=${mapping.kitsuId} " +
-                    "simkl=${mapping.simklId} tvdb=${mapping.tvdbId}")
                 animeMappingCache[query] = mapping to System.currentTimeMillis()
                 MetadataDiskCache.write("anime", query, mapping.toJson())
                 return mapping
             }
         }
-        p1("EXHAUSTED", "reason=all-hosts-unavailable-or-unmatched")
         return null
     }
 
@@ -3734,18 +3586,15 @@ open class StremioC(
         callback: (ExtractorLink) -> Unit
     ) {
         if (targetType != "movie" && targetType != "series") {
-            android.util.Log.i("StremioCStreams", "INTEGRATION_FALLBACK skip reason=unsupported-type type=$targetType")
             return
         }
 
         val media = integrationData(loadData, targetType, globalId, globalSeason, globalEpisode)
         if (!media.imdbId.isNullOrBlank()) {
-            android.util.Log.i("StremioCStreams", "INTEGRATION_FALLBACK skip reason=imdb-present type=$targetType id=${media.imdbId}")
             return
         }
 
         val tmdbId = media.tmdbId ?: run {
-            android.util.Log.i("StremioCStreams", "INTEGRATION_FALLBACK skip reason=missing-tmdb type=$targetType")
             return
         }
         val stremioId = if (targetType == "series") {
@@ -3757,8 +3606,6 @@ open class StremioC(
         }
         val encodedId = stremioId.urlEncode()
         val addons = getIntegrationStremioAddons()
-        android.util.Log.i("StremioCStreams",
-            "INTEGRATION_FALLBACK plan type=$targetType tmdb=$tmdbId mappedId=$stremioId addonCount=${addons.size}")
         if (addons.isEmpty()) return
 
         supervisorScope {
@@ -3784,12 +3631,9 @@ open class StremioC(
                             }
                         } else {
                             val requestUrl = "$cleanBaseUrl/stream/$targetType/${encodedId}.json$querySuffix"
-                            val started = android.os.SystemClock.elapsedRealtime()
                             val response = customSession.get(requestUrl, timeout = 25L)
                             val text = response.text
                             val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
-                            android.util.Log.i("StremioCStreams",
-                                "source=integration addon=${addon.name.take(40)} type=$targetType id=$stremioId http=${response.code} streams=${res?.streams?.size ?: 0} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
 
                             res?.streams?.forEach { stream ->
                                 stream.runCallback(
@@ -3807,8 +3651,6 @@ open class StremioC(
                         }
                     }.onFailure { error ->
                         if (error is CancellationException) throw error
-                        android.util.Log.w("StremioCStreams",
-                            "source=integration addon=${addon.name.take(40)} type=$targetType id=$stremioId error=${error.javaClass.simpleName}")
                     }
                 }
             }.awaitAll()
@@ -4602,7 +4444,6 @@ open class StremioC(
                 }
             }
 
-            android.util.Log.i("StremioCStreams", "ROUTE episodes-built provider=${stremioStreamDebugUrl(provider.mainUrl)} anime=$isAnime originalAnime=$originalAnimeId imdb=$finalImdbId episodes=${processedEpisodes.size} firstSeason=${processedEpisodes.firstOrNull()?.season} firstEpisode=${processedEpisodes.firstOrNull()?.episode}")
             return processedEpisodes.sortedWith(compareBy({ it.season }, { it.episode }))
         }
         

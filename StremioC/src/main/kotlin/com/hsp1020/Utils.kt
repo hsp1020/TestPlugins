@@ -32,7 +32,6 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import android.os.SystemClock
 import com.lagradost.cloudstream3.Score
 import com.lagradost.cloudstream3.syncproviders.providers.SimklApi
 import com.lagradost.cloudstream3.syncproviders.AccountManager
@@ -58,7 +57,6 @@ import com.google.android.material.chip.Chip
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import android.text.Editable
 import android.text.SpannableStringBuilder
 import android.text.Spanned
@@ -1224,7 +1222,6 @@ internal class RatingPlotImageHook(
         private val pluginResources: Resources
     ) {
         private companion object {
-            const val TAG = "STCSeasonSync"
             val IMDb = Regex("tt\\d+")
             val allowed = setOf("mal", "anilist", "kitsu", "simkl")
             val titles = mapOf("mal" to "MAL", "anilist" to "AniList",
@@ -1271,14 +1268,12 @@ internal class RatingPlotImageHook(
 
         private suspend fun simklSeasonRead(
             repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
-            id: String, requested: Int, gen: Long
+            id: String, requested: Int
         ): SimklSeasonSnapshot? {
             val headers = SimklApi.getHeaders(repo.authToken() ?: return null) +
                 mapOf("content-type" to "application/json")
             val ids = simklIds(id)
             if (ids == null) {
-                Log.w(TAG, "event=SIMKL_P3_BLOCK session=$session gen=$gen " +
-                    "season=$requested reason=missing-id")
                 return null
             }
             return try {
@@ -1286,8 +1281,6 @@ internal class RatingPlotImageHook(
                 val response = app.post("https://api.simkl.com/sync/watched?extended=episodes",
                     headers=headers, requestBody=payload.toString().toRequestBody())
                 if (response.code !in 200..299) {
-                    Log.w(TAG, "event=SIMKL_P3_HTTP session=$session gen=$gen " +
-                        "season=$requested response=${response.code}")
                     return null
                 }
                 val records = JSONArray(response.text)
@@ -1328,29 +1321,21 @@ internal class RatingPlotImageHook(
                     SimklSeasonSnapshot(ids, requested, chosen.first, chosen.second,
                         parsed.filterKeys { it != requested }.mapValues { it.value.second })
                 else null
-                Log.i(TAG,"event=SIMKL_P3_READ session=$session gen=$gen season=$requested " +
-                    "http=${response.code} record=${record != null} seasons=${parsed.keys} " +
-                    "total=${result?.available?.size} watched=${result?.watched?.size} " +
-                    "malformed=$malformed readOnly=${result == null}")
                 result
             } catch (e: CancellationException) { throw e }
               catch (e: Exception) {
-                  Log.w(TAG,"event=SIMKL_P3_READ_FAILED session=$session gen=$gen season=$requested " +
-                      "cause=${e.javaClass.simpleName}")
                   null
               }
         }
 
         private suspend fun simklSeasonSave(
-            tracker: Tracker, draft: Draft, baseline: Draft, gen: Long, sn: Int
+            tracker: Tracker, draft: Draft, baseline: Draft, sn: Int
         ): Boolean {
             val initial = tracker.simklSeason ?: return false
             if (draft.score != baseline.score ||
                 (draft.status != baseline.status &&
                     !(baseline.status == SyncWatchType.NONE &&
                       draft.status == SyncWatchType.WATCHING && draft.watched > 0))) {
-                Log.w(TAG,"event=SIMKL_P3_BLOCK session=$session gen=$gen season=$sn " +
-                    "reason=title-wide-status-or-rating")
                 return false
             }
             if (draft.watched !in 0..initial.available.size) return false
@@ -1371,35 +1356,25 @@ internal class RatingPlotImageHook(
             val api = if (countDiff > 0) "history" else "history/remove"
             val headers = SimklApi.getHeaders(tracker.repo.authToken() ?: return false) +
                 mapOf("content-type" to "application/json")
-            Log.i(TAG,"event=SIMKL_P3_WRITE session=$session gen=$gen season=$sn " +
-                "operation=$api episodes=$delta before=${initial.watched.size} " +
-                "desired=${draft.watched} untouchedSeasons=${initial.otherSeasons.keys}")
             val response = try { app.post("https://api.simkl.com/sync/$api",
                 headers=headers, requestBody=body.toRequestBody()) }
                 catch (e: Exception) {
-                    Log.w(TAG,"event=SIMKL_P3_WRITE_FAILED session=$session gen=$gen " +
-                        "season=$sn cause=${e.javaClass.simpleName}")
                     return false
                 }
             val missing = runCatching { JSONObject(response.text)
                 .optJSONObject("not_found")?.optJSONArray("shows")?.length() ?: 0
                 }.getOrDefault(-1)
             if (response.code !in 200..299 || missing != 0) {
-                Log.w(TAG,"event=SIMKL_P3_WRITE_RESPONSE session=$session gen=$gen " +
-                    "season=$sn http=${response.code} notFound=$missing")
                 return false
             }
             for (attempt in 1..3) {
                 if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
-                val current = simklSeasonRead(tracker.repo, tracker.id, sn, gen)
+                val current = simklSeasonRead(tracker.repo, tracker.id, sn)
                 val sameOther = current != null &&
                     initial.otherSeasons.all { (key, seen) ->
                         current.otherSeasons[key] == seen
                     }
                 val exact = current?.watched == expected
-                Log.i(TAG,"event=SIMKL_P3_VERIFY session=$session gen=$gen season=$sn " +
-                    "attempt=$attempt exact=$exact otherSeasons=$sameOther " +
-                    "expected=$expected observed=${current?.watched}")
                 if (exact && sameOther) {
                     tracker.simklSeason = current
                     return true
@@ -1422,153 +1397,60 @@ internal class RatingPlotImageHook(
         private fun jsonInt(obj: JSONObject?, key: String): Int? =
             obj?.opt(key)?.toString()?.toIntOrNull()?.takeIf { it > 0 }
 
-        // P4 diagnostics: inspect response shape without dumping account history or credentials.
-        private fun p4Shape(body: String): String {
-            val raw = body.trim()
-            val parsed = runCatching { org.json.JSONTokener(raw).nextValue() }.getOrNull()
-            val root = parsed as? JSONObject
-            val array = parsed as? JSONArray
-            val anime = root?.optJSONArray("anime")
-            val type = when {
-                raw.isEmpty() -> "empty-body"
-                parsed == JSONObject.NULL -> "json-null"
-                root != null -> "object"
-                array != null -> "array"
-                parsed == null -> "unparseable"
-                else -> parsed.javaClass.simpleName
-            }
-            val head = if (raw == "{}" || raw == "[]" || raw == "null") raw else "withheld"
-            return "type=$type bytes=${body.length} keys=${root?.keys()?.asSequence()?.toList()} " +
-                "animeType=${root?.opt("anime")?.javaClass?.simpleName} animeRows=${anime?.length()} " +
-                "rootRows=${array?.length()} error=${root?.optString("error")?.take(100)} " +
-                "message=${root?.optString("message")?.take(100)} literal=$head"
-        }
-
-        private fun p4Trace(event: String, gen: Long, sn: Int?, details: String) {
-            Log.i(TAG, "event=$event session=$session gen=$gen season=$sn $details")
-        }
-
         /**
-         * Exact watched grid for the Simkl anime IDs selected by the season crosswalk.
-         * Unlike /sync/all-items/anime, /sync/watched returns episodes (including
-         * watched=false) even when the user's watchlist is empty.
-         * Fail closed on partial responses: never interpret a missing item/episode as
-         * unwatched and never infer watched flags from presence alone.
+         * Query per-episode watched flags for the season's validated Simkl anime IDs.
+         * Do not cross-check a separate endpoint's episode count or summary total.
          */
         private suspend fun simklAnimeWatched(
             repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
-            ids: Set<Int>, mapped: List<AnimeSlot>, gen: Long, targetSeason: Int,
-            force: Boolean
+            ids: Set<Int>
         ): Set<String>? {
-            val token = repo.authToken()
-            p4Trace("SIMKL_P4_WATCHED_BEGIN",gen,targetSeason,
-                "ids=$ids expectedMapped=${mapped.size} force=$force authorized=${token != null}")
-            if(token == null || ids.isEmpty())return null
-            val headers=SimklApi.getHeaders(token)+mapOf("content-type" to "application/json")
+            if(ids.isEmpty())return null
+            val headers=SimklApi.getHeaders(repo.authToken() ?: return null)+
+                mapOf("content-type" to "application/json")
             val request=JSONArray().also { array ->
                 ids.forEach { id ->
                     array.put(JSONObject().put("ids",JSONObject().put("simkl",id)))
                 }
             }
-            val start=SystemClock.elapsedRealtime()
             val response=try {
                 app.post("https://api.simkl.com/sync/watched?extended=episodes",
                     headers=headers,requestBody=request.toString().toRequestBody())
             }catch(e: CancellationException){throw e}
-             catch(e: Exception){
-                Log.w(TAG,"event=SIMKL_P4_WATCHED_EXCEPTION session=$session gen=$gen " +
-                    "season=$targetSeason cause=${e.javaClass.simpleName}")
-                return null
-             }
-            p4Trace("SIMKL_P4_WATCHED_HTTP",gen,targetSeason,
-                "http=${response.code} elapsedMs=${SystemClock.elapsedRealtime()-start} " +
-                "ids=$ids ${p4Shape(response.text)}")
+             catch(e: Exception){return null}
             if(response.code !in 200..299)return null
-            val rows=runCatching { JSONArray(response.text) }.getOrNull()
-            if(rows == null || rows.length()!=ids.size){
-                p4Trace("SIMKL_P4_WATCHED_INVALID",gen,targetSeason,
-                    "reason=unexpected-row-count rows=${rows?.length()} expected=${ids.size}")
-                return null
-            }
+            val rows=runCatching { JSONArray(response.text) }.getOrNull() ?: return null
+            if(rows.length()!=ids.size)return null
             val watched=linkedSetOf<String>()
             val observed=linkedSetOf<String>()
             val returned=linkedSetOf<Int>()
             for(i in 0 until rows.length()){
-                val row=rows.optJSONObject(i)
-                val id=jsonInt(row?.optJSONObject("ids"),"simkl")
+                val row=rows.optJSONObject(i) ?: return null
+                val id=jsonInt(row.optJSONObject("ids"),"simkl") ?: return null
                 val rootId=jsonInt(row,"simkl")
-                if(row==null || id==null || id !in ids || rootId!=null && rootId!=id ||
-                    !returned.add(id)){
-                    p4Trace("SIMKL_P4_WATCHED_INVALID",gen,targetSeason,
-                        "reason=unexpected-or-duplicate-id index=$i id=$id rootId=$rootId returned=$returned")
-                    return null
-                }
-                val seasons=row.optJSONArray("seasons")
-                val claimed=row.optInt("episodes_watched",-1)
-                if(seasons==null || claimed<0){
-                    p4Trace("SIMKL_P4_WATCHED_INVALID",gen,targetSeason,
-                        "reason=missing-seasons-or-count id=$id seasons=${seasons?.length()} claimed=$claimed")
-                    return null
-                }
-                var count=0
+                if(id !in ids || (rootId!=null && rootId!=id) || !returned.add(id))return null
+                val seasons=row.optJSONArray("seasons") ?: return null
                 for(j in 0 until seasons.length()){
-                    val part=seasons.optJSONObject(j)
-                    val episodes=part?.optJSONArray("episodes")
-                    if(part==null || episodes==null || jsonInt(part,"number")==null){
-                        p4Trace("SIMKL_P4_WATCHED_INVALID",gen,targetSeason,
-                            "reason=invalid-season id=$id index=$j")
-                        return null
-                    }
+                    val part=seasons.optJSONObject(j) ?: return null
+                    val episodes=part.optJSONArray("episodes") ?: return null
+                    if(jsonInt(part,"number")==null)return null
                     for(k in 0 until episodes.length()){
-                        val ep=episodes.optJSONObject(k)
-                        val number=jsonInt(ep,"number")
-                        val flag=ep?.opt("watched")
-                        if(number==null || flag !is Boolean || !observed.add("$id:$number")){
-                            p4Trace("SIMKL_P4_WATCHED_INVALID",gen,targetSeason,
-                                "reason=missing-or-duplicate-episode id=$id seasonIndex=$j index=$k " +
-                                "episode=$number watchedType=${flag?.javaClass?.simpleName}")
-                            return null
-                        }
-                        if(flag){watched+="$id:$number";count++}
+                        val ep=episodes.optJSONObject(k) ?: return null
+                        val number=jsonInt(ep,"number") ?: return null
+                        val flag=ep.opt("watched")
+                        if(flag !is Boolean || !observed.add("$id:$number"))return null
+                        if(flag)watched+="$id:$number"
                     }
                 }
-                p4Trace("SIMKL_P4_WATCHED_ROW",gen,targetSeason,
-                    "id=$id result=${row.opt("result")} list=${row.optString("list")} " +
-                    "reportedTotal=${row.optInt("episodes_total",-1)} " +
-                    "aired=${row.optInt("episodes_aired",-1)} claimedWatched=$claimed " +
-                    "observed=$count seasons=${seasons.length()} " +
-                    "keys=${observed.count { it.startsWith("$id:") }}")
-                if(count!=claimed){
-                    p4Trace("SIMKL_P4_WATCHED_INVALID",gen,targetSeason,
-                        "reason=watched-count-mismatch id=$id counted=$count claimed=$claimed")
-                    return null
-                }
             }
-            val target=mapped.map { it.key }.toSet()
-            val missing=target-observed
-            if(returned!=ids || missing.isNotEmpty()){
-                p4Trace("SIMKL_P4_WATCHED_INVALID",gen,targetSeason,
-                    "reason=incomplete-episode-grid returned=$returned missing=${missing.take(30)} " +
-                    "missingCount=${missing.size}")
-                return null
-            }
-            p4Trace("SIMKL_P4_WATCHED_READY",gen,targetSeason,
-                "returned=$returned keys=${observed.size} watchedTotal=${watched.size} " +
-                "watchedMapped=${(watched intersect target).size} outside=${(watched-target).size}")
-            return watched
+            return watched.takeIf { returned==ids }
         }
 
         private suspend fun simklAnimeRead(
             repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
-            mapped: SeasonTrackerIds, targetSeason: Int, gen: Long,
-            force: Boolean = false
+            mapped: SeasonTrackerIds, targetSeason: Int
         ): AnimeSnapshot? {
-            p4Trace("SIMKL_P4_BEGIN", gen, targetSeason,
-                "mal=${mapped.mal} simkl=${mapped.simkl} tvdb=${mapped.tvdb} " +
-                "tvdbSeason=${mapped.tvdbSeason} anilist=${mapped.aniList} kitsu=${mapped.kitsu} " +
-                "force=$force catalogEpisodes=${StremioC.seasonEpisodeCountsByUrl[pageUrl.orEmpty()]?.get(targetSeason)}")
             val auth = repo.authToken()
-            p4Trace("SIMKL_P4_AUTH", gen, targetSeason, "authorized=${auth != null}")
             val headers = SimklApi.getHeaders(auth ?: return null)
             val candidates = linkedSetOf<Int>()
             val tvdbSearchMatches = linkedSetOf<Int>()
@@ -1580,9 +1462,6 @@ internal class RatingPlotImageHook(
                         params=mapOf(field to value.toString()),headers=headers,cacheTime=0)
                     val array=if (resp.code in 200..299)
                         runCatching { JSONArray(resp.text) }.getOrNull() else null
-                    p4Trace("SIMKL_P4_SEARCH_RESPONSE",gen,targetSeason,
-                        "field=$field lookup=$value http=${resp.code} ${p4Shape(resp.text)} " +
-                        "rows=${array?.length()} keys=${(0 until minOf(3,array?.length() ?: 0)).map { i -> array?.optJSONObject(i)?.keys()?.asSequence()?.toList() }}")
                     val found=mutableListOf<Int>()
                     for(i in 0 until (array?.length() ?: 0)){
                         val item=array?.optJSONObject(i)
@@ -1591,24 +1470,17 @@ internal class RatingPlotImageHook(
                         val id=jsonInt(ids,"simkl")
                         if (id != null) found+=id
                     }
-                    Log.i(TAG,"event=SIMKL_P4_SEARCH session=$session gen=$gen season=$targetSeason " +
-                        "field=$field http=${resp.code} rows=${array?.length()} ids=$found")
                     candidates.addAll(found.take(24))
                     if (field=="tvdb")tvdbSearchMatches.addAll(found.take(24))
                     if (field=="mal")malSearchMatches.addAll(found.take(24))
                 }catch(e: CancellationException){throw e}
                  catch(e: Exception){
-                    Log.w(TAG,"event=SIMKL_P4_SEARCH_FAIL session=$session gen=$gen season=$targetSeason " +
-                        "field=$field cause=${e.javaClass.simpleName}")
                  }
             }
             // Simkl's own native ID resolver, with TVDB parent search to find every cour.
             mapped.mal?.let { search("mal",it) }
             mapped.tvdb?.let { search("tvdb",it) }
-            p4Trace("SIMKL_P4_SEARCH_FINAL",gen,targetSeason,
-                "candidates=$candidates malMatches=$malSearchMatches tvdbMatches=$tvdbSearchMatches")
             if(candidates.isEmpty()){
-                p4Trace("SIMKL_P4_BLOCK",gen,targetSeason,"reason=no-simkl-candidates")
                 return null
             }
             val tvdbSeason=mapped.tvdbSeason
@@ -1619,38 +1491,27 @@ internal class RatingPlotImageHook(
                 try{
                     val detail=app.get("https://api.simkl.com/anime/$id",
                         headers=headers,cacheTime=600)
-                    p4Trace("SIMKL_P4_DETAIL_HTTP",gen,targetSeason,
-                        "candidate=$id http=${detail.code} ${p4Shape(detail.text)}")
                     if(detail.code !in 200..299){
-                        p4Trace("SIMKL_P4_CANDIDATE_SKIP",gen,targetSeason,"id=$id reason=detail-http")
                         continue
                     }
                     val info=runCatching { JSONObject(detail.text) }.getOrNull()
                     if(info == null){
-                        p4Trace("SIMKL_P4_CANDIDATE_SKIP",gen,targetSeason,"id=$id reason=detail-invalid-json")
                         continue
                     }
                     val ids=info.optJSONObject("ids")
                     if(ids == null){
-                        p4Trace("SIMKL_P4_CANDIDATE_SKIP",gen,targetSeason,"id=$id reason=no-ids keys=${info.keys().asSequence().toList()}")
                         continue
                     }
-                    p4Trace("SIMKL_P4_DETAIL_IDS",gen,targetSeason,"candidate=$id ids=$ids")
                     if(jsonInt(ids,"simkl") != id){
-                        p4Trace("SIMKL_P4_CANDIDATE_SKIP",gen,targetSeason,"id=$id reason=simkl-id-mismatch returned=${jsonInt(ids,"simkl")}")
                         continue
                     }
                     // Only the mapped direct ID may be accepted by native MAL identity.
                     val malMatched=mapped.mal != null &&
                         jsonInt(ids,"mal")==mapped.mal
                     val direct=mapped.simkl==id
-                    p4Trace("SIMKL_P4_EPISODE_CACHE",gen,targetSeason,
-                        "candidate=$id hit=${animeEpisodeCache.containsKey(id)} cachedCount=${animeEpisodeCache[id]?.size}")
                     val row=animeEpisodeCache[id] ?: run {
                         val list=app.get("https://api.simkl.com/anime/episodes/$id",
                             headers=headers,cacheTime=600)
-                        p4Trace("SIMKL_P4_EPISODES_HTTP",gen,targetSeason,
-                            "candidate=$id http=${list.code} ${p4Shape(list.text)}")
                         if(list.code !in 200..299)throw IllegalStateException("episodes-http-${list.code}")
                         val array=JSONArray(list.text)
                         val found=(0 until array.length()).mapNotNull { i ->
@@ -1667,22 +1528,13 @@ internal class RatingPlotImageHook(
                         animeEpisodeCache[id]=found
                         found
                     }
-                    p4Trace("SIMKL_P4_EPISODE_SLOTS",gen,targetSeason,
-                        "candidate=$id total=${row.size} " +
-                        "slots=${row.take(50).map { "${it.native}@${it.tvdbSeason}:${it.tvdbEpisode}" }} " +
-                        "truncated=${row.size > 50}")
                     if(tvdbId!=null && tvdbSeason!=null){
                         val correctParent=jsonInt(ids,"tvdb")==tvdbId ||
                             id in tvdbSearchMatches || (direct && malMatched)
                         if(!correctParent){
-                            p4Trace("SIMKL_P4_CANDIDATE_SKIP",gen,targetSeason,
-                                "id=$id reason=tvdb-parent-mismatch actual=${jsonInt(ids,"tvdb")} expected=$tvdbId")
                             continue
                         }
                         val subset=row.filter { it.tvdbSeason == tvdbSeason && it.tvdbEpisode > 0 }
-                        p4Trace("SIMKL_P4_TVDB_FILTER",gen,targetSeason,
-                            "id=$id expectedTvdbSeason=$tvdbSeason matched=${subset.size} rowTotal=${row.size} " +
-                            "mappedEpisodes=${subset.take(50).map { it.tvdbEpisode }}")
                         if(subset.isNotEmpty()){
                             slots+=subset
                             validated+=id
@@ -1692,56 +1544,30 @@ internal class RatingPlotImageHook(
                         slots+=row.map { it.copy(tvdbEpisode=it.native) }
                         validated+=id
                     }
-                    Log.i(TAG,"event=SIMKL_P4_CANDIDATE session=$session gen=$gen " +
-                        "season=$targetSeason id=$id matchedMal=$malMatched direct=$direct " +
-                        "tvdb=$tvdbId accepted=${id in validated} episodes=${row.size}")
                 }catch(e: CancellationException){throw e}
                  catch(e: Exception){
-                    Log.w(TAG,"event=SIMKL_P4_CANDIDATE_FAIL session=$session gen=$gen " +
-                        "season=$targetSeason id=$id cause=${e.javaClass.simpleName}")
                  }
             }
             val sorted=slots.sortedWith(compareBy<AnimeSlot> { it.tvdbEpisode }.thenBy { it.simkl })
             val keys=sorted.map { it.tvdbEpisode }
             // Different providers may expose different episode counts and TVDB ranges.
             // Only accept episode slots with an unambiguous, unique mapping.
-            p4Trace("SIMKL_P4_COVERAGE_CHECK",gen,targetSeason,
-                "candidates=$candidates accepted=$validated slots=${sorted.size} " +
-                "tvdbNumbers=${keys.take(60)} unique=${keys.distinct().size == keys.size} " +
-                "sourceIds=${sorted.map { it.simkl }.distinct()} " +
-                "catalogCount=${StremioC.seasonEpisodeCountsByUrl[pageUrl.orEmpty()]?.get(targetSeason)}")
             if(sorted.isEmpty() || keys.distinct().size != keys.size){
-                Log.w(TAG,"event=SIMKL_P4_COVERAGE session=$session gen=$gen season=$targetSeason " +
-                    "candidates=$candidates mapped=$validated slots=${sorted.size} " +
-                    "duplicates=${keys.size!=keys.distinct().size} valid=false")
                 return null
             }
-            val watchedAll=simklAnimeWatched(repo,validated,sorted,gen,targetSeason,force)
+            val watchedAll=simklAnimeWatched(repo,validated)
             if(watchedAll==null){
-                p4Trace("SIMKL_P4_BLOCK",gen,targetSeason,
-                    "reason=watched-grid-unverified candidates=$validated")
                 return null
             }
             val targetKeys=sorted.mapTo(linkedSetOf()) { it.key }
-            p4Trace("SIMKL_P4_EPISODE_INTERSECTION",gen,targetSeason,
-                "libraryTotal=${watchedAll.size} mapped=${targetKeys.size} " +
-                "matchedKeys=${watchedAll.intersect(targetKeys).take(60)} " +
-                "outside=${(watchedAll-targetKeys).size} outsideSample=${(watchedAll-targetKeys).take(30)}")
             val result=AnimeSnapshot(tvdbId,tvdbSeason,sorted,
                 watchedAll.intersect(targetKeys),watchedAll-targetKeys,
                 if(tvdbId!=null && tvdbSeason!=null)"tvdb" else "native",validated)
-            Log.i(TAG,"event=SIMKL_P4_READY session=$session gen=$gen season=$targetSeason " +
-                "mode=${result.mode} simklIds=${result.sourceIds} total=${sorted.size} " +
-                "watched=${result.watched.size} other=${result.outside.size}")
             return result
         }
 
         private suspend fun simklAnimeSave(tracker: Tracker, draft: Draft,
-            initial: Draft, gen: Long, seasonNumber: Int): Boolean {
-            p4Trace("SIMKL_P4_SAVE_BEGIN",gen,seasonNumber,
-                "provider=${tracker.prefix} before=${tracker.simklAnime?.watched?.size} " +
-                "desired=${draft.watched} targetTotal=${tracker.simklAnime?.mapped?.size} " +
-                "mode=${tracker.simklAnime?.mode} ids=${tracker.simklAnime?.sourceIds}")
+            initial: Draft, seasonNumber: Int): Boolean {
             val before=tracker.simklAnime ?:return false
             if(draft.score!=initial.score ||
                (draft.status!=initial.status && !(
@@ -1774,20 +1600,13 @@ internal class RatingPlotImageHook(
             val endpoint=if(diff>0)"history" else "history/remove"
             val headers=SimklApi.getHeaders(tracker.repo.authToken()?:return false)+
                 mapOf("content-type" to "application/json")
-            Log.i(TAG,"event=SIMKL_P4_WRITE session=$session gen=$gen season=$seasonNumber " +
-                "mode=${before.mode} operation=$endpoint entries=${changes.map{it.key}} " +
-                "otherProtected=${before.outside.size} payload=${body}")
             val response=try {
                 app.post("https://api.simkl.com/sync/$endpoint",
                     headers=headers,requestBody=body.toString().toRequestBody())
             } catch(e: CancellationException){ throw e }
               catch(e: Exception){
-                  p4Trace("SIMKL_P4_WRITE_EXCEPTION",gen,seasonNumber,
-                      "endpoint=$endpoint reason=${e.javaClass.simpleName}")
                   throw e
               }
-            p4Trace("SIMKL_P4_WRITE_RESPONSE",gen,seasonNumber,
-                "endpoint=$endpoint http=${response.code} ${p4Shape(response.text)}")
             val failed=runCatching{
                 val obj=JSONObject(response.text)
                 val notFound=obj.optJSONObject("not_found")
@@ -1795,8 +1614,6 @@ internal class RatingPlotImageHook(
                     (notFound?.optJSONArray("anime")?.length()?:0)
             }.getOrNull()
             if(response.code !in 200..299 || failed==null || failed>0){
-                Log.w(TAG,"event=SIMKL_P4_WRITE_FAIL session=$session gen=$gen " +
-                    "http=${response.code} notFound=$failed")
                 return false
             }
             val expected=if(diff>0)before.watched+changes.map{it.key}
@@ -1804,20 +1621,14 @@ internal class RatingPlotImageHook(
             for(attempt in 1..3){
                 if(attempt>1)kotlinx.coroutines.delay(if(attempt==2)350L else 900L)
                 val mapped=tracker.seasonMapping ?: return false
-                val after=simklAnimeRead(tracker.repo,mapped,seasonNumber,gen,force=true)
+                val after=simklAnimeRead(tracker.repo,mapped,seasonNumber)
                 val same=after?.watched==expected
                 val preserved=after?.outside==before.outside
-                Log.i(TAG,"event=SIMKL_P4_VERIFY session=$session gen=$gen season=$seasonNumber " +
-                    "attempt=$attempt exact=$same others=$preserved " +
-                    "expected=${expected.take(60)} actual=${after?.watched?.take(60)} " +
-                    "expectedOutsideCount=${before.outside.size} actualOutsideCount=${after?.outside?.size} " +
-                    "readCount=${after?.watched?.size}")
                 if(same && preserved){tracker.simklAnime=after;return true}
             }
             return false
         }
 
-        private val session = Integer.toHexString(System.identityHashCode(fragment))
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         private val observers = mutableListOf<() -> Unit>()
         private var active = false
@@ -1850,10 +1661,6 @@ internal class RatingPlotImageHook(
         private val holder by lazy { root.findViewById<View>(R.id.result_sync_holder) }
         private val shimmer by lazy { root.findViewById<View>(R.id.result_sync_loading_shimmer) }
 
-        private fun log(event: String, info: String = "") {
-            Log.i(TAG, "event=$event session=$session gen=$generation season=${season ?: "none"} " +
-                "chosen=${selected ?: "none"} $info")
-        }
         private fun valid(g: Long, n: Int?): Boolean =
             active && generation == g && season == n
 
@@ -1873,7 +1680,6 @@ internal class RatingPlotImageHook(
             syncModel = if (fragment is com.lagradost.cloudstream3.ui.result.ResultFragmentPhone)
                 ViewModelProvider(fragment)[SyncViewModel::class.java] else null
             val owner = fragment.viewLifecycleOwner
-            log("ATTACH", "screen=${fragment.javaClass.simpleName} syncModel=${syncModel != null}")
             observe(vm.page, owner) { value ->
                 when(value) {
                     is Resource.Success -> {
@@ -1885,66 +1691,56 @@ internal class RatingPlotImageHook(
                             seasonNumbers = emptyList()
                             selectionIndex = null
                             season = null
-                            reset("page-change")
-                            log("PAGE", "name=${data.title.take(80)} imdb=${IMDb.find(data.url)?.value} " +
-                                "services=${rawSyncs.keys}")
+                            reset()
                         } else {
                             rawSyncs = data.syncData.toMap()
                         }
-                        resolve("page")
+                        resolve()
                     }
-                    is Resource.Failure -> log("PAGE_FAILURE")
+                    is Resource.Failure -> {}
                     else -> {}
                 }
             }
             observe(vm.seasonSelections, owner) { items ->
                 seasonNumbers = items.map { it.second }
-                log("SEASON_LIST", "numbers=$seasonNumbers")
-                resolve("list")
+                resolve()
             }
             observe(vm.selectedSeasonIndex, owner) { index ->
                 selectionIndex = index
-                log("SEASON_INDEX", "index=$index resolved=${seasonNumbers.getOrNull(index)}")
-                resolve("index")
+                resolve()
             }
             syncModel?.let { model ->
                 observe(model.userData, owner) { result ->
                     if (combo != null) {
-                        log("CORE_USER_IGNORED", "resource=${result?.javaClass?.simpleName} " +
-                            "coreIds=${model.getSyncs().keys} panelOwner=StremioC")
-                        root.post { if (active) render("core-user") }
+                        root.post { if (active) render() }
                     }
                 }
                 observe(model.metadata, owner) { result ->
                     if (combo != null) {
-                        log("CORE_META_IGNORED", "resource=${result?.javaClass?.simpleName}")
-                        root.post { if (active) render("core-metadata") }
+                        root.post { if (active) render() }
                     }
                 }
                 observe(model.synced, owner) {
-                    if (combo != null) root.post { if (active) render("core-synced") }
+                    if (combo != null) root.post { if (active) render() }
                 }
             }
         }
 
-        private fun resolve(origin: String) {
+        private fun resolve() {
             val chosen = selectionIndex?.let { seasonNumbers.getOrNull(it) }
             if (pageUrl == null || chosen == null || chosen <= 0) return
             if (chosen == season) return
             season = chosen
             generation++
-            log("SEASON_CHANGED", "origin=$origin index=$selectionIndex seasonList=$seasonNumbers " +
-                "imdb=${IMDb.find(pageUrl.orEmpty())?.value}")
             begin()
         }
 
-        private fun reset(reason: String) {
+        private fun reset() {
             fetchJob?.cancel()
             fetchJob = null
             statuses.clear()
             selected = null
             startedFor = null
-            log("TARGET_RESET", "reason=$reason")
         }
 
         private fun begin() {
@@ -1955,16 +1751,13 @@ internal class RatingPlotImageHook(
             val multi = seasonNumbers.size > 1
             val generalSimkl = isAnime != true && multi && rawSyncs.containsKey("simkl")
             if ((isAnime != true && !generalSimkl) || syncModel == null) {
-                reset("non-anime-or-tv")
+                reset()
                 teardownUi()
-                log("ELIGIBILITY", "enabled=false anime=$isAnime multi=$multi")
                 return
             }
-            reset("season-selection")
+            reset()
             val gen = generation
             ensureUi()
-            log("ELIGIBILITY", "enabled=true multi=$multi raw=${rawSyncs.keys} " +
-                "sourceEpisodes=${StremioC.seasonEpisodeCountsByUrl[url]?.get(sn)}")
             fetchJob = scope.launch {
                 var mappedSeason: SeasonTrackerIds? = null
                 val ids = if (!multi) rawSyncs.filterKeys { it in allowed }
@@ -1974,22 +1767,15 @@ internal class RatingPlotImageHook(
                         .firstOrNull { it.name == fragment.arguments?.getString("apiName") }
                         ?: APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull()
                     if (imdb == null || provider == null) {
-                        log("MAPPING_BLOCK", "reason=missing-imdb-or-provider")
                         emptyMap()
                     } else {
-                        log("MAPPING_START", "imdb=$imdb target=$sn")
                         val mapping = try { withContext(Dispatchers.IO) {
                             provider.seasonTrackerIds(imdb, sn)
                         } } catch (e: CancellationException) { throw e }
                           catch (e: Exception) {
-                            log("MAPPING_ERROR", "cause=${e.javaClass.simpleName}")
                             null
                         }
                         mappedSeason = mapping
-                        log("MAPPING_RESULT", "target=$sn MAL=${mapping?.mal} " +
-                            "AniList=${mapping?.aniList} Kitsu=${mapping?.kitsu} " +
-                            "Simkl=${mapping?.simkl} TVDB=${mapping?.tvdb} " +
-                            "TVDBSeason=${mapping?.tvdbSeason}")
                         linkedMapOf<String,String>().apply {
                             mapping?.mal?.let { put("mal", it.toString()) }
                             mapping?.aniList?.let { put("anilist", it.toString()) }
@@ -2004,14 +1790,11 @@ internal class RatingPlotImageHook(
                         }
                     }
                 }
-                if (!valid(gen, sn)) { log("STALE", "phase=map"); return@launch }
+                if (!valid(gen, sn)) { return@launch }
                 val matched = AccountManager.syncApis.filter { ids.containsKey(it.idPrefix) }
                     .filter { it.authUser() != null }
-                log("TARGETS", "ids=${ids.keys} connected=${matched.map { it.idPrefix }} " +
-                    "omitted=${ids.keys - matched.map { it.idPrefix }.toSet()}")
                 if (matched.isEmpty()) {
-                    log("TARGET_EMPTY", "reason=unmapped-or-no-account")
-                    render("empty")
+                    render()
                     return@launch
                 }
                 statuses = linkedMapOf<String,Tracker>().apply {
@@ -2021,7 +1804,7 @@ internal class RatingPlotImageHook(
                 }
                 selected = preferred?.takeIf { it in statuses } ?: statuses.keys.firstOrNull()
                 updateOptions()
-                render("fetch-start")
+                render()
                 val simklSeasonReplies =
                     java.util.concurrent.ConcurrentHashMap<String, SimklSeasonSnapshot>()
                 val simklAnimeReplies =
@@ -2029,14 +1812,8 @@ internal class RatingPlotImageHook(
                 val replies = matched.map { repo ->
                     async(Dispatchers.IO) {
                         val id = ids.getValue(repo.idPrefix)
-                        val started = SystemClock.elapsedRealtime()
                         val state = repo.status(id)
                         if(repo.idPrefix=="simkl"){
-                            p4Trace("SIMKL_P4_CORE_STATUS",gen,sn,
-                                "syncId=$id ok=${state.isSuccess} " +
-                                "status=${state.getOrNull()?.status} watched=${state.getOrNull()?.watchedEpisodes} " +
-                                "error=${state.exceptionOrNull()?.javaClass?.simpleName} " +
-                                "elapsedMs=${SystemClock.elapsedRealtime()-started}")
                         }
                         // MAL's general load() parses unrelated statistics fields with
                         // unstable string/number types. Use the minimal num_episodes API
@@ -2045,24 +1822,16 @@ internal class RatingPlotImageHook(
                             null else repo.load(id)
                         val remote = state.getOrNull()
                         val simklExact = if (generalSimkl && repo.idPrefix == "simkl")
-                            simklSeasonRead(repo, id, sn, gen) else null
+                            simklSeasonRead(repo, id, sn) else null
                         if (generalSimkl && repo.idPrefix == "simkl" && simklExact != null)
                             simklSeasonReplies["simkl"] = simklExact
                         val animeExact = if (multi && isAnime == true &&
                             repo.idPrefix == "simkl" && mappedSeason != null) {
-                            simklAnimeRead(repo, mappedSeason!!, sn, gen)
+                            simklAnimeRead(repo, mappedSeason!!, sn)
                         } else null
                         if (multi && isAnime == true && repo.idPrefix == "simkl" &&
                             animeExact != null) simklAnimeReplies["simkl"] = animeExact
                         if (multi && isAnime == true && repo.idPrefix == "simkl") {
-                            p4Trace("SIMKL_P4_PROVIDER_JOIN",gen,sn,
-                                "mappedSeason=${mappedSeason != null} exactSnapshot=${animeExact != null} " +
-                                "coreStateOk=${state.isSuccess} coreMetaOk=${meta?.isSuccess} " +
-                                "sourceIds=${animeExact?.sourceIds} count=${animeExact?.mapped?.size}")
-                            Log.i(TAG, "event=SIMKL_P4_VALIDATE session=$session gen=$gen " +
-                                "season=$sn verified=${animeExact != null} " +
-                                "mappedTitles=${animeExact?.sourceIds} " +
-                                "total=${animeExact?.mapped?.size}")
                         }
                         var total = when {
                             generalSimkl && repo.idPrefix == "simkl" -> simklExact?.available?.size
@@ -2087,17 +1856,12 @@ internal class RatingPlotImageHook(
                                         .optJSONObject("data")?.optJSONObject("attributes")
                                     val episodes = attributes?.opt("episodeCount")?.toString()
                                         ?.toIntOrNull()?.takeIf { it > 0 }
-                                    Log.i(TAG, "event=KITSU_TOTAL session=$session gen=$gen " +
-                                        "season=$sn id=$id host=${host.substringAfter("https://")} " +
-                                        "http=${response.code} episodes=$episodes")
                                     if (episodes != null) {
                                         total = episodes
                                         origin = "kitsu-episodeCount"
                                         break
                                     }
                                 } catch (e: Exception) {
-                                    Log.w(TAG, "event=KITSU_TOTAL_FAIL session=$session gen=$gen " +
-                                        "season=$sn id=$id cause=${e.javaClass.simpleName}")
                                 }
                             }
                         }
@@ -2110,12 +1874,8 @@ internal class RatingPlotImageHook(
                                         headers = mapOf("Authorization" to "Bearer $token"), cacheTime = 0)
                                     total = JSONObject(response.text).optInt("num_episodes").takeIf { it > 0 }
                                     if (total != null) origin = "mal-lightweight"
-                                    Log.i(TAG, "event=MAL_LIGHT session=$session gen=$gen id=$id " +
-                                        "http=${response.code} total=$total")
                                 }
                             } catch (e: Exception) {
-                                Log.w(TAG,"event=MAL_LIGHT_FAILED session=$session gen=$gen " +
-                                    "id=$id cause=${e.javaClass.simpleName}")
                             }
                         }
                         val fields = if (multi && isAnime == true &&
@@ -2129,17 +1889,10 @@ internal class RatingPlotImageHook(
                                 simklExact?.watched?.size ?: 0
                                 else it.watchedEpisodes ?: 0, it.score)
                         }
-                        Log.i(TAG, "event=PROVIDER_FETCH session=$session gen=$gen season=$sn " +
-                            "provider=${repo.idPrefix} id=$id stateOk=${state.isSuccess} " +
-                            "metaOk=${meta?.isSuccess ?: "skipped"} status=${fields?.status} " +
-                            "watched=${fields?.watched} total=$total origin=$origin " +
-                            "stateError=${state.exceptionOrNull()?.javaClass?.simpleName} " +
-                            "metaError=${meta?.exceptionOrNull()?.javaClass?.simpleName} " +
-                            "elapsedMs=${SystemClock.elapsedRealtime()-started}")
                         Triple(repo.idPrefix, fields, Pair(total, origin))
                     }
                 }.awaitAll()
-                if (!valid(gen, sn)) { log("STALE", "phase=fetch"); return@launch }
+                if (!valid(gen, sn)) { return@launch }
                 statuses["simkl"]?.let { simkl ->
                     simkl.simklSeason = simklSeasonReplies["simkl"]
                     simkl.simklAnime = simklAnimeReplies["simkl"]
@@ -2149,8 +1902,6 @@ internal class RatingPlotImageHook(
                 val commonTotal = if (!multi) providerTotals.maxOrNull()
                     else providerTotals.distinct().singleOrNull()
                 if (multi && commonTotal != null)
-                    log("TOTAL_PEER", "season=$sn verifiedMappedIds=${statuses.keys} " +
-                        "providerKnownTotals=$providerTotals inferred=$commonTotal")
                 val offeredCount = StremioC.seasonEpisodeCountsByUrl[url]?.get(sn)
                 replies.forEach { (prefix, draft, count) ->
                     val target = statuses[prefix] ?: return@forEach
@@ -2175,12 +1926,9 @@ internal class RatingPlotImageHook(
                             target.simklAnime == null -> "simkl-anime-episode-map-unverified"
                         else -> null
                     }
-                    log("PROVIDER_READY", "provider=$prefix status=${draft?.status} " +
-                        "watched=${draft?.watched} total=${target.total} source=${target.totalSource} " +
-                        "readOnly=${target.writeBlocked} offered=$offeredCount")
                 }
                 updateOptions()
-                render("fetch-complete")
+                render()
             }
         }
 
@@ -2226,8 +1974,7 @@ internal class RatingPlotImageHook(
                     if (key == selected) return
                     selected = key
                     preferred = key
-                    log("PROVIDER_SELECT", "provider=$key list=${statuses.keys}")
-                    render("provider-selected")
+                    render()
                 }
             }
             plus?.setOnClickListener { adjust(1) }
@@ -2238,8 +1985,7 @@ internal class RatingPlotImageHook(
                 val edit = tracker.draft ?: return@setOnItemClickListener
                 edit.status = SyncWatchType.fromInternalId(pos - 1)
                 edit.explicitNone = edit.status == SyncWatchType.NONE
-                log("FIELD_EDIT", "provider=${tracker.prefix} field=status value=${edit.status}")
-                render("status-edit")
+                render()
             }
             slider?.clearOnChangeListeners()
             slider?.addOnChangeListener { _, value, fromUser ->
@@ -2247,8 +1993,7 @@ internal class RatingPlotImageHook(
                 val tracker = statuses[selected] ?: return@addOnChangeListener
                 val draft = tracker.draft ?: return@addOnChangeListener
                 draft.score = Score.from(value, 10)
-                log("FIELD_EDIT", "provider=${tracker.prefix} field=rating value=$value")
-                render("rating-edit")
+                render()
             }
             current?.addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -2259,16 +2004,10 @@ internal class RatingPlotImageHook(
                     val entered = s?.toString()?.toIntOrNull() ?: return
                     val clamped = entered.coerceIn(0, tracker.total?.takeIf { it > 0 } ?: Int.MAX_VALUE)
                     draft.watched = clamped
-                    log("FIELD_EDIT", "provider=${tracker.prefix} field=episodes entered=$entered " +
-                        "applied=$clamped max=${tracker.total} source=${tracker.totalSource}")
-                    root.post { if (active && selected == tracker.prefix) render("text-edit") }
+                    root.post { if (active && selected == tracker.prefix) render() }
                 }
                 override fun afterTextChanged(s: Editable?) {}
             })
-            log("UI_ATTACHED", "selector=BrowseGenre shared widthDp=208 " +
-                "save=${saveButton != null} plus=${plus != null} " +
-                "minus=${minus != null} rating=${slider != null} " +
-                "statusList=${checks != null} episodesInput=${current != null}")
         }
 
         private fun updateOptions() {
@@ -2290,8 +2029,6 @@ internal class RatingPlotImageHook(
                 comboArrow?.visibility = if (statuses.size > 1) View.VISIBLE else View.GONE
                 val position = statuses.keys.indexOf(selected).coerceAtLeast(0)
                 if (names.isNotEmpty()) spinner.setSelection(position, false)
-                log("UI_OPTIONS", "items=${statuses.keys} selected=$selected enabled=${spinner.isEnabled} " +
-                    "popupWidth=${spinner.dropDownWidth}")
             } finally { applying = false }
         }
 
@@ -2301,12 +2038,10 @@ internal class RatingPlotImageHook(
             val upper = tracker.total?.takeIf { it > 0 } ?: Int.MAX_VALUE
             val before = draft.watched
             draft.watched = (draft.watched.toLong() + delta).coerceIn(0L, upper.toLong()).toInt()
-            log("FIELD_EDIT", "provider=${tracker.prefix} field=episodes-delta " +
-                "before=$before delta=$delta after=${draft.watched} total=${tracker.total}")
-            render("episode-button")
+            render()
         }
 
-        private fun render(reason: String) {
+        private fun render() {
             if (!active || combo == null) return
             val target = statuses[selected]
             if (target == null || target.loading || target.draft == null) {
@@ -2325,11 +2060,7 @@ internal class RatingPlotImageHook(
                     checks?.clearChoices()
                     scoreLabel?.text = "?"
                 } finally { applying = false }
-                if (target == null) {
-                    log("UI_UNAVAILABLE", "reason=$reason count=${statuses.size}")
-                } else if (!target.loading) {
-                    log("UI_UNAVAILABLE", "reason=$reason provider=${target.prefix} error=${target.error}")
-                }
+
                 return
             }
             val data = target.draft!!
@@ -2361,11 +2092,7 @@ internal class RatingPlotImageHook(
                 plus?.isEnabled = target.writeBlocked == null
                 minus?.isEnabled = target.writeBlocked == null
             } catch (e: Exception) {
-                log("UI_ERROR", "phase=$reason cause=${e.javaClass.simpleName}")
             } finally { applying = false }
-            log("UI_RENDER", "reason=$reason provider=${target.prefix} status=${data.status} " +
-                "watched=${data.watched} total=${target.total} totalSource=${target.totalSource} " +
-                "readOnly=${target.writeBlocked} dirty=${data != target.baseline}")
         }
 
         private fun save() {
@@ -2378,23 +2105,19 @@ internal class RatingPlotImageHook(
             val id = tracker.id
             val before = initial.snapshot()
             if (tracker.writeBlocked != null || tracker.saving) {
-                log("SAVE_BLOCK", "provider=$prefix cause=${tracker.writeBlocked ?: "already-saving"}")
                 return
             }
             if (draft.status == SyncWatchType.NONE && draft.watched > 0 && !draft.explicitNone) {
                 draft.status = SyncWatchType.WATCHING
                 tracker.draft?.status = SyncWatchType.WATCHING
-                log("AUTO_WATCHING", "provider=$prefix reason=progress-positive")
             }
             val updated = draft != before
-            if (!updated) { log("SAVE_NOOP", "provider=$prefix"); return }
+            if (!updated) { return }
             if (draft.status == SyncWatchType.NONE && !draft.explicitNone &&
                 (draft.score != before.score || draft.watched != before.watched)) {
-                log("SAVE_BLOCK", "provider=$prefix cause=none-would-delete")
                 return
             }
             if (draft.watched < 0 || tracker.total?.let { it > 0 && draft.watched > it } == true) {
-                log("SAVE_BLOCK", "provider=$prefix cause=progress-limit total=${tracker.total}")
                 return
             }
             if ((tracker.simklSeason != null || tracker.simklAnime != null) &&
@@ -2402,28 +2125,22 @@ internal class RatingPlotImageHook(
                     (draft.status != before.status &&
                      !(before.status == SyncWatchType.NONE &&
                        draft.status == SyncWatchType.WATCHING && draft.watched > 0)))) {
-                log("SAVE_BLOCK","provider=$prefix reason=simkl-status-is-show-wide")
                 return
             }
             tracker.saving = true
-            render("save-start")
-            log("SAVE_REQUEST", "provider=$prefix id=$id season=$sn gen=$gen " +
-                "before=$before after=$draft total=${tracker.total} origin=${tracker.totalSource}")
+            render()
             // Detached/changed screens do not receive this result, but the snapshot
             // keeps writes directed to the user's original chosen service/season.
             scope.launch {
-                val started = SystemClock.elapsedRealtime()
                 val result = withContext(Dispatchers.IO) {
                     if (tracker.simklSeason != null) {
-                        simklSeasonSave(tracker, draft, before, gen, sn)
+                        simklSeasonSave(tracker, draft, before, sn)
                     } else if (tracker.simklAnime != null) {
-                        simklAnimeSave(tracker, draft, before, gen, sn)
+                        simklAnimeSave(tracker, draft, before, sn)
                     } else {
                     val fresh = tracker.repo.status(id)
                     val remote = fresh.getOrNull()
                     if (remote == null) {
-                        Log.w(TAG, "event=SAVE_REMOTE_MISSING session=$session gen=$gen season=$sn " +
-                            "provider=$prefix id=$id error=${fresh.exceptionOrNull()?.javaClass?.simpleName}")
                         false
                     } else {
                         if (draft.status != before.status) remote.status = draft.status
@@ -2434,8 +2151,6 @@ internal class RatingPlotImageHook(
                         if (remote.status != SyncWatchType.NONE && remote.watchedEpisodes == null)
                             remote.watchedEpisodes = 0
                         val issued = tracker.repo.updateStatus(id, remote)
-                        Log.i(TAG, "event=SAVE_HTTP session=$session gen=$gen season=$sn provider=$prefix " +
-                            "id=$id ok=${issued.getOrNull()} error=${issued.exceptionOrNull()?.javaClass?.simpleName}")
                         var verified = false
                         for (attempt in 1..3) {
                             if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
@@ -2445,15 +2160,10 @@ internal class RatingPlotImageHook(
                                 (draft.status == before.status || got.status == remote.status) &&
                                 (draft.watched == before.watched || (got.watchedEpisodes ?: 0) == (remote.watchedEpisodes ?: 0)) &&
                                 (draft.score == before.score || got.score == remote.score)
-                            Log.i(TAG,"event=SAVE_READBACK session=$session gen=$gen season=$sn " +
-                                "provider=$prefix attempt=$attempt request=${issued.getOrNull()} " +
-                                "verified=$verified gotStatus=${got?.status} gotEpisodes=${got?.watchedEpisodes} " +
-                                "expectedStatus=${remote.status} expectedEpisodes=${remote.watchedEpisodes} " +
-                                "exception=${read.exceptionOrNull()?.javaClass?.simpleName}")
                             if (verified) break
                         }
                         if (!verified && prefix == "kitsu" && remote.status != SyncWatchType.NONE) {
-                            val fallback = kitsuFallback(id, remote, gen, sn, tracker.repo)
+                            val fallback = kitsuFallback(id, remote, tracker.repo)
                             if (fallback) {
                                 val after = tracker.repo.status(id).getOrNull()
                                 verified = after != null &&
@@ -2461,8 +2171,6 @@ internal class RatingPlotImageHook(
                                     (draft.watched == before.watched ||
                                         (after.watchedEpisodes ?: 0) == (remote.watchedEpisodes ?: 0)) &&
                                     (draft.score == before.score || after.score == remote.score)
-                                Log.i(TAG, "event=KITSU_RECHECK session=$session gen=$gen season=$sn " +
-                                    "verified=$verified status=${after?.status} progress=${after?.watchedEpisodes}")
                             }
                         }
                         verified
@@ -2488,24 +2196,19 @@ internal class RatingPlotImageHook(
                                     current.explicitNone=false
                                 }
                             }
-                            log("SIMKL_P4_UI_RECONCILE",
-                                "provider=$prefix actual=$actual watched=$count total=${anime.mapped.size}")
                         } else {
                             tracker.baseline = draft.snapshot()
                             tracker.draft?.let { if (it == draft) it.explicitNone = false }
                         }
                     } else tracker.error = "save-or-readback-failed"
-                    log("SAVE_COMPLETE", "provider=$prefix id=$id verified=$result " +
-                        "elapsedMs=${SystemClock.elapsedRealtime()-started}")
-                    render("save-done")
+                    render()
                 } else {
-                    log("STALE", "phase=save-complete provider=$prefix origSeason=$sn verified=$result")
                 }
             }
         }
 
         private suspend fun kitsuFallback(
-            id: String, expected: SyncAPI.AbstractSyncStatus, gen: Long, sn: Int,
+            id: String, expected: SyncAPI.AbstractSyncStatus,
             repo: com.lagradost.cloudstream3.syncproviders.SyncRepo
         ): Boolean {
             val status = when (expected.status) {
@@ -2530,9 +2233,6 @@ internal class RatingPlotImageHook(
                     val entry = if (find.code in 200..299)
                         JSONObject(find.text).optJSONArray("data")?.optJSONObject(0)
                             ?.optString("id")?.takeIf { it.isNotBlank() } else null
-                    Log.i(TAG, "event=KITSU_HTTP session=$session gen=$gen season=$sn " +
-                        "host=${host.substringAfter("https://")} step=find code=${find.code} " +
-                        "existing=${entry != null}")
                     if (find.code !in 200..299) continue
                     val data = JSONObject().put("type","libraryEntries").put("attributes",payload)
                     if (entry != null) data.put("id",entry)
@@ -2545,17 +2245,10 @@ internal class RatingPlotImageHook(
                     val response = if (entry == null)
                         app.post("$host/library-entries", headers=headers, requestBody=body)
                     else app.patch("$host/library-entries/$entry", headers=headers, requestBody=body)
-                    val errors = if (response.code !in 200..299)
-                        runCatching { JSONObject(response.text).optJSONArray("errors")?.length() }.getOrNull()
-                    else null
-                    Log.i(TAG, "event=KITSU_HTTP session=$session gen=$gen season=$sn " +
-                        "host=${host.substringAfter("https://")} step=${if(entry == null) "create" else "update"} " +
-                        "code=${response.code} errors=$errors")
+
                     if (response.code in 200..299) return true
                 } catch(e: CancellationException) { throw e }
                 catch(e: Exception) {
-                    Log.e(TAG, "event=KITSU_HTTP session=$session gen=$gen season=$sn " +
-                        "failure=${e.javaClass.simpleName}")
                 }
             }
             return false
@@ -2581,17 +2274,10 @@ internal class RatingPlotImageHook(
                     if (fromUser) model.setScore(Score.from(value, view.valueTo.toInt()))
                 }
             }
-            log("UI_DETACH")
-        }
-
-        fun resume() {
-            if (active) log("RESUME", "page=${pageUrl?.hashCode()} season=$season")
         }
 
         fun stop() {
             if (!active) return
-            log("DETACH", "observers=${observers.size} statuses=${statuses.keys} " +
-                "running=${fetchJob?.isActive}")
             active = false
             generation++
             fetchJob?.cancel()
@@ -2612,7 +2298,7 @@ internal class RatingPlotImageHook(
         fun matchesMdbKey(key: String): Boolean = StremioCMdbUiBridge.keyFor(detailUrl) == key
 
         fun auditReentry() {
-            seasonSyncProbe.resume()
+
             val key = StremioCMdbUiBridge.keyFor(detailUrl) ?: return
         }
 
@@ -2827,7 +2513,6 @@ internal class RatingPlotImageHook(
             }
             actorInformation.start()
             runCatching { seasonSyncProbe.start() }.onFailure {
-                Log.e("STCSeasonSync", "event=ATTACH_FAILURE fragment=${fragment.javaClass.simpleName}", it)
             }
             view.addTextChangedListener(this)
             searchButton?.setOnClickListener(searchClick)
