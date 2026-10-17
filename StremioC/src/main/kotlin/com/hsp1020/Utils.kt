@@ -1481,12 +1481,13 @@ internal class RatingPlotImageHook(
                     target.loading = false
                     target.baseline = draft?.snapshot()
                     target.draft = draft?.snapshot()
-                    target.total = count.first ?: commonTotal
-                    target.totalSource = if (count.first != null) count.second
+                    val trackerTotal = count.first
+                    target.total = trackerTotal ?: commonTotal
+                    target.totalSource = if (trackerTotal != null) count.second
                         else if (commonTotal != null) "single-season-peer" else "unknown"
                     target.error = if (draft == null) "status-unavailable" else null
                     target.writeBlocked = if (multi && offeredCount != null &&
-                        count.first != null && offeredCount > count.first)
+                        trackerTotal != null && offeredCount > trackerTotal)
                         "source-more-episodes-than-tracker" else null
                     log("PROVIDER_READY", "provider=$prefix status=${draft?.status} " +
                         "watched=${draft?.watched} total=${target.total} source=${target.totalSource} " +
@@ -1597,6 +1598,8 @@ internal class RatingPlotImageHook(
             val target = statuses[selected]
             if (target == null || target.loading || target.draft == null) {
                 saveButton?.isEnabled = false
+                holder?.visibility = View.GONE
+                shimmer?.visibility = if (target?.loading == true) View.VISIBLE else View.GONE
                 if (target == null) {
                     log("UI_UNAVAILABLE", "reason=$reason count=${statuses.size}")
                 } else if (!target.loading) {
