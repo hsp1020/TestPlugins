@@ -1105,7 +1105,7 @@ private class PipSubtitleScaler {
         }
         if (view.translationY != 0f) view.translationY = 0f
         view.setBottomPaddingFraction(SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
-        view.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * 2f)
+        view.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * 1.5f)
     }
 
     private fun startPositionGuard(view: SubtitleView) {
