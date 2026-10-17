@@ -81,6 +81,8 @@ inline fun <T> runSuspendCatching(block: () -> T): Result<T> {
     }
 }
 
+internal data class SeasonTrackerIds(val mal: Int?, val aniList: Int?, val kitsu: Int?)
+
 private fun String.urlEncode(): String = try { URLEncoder.encode(this, "UTF-8").replace("+", "%20") } catch (e: Exception) { this }
 
 
@@ -3245,6 +3247,21 @@ open class StremioC(
         val imdbId: String?, val tvdbSeason: Int?, val imdbSeason: Int?,
         val traktSeason: Int?
     )
+
+    /** Reuses the existing AIOStreams anime season mapping and its memory/disk cache. */
+    internal suspend fun seasonTrackerIds(imdbId: String, season: Int): SeasonTrackerIds? {
+        if (!IMDB_ID_REGEX.matches(imdbId) || season <= 0) return null
+        val mapped = fetchAnimeSeasonMapping(LoadData(
+            id = imdbId, imdbId = imdbId, imdbSeason = season, isAnime = true
+        )) ?: return null
+        if (mapped.imdbId != imdbId) return null
+        // A multi-season IMDb page must never attach a different season's tracker ID.
+        if (season > 1 && mapped.imdbSeason != season &&
+            mapped.tvdbSeason != season && mapped.traktSeason != season &&
+            mapped.tmdbSeason != season) return null
+        return SeasonTrackerIds(mapped.malId, mapped.aniListId, mapped.kitsuId?.toIntOrNull())
+            .takeIf { it.mal != null || it.aniList != null || it.kitsu != null }
+    }
 
     private suspend fun fetchAnimeSeasonMapping(loadData: LoadData): AnimeSeasonMapping? {
         val aniListLookupId = loadData.originalAnimeId?.takeIf { it.startsWith("anilist:") }
