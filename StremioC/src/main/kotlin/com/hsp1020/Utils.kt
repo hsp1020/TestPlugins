@@ -21,6 +21,7 @@ import com.lagradost.cloudstream3.R
 import org.json.JSONArray
 import org.json.JSONObject
 import com.lagradost.cloudstream3.utils.getQualityFromName
+import com.lagradost.cloudstream3.utils.SubtitleHelper
 import kotlinx.coroutines.CancellationException
 import java.util.Locale
 import kotlin.math.round
@@ -342,17 +343,15 @@ internal class StremioAudioSelector {
         val languages = listOfNotNull(appLanguage, if (anime) "ja" else "en",
             "en".takeIf { anime }).map { it.lowercase(Locale.ROOT) }.distinct()
         val match = languages.firstNotNullOfOrNull { language ->
-            val iso3 = runCatching { Locale.forLanguageTag(language).getISO3Language() }.getOrNull()
             groups.firstNotNullOfOrNull { group ->
                 (0 until group.length).firstOrNull { i ->
-                    val trackLocale = Locale.forLanguageTag(
-                        group.getTrackFormat(i).language.orEmpty().replace('_', '-')
-                    )
-                    group.isTrackSupported(i) && (
-                        trackLocale.language.equals(language, ignoreCase = true) ||
-                            (iso3 != null &&
-                                runCatching { trackLocale.getISO3Language() }.getOrNull() == iso3)
-                    )
+                    val raw = group.getTrackFormat(i).language?.trim().orEmpty()
+                    val code = SubtitleHelper.fromCodeToLangTagIETF(raw)
+                        ?: SubtitleHelper.fromCodeToLangTagIETF(
+                            raw.replace('_', '-').substringBefore('-')
+                        )
+                    group.isTrackSupported(i) &&
+                        code?.substringBefore('-')?.equals(language, ignoreCase = true) == true
                 }?.let { group to it }
             }
         }
