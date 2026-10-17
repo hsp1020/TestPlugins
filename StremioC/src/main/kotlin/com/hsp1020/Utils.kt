@@ -1244,7 +1244,9 @@ internal class RatingPlotImageHook(
             var total: Int? = null, var totalSource: String = "unknown",
             var error: String? = null, var loading: Boolean = true, var saving: Boolean = false,
             var writeBlocked: String? = null, var simklSeason: SimklSeasonSnapshot? = null,
-            var simklAnimeVerified: Boolean = false
+            var simklAnimeVerified: Boolean = false,
+            var simklAnime: AnimeSnapshot? = null,
+            var seasonMapping: SeasonTrackerIds? = null
         )
 
         /** Exact Simkl episode keys, never the aggregate watchedEpisodesCount. */
@@ -1406,6 +1408,264 @@ internal class RatingPlotImageHook(
             return false
         }
 
+        /** Season-exact TVDB episode map; never inferred from a title's total count. */
+        private data class AnimeSlot(val simkl: Int, val native: Int, val tvdbEpisode: Int) {
+            val key get() = "$simkl:$native"
+        }
+        private data class AnimeSnapshot(
+            val tvdbId: Int?, val tvdbSeason: Int?, val mapped: List<AnimeSlot>,
+            val watched: Set<String>, val outside: Set<String>,
+            val mode: String, val sourceIds: Set<Int>
+        )
+        private var animeLibraryCache: Pair<Long, JSONObject>? = null
+        private val animeEpisodeCache = mutableMapOf<Int, List<AnimeSlot>>()
+
+        private fun jsonInt(obj: JSONObject?, key: String): Int? =
+            obj?.opt(key)?.toString()?.toIntOrNull()?.takeIf { it > 0 }
+
+        private suspend fun animeLibrary(repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
+            gen: Long, force: Boolean = false): JSONObject? {
+            val now = SystemClock.elapsedRealtime()
+            if (!force) animeLibraryCache?.let {
+                if (now - it.first in 0..20000) {
+                    Log.i(TAG,"event=SIMKL_P4_LIBRARY_CACHE session=$session gen=$gen age=${now-it.first}")
+                    return it.second
+                }
+            }
+            val header = SimklApi.getHeaders(repo.authToken() ?: return null)
+            val resp = app.get("https://api.simkl.com/sync/all-items/anime",
+                params=mapOf("extended" to "full_anime_seasons"),headers=header,cacheTime=0)
+            if (resp.code !in 200..299) {
+                Log.w(TAG,"event=SIMKL_P4_LIBRARY_HTTP session=$session gen=$gen http=${resp.code}")
+                return null
+            }
+            val obj = runCatching { JSONObject(resp.text) }.getOrNull()
+            if (obj == null || !obj.has("anime")) {
+                Log.w(TAG,"event=SIMKL_P4_LIBRARY_INVALID session=$session gen=$gen")
+                return null
+            }
+            animeLibraryCache=now to obj
+            Log.i(TAG,"event=SIMKL_P4_LIBRARY session=$session gen=$gen items=" +
+                "${obj.optJSONArray("anime")?.length() ?: 0} http=${resp.code}")
+            return obj
+        }
+
+        private suspend fun simklAnimeRead(
+            repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
+            mapped: SeasonTrackerIds, targetSeason: Int, sourceCount: Int?, gen: Long,
+            force: Boolean = false
+        ): AnimeSnapshot? {
+            val headers = SimklApi.getHeaders(repo.authToken() ?: return null)
+            val candidates = linkedSetOf<Int>()
+            val tvdbSearchMatches = linkedSetOf<Int>()
+            val malSearchMatches = linkedSetOf<Int>()
+            mapped.simkl?.let { candidates += it }
+            suspend fun search(field: String, value: Int) {
+                try {
+                    val resp=app.get("https://api.simkl.com/search/id",
+                        params=mapOf(field to value.toString()),headers=headers,cacheTime=0)
+                    val array=if (resp.code in 200..299)
+                        runCatching { JSONArray(resp.text) }.getOrNull() else null
+                    val found=mutableListOf<Int>()
+                    for(i in 0 until (array?.length() ?: 0)){
+                        val item=array?.optJSONObject(i)
+                        val ids=item?.optJSONObject("ids")
+                            ?: item?.optJSONObject("anime")?.optJSONObject("ids")
+                        val id=jsonInt(ids,"simkl")
+                        if (id != null) found+=id
+                    }
+                    Log.i(TAG,"event=SIMKL_P4_SEARCH session=$session gen=$gen season=$targetSeason " +
+                        "field=$field http=${resp.code} rows=${array?.length()} ids=$found")
+                    candidates.addAll(found.take(24))
+                    if (field=="tvdb")tvdbSearchMatches.addAll(found.take(24))
+                    if (field=="mal")malSearchMatches.addAll(found.take(24))
+                }catch(e: CancellationException){throw e}
+                 catch(e: Exception){
+                    Log.w(TAG,"event=SIMKL_P4_SEARCH_FAIL session=$session gen=$gen season=$targetSeason " +
+                        "field=$field cause=${e.javaClass.simpleName}")
+                 }
+            }
+            // Simkl's own native ID resolver, with TVDB parent search to find every cour.
+            mapped.mal?.let { search("mal",it) }
+            mapped.tvdb?.let { search("tvdb",it) }
+            if(candidates.isEmpty())return null
+            val tvdbSeason=mapped.tvdbSeason
+            val tvdbId=mapped.tvdb
+            val slots=mutableListOf<AnimeSlot>()
+            val validated=linkedSetOf<Int>()
+            for(id in candidates.take(24)){
+                try{
+                    val detail=app.get("https://api.simkl.com/anime/$id",
+                        headers=headers,cacheTime=600)
+                    if(detail.code !in 200..299)continue
+                    val info=runCatching { JSONObject(detail.text) }.getOrNull() ?: continue
+                    val ids=info.optJSONObject("ids") ?: continue
+                    if(jsonInt(ids,"simkl") != id)continue
+                    // Only the mapped direct ID may be accepted by native MAL identity.
+                    val malMatched=mapped.mal != null &&
+                        jsonInt(ids,"mal")==mapped.mal
+                    val direct=mapped.simkl==id
+                    val row=animeEpisodeCache[id] ?: run {
+                        val list=app.get("https://api.simkl.com/anime/episodes/$id",
+                            headers=headers,cacheTime=600)
+                        if(list.code !in 200..299)throw IllegalStateException("episodes-http-${list.code}")
+                        val array=JSONArray(list.text)
+                        val found=(0 until array.length()).mapNotNull { i ->
+                            val ep=array.optJSONObject(i)
+                            val native=jsonInt(ep,"episode") ?: return@mapNotNull null
+                            if(ep?.optString("type")=="special")return@mapNotNull null
+                            val tvdb=ep?.optJSONObject("tvdb")
+                            val season=jsonInt(tvdb,"season") ?: 0
+                            val episode=jsonInt(tvdb,"episode") ?: 0
+                            AnimeSlot(id,native,if(season==tvdbSeason)episode else 0)
+                        }
+                        if(found.map { it.native }.distinct().size != found.size)
+                            throw IllegalStateException("duplicate-native-episodes")
+                        animeEpisodeCache[id]=found
+                        found
+                    }
+                    if(tvdbId!=null && tvdbSeason!=null){
+                        val correctParent=jsonInt(ids,"tvdb")==tvdbId ||
+                            id in tvdbSearchMatches || (direct && malMatched)
+                        if(!correctParent)continue
+                        val subset=row.filter { it.tvdbEpisode > 0 }
+                        if(subset.isNotEmpty()){
+                            slots+=subset
+                            validated+=id
+                        }
+                    } else if(malMatched && candidates.size==1 &&
+                        (direct || id in malSearchMatches)){
+                        slots+=row.map { it.copy(tvdbEpisode=it.native) }
+                        validated+=id
+                    }
+                    Log.i(TAG,"event=SIMKL_P4_CANDIDATE session=$session gen=$gen " +
+                        "season=$targetSeason id=$id matchedMal=$malMatched direct=$direct " +
+                        "tvdb=$tvdbId accepted=${id in validated} episodes=${row.size}")
+                }catch(e: CancellationException){throw e}
+                 catch(e: Exception){
+                    Log.w(TAG,"event=SIMKL_P4_CANDIDATE_FAIL session=$session gen=$gen " +
+                        "season=$targetSeason id=$id cause=${e.javaClass.simpleName}")
+                 }
+            }
+            val sorted=slots.sortedWith(compareBy<AnimeSlot> { it.tvdbEpisode }.thenBy { it.simkl })
+            val keys=sorted.map { it.tvdbEpisode }
+            if(sorted.isEmpty() || keys.distinct().size != keys.size ||
+                keys != (1..keys.size).toList() ||
+                (sourceCount != null && sourceCount > sorted.size)){
+                Log.w(TAG,"event=SIMKL_P4_COVERAGE session=$session gen=$gen season=$targetSeason " +
+                    "candidates=$candidates mapped=$validated slots=${sorted.size} " +
+                    "source=$sourceCount duplicates=${keys.size!=keys.distinct().size} valid=false")
+                return null
+            }
+            val library=animeLibrary(repo,gen,force) ?: return null
+            val watchedAll=linkedSetOf<String>()
+            val claimedWatched=mutableMapOf<Int,Int>()
+            val anime=library.optJSONArray("anime")
+            for(i in 0 until (anime?.length() ?: 0)){
+                val entry=anime?.optJSONObject(i) ?: continue
+                val id=jsonInt(entry.optJSONObject("anime")?.optJSONObject("ids"),"simkl")
+                    ?:continue
+                val claimed=entry.optInt("watched_episodes_count",-1)
+                if(claimed>=0)claimedWatched[id]=claimed
+                val seasons=entry?.optJSONArray("seasons")
+                for(j in 0 until(seasons?.length() ?: 0)){
+                    val episodes=seasons?.optJSONObject(j)?.optJSONArray("episodes")
+                    for(k in 0 until(episodes?.length() ?: 0)){
+                        val ep=episodes?.optJSONObject(k)
+                        val native=jsonInt(ep,"number") ?:continue
+                        if(ep?.opt("watched") != false)watchedAll+="$id:$native"
+                    }
+                }
+            }
+            val badCounts=validated.filter { id ->
+                val counted=watchedAll.count { it.startsWith("$id:") }
+                val expected=claimedWatched[id]
+                expected!=null && counted<expected
+            }
+            if(badCounts.isNotEmpty()){
+                Log.w(TAG,"event=SIMKL_P4_LIBRARY_INCOMPLETE session=$session gen=$gen " +
+                    "season=$targetSeason ids=$badCounts")
+                return null
+            }
+            val targetKeys=sorted.mapTo(linkedSetOf()) { it.key }
+            val result=AnimeSnapshot(tvdbId,tvdbSeason,sorted,
+                watchedAll.intersect(targetKeys),watchedAll-targetKeys,
+                if(tvdbId!=null && tvdbSeason!=null)"tvdb" else "native",validated)
+            Log.i(TAG,"event=SIMKL_P4_READY session=$session gen=$gen season=$targetSeason " +
+                "mode=${result.mode} simklIds=${result.sourceIds} total=${sorted.size} " +
+                "watched=${result.watched.size} other=${result.outside.size}")
+            return result
+        }
+
+        private suspend fun simklAnimeSave(tracker: Tracker, draft: Draft,
+            initial: Draft, gen: Long, seasonNumber: Int): Boolean {
+            val before=tracker.simklAnime ?:return false
+            if(draft.score!=initial.score ||
+               (draft.status!=initial.status && !(
+                   initial.status==SyncWatchType.NONE &&
+                   draft.status==SyncWatchType.WATCHING && draft.watched>0)))return false
+            val diff=draft.watched-before.watched.size
+            if(diff==0)return true
+            if(draft.watched !in 0..before.mapped.size)return false
+            val changes=if(diff>0)before.mapped.filterNot { it.key in before.watched }.take(diff)
+                else before.mapped.filter { it.key in before.watched }.takeLast(-diff)
+            if(changes.size != kotlin.math.abs(diff))return false
+            val body=if(before.mode=="tvdb"){
+                val episodes=JSONArray().also { a ->
+                    changes.forEach { a.put(JSONObject().put("number",it.tvdbEpisode)) }
+                }
+                JSONObject().put("shows",JSONArray().put(JSONObject()
+                    .put("ids",JSONObject().put("tvdb",before.tvdbId))
+                    .put("use_tvdb_anime_seasons",true)
+                    .put("seasons",JSONArray().put(JSONObject()
+                        .put("number",before.tvdbSeason)
+                        .put("episodes",episodes)))))
+            }else{
+                val id=before.sourceIds.singleOrNull()?:return false
+                JSONObject().put("anime",JSONArray().put(JSONObject()
+                    .put("ids",JSONObject().put("simkl",id))
+                    .put("episodes",JSONArray().also { a ->
+                        changes.forEach { a.put(JSONObject().put("number",it.native)) }
+                    })))
+            }
+            val endpoint=if(diff>0)"history" else "history/remove"
+            val headers=SimklApi.getHeaders(tracker.repo.authToken()?:return false)+
+                mapOf("content-type" to "application/json")
+            Log.i(TAG,"event=SIMKL_P4_WRITE session=$session gen=$gen season=$seasonNumber " +
+                "mode=${before.mode} operation=$endpoint entries=${changes.map{it.key}} " +
+                "otherProtected=${before.outside.size}")
+            val response=app.post("https://api.simkl.com/sync/$endpoint",
+                headers=headers,requestBody=body.toString().toRequestBody())
+            val failed=runCatching{
+                val obj=JSONObject(response.text)
+                val notFound=obj.optJSONObject("not_found")
+                (notFound?.optJSONArray("shows")?.length()?:0)+
+                    (notFound?.optJSONArray("anime")?.length()?:0)
+            }.getOrNull()
+            if(response.code !in 200..299 || failed==null || failed>0){
+                Log.w(TAG,"event=SIMKL_P4_WRITE_FAIL session=$session gen=$gen " +
+                    "http=${response.code} notFound=$failed")
+                return false
+            }
+            animeLibraryCache=null
+            val expected=if(diff>0)before.watched+changes.map{it.key}
+                else before.watched-changes.map{it.key}.toSet()
+            for(attempt in 1..3){
+                if(attempt>1)kotlinx.coroutines.delay(if(attempt==2)350L else 900L)
+                val mapped=tracker.seasonMapping ?: return false
+                val after=simklAnimeRead(tracker.repo,mapped,seasonNumber,
+                    StremioC.seasonEpisodeCountsByUrl[pageUrl.orEmpty()]?.get(seasonNumber),
+                    gen,force=true)
+                val same=after?.watched==expected
+                val preserved=after?.outside==before.outside
+                Log.i(TAG,"event=SIMKL_P4_VERIFY session=$session gen=$gen season=$seasonNumber " +
+                    "attempt=$attempt exact=$same others=$preserved " +
+                    "readCount=${after?.watched?.size}")
+                if(same && preserved){tracker.simklAnime=after;return true}
+            }
+            return false
+        }
+
         private val session = Integer.toHexString(System.identityHashCode(fragment))
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         private val observers = mutableListOf<() -> Unit>()
@@ -1555,6 +1815,7 @@ internal class RatingPlotImageHook(
             log("ELIGIBILITY", "enabled=true multi=$multi raw=${rawSyncs.keys} " +
                 "sourceEpisodes=${StremioC.seasonEpisodeCountsByUrl[url]?.get(sn)}")
             fetchJob = scope.launch {
+                var mappedSeason: SeasonTrackerIds? = null
                 val ids = if (!multi) rawSyncs.filterKeys { it in allowed }
                     else if (generalSimkl) rawSyncs.filterKeys { it == "simkl" } else {
                     val imdb = IMDb.find(url)?.value ?: IMDb.find(detailUrl.orEmpty())?.value
@@ -1573,17 +1834,21 @@ internal class RatingPlotImageHook(
                             log("MAPPING_ERROR", "cause=${e.javaClass.simpleName}")
                             null
                         }
+                        mappedSeason = mapping
                         log("MAPPING_RESULT", "target=$sn MAL=${mapping?.mal} " +
                             "AniList=${mapping?.aniList} Kitsu=${mapping?.kitsu} " +
-                            "simklViaMal=${mapping?.mal != null}")
+                            "Simkl=${mapping?.simkl} TVDB=${mapping?.tvdb} " +
+                            "TVDBSeason=${mapping?.tvdbSeason}")
                         linkedMapOf<String,String>().apply {
                             mapping?.mal?.let { put("mal", it.toString()) }
                             mapping?.aniList?.let { put("anilist", it.toString()) }
                             mapping?.kitsu?.let { put("kitsu", it.toString()) }
-                            // P4: Simkl's anime title is resolved from the season-specific
-                            // MAL identifier, not the whole-series IMDb identifier.
-                            mapping?.mal?.let { mal ->
-                                put("simkl", JSONObject().put("Mal",mal.toString()).toString())
+                            // Prefer the authoritative season Simkl ID supplied by
+                            // AIOStreams; Simkl's native search is the fallback.
+                            if (mapping?.simkl != null) {
+                                put("simkl", JSONObject().put("Simkl",mapping.simkl).toString())
+                            } else mapping?.mal?.let { mal ->
+                                put("simkl", JSONObject().put("Mal",mal).toString())
                             }
                         }
                     }
@@ -1621,52 +1886,31 @@ internal class RatingPlotImageHook(
                             simklSeasonRead(repo, id, sn, gen) else null
                         if (generalSimkl && repo.idPrefix == "simkl")
                             statuses["simkl"]?.simklSeason = simklExact
-                        val verifiedAnime = if (multi && isAnime == true &&
-                            repo.idPrefix == "simkl") {
-                            // A matching episode count alone does not prove that two
-                            // IMDb seasons have different Simkl anime entries.
-                            // Require the returned Simkl anime to carry the exact
-                            // season-specific MAL ID, not a broad IMDb match.
-                            val mal = simklIds(id)?.optString("mal")
-                            val exactMalEntry = if (mal.isNullOrBlank()) false else try {
-                                val headers = SimklApi.getHeaders(repo.authToken()
-                                    ?: throw IllegalStateException("no-account"))
-                                val search = app.get("https://api.simkl.com/search/id",
-                                    params = mapOf("mal" to mal),
-                                    headers = headers)
-                                val records = JSONArray(search.text)
-                                val matching = (0 until records.length())
-                                    .mapNotNull { records.optJSONObject(it) }
-                                    .filter { it.optString("type") == "anime" &&
-                                        it.optJSONObject("ids")?.optString("mal") == mal }
-                                Log.i(TAG, "event=SIMKL_P4_ID session=$session gen=$gen " +
-                                    "season=$sn mal=$mal http=${search.code} exact=${matching.size}")
-                                search.code in 200..299 && matching.size == 1
-                            } catch (e: CancellationException) { throw e }
-                              catch (e: Exception) {
-                                Log.w(TAG,"event=SIMKL_P4_ID_FAIL session=$session gen=$gen " +
-                                    "season=$sn mal=$mal cause=${e.javaClass.simpleName}")
-                                false
-                              }
-                            val exactEpisodes = if (exactMalEntry)
-                                (remote as? SimklApi.SimklSyncStatus)
-                                    ?.episodeConstructor?.getEpisodes() else null
-                            exactMalEntry && exactEpisodes != null && exactEpisodes.isNotEmpty() &&
-                                exactEpisodes.all { it.season == null } &&
-                                remote?.maxEpisodes == exactEpisodes.size
-                        } else false
+                        val animeExact = if (multi && isAnime == true &&
+                            repo.idPrefix == "simkl" && mappedSeason != null) {
+                            simklAnimeRead(repo, mappedSeason!!, sn,
+                                StremioC.seasonEpisodeCountsByUrl[url]?.get(sn), gen)
+                        } else null
                         if (multi && isAnime == true && repo.idPrefix == "simkl") {
-                            statuses["simkl"]?.simklAnimeVerified = verifiedAnime
-                            Log.i(TAG, "event=SIMKL_P4_VALIDATE session=$session gen=$gen " +
-                                "season=$sn perAnimeEntry=$verifiedAnime " +
-                                "total=${remote?.maxEpisodes}")
+                            statuses["simkl"]?.simklAnime = animeExact
+                            statuses["simkl"]?.seasonMapping = mappedSeason
                         }
-                        var total = if (generalSimkl && repo.idPrefix == "simkl")
-                            simklExact?.available?.size
-                        else meta?.getOrNull()?.totalEpisodes?.takeIf { it > 0 }
-                            ?: remote?.maxEpisodes?.takeIf { it > 0 }
+                        if (multi && isAnime == true && repo.idPrefix == "simkl") {
+                            Log.i(TAG, "event=SIMKL_P4_VALIDATE session=$session gen=$gen " +
+                                "season=$sn verified=${animeExact != null} " +
+                                "mappedTitles=${animeExact?.sourceIds} " +
+                                "total=${animeExact?.mapped?.size}")
+                        }
+                        var total = when {
+                            generalSimkl && repo.idPrefix == "simkl" -> simklExact?.available?.size
+                            multi && isAnime == true && repo.idPrefix == "simkl" ->
+                                animeExact?.mapped?.size
+                            else -> meta?.getOrNull()?.totalEpisodes?.takeIf { it > 0 }
+                                ?: remote?.maxEpisodes?.takeIf { it > 0 }
+                        }
                         var origin = if (simklExact != null) "simkl-season-episode-keys"
-                            else if (generalSimkl && repo.idPrefix == "simkl") "unverified"
+                            else if (animeExact != null) "simkl-anime-tvdb-episode-map"
+                            else if (repo.idPrefix == "simkl" && multi) "unverified"
                             else if (meta?.getOrNull()?.totalEpisodes?.let { it > 0 } == true)
                                 "provider-metadata"
                             else if (total != null) "provider-status" else "unknown"
@@ -1711,7 +1955,13 @@ internal class RatingPlotImageHook(
                                     "id=$id cause=${e.javaClass.simpleName}")
                             }
                         }
-                        val fields = remote?.let {
+                        val fields = if (multi && isAnime == true &&
+                            repo.idPrefix == "simkl") animeExact?.let {
+                            val watched=it.watched.size
+                            Draft(if (watched==0) SyncWatchType.NONE
+                                  else if (watched==it.mapped.size) SyncWatchType.COMPLETED
+                                  else SyncWatchType.WATCHING, watched, null)
+                        } else remote?.let {
                             Draft(it.status, if (generalSimkl && repo.idPrefix == "simkl")
                                 simklExact?.watched?.size ?: 0
                                 else it.watchedEpisodes ?: 0, it.score)
@@ -1754,9 +2004,7 @@ internal class RatingPlotImageHook(
                         generalSimkl && prefix == "simkl" && target.simklSeason == null ->
                             "simkl-season-episodes-unverified"
                         multi && isAnime == true && prefix == "simkl" &&
-                            (!target.simklAnimeVerified || trackerTotal == null ||
-                             commonTotal == null || trackerTotal != commonTotal) ->
-                            "simkl-anime-title-unverified"
+                            target.simklAnime == null -> "simkl-anime-episode-map-unverified"
                         else -> null
                     }
                     log("PROVIDER_READY", "provider=$prefix status=${draft?.status} " +
@@ -1934,8 +2182,10 @@ internal class RatingPlotImageHook(
                 checks?.setItemChecked(data.status.internalId + 1, true)
                 // A Simkl show has one global status/rating. Never disguise it as
                 // a season-local edit; only per-episode history is writable.
-                checks?.isEnabled = target.writeBlocked == null && target.simklSeason == null
-                slider?.isEnabled = target.writeBlocked == null && target.simklSeason == null
+                checks?.isEnabled = target.writeBlocked == null &&
+                    target.simklSeason == null && target.simklAnime == null
+                slider?.isEnabled = target.writeBlocked == null &&
+                    target.simklSeason == null && target.simklAnime == null
                 val valScore = data.score?.toFloat(10) ?: 0f
                 slider?.value = valScore.coerceIn(0f,10f).toInt().toFloat()
                 scoreLabel?.text = data.score?.toInt(10)?.toString()?.plus("/10") ?: "?"
@@ -1979,7 +2229,7 @@ internal class RatingPlotImageHook(
                 log("SAVE_BLOCK", "provider=$prefix cause=progress-limit total=${tracker.total}")
                 return
             }
-            if (tracker.simklSeason != null &&
+            if ((tracker.simklSeason != null || tracker.simklAnime != null) &&
                 (draft.score != before.score ||
                     (draft.status != before.status &&
                      !(before.status == SyncWatchType.NONE &&
@@ -1998,6 +2248,8 @@ internal class RatingPlotImageHook(
                 val result = withContext(Dispatchers.IO) {
                     if (tracker.simklSeason != null) {
                         simklSeasonSave(tracker, draft, before, gen, sn)
+                    } else if (tracker.simklAnime != null) {
+                        simklAnimeSave(tracker, draft, before, gen, sn)
                     } else {
                     val fresh = tracker.repo.status(id)
                     val remote = fresh.getOrNull()

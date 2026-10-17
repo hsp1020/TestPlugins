@@ -81,7 +81,11 @@ inline fun <T> runSuspendCatching(block: () -> T): Result<T> {
     }
 }
 
-internal data class SeasonTrackerIds(val mal: Int?, val aniList: Int?, val kitsu: Int?)
+internal data class SeasonTrackerIds(
+    val mal: Int?, val aniList: Int?, val kitsu: Int?,
+    val simkl: Int? = null, val tvdb: Int? = null,
+    val tvdbSeason: Int? = null, val tmdbSeason: Int? = null
+)
 
 private fun String.urlEncode(): String = try { URLEncoder.encode(this, "UTF-8").replace("+", "%20") } catch (e: Exception) { this }
 
@@ -3247,6 +3251,7 @@ open class StremioC(
         
     private data class AnimeSeasonMapping(
         val kitsuId: String?, val malId: Int?, val aniListId: Int?, val tmdbId: Int?,
+        val simklId: Int? = null, val tvdbId: Int? = null,
         val tmdbSeason: Int?, val tmdbEpisode: Int?, val title: String?,
         val imdbId: String?, val tvdbSeason: Int?, val imdbSeason: Int?,
         val traktSeason: Int?
@@ -3270,8 +3275,11 @@ open class StremioC(
                 "imdbSeason=${mapped.imdbSeason} tvdb=${mapped.tvdbSeason} trakt=${mapped.traktSeason} tmdb=${mapped.tmdbSeason}")
             return null
         }
-        return SeasonTrackerIds(mapped.malId, mapped.aniListId, mapped.kitsuId?.toIntOrNull())
-            .takeIf { it.mal != null || it.aniList != null || it.kitsu != null }
+        return SeasonTrackerIds(mapped.malId, mapped.aniListId,
+            mapped.kitsuId?.toIntOrNull(), mapped.simklId, mapped.tvdbId,
+            mapped.tvdbSeason, mapped.tmdbSeason)
+            .takeIf { it.mal != null || it.aniList != null || it.kitsu != null ||
+                it.simkl != null }
     }
 
     private suspend fun fetchAnimeSeasonMapping(loadData: LoadData, p1Trace: Boolean = false): AnimeSeasonMapping? {
@@ -3328,7 +3336,9 @@ open class StremioC(
         if (cachedAnime != null) {
             p1("CACHE_HIT", "origin=${if (memoryAnime != null) "RAM" else "disk"} " +
                 "imdb=${cachedAnime.first.imdbId} mappedSeason=${cachedAnime.first.imdbSeason} " +
-                "mal=${cachedAnime.first.malId} anilist=${cachedAnime.first.aniListId} kitsu=${cachedAnime.first.kitsuId}")
+                "mal=${cachedAnime.first.malId} anilist=${cachedAnime.first.aniListId} " +
+                "kitsu=${cachedAnime.first.kitsuId} simkl=${cachedAnime.first.simklId} " +
+                "tvdb=${cachedAnime.first.tvdbId}")
             return cachedAnime.first
         }
         p1("CACHE_MISS")
@@ -3432,6 +3442,8 @@ open class StremioC(
                 malId = ids.get("malId").intOrNull()?.takeIf { it > 0 },
                 aniListId = ids.get("anilistId").intOrNull()?.takeIf { it > 0 },
                 tmdbId = ids.get("themoviedbId").intOrNull()?.takeIf { it > 0 },
+                simklId = ids.get("simklId").intOrNull()?.takeIf { it > 0 },
+                tvdbId = ids.get("thetvdbId").intOrNull()?.takeIf { it > 0 },
                 tmdbSeason = tmdbSeason,
                 tmdbEpisode = tmdbEpisode,
                 title = data.get("title").textOrNull(),
@@ -3455,7 +3467,8 @@ open class StremioC(
             }
             if (mapping != null) {
                 p1("HOST_MATCH", "host=$host mappedSeason=${mapping.imdbSeason} " +
-                    "mal=${mapping.malId} anilist=${mapping.aniListId} kitsu=${mapping.kitsuId}")
+                    "mal=${mapping.malId} anilist=${mapping.aniListId} kitsu=${mapping.kitsuId} " +
+                    "simkl=${mapping.simklId} tvdb=${mapping.tvdbId}")
                 animeMappingCache[query] = mapping to System.currentTimeMillis()
                 MetadataDiskCache.write("anime", query, mapping.toJson())
                 return mapping

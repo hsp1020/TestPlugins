@@ -52,6 +52,7 @@ import android.widget.Toast
 import android.widget.CheckBox
 import android.widget.Switch
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.util.Base64
@@ -967,6 +968,21 @@ class SettingsBottomFragment(
         }
     }
 
+    // CineStream-style editor: one scrollable dialog body, without custom window
+    // movement, footer measurement, or IME frame listeners.
+    private fun nativeEditorImeView(content: LinearLayout): View {
+        if (isLayout(TV)) return content
+        return ScrollView(hostContext).apply {
+            isFillViewport = false
+            isVerticalScrollBarEnabled = false
+            clipToPadding = false
+            addView(content, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+        }
+    }
+
     private fun setupCustomDialog(
         dialog: AlertDialog, contentView: View, bodyView: View? = null, capDp: Int = 480,
         owner: Dialog = topDialog(), initialFocus: (() -> View?)? = null,
@@ -1011,7 +1027,7 @@ class SettingsBottomFragment(
         dialog.setCanceledOnTouchOutside(false)
         val ownerWindow = owner.window
         val ownerInputMode = ownerWindow?.attributes?.softInputMode
-        if (ownerInputMode != null) {
+        if (ownerInputMode != null && !nativeIme) {
             ownerWindow.setSoftInputMode((ownerInputMode and WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST.inv()) or
                 WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
             onClose(dialog) {
@@ -1028,15 +1044,20 @@ class SettingsBottomFragment(
                 x = 0; y = 0
                 if (!nativeIme) windowAnimations = 0
             }
-            // Override the theme's initial window width before show()/first draw.
-            if (nativeIme) setLayout(
-                minOf(dp(capDp), (hostContext.resources.displayMetrics.widthPixels * 0.9f).toInt()),
-                WindowManager.LayoutParams.WRAP_CONTENT
-            )
-        }
+         }
         // Input dialogs rely on Android's native IME resize, not fitDialog().
         if (root != null && !nativeIme) fitDialog(dialog, root, body, capDp)
         dialog.setOnShowListener {
+            if (nativeIme) {
+                dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+                dialog.window?.setLayout(
+                    minOf(dp(capDp), (hostContext.resources.displayMetrics.widthPixels * 0.9f).toInt()),
+                    WindowManager.LayoutParams.WRAP_CONTENT
+                )
+                android.util.Log.i("StremioCSettingsIME",
+                    "event=NATIVE_EDITOR_SHOW width=${dialog.window?.attributes?.width} " +
+                    "height=${dialog.window?.attributes?.height} mode=adjustResize")
+            }
             if (isLayout(TV) || initialFocus != null) {
                 val focus = initialFocus?.invoke() ?: body?.getFocusables(View.FOCUS_FORWARD)?.firstOrNull { usable(it) }
                     ?: contentView.getFocusables(View.FOCUS_FORWARD).firstOrNull { usable(it) }
@@ -2028,7 +2049,7 @@ class SettingsBottomFragment(
         val close = simpleButton("Close")
         val save = simpleButton("Save")
         dialogView.addView(popupButtons(close, save))
-        val dlg = AlertDialog.Builder(ctx).setView(nativeImeView(dialogView)).create()
+        val dlg = AlertDialog.Builder(ctx).setView(nativeEditorImeView(dialogView)).create()
         setupCustomDialog(dlg, dialogView, dialogView.optional("catalogEditorScroll"), 600, owner,
             initialFocus = { if (urlError != null) url else name }, nativeIme = !isLayout(TV))
         save.setOnClickListener {
