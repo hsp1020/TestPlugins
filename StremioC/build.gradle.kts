@@ -8,8 +8,7 @@ version = 17
 android {
     namespace = "com.hsp1020" // Gradle 8.0+ 필수 추가 (이 코드가 없으면 BuildConfig가 생성되지 않음)
     // Include the same extractor source in StremioC's own classes.dex.
-    sourceSets.getByName("main").java.srcDir(rootProject.file("SharedYouTube/src/main/kotlin"))
-    sourceSets.getByName("main").java.srcDir(rootProject.file("SharedPiP/src/main/kotlin"))
+    sourceSets.getByName("main").java.srcDir(rootProject.file("CommonLogic/src/main/kotlin"))
 
     buildFeatures {
         buildConfig = true

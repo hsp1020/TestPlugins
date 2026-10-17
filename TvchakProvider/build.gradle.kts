@@ -17,7 +17,7 @@ cloudstream {
 }
 
 android {
-    sourceSets.getByName("main").java.srcDir(rootProject.file("SharedPiP/src/main/kotlin"))
+    sourceSets.getByName("main").java.srcDir(rootProject.file("CommonLogic/src/main/kotlin"))
 }
 
 dependencies {

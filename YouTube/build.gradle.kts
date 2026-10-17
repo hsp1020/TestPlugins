@@ -28,6 +28,5 @@ dependencies {
 
 // Compile the shared extractor into this plugin's own classes.dex.
 android {
-    sourceSets.getByName("main").java.srcDir(rootProject.file("SharedYouTube/src/main/kotlin"))
-    sourceSets.getByName("main").java.srcDir(rootProject.file("SharedPiP/src/main/kotlin"))
+    sourceSets.getByName("main").java.srcDir(rootProject.file("CommonLogic/src/main/kotlin"))
 }
