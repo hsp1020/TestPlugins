@@ -1417,7 +1417,6 @@ internal class RatingPlotImageHook(
             val watched: Set<String>, val outside: Set<String>,
             val mode: String, val sourceIds: Set<Int>
         )
-        private var animeLibraryCache: Pair<Long, JSONObject>? = null
         private val animeEpisodeCache = mutableMapOf<Int, List<AnimeSlot>>()
 
         private fun jsonInt(obj: JSONObject?, key: String): Int? =
@@ -1449,59 +1448,114 @@ internal class RatingPlotImageHook(
             Log.i(TAG, "event=$event session=$session gen=$gen season=$sn $details")
         }
 
-        private suspend fun animeLibrary(repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
-            gen: Long, force: Boolean = false): JSONObject? {
-            val now = SystemClock.elapsedRealtime()
-            p4Trace("SIMKL_P4_LIBRARY_BEGIN", gen, season,
-                "force=$force cached=${animeLibraryCache != null} cacheAgeMs=${animeLibraryCache?.let { now-it.first }}")
-            if (!force) animeLibraryCache?.let {
-                if (now - it.first in 0L..20_000L) {
-                    Log.i(TAG,"event=SIMKL_P4_LIBRARY_CACHE session=$session gen=$gen age=${now-it.first} " +
-                        "cachedKeys=${it.second.keys().asSequence().toList()} " +
-                        "cachedRows=${it.second.optJSONArray("anime")?.length()}")
-                    return it.second
+        /**
+         * Exact watched grid for the Simkl anime IDs selected by the season crosswalk.
+         * Unlike /sync/all-items/anime, /sync/watched returns episodes (including
+         * watched=false) even when the user's watchlist is empty.
+         * Fail closed on partial responses: never interpret a missing item/episode as
+         * unwatched and never infer watched flags from presence alone.
+         */
+        private suspend fun simklAnimeWatched(
+            repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
+            ids: Set<Int>, mapped: List<AnimeSlot>, gen: Long, targetSeason: Int,
+            force: Boolean
+        ): Set<String>? {
+            val token = repo.authToken()
+            p4Trace("SIMKL_P4_WATCHED_BEGIN",gen,targetSeason,
+                "ids=$ids expectedMapped=${mapped.size} force=$force authorized=${token != null}")
+            if(token == null || ids.isEmpty())return null
+            val headers=SimklApi.getHeaders(token)+mapOf("content-type" to "application/json")
+            val request=JSONArray().also { array ->
+                ids.forEach { id ->
+                    array.put(JSONObject().put("ids",JSONObject().put("simkl",id)))
                 }
             }
-            val token = repo.authToken()
-            p4Trace("SIMKL_P4_LIBRARY_AUTH", gen, season, "authorized=${token != null}")
-            val header = SimklApi.getHeaders(token ?: return null)
-            val started = SystemClock.elapsedRealtime()
-            val resp = try {
-                app.get("https://api.simkl.com/sync/all-items/anime",
-                    params=mapOf("extended" to "full_anime_seasons"),headers=header,cacheTime=0)
-            } catch(e: CancellationException) { throw e }
-              catch(e: Exception) {
-                  p4Trace("SIMKL_P4_LIBRARY_EXCEPTION", gen, season,
-                      "cause=${e.javaClass.simpleName} elapsedMs=${SystemClock.elapsedRealtime()-started}")
-                  throw e
-              }
-            p4Trace("SIMKL_P4_LIBRARY_RESPONSE", gen, season,
-                "http=${resp.code} elapsedMs=${SystemClock.elapsedRealtime()-started} ${p4Shape(resp.text)}")
-            if (resp.code !in 200..299) {
-                Log.w(TAG,"event=SIMKL_P4_LIBRARY_HTTP session=$session gen=$gen http=${resp.code}")
+            val start=SystemClock.elapsedRealtime()
+            val response=try {
+                app.post("https://api.simkl.com/sync/watched?extended=episodes",
+                    headers=headers,requestBody=request.toString().toRequestBody())
+            }catch(e: CancellationException){throw e}
+             catch(e: Exception){
+                Log.w(TAG,"event=SIMKL_P4_WATCHED_EXCEPTION session=$session gen=$gen " +
+                    "season=$targetSeason cause=${e.javaClass.simpleName}")
+                return null
+             }
+            p4Trace("SIMKL_P4_WATCHED_HTTP",gen,targetSeason,
+                "http=${response.code} elapsedMs=${SystemClock.elapsedRealtime()-start} " +
+                "ids=$ids ${p4Shape(response.text)}")
+            if(response.code !in 200..299)return null
+            val rows=runCatching { JSONArray(response.text) }.getOrNull()
+            if(rows == null || rows.length()!=ids.size){
+                p4Trace("SIMKL_P4_WATCHED_INVALID",gen,targetSeason,
+                    "reason=unexpected-row-count rows=${rows?.length()} expected=${ids.size}")
                 return null
             }
-            val parseResult = runCatching { JSONObject(resp.text) }
-            val obj = parseResult.getOrNull()
-            val unknownKeys = obj?.keys()?.asSequence()?.filter { it != "anime" }?.toList()
-            val invalidReason = when {
-                obj == null -> "not-json-object"
-                !unknownKeys.isNullOrEmpty() -> "unexpected-keys:$unknownKeys"
-                obj.has("anime") && obj.optJSONArray("anime") == null -> "anime-not-array"
-                else -> null
+            val watched=linkedSetOf<String>()
+            val observed=linkedSetOf<String>()
+            val returned=linkedSetOf<Int>()
+            for(i in 0 until rows.length()){
+                val row=rows.optJSONObject(i)
+                val id=jsonInt(row?.optJSONObject("ids"),"simkl")
+                val rootId=jsonInt(row,"simkl")
+                if(row==null || id==null || id !in ids || rootId!=null && rootId!=id ||
+                    !returned.add(id)){
+                    p4Trace("SIMKL_P4_WATCHED_INVALID",gen,targetSeason,
+                        "reason=unexpected-or-duplicate-id index=$i id=$id rootId=$rootId returned=$returned")
+                    return null
+                }
+                val seasons=row.optJSONArray("seasons")
+                val claimed=row.optInt("episodes_watched",-1)
+                if(seasons==null || claimed<0){
+                    p4Trace("SIMKL_P4_WATCHED_INVALID",gen,targetSeason,
+                        "reason=missing-seasons-or-count id=$id seasons=${seasons?.length()} claimed=$claimed")
+                    return null
+                }
+                var count=0
+                for(j in 0 until seasons.length()){
+                    val part=seasons.optJSONObject(j)
+                    val episodes=part?.optJSONArray("episodes")
+                    if(part==null || episodes==null || jsonInt(part,"number")==null){
+                        p4Trace("SIMKL_P4_WATCHED_INVALID",gen,targetSeason,
+                            "reason=invalid-season id=$id index=$j")
+                        return null
+                    }
+                    for(k in 0 until episodes.length()){
+                        val ep=episodes.optJSONObject(k)
+                        val number=jsonInt(ep,"number")
+                        val flag=ep?.opt("watched")
+                        if(number==null || flag !is Boolean || !observed.add("$id:$number")){
+                            p4Trace("SIMKL_P4_WATCHED_INVALID",gen,targetSeason,
+                                "reason=missing-or-duplicate-episode id=$id seasonIndex=$j index=$k " +
+                                "episode=$number watchedType=${flag?.javaClass?.simpleName}")
+                            return null
+                        }
+                        if(flag){watched+="$id:$number";count++}
+                    }
+                }
+                p4Trace("SIMKL_P4_WATCHED_ROW",gen,targetSeason,
+                    "id=$id result=${row.opt("result")} list=${row.optString("list")} " +
+                    "reportedTotal=${row.optInt("episodes_total",-1)} " +
+                    "aired=${row.optInt("episodes_aired",-1)} claimedWatched=$claimed " +
+                    "observed=$count seasons=${seasons.length()} " +
+                    "keys=${observed.count { it.startsWith("$id:") }}")
+                if(count!=claimed){
+                    p4Trace("SIMKL_P4_WATCHED_INVALID",gen,targetSeason,
+                        "reason=watched-count-mismatch id=$id counted=$count claimed=$claimed")
+                    return null
+                }
             }
-            p4Trace("SIMKL_P4_LIBRARY_PARSE", gen, season,
-                "ok=${invalidReason == null} reason=$invalidReason " +
-                "parseException=${parseResult.exceptionOrNull()?.javaClass?.simpleName} " +
-                "keyCount=${obj?.length()} rows=${obj?.optJSONArray("anime")?.length()}")
-            if (invalidReason != null) {
-                Log.w(TAG,"event=SIMKL_P4_LIBRARY_INVALID session=$session gen=$gen reason=$invalidReason")
+            val target=mapped.map { it.key }.toSet()
+            val missing=target-observed
+            if(returned!=ids || missing.isNotEmpty()){
+                p4Trace("SIMKL_P4_WATCHED_INVALID",gen,targetSeason,
+                    "reason=incomplete-episode-grid returned=$returned missing=${missing.take(30)} " +
+                    "missingCount=${missing.size}")
                 return null
             }
-            animeLibraryCache=now to obj!!
-            Log.i(TAG,"event=SIMKL_P4_LIBRARY session=$session gen=$gen items=" +
-                "${obj.optJSONArray("anime")?.length() ?: 0} http=${resp.code}")
-            return obj
+            p4Trace("SIMKL_P4_WATCHED_READY",gen,targetSeason,
+                "returned=$returned keys=${observed.size} watchedTotal=${watched.size} " +
+                "watchedMapped=${(watched intersect target).size} outside=${(watched-target).size}")
+            return watched
         }
 
         private suspend fun simklAnimeRead(
@@ -1662,64 +1716,10 @@ internal class RatingPlotImageHook(
                     "duplicates=${keys.size!=keys.distinct().size} valid=false")
                 return null
             }
-            val library=animeLibrary(repo,gen,force)
-            if(library == null){
+            val watchedAll=simklAnimeWatched(repo,validated,sorted,gen,targetSeason,force)
+            if(watchedAll==null){
                 p4Trace("SIMKL_P4_BLOCK",gen,targetSeason,
-                    "reason=library-null candidateIds=$validated hasMemoryCache=${animeLibraryCache != null}")
-                return null
-            }
-            p4Trace("SIMKL_P4_LIBRARY_READY",gen,targetSeason,
-                "libraryKeys=${library.keys().asSequence().toList()} records=${library.optJSONArray("anime")?.length()} " +
-                "targetIds=$validated")
-            val watchedAll=linkedSetOf<String>()
-            val claimedWatched=mutableMapOf<Int,Int>()
-            val anime=library.optJSONArray("anime")
-            for(i in 0 until (anime?.length() ?: 0)){
-                val entry=anime?.optJSONObject(i)
-                if(entry == null){
-                    p4Trace("SIMKL_P4_LIBRARY_ENTRY_INVALID",gen,targetSeason,
-                        "index=$i reason=entry-not-object")
-                    return null
-                }
-                val media=entry.optJSONObject("show") ?: entry.optJSONObject("anime")
-                val id=jsonInt(media?.optJSONObject("ids"),"simkl")
-                if(id == null){
-                    p4Trace("SIMKL_P4_LIBRARY_ENTRY_INVALID",gen,targetSeason,
-                        "index=$i reason=missing-id keys=${entry.keys().asSequence().toList()} " +
-                        "mediaType=${entry.opt("show")?.javaClass?.simpleName} " +
-                        "animeType=${entry.opt("anime")?.javaClass?.simpleName}")
-                    Log.w(TAG,"event=SIMKL_P4_LIBRARY_INVALID session=$session gen=$gen " +
-                        "season=$targetSeason reason=missing-item-id")
-                    return null
-                }
-                val claimed=entry.optInt("watched_episodes_count",-1)
-                if(claimed>=0)claimedWatched[id]=claimed
-                val seasons=entry.optJSONArray("seasons")
-                if(id in validated){
-                    p4Trace("SIMKL_P4_LIBRARY_TARGET",gen,targetSeason,
-                        "index=$i id=$id entryKeys=${entry.keys().asSequence().toList()} " +
-                        "claimed=$claimed seasonsType=${entry.opt("seasons")?.javaClass?.simpleName} " +
-                        "seasons=${seasons?.length()} episodesPerSeason=${(0 until (seasons?.length() ?: 0)).map { j -> seasons?.optJSONObject(j)?.optJSONArray("episodes")?.length() }}")
-                }
-                for(j in 0 until(seasons?.length() ?: 0)){
-                    val episodes=seasons?.optJSONObject(j)?.optJSONArray("episodes")
-                    for(k in 0 until(episodes?.length() ?: 0)){
-                        val ep=episodes?.optJSONObject(k)
-                        val native=jsonInt(ep,"number") ?:continue
-                        if(ep?.opt("watched") != false)watchedAll+="$id:$native"
-                    }
-                }
-            }
-            val badCounts=validated.filter { id ->
-                val counted=watchedAll.count { it.startsWith("$id:") }
-                val expected=claimedWatched[id]
-                p4Trace("SIMKL_P4_LIBRARY_COUNT",gen,targetSeason,
-                    "id=$id counted=$counted claimed=$expected consistent=${expected == null || counted >= expected}")
-                expected!=null && counted<expected
-            }
-            if(badCounts.isNotEmpty()){
-                Log.w(TAG,"event=SIMKL_P4_LIBRARY_INCOMPLETE session=$session gen=$gen " +
-                    "season=$targetSeason ids=$badCounts")
+                    "reason=watched-grid-unverified candidates=$validated")
                 return null
             }
             val targetKeys=sorted.mapTo(linkedSetOf()) { it.key }
@@ -1799,7 +1799,6 @@ internal class RatingPlotImageHook(
                     "http=${response.code} notFound=$failed")
                 return false
             }
-            animeLibraryCache=null
             val expected=if(diff>0)before.watched+changes.map{it.key}
                 else before.watched-changes.map{it.key}.toSet()
             for(attempt in 1..3){
