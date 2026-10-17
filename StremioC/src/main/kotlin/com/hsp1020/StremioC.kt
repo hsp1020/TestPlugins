@@ -3158,6 +3158,14 @@ open class StremioC(
                 it.simkl != null }
     }
 
+    /** Reuse the existing AIOStreams cache for an anime movie or a split season. */
+    internal suspend fun playbackTrackerIds(loadData: LoadData): SeasonTrackerIds? {
+        val mapped = fetchAnimeSeasonMapping(loadData) ?: return null
+        return SeasonTrackerIds(mapped.malId, mapped.aniListId,
+            mapped.kitsuId?.toIntOrNull(), mapped.simklId, mapped.tvdbId,
+            mapped.tvdbSeason, mapped.tmdbSeason)
+    }
+
     private suspend fun fetchAnimeSeasonMapping(loadData: LoadData): AnimeSeasonMapping? {
         val aniListLookupId = loadData.originalAnimeId?.takeIf { it.startsWith("anilist:") }
             ?.removePrefix("anilist:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }

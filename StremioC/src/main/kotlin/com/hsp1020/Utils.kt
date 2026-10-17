@@ -739,6 +739,7 @@ internal class RatingPlotImageHook(
     private val watchers = mutableMapOf<Fragment, Watcher>()
     private val audioSelector = StremioAudioSelector()
     private val subtitleController = StremioSubtitleController()
+    private val scrobble = StremioScrobble(context)
     private val pipSubtitles = PipSubtitleScaler { apiName ->
         apiName == "StremioC" || APIHolder.allProviders.any {
             it is StremioC && it.name.equals(apiName, ignoreCase = true)
@@ -1098,6 +1099,7 @@ internal class RatingPlotImageHook(
                 pipSubtitles.watch(f)
                 audioSelector.watch(f)
                 subtitleController.watch(f)
+                scrobble.watch(f)
             }
         }
 
@@ -1117,6 +1119,7 @@ internal class RatingPlotImageHook(
             pipSubtitles.watch(f)
             audioSelector.watch(f)
             subtitleController.watch(f)
+            scrobble.watch(f)
             watchers[f]?.let { watcher ->
                 watcher.render() // CloudStream may reuse an old LoadResponse without calling load().
                 watcher.auditReentry()
@@ -1130,6 +1133,7 @@ internal class RatingPlotImageHook(
             pipSubtitles.detach(f)
             audioSelector.detach(f)
             subtitleController.detach(f)
+            scrobble.detach(f)
             watchers.remove(f)?.detach()
         }
     }
@@ -1149,8 +1153,10 @@ internal class RatingPlotImageHook(
     }
 
     fun stop() {
+        scrobble.stop()
         audioSelector.detach()
         subtitleController.detach()
+        scrobble.detach()
         pipSubtitles.detach()
         StremioCMdbUiBridge.listen(null)
         homeEntries.detach()
@@ -1170,6 +1176,7 @@ internal class RatingPlotImageHook(
         pipSubtitles.detach()
         audioSelector.detach()
         subtitleController.detach()
+        scrobble.detach()
         homeEntries.detach()
         detachPreview()
         detailRevealEnd?.invoke()
@@ -1189,6 +1196,7 @@ internal class RatingPlotImageHook(
                     pipSubtitles.watch(f)
                     audioSelector.watch(f)
                     subtitleController.watch(f)
+                    scrobble.watch(f)
                 }
                 if (f.isAdded) scan(f.childFragmentManager)
             }
@@ -2577,6 +2585,7 @@ internal class RatingPlotImageHook(
         pipSubtitles.detach()
         audioSelector.detach()
         subtitleController.detach()
+        scrobble.detach()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
         watchers.clear(); host = null
