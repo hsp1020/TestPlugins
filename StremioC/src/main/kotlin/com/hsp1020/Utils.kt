@@ -292,6 +292,7 @@ internal class StremioSubtitleController {
     private var selectionDialog: Dialog? = null
     private var selectionBeforeDialog: SubtitleData? = null
     private var settings: SharedPreferences? = null
+    private var preferredLanguage = "en"
     private var sortedDialog: Dialog? = null
     private var pendingDialog: Dialog? = null
     private var isStremio = false
@@ -332,8 +333,17 @@ internal class StremioSubtitleController {
         }
     } as Media3Player.Listener
     private val settingsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key == SUBTITLE_AUTO_SELECT_KEY && isStremio) manualOverride = true
+        if (key == SUBTITLE_AUTO_SELECT_KEY) {
+            preferredLanguage = readPreferredLanguage()
+            if (isStremio) manualOverride = true
+        }
     }
+    private fun readPreferredLanguage(): String =
+        runCatching { settings?.getString(SUBTITLE_AUTO_SELECT_KEY, null) }
+            .getOrNull()?.trim()?.removeSurrounding("\"")
+            ?.takeIf { it.matches(Regex("[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*")) }
+            ?: "en"
+
 
     private fun currentLinkUrl(f: GeneratorPlayer): String? =
         runCatching { (linkField?.get(f.player) as? ExtractorLink)?.url }.getOrNull()
@@ -439,6 +449,7 @@ internal class StremioSubtitleController {
         model?.currentSubtitles?.observe(candidate.viewLifecycleOwner, observer)
         removeObserver = { model?.currentSubtitles?.removeObserver(observer) }
         settings = candidate.context?.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+        preferredLanguage = readPreferredLanguage()
         settings?.registerOnSharedPreferenceChangeListener(settingsListener)
         candidate.view?.viewTreeObserver?.takeIf { it.isAlive }?.let {
             it.addOnPreDrawListener(onDraw)
@@ -468,7 +479,7 @@ internal class StremioSubtitleController {
         val popup = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
         trackDialog(f, popup)
         if (manualOverride || popup?.isShowing == true) return
-        val language = SubtitlesFragment.getAutoSelectLanguageTagIETF()
+        val language = preferredLanguage
         if (language.isBlank()) return
         val target = subtitles.firstOrNull {
             it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it.matchesLanguageCode(language)

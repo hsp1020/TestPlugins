@@ -20,6 +20,7 @@ import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.getActivity
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs
+import com.lagradost.cloudstream3.ui.subtitles.SUBTITLE_AUTO_SELECT_KEY
 import com.lagradost.cloudstream3.utils.DataStoreHelper
 import com.lagradost.cloudstream3.utils.USER_PINNED_PROVIDERS
 import org.json.JSONArray
@@ -135,6 +136,16 @@ class StremioCPlugin : Plugin() {
         }
         isUnloaded = false
         val appContext = context.applicationContext
+        // CloudStream stores this setting as a JSON string (e.g. "\"en\"").
+        // Repair only legacy bare language tags; leave valid settings untouched.
+        val subtitlePrefs = appContext.getSharedPrefs()
+        val subtitleLanguage = subtitlePrefs.getString(SUBTITLE_AUTO_SELECT_KEY, null)?.trim()
+        if (subtitleLanguage != null &&
+            subtitleLanguage.matches(Regex("[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*"))) {
+            subtitlePrefs.edit().putString(
+                SUBTITLE_AUTO_SELECT_KEY, JSONObject.quote(subtitleLanguage)
+            ).apply()
+        }
 
         // --- 1. StremioC 자체 부팅 복원 엔진 (Flag Guard + Checksum 검증) ---
         try {

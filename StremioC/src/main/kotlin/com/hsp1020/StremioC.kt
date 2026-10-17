@@ -2742,20 +2742,8 @@ open class StremioC(
             }
         }
 
-        val copyId = loadData.imdbId ?: loadData.id ?: ""
-        if (!copyId.isNullOrBlank()) {
-            wrappedCallback.invoke(
-                newExtractorLink(
-                    "Copy to clipboard",
-                    "📋 Video ID: $copyId",
-                    copyId,
-                    ExtractorLinkType.VIDEO
-                )
-                {
-                    this.quality = Qualities.Unknown.value
-                }
-            )
-        }
+        // IDs are metadata, not playable URLs. Use the StremioC "Copy video ID"
+        // episode action rather than emitting a synthetic ExtractorLink.
 
         val currentMainUrl = loadData.addonUrl?.takeIf { it.isNotBlank() } ?: mainUrl
         val cleanBaseUrl = currentMainUrl.fixSourceUrl().cleanBaseUrl()
@@ -2771,6 +2759,8 @@ open class StremioC(
                 parsed != null && (parsed.scheme == "http" || parsed.scheme == "https")
             }.filterNot { stremioManifestUrl(it.url) == stremioManifestUrl(currentMainUrl) }
         } else emptyList()
+        android.util.Log.i("StremioCStreams",
+            "request type=$targetType id=$primaryId provider=${name.take(40)} extraEnabled=${syncSettings.streamSubtitleMap[currentCleanUrl] == true} extraCount=${extraUrls.size}")
 
         val customHosts = withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
@@ -2990,10 +2980,14 @@ open class StremioC(
             {
                 val request = streamRequest(targetType, primaryId, loadData.season, loadData.episode)
                 if (cleanBaseUrl.isNotBlank() && request != null) {
-                    runSuspendCatching {
+                    val started = android.os.SystemClock.elapsedRealtime()
+                    val outcome = runSuspendCatching {
                         val streamRequestUrl = "$cleanBaseUrl/stream/${request.first}/${request.second.urlEncode()}.json$querySuffix"
-                        val text = customSession.get(streamRequestUrl, timeout = 25L).text
+                        val response = customSession.get(streamRequestUrl, timeout = 25L)
+                        val text = response.text
                         val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
+                        android.util.Log.i("StremioCStreams",
+                            "source=main type=${request.first} id=${request.second} http=${response.code} streams=${res?.streams?.size ?: 0} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
                         res?.streams?.forEach { stream ->
                             stream.runCallback(
                                 this@StremioC,
@@ -3004,6 +2998,13 @@ open class StremioC(
                             )
                         }
                     }
+                    outcome.onFailure { error ->
+                        android.util.Log.w("StremioCStreams",
+                            "source=main type=${request.first} id=${request.second} error=${error.javaClass.simpleName} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
+                    }
+                } else {
+                    android.util.Log.i("StremioCStreams",
+                        "source=main skipped type=$targetType id=$primaryId reason=${if (request == null) "missing-id" else "missing-base"}")
                 }
             },
             {
@@ -3048,15 +3049,28 @@ open class StremioC(
                                     ?: base.toHttpUrlOrNull()?.host.orEmpty()
                                 if (source.isNotBlank()) stremioSourceNames.add(source.lowercase())
                                 runAllAsync({
-                                    if (streamRequest != null) runSuspendCatching {
-                                        val requestUrl = "$base/stream/${streamRequest.first}/${streamRequest.second.urlEncode()}.json$suffix"
-                                        val text = customSession.get(requestUrl, timeout = 25L).text
-                                        val streams = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
-                                        streams?.streams?.forEach { stream ->
-                                            stream.runCallback(this@StremioC, source,
-                                                stremioSubtitleFrom(addonUrl), extractorSubtitleFrom(addonUrl), wrappedCallback,
-                                                preferredName = addon.name)
+                                    if (streamRequest != null && base.isNotBlank()) {
+                                        val started = android.os.SystemClock.elapsedRealtime()
+                                        val outcome = runSuspendCatching {
+                                            val requestUrl = "$base/stream/${streamRequest.first}/${streamRequest.second.urlEncode()}.json$suffix"
+                                            val response = customSession.get(requestUrl, timeout = 25L)
+                                            val text = response.text
+                                            val streams = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
+                                            android.util.Log.i("StremioCStreams",
+                                                "source=extra addon=${source.take(40)} type=${streamRequest.first} id=${streamRequest.second} http=${response.code} streams=${streams?.streams?.size ?: 0} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
+                                            streams?.streams?.forEach { stream ->
+                                                stream.runCallback(this@StremioC, source,
+                                                    stremioSubtitleFrom(addonUrl), extractorSubtitleFrom(addonUrl), wrappedCallback,
+                                                    preferredName = addon.name)
+                                            }
                                         }
+                                        outcome.onFailure { error ->
+                                            android.util.Log.w("StremioCStreams",
+                                                "source=extra addon=${source.take(40)} type=${streamRequest.first} id=${streamRequest.second} error=${error.javaClass.simpleName} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
+                                        }
+                                    } else {
+                                        android.util.Log.i("StremioCStreams",
+                                            "source=extra addon=${source.take(40)} skipped reason=${if (streamRequest == null) "missing-id" else "missing-base"}")
                                     }
                                 }, {
                                     val mappedId = mappedAnimeStremioId()
@@ -3547,8 +3561,12 @@ open class StremioC(
                             }
                         } else {
                             val requestUrl = "$cleanBaseUrl/stream/$targetType/${encodedId}.json$querySuffix"
-                            val text = customSession.get(requestUrl, timeout = 25L).text
+                            val started = android.os.SystemClock.elapsedRealtime()
+                            val response = customSession.get(requestUrl, timeout = 25L)
+                            val text = response.text
                             val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
+                            android.util.Log.i("StremioCStreams",
+                                "source=integration addon=${addon.name.take(40)} type=$targetType id=$stremioId http=${response.code} streams=${res?.streams?.size ?: 0} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
 
                             res?.streams?.forEach { stream ->
                                 stream.runCallback(
@@ -3566,6 +3584,8 @@ open class StremioC(
                         }
                     }.onFailure { error ->
                         if (error is CancellationException) throw error
+                        android.util.Log.w("StremioCStreams",
+                            "source=integration addon=${addon.name.take(40)} type=$targetType id=$stremioId error=${error.javaClass.simpleName}")
                     }
                 }
             }.awaitAll()
