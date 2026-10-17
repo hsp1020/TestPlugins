@@ -920,6 +920,7 @@ open class StremioC(
         private val libraryOriginalUrlsByMeta = lruCacheMap<String, MutableSet<String>>(200)
         internal val expectedLogoByUrl = lruCacheMap<String, Boolean>(200)
         internal val animeAudioByUrl = lruCacheMap<String, Boolean>(200)
+        internal val seasonEpisodeCountsByUrl = lruCacheMap<String, Map<Int, Int>>(200)
         internal val subtitleOrderByUrl = Collections.synchronizedMap(lruCacheMap<String, Int>(1200))
         internal val trailerChoicesByUrl = lruCacheMap<String, List<TrailerChoice>>(200)
         // A /meta response is shared by detail and episode loading. Keep a bounded
@@ -4783,6 +4784,10 @@ open class StremioC(
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
                 StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
+                StremioC.seasonEpisodeCountsByUrl[metaUrl] = finalVideos.orEmpty()
+                    .mapNotNull { video -> video.seasonNumber?.takeIf { it > 0 }?.let { it to video } }
+                    .groupBy({ it.first }, { it.second })
+                    .mapValues { (_, videos) -> videos.size }
                 StremioC.trailerChoicesByUrl[metaUrl] = finalTrailers
                 StremioC.genreCatalogsByUrl[metaUrl] = genreTargets
                 val resolvedMovieId = if (finalType == "other" && finalVideos?.size == 1) {
@@ -4858,6 +4863,10 @@ open class StremioC(
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
                 StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
+                StremioC.seasonEpisodeCountsByUrl[metaUrl] = finalVideos.orEmpty()
+                    .mapNotNull { video -> video.seasonNumber?.takeIf { it > 0 }?.let { it to video } }
+                    .groupBy({ it.first }, { it.second })
+                    .mapValues { (_, videos) -> videos.size }
                 StremioC.trailerChoicesByUrl[metaUrl] = finalTrailers
                 StremioC.genreCatalogsByUrl[metaUrl] = genreTargets
                 val response = run { provider.newTvSeriesLoadResponse(
