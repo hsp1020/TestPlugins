@@ -1246,6 +1246,8 @@ internal class RatingPlotImageHook(
         private var p1Initial: Fields? = null
         private var p1TrustedUser: SyncAPI.AbstractSyncStatus? = null
         private var p1Saving = false
+        private var p1SourceCount: Int? = null
+        private var p1ReadOnly = emptySet<String>()
         private val saveButton by lazy(LazyThreadSafetyMode.NONE) {
             root.findViewById<View>(R.id.result_sync_set_score)
         }
@@ -1276,6 +1278,8 @@ internal class RatingPlotImageHook(
             p1Primary = null
             p1Initial = null
             p1TrustedUser = null
+            p1SourceCount = null
+            p1ReadOnly = emptySet()
             trace("P1_RESET", "reason=$reason")
         }
 
@@ -1298,6 +1302,9 @@ internal class RatingPlotImageHook(
             val imdb = IMDB.find(url)?.value ?: IMDB.find(detailUrl.orEmpty())?.value
             p1Reset("season-selection")
             p1GuardClick()
+            p1SourceCount = StremioC.seasonEpisodeCountsByUrl[url]?.get(season)
+            trace("P1_SOURCE_SEASON", "selected=$season episodes=${p1SourceCount ?: "unknown"} " +
+                "all=${StremioC.seasonEpisodeCountsByUrl[url] ?: "unavailable"}")
             // While a mapping is unresolved, remove the unscoped IMDb/Simkl sync
             // target. Never allow native Save to write a different season.
             syncModel?.clear()
@@ -1386,13 +1393,22 @@ internal class RatingPlotImageHook(
                 p1Target = usable.associate { it.prefix to it.id }
                 p1Statuses = usable.associate { it.prefix to it.status!! }
                 p1Totals = usable.associate { it.prefix to it.total }
+                p1ReadOnly = usable.filter { row ->
+                    val source = p1SourceCount
+                    source != null && source > 0 && row.total != null &&
+                        row.total > 0 && row.total != source
+                }.map { it.prefix }.toSet()
+                trace("P1_TOTAL_VALIDATION", "sourceEpisodes=${p1SourceCount ?: "unknown"} " +
+                    "providerTotals=$p1Totals readOnly=$p1ReadOnly " +
+                    "rule=source-and-tracker-totals-must-match-if-known")
                 val primary = usable.first()
                 p1Primary = primary.prefix
                 val snapshot = primary.status!!
                 p1Initial = fields(snapshot)
                 trace("P1_NATIVE_TARGET", "primary=${primary.prefix} id=${primary.id} " +
                     "all=$p1Target baseline=$p1Initial before=${idSummary(syncModel?.getSyncs().orEmpty())}")
-                syncModel?.setSync(primary.prefix, primary.id)
+                syncModel?.clear()
+                syncModel?.addSyncs(p1Target)
                 syncModel?.updateSynced()
                 syncModel?.updateUserData()
                 p1GuardClick()
@@ -1423,9 +1439,9 @@ internal class RatingPlotImageHook(
                 item.maxEpisodes = wantedTotal
                 trace("P1_TOTAL_APPLY", "service=$p1Primary total=$wantedTotal " +
                     "watched=${item.watchedEpisodes}")
-                // Host observes the result; republish through its public mutation API
-                // without modifying any external account.
-                syncModel?.setEpisodes(item.watchedEpisodes ?: 0)
+                // Host observes the result; republish without changing watched count,
+                // including the null (not yet on list) case.
+                syncModel?.setStatus(item.status.internalId)
             }
         }
 
@@ -1437,7 +1453,7 @@ internal class RatingPlotImageHook(
             val trusted = p1TrustedUser
             val live = (sync.userData.value as? Resource.Success)?.value
             val base = p1Initial
-            val correctTarget = prefix != null && sync.getSyncs() == mapOf(prefix to p1Target[prefix])
+            val correctTarget = prefix != null && sync.getSyncs() == p1Target
             trace("P1_SAVE_ATTEMPT", "primary=$prefix mapped=$p1Target " +
                 "ready=${trusted != null} identical=${live === trusted} " +
                 "correctTarget=$correctTarget saving=$p1Saving")
@@ -1446,7 +1462,8 @@ internal class RatingPlotImageHook(
                 trace("P1_SAVE_BLOCK", "reason=unresolved-stale-or-busy")
                 return
             }
-            val edited = fields(live!!)
+            val readyUser = live ?: return
+            val edited = fields(readyUser)
             val changedStatus = edited.status != base.status
             val changedScore = edited.rating != base.rating
             val changedProgress = edited.watched != base.watched
@@ -1475,15 +1492,19 @@ internal class RatingPlotImageHook(
                             val state = now.getOrNull() ?: if (now.isSuccess) item else null
                             if (state == null) return@async name to false
                             if (changedStatus) state.status = edited.status
-                            if (changedScore) state.score = live.score
+                            if (changedScore) state.score = readyUser.score
                             if (changedProgress) state.watchedEpisodes = edited.watched
                             val total = p1Totals[name] ?: state.maxEpisodes
-                            val valid = (state.watchedEpisodes ?: 0) >= 0 &&
+                            val source = p1SourceCount
+                            val valid = name !in p1ReadOnly &&
+                                (source == null || source <= 0 || (total != null && total == source)) &&
+                                (state.watchedEpisodes ?: 0) >= 0 &&
                                 (total == null || total <= 0 || (state.watchedEpisodes ?: 0) <= total)
                             val result = if (valid) repo.updateStatus(id, state) else null
                             android.util.Log.i(TAG, "event=P1_SAVE_RESULT session=$instance gen=$gen " +
                                 "season=$season provider=$name id=$id valid=$valid " +
                                 "success=${result?.getOrNull() == true} " +
+                                "readOnly=${name in p1ReadOnly} source=$source total=$total " +
                                 "error=${result?.exceptionOrNull()?.javaClass?.simpleName}")
                             name to (result?.getOrNull() == true)
                         }
@@ -1493,7 +1514,7 @@ internal class RatingPlotImageHook(
                     if (p1Valid(gen, season)) {
                         // Re-resolve account state on the next selection. Do not keep
                         // mutated old service snapshots after partial saves.
-                        p1Initial = fields(live)
+                        p1Initial = fields(readyUser)
                     }
                 } catch (e: CancellationException) {
                     trace("P1_SAVE_CANCEL", "targetSeason=$season token=$gen")
