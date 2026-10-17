@@ -1044,9 +1044,10 @@ private class PipSubtitleScaler {
         if (event.isInPictureInPictureMode) enterPip() else leavePip()
     }
     private val subtitleStyleListener: (SaveCaptionStyle) -> Unit = {
-        // Core applies the saved fixed size first; keep the PiP override afterward.
-        subtitle?.post {
-            if (inPip) subtitle?.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION)
+        // Core restores its fixed font size and elevation when settings change.
+        val view = subtitle
+        view?.post {
+            if (inPip && subtitle === view) applyPipStyle(view)
         }
     }
 
@@ -1088,22 +1089,38 @@ private class PipSubtitleScaler {
         if (host.isInPictureInPictureMode) enterPip()
     }
 
+    private fun applyPipStyle(view: SubtitleView) {
+        // Next Player uses a full-size SubtitleView with Media3's default 8% bottom inset.
+        // CloudStream's fixed elevation (paddingTop + translationY) must not remain in PiP.
+        if (view.paddingTop != 0) {
+            view.setPadding(view.paddingLeft, 0, view.paddingRight, view.paddingBottom)
+        }
+        if (view.translationY != 0f) view.translationY = 0f
+        view.setBottomPaddingFraction(SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
+        view.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION)
+    }
+
     private fun enterPip() {
         val view = subtitle ?: return
         if (inPip) return
         inPip = true
-        // Next Player: scale according to the current PiP subtitle viewport.
-        // Media3 recalculates automatically when the window is resized.
-        view.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION)
+        applyPipStyle(view)
     }
 
     private fun leavePip() {
         if (!inPip) return
         inPip = false
-        subtitle?.setFixedTextSize(
-            TypedValue.COMPLEX_UNIT_SP,
-            SubtitlesFragment.getCurrentSavedStyle().fixedTextSize ?: 25f
-        )
+        subtitle?.let { view ->
+            val style = SubtitlesFragment.getCurrentSavedStyle()
+            // Restore all of CloudStream's normal subtitle layout (0% bottom inset,
+            // fixed font size, saved top padding) and its elevation translation.
+            SubtitlesFragment.setSubtitleViewStyle(view, style, true)
+            view.translationY = -TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_DIP,
+                style.elevation.toFloat(),
+                view.resources.displayMetrics
+            )
+        }
     }
 
     private fun unbind() {
