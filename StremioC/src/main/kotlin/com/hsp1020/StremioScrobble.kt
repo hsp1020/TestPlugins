@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.ViewTreeObserver
 import androidx.annotation.OptIn
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModelProvider
@@ -36,6 +37,7 @@ internal class StremioScrobble(context: Context) {
     private val queue = Channel<Report>(64)
     private var fragment: GeneratorPlayer? = null
     private var model: PlayerGeneratorViewModel? = null
+    private var tree: ViewTreeObserver? = null
     private val main = Handler(Looper.getMainLooper())
     private val trackerMappings = linkedMapOf<String, SeasonTrackerIds?>()
     private var player: Media3Player? = null
@@ -43,11 +45,8 @@ internal class StremioScrobble(context: Context) {
     private var lastEvent: String? = null
     private var lastPosition = 0L
     private var lastDuration = 0L
-    private var seekPending = false
-    private var seekPosition = 0L
-    private var seekAtMs = 0L
-    private var lastProgressAtMs = 0L
     private var seekReport: Runnable? = null
+    private var seekedPastThresholdAt = 0L
 
     private data class Item(
         val id: Int, val url: String, val api: String,
@@ -111,138 +110,163 @@ internal class StremioScrobble(context: Context) {
     }
 
     private fun progress(item: Item, current: Media3Player?): Pair<Long, Long> {
-        val saved = DataStoreHelper.getViewPos(item.id)
         val position = current?.currentPosition?.takeIf { it >= 0L }
-            ?: saved?.position ?: lastPosition
         val duration = current?.duration?.takeIf { it > 0L }
-            ?: saved?.duration?.takeIf { it > 0L } ?: lastDuration
-        return position.coerceAtLeast(0L) to duration.coerceAtLeast(0L)
+        if (position != null && duration != null) return position to duration
+        val saved = DataStoreHelper.getViewPos(item.id)
+        return (position ?: saved?.position ?: lastPosition).coerceAtLeast(0L) to
+            (duration ?: saved?.duration?.takeIf { it > 0L } ?: lastDuration).coerceAtLeast(0L)
     }
 
 
-    /** A single 15-second progress timer, independent of view drawing. */
-    private fun emit(event: String, item: Item, current: Media3Player? = player, played: Boolean? = null, refresh: Boolean = false) {
+    /** Only state transitions and Seek send reports; no recurring polling. */
+    private fun emit(event: String, item: Item, current: Media3Player? = player, played: Boolean? = null, allowRepeat: Boolean = false) {
         if (lastEvent == "stop" ||
-            (event == "start" && (current?.isPlaying != true || !refresh && lastEvent == "start")) ||
+            (event == "start" && current?.isPlaying != true) ||
             (event != "start" && lastEvent == null) ||
-            (!refresh && event != "progress" && lastEvent == event)) return
+            (event != "start" && !allowRepeat && lastEvent == event)) return
 
         val (pos, duration) = progress(item, current)
         lastPosition = pos
         lastDuration = duration
-        if (event != "progress") lastEvent = event
-        if (event == "start") lastProgressAtMs = SystemClock.elapsedRealtime()
-
+        lastEvent = event
+        if (event == "start" && duration > 0L && pos.toDouble() / duration >= 0.80 &&
+            seekedPastThresholdAt == 0L) {
+            seekedPastThresholdAt = SystemClock.elapsedRealtime()
+        }
         val target = playbackBase() ?: return
         val report = Report(item, event, pos, duration, target, played)
-        if (queue.trySend(report).isFailure && event != "progress") {
-            // A saturated progress queue must never silently lose a final stop.
+        if (queue.trySend(report).isFailure) {
+            // Lifecycle reports must not be lost if earlier requests are slow.
             senderScope.launch { runCatching { queue.send(report) } }
         }
     }
 
-    private fun refreshEpisode() {
-        val state = model?.state?.generatorState ?: return
-        val response = state.response ?: return
-        val episode = state.meta as? ResultEpisode ?: return
-        if (active?.key == response.url + "#" + episode.id) return
+    /** Deserialize only when the actual episode changes. */
+    private fun refreshEpisode(): Boolean {
+        val state = model?.state?.generatorState ?: return false
+        val response = state.response ?: return false
+        val episode = state.meta as? ResultEpisode ?: return false
+        if (active?.key == response.url + "#" + episode.id) return false
 
         val next = snapshot()
         active?.let { old ->
-            // Do not read the next episode's position for the previous stop.
+            // The old stop must use its stored position, never the new episode's player.
             if (lastEvent != null && lastEvent != "stop") emit("stop", old, null)
         }
+        cancelCompletion()
+        seekReport?.let(main::removeCallbacks)
+        seekReport = null
         active = next
         lastEvent = null
         lastPosition = 0L
         lastDuration = 0L
-        seekPending = false
-        lastProgressAtMs = 0L
-        seekReport?.let(main::removeCallbacks)
-        seekReport = null
-        if (next != null && player?.isPlaying == true) emit("start", next)
+        seekedPastThresholdAt = 0L
+        if (next != null && player?.isPlaying == true) {
+            emit("start", next)
+            scheduleCompletion()
+        }
+        return true
     }
 
+    /** Rebind if CloudStream replaces the Media3 player (for example, mirror change). */
     private fun attachPlayer() {
         val next = fragment?.playerView?.player
         if (next === player) return
+        cancelCompletion()
         player?.removeListener(listener)
         player = next
         next?.addListener(listener)
+        val changed = refreshEpisode()
+        if (!changed && next?.isPlaying == true) {
+            active?.let { emit("start", it) }
+            scheduleCompletion()
+        }
     }
 
-    private fun checkProgress() {
-        val item = active ?: return
+    /**
+     * One scheduled threshold check, not a timer that runs every 15 seconds.
+     * A seek directly past 80% must first continue playing before it counts.
+     */
+    private fun scheduleCompletion() {
+        main.removeCallbacks(completion)
         val current = player ?: return
-        if (!current.isPlaying || lastEvent != "start") return
-        val now = SystemClock.elapsedRealtime()
-        val elapsed = now - lastProgressAtMs
-        if (elapsed < 15_000L) return
-        lastProgressAtMs = now
-        val (pos, duration) = progress(item, current)
-        // Recover a seek if a host-specific player did not dispatch Media3 discontinuity.
-        // Normal playback, including high speed and stalls, stays on the progress path.
-        if (pos + 15_000L < lastPosition ||
-            pos - lastPosition > elapsed * 3 + 30_000L) {
-            seekPending = true
-            seekPosition = pos
-            seekAtMs = now
-            // AIOMetadata ignores progress for tracker scrobbles, but start updates
-            // Simkl's active session at the current position without pausing it.
-            emit("start", item, current, refresh = true)
-            return
-        }
-        if (seekPending) {
-            val elapsed = (SystemClock.elapsedRealtime() - seekAtMs).coerceAtLeast(0L)
-            // Moving the seekbar past 80% is not continuous playback.
-            if (pos > seekPosition && pos - seekPosition <= elapsed * 2 + 10_000L)
-                seekPending = false
-        }
-        if (!seekPending && duration > 0L && pos.toDouble() / duration >= 0.80) {
-            // The AIOMetadata /playback progress event itself marks nothing watched.
-            // A single completed stop is interpreted by Simkl, MDBList and anime lists.
-            emit("stop", item, current, played = true)
-        } else {
-            emit("progress", item, current)
+        if (lastEvent == "stop" || !current.isPlaying) return
+        val (position, duration) = active?.let { progress(it, current) } ?: return
+        if (duration <= 0L) return
+        val threshold = (duration * 0.80).toLong()
+        val remaining = (threshold - position).coerceAtLeast(0L)
+        val speed = current.playbackParameters.speed.toDouble().coerceAtLeast(0.1)
+        val timeToThreshold = (remaining / speed).toLong().coerceAtLeast(1000L)
+        val seekGrace = if (seekedPastThresholdAt != 0L)
+            (15_000L - (SystemClock.elapsedRealtime() - seekedPastThresholdAt)).coerceAtLeast(0L)
+            else 0L
+        main.postDelayed(completion, maxOf(timeToThreshold, seekGrace))
+    }
+
+    private val completion = Runnable {
+        val item = active
+        val current = player
+        if (item != null && current?.isPlaying == true && lastEvent != "stop") {
+            val (position, duration) = progress(item, current)
+            if (duration > 0L && position.toDouble() / duration >= 0.80 &&
+                (seekedPastThresholdAt == 0L ||
+                    SystemClock.elapsedRealtime() - seekedPastThresholdAt >= 15_000L)) {
+                emit("stop", item, current, played = true)
+            } else scheduleCompletion()
         }
     }
 
-    private val tick = object : Runnable {
-        override fun run() {
-            if (fragment == null) return
-            attachPlayer()
-            refreshEpisode()
-            if (player?.isPlaying == true) {
-                active?.let { if (lastEvent != "start" && lastEvent != "stop") emit("start", it) }
-                checkProgress()
-            }
-            main.postDelayed(this, if (player == null || active == null) 500L else 15_000L)
-        }
+    private fun cancelCompletion() {
+        main.removeCallbacks(completion)
     }
 
-    // Dynamic proxy avoids default-method ABI differences across Media3 host versions.
+    // Layout events are only used to discover a new player, not to parse episode JSON.
+    private val layout = ViewTreeObserver.OnGlobalLayoutListener {
+        attachPlayer()
+        // Cheap key comparison; snapshot JSON is parsed only for a new episode.
+        if (player?.isPlaying == true) refreshEpisode()
+    }
+
+
+    // Dynamic proxy avoids default-method ABI differences across Media3 versions.
     private val listener = java.lang.reflect.Proxy.newProxyInstance(
         Media3Player.Listener::class.java.classLoader,
         arrayOf(Media3Player.Listener::class.java)
     ) { proxy, method, args ->
         when (method.name) {
             "onIsPlayingChanged" -> {
-                refreshEpisode()
-                if (args?.getOrNull(0) == true) active?.let { emit("start", it) }
+                val changed = refreshEpisode()
+                if (args?.getOrNull(0) == true) {
+                    if (!changed) active?.let { emit("start", it) }
+                    scheduleCompletion()
+                } else cancelCompletion()
                 null
             }
             "onPlayWhenReadyChanged" -> {
                 if (args?.getOrNull(0) == false) {
+                    cancelCompletion()
                     refreshEpisode()
                     active?.let { emit("pause", it) }
                 }
                 null
             }
             "onPlaybackStateChanged" -> {
-                if (args?.getOrNull(0) == Media3Player.STATE_ENDED) {
-                    refreshEpisode()
-                    active?.let { emit("stop", it) }
+                when (args?.getOrNull(0)) {
+                    Media3Player.STATE_READY -> {
+                        refreshEpisode()
+                        scheduleCompletion() // Runtime may only become available when READY.
+                    }
+                    Media3Player.STATE_ENDED -> {
+                        cancelCompletion()
+                        refreshEpisode()
+                        active?.let { emit("stop", it) }
+                    }
                 }
+                null
+            }
+            "onPlaybackParametersChanged" -> {
+                scheduleCompletion()
                 null
             }
             "onPositionDiscontinuity" -> {
@@ -250,21 +274,19 @@ internal class StremioScrobble(context: Context) {
                 val reason = args?.lastOrNull() as? Int
                 if (reason == Media3Player.DISCONTINUITY_REASON_SEEK ||
                     reason == Media3Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) {
-                    active?.let { item ->
-                        val (position, duration) = progress(item, player)
-                        lastPosition = position
-                        lastDuration = duration
-                        seekPosition = position
-                        seekAtMs = SystemClock.elapsedRealtime()
-                        seekPending = true
+                    val current = player
+                    val item = active
+                    if (item != null && current != null && lastEvent != "stop") {
+                        val (position, duration) = progress(item, current)
+                        seekedPastThresholdAt = if (duration > 0L && position.toDouble() / duration >= 0.80)
+                            SystemClock.elapsedRealtime() else 0L
+                        scheduleCompletion()
+                        // Coalesce rapid scrubbing into one new-position report.
                         seekReport?.let(main::removeCallbacks)
                         seekReport = Runnable {
                             seekReport = null
                             if (active?.key == item.key && lastEvent != null && lastEvent != "stop") {
-                                // A seek during playback refreshes "watching now"; a paused
-                                // seek refreshes the saved resume position.
-                                val action = if (player?.isPlaying == true) "start" else "pause"
-                                emit(action, item, refresh = true)
+                                emit(if (player?.isPlaying == true) "start" else "pause", item, allowRepeat = true)
                             }
                         }.also { main.postDelayed(it, 750L) }
                     }
@@ -279,20 +301,36 @@ internal class StremioScrobble(context: Context) {
     } as Media3Player.Listener
 
     fun watch(fragment: Fragment) {
-        if (fragment !is GeneratorPlayer || fragment === this.fragment) return
+        if (fragment !is GeneratorPlayer) return
+        if (fragment === this.fragment) {
+            attachPlayer()
+            refreshEpisode()
+            return
+        }
         detach()
         this.fragment = fragment
         model = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
-        main.post(tick)
+        fragment.view?.viewTreeObserver?.takeIf { it.isAlive }?.let {
+            tree = it
+            it.addOnGlobalLayoutListener(layout)
+        }
+        fragment.view?.post {
+            if (this.fragment === fragment) {
+                attachPlayer()
+                refreshEpisode()
+            }
+        }
     }
 
     fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
-        main.removeCallbacks(tick)
+        cancelCompletion()
         seekReport?.let(main::removeCallbacks)
         seekReport = null
         active?.let { if (lastEvent != null && lastEvent != "stop") emit("stop", it) }
+        tree?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(layout)
         player?.removeListener(listener)
+        tree = null
         player = null
         fragment = null
         model = null
@@ -300,8 +338,7 @@ internal class StremioScrobble(context: Context) {
         lastEvent = null
         lastPosition = 0L
         lastDuration = 0L
-        seekPending = false
-        lastProgressAtMs = 0L
+        seekedPastThresholdAt = 0L
     }
 
     fun stop() {
@@ -315,13 +352,15 @@ internal class StremioScrobble(context: Context) {
         val data = item.source
         if (item.anime && data != null &&
             ((item.season ?: 0) > 1 || ids["imdb"].isNullOrBlank() && ids["kitsu"].isNullOrBlank())) {
-            val provider = APIHolder.allProviders.filterIsInstance<StremioC>()
-                .firstOrNull { it.name.equals(item.api, true) }
-                ?: APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull()
             val mapped = if (trackerMappings.containsKey(item.key)) trackerMappings[item.key]
-                else provider?.playbackTrackerIds(data).also {
-                    trackerMappings[item.key] = it
-                    if (trackerMappings.size > 12) trackerMappings.remove(trackerMappings.keys.first())
+                else {
+                    val provider = APIHolder.allProviders.filterIsInstance<StremioC>()
+                        .firstOrNull { it.name.equals(item.api, true) }
+                        ?: APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull()
+                    provider?.playbackTrackerIds(data).also {
+                        trackerMappings[item.key] = it
+                        if (trackerMappings.size > 12) trackerMappings.remove(trackerMappings.keys.first())
+                    }
                 }
             mapped?.kitsu?.let { ids["kitsu"] = it.toString() }
             mapped?.mal?.let { ids["mal"] = it.toString() }
