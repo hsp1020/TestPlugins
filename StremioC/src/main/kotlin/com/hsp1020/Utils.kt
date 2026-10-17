@@ -42,6 +42,7 @@ import com.google.android.material.chip.Chip
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.text.Editable
 import android.text.SpannableStringBuilder
 import android.text.Spanned
@@ -68,6 +69,7 @@ import androidx.lifecycle.ViewModelProvider
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
+import com.lagradost.cloudstream3.ui.result.SyncViewModel
 import com.lagradost.cloudstream3.ui.result.ActorAdaptor
 import com.lagradost.cloudstream3.utils.AppContextUtils.html
 import com.lagradost.cloudstream3.APIHolder
@@ -1199,14 +1201,182 @@ internal class RatingPlotImageHook(
         }
     }
 
+    /**
+     * P0-only season synchronization trace. It never modifies the core season picker,
+     * SyncViewModel IDs or tracking accounts. Observers are explicitly removed on detach.
+     */
+    private class SeasonSyncProbe(private val fragment: Fragment, private val detailUrl: String?) {
+        private companion object {
+            const val TAG = "STCSeasonSync"
+            val IMDB = Regex("tt\\d+")
+        }
+
+        private val instance = Integer.toHexString(System.identityHashCode(fragment))
+        private val cleanup = mutableListOf<() -> Unit>()
+        private var active = false
+        private var generation = 0L
+        private var pageUrl: String? = null
+        private var seasons = emptyList<Int>()
+        private var index: Int? = null
+        private var selectedSeason: Int? = null
+        private var lastPending: String? = null
+        private var syncModel: SyncViewModel? = null
+
+        private fun key(url: String?): String =
+            url?.let { Integer.toHexString(it.hashCode()) } ?: "null"
+
+        private fun idSummary(ids: Map<String, String>): String =
+            ids.toSortedMap().entries.joinToString(",", "[", "]") { (name, id) ->
+                // Sync identifiers are media IDs, not addon URLs or authorization credentials.
+                "$name=${id.take(110)}"
+            }
+
+        private fun trace(event: String, info: String = "") {
+            Log.i(TAG, "event=$event session=$instance gen=$generation page=${key(pageUrl)} " +
+                "season=${selectedSeason ?: "none"} $info")
+        }
+
+        private fun <T> listen(
+            data: androidx.lifecycle.LiveData<T>,
+            owner: androidx.lifecycle.LifecycleOwner,
+            callback: (T) -> Unit
+        ) {
+            val observer = Observer<T> { if (active) callback(it) }
+            data.observe(owner, observer)
+            cleanup += { data.removeObserver(observer) }
+        }
+
+        private fun resolveSelection(origin: String) {
+            val selected = index?.let { seasons.getOrNull(it) }
+            if (pageUrl == null || selected == null || selected <= 0) {
+                val reason = "origin=$origin index=${index ?: "null"} size=${seasons.size} " +
+                    "pageReady=${pageUrl != null}"
+                if (reason != lastPending) {
+                    lastPending = reason
+                    trace("SELECTION_PENDING", reason)
+                }
+                return
+            }
+            lastPending = null
+            if (selected == selectedSeason) return
+            val previous = selectedSeason
+            generation++ // Future P1 requests must match this token before applying results.
+            selectedSeason = selected
+            val imdb = IMDB.find(pageUrl.orEmpty())?.value ?: IMDB.find(detailUrl.orEmpty())?.value
+            trace(if (previous == null) "SEASON_INITIAL" else "SEASON_CHANGED",
+                "origin=$origin previous=${previous ?: "none"} index=$index " +
+                "seasonList=$seasons imdb=${imdb ?: "unknown"} sourceHash=${key(detailUrl)}")
+            trace("SYNC_TARGET_P0", "imdb=${imdb ?: "unknown"} selected=$selected " +
+                "ids=${syncModel?.getSyncs()?.let(::idSummary) ?: "tv-or-unavailable"} " +
+                "lookup=not_started write=disabled")
+        }
+
+        fun start() {
+            if (active) return
+            val model = ViewModelProvider(fragment)[ResultViewModel2::class.java]
+            // The TV result fragment does not own the phone's sync panel/model.
+            val sync = if (fragment.javaClass.name.endsWith("ResultFragmentPhone"))
+                ViewModelProvider(fragment)[SyncViewModel::class.java] else null
+            syncModel = sync
+            val owner = fragment.viewLifecycleOwner
+            active = true
+            trace("ATTACH", "screen=${fragment.javaClass.simpleName} " +
+                "sourceHash=${key(detailUrl)} sourceImdb=${IMDB.find(detailUrl.orEmpty())?.value} " +
+                "syncModel=${sync != null} viewLifecycle=${owner.lifecycle.currentState}")
+            listen(model.page, owner) { value ->
+                when (value) {
+                    is Resource.Success -> {
+                        val data = value.value
+                        if (data.url != pageUrl) {
+                            val previous = pageUrl
+                            generation++
+                            pageUrl = data.url
+                            seasons = emptyList()
+                            index = null
+                            selectedSeason = null
+                            lastPending = null
+                            trace("PAGE_CHANGED", "previousHash=${key(previous)} " +
+                                "title=${data.title.take(75)} ids=${idSummary(data.syncData)} " +
+                                "imdb=${IMDB.find(data.url)?.value ?: "unknown"}")
+                        } else {
+                            trace("PAGE_REEMITTED", "ids=${idSummary(data.syncData)}")
+                        }
+                        resolveSelection("page")
+                    }
+                    is Resource.Loading -> trace("PAGE_LOADING")
+                    is Resource.Failure -> trace("PAGE_FAILURE")
+                    else -> trace("PAGE_EMPTY")
+                }
+            }
+            listen(model.seasonSelections, owner) { list ->
+                seasons = list.map { it.second }
+                trace("SEASON_LIST", "numbers=$seasons labels=${list.size} " +
+                    "duplicates=${seasons.size != seasons.distinct().size}")
+                resolveSelection("list")
+            }
+            listen(model.selectedSeasonIndex, owner) { selected ->
+                index = selected
+                trace("SEASON_INDEX", "index=$selected count=${seasons.size} " +
+                    "resolved=${seasons.getOrNull(selected)}")
+                resolveSelection("index")
+            }
+            listen(model.watchStatus, owner) {
+                trace("LOCAL_WATCH", "state=$it (CloudStream bookmark, not external sync)")
+            }
+            if (sync != null) {
+                trace("SYNC_MODEL_INITIAL", "ids=${idSummary(sync.getSyncs())}")
+                listen(sync.synced, owner) { providers ->
+                    trace("SYNC_PROVIDERS", "ids=${idSummary(sync.getSyncs())} " +
+                        "providers=${providers.joinToString(",") { "${it.idPrefix}:${it.isSynced}:${it.hasAccount}" }}")
+                }
+                listen(sync.userData, owner) { value ->
+                    val detail = when (value) {
+                        is Resource.Success -> "status=${value.value.status} " +
+                            "watched=${value.value.watchedEpisodes} max=${value.value.maxEpisodes}"
+                        is Resource.Loading -> "loading"
+                        is Resource.Failure -> "failure"
+                        else -> "empty"
+                    }
+                    trace("SYNC_USER", "result=$detail ids=${idSummary(sync.getSyncs())}")
+                }
+                listen(sync.metadata, owner) { value ->
+                    val detail = when (value) {
+                        is Resource.Success -> "total=${value.value.totalEpisodes}"
+                        is Resource.Loading -> "loading"
+                        is Resource.Failure -> "failure"
+                        else -> "empty"
+                    }
+                    trace("SYNC_METADATA", "result=$detail")
+                }
+            }
+        }
+
+        fun resume() {
+            if (active) trace("RESUME", "index=${index ?: "null"} numbers=$seasons " +
+                "ids=${syncModel?.getSyncs()?.let(::idSummary) ?: "unavailable"}")
+        }
+
+        fun stop() {
+            if (!active) return
+            active = false
+            generation++ // Invalidate any in-flight future season-mapping work.
+            trace("DETACH", "observers=${cleanup.size} index=${index ?: "null"} numbers=$seasons")
+            cleanup.forEach { it() }
+            cleanup.clear()
+            syncModel = null
+        }
+    }
+
     private inner class Watcher(private val view: TextView, private val root: View, private val detailUrl: String?, private val fragment: Fragment) : TextWatcher {
         private val backdrop = DetailBackdropLayout(root, detailUrl)
+        private val seasonSyncProbe = SeasonSyncProbe(fragment, detailUrl)
         private val trailers = TrailerChooser(fragment, root, detailUrl)
         private var changing = false
 
         fun matchesMdbKey(key: String): Boolean = StremioCMdbUiBridge.keyFor(detailUrl) == key
 
         fun auditReentry() {
+            seasonSyncProbe.resume()
             val key = StremioCMdbUiBridge.keyFor(detailUrl) ?: return
         }
 
@@ -1420,6 +1590,9 @@ internal class RatingPlotImageHook(
                 for (i in 0 until list.childCount) positionEpisodeIndicator(list.getChildAt(i))
             }
             actorInformation.start()
+            runCatching { seasonSyncProbe.start() }.onFailure {
+                Log.e("STCSeasonSync", "event=ATTACH_FAILURE fragment=${fragment.javaClass.simpleName}", it)
+            }
             view.addTextChangedListener(this)
             searchButton?.setOnClickListener(searchClick)
             if (searchButton != null || castItems != null || genreGroup != null)
@@ -1427,6 +1600,7 @@ internal class RatingPlotImageHook(
             runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() }
         }
         fun detach() {
+            seasonSyncProbe.stop()
             episodeList?.removeOnChildAttachStateChangeListener(episodeChildListener)
             episodeIndicatorRestores.values.toList().forEach { it.invoke() }
             episodeIndicatorRestores.clear()
