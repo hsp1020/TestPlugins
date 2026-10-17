@@ -898,6 +898,7 @@ open class StremioC(
         // Bounded mapping only; never change CloudStream's original detail URL.
         private val libraryOriginalUrlsByMeta = lruCacheMap<String, MutableSet<String>>(200)
         internal val expectedLogoByUrl = lruCacheMap<String, Boolean>(200)
+        internal val animeAudioByUrl = lruCacheMap<String, Boolean>(200)
         internal val trailerChoicesByUrl = lruCacheMap<String, List<TrailerChoice>>(200)
         // A /meta response is shared by detail and episode loading. Keep a bounded
         // byte cache and join concurrent fetches for the identical exact URL.
@@ -2334,6 +2335,7 @@ open class StremioC(
                         for (source in listOf(metaUrl, response.url)) {
                             fallbackLogoTitles[source]?.let { fallbackLogoTitles[url] = it }
                             expectedLogoByUrl[source]?.let { expectedLogoByUrl[url] = it }
+                            animeAudioByUrl[source]?.let { animeAudioByUrl[url] = it }
                             trailerChoicesByUrl[source]?.let { trailerChoicesByUrl[url] = it }
                             genreCatalogsByUrl[source]?.let { genreCatalogsByUrl[url] = it }
                         }
@@ -2631,6 +2633,7 @@ open class StremioC(
         if (url != loadRes.url) {
             fallbackLogoTitles[loadRes.url]?.let { fallbackLogoTitles[url] = it }
             expectedLogoByUrl[loadRes.url]?.let { expectedLogoByUrl[url] = it }
+            animeAudioByUrl[loadRes.url]?.let { animeAudioByUrl[url] = it }
             trailerChoicesByUrl[loadRes.url]?.let { trailerChoicesByUrl[url] = it }
             genreCatalogsByUrl[loadRes.url]?.let { genreCatalogsByUrl[url] = it }
             ActorInformation.alias(this@StremioC, url, loadRes.url)
@@ -2643,6 +2646,7 @@ open class StremioC(
         for (originalUrl in libraryOrigins) {
             fallbackLogoTitles[url]?.let { fallbackLogoTitles[originalUrl] = it }
             expectedLogoByUrl[url]?.let { expectedLogoByUrl[originalUrl] = it }
+            animeAudioByUrl[url]?.let { animeAudioByUrl[originalUrl] = it }
             trailerChoicesByUrl[url]?.let { trailerChoicesByUrl[originalUrl] = it }
             genreCatalogsByUrl[url]?.let { genreCatalogsByUrl[originalUrl] = it }
         }
@@ -4548,6 +4552,7 @@ open class StremioC(
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
+                StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
                 StremioC.trailerChoicesByUrl[metaUrl] = finalTrailers
                 StremioC.genreCatalogsByUrl[metaUrl] = genreTargets
                 val resolvedMovieId = if (finalType == "other" && finalVideos?.size == 1) {
@@ -4622,6 +4627,7 @@ open class StremioC(
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
+                StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
                 StremioC.trailerChoicesByUrl[metaUrl] = finalTrailers
                 StremioC.genreCatalogsByUrl[metaUrl] = genreTargets
                 val response = run { provider.newTvSeriesLoadResponse(
