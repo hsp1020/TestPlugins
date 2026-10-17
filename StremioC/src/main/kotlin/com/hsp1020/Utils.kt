@@ -1529,6 +1529,37 @@ internal class RatingPlotImageHook(
             return actual.singleOrNull()?.takeIf { echoed==ids }
         }
 
+        /**
+         * /sync/all-items/anime is authoritative for library categories, whereas
+         * /sync/watched is used for individual episode flags. Read this only after
+         * an explicit watchlist write, not on every detail page visit.
+         */
+        private suspend fun simklAnimeLibraryStatus(
+            repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
+            ids: Set<Int>
+        ): SyncWatchType? {
+            if(ids.isEmpty())return null
+            val headers=SimklApi.getHeaders(repo.authToken() ?: return null)
+            val response=try {
+                app.get("https://api.simkl.com/sync/all-items/anime",
+                    headers=headers,cacheTime=0)
+            }catch(e: CancellationException){throw e}
+             catch(e: Exception){return null}
+            if(response.code !in 200..299)return null
+            val body=runCatching { JSONObject(response.text) }.getOrNull() ?: return null
+            val anime=body.optJSONArray("anime") ?: return null
+            val statuses=linkedMapOf<Int, SyncWatchType>()
+            for(i in 0 until anime.length()) {
+                val item=anime.optJSONObject(i) ?: continue
+                val id=jsonInt(item.optJSONObject("show")?.optJSONObject("ids"),"simkl")
+                    ?: continue
+                if(id !in ids)continue
+                val status=simklWatchlistStatus(item.opt("status")) ?: return null
+                if(status==SyncWatchType.NONE || statuses.put(id,status)!=null)return null
+            }
+            return ids.map { statuses[it] ?: return null }.distinct().singleOrNull()
+        }
+
         private suspend fun simklAnimeRead(
             repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
             mapped: SeasonTrackerIds, targetSeason: Int
@@ -1724,6 +1755,22 @@ internal class RatingPlotImageHook(
                 simklAnimeSetStatus(tracker.repo,before.sourceIds,draft.status)
                     ?: return false
             else null
+
+            // On status-only writes, verify the actual Simkl library rather
+            // than treating the episode-grid lookup as a watchlist write ack.
+            // This also avoids a second sync/watched request while Simkl holds
+            // its per-user write lock.
+            if(statusChanged && diff==0) {
+                for(attempt in 1..3) {
+                    if(attempt>1)kotlinx.coroutines.delay(if(attempt==2)350L else 900L)
+                    val stored=simklAnimeLibraryStatus(tracker.repo,before.sourceIds)
+                    if(stored!=null && stored==acceptedStatus) {
+                        tracker.simklAnime=before.copy(status=stored)
+                        return true
+                    }
+                }
+                return false
+            }
 
             for(attempt in 1..3) {
                 if(attempt>1)kotlinx.coroutines.delay(if(attempt==2)350L else 900L)
