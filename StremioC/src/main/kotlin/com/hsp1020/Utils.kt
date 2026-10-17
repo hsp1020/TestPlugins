@@ -1039,6 +1039,14 @@ private class PipSubtitleScaler {
     private var activity: FragmentActivity? = null
     private var subtitle: SubtitleView? = null
     private var inPip = false
+    private var pipPositionObserver: ViewTreeObserver? = null
+    private val pipPositionGuard = ViewTreeObserver.OnPreDrawListener {
+        // CloudStream's independently started ObjectAnimator can change this after PiP entry.
+        if (inPip) subtitle?.let { view ->
+            if (view.translationY != 0f) view.translationY = 0f
+        }
+        true
+    }
 
     private val pipListener = Consumer<PictureInPictureModeChangedInfo> { event ->
         if (event.isInPictureInPictureMode) enterPip() else leavePip()
@@ -1112,16 +1120,33 @@ private class PipSubtitleScaler {
         view.setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, fontSize * pipScale)
     }
 
+    private fun startPositionGuard(view: SubtitleView) {
+        stopPositionGuard()
+        view.viewTreeObserver.takeIf { it.isAlive }?.let { observer ->
+            observer.addOnPreDrawListener(pipPositionGuard)
+            pipPositionObserver = observer
+        }
+    }
+
+    private fun stopPositionGuard() {
+        pipPositionObserver?.let { observer ->
+            if (observer.isAlive) observer.removeOnPreDrawListener(pipPositionGuard)
+        }
+        pipPositionObserver = null
+    }
+
     private fun enterPip() {
         val view = subtitle ?: return
         if (inPip) return
         inPip = true
         applyPipStyle(view)
+        startPositionGuard(view)
     }
 
     private fun leavePip() {
         if (!inPip) return
         inPip = false
+        stopPositionGuard()
         subtitle?.let { view ->
             val style = SubtitlesFragment.getCurrentSavedStyle()
             // Restore CloudStream's original font size, padding and elevation.
@@ -1136,6 +1161,7 @@ private class PipSubtitleScaler {
 
     private fun unbind() {
         leavePip()
+        stopPositionGuard()
         activity?.removeOnPictureInPictureModeChangedListener(pipListener)
         if (subtitle != null) SubtitlesFragment.applyStyleEvent -= subtitleStyleListener
         attached = null
