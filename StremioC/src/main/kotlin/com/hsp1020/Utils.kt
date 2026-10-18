@@ -1610,6 +1610,19 @@ internal class RatingPlotImageHook(
             val mode: String, val sourceIds: Set<Int>,
             val status: SyncWatchType?, val statusEditable: Boolean
         )
+        /** Shared Simkl anime ID: title status remains global, season progress does not. */
+        private fun animeSeasonDisplayStatus(snap: AnimeSnapshot): SyncWatchType {
+            val count=snap.watched.size
+            if(!snap.statusEditable && snap.status==SyncWatchType.COMPLETED &&
+                snap.mapped.isNotEmpty() && count<snap.mapped.size)
+                return if(count==0) SyncWatchType.NONE else SyncWatchType.WATCHING
+            return snap.status ?: when {
+                count==0 -> SyncWatchType.NONE
+                count==snap.mapped.size -> SyncWatchType.COMPLETED
+                else -> SyncWatchType.WATCHING
+            }
+        }
+
         private data class AnimeWatchGrid(
             val watched: Set<String>, val statuses: Map<Int, SyncWatchType>
         )
@@ -1836,66 +1849,107 @@ internal class RatingPlotImageHook(
                 "code=${response.code} ackValid=${ack!=null} keys=${ack?.keys()?.asSequence()?.toList()} deleted=${ack?.optJSONObject("deleted")?.opt("shows")} missing=${ack?.optJSONObject("not_found")?.optJSONArray("shows")?.length()} bytes=${response.text.length}")
             // A write ACK is not authoritative; verify both membership and
             // watched state before declaring success or failure.
+            // Read the complete watchlist, not the per-type endpoint that can
+            // reply with the JSON literal null even after a successful DELETE.
             var confirmedPresent=false
-            for(attempt in 1..4){
-                if(attempt>1)kotlinx.coroutines.delay(when(attempt){2->500L;3->1200L;else->2400L})
+            var validSnapshots=0
+            for(attempt in 1..4) {
+                if(attempt>1)kotlinx.coroutines.delay(
+                    when(attempt){2->500L;3->1200L;else->2400L})
                 val check=try {
-                    app.get("https://api.simkl.com/sync/all-items/anime",
+                    app.get("https://api.simkl.com/sync/all-items/",
                         headers=headers,cacheTime=0)
                 }catch(e:CancellationException){throw e}
                  catch(e:Exception){
-                    trace("ANIME_DELETE_READ_EXCEPTION", "attempt=$attempt type=${e.javaClass.simpleName}")
+                    trace("ANIME_DELETE_READ_EXCEPTION",
+                        "attempt=$attempt source=all-items-root type=${e.javaClass.simpleName}")
                     continue
                  }
-                trace("ANIME_DELETE_READ_HTTP", "attempt=$attempt code=${check.code} bytes=${check.text.length} prefix=${check.text.trim().firstOrNull()} isJsonNull=${check.text.trim()=="null"}")
+                val raw=check.text.trim()
+                trace("ANIME_DELETE_READ_HTTP",
+                    "attempt=$attempt source=all-items-root code=${check.code} bytes=${check.text.length} jsonNull=${raw=="null"}")
                 if(check.code !in 200..299)continue
-                val body=runCatching { JSONObject(check.text) }.getOrNull()
-                if(body==null){
-                    trace("ANIME_DELETE_READ_SCHEMA", "attempt=$attempt type=${if(check.text.trim()=="null")"json-null" else "non-object"} authoritative=false fallbackRequired=true")
+                if(raw=="null"){
+                    trace("ANIME_DELETE_READ_SCHEMA", "attempt=$attempt type=json-null authoritative=false")
                     continue
                 }
-                val anime=body.optJSONArray("anime")
-                    ?: if(body.length()==0) JSONArray() else {
-                        trace("ANIME_DELETE_READ_SCHEMA", "attempt=$attempt type=no-anime-list keys=${body.keys().asSequence().toList()}")
-                        continue
-                    }
+                val body=runCatching { JSONObject(check.text) }.getOrNull()
+                if(body==null){
+                    trace("ANIME_DELETE_READ_SCHEMA", "attempt=$attempt type=invalid-object")
+                    continue
+                }
+                val keys=body.keys().asSequence().toSet()
+                if((keys.isNotEmpty() && keys.none { it in setOf("anime","shows","movies") }) ||
+                   (body.has("anime") && body.optJSONArray("anime")==null)){
+                    trace("ANIME_DELETE_READ_SCHEMA", "attempt=$attempt type=unexpected-schema keys=$keys")
+                    continue
+                }
+                // On a full sync without date_from, missing categories are empty.
+                val anime=body.optJSONArray("anime") ?: JSONArray()
                 val seen=linkedSetOf<Int>()
                 var invalid=false
-                for(i in 0 until anime.length()) {
+                for(i in 0 until anime.length()){
                     val entry=anime.optJSONObject(i)
                     val entryIds=entry?.optJSONObject("show")?.optJSONObject("ids")
                         ?: entry?.optJSONObject("anime")?.optJSONObject("ids")
                         ?: entry?.optJSONObject("ids")
                     val id=jsonInt(entryIds,"simkl")
-                    if(id==null){ invalid=true; break }
-                    seen+=id
+                    if(id==null || !seen.add(id)){ invalid=true; break }
                 }
                 if(invalid){
-                    trace("ANIME_DELETE_READ_SCHEMA", "attempt=$attempt type=invalid-entry itemCount=${anime.length()}")
+                    trace("ANIME_DELETE_READ_SCHEMA", "attempt=$attempt type=invalid-entry entries=${anime.length()}")
                     continue
                 }
+                validSnapshots++
                 val remaining=ids.intersect(seen)
-                trace("ANIME_DELETE_VERIFY", "attempt=$attempt total=${anime.length()} stillPresent=$remaining confirmedAbsent=${remaining.isEmpty()}")
+                trace("ANIME_DELETE_VERIFY",
+                    "attempt=$attempt source=all-items-root valid=$validSnapshots entries=${anime.length()} stillPresent=$remaining")
                 if(remaining.isEmpty()){
-                    trace("ANIME_DELETE_FINAL", "source=all-items result=removed")
-                    return true
-                }
-                confirmedPresent=true
+                    val grid=simklAnimeWatched(repo,ids)
+                    val cleared=grid!=null &&
+                        ids.all { grid.statuses[it]==SyncWatchType.NONE } &&
+                        grid.watched.isEmpty()
+                    trace("ANIME_DELETE_HISTORY_VERIFY",
+                        "attempt=$attempt valid=${grid!=null} statuses=${grid?.statuses} watched=${grid?.watched?.size} cleared=$cleared")
+                    if(cleared){
+                        trace("ANIME_DELETE_FINAL", "result=removed membership=verified history=verified source=all-items-root")
+                        return true
+                    }
+                }else confirmedPresent=true
             }
-            // A positive library membership overrules missing/ambiguous grid
-            // results; never claim removal when a valid library read shows it.
             if(confirmedPresent){
-                trace("ANIME_DELETE_FINAL", "source=all-items result=still-listed")
+                trace("ANIME_DELETE_FINAL", "result=still-listed source=all-items-root")
                 return false
             }
-            // For malformed/blocked all-items responses, /sync/watched is an
-            // independent authenticated source for both list status and history.
+            // A second independent library reader uses CloudStream's native
+            // Simkl parser. Cache must be cleared before that server fetch.
+            val user=repo.authUser()
+            if(user!=null){
+                val key=user.id.toString()
+                removeKey(SimklApi.SIMKL_CACHED_LIST_TIME,key)
+                removeKey(SimklApi.SIMKL_CACHED_LIST,key)
+                trace("ANIME_DELETE_NATIVE_CACHE_CLEAR", "accountHash=${key.hashCode()}")
+            }
+            val library=try { repo.library().getOrNull() }
+                catch(e:CancellationException){throw e}
+                catch(e:Exception){
+                    trace("ANIME_DELETE_NATIVE_EXCEPTION", "type=${e.javaClass.simpleName}")
+                    null
+                }
+            val nativeIds=ids.mapTo(linkedSetOf()){it.toString()}
+            val matches=library?.allLibraryLists?.sumOf { page ->
+                page.items.count { it.syncId in nativeIds }
+            }
             val grid=simklAnimeWatched(repo,ids)
-            val removed=grid!=null && ids.all { grid.statuses[it]==SyncWatchType.NONE } &&
+            val cleared=grid!=null &&
+                ids.all { grid.statuses[it]==SyncWatchType.NONE } &&
                 grid.watched.isEmpty()
-            trace("ANIME_DELETE_FALLBACK", "available=${grid!=null} statuses=${grid?.statuses} watched=${grid?.watched?.size} confirmed=$removed libraryMembershipUnverified=true source=watched")
-            trace("ANIME_DELETE_FINAL", "source=watched result=${if(removed)"removed" else "unconfirmed"}")
-            return removed
+            val confirmed=library!=null && matches==0 && cleared
+            trace("ANIME_DELETE_NATIVE_VERIFY",
+                "libraryValid=${library!=null} matches=$matches gridValid=${grid!=null} statuses=${grid?.statuses} historyClear=$cleared success=$confirmed")
+            trace("ANIME_DELETE_FINAL",
+                "result=${if(confirmed)"removed" else "unconfirmed"} source=native-library membershipVerified=${library!=null && matches==0} historyVerified=$cleared")
+            return confirmed
         }
 
         private suspend fun simklAnimeRead(
@@ -2051,8 +2105,11 @@ internal class RatingPlotImageHook(
             val diff=draft.watched-before.watched.size
             val autoWatching=initial.status==SyncWatchType.NONE &&
                 draft.status==SyncWatchType.WATCHING && diff>0
-            val statusChanged=draft.status!=initial.status && !autoWatching
-            trace("ANIME_SAVE_PLAN", "diff=$diff statusChanged=$statusChanged autoWatching=$autoWatching")
+            val progressDemotion=!before.statusEditable &&
+                initial.status==SyncWatchType.COMPLETED &&
+                draft.status==SyncWatchType.WATCHING && diff<0
+            val statusChanged=draft.status!=initial.status && !autoWatching && !progressDemotion
+            trace("ANIME_SAVE_PLAN", "diff=$diff statusChanged=$statusChanged autoWatching=$autoWatching progressDemotion=$progressDemotion editable=${before.statusEditable} outside=${before.outside.size}")
             if(statusChanged && (!before.statusEditable ||
                 simklWatchlistDestination(draft.status)==null))return false
             if(diff==0 && !statusChanged)return true
@@ -2495,9 +2552,9 @@ internal class RatingPlotImageHook(
                         val fields = if (multi && isAnime == true &&
                             repo.idPrefix == "simkl") animeExact?.let {
                             val watched=it.watched.size
-                            Draft(it.status ?: if(watched==0) SyncWatchType.NONE
-                                  else if (watched==it.mapped.size) SyncWatchType.COMPLETED
-                                  else SyncWatchType.WATCHING, watched, null)
+                            val projected=animeSeasonDisplayStatus(it)
+                            trace("ANIME_SEASON_DISPLAY", "season=$sn nativeStatus=${it.status} projected=$projected watched=$watched total=${it.mapped.size} editable=${it.statusEditable}")
+                            Draft(projected,watched,null)
                         } else remote?.let {
                             Draft(if (generalSimkl && repo.idPrefix == "simkl" && simklExact != null)
                                 simklSeasonStatus(simklExact) else it.status,
@@ -2778,6 +2835,84 @@ internal class RatingPlotImageHook(
             } finally { applying = false }
         }
 
+        /** Independent MAL readback, used when the core status parser or
+         * asynchronous MAL readback has not confirmed an acknowledged write. */
+        private suspend fun malDirectVerify(
+            tracker: Tracker, expected: com.lagradost.cloudstream3.syncproviders.SyncAPI.AbstractSyncStatus,
+            compareStatus: Boolean, compareProgress: Boolean, compareScore: Boolean,
+            request: Long
+        ): Boolean {
+            val token=tracker.repo.authToken()?.accessToken
+            val id=tracker.id.toIntOrNull()
+            if(token==null || id==null)return false
+            val response=try {
+                app.get("https://api.myanimelist.net/v2/anime/$id?fields=my_list_status",
+                    headers=mapOf("Authorization" to "Bearer $token"),cacheTime=0)
+            }catch(e:CancellationException){throw e}
+             catch(e:Exception){
+                trace("MAL_DIRECT_READ_EXCEPTION", "request=$request type=${e.javaClass.simpleName}")
+                return false
+             }
+            trace("MAL_DIRECT_READ_HTTP", "request=$request code=${response.code} bytes=${response.text.length}")
+            if(response.code !in 200..299)return false
+            val body=runCatching { JSONObject(response.text) }.getOrNull()
+            val actual=body?.optJSONObject("my_list_status") ?: return false
+            val wantedStatus=when(expected.status){
+                SyncWatchType.WATCHING -> "watching"
+                SyncWatchType.COMPLETED -> "completed"
+                SyncWatchType.ONHOLD -> "on_hold"
+                SyncWatchType.DROPPED -> "dropped"
+                SyncWatchType.PLANTOWATCH -> "plan_to_watch"
+                else -> null
+            }
+            val statusOk=!compareStatus || (wantedStatus!=null &&
+                actual.optString("status")==wantedStatus)
+            val progressOk=!compareProgress ||
+                actual.optInt("num_episodes_watched",-1)==(expected.watchedEpisodes ?: 0)
+            val scoreOk=!compareScore ||
+                actual.optInt("score",-1)==(expected.score?.toInt(10) ?: 0)
+            val valid=statusOk && progressOk && scoreOk
+            trace("MAL_DIRECT_VERIFY",
+                "request=$request matched=$valid status=${actual.optString("status")} wanted=$wantedStatus watched=${actual.optInt("num_episodes_watched",-1)} expected=${expected.watchedEpisodes} statusOk=$statusOk progressOk=$progressOk scoreOk=$scoreOk")
+            return valid
+        }
+
+        /** Watch activity-scoped LibraryViewModel publication after cache reload.
+         * This observer remains alive if the detail fragment is detached. */
+        private fun observeNativeLibraryPublication(provider: String, request: Long) {
+            val activity=fragment.activity
+            if(activity==null){
+                trace("REFRESH_LIBRARY_OBSERVER", "request=$request provider=$provider attached=false")
+                return
+            }
+            val vm=ViewModelProvider(activity)[
+                com.lagradost.cloudstream3.ui.library.LibraryViewModel::class.java]
+            val current=vm.currentSyncApi?.idPrefix
+            trace("REFRESH_LIBRARY_OBSERVER",
+                "request=$request provider=$provider currentProvider=$current attached=true")
+            if(current!=provider){
+                trace("REFRESH_LIBRARY_DEFERRED",
+                    "request=$request provider=$provider currentProvider=$current flagMaintained=true")
+                return
+            }
+            var loadingObserved=false
+            val observer=object : Observer<Resource<List<SyncAPI.Page>>> {
+                override fun onChanged(value: Resource<List<SyncAPI.Page>>) {
+                    if(value is Resource.Loading){
+                        loadingObserved=true
+                        trace("REFRESH_LIBRARY_LOADING", "request=$request provider=$provider")
+                        return
+                    }
+                    if(!loadingObserved)return
+                    val pages=(value as? Resource.Success)?.value
+                    trace("REFRESH_LIBRARY_PUBLISHED",
+                        "request=$request provider=$provider kind=${value?.javaClass?.simpleName} pageCount=${pages?.size} totalItems=${pages?.sumOf { it.items.size }}")
+                    vm.pages.removeObserver(this)
+                }
+            }
+            vm.pages.observe(activity,observer)
+        }
+
         private fun save() {
             val tracker = statuses[selected] ?: return
             val draft = tracker.draft?.snapshot() ?: return
@@ -2829,7 +2964,11 @@ internal class RatingPlotImageHook(
                 trace("SAVE_REJECT", "provider=$prefix cause=simkl-anime-rating-disabled")
                 return
             }
+            val animeProgressDemotion=tracker.simklAnime?.statusEditable==false &&
+                before.status==SyncWatchType.COMPLETED &&
+                draft.status==SyncWatchType.WATCHING && draft.watched<before.watched
             if (tracker.simklAnime != null && draft.status != before.status &&
+                !animeProgressDemotion &&
                 !(before.status == SyncWatchType.NONE &&
                   draft.status == SyncWatchType.WATCHING && draft.watched > 0) &&
                 (tracker.simklAnime?.statusEditable != true ||
@@ -2838,12 +2977,14 @@ internal class RatingPlotImageHook(
                 trace("SAVE_REJECT", "provider=$prefix cause=anime-status-not-editable")
                 return
             }
+            trace("SAVE_ANIME_GUARD", "provider=$prefix manualDemotion=$animeProgressDemotion editable=${tracker.simklAnime?.statusEditable} requested=${draft.status}/${draft.watched} before=${before.status}/${before.watched}")
             val operationKey="$prefix:$id"
             if(!pendingWrites.add(operationKey)) {
                 trace("SAVE_REJECT", "provider=$prefix cause=other-screen-save-in-progress")
                 return
             }
             val request=System.nanoTime()
+            var writeAcceptedButUnconfirmed=false
             tracker.saving = true
             trace("SAVE_ROUTE", "request=$request provider=$prefix tv=${tracker.simklSeason!=null} anime=${tracker.simklAnime!=null} malRemove=${prefix=="mal"&&draft.explicitNone}")
             render()
@@ -2876,9 +3017,13 @@ internal class RatingPlotImageHook(
                         val issued = tracker.repo.updateStatus(id, remote)
                         trace("CORE_WRITE", "provider=$prefix request=${remote.status}/${remote.watchedEpisodes} result=${issued.getOrNull()} error=${issued.exceptionOrNull()?.javaClass?.simpleName}")
                         var verified = false
-                        for (attempt in 1..5) {
+                        val maxAttempts=if(prefix=="mal")7 else 5
+                        for (attempt in 1..maxAttempts) {
                             if (attempt > 1) kotlinx.coroutines.delay(
-                                when(attempt) { 2 -> 350L; 3 -> 900L; 4 -> 1800L; else -> 3000L })
+                                when(attempt) {
+                                    2->350L;3->900L;4->1800L;5->3000L
+                                    6->4000L;else->5000L
+                                })
                             val read = tracker.repo.status(id)
                             val got = read.getOrNull()
                             verified = got != null &&
@@ -2887,6 +3032,21 @@ internal class RatingPlotImageHook(
                                 (draft.score == before.score || got.score == remote.score)
                             trace("CORE_VERIFY", "request=$request provider=$prefix attempt=$attempt match=$verified read=${got?.status}/${got?.watchedEpisodes} readError=${read.exceptionOrNull()?.javaClass?.simpleName} writeAck=${issued.getOrNull()} statusExpected=${remote.status} countExpected=${remote.watchedEpisodes} panelActive=$active generationValid=${valid(gen,sn)}")
                             if (verified) break
+                        }
+                        if(!verified && prefix=="mal" && issued.getOrNull()==true) {
+                            for(attempt in 1..2) {
+                                if(attempt>1)kotlinx.coroutines.delay(2000L)
+                                verified=malDirectVerify(tracker,remote,
+                                    draft.status!=before.status,
+                                    draft.watched!=before.watched,
+                                    draft.score!=before.score,request)
+                                trace("MAL_READBACK_FALLBACK", "request=$request attempt=$attempt verified=$verified")
+                                if(verified)break
+                            }
+                            if(!verified) {
+                                writeAcceptedButUnconfirmed=true
+                                trace("MAL_WRITE_UNCONFIRMED", "request=$request ack=true readbackConfirmed=false outcome=pending-not-rejected")
+                            }
                         }
                         if (!verified && prefix == "kitsu" && remote.status != SyncWatchType.NONE) {
                             val fallback = kitsuFallback(id, remote, tracker.repo)
@@ -2909,8 +3069,8 @@ internal class RatingPlotImageHook(
                     trace("SAVE_JOB_EXCEPTION", "request=$request provider=$prefix type=${e.javaClass.simpleName}")
                     false
                 }
-                trace("SAVE_VERIFY_FINISH", "request=$request provider=$prefix success=$result active=$active originalGen=$gen currentGen=$generation")
-                if(result) {
+                trace("SAVE_VERIFY_FINISH", "request=$request provider=$prefix success=$result writeAcceptedButUnconfirmed=$writeAcceptedButUnconfirmed active=$active originalGen=$gen currentGen=$generation")
+                if(result || writeAcceptedButUnconfirmed) {
                     try {
                         withContext(Dispatchers.IO) { refreshAfterVerifiedWrite(tracker,prefix,request) }
                     } catch(e:CancellationException) {
@@ -2920,7 +3080,7 @@ internal class RatingPlotImageHook(
                     }
                 }
                 pendingWrites.remove(operationKey)
-                trace("SAVE_FINAL", "request=$request provider=$prefix success=$result viewValid=${valid(gen,sn)} currentTracker=${statuses[prefix]===tracker} retainedJob=true")
+                trace("SAVE_FINAL", "request=$request provider=$prefix success=$result unconfirmed=$writeAcceptedButUnconfirmed outcome=${if(result)"verified" else if(writeAcceptedButUnconfirmed)"write-acknowledged-pending" else "failed"} viewValid=${valid(gen,sn)} currentTracker=${statuses[prefix]===tracker} retainedJob=true")
                 if (valid(gen, sn) && statuses[prefix] === tracker) {
                     tracker.saving = false
                     if (result) {
@@ -2928,11 +3088,8 @@ internal class RatingPlotImageHook(
                         val anime = tracker.simklAnime
                         if (anime != null) {
                             val count=anime.watched.size
-                            val actual=anime.status ?: when {
-                                count == 0 -> SyncWatchType.NONE
-                                count == anime.mapped.size -> SyncWatchType.COMPLETED
-                                else -> SyncWatchType.WATCHING
-                            }
+                            val actual=animeSeasonDisplayStatus(anime)
+                            trace("ANIME_SEASON_SAVE_DISPLAY", "request=$request nativeStatus=${anime.status} projected=$actual watched=$count total=${anime.mapped.size} editable=${anime.statusEditable}")
                             tracker.baseline=Draft(actual,count,null)
                             tracker.draft?.let { current ->
                                 if(current == draft) {
@@ -2954,14 +3111,19 @@ internal class RatingPlotImageHook(
                             tracker.baseline = draft.snapshot()
                             tracker.draft?.let { if (it == draft) it.explicitNone = false }
                         }
-                    } else tracker.error = "save-or-readback-failed"
+                    } else tracker.error = if(writeAcceptedButUnconfirmed)
+                        "server-write-readback-pending" else "save-or-readback-failed"
                     trace("SAVE_UI_RESULT", "provider=$prefix saved=$result baseline=${tracker.baseline?.status}/${tracker.baseline?.watched} draft=${tracker.draft?.status}/${tracker.draft?.watched} error=${tracker.error} selected=$selected")
                     render()
                 } else {
                     trace("SAVE_DETACHED", "request=$request provider=$prefix success=$result originalGen=$gen currentGen=$generation originalSeason=$sn currentSeason=$season active=$active globalRefreshScheduled=$result")
                 }
-                if(result) {
-                    trace("REFRESH_EVENT", "request=$request provider=$prefix source=verified-write libraryReload=true")
+                if(result || writeAcceptedButUnconfirmed) {
+                    try { observeNativeLibraryPublication(prefix,request) }
+                    catch(e:Exception) {
+                        trace("REFRESH_LIBRARY_OBSERVER_EXCEPTION", "request=$request provider=$prefix type=${e.javaClass.simpleName}")
+                    }
+                    trace("REFRESH_EVENT", "request=$request provider=$prefix source=${if(result)"verified-write" else "acknowledged-pending"} libraryReload=true")
                     MainActivity.reloadLibraryEvent(true)
                     val model=syncModel
                     if(active && model!=null) {
@@ -2971,7 +3133,7 @@ internal class RatingPlotImageHook(
                     } else {
                         trace("REFRESH_NATIVE_DETACHED", "request=$request provider=$prefix active=$active modelPresent=${model!=null} libraryEventDispatched=true refreshFlag=${tracker.repo.requireLibraryRefresh}")
                     }
-                } else trace("REFRESH_SKIPPED", "request=$request provider=$prefix reason=write-not-verified")
+                } else trace("REFRESH_SKIPPED", "request=$request provider=$prefix reason=write-not-confirmed-or-acknowledged")
             }
         }
 
