@@ -2948,14 +2948,16 @@ open class StremioC(
             return "$imdb:$season:$episode"
         }
         suspend fun streamRequest(type: String, id: String, season: Int?, episode: Int?): Pair<String, String>? {
-            val mappedId = mappedAnimeStremioId()
+            val originalFirst = type != "movie" && type != "series" && id.isNotBlank()
+            val mappedId = if (originalFirst) null else mappedAnimeStremioId()
             val result = when {
+                originalFirst -> type to id
                 mappedId != null -> "series" to mappedId
                 isLibraryAnimeId(id) -> if (actualIsMovie) integrationImdbId?.let { "movie" to it } else null
                 id.isBlank() -> null
                 else -> type to (buildStremioId(type, id, season, episode) ?: id)
             }
-            trace("stream_id", "input=${traceKey(id)} type=$type season=$season ep=$episode mapped=${mappedId != null} outputType=${result?.first} output=${traceKey(result?.second)} changed=${result?.second != id}")
+            trace("stream_id", "input=${traceKey(id)} type=$type season=$season ep=$episode originalFirst=$originalFirst mapped=${mappedId != null} outputType=${result?.first} output=${traceKey(result?.second)} changed=${result?.second != id}")
             return result
         }
         runAllAsync(
@@ -2979,23 +2981,41 @@ open class StremioC(
                 val request = streamRequest(targetType, primaryId, loadData.season, loadData.episode)
                 trace("main_route", "host=${traceHost(cleanBaseUrl)} type=${request?.first} id=${traceKey(request?.second)} skipped=${cleanBaseUrl.isBlank() || request == null}")
                 if (cleanBaseUrl.isNotBlank() && request != null) {
-                    runSuspendCatching {
-                        val streamRequestUrl = "$cleanBaseUrl/stream/${request.first}/${request.second.urlEncode()}.json$querySuffix"
-                        val response = customSession.get(streamRequestUrl, timeout = 25L)
-                        val text = response.text
-                        val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
-                        trace("main_response", "code=${response.code} bodyBytes=${text.length} errorField=${text.contains("\"error\"")} parsed=${res != null} ${res?.streams?.let(::streamKinds) ?: ""}")
-                        res?.streams?.forEach { stream ->
-                            stream.runCallback(
-                                this@StremioC,
-                                name,
-                                stremioSubtitleFrom(currentMainUrl),
-                                extractorSubtitleFrom(currentMainUrl),
-                                wrappedCallback
-                            )
-                        }
-                    }.onFailure { trace("main_failure", "kind=${traceException(it)}") }
+                    suspend fun fetchMainStreams(route: Pair<String, String>, fallback: Boolean): Int =
+                        runSuspendCatching {
+                            val streamRequestUrl = "$cleanBaseUrl/stream/${route.first}/${route.second.urlEncode()}.json$querySuffix"
+                            val response = customSession.get(streamRequestUrl, timeout = 25L)
+                            val text = response.text
+                            val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
+                            trace("main_response", "fallback=$fallback type=${route.first} id=${traceKey(route.second)} code=${response.code} bodyBytes=${text.length} errorField=${text.contains("\"error\"")} parsed=${res != null} ${res?.streams?.let(::streamKinds) ?: ""}")
+                            var emitted = 0
+                            res?.streams?.forEach { stream ->
+                                stream.runCallback(
+                                    this@StremioC,
+                                    name,
+                                    stremioSubtitleFrom(currentMainUrl),
+                                    extractorSubtitleFrom(currentMainUrl),
+                                    { link ->
+                                        emitted++
+                                        wrappedCallback(link)
+                                    }
+                                )
+                            }
+                            emitted
+                        }.onFailure { trace("main_failure", "fallback=$fallback kind=${traceException(it)}") }
+                            .getOrDefault(0)
 
+                    val originalLinks = fetchMainStreams(request, false)
+                    if (targetType != "movie" && targetType != "series" && originalLinks == 0) {
+                        val mappedId = mappedAnimeStremioId()
+                        if (mappedId != null) {
+                            val fallbackRequest = "series" to mappedId
+                            if (fallbackRequest != request) {
+                                trace("main_fallback", "reason=noOriginalLinks type=${fallbackRequest.first} id=${traceKey(fallbackRequest.second)}")
+                                fetchMainStreams(fallbackRequest, true)
+                            }
+                        }
+                    }
                 }
             },
             {
