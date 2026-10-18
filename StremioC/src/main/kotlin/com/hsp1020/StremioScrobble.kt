@@ -195,7 +195,7 @@ internal class StremioScrobble(context: Context) {
         main.removeCallbacks(completion)
         val current = player ?: return
         if (lastEvent == "stop" || !current.isPlaying) return
-        val (position, duration) = active?.let { progress(it, current) } ?: return
+        val (position, duration) = active?.let { playbackPosition(it, current) } ?: return
         if (duration <= 0L) return
         val threshold = (duration * 0.80).toLong()
         val remaining = (threshold - position).coerceAtLeast(0L)
