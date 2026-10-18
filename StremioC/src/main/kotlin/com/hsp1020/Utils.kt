@@ -2446,13 +2446,13 @@ internal class RatingPlotImageHook(
                 // Simkl anime titles dedicated to the selected season have an
                 // independent watchlist status. Shared multi-season titles do not.
                 checks?.isEnabled = target.writeBlocked == null &&
+                    (target.simklSeason == null || target.simklSeason?.listStatus != null) &&
+                    (target.simklAnime == null || target.simklAnime?.statusEditable == true)
                 val sig = "$selected:${data.status}:${data.watched}:${target.saving}:${target.writeBlocked}:${target.simklSeason?.listStatus}:${target.simklAnime?.statusEditable}"
                 if (sig != lastDiagnosticUi) {
                     lastDiagnosticUi = sig
-                    trace("UI_RENDER", "state=$sig total=${target.total} statusEnabled=${target.writeBlocked==null && (target.simklSeason==null || target.simklSeason?.listStatus!=null) && (target.simklAnime==null || target.simklAnime?.statusEditable==true)} score=${data.score?.toInt(10)} error=${target.error}")
+                    trace("UI_RENDER", "state=$sig total=${target.total} statusEnabled=${checks?.isEnabled} score=${data.score?.toInt(10)} error=${target.error}")
                 }
-                    (target.simklSeason == null || target.simklSeason?.listStatus != null) &&
-                    (target.simklAnime == null || target.simklAnime?.statusEditable == true)
                 slider?.isEnabled = target.writeBlocked == null &&
                     target.simklSeason == null && target.simklAnime == null
                 val valScore = data.score?.toFloat(10) ?: 0f
