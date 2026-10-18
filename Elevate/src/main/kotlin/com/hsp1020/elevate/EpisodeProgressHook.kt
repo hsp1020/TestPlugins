@@ -319,6 +319,7 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
         const val TAG = "ElevateProgress"
         const val HOME_CLASS = "com.lagradost.cloudstream3.ui.home.HomeFragment"
         val DETAIL_CLASSES = setOf(
+            "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer",
             "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
             "com.lagradost.cloudstream3.ui.result.ResultFragmentTv"
         )
