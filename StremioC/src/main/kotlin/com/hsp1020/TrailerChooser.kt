@@ -18,6 +18,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.cardview.widget.CardView
 import androidx.core.content.res.ResourcesCompat
 import androidx.core.view.doOnPreDraw
@@ -30,11 +31,14 @@ import androidx.preference.PreferenceManager
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.chip.Chip
 import com.google.android.material.chip.ChipDrawable
+import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.ui.player.PlayerSubtitleHelper
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
+import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.extractorApis
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
 import com.lagradost.cloudstream3.utils.SubtitleHelper
@@ -54,11 +58,30 @@ import com.lagradost.cloudstream3.ui.player.VideoGenerator
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.ui.result.VideoWatchState
 
+private fun installedYouTubeExtractor(): ExtractorApi? {
+    for (index in extractorApis.lastIndex downTo 0) {
+        val extractor = extractorApis[index]
+        if (extractor.name != "YouTube" ||
+            !extractor.mainUrl.trimEnd('/').equals("https://www.youtube.com", ignoreCase = true) ||
+            extractor.sourcePlugin.isNullOrBlank()) continue
+        if (APIHolder.allProviders.any { provider ->
+                provider.name == "YouTube" && provider.sourcePlugin == extractor.sourcePlugin
+            }) return extractor
+    }
+    return null
+}
+
 private suspend fun extractTrailerMedia(youtubeId: String): Pair<List<ExtractorLink>, List<SubtitleData>> =
     withContext(Dispatchers.IO) {
+        val registered = installedYouTubeExtractor()
+            ?: return@withContext emptyList<ExtractorLink>() to emptyList<SubtitleData>()
+        // Preserve the previous per-playback extractor instance rather than sharing mutable state.
+        val extractor = runCatching {
+            registered.javaClass.getDeclaredConstructor().newInstance() as ExtractorApi
+        }.getOrDefault(registered)
         val links = Collections.synchronizedList(mutableListOf<ExtractorLink>())
         val subtitles = Collections.synchronizedList(mutableListOf<SubtitleFile>())
-        com.hsp1020.youtube.YoutubeExtractor().getUrl(
+        extractor.getUrl(
             "https://www.youtube.com/watch?v=$youtubeId",
             null,
             { subtitles.add(it) },
@@ -245,9 +268,25 @@ internal class TrailerChooser(
         button?.contentDescription = "${root.context.getString(R.string.play_trailer_button)} (${items.size})"
     }
 
+    private fun showYouTubeInstallNotice() {
+        val activity = fragment.activity ?: return
+        val message = if (activity.resources.configuration.locales[0].language == "ko")
+            "예고편을 재생하려면 YouTube 플러그인을 설치하고 활성화해야 합니다."
+        else
+            "Install and enable the YouTube plugin to play trailers."
+        AlertDialog.Builder(activity)
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
     private fun showPicker(restoreScrollY: Int? = null, restoreFocus: Int = -1): Boolean {
         val activity = fragment.activity ?: return false
         if (dialog?.isShowing == true || opening || items.isEmpty()) return false
+        if (installedYouTubeExtractor() == null) {
+            if (restoreScrollY == null) showYouTubeInstallNotice()
+            return false
+        }
         val foreground = themeColor("textColor", Color.WHITE)
         val list = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -529,6 +568,10 @@ internal class TrailerChooser(
     private fun play(entry: TrailerChoice, scrollY: Int, focusedRow: Int) {
         if (opening) return
         val picker = dialog?.takeIf { it.isShowing } ?: return
+        if (installedYouTubeExtractor() == null) {
+            showYouTubeInstallNotice()
+            return
+        }
         opening = true
         extractionProgress?.visibility = View.VISIBLE
         extractionJob = scope.launch {

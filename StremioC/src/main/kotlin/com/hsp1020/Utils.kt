@@ -1,7 +1,6 @@
 
 package com.hsp1020
 
-import com.hsp1020.pip.PipSubtitleScaler
 import androidx.annotation.OptIn
 import androidx.core.os.ConfigurationCompat
 import androidx.media3.common.C
@@ -732,11 +731,6 @@ internal class RatingPlotImageHook(
     private val audioSelector = StremioAudioSelector()
     private val subtitleController = StremioSubtitleController()
     private val scrobble = StremioScrobble(context)
-    private val pipSubtitles = PipSubtitleScaler { apiName ->
-        apiName == "StremioC" || APIHolder.allProviders.any {
-            it is StremioC && it.name.equals(apiName, ignoreCase = true)
-        }
-    }
     private val mdbUpdate: (String) -> Unit = { cacheKey ->
         val matched = watchers.values.filter { it.matchesMdbKey(cacheKey) }
         val applied = matched.count { it.refreshLateMdb() }
@@ -964,7 +958,6 @@ internal class RatingPlotImageHook(
                     syncHomeHooks()
                 }
                 attach(f, v)
-                pipSubtitles.watch(f)
                 audioSelector.watch(f)
                 subtitleController.watch(f)
                 scrobble.watch(f)
@@ -974,7 +967,6 @@ internal class RatingPlotImageHook(
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
             if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
                 syncHomeHooks()
-            pipSubtitles.watch(f)
             audioSelector.watch(f)
             subtitleController.watch(f)
             scrobble.watch(f)
@@ -988,7 +980,6 @@ internal class RatingPlotImageHook(
                 homeRoot = null
                 homeEntries.detach()
             }
-            pipSubtitles.detach(f)
             audioSelector.detach(f)
             subtitleController.detach(f)
             scrobble.detach(f)
@@ -1008,7 +999,6 @@ internal class RatingPlotImageHook(
         audioSelector.detach()
         subtitleController.detach()
         scrobble.detach()
-        pipSubtitles.detach()
         StremioCMdbUiBridge.listen(null)
         removeHomeProviderObserver?.invoke()
         removeHomeProviderObserver = null
@@ -1025,7 +1015,6 @@ internal class RatingPlotImageHook(
 
     private fun use(activity: FragmentActivity) {
         if (host === activity) return
-        pipSubtitles.detach()
         audioSelector.detach()
         subtitleController.detach()
         scrobble.detach()
@@ -1052,7 +1041,6 @@ internal class RatingPlotImageHook(
                         syncHomeHooks()
                     }
                     attach(f, it)
-                    pipSubtitles.watch(f)
                     audioSelector.watch(f)
                     subtitleController.watch(f)
                     scrobble.watch(f)
@@ -3055,7 +3043,6 @@ internal class RatingPlotImageHook(
         homeRoot = null
         homeEntries.detach()
         detachPreview()
-        pipSubtitles.detach()
         audioSelector.detach()
         subtitleController.detach()
         scrobble.detach()

@@ -1,4 +1,4 @@
-package com.hsp1020.globalsearch
+package com.hsp1020.elevate
 
 import android.app.Activity
 import android.app.Application
@@ -18,6 +18,7 @@ import androidx.fragment.app.FragmentManager
 import androidx.navigation.NavOptions
 import androidx.navigation.fragment.NavHostFragment
 import com.google.android.material.navigation.NavigationBarView
+import com.hsp1020.pip.PipSubtitleLifecycle
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
@@ -30,19 +31,23 @@ import com.lagradost.cloudstream3.utils.UIHelper.hideKeyboard
 import com.lagradost.cloudstream3.utils.UIHelper.navigate
 
 @CloudstreamPlugin
-class GlobalSearchHookPlugin : Plugin() {
+class ElevatePlugin : Plugin() {
     private var hook: NativeDetailSearchHook? = null
+    private var pipSubtitles: PipSubtitleLifecycle? = null
 
     override fun load(context: Context) {
         hook?.stop()
-        hook = (context.applicationContext as? Application)?.let {
-            NativeDetailSearchHook(it).also(NativeDetailSearchHook::start)
-        }
+        pipSubtitles?.stop()
+        val application = context.applicationContext as? Application
+        hook = application?.let { NativeDetailSearchHook(it).also(NativeDetailSearchHook::start) }
+        pipSubtitles = application?.let { PipSubtitleLifecycle(it) { true }.also { service -> service.start() } }
     }
 
     override fun beforeUnload() {
         hook?.stop()
         hook = null
+        pipSubtitles?.stop()
+        pipSubtitles = null
         super.beforeUnload()
     }
 }
@@ -124,7 +129,7 @@ private class NativeDetailSearchHook(private val app: Application) : Application
     ) {
         private val titleView: TextView? =
             root.resources.getIdentifier("result_title", "id", root.context.packageName)
-                .takeIf { it != 0 }?.let(root::findViewById)
+                .takeIf { it != 0 }?.let { root.findViewById<TextView>(it) }
         private val click = View.OnClickListener {
             val title = titleView?.text?.toString()?.trim().orEmpty()
                 .ifEmpty { fragment.arguments?.getString("name")?.trim().orEmpty() }

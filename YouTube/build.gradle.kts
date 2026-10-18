@@ -27,6 +27,4 @@ dependencies {
 }
 
 // Compile the shared extractor into this plugin's own classes.dex.
-android {
-    sourceSets.getByName("main").java.srcDir(rootProject.file("CommonLogic/src/main/kotlin"))
-}
+

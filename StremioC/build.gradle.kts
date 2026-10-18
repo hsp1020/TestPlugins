@@ -7,7 +7,6 @@ version = 17
 android {
     namespace = "com.hsp1020" 
 
-    sourceSets.getByName("main").java.srcDir(rootProject.file("CommonLogic/src/main/kotlin"))
 
     buildFeatures {
         buildConfig = true

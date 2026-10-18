@@ -13,9 +13,7 @@ cloudstream {
     iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/LinkkfProvider/linktv.png"
 }
 
-android {
-    sourceSets.getByName("main").java.srcDir(rootProject.file("CommonLogic/src/main/kotlin"))
-}
+
 
 dependencies {
     // Provided at runtime by CloudStream; do not bundle another copy.
