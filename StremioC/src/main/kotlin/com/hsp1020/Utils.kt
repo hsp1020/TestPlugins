@@ -1851,7 +1851,7 @@ internal class RatingPlotImageHook(
                 if(check.code !in 200..299)continue
                 val body=runCatching { JSONObject(check.text) }.getOrNull()
                 if(body==null){
-                    trace("ANIME_DELETE_READ_SCHEMA", "attempt=$attempt type=non-object")
+                    trace("ANIME_DELETE_READ_SCHEMA", "attempt=$attempt type=${if(check.text.trim()=="null")"json-null" else "non-object"} authoritative=false fallbackRequired=true")
                     continue
                 }
                 val anime=body.optJSONArray("anime")
@@ -1893,7 +1893,7 @@ internal class RatingPlotImageHook(
             val grid=simklAnimeWatched(repo,ids)
             val removed=grid!=null && ids.all { grid.statuses[it]==SyncWatchType.NONE } &&
                 grid.watched.isEmpty()
-            trace("ANIME_DELETE_FALLBACK", "available=${grid!=null} statuses=${grid?.statuses} watched=${grid?.watched?.size} confirmed=$removed")
+            trace("ANIME_DELETE_FALLBACK", "available=${grid!=null} statuses=${grid?.statuses} watched=${grid?.watched?.size} confirmed=$removed libraryMembershipUnverified=true source=watched")
             trace("ANIME_DELETE_FINAL", "source=watched result=${if(removed)"removed" else "unconfirmed"}")
             return removed
         }
@@ -2772,7 +2772,7 @@ internal class RatingPlotImageHook(
                     current?.isEnabled!=true && plus?.isEnabled!=true &&
                     minus?.isEnabled!=true && saveButton?.isEnabled!=true &&
                     slider?.isEnabled!=true)
-                trace("UI_LOCK_ASSERT", "provider=$selected locked=$locked localSaving=${target.saving} globalWrite=${pendingWrites.contains("${target.prefix}:${target.id}")} invariant=$invariant statusEnabled=${checks?.isEnabled} progressEnabled=${current?.isEnabled} minusEnabled=${minus?.isEnabled} plusEnabled=${plus?.isEnabled} saveEnabled=${saveButton?.isEnabled} scoreEnabled=${slider?.isEnabled}")
+                trace("UI_LOCK_ASSERT", "provider=$selected locked=$locked localSaving=${target.saving} globalWrite=${pendingWrites.contains("${target.prefix}:${target.id}")} invariant=$invariant statusEnabled=${checks?.isEnabled} progressEnabled=${current?.isEnabled} minusEnabled=${minus?.isEnabled} plusEnabled=${plus?.isEnabled} saveEnabled=${saveButton?.isEnabled} scoreEnabled=${slider?.isEnabled}"); if(!invariant) trace("UI_LOCK_VIOLATION", "provider=$selected locked=true inputsEnabled=true")
             } catch (e: Exception) {
                   traceError("SYNC_EXCEPTION", e)
             } finally { applying = false }
@@ -2885,7 +2885,7 @@ internal class RatingPlotImageHook(
                                 (draft.status == before.status || got.status == remote.status) &&
                                 (draft.watched == before.watched || (got.watchedEpisodes ?: 0) == (remote.watchedEpisodes ?: 0)) &&
                                 (draft.score == before.score || got.score == remote.score)
-                            trace("CORE_VERIFY", "request=$request provider=$prefix attempt=$attempt match=$verified read=${got?.status}/${got?.watchedEpisodes} writeAck=${issued.getOrNull()} statusExpected=${remote.status} countExpected=${remote.watchedEpisodes}")
+                            trace("CORE_VERIFY", "request=$request provider=$prefix attempt=$attempt match=$verified read=${got?.status}/${got?.watchedEpisodes} readError=${read.exceptionOrNull()?.javaClass?.simpleName} writeAck=${issued.getOrNull()} statusExpected=${remote.status} countExpected=${remote.watchedEpisodes} panelActive=$active generationValid=${valid(gen,sn)}")
                             if (verified) break
                         }
                         if (!verified && prefix == "kitsu" && remote.status != SyncWatchType.NONE) {
@@ -2958,7 +2958,7 @@ internal class RatingPlotImageHook(
                     trace("SAVE_UI_RESULT", "provider=$prefix saved=$result baseline=${tracker.baseline?.status}/${tracker.baseline?.watched} draft=${tracker.draft?.status}/${tracker.draft?.watched} error=${tracker.error} selected=$selected")
                     render()
                 } else {
-                    trace("SAVE_DETACHED", "request=$request provider=$prefix originalGen=$gen currentGen=$generation originalSeason=$sn currentSeason=$season active=$active")
+                    trace("SAVE_DETACHED", "request=$request provider=$prefix success=$result originalGen=$gen currentGen=$generation originalSeason=$sn currentSeason=$season active=$active globalRefreshScheduled=$result")
                 }
                 if(result) {
                     trace("REFRESH_EVENT", "request=$request provider=$prefix source=verified-write libraryReload=true")
@@ -2969,7 +2969,7 @@ internal class RatingPlotImageHook(
                         model.updateUserData()
                         model.updateSynced()
                     } else {
-                        trace("REFRESH_NATIVE_DETACHED", "request=$request provider=$prefix active=$active modelPresent=${model!=null}")
+                        trace("REFRESH_NATIVE_DETACHED", "request=$request provider=$prefix active=$active modelPresent=${model!=null} libraryEventDispatched=true refreshFlag=${tracker.repo.requireLibraryRefresh}")
                     }
                 } else trace("REFRESH_SKIPPED", "request=$request provider=$prefix reason=write-not-verified")
             }
