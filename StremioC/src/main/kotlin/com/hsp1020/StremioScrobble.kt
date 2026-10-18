@@ -47,9 +47,7 @@ internal class StremioScrobble(context: Context) {
     private var lastDuration = 0L
     private var pendingSeekReport: Runnable? = null
     private var lastSeekReportAtMs = 0L
-    /** Seek past 80% requires 60 seconds of uninterrupted actual playback. */
-    private var seekCompletionPending = false
-    private var seekPlaybackStartedAtMs = 0L
+    private var seekedPastThresholdAt = 0L
     private fun syncTrace(stage: String, detail: String = "") {
         android.util.Log.i("STREMIOC_SYNC", "component=PLAYBACK stage=$stage $detail")
     }
@@ -142,18 +140,14 @@ internal class StremioScrobble(context: Context) {
             return
         }
 
-        val firstStart = event == "start" && lastEvent == null
         val (pos, duration) = playbackPosition(item, current)
         syncTrace("EMIT_POSITION", "event=$event itemId=${item.id} season=${item.season} episode=${item.episode} pos=$pos duration=$duration played=$played")
         lastPosition = pos
         lastDuration = duration
         lastEvent = event
         if (event == "start" && duration > 0L && pos.toDouble() / duration >= 0.80 &&
-            (firstStart || seekCompletionPending)) {
-            // Opening beyond 80% or resuming an explicitly seeked session needs 60s.
-            seekCompletionPending = true
-            if (seekPlaybackStartedAtMs == 0L && current?.isPlaying == true)
-                seekPlaybackStartedAtMs = SystemClock.elapsedRealtime()
+            seekedPastThresholdAt == 0L) {
+            seekedPastThresholdAt = SystemClock.elapsedRealtime()
         }
         val target = playbackBase() ?: run {
             syncTrace("EMIT_NO_TARGET", "event=$event itemId=${item.id}")
@@ -188,7 +182,7 @@ internal class StremioScrobble(context: Context) {
         lastEvent = null
         lastPosition = 0L
         lastDuration = 0L
-        resetSeekCompletion()
+        seekedPastThresholdAt = 0L
         if (next != null && player?.isPlaying == true) {
             emit("start", next)
             scheduleCompletion()
@@ -214,25 +208,9 @@ internal class StremioScrobble(context: Context) {
         }
     }
 
-    private fun resetSeekCompletion() {
-        seekCompletionPending = false
-        seekPlaybackStartedAtMs = 0L
-    }
-
-    private fun pauseSeekCompletion() {
-        // Buffering/pausing interrupts the required 60 seconds of actual playback.
-        if (seekCompletionPending) seekPlaybackStartedAtMs = 0L
-    }
-
-    private fun updateSeekCompletion(current: Media3Player, position: Long, duration: Long) {
-        seekCompletionPending = duration > 0L && position.toDouble() / duration >= 0.80
-        seekPlaybackStartedAtMs =
-            if (seekCompletionPending && current.isPlaying) SystemClock.elapsedRealtime() else 0L
-    }
-
     /**
-     * One scheduled threshold check. Normal playback completes at 80%; a seek
-     * into the final 20% completes after 60 uninterrupted seconds or natural end.
+     * One scheduled threshold check, not a timer that runs every 15 seconds.
+     * A seek directly past 80% must first continue playing before it counts.
      */
     private fun scheduleCompletion() {
         main.removeCallbacks(completion)
@@ -244,13 +222,11 @@ internal class StremioScrobble(context: Context) {
         val remaining = (threshold - position).coerceAtLeast(0L)
         val speed = current.playbackParameters.speed.toDouble().coerceAtLeast(0.1)
         val timeToThreshold = (remaining / speed).toLong().coerceAtLeast(1000L)
-        if (seekCompletionPending && seekPlaybackStartedAtMs == 0L)
-            seekPlaybackStartedAtMs = SystemClock.elapsedRealtime()
-        val seekWait = if (seekCompletionPending)
-            (60_000L - (SystemClock.elapsedRealtime() - seekPlaybackStartedAtMs)).coerceAtLeast(0L)
+        val seekGrace = if (seekedPastThresholdAt != 0L)
+            (15_000L - (SystemClock.elapsedRealtime() - seekedPastThresholdAt)).coerceAtLeast(0L)
             else 0L
-        syncTrace("COMPLETION_PLAN", "itemId=${active?.id} position=$position duration=$duration threshold=$threshold msUntilThreshold=$timeToThreshold seekWait=$seekWait")
-        main.postDelayed(completion, maxOf(timeToThreshold, seekWait))
+        syncTrace("COMPLETION_PLAN", "itemId=${active?.id} position=$position duration=$duration threshold=$threshold msUntilThreshold=$timeToThreshold grace=$seekGrace")
+        main.postDelayed(completion, maxOf(timeToThreshold, seekGrace))
     }
 
     private val completion = Runnable {
@@ -258,16 +234,14 @@ internal class StremioScrobble(context: Context) {
         val current = player
         if (item != null && current?.isPlaying == true && lastEvent != "stop") {
             val (position, duration) = playbackPosition(item, current)
-            val playedAfterSeek = seekCompletionPending && seekPlaybackStartedAtMs != 0L &&
-                SystemClock.elapsedRealtime() - seekPlaybackStartedAtMs >= 60_000L
-            syncTrace("COMPLETION_CHECK", "itemId=${item.id} position=$position duration=$duration seekPending=$seekCompletionPending seekElapsed=${if (seekPlaybackStartedAtMs == 0L) 0L else SystemClock.elapsedRealtime() - seekPlaybackStartedAtMs}")
+            syncTrace("COMPLETION_CHECK", "itemId=${item.id} position=$position duration=$duration seekGraceStarted=${seekedPastThresholdAt!=0L}")
             if (duration > 0L && position.toDouble() / duration >= 0.80 &&
-                (!seekCompletionPending || playedAfterSeek)) {
+                (seekedPastThresholdAt == 0L ||
+                    SystemClock.elapsedRealtime() - seekedPastThresholdAt >= 15_000L)) {
                 emit("stop", item, current, played = true)
             } else scheduleCompletion()
         }
     }
-
 
     private fun cancelCompletion() {
         main.removeCallbacks(completion)
@@ -329,17 +303,13 @@ internal class StremioScrobble(context: Context) {
                     lastSeekReportAtMs = 0L
                     if (!changed) active?.let { emit("start", it) }
                     scheduleCompletion()
-                } else {
-                    pauseSeekCompletion()
-                    cancelCompletion()
-                }
+                } else cancelCompletion()
                 null
             }
             "onPlayWhenReadyChanged" -> {
                 if (args?.getOrNull(0) == false) {
                     cancelPendingSeek()
                     lastSeekReportAtMs = 0L
-                    pauseSeekCompletion()
                     cancelCompletion()
                     refreshEpisode()
                     active?.let { emit("pause", it) }
@@ -357,7 +327,7 @@ internal class StremioScrobble(context: Context) {
                         lastSeekReportAtMs = 0L
                         cancelCompletion()
                         refreshEpisode()
-                        active?.let { emit("stop", it, played = true) }
+                        active?.let { emit("stop", it) }
                     }
                 }
                 null
@@ -376,14 +346,14 @@ internal class StremioScrobble(context: Context) {
                     val item = active
                     if (item != null && current != null && lastEvent != "stop") {
                         val (position, duration) = playbackPosition(item, current)
-                        updateSeekCompletion(current, position, duration)
+                        seekedPastThresholdAt = if (duration > 0L && position.toDouble() / duration >= 0.80)
+                            SystemClock.elapsedRealtime() else 0L
                         scheduleCompletion()
                         reportSeek(item)
                     }
                 }
                 null
             }
-
             "equals" -> proxy === args?.getOrNull(0)
             "hashCode" -> System.identityHashCode(proxy)
             "toString" -> "StremioScrobbleListener"
@@ -431,7 +401,7 @@ internal class StremioScrobble(context: Context) {
         lastEvent = null
         lastPosition = 0L
         lastDuration = 0L
-        resetSeekCompletion()
+        seekedPastThresholdAt = 0L
     }
 
     fun stop() {
