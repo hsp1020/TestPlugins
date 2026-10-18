@@ -8,6 +8,7 @@ import android.content.Context
 import androidx.appcompat.app.AppCompatDialog
 import android.content.SharedPreferences
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.content.res.Resources
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
@@ -19,12 +20,14 @@ import android.view.MotionEvent
 import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.view.ViewConfiguration
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Spinner
 import android.widget.FrameLayout
 import androidx.appcompat.widget.AppCompatSpinner
+import androidx.appcompat.widget.SearchView
 import com.google.android.material.button.MaterialButton
 import android.widget.LinearLayout
 import android.view.Gravity
@@ -773,7 +776,13 @@ internal class CatalogBrowserDialog(
         (activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)?.navController
     }
     private val detailHandoff by lazy {
-        StremioDetailHandoff(activity, dialog, navigation, ::dismiss)
+        StremioDetailHandoff(activity, dialog, navigation, ::dismiss,
+            onReturn = {
+                if (!closed) {
+                    dialog.show()
+                    fitWindowToNavigation()
+                }
+            })
     }
     private var originEntryId: String? = null
     private var searchReturnEntryId: String? = null
@@ -795,6 +804,23 @@ internal class CatalogBrowserDialog(
                 R.id.navigation_results_tv, R.id.navigation_player
             ) -> dismiss()
             returning == null && originEntryId != null && entryId != originEntryId -> dismiss()
+        }
+    }
+    private val searchFocusCallbacks = object : FragmentManager.FragmentLifecycleCallbacks() {
+        override fun onFragmentResumed(fm: FragmentManager, fragment: Fragment) {
+            if (fragment !is QuickSearchFragment || searchReturnEntryId == null) return
+            fragment.view?.post {
+                if (closed || searchReturnEntryId == null || !fragment.isResumed ||
+                    navigation?.currentDestination?.id != R.id.navigation_quick_search) return@post
+                val search = fragment.view?.findViewById<SearchView>(R.id.quick_search) ?: return@post
+                search.isIconified = false
+                val input = search.findViewById<android.widget.EditText>(
+                    androidx.appcompat.R.id.search_src_text
+                )
+                (input ?: search).requestFocus()
+                (activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+                    ?.showSoftInput(input ?: search, InputMethodManager.SHOW_IMPLICIT)
+            }
         }
     }
     private val items = ArrayList<SearchResponse>()
@@ -829,16 +855,22 @@ internal class CatalogBrowserDialog(
         val activityOrigin = IntArray(2)
         decor.getLocationOnScreen(activityOrigin)
         val rail = activity.findViewById<View>(R.id.nav_rail_view)
+        val home = navigation?.currentDestination?.id == R.id.navigation_home
+        val landscape = activity.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val railRight = if (rail?.isShown == true && rail.width > 0) {
             val at = IntArray(2)
             rail.getLocationOnScreen(at)
             (at[0] - activityOrigin[0] + rail.width).coerceIn(0, width)
+        } else if (home && landscape) {
+            activity.resources.getDimensionPixelSize(R.dimen.nav_rail_view_width).coerceAtMost(width)
         } else 0
         val bottomNavigation = activity.findViewById<View>(R.id.nav_view)
         val bottom = if (bottomNavigation?.isShown == true && bottomNavigation.height > 0) {
             val at = IntArray(2)
             bottomNavigation.getLocationOnScreen(at)
             (at[1] - activityOrigin[1]).coerceIn(0, height)
+        } else if (home && !landscape) {
+            (height - activity.resources.getDimensionPixelSize(R.dimen.nav_view_height)).coerceAtLeast(0)
         } else height
         window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         window.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
@@ -941,6 +973,9 @@ internal class CatalogBrowserDialog(
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(8), dp(12), 0)
             setBackgroundColor(headerColor)
+            val labelInset = dp(48) +
+                (dp(82) - selectorLabelStyle.paint.measureText("Type") - dp(12))
+                    .roundToInt().coerceAtLeast(0)
             val search = ImageView(activity).apply {
                 setImageResource(R.drawable.search_icon)
                 imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.textColor))
@@ -956,15 +991,17 @@ internal class CatalogBrowserDialog(
             }
             addView(LinearLayout(activity).apply {
                 gravity = Gravity.CENTER_VERTICAL
-                addView(search, LinearLayout.LayoutParams(dp(48), dp(48)))
+                addView(search, LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+                    marginEnd = labelInset - dp(48)
+                })
                 addView(selectorRow("Type", typeSelector, typeArrow),
                     LinearLayout.LayoutParams(0, -2, 1f))
             }, ViewGroup.LayoutParams(-1, -2))
             addView(selectorRow("Catalog", catalogSelector, catalogArrow).apply {
-                setPadding(dp(48), 0, 0, 0)
+                setPadding(labelInset, 0, 0, 0)
             }, ViewGroup.LayoutParams(-1, -2))
             addView(selectorRow("Genre", genreSelector, genreArrow).apply {
-                setPadding(dp(48), 0, 0, 0)
+                setPadding(labelInset, 0, 0, 0)
             }, ViewGroup.LayoutParams(-1, -2))
         }
         val header = AppBarLayout(activity).apply {
@@ -1053,6 +1090,7 @@ internal class CatalogBrowserDialog(
             prefs.unregisterOnSharedPreferenceChangeListener(settingsListener)
             manifestPrefs.unregisterOnSharedPreferenceChangeListener(manifestListener)
             activity.lifecycle.removeObserver(hostObserver)
+            activity.supportFragmentManager.unregisterFragmentLifecycleCallbacks(searchFocusCallbacks)
             navigation?.removeOnDestinationChangedListener(destinationListener)
             activity.window.decorView.removeOnLayoutChangeListener(windowBoundsListener)
             activity.findViewById<View>(R.id.nav_rail_view)
@@ -1083,6 +1121,7 @@ internal class CatalogBrowserDialog(
         activity.findViewById<View>(R.id.nav_view)
             ?.addOnLayoutChangeListener(windowBoundsListener)
         navigation?.addOnDestinationChangedListener(destinationListener)
+        activity.supportFragmentManager.registerFragmentLifecycleCallbacks(searchFocusCallbacks, true)
         activity.lifecycle.addObserver(hostObserver)
         prefs.registerOnSharedPreferenceChangeListener(settingsListener)
         manifestPrefs.registerOnSharedPreferenceChangeListener(manifestListener)
