@@ -12,6 +12,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.media3.common.Player as Media3Player
 import androidx.media3.common.util.UnstableApi
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.MovieLoadResponse
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
@@ -45,6 +46,8 @@ internal class StremioScrobble(context: Context) {
     private var lastEvent: String? = null
     private var lastPosition = 0L
     private var lastDuration = 0L
+    // The last duration approved from this Media3 item, not persisted playback history.
+    private var approvedDurationMs = 0L
     private var pendingSeekReport: Runnable? = null
     private var lastSeekReportAtMs = 0L
     private var seekCompletionPending = false
@@ -57,7 +60,8 @@ internal class StremioScrobble(context: Context) {
         val id: Int, val url: String, val api: String,
         val movie: Boolean, val season: Int?, val episode: Int?,
         val anime: Boolean, val source: StremioC.LoadData?,
-        val ids: Map<String, String>, val urlId: String?
+        val ids: Map<String, String>, val urlId: String?,
+        val expectedDurationMs: Long?
     ) { val key: String get() = url + "#" + id }
 
     private data class Report(
@@ -98,11 +102,14 @@ internal class StremioScrobble(context: Context) {
         val movie = episode.tvType in setOf(TvType.Movie, TvType.AnimeMovie)
         val urlId = Regex("/meta/(?:movie|series)/([^/?]+)[.]json").find(response.url)
             ?.groupValues?.getOrNull(1)?.let(Uri::decode)
+        val expectedMinutes = if (movie) (response as? MovieLoadResponse)?.duration
+            ?: episode.runTime else episode.runTime
+        val expectedDurationMs = expectedMinutes?.takeIf { it > 0 }?.toLong()?.times(60_000L)
         syncTrace("EPISODE_SNAPSHOT", "itemId=${episode.id} urlHash=${response.url.hashCode()} movie=$movie season=${episode.season} episode=${episode.episode} isAnime=${data?.isAnime} ids=${ids.keys} dataParsed=${data != null}")
         return Item(episode.id, response.url, response.apiName, movie,
             if (movie) null else episode.season, if (movie) null else episode.episode,
             data?.isAnime == true || episode.tvType in setOf(TvType.Anime, TvType.AnimeMovie),
-            data, ids, urlId)
+            data, ids, urlId, expectedDurationMs)
     }
 
     private fun playbackBase(): String? {
@@ -131,6 +138,25 @@ internal class StremioScrobble(context: Context) {
     }
 
 
+    /**
+     * Only accept the current Media3 item's real duration: at least 50% of
+     * metadata runtime, or at least 60 seconds when metadata has no runtime.
+     * Unknown duration is not approval. No network requests or polling.
+     */
+    private fun approvedRuntime(item: Item, current: Media3Player?): Boolean {
+        val actual = current?.duration?.takeIf { it > 0L }
+        if (actual != null) {
+            val minimum = item.expectedDurationMs?.let { (it + 1L) / 2L } ?: 60_000L
+            val passed = actual >= minimum
+            if (active?.key == item.key && current === player)
+                approvedDurationMs = if (passed) actual else 0L
+            return passed
+        }
+        // An old episode's stop may run after the player has been replaced.
+        // Approve only if this exact item was already checked against Media3.
+        return current == null && active?.key == item.key && approvedDurationMs > 0L
+    }
+
     /** Only state transitions and Seek send reports; no recurring polling. */
     private fun emit(event: String, item: Item, current: Media3Player? = player, played: Boolean? = null, allowRepeat: Boolean = false) {
         if (lastEvent == "stop" ||
@@ -141,8 +167,11 @@ internal class StremioScrobble(context: Context) {
             return
         }
 
+        // Reject every event (start, pause, stop) from a short/error stream.
+        if (!approvedRuntime(item, current)) return
         val openingSession = event == "start" && lastEvent == null
-        val (pos, duration) = playbackPosition(item, current)
+        val (pos, rawDuration) = playbackPosition(item, current)
+        val duration = if (current == null) approvedDurationMs else rawDuration
         syncTrace("EMIT_POSITION", "event=$event itemId=${item.id} season=${item.season} episode=${item.episode} pos=$pos duration=$duration played=$played")
         lastPosition = pos
         lastDuration = duration
@@ -178,6 +207,7 @@ internal class StremioScrobble(context: Context) {
             // The old stop must use its stored position, never the new episode's player.
             if (lastEvent != null && lastEvent != "stop") emit("stop", old, null)
         }
+        approvedDurationMs = 0L
         cancelCompletion()
         cancelPendingSeek()
         lastSeekReportAtMs = 0L
@@ -206,6 +236,8 @@ internal class StremioScrobble(context: Context) {
         player = next
         next?.addListener(listener)
         val changed = refreshEpisode()
+        // A mirror can replace the Media3 item without changing the episode.
+        if (!changed) approvedDurationMs = 0L
         if (!changed && next?.isPlaying == true) {
             active?.let { emit("start", it) }
             scheduleCompletion()
@@ -220,7 +252,9 @@ internal class StremioScrobble(context: Context) {
         main.removeCallbacks(completion)
         val current = player ?: return
         if (lastEvent == "stop" || !current.isPlaying) return
-        val (position, duration) = active?.let { playbackPosition(it, current) } ?: return
+        val item = active ?: return
+        if (!approvedRuntime(item, current)) return
+        val (position, duration) = playbackPosition(item, current)
         if (duration <= 0L) return
         val threshold = (duration * 0.80).toLong()
         val remaining = (threshold - position).coerceAtLeast(0L)
@@ -238,7 +272,8 @@ internal class StremioScrobble(context: Context) {
     private val completion = Runnable {
         val item = active
         val current = player
-        if (item != null && current?.isPlaying == true && lastEvent != "stop") {
+        if (item != null && current?.isPlaying == true && lastEvent != "stop" &&
+            approvedRuntime(item, current)) {
             val (position, duration) = playbackPosition(item, current)
             val seekWaitSatisfied = seekPlaybackStartedAtMs != 0L &&
                 SystemClock.elapsedRealtime() - seekPlaybackStartedAtMs >= 60_000L
@@ -331,7 +366,10 @@ internal class StremioScrobble(context: Context) {
                 when (args?.getOrNull(0)) {
                     Media3Player.STATE_READY -> {
                         refreshEpisode()
-                        scheduleCompletion() // Runtime may only become available when READY.
+                        // A pending start is emitted once Media3 knows the duration.
+                        if (player?.isPlaying == true && lastEvent == null)
+                            active?.let { emit("start", it) }
+                        scheduleCompletion()
                     }
                     Media3Player.STATE_ENDED -> {
                         cancelPendingSeek()
@@ -344,6 +382,21 @@ internal class StremioScrobble(context: Context) {
                 null
             }
             "onPlaybackParametersChanged" -> {
+                scheduleCompletion()
+                null
+            }
+            "onMediaItemTransition" -> {
+                val changed = refreshEpisode()
+                if (!changed) approvedDurationMs = 0L
+                if (!changed && player?.isPlaying == true && lastEvent != "stop") {
+                    active?.let { emit("start", it) }
+                    scheduleCompletion()
+                }
+                null
+            }
+            "onTimelineChanged" -> {
+                if (player?.isPlaying == true && lastEvent == null)
+                    active?.let { emit("start", it) }
                 scheduleCompletion()
                 null
             }
@@ -414,6 +467,7 @@ internal class StremioScrobble(context: Context) {
         lastEvent = null
         lastPosition = 0L
         lastDuration = 0L
+        approvedDurationMs = 0L
         seekCompletionPending = false
         seekPlaybackStartedAtMs = 0L
     }
