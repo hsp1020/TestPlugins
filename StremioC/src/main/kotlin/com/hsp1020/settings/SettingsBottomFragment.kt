@@ -991,7 +991,8 @@ class SettingsBottomFragment(
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            setSoftInputMode(if (isLayout(TV)) WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                else WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN)
             attributes = attributes.apply {
                 gravity = Gravity.CENTER
                 x = 0; y = 0
@@ -1004,7 +1005,7 @@ class SettingsBottomFragment(
         }
         if (isLayout(TV) && root != null) fitDialog(dialog, root, body, capDp)
         dialog.setOnShowListener {
-            if (!isLayout(TV)) dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            if (!isLayout(TV)) dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN)
             if (isLayout(TV) || initialFocus != null) {
                 val focus = initialFocus?.invoke() ?: body?.getFocusables(View.FOCUS_FORWARD)?.firstOrNull { usable(it) }
                     ?: contentView.getFocusables(View.FOCUS_FORWARD).firstOrNull { usable(it) }
@@ -2494,12 +2495,17 @@ private fun showLanguageSelectDialog() {
 
                 holder.etOrder.setOnFocusChangeListener { _, hasFocus ->
                     if (hasFocus) {
-                        rv.postDelayed({
-                            if (activeDialog?.isShowing == true && !closing) {
-                                val index = visibleTabs.indexOfFirst { it.key == tab.key }
-                                if (index >= 0) rv.smoothScrollToPosition(index)
-                            }
-                        }, 150)
+                        if (isLayout(TV)) {
+                            rv.postDelayed({
+                                if (activeDialog?.isShowing == true && !closing) {
+                                    val index = visibleTabs.indexOfFirst { it.key == tab.key }
+                                    if (index >= 0) rv.smoothScrollToPosition(index)
+                                }
+                            }, 150)
+                        } else {
+                            holder.etOrder.requestRectangleOnScreen(
+                                Rect(0, 0, holder.etOrder.width, holder.etOrder.height), true)
+                        }
                     } else {
                         val inputVal = holder.etOrder.text.toString().toIntOrNull()
                         if (inputVal != null && inputVal != holder.displayedOrder) {
