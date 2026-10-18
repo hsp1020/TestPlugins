@@ -143,13 +143,15 @@ internal class StremioScrobble(context: Context) {
             return
         }
 
+        val firstStart = event == "start" && lastEvent == null
         val (pos, duration) = playbackPosition(item, current)
         syncTrace("EMIT_POSITION", "event=$event itemId=${item.id} season=${item.season} episode=${item.episode} pos=$pos duration=$duration played=$played")
         lastPosition = pos
         lastDuration = duration
         lastEvent = event
-        if (event == "start" && duration > 0L && pos.toDouble() / duration >= 0.80) {
-            // Starting/resuming beyond 80% is not evidence of normal playback to that mark.
+        if (event == "start" && duration > 0L && pos.toDouble() / duration >= 0.80 &&
+            (firstStart || seekCompletionPending)) {
+            // Opening beyond 80% or resuming an explicitly seeked session needs 60s.
             seekCompletionPending = true
             if (seekPlaybackStartedAtMs == 0L && current?.isPlaying == true)
                 seekPlaybackStartedAtMs = SystemClock.elapsedRealtime()
@@ -177,7 +179,7 @@ internal class StremioScrobble(context: Context) {
         val next = snapshot()
         syncTrace("EPISODE_TRANSITION", "fromItem=${active?.id} toItem=${next?.id} fromSeason=${active?.season} toSeason=${next?.season} fromEpisode=${active?.episode} toEpisode=${next?.episode}")
         active?.let { old ->
-            // The old stop must use its stored position, never the new episode's player.
+            // Preserve the old episode's saved position; an unfinished exit is a pause.
             if (lastEvent != null && lastEvent != "stop") emit("pause", old, null)
         }
         cancelCompletion()
@@ -395,7 +397,8 @@ internal class StremioScrobble(context: Context) {
                 if (item != null && current != null) {
                     val isSeek = reason == Media3Player.DISCONTINUITY_REASON_SEEK ||
                         reason == Media3Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT
-                    if (lastEvent == "stop" && isSeek) {
+                    if (lastEvent == "stop" &&
+                        reason == Media3Player.DISCONTINUITY_REASON_SEEK) {
                         val (position, duration) = playbackPosition(item, current)
                         restartRequested = duration > 0L &&
                             position <= minOf(duration / 20L, 60_000L)
