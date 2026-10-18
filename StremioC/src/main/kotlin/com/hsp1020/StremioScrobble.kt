@@ -45,7 +45,8 @@ internal class StremioScrobble(context: Context) {
     private var lastEvent: String? = null
     private var lastPosition = 0L
     private var lastDuration = 0L
-    private var seekReport: Runnable? = null
+    private var pendingSeekReport: Runnable? = null
+    private var lastSeekReportAtMs = 0L
     private var seekedPastThresholdAt = 0L
 
     private data class Item(
@@ -109,7 +110,7 @@ internal class StremioScrobble(context: Context) {
         }.getOrNull()
     }
 
-    private fun progress(item: Item, current: Media3Player?): Pair<Long, Long> {
+    private fun playbackPosition(item: Item, current: Media3Player?): Pair<Long, Long> {
         val position = current?.currentPosition?.takeIf { it >= 0L }
         val duration = current?.duration?.takeIf { it > 0L }
         if (position != null && duration != null) return position to duration
@@ -126,7 +127,7 @@ internal class StremioScrobble(context: Context) {
             (event != "start" && lastEvent == null) ||
             (event != "start" && !allowRepeat && lastEvent == event)) return
 
-        val (pos, duration) = progress(item, current)
+        val (pos, duration) = playbackPosition(item, current)
         lastPosition = pos
         lastDuration = duration
         lastEvent = event
@@ -155,8 +156,8 @@ internal class StremioScrobble(context: Context) {
             if (lastEvent != null && lastEvent != "stop") emit("stop", old, null)
         }
         cancelCompletion()
-        seekReport?.let(main::removeCallbacks)
-        seekReport = null
+        cancelPendingSeek()
+        lastSeekReportAtMs = 0L
         active = next
         lastEvent = null
         lastPosition = 0L
@@ -173,6 +174,8 @@ internal class StremioScrobble(context: Context) {
     private fun attachPlayer() {
         val next = fragment?.playerView?.player
         if (next === player) return
+        cancelPendingSeek()
+        lastSeekReportAtMs = 0L
         cancelCompletion()
         player?.removeListener(listener)
         player = next
@@ -208,7 +211,7 @@ internal class StremioScrobble(context: Context) {
         val item = active
         val current = player
         if (item != null && current?.isPlaying == true && lastEvent != "stop") {
-            val (position, duration) = progress(item, current)
+            val (position, duration) = playbackPosition(item, current)
             if (duration > 0L && position.toDouble() / duration >= 0.80 &&
                 (seekedPastThresholdAt == 0L ||
                     SystemClock.elapsedRealtime() - seekedPastThresholdAt >= 15_000L)) {
@@ -219,6 +222,33 @@ internal class StremioScrobble(context: Context) {
 
     private fun cancelCompletion() {
         main.removeCallbacks(completion)
+    }
+
+    /** Seek-only rate limit: first report now, further seeks at most once per 15 seconds. */
+    private fun reportSeek(item: Item) {
+        if (lastEvent == null || lastEvent == "stop") return
+        val now = SystemClock.elapsedRealtime()
+        val elapsed = now - lastSeekReportAtMs
+        if (lastSeekReportAtMs == 0L || elapsed >= 15_000L) {
+            cancelPendingSeek()
+            emit(if (player?.isPlaying == true) "start" else "pause", item, allowRepeat = true)
+            lastSeekReportAtMs = now
+            return
+        }
+        if (pendingSeekReport != null) return
+        pendingSeekReport = Runnable {
+            pendingSeekReport = null
+            if (active?.key == item.key && lastEvent != null && lastEvent != "stop") {
+                // Read the actual latest position at send time, not the original seek target.
+                emit(if (player?.isPlaying == true) "start" else "pause", item, allowRepeat = true)
+                lastSeekReportAtMs = SystemClock.elapsedRealtime()
+            }
+        }.also { main.postDelayed(it, 15_000L - elapsed) }
+    }
+
+    private fun cancelPendingSeek() {
+        pendingSeekReport?.let(main::removeCallbacks)
+        pendingSeekReport = null
     }
 
     // Layout events are only used to discover a new player, not to parse episode JSON.
@@ -238,6 +268,9 @@ internal class StremioScrobble(context: Context) {
             "onIsPlayingChanged" -> {
                 val changed = refreshEpisode()
                 if (args?.getOrNull(0) == true) {
+                    // A real resume reports the current position immediately.
+                    cancelPendingSeek()
+                    lastSeekReportAtMs = 0L
                     if (!changed) active?.let { emit("start", it) }
                     scheduleCompletion()
                 } else cancelCompletion()
@@ -245,6 +278,8 @@ internal class StremioScrobble(context: Context) {
             }
             "onPlayWhenReadyChanged" -> {
                 if (args?.getOrNull(0) == false) {
+                    cancelPendingSeek()
+                    lastSeekReportAtMs = 0L
                     cancelCompletion()
                     refreshEpisode()
                     active?.let { emit("pause", it) }
@@ -258,6 +293,8 @@ internal class StremioScrobble(context: Context) {
                         scheduleCompletion() // Runtime may only become available when READY.
                     }
                     Media3Player.STATE_ENDED -> {
+                        cancelPendingSeek()
+                        lastSeekReportAtMs = 0L
                         cancelCompletion()
                         refreshEpisode()
                         active?.let { emit("stop", it) }
@@ -277,18 +314,11 @@ internal class StremioScrobble(context: Context) {
                     val current = player
                     val item = active
                     if (item != null && current != null && lastEvent != "stop") {
-                        val (position, duration) = progress(item, current)
+                        val (position, duration) = playbackPosition(item, current)
                         seekedPastThresholdAt = if (duration > 0L && position.toDouble() / duration >= 0.80)
                             SystemClock.elapsedRealtime() else 0L
                         scheduleCompletion()
-                        // Coalesce rapid scrubbing into one new-position report.
-                        seekReport?.let(main::removeCallbacks)
-                        seekReport = Runnable {
-                            seekReport = null
-                            if (active?.key == item.key && lastEvent != null && lastEvent != "stop") {
-                                emit(if (player?.isPlaying == true) "start" else "pause", item, allowRepeat = true)
-                            }
-                        }.also { main.postDelayed(it, 750L) }
+                        reportSeek(item)
                     }
                 }
                 null
@@ -325,8 +355,8 @@ internal class StremioScrobble(context: Context) {
     fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
         cancelCompletion()
-        seekReport?.let(main::removeCallbacks)
-        seekReport = null
+        cancelPendingSeek()
+        lastSeekReportAtMs = 0L
         active?.let { if (lastEvent != null && lastEvent != "stop") emit("stop", it) }
         tree?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(layout)
         player?.removeListener(listener)
