@@ -1823,7 +1823,8 @@ class SettingsBottomFragment(
         settingsDialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setGravity(Gravity.CENTER)
-            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            setSoftInputMode(if (mobile) WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
+                else WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
             if (mobile) setLayout(
                 minOf(dp(800), (hostContext.resources.displayMetrics.widthPixels * 0.9f).toInt()),
                 WindowManager.LayoutParams.WRAP_CONTENT)
