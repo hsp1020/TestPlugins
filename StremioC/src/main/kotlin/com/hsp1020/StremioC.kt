@@ -4800,6 +4800,7 @@ open class StremioC(
                 return@coroutineScope run { response.apply { attachMappedIds() } }
 
             } else {
+                val representativeRunTime = stremioRuntimeMinutes(this@CatalogEntry.runtime)
                 val finalEpisodes = run { processEpisodes(
                     provider, 
                     cleanImdbId, 
@@ -4819,7 +4820,9 @@ open class StremioC(
                     finalKitsuId?.toString() ?: this@CatalogEntry.kitsuIdExt,
                     tmdbData?.fetchedYear, // ★ 수집된 출시 연도(year) 인자 전달 추가
                     originalAnimeId
-                ) }
+                ) }.onEach { episode ->
+                    if (episode.runTime == null) episode.runTime = representativeRunTime
+                }
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
