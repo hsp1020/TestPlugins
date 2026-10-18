@@ -1380,15 +1380,24 @@ internal class RatingPlotImageHook(
               }
             trace("TV_LIBRARY_HTTP", "code=${response.code} bytes=${response.text.length}")
             if(response.code !in 200..299)return null
-            val root=runCatching { JSONObject(response.text) }.getOrNull()
+            val body=response.text.trim()
+            if(body.isEmpty() || body=="null") {
+                trace("TV_LIBRARY_SCHEMA", "kind=${if(body.isEmpty())"empty-body" else "null-body"}")
+                return null
+            }
+            val root=runCatching { JSONObject(body) }.getOrNull()
             if(root==null) {
                 trace("TV_LIBRARY_SCHEMA", "kind=not-object")
                 return null
             }
-            val rows=root.optJSONArray("shows") ?: if(root.length()==0) JSONArray() else {
-                trace("TV_LIBRARY_SCHEMA", "kind=missing-shows keys=${root.keys().asSequence().toList()}")
+            val rows=root.optJSONArray("shows") ?: if(root.length()==0) {
+                trace("TV_LIBRARY_SCHEMA", "kind=empty-object")
+                JSONArray()
+            } else {
+                trace("TV_LIBRARY_SCHEMA", "kind=invalid-shows keys=${root.keys().asSequence().toList()}")
                 return null
             }
+            if(rows.length()==0) trace("TV_LIBRARY_SCHEMA", "kind=empty-shows")
             var present=false
             for (i in 0 until rows.length()) {
                 val entry=rows.optJSONObject(i) ?: return null
@@ -1403,7 +1412,8 @@ internal class RatingPlotImageHook(
         }
 
         private suspend fun simklSeasonSave(
-            tracker: Tracker, draft: Draft, baseline: Draft, sn: Int
+            tracker: Tracker, draft: Draft, baseline: Draft, sn: Int,
+            markUnconfirmed: () -> Unit
         ): Boolean {
             val initial = tracker.simklSeason ?: return false
             trace("TV_SAVE_BEGIN", "selected=$sn draft=${draft.status}/${draft.watched} before=${baseline.status}/${baseline.watched} explicitNone=${draft.explicitNone} other=${initial.otherSeasons.mapValues { it.value.size }}")
@@ -1440,6 +1450,7 @@ internal class RatingPlotImageHook(
                     simklWatchlistDestination(draft.status) == null)) return false
 
             if(fullDelete) {
+                var deleteAcknowledged=false
                 val fresh=simklSeasonRead(tracker.repo,tracker.id,sn)
                 val safe=fresh!=null && fresh.available==initial.available &&
                     fresh.watched==initial.watched &&
@@ -1464,7 +1475,11 @@ internal class RatingPlotImageHook(
                         return false
                      }
                     val ack=runCatching { JSONObject(response.text) }.getOrNull()
-                    trace("TV_DELETE_HTTP", "code=${response.code} ackKeys=${ack?.keys()?.asSequence()?.toList()} deleted=${ack?.optJSONObject("deleted")?.opt("shows")} notFound=${ack?.optJSONObject("not_found")?.optJSONArray("shows")?.length()}")
+                    val deleted=ack?.optJSONObject("deleted")?.optInt("shows",-1) ?: -1
+                    val notFound=ack?.optJSONObject("not_found")?.optJSONArray("shows")?.length() ?: 0
+                    deleteAcknowledged=response.code in 200..299 && deleted>0 && notFound==0
+                    trace("TV_DELETE_HTTP", "code=${response.code} deleted=${deleted} notFound=${notFound} accepted=${deleteAcknowledged}")
+                    if(!deleteAcknowledged)return false
                 }else if(initial.watched.isNotEmpty() || fresh?.listStatus!=SyncWatchType.NONE) {
                     trace("TV_DELETE_REJECT", "reason=history-membership-conflict")
                     return false
@@ -1474,8 +1489,8 @@ internal class RatingPlotImageHook(
                         when(attempt){2->500L;3->1100L;else->2000L})
                     val present=simklTvLibraryMembership(tracker.repo,initial.ids)
                     val state=simklSeasonRead(tracker.repo,tracker.id,sn)
-                    val preserved=state==null || state.otherSeasons==initial.otherSeasons
-                    val empty=state==null || state.watched.isEmpty()
+                    val preserved=state!=null && state.otherSeasons==initial.otherSeasons
+                    val empty=state!=null && state.watched.isEmpty()
                     trace("TV_DELETE_VERIFY", "attempt=$attempt member=$present progress=${state?.watched?.size} other=${state?.otherSeasons?.mapValues { it.value.size }} preserved=$preserved empty=$empty")
                     if(present==false && preserved && empty) {
                         tracker.simklSeason=(state ?: initial).copy(
@@ -1485,7 +1500,8 @@ internal class RatingPlotImageHook(
                         return true
                     }
                 }
-                trace("TV_DELETE_FINAL", "success=false reason=readback-not-confirmed")
+                if(deleteAcknowledged)markUnconfirmed()
+                trace("TV_DELETE_FINAL", "success=false pending=${deleteAcknowledged} reason=readback-not-confirmed")
                 return false
             }
 
@@ -2997,7 +3013,9 @@ internal class RatingPlotImageHook(
                         draft.explicitNone) {
                         malRemoveFromLibrary(tracker.repo,id)
                     } else if (tracker.simklSeason != null) {
-                        simklSeasonSave(tracker, draft, before, sn)
+                        simklSeasonSave(tracker, draft, before, sn) {
+                            writeAcceptedButUnconfirmed=true
+                        }
                     } else if (tracker.simklAnime != null) {
                         simklAnimeSave(tracker, draft, before, sn)
                     } else {
@@ -3116,7 +3134,7 @@ internal class RatingPlotImageHook(
                     trace("SAVE_UI_RESULT", "provider=$prefix saved=$result baseline=${tracker.baseline?.status}/${tracker.baseline?.watched} draft=${tracker.draft?.status}/${tracker.draft?.watched} error=${tracker.error} selected=$selected")
                     render()
                 } else {
-                    trace("SAVE_DETACHED", "request=$request provider=$prefix success=$result originalGen=$gen currentGen=$generation originalSeason=$sn currentSeason=$season active=$active globalRefreshScheduled=$result")
+                    trace("SAVE_DETACHED", "request=$request provider=$prefix success=$result originalGen=$gen currentGen=$generation originalSeason=$sn currentSeason=$season active=$active globalRefreshScheduled=${result || writeAcceptedButUnconfirmed}")
                 }
                 if(result || writeAcceptedButUnconfirmed) {
                     try { observeNativeLibraryPublication(prefix,request) }
