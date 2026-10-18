@@ -48,7 +48,6 @@ internal class StremioScrobble(context: Context) {
     private var pendingSeekReport: Runnable? = null
     private var lastSeekReportAtMs = 0L
     /** Seek past 80% requires 60 seconds of uninterrupted actual playback. */
-    private var restartRequested = false
     private var seekCompletionPending = false
     private var seekPlaybackStartedAtMs = 0L
     private fun syncTrace(stage: String, detail: String = "") {
@@ -179,13 +178,12 @@ internal class StremioScrobble(context: Context) {
         val next = snapshot()
         syncTrace("EPISODE_TRANSITION", "fromItem=${active?.id} toItem=${next?.id} fromSeason=${active?.season} toSeason=${next?.season} fromEpisode=${active?.episode} toEpisode=${next?.episode}")
         active?.let { old ->
-            // Preserve the old episode's saved position; an unfinished exit is a pause.
-            if (lastEvent != null && lastEvent != "stop") emit("pause", old, null)
+            // The old stop must use its stored position, never the new episode's player.
+            if (lastEvent != null && lastEvent != "stop") emit("stop", old, null)
         }
         cancelCompletion()
         cancelPendingSeek()
         lastSeekReportAtMs = 0L
-        restartRequested = false
         active = next
         lastEvent = null
         lastPosition = 0L
@@ -207,12 +205,11 @@ internal class StremioScrobble(context: Context) {
         lastSeekReportAtMs = 0L
         cancelCompletion()
         player?.removeListener(listener)
-        restartRequested = false // A mirror replacement is not itself a new viewing.
         player = next
         next?.addListener(listener)
         val changed = refreshEpisode()
         if (!changed && next?.isPlaying == true) {
-            active?.let { if (!restartCompletedWatch(it, next)) emit("start", it) }
+            active?.let { emit("start", it) }
             scheduleCompletion()
         }
     }
@@ -231,22 +228,6 @@ internal class StremioScrobble(context: Context) {
         seekCompletionPending = duration > 0L && position.toDouble() / duration >= 0.80
         seekPlaybackStartedAtMs =
             if (seekCompletionPending && current.isPlaying) SystemClock.elapsedRealtime() else 0L
-    }
-
-    /** Reopen a completed watch only when the same/new player is actually playing near the start. */
-    private fun restartCompletedWatch(item: Item, current: Media3Player?): Boolean {
-        if (!restartRequested || lastEvent != "stop" || current?.isPlaying != true) return false
-        val (position, duration) = playbackPosition(item, current)
-        if (duration <= 0L || position > minOf(duration / 20L, 60_000L)) return false
-        restartRequested = false
-        cancelCompletion()
-        cancelPendingSeek()
-        lastSeekReportAtMs = 0L
-        resetSeekCompletion()
-        lastEvent = null
-        emit("start", item, current)
-        scheduleCompletion()
-        return true
     }
 
     /**
@@ -346,9 +327,7 @@ internal class StremioScrobble(context: Context) {
                     // A real resume reports the current position immediately.
                     cancelPendingSeek()
                     lastSeekReportAtMs = 0L
-                    if (!changed) active?.let {
-                        if (!restartCompletedWatch(it, player)) emit("start", it)
-                    }
+                    if (!changed) active?.let { emit("start", it) }
                     scheduleCompletion()
                 } else {
                     pauseSeekCompletion()
@@ -371,7 +350,6 @@ internal class StremioScrobble(context: Context) {
                 when (args?.getOrNull(0)) {
                     Media3Player.STATE_READY -> {
                         refreshEpisode()
-                        active?.let { restartCompletedWatch(it, player) }
                         scheduleCompletion() // Runtime may only become available when READY.
                     }
                     Media3Player.STATE_ENDED -> {
@@ -392,18 +370,11 @@ internal class StremioScrobble(context: Context) {
                 refreshEpisode()
                 val reason = args?.lastOrNull() as? Int
                 syncTrace("POSITION_DISCONTINUITY", "reason=$reason active=${active?.id}")
-                val current = player
-                val item = active
-                if (item != null && current != null) {
-                    val isSeek = reason == Media3Player.DISCONTINUITY_REASON_SEEK ||
-                        reason == Media3Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT
-                    if (lastEvent == "stop" &&
-                        reason == Media3Player.DISCONTINUITY_REASON_SEEK) {
-                        val (position, duration) = playbackPosition(item, current)
-                        restartRequested = duration > 0L &&
-                            position <= minOf(duration / 20L, 60_000L)
-                    }
-                    if (!restartCompletedWatch(item, current) && lastEvent != "stop" && isSeek) {
+                if (reason == Media3Player.DISCONTINUITY_REASON_SEEK ||
+                    reason == Media3Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) {
+                    val current = player
+                    val item = active
+                    if (item != null && current != null && lastEvent != "stop") {
                         val (position, duration) = playbackPosition(item, current)
                         updateSeekCompletion(current, position, duration)
                         scheduleCompletion()
@@ -449,7 +420,7 @@ internal class StremioScrobble(context: Context) {
         cancelCompletion()
         cancelPendingSeek()
         lastSeekReportAtMs = 0L
-        active?.let { if (lastEvent != null && lastEvent != "stop") emit("pause", it) }
+        active?.let { if (lastEvent != null && lastEvent != "stop") emit("stop", it) }
         tree?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(layout)
         player?.removeListener(listener)
         tree = null
@@ -458,7 +429,6 @@ internal class StremioScrobble(context: Context) {
         model = null
         active = null
         lastEvent = null
-        restartRequested = false
         lastPosition = 0L
         lastDuration = 0L
         resetSeekCompletion()
