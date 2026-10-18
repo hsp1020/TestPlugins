@@ -1270,7 +1270,7 @@ internal class RatingPlotImageHook(
             var total: Int? = null, var totalSource: String = "unknown",
             var error: String? = null, var loading: Boolean = true, var saving: Boolean = false,
             var writeBlocked: String? = null, var simklSeason: SimklSeasonSnapshot? = null,
-            var simklAnime: AnimeSnapshot? = null,
+            var simklAnime: AnimeSnapshot? = null, var ratingLoaded: Boolean = true,
             var seasonMapping: SeasonTrackerIds? = null
         )
 
@@ -1382,6 +1382,80 @@ internal class RatingPlotImageHook(
             val body=response.text.trim()
             return if(body=="null") JSONObject()
                 else runCatching { JSONObject(body) }.getOrNull()
+        }
+
+        private suspend fun simklScores(
+            repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
+            targets: List<JSONObject>, anime: Boolean
+        ): List<Score?>? {
+            if(targets.isEmpty())return null
+            val kind=if(anime)"anime" else "shows"
+            val root=simklLibraryObject(repo,kind) ?: return null
+            val rows=root.optJSONArray(kind) ?: if(root.length()==0) JSONArray() else return null
+            val scores=mutableListOf<Score?>()
+            for(ids in targets) {
+                var found: JSONObject?=null
+                for(i in 0 until rows.length()) {
+                    val item=rows.optJSONObject(i) ?: return null
+                    val rowIds=item.optJSONObject("show")?.optJSONObject("ids")
+                        ?: item.optJSONObject("ids") ?: return null
+                    if(ids.keys().asSequence().any { key ->
+                        ids.optString(key).isNotBlank() &&
+                            ids.optString(key)==rowIds.optString(key)
+                    }) {
+                        if(found!=null)return null
+                        found=item
+                    }
+                }
+                val raw=found?.opt("user_rating")
+                val rating=when(raw) {
+                    null, JSONObject.NULL -> null
+                    is Number -> raw.toInt()
+                    else -> raw.toString().toIntOrNull() ?: return null
+                }
+                if(rating!=null && rating !in 1..10)return null
+                scores+=rating?.let { Score.from10(it) }
+            }
+            return scores
+        }
+
+        private suspend fun simklSaveScores(
+            repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
+            targets: List<JSONObject>, score: Score?, anime: Boolean
+        ): Boolean {
+            if(targets.isEmpty())return false
+            val value=score?.toInt(10) ?: 0
+            if(value !in 0..10)return false
+            val headers=SimklApi.getHeaders(repo.authToken() ?: return false)+
+                mapOf("content-type" to "application/json")
+            val items=JSONArray().also { array ->
+                targets.forEach { ids ->
+                    val entry=JSONObject().put("ids",ids)
+                    if(value>0)entry.put("rating",value)
+                    array.put(entry)
+                }
+            }
+            val action=if(value>0)"ratings" else "ratings/remove"
+            val response=try {
+                app.post("https://api.simkl.com/sync/$action",headers=headers,
+                    requestBody=JSONObject().put("shows",items).toString().toRequestBody())
+            }catch(e:CancellationException){throw e}
+             catch(e:Exception){return false}
+            if(response.code !in 200..299)return false
+            val ack=runCatching { JSONObject(response.text) }.getOrNull() ?: return false
+            val saved=ack.optJSONObject(if(value>0)"added" else "deleted")
+                ?.optInt("shows",-1) ?: -1
+            val missing=ack.optJSONObject("not_found")
+            if(saved!=targets.size ||
+                (missing?.optJSONArray("shows")?.length() ?: 0)>0 ||
+                (missing?.optJSONArray("anime")?.length() ?: 0)>0)return false
+            for(attempt in 1..3) {
+                if(attempt>1)kotlinx.coroutines.delay(if(attempt==2)350L else 900L)
+                val actual=simklScores(repo,targets,anime)
+                if(actual!=null && actual.all { (it?.toInt(10) ?: 0)==value })
+                    return true
+            }
+            return false
         }
 
         private suspend fun simklTvLibraryMembership(
@@ -2187,6 +2261,7 @@ internal class RatingPlotImageHook(
                     java.util.concurrent.ConcurrentHashMap<String, SimklSeasonSnapshot>()
                 val simklAnimeReplies =
                     java.util.concurrent.ConcurrentHashMap<String, AnimeSnapshot>()
+                val ratingLoaded = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
                 val replies = matched.map { repo ->
                     async(Dispatchers.IO) {
                         val id = ids.getValue(repo.idPrefix)
@@ -2254,7 +2329,14 @@ internal class RatingPlotImageHook(
                             repo.idPrefix == "simkl") animeExact?.let {
                             val watched=it.watched.size
                             val projected=animeSeasonDisplayStatus(it)
-                            Draft(projected,watched,null)
+                            val targets=it.sourceIds.map { source ->
+                                JSONObject().put("simkl",source)
+                            }
+                            val scores=simklScores(repo,targets,true)
+                            ratingLoaded["simkl"]=scores!=null
+                            val score=scores?.distinctBy { value -> value?.toInt(10) }
+                                ?.singleOrNull()
+                            Draft(projected,watched,score)
                         } else remote?.let {
                             Draft(if (generalSimkl && repo.idPrefix == "simkl" && simklExact != null)
                                 simklSeasonStatus(simklExact) else it.status,
@@ -2269,6 +2351,7 @@ internal class RatingPlotImageHook(
                 statuses["simkl"]?.let { simkl ->
                     simkl.simklSeason = simklSeasonReplies["simkl"]
                     simkl.simklAnime = simklAnimeReplies["simkl"]
+                    simkl.ratingLoaded = ratingLoaded["simkl"] ?: true
                     simkl.seasonMapping = mappedSeason
                 }
                 val providerTotals = replies.mapNotNull { it.third.first }.filter { it > 0 }
@@ -2487,7 +2570,7 @@ internal class RatingPlotImageHook(
                     (target.simklSeason == null || target.simklSeason?.listStatus != null) &&
                     (target.simklAnime == null || target.simklAnime?.statusEditable == true)
                 slider?.isEnabled = !isWriteInFlight(target) && target.writeBlocked == null &&
-                    target.simklSeason == null && target.simklAnime == null
+                    (target.simklAnime == null || target.ratingLoaded)
                 val valScore = data.score?.toFloat(10) ?: 0f
                 slider?.value = valScore.coerceIn(0f,10f).toInt().toFloat()
                 scoreLabel?.text = data.score?.toInt(10)?.toString()?.plus("/10") ?: "?"
@@ -2571,12 +2654,8 @@ internal class RatingPlotImageHook(
             if (draft.watched < 0 || tracker.total?.let { it > 0 && draft.watched > it } == true) {
                 return
             }
-            if (tracker.simklSeason != null && draft.score != before.score) {
-                return
-            }
-            if (tracker.simklAnime != null && draft.score != before.score) {
-                return
-            }
+            if (tracker.simklAnime != null && !tracker.ratingLoaded &&
+                draft.score != before.score) return
             val animeProgressDemotion=tracker.simklAnime?.statusEditable==false &&
                 before.status==SyncWatchType.COMPLETED &&
                 draft.status==SyncWatchType.WATCHING && draft.watched<before.watched
@@ -2603,9 +2682,23 @@ internal class RatingPlotImageHook(
                         draft.explicitNone) {
                         malRemoveFromLibrary(tracker.repo,id)
                     } else if (tracker.simklSeason != null) {
-                        simklSeasonSave(tracker, draft, before, sn)
+                        val changed=draft.status!=before.status || draft.watched!=before.watched ||
+                            (draft.status==SyncWatchType.NONE && draft.explicitNone)
+                        val ratingChanged=draft.score!=before.score &&
+                            !(draft.status==SyncWatchType.NONE && draft.explicitNone)
+                        (!changed || simklSeasonSave(tracker,draft.copy(score=before.score),before,sn)) &&
+                            (!ratingChanged || simklSaveScores(tracker.repo,
+                                listOf(tracker.simklSeason!!.ids),draft.score,false))
                     } else if (tracker.simklAnime != null) {
-                        simklAnimeSave(tracker, draft, before, sn)
+                        val changed=draft.status!=before.status || draft.watched!=before.watched ||
+                            (draft.status==SyncWatchType.NONE && draft.explicitNone)
+                        val ratingChanged=draft.score!=before.score &&
+                            !(draft.status==SyncWatchType.NONE && draft.explicitNone)
+                        (!changed || simklAnimeSave(tracker,draft.copy(score=before.score),before,sn)) &&
+                            (!ratingChanged || simklSaveScores(tracker.repo,
+                                tracker.simklAnime!!.sourceIds.map { source ->
+                                    JSONObject().put("simkl",source)
+                                },draft.score,true))
                     } else {
                     val fresh = tracker.repo.status(id)
                     val remote = fresh.getOrNull()
@@ -2684,18 +2777,23 @@ internal class RatingPlotImageHook(
                         if (anime != null) {
                             val count=anime.watched.size
                             val actual=animeSeasonDisplayStatus(anime)
-                            tracker.baseline=Draft(actual,count,null)
+                            val savedScore=if(draft.status==SyncWatchType.NONE && draft.explicitNone)
+                                null else draft.score
+                            tracker.baseline=Draft(actual,count,savedScore)
                             tracker.draft?.let { current ->
                                 if(current == draft) {
                                     current.status=actual
                                     current.watched=count
+                                    current.score=savedScore
                                     current.explicitNone=false
                                 }
                             }
                         } else if (tracker.simklSeason != null) {
                             val actual = tracker.simklSeason!!
                             tracker.baseline = Draft(simklSeasonStatus(actual),
-                                actual.watched.size, draft.score)
+                                actual.watched.size,
+                                if(draft.status==SyncWatchType.NONE && draft.explicitNone)
+                                    null else draft.score)
                             tracker.draft = tracker.baseline?.snapshot()
                         } else if(prefix=="mal" && draft.status==SyncWatchType.NONE &&
                             draft.explicitNone) {
