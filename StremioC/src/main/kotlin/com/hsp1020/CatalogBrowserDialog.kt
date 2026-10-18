@@ -1147,7 +1147,7 @@ internal class CatalogBrowserDialog(
         visibility = View.GONE
     }
 
-    private fun selectorRow(title: String, spinner: AppCompatSpinner, arrow: TextView) =
+    private fun selectorRow(title: String, spinner: AppCompatSpinner, arrow: TextView, gap: Int) =
         LinearLayout(activity).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(TextView(activity).apply {
@@ -1156,7 +1156,8 @@ internal class CatalogBrowserDialog(
                 gravity = Gravity.CENTER_VERTICAL
                 setTextColor(activity.colorFromAttribute(R.attr.textColor))
                 setSingleLine(true)
-            }, LinearLayout.LayoutParams(dp(82), dp(48)))
+            }, LinearLayout.LayoutParams(
+                selectorLabelStyle.paint.measureText(title).roundToInt() + gap, dp(48)))
             addView(FrameLayout(activity).apply {
                 addView(spinner, FrameLayout.LayoutParams(-1, -1))
                 addView(arrow, FrameLayout.LayoutParams(dp(40), -1, Gravity.END))
@@ -1199,7 +1200,10 @@ internal class CatalogBrowserDialog(
             val searchGap = (dp(82) -
                 selectorLabelStyle.paint.measureText("Type").roundToInt() - dp(12))
                 .coerceAtLeast(0) / 2
-            val labelInset = dp(24) + searchGap
+            val spinnerStart = dp(24) + searchGap + dp(82)
+            val labelInset = { title: String ->
+                spinnerStart - selectorLabelStyle.paint.measureText(title).roundToInt() - searchGap
+            }
             val search = ImageView(activity).apply {
                 setImageResource(R.drawable.search_icon)
                 imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.textColor))
@@ -1216,17 +1220,18 @@ internal class CatalogBrowserDialog(
             }
             addView(LinearLayout(activity).apply {
                 gravity = Gravity.CENTER_VERTICAL
+                setPadding(labelInset("Type") - dp(24) - searchGap, 0, 0, 0)
                 addView(search, LinearLayout.LayoutParams(dp(24), dp(24)).apply {
                     marginEnd = searchGap
                 })
-                addView(selectorRow("Type", typeSelector, typeArrow),
+                addView(selectorRow("Type", typeSelector, typeArrow, searchGap),
                     LinearLayout.LayoutParams(0, -2, 1f))
             }, ViewGroup.LayoutParams(-1, -2))
-            addView(selectorRow("Catalog", catalogSelector, catalogArrow).apply {
-                setPadding(labelInset, 0, 0, 0)
+            addView(selectorRow("Catalog", catalogSelector, catalogArrow, searchGap).apply {
+                setPadding(labelInset("Catalog"), 0, 0, 0)
             }, ViewGroup.LayoutParams(-1, -2))
-            addView(selectorRow("Genre", genreSelector, genreArrow).apply {
-                setPadding(labelInset, 0, 0, 0)
+            addView(selectorRow("Genre", genreSelector, genreArrow, searchGap).apply {
+                setPadding(labelInset("Genre"), 0, 0, 0)
             }, ViewGroup.LayoutParams(-1, -2))
         }
         val header = AppBarLayout(activity).apply {
