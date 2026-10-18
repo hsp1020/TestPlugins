@@ -1422,8 +1422,13 @@ internal class RatingPlotImageHook(
             val countDiff = requestedCount - initial.watched.size
             val autoWatching = baseline.status == SyncWatchType.NONE &&
                 draft.status == SyncWatchType.WATCHING && countDiff > 0
+            val progressDemotion = draft.status == SyncWatchType.WATCHING &&
+                baseline.status == SyncWatchType.COMPLETED && countDiff < 0
+            // Manually reducing a completed season changes its local display,
+            // not the title-wide Simkl watchlist category.
             val statusChanged = !clearSelectedSeason && !seasonCompleted &&
-                draft.status != baseline.status && !autoWatching
+                draft.status != baseline.status && !autoWatching &&
+                !progressDemotion && initial.listStatus != draft.status
             val otherWatched=initial.otherSeasons.values.any { it.isNotEmpty() }
             val fullDelete=clearSelectedSeason && !otherWatched
             trace("TV_SAVE_PLAN", "none=$clearSelectedSeason fullDelete=$fullDelete otherWatched=$otherWatched seasonComplete=$seasonCompleted requested=$requestedCount diff=$countDiff statusChanged=$statusChanged autoWatching=$autoWatching statusKnown=${initial.listStatus!=null}")
@@ -1763,9 +1768,25 @@ internal class RatingPlotImageHook(
              catch(e: Exception){
                   traceError("SYNC_EXCEPTION", e)
                   return null}
+            trace("ANIME_LIBRARY_HTTP", "code=${response.code} bytes=${response.text.length} kind=${response.text.trim().firstOrNull()}")
             if(response.code !in 200..299)return null
-            trace("ANIME_LIBRARY_HTTP", "code=${response.code}")
-            val body=runCatching { JSONObject(response.text) }.getOrNull() ?: return null
+            if(response.text.trim()=="null") {
+                // Simkl sometimes returns the JSON literal null (HTTP 200).
+                // Neither treat it as an empty library nor as a saved status.
+                val fallback=simklAnimeWatched(repo,ids)
+                val statuses=ids.mapNotNull { fallback?.statuses?.get(it) }
+                val exact=fallback!=null && statuses.size==ids.size &&
+                    statuses.distinct().size==1
+                val confirmed=if(exact)statuses.firstOrNull() else null
+                trace("ANIME_LIBRARY_NULL_FALLBACK",
+                    "ids=$ids gridPresent=${fallback!=null} returned=${fallback?.statuses?.keys} watched=${fallback?.watched?.size} status=$confirmed exact=$exact")
+                return confirmed
+            }
+            val body=runCatching { JSONObject(response.text) }.getOrNull()
+            if(body==null) {
+                trace("ANIME_LIBRARY_SCHEMA", "kind=invalid-json")
+                return null
+            }
             val anime=body.optJSONArray("anime") ?: return null
             val statuses=linkedMapOf<Int, SyncWatchType>()
             for(i in 0 until anime.length()) {
@@ -1822,7 +1843,7 @@ internal class RatingPlotImageHook(
                     trace("ANIME_DELETE_READ_EXCEPTION", "attempt=$attempt type=${e.javaClass.simpleName}")
                     continue
                  }
-                trace("ANIME_DELETE_READ_HTTP", "attempt=$attempt code=${check.code} bytes=${check.text.length} prefix=${check.text.trim().firstOrNull()}")
+                trace("ANIME_DELETE_READ_HTTP", "attempt=$attempt code=${check.code} bytes=${check.text.length} prefix=${check.text.trim().firstOrNull()} isJsonNull=${check.text.trim()=="null"}")
                 if(check.code !in 200..299)continue
                 val body=runCatching { JSONObject(check.text) }.getOrNull()
                 if(body==null){
@@ -2568,7 +2589,8 @@ internal class RatingPlotImageHook(
                     val entered = s?.toString()?.toIntOrNull() ?: return
                     val clamped = entered.coerceIn(0, tracker.total?.takeIf { it > 0 } ?: Int.MAX_VALUE)
                     draft.watched = clamped
-                    trace("UI_EPISODE_INPUT", "provider=$selected input=$entered clamped=$clamped")
+                    reconcileManualProgress(tracker,draft,"input")
+                    trace("UI_EPISODE_INPUT", "provider=$selected input=$entered clamped=$clamped status=${draft.status}")
                     root.post { if (active && selected == tracker.prefix) render() }
                 }
                 override fun afterTextChanged(s: Editable?) {}
@@ -2597,6 +2619,21 @@ internal class RatingPlotImageHook(
             } finally { applying = false }
         }
 
+        /** A partial episode count cannot retain a completed local state.
+         * NONE remains an explicit selection (and may delete watchlist data).
+         */
+        private fun reconcileManualProgress(tracker: Tracker, edit: Draft, source: String) {
+            val total=tracker.total?.takeIf { it>0 }
+            if(total!=null && edit.status==SyncWatchType.COMPLETED &&
+                edit.watched<total) {
+                edit.status=SyncWatchType.WATCHING
+                edit.explicitNone=false
+                trace("PROGRESS_DEMOTE", "provider=${tracker.prefix} source=$source count=${edit.watched} total=$total status=WATCHING")
+            } else {
+                trace("PROGRESS_RULE", "provider=${tracker.prefix} source=$source count=${edit.watched} total=$total status=${edit.status}")
+            }
+        }
+
         private fun adjust(delta: Int) {
             val tracker = statuses[selected] ?: return
             if (tracker.saving || tracker.writeBlocked != null) {
@@ -2606,7 +2643,8 @@ internal class RatingPlotImageHook(
             val draft = tracker.draft ?: return
             val upper = tracker.total?.takeIf { it > 0 } ?: Int.MAX_VALUE
             draft.watched = (draft.watched.toLong() + delta).coerceIn(0L, upper.toLong()).toInt()
-            trace("UI_EPISODE_STEP", "provider=$selected delta=$delta value=${draft.watched} limit=$upper")
+            reconcileManualProgress(tracker,draft,"step")
+            trace("UI_EPISODE_STEP", "provider=$selected delta=$delta value=${draft.watched} limit=$upper status=${draft.status}")
             render()
         }
 
