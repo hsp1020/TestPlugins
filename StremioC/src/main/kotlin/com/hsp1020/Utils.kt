@@ -83,6 +83,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import com.lagradost.cloudstream3.mvvm.Resource
+import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.ui.result.SyncViewModel
@@ -751,6 +752,19 @@ internal class RatingPlotImageHook(
         val applied = matched.count { it.refreshLateMdb() }
     }
     private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview, ::bindPhoneHero)
+    private var homeRoot: View? = null
+    private var removeHomeProviderObserver: (() -> Unit)? = null
+    private fun syncHomeHooks() {
+        val activity = host
+        val selected = activity?.let { ViewModelProvider(it)[HomeViewModel::class.java].apiName.value }
+        if (selected != null && APIHolder.allProviders.any {
+                it is StremioC && it.hasMainPage && it.name == selected
+            }) {
+            homeRoot?.let { homeEntries.attach(it) }
+        } else {
+            homeEntries.detach()
+        }
+    }
     private var phoneHero: PhoneHeroHook? = null
     private fun bindPhoneHero(parent: RecyclerView?) {
         if (parent == null || !isLayout(PHONE)) {
@@ -1081,8 +1095,10 @@ internal class RatingPlotImageHook(
             fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?
         ) {
             runCatching {
-                if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
-                    homeEntries.attach(v)
+                if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment") {
+                    homeRoot = v
+                    syncHomeHooks()
+                }
                 if (f.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment")
                     setupSearchNavigation(f, v)
                 if (f.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment" &&
@@ -1117,6 +1133,8 @@ internal class RatingPlotImageHook(
         }
 
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
+            if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
+                syncHomeHooks()
             pipSubtitles.watch(f)
             audioSelector.watch(f)
             subtitleController.watch(f)
@@ -1128,8 +1146,10 @@ internal class RatingPlotImageHook(
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
-            if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
+            if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment") {
+                homeRoot = null
                 homeEntries.detach()
+            }
             releaseHomeMenu(f)
             pipSubtitles.detach(f)
             audioSelector.detach(f)
@@ -1160,6 +1180,9 @@ internal class RatingPlotImageHook(
         scrobble.detach()
         pipSubtitles.detach()
         StremioCMdbUiBridge.listen(null)
+        removeHomeProviderObserver?.invoke()
+        removeHomeProviderObserver = null
+        homeRoot = null
         homeEntries.detach()
         detachPreview()
         detailRevealEnd?.invoke()
@@ -1178,6 +1201,9 @@ internal class RatingPlotImageHook(
         audioSelector.detach()
         subtitleController.detach()
         scrobble.detach()
+        removeHomeProviderObserver?.invoke()
+        removeHomeProviderObserver = null
+        homeRoot = null
         homeEntries.detach()
         detachPreview()
         detailRevealEnd?.invoke()
@@ -1187,12 +1213,18 @@ internal class RatingPlotImageHook(
         watchers.clear()
         host = activity
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragmentCallback, true)
+        val homeModel = ViewModelProvider(activity)[HomeViewModel::class.java]
+        val homeObserver = Observer<String?> { syncHomeHooks() }
+        homeModel.apiName.observe(activity, homeObserver)
+        removeHomeProviderObserver = { homeModel.apiName.removeObserver(homeObserver) }
         observePreview(activity)
         fun scan(fm: FragmentManager) {
             fm.fragments.forEach { f ->
                 f.view?.let {
-                    if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
-                        homeEntries.attach(it)
+                    if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment") {
+                        homeRoot = it
+                        syncHomeHooks()
+                    }
                     attach(f, it)
                     pipSubtitles.watch(f)
                     audioSelector.watch(f)
@@ -3569,6 +3601,10 @@ internal class RatingPlotImageHook(
         if (activity is MainActivity) runCatching { use(activity) }
     }
     override fun onActivityDestroyed(activity: Activity) { if (host === activity) {
+        removeHomeProviderObserver?.invoke()
+        removeHomeProviderObserver = null
+        homeRoot = null
+        homeEntries.detach()
         detachPreview()
         detailRevealEnd?.invoke()
         resetSearchState()
