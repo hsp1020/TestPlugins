@@ -53,6 +53,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.navigation.NavController
+import androidx.navigation.fragment.FragmentNavigator
 import androidx.navigation.fragment.NavHostFragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -970,7 +971,8 @@ internal class CatalogBrowserDialog(
         var stable = 0
         lateinit var check: Runnable
         check = Runnable {
-            if (closed || detailHandoff.isActive || navigation?.currentBackStackEntry?.id != entryId) {
+            if (closed || detailHandoff.isActive ||
+                navigation?.currentDestination?.id != destinationId) {
                 pendingDestinationCheck = null
                 return@Runnable
             }
@@ -978,10 +980,10 @@ internal class CatalogBrowserDialog(
                 .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment
             val fragment = host?.childFragmentManager?.primaryNavigationFragment
             val view = fragment?.view
-            val ready = fragment != null &&
-                (destinationId == R.id.navigation_home ||
-                    fragment.javaClass.name != "com.lagradost.cloudstream3.ui.home.HomeFragment") &&
-                fragment.isResumed && view?.isShown == true &&
+            val destinationClass = (navigation?.currentDestination as? FragmentNavigator.Destination)?.className
+            val ready = fragment != null && fragment.isAdded &&
+                (destinationClass == null || fragment.javaClass.name == destinationClass) &&
+                view?.isAttachedToWindow == true && view.isShown &&
                 view.width > 0 && view.height > 0 && !view.isLayoutRequested &&
                 view.animation?.hasEnded() != false
             stable = if (ready) stable + 1 else 0
