@@ -2247,7 +2247,6 @@ internal class RatingPlotImageHook(
                                     simklExact?.watched?.size ?: 0
                                 else it.watchedEpisodes ?: 0, it.score)
                         }
-                        Triple(repo.idPrefix, fields, Pair(total, origin))
                         trace("DRAFT", "provider=${repo.idPrefix} status=${fields?.status} watched=${fields?.watched} total=$total source=$origin")
                         Triple(repo.idPrefix, fields, Pair(total, origin))
                     }
@@ -2282,10 +2281,6 @@ internal class RatingPlotImageHook(
                             "simkl-season-episodes-unverified"
                         multi && isAnime == true && prefix == "simkl" &&
                             target.simklAnime == null -> "simkl-anime-episode-map-unverified"
-                        else -> null
-                    }
-                }
-                updateOptions()
                         else -> null
                     }
                     trace("TRACKER_READY", "provider=$prefix blocked=${target.writeBlocked} error=${target.error} status=${target.draft?.status} watched=${target.draft?.watched} total=${target.total}")
