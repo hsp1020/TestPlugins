@@ -458,6 +458,7 @@ open class StremioC(
 
     private suspend fun simklLibraryMetaUrl(url: String, base: String): String? {
         val simklId = libraryItemId(url, "simkl.com", "tv", "movies", "anime") ?: return null
+        syncDiag("SIMKL_LIBRARY_BEGIN", "id=$simklId inputHash=${url.hashCode()}")
         val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
             ?.authData() ?: return null
 
@@ -470,14 +471,17 @@ open class StremioC(
 
         // CloudStream persists the complete, account-scoped Simkl library, including external IDs.
         val cached = run {
+        syncDiag("SIMKL_LIBRARY_AUTH", "authenticated=true")
             getKey<JsonNode>(SimklApi.SIMKL_CACHED_LIST, auth.user.id.toString())
         }
         for ((section, type) in listOf("movies" to "movie", "shows" to "series", "anime" to "series")) {
             val item = cached?.get(section)?.firstOrNull {
+            syncDiag("SIMKL_LIBRARY_CACHE_LOOKUP", "section=$section available=${cached?.get(section)?.size()}")
                 val content = if (section == "movies") it.get("movie") else it.get("show")
                 content?.get("ids")?.get("simkl")?.asText() == simklId
             } ?: continue
             val ids = (if (section == "movies") item.get("movie") else item.get("show"))?.get("ids")
+            syncDiag("SIMKL_LIBRARY_CACHE_HIT", "section=$section idKeys=${ids?.fieldNames()?.asSequence()?.toList()}")
             if (section != "anime") {
                 simklMetaUrl(base, type, ids)?.let { return it }
                 continue
@@ -510,6 +514,7 @@ open class StremioC(
 
         // Cache miss (or no external ID): first identify the media type, then fetch full IDs.
         val matches = runSuspendCatching {
+            syncDiag("SIMKL_LIBRARY_SEARCH", "simklId=$simklId cacheMiss=true")
             run {
                 parseJson<JsonNode>(customSession.get(
                     "https://api.simkl.com/search/id",
@@ -520,6 +525,7 @@ open class StremioC(
             }
         }.getOrNull()
         val match = matches?.takeIf { it.isArray }?.firstOrNull {
+        syncDiag("SIMKL_LIBRARY_SEARCH_RESULT", "typeIsArray=${matches?.isArray} itemCount=${matches?.size()}")
             it.get("ids")?.get("simkl")?.asText() == simklId
         } ?: return null
         val endpoint = when (match.get("type").textOrNull()?.lowercase()) {
@@ -529,6 +535,7 @@ open class StremioC(
             else -> return null
         }
         val detail = runSuspendCatching {
+            syncDiag("SIMKL_LIBRARY_DETAIL", "endpoint=$endpoint simklId=$simklId")
             run {
                 parseJson<JsonNode>(customSession.get(
                     "https://api.simkl.com/$endpoint/$simklId",
@@ -616,6 +623,7 @@ open class StremioC(
 
     override suspend fun getLoadUrl(name: SyncIdName, id: String): String? {
         val resolved = getLoadUrlInternal(name, id)
+        syncDiag("LIBRARY_ROUTE", "type=$name idHash=${id.hashCode()} resolved=${resolved!=null} resolvedHash=${resolved?.hashCode()}")
         // The sync provider's lookup URL is not necessarily the URL kept in
         // ResultFragment arguments. MAL and AniList can differ from the host's
         // canonical URL even for the same anime ID; Kitsu often does not.
@@ -646,6 +654,7 @@ open class StremioC(
     private suspend fun getLoadUrlInternal(name: SyncIdName, id: String): String? {
         if (mainUrl.isNotBlank()) return null
         val base = libraryMetadataBase() ?: return null
+        syncDiag("LIBRARY_META_BASE", "source=$name idHash=${id.hashCode()} basePresent=true")
         if (name == SyncIdName.Simkl) return simklLibraryMetaUrl(id, base)
         val (directId, itemId) = when (name) {
             SyncIdName.MyAnimeList -> libraryItemId(id, "myanimelist.net", "anime")?.let { "mal:$it" to it }
@@ -654,6 +663,7 @@ open class StremioC(
             else -> null
         } ?: return null
         val type = animeLibraryMetaType(name, itemId) ?: return null
+        syncDiag("LIBRARY_ANIME_TYPE", "provider=$name itemId=$itemId resolvedType=$type")
         return "$base/meta/$type/${directId.urlEncode()}.json"
     }
 
@@ -3136,19 +3146,29 @@ open class StremioC(
         val traktSeason: Int?
     )
 
+    /** Temporary one-pass tracker diagnostics. No tokens or raw addon configuration URLs. */
+    private fun syncDiag(stage: String, data: String = "") {
+        android.util.Log.i("STREMIOC_SYNC", "component=MAP stage=$stage $data")
+    }
+
     /** Reuses the existing AIOStreams anime season mapping and its memory/disk cache. */
     internal suspend fun seasonTrackerIds(imdbId: String, season: Int): SeasonTrackerIds? {
         if (!IMDB_ID_REGEX.matches(imdbId) || season <= 0) return null
+        syncDiag("SEASON_MAP_REQUEST", "imdb=$imdbId season=$season")
         val mapped = fetchAnimeSeasonMapping(LoadData(
             id = imdbId, imdbId = imdbId, imdbSeason = season, isAnime = true
         )) ?: return null
+        )) ?: return null
         if (mapped.imdbId != imdbId) {
+            syncDiag("SEASON_MAP_REJECT", "reason=imdbMismatch requested=$imdbId actual=${mapped.imdbId}")
             return null
         }
         // A multi-season IMDb page must never attach a different season's tracker ID.
+        syncDiag("SEASON_MAP_MATCH", "simkl=${mapped.simklId} mal=${mapped.malId} al=${mapped.aniListId} kitsu=${mapped.kitsuId} tvdb=${mapped.tvdbId} imdbSeason=${mapped.imdbSeason} tvdbSeason=${mapped.tvdbSeason}")
         if (season > 1 && mapped.imdbSeason != season &&
             mapped.tvdbSeason != season && mapped.traktSeason != season &&
             mapped.tmdbSeason != season) {
+            syncDiag("SEASON_MAP_REJECT", "reason=seasonMismatch requested=$season imdb=${mapped.imdbSeason} tvdb=${mapped.tvdbSeason} trakt=${mapped.traktSeason} tmdb=${mapped.tmdbSeason}")
             return null
         }
         return SeasonTrackerIds(mapped.malId, mapped.aniListId,
@@ -3161,12 +3181,14 @@ open class StremioC(
     /** Reuse the existing AIOStreams cache for an anime movie or a split season. */
     internal suspend fun playbackTrackerIds(loadData: LoadData): SeasonTrackerIds? {
         val mapped = fetchAnimeSeasonMapping(loadData) ?: return null
+        syncDiag("PLAYBACK_MAP", "idHash=${loadData.id?.hashCode()} imdb=${mapped.imdbId} simkl=${mapped.simklId} mal=${mapped.malId} al=${mapped.aniListId} kitsu=${mapped.kitsuId}")
         return SeasonTrackerIds(mapped.malId, mapped.aniListId,
             mapped.kitsuId?.toIntOrNull(), mapped.simklId, mapped.tvdbId,
             mapped.tvdbSeason, mapped.tmdbSeason)
     }
 
     private suspend fun fetchAnimeSeasonMapping(loadData: LoadData): AnimeSeasonMapping? {
+        syncDiag("AIO_MAP_BEGIN", "idHash=${loadData.id?.hashCode()} originalHash=${loadData.originalAnimeId?.hashCode()} imdb=${loadData.imdbId} season=${loadData.imdbSeason} episode=${loadData.imdbEpisode} isAnime=${loadData.isAnime}")
         val aniListLookupId = loadData.originalAnimeId?.takeIf { it.startsWith("anilist:") }
             ?.removePrefix("anilist:")?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
             ?: loadData.anilistId?.takeIf { it > 0 }
@@ -3197,6 +3219,7 @@ open class StremioC(
         val season = loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 }
         val episode = loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 }
         val query = when {
+            syncDiag("AIO_MAP_ID", "resolved=$id imdb=$imdbId kitsu=$kitsuId mal=$malLookupId al=$aniListLookupId byMal=$byMal byKitsu=$byKitsu byAl=$byAniList season=$season episode=$episode")
             byMal -> "idType=malId&idValue=$id"
             byAniList -> "idType=anilistId&idValue=$id"
             byKitsu || (id == kitsuId && imdbId == null) -> "idType=kitsuId&idValue=$id"
@@ -3215,18 +3238,21 @@ open class StremioC(
             }
         }
         if (cachedAnime != null) {
+            syncDiag("AIO_MAP_CACHE_HIT", "queryHash=${query.hashCode()} hasSimkl=${cachedAnime.first.simklId != null} mappedImdbSeason=${cachedAnime.first.imdbSeason}")
             return cachedAnime.first
         }
         val noMappingStamp = animeNoMappingCache[query]
         if (noMappingStamp != null) {
             val age = System.currentTimeMillis() - noMappingStamp
             if (age >= 0L && age < 15L * 60 * 1000) {
+                syncDiag("AIO_MAP_MISS_MEMORY", "queryHash=${query.hashCode()} ageMs=$age")
                 return null
             }
             animeNoMappingCache.remove(query)
         }
         MetadataDiskCache.read("missing_anime", query)?.takeIf { it.first == "null" }?.let {
             animeNoMappingCache[query] = it.second
+            syncDiag("AIO_MAP_MISS_DISK", "queryHash=${query.hashCode()}")
             return null
         }
         val hosts = listOf(
@@ -3238,12 +3264,14 @@ open class StremioC(
             "aiostreams.viren070.me"
         )
         for (host in hosts) {
+            syncDiag("AIO_MAP_HOST_START", "host=$host queryHash=${query.hashCode()}")
             var noMapping = false
             val outcome = runSuspendCatching {
             val response = run {
                 fetchSharedAnimeText("https://$host/api/v1/anime?$query")
             }
             val root = run { parseJson<JsonNode>(response) }
+            syncDiag("AIO_MAP_HOST_RESPONSE", "host=$host success=${root.get("success")?.asBoolean()} dataNull=${root.get("data")?.isNull} bytes=${response.length}")
             if (root.get("success")?.asBoolean() != true) {
                 return@runSuspendCatching null
             }
@@ -3315,7 +3343,9 @@ open class StremioC(
             )
             }
             val mapping = outcome.getOrNull()
+            syncDiag("AIO_MAP_HOST_OUTCOME", "host=$host mapped=${mapping!=null} noMapping=$noMapping resolvedSimkl=${mapping?.simklId} resolvedMal=${mapping?.malId} resolvedAl=${mapping?.aniListId} imdbSeason=${mapping?.imdbSeason} tvdbSeason=${mapping?.tvdbSeason}")
             if (noMapping) {
+                syncDiag("AIO_MAP_MISS_CONFIRMED", "host=$host queryHash=${query.hashCode()}")
                 // Cache only an authoritative success=true/data=null response, never host errors.
                 animeNoMappingCache[query] = System.currentTimeMillis()
                 addonMetaScope.launch {
@@ -3324,11 +3354,13 @@ open class StremioC(
                 return null
             }
             if (mapping != null) {
+                syncDiag("AIO_MAP_SAVE_CACHE", "host=$host queryHash=${query.hashCode()}")
                 animeMappingCache[query] = mapping to System.currentTimeMillis()
                 MetadataDiskCache.write("anime", query, mapping.toJson())
                 return mapping
             }
         }
+        syncDiag("AIO_MAP_EXHAUSTED", "queryHash=${query.hashCode()} hosts=${hosts.size}")
         return null
     }
 
