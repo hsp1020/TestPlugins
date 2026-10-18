@@ -34,13 +34,16 @@ import com.lagradost.cloudstream3.utils.UIHelper.navigate
 class ElevatePlugin : Plugin() {
     private var hook: NativeDetailSearchHook? = null
     private var pipSubtitles: PipSubtitleLifecycle? = null
+    private var episodeProgress: EpisodeProgressHook? = null
 
     override fun load(context: Context) {
         hook?.stop()
         pipSubtitles?.stop()
+        episodeProgress?.stop()
         val application = context.applicationContext as? Application
         hook = application?.let { NativeDetailSearchHook(it).also(NativeDetailSearchHook::start) }
         pipSubtitles = application?.let { PipSubtitleLifecycle(it) { true }.also { service -> service.start() } }
+        episodeProgress = application?.let { EpisodeProgressHook(it).also(EpisodeProgressHook::start) }
     }
 
     override fun beforeUnload() {
@@ -48,6 +51,8 @@ class ElevatePlugin : Plugin() {
         hook = null
         pipSubtitles?.stop()
         pipSubtitles = null
+        episodeProgress?.stop()
+        episodeProgress = null
         super.beforeUnload()
     }
 }
