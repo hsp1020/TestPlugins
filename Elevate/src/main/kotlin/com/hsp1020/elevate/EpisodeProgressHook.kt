@@ -165,19 +165,20 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
             val poster = row.findViewById<ImageView>(
                 if (home) R.id.imageView else R.id.episode_poster
             )
+            val originalOverlay = row.findViewById<View>(R.id.watch_progress_container)
             val frame = if (home) row.findViewById<FrameLayout>(R.id.background_card)
                         else poster?.parent as? FrameLayout
-            if (nativeProgress == null || poster == null || frame == null) {
+            if (nativeProgress == null || poster == null || frame == null || originalOverlay == null) {
                 rows.remove(row)?.restore()
                 return
             }
 
             val current = rows[row]
-            val state = if (current != null && current.native === nativeProgress && current.frame === frame) {
+            val state = if (current != null && current.native === nativeProgress && current.frame === frame && current.overlay === originalOverlay) {
                 current
             } else {
                 current?.restore()
-                RowProgress(nativeProgress, frame, createProgressBar(frame.context)).also {
+                RowProgress(nativeProgress, frame, originalOverlay, createProgressBar(frame.context)).also {
                     frame.addView(it.horizontal)
                     rows[row] = it
                 }
@@ -215,25 +216,23 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
     private class RowProgress(
         val native: ProgressBar,
         val frame: FrameLayout,
+        val overlay: View,
         val horizontal: ProgressBar
     ) {
-        private var nativeVisibility = native.visibility
+        private val originalOverlayVisibility = overlay.visibility
 
         fun update() {
-            if (native.visibility != View.INVISIBLE) nativeVisibility = native.visibility
-            val visible = nativeVisibility == View.VISIBLE && native.max > 0 && native.progress > 0
+            val visible = native.visibility == View.VISIBLE && native.max > 0 && native.progress > 0
             val amount = if (visible) (native.progress.toFloat() / native.max * 1000f).toInt().coerceIn(0, 1000) else 0
             if (horizontal.progress != amount) horizontal.progress = amount
             val target = if (visible) View.VISIBLE else View.GONE
             if (horizontal.visibility != target) horizontal.visibility = target
-            if (nativeVisibility == View.VISIBLE && native.visibility != View.INVISIBLE) {
-                native.visibility = View.INVISIBLE
-            }
+            if (overlay.visibility != View.INVISIBLE) overlay.visibility = View.INVISIBLE
         }
 
         fun restore() {
             if (horizontal.parent === frame) frame.removeView(horizontal)
-            native.visibility = nativeVisibility
+            overlay.visibility = originalOverlayVisibility
         }
     }
 
