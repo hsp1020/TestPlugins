@@ -90,6 +90,20 @@ internal data class SeasonTrackerIds(
 private fun String.urlEncode(): String = try { URLEncoder.encode(this, "UTF-8").replace("+", "%20") } catch (e: Exception) { this }
 
 
+private val stremioRuntimePattern = Regex("""(?i)^(?:(\d+)\s*h(?:ours?|rs?)?\s*)?(?:(\d+)\s*m(?:in(?:utes?)?)?\s*)?$""")
+
+/** CloudStream stores movie duration and episode runTime as whole minutes. */
+private fun stremioRuntimeMinutes(runtime: String?): Int? {
+    val value = runtime?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    value.toIntOrNull()?.takeIf { it > 0 }?.let { return it }
+    val parts = stremioRuntimePattern.matchEntire(value) ?: return null
+    if (parts.groupValues[1].isEmpty() && parts.groupValues[2].isEmpty()) return null
+    val hours = parts.groupValues[1].ifEmpty { "0" }.toIntOrNull() ?: return null
+    val minutes = parts.groupValues[2].ifEmpty { "0" }.toIntOrNull() ?: return null
+    val total = hours.toLong() * 60L + minutes
+    return total.takeIf { it in 1L..Int.MAX_VALUE.toLong() }?.toInt()
+}
+
 private fun String.cleanBaseUrl(): String {
     return this.substringBefore("?").replace("/manifest.json", "").trimEnd('/')
 }
@@ -4102,6 +4116,7 @@ open class StremioC(
         @JsonProperty("background") val background: String? = null, 
         @JsonProperty("logo") val logo: String? = null,
         @JsonProperty("description") val description: String? = null, 
+        @JsonProperty("runtime") val runtime: String? = null,
         @JsonProperty("imdbRating") val imdbRating: String? = null, 
         @JsonProperty("type") val type: String? = null,
         @JsonProperty("original_language") val original_language: String? = null,
@@ -4768,7 +4783,10 @@ open class StremioC(
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations 
-                    this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
+                    this.duration = stremioRuntimeMinutes(this@CatalogEntry.runtime)
+                        ?: finalVideos?.singleOrNull()?.runtime?.let(::stremioRuntimeMinutes)
+                        ?: tmdbData?.fetchedRuntime
+                    this.contentRating = tmdbData?.fetchedAgeRating
                     finalLogo?.let { this.logoUrl = it }
 
 
@@ -4849,6 +4867,7 @@ open class StremioC(
         @JsonProperty("description") val description: String? = null,
         @JsonProperty("firstAired") val firstAired: String? = null,
         @JsonProperty("released") val released: String? = null,
+        @JsonProperty("runtime") val runtime: String? = null,
         @JsonProperty("tvdb_id") val tvdb_id: Int? = null,
         @JsonProperty("imdbSeason") val imdbSeason: Int? = null,
         @JsonProperty("imdbEpisode") val imdbEpisode: Int? = null,
@@ -4927,6 +4946,8 @@ open class StremioC(
                 this.description = finalEpDesc
                 this.season = displaySeason
                 this.episode = displayEpisode
+                this.runTime = stremioRuntimeMinutes(this@Video.runtime)
+                    ?: tmdbEp?.runtime?.takeIf { it > 0 }
 
                 finalAirDate?.takeIf { it.isNotBlank() }?.let { this.addDate(it) }
             }
