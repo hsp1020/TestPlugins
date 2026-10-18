@@ -971,36 +971,45 @@ internal class CatalogBrowserDialog(
     private fun restoreSearchAfterIme() {
         pendingSearchReturn?.invoke()
         searchFocusIssued = false
-        previousSearchSoftInput?.let(activity.window::setSoftInputMode)
-        previousSearchSoftInput = null
-        dialog.window?.apply {
-            addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
-        }
-        dialog.show()
-        fitWindowToNavigation(force = true)
         val decor = activity.window.decorView
         val tree = decor.viewTreeObserver
-        if (!tree.isAlive) {
-            dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-            return
-        }
         var stable = 0
-        lateinit var listener: ViewTreeObserver.OnPreDrawListener
-        val release = {
-            if (tree.isAlive) tree.removeOnPreDrawListener(listener)
-            if (!closed) dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-            pendingSearchReturn = null
-        }
-        listener = ViewTreeObserver.OnPreDrawListener {
+        fun ready(): Boolean {
             val insets = ViewCompat.getRootWindowInsets(decor)
             val keyboard = insets?.isVisible(WindowInsetsCompat.Type.ime()) == true ||
                 (insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0) >
                 (insets?.getInsets(WindowInsetsCompat.Type.systemBars())?.bottom ?: 0) + dp(8)
-            stable = if (!keyboard) stable + 1 else 0
-            if (closed || navigation?.currentBackStackEntry?.id != originEntryId ||
-                stable >= 3) release()
-            else decor.postInvalidateOnAnimation()
+            val home = stremioCurrentDestinationView(activity, navigation)
+            return !keyboard && navigation?.currentDestination?.id == R.id.navigation_home &&
+                home != null && home.isShown && home.width > 0 && home.height > 0 &&
+                !home.isLayoutRequested && home.animation?.hasEnded() != false
+        }
+        fun showBrowser() {
+            if (closed || navigation?.currentBackStackEntry?.id != originEntryId) return
+            previousSearchSoftInput?.let(activity.window::setSoftInputMode)
+            previousSearchSoftInput = null
+            dialog.show()
+            fitWindowToNavigation(force = true)
+        }
+        if (!tree.isAlive) {
+            if (ready()) showBrowser()
+            return
+        }
+        lateinit var listener: ViewTreeObserver.OnPreDrawListener
+        val release = {
+            if (tree.isAlive) tree.removeOnPreDrawListener(listener)
+            pendingSearchReturn = null
+        }
+        listener = ViewTreeObserver.OnPreDrawListener {
+            if (closed || navigation?.currentBackStackEntry?.id != originEntryId) {
+                release()
+            } else {
+                stable = if (ready()) stable + 1 else 0
+                if (stable >= 3) {
+                    release()
+                    showBrowser()
+                } else decor.postInvalidateOnAnimation()
+            }
             true
         }
         pendingSearchReturn = release
