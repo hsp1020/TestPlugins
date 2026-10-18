@@ -1404,7 +1404,6 @@ internal class RatingPlotImageHook(
                 for (attempt in 1..3) {
                     if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
                     val current = simklSeasonRead(tracker.repo, tracker.id, sn)
-                    trace("TV_STATUS_VERIFY", "attempt=$attempt accepted=$accepted actual=${current?.listStatus} watched=${current?.watched} other=${current?.otherSeasons?.mapValues { it.value.size }}")
                     trace("TV_EPISODE_VERIFY_START", "attempt=$attempt beforeOther=${initial.otherSeasons.mapValues { it.value.size }} expected=$expected")
                     confirmed = current?.watched == expected &&
                         initial.otherSeasons.all { (key, seen) ->
@@ -1445,6 +1444,7 @@ internal class RatingPlotImageHook(
                 for (attempt in 1..3) {
                     if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
                     val current = simklSeasonRead(tracker.repo, tracker.id, sn)
+                    trace("TV_STATUS_VERIFY", "attempt=$attempt accepted=$accepted actual=${current?.listStatus} watched=${current?.watched} other=${current?.otherSeasons?.mapValues { it.value.size }}")
                     if (current?.listStatus == accepted &&
                         current.watched == (tracker.simklSeason ?: initial).watched &&
                         current.otherSeasons == (tracker.simklSeason ?: initial).otherSeasons) {
