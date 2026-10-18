@@ -1118,7 +1118,8 @@ internal class RatingPlotImageHook(
             val available: List<Int>,
             val watched: Set<Int>,
             val otherSeasons: Map<Int, Set<Int>>,
-            val listStatus: SyncWatchType?
+            val listStatus: SyncWatchType?,
+            val otherSeasonsComplete: Boolean
         )
 
         private fun simklSeasonStatus(snap: SimklSeasonSnapshot): SyncWatchType {
@@ -1195,9 +1196,13 @@ internal class RatingPlotImageHook(
                 val chosen = parsed[requested]
                 val listStatus = record?.takeIf { it.has("list") }
                     ?.let { simklWatchlistStatus(it.opt("list")) }
+                val others=parsed.filterKeys { it != requested }
                 val result = if (!malformed && chosen != null && chosen.first.isNotEmpty())
                     SimklSeasonSnapshot(ids, requested, chosen.first, chosen.second,
-                        parsed.filterKeys { it != requested }.mapValues { it.value.second }, listStatus)
+                        others.mapValues { it.value.second }, listStatus,
+                        others.isNotEmpty() && others.values.all { (episodes, watched) ->
+                            episodes.isNotEmpty() && episodes.size == watched.size
+                        })
                 else null
                 result
             } catch (e: CancellationException) { throw e }
@@ -1339,13 +1344,19 @@ internal class RatingPlotImageHook(
             val progressDemotion = draft.status == SyncWatchType.WATCHING &&
                 baseline.status == SyncWatchType.COMPLETED && countDiff < 0
 
-            val statusChanged = !clearSelectedSeason && !seasonCompleted &&
+            val completionNeeded = !clearSelectedSeason &&
+                requestedCount == initial.available.size && initial.otherSeasonsComplete &&
+                initial.listStatus != SyncWatchType.COMPLETED &&
+                (draft.status == SyncWatchType.COMPLETED ||
+                    draft.status == SyncWatchType.WATCHING)
+            val statusChanged = completionNeeded || (!clearSelectedSeason && !seasonCompleted &&
                 draft.status != baseline.status && !autoWatching &&
-                !progressDemotion && initial.listStatus != draft.status
+                !progressDemotion && initial.listStatus != draft.status)
+            val destinationStatus = if(completionNeeded) SyncWatchType.COMPLETED else draft.status
             val otherWatched=initial.otherSeasons.values.any { it.isNotEmpty() }
             val fullDelete=clearSelectedSeason && !otherWatched
             if (statusChanged && (initial.listStatus == null ||
-                    simklWatchlistDestination(draft.status) == null)) return false
+                    simklWatchlistDestination(destinationStatus) == null)) return false
 
             if(fullDelete) {
 
@@ -1442,7 +1453,7 @@ internal class RatingPlotImageHook(
 
             if (statusChanged) {
 
-                val destination = simklWatchlistDestination(draft.status) ?: return false
+                val destination = simklWatchlistDestination(destinationStatus) ?: return false
                 val payload = JSONObject().put("shows", JSONArray().put(
                     JSONObject().put("ids", initial.ids).put("to", destination)))
                 val response = try {
@@ -1458,7 +1469,8 @@ internal class RatingPlotImageHook(
                     return false
                 val accepted = result.optJSONObject("added")?.optJSONArray("shows")
                     ?.optJSONObject(0)?.opt("to")?.let { simklWatchlistStatus(it) }
-                    ?.takeIf { it != SyncWatchType.NONE } ?: draft.status
+                    ?.takeIf { it != SyncWatchType.NONE } ?: destinationStatus
+                if (completionNeeded && accepted != SyncWatchType.COMPLETED) return false
                 for (attempt in 1..3) {
                     if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
                     val current = simklSeasonRead(tracker.repo, tracker.id, sn)
@@ -2483,8 +2495,13 @@ internal class RatingPlotImageHook(
                 draft.status = SyncWatchType.WATCHING
                 tracker.draft?.status = SyncWatchType.WATCHING
             }
+            val statusRepair = tracker.simklSeason?.let { snap ->
+                draft.status == SyncWatchType.COMPLETED &&
+                    snap.watched.size == snap.available.size && snap.otherSeasonsComplete &&
+                    snap.listStatus != null && snap.listStatus != SyncWatchType.COMPLETED
+            } == true
             val updated = draft != before
-            if (!updated) { return }
+            if (!updated && !statusRepair) { return }
             if (draft.status == SyncWatchType.NONE && !draft.explicitNone &&
                 (draft.score != before.score || draft.watched != before.watched)) {
                 return
@@ -2521,7 +2538,7 @@ internal class RatingPlotImageHook(
                         malRemoveFromLibrary(tracker.repo,id)
                     } else if (tracker.simklSeason != null) {
                         val changed=draft.status!=before.status || draft.watched!=before.watched ||
-                            (draft.status==SyncWatchType.NONE && draft.explicitNone)
+                            (draft.status==SyncWatchType.NONE && draft.explicitNone) || statusRepair
                         val ratingChanged=draft.score!=before.score &&
                             !(draft.status==SyncWatchType.NONE && draft.explicitNone)
                         (!changed || simklSeasonSave(tracker,draft.copy(score=before.score),before,sn)) &&
