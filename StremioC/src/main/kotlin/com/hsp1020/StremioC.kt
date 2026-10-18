@@ -3007,13 +3007,14 @@ open class StremioC(
 
                     val originalLinks = fetchMainStreams(request, false)
                     if (targetType != "movie" && targetType != "series" && originalLinks == 0) {
-                        val mappedId = mappedAnimeStremioId()
-                        if (mappedId != null) {
-                            val fallbackRequest = "series" to mappedId
-                            if (fallbackRequest != request) {
-                                trace("main_fallback", "reason=noOriginalLinks type=${fallbackRequest.first} id=${traceKey(fallbackRequest.second)}")
-                                fetchMainStreams(fallbackRequest, true)
-                            }
+                        val fallbackRequest = if (actualIsMovie) {
+                            integrationImdbId?.let { "movie" to it }
+                        } else {
+                            mappedAnimeStremioId()?.let { "series" to it }
+                        }
+                        if (fallbackRequest != null && fallbackRequest != request) {
+                            trace("main_fallback", "reason=noOriginalLinks type=${fallbackRequest.first} id=${traceKey(fallbackRequest.second)}")
+                            fetchMainStreams(fallbackRequest, true)
                         }
                     }
                 }
