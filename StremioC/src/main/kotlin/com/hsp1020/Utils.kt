@@ -1401,23 +1401,11 @@ internal class RatingPlotImageHook(
               catch(e: Exception) {
                 return null
               }
-            if(response.code !in 200..299) {
-                logSimklHttpJson("GET /sync/all-items/shows?extended=ids_only",
-                    response.code, response.text)
-                return null
-            }
+            if(response.code !in 200..299)return null
             val body=response.text.trim()
-            if(body.isEmpty() || body=="null") {
-                logSimklHttpJson("GET /sync/all-items/shows?extended=ids_only",
-                    response.code, response.text)
-                return null
-            }
-            val root=runCatching { JSONObject(body) }.getOrNull()
-            if(root==null) {
-                logSimklHttpJson("GET /sync/all-items/shows?extended=ids_only",
-                    response.code, response.text)
-                return null
-            }
+            if(body=="null")return false // A successful empty Simkl watchlist.
+            if(body.isEmpty())return null
+            val root=runCatching { JSONObject(body) }.getOrNull() ?: return null
             val rows=root.optJSONArray("shows") ?: if(root.length()==0) {
                 JSONArray()
             } else {
@@ -1436,8 +1424,7 @@ internal class RatingPlotImageHook(
         }
 
         private suspend fun simklSeasonSave(
-            tracker: Tracker, draft: Draft, baseline: Draft, sn: Int,
-            markUnconfirmed: () -> Unit
+            tracker: Tracker, draft: Draft, baseline: Draft, sn: Int
         ): Boolean {
             val initial = tracker.simklSeason ?: return false
             if (draft.score != baseline.score || draft.watched !in 0..initial.available.size)
@@ -1472,7 +1459,8 @@ internal class RatingPlotImageHook(
                     simklWatchlistDestination(draft.status) == null)) return false
 
             if(fullDelete) {
-                var deleteAcknowledged=false
+                // Recheck the selected season and ensure all other seasons are
+                // unwatched before allowing a whole-title removal.
                 val fresh=simklSeasonRead(tracker.repo,tracker.id,sn)
                 val safe=fresh!=null && fresh.available==initial.available &&
                     fresh.watched==initial.watched &&
@@ -1480,9 +1468,8 @@ internal class RatingPlotImageHook(
                     fresh.otherSeasons.values.all { it.isEmpty() }
                 if(!safe)return false
                 val presentBefore=simklTvLibraryMembership(tracker.repo,initial.ids)
-                if(presentBefore==null)return false
+                    ?: return false
                 if(presentBefore) {
-                    // Deliberately no seasons or episodes: remove the full title.
                     val payload=JSONObject().put("shows",JSONArray().put(
                         JSONObject().put("ids",initial.ids)))
                     val response=try {
@@ -1495,27 +1482,14 @@ internal class RatingPlotImageHook(
                     val ack=runCatching { JSONObject(response.text) }.getOrNull()
                     val deleted=ack?.optJSONObject("deleted")?.optInt("shows",-1) ?: -1
                     val notFound=ack?.optJSONObject("not_found")?.optJSONArray("shows")?.length() ?: 0
-                    deleteAcknowledged=response.code in 200..299 && deleted>0 && notFound==0
-                    if(!deleteAcknowledged)return false
+                    if(response.code !in 200..299 || deleted<=0 || notFound!=0)return false
                 }else if(initial.watched.isNotEmpty() || fresh?.listStatus!=SyncWatchType.NONE) {
+                    // Already absent: succeed only for an unchanged empty title.
                     return false
                 }
-                for(attempt in 1..4) {
-                    if(attempt>1) kotlinx.coroutines.delay(
-                        when(attempt){2->500L;3->1100L;else->2000L})
-                    val present=simklTvLibraryMembership(tracker.repo,initial.ids)
-                    val state=simklSeasonRead(tracker.repo,tracker.id,sn)
-                    val preserved=state!=null && state.otherSeasons==initial.otherSeasons
-                    val empty=state!=null && state.watched.isEmpty()
-                    if(present==false && preserved && empty) {
-                        tracker.simklSeason=(state ?: initial).copy(
-                            watched=emptySet(),listStatus=SyncWatchType.NONE)
-                        tracker.repo.requireLibraryRefresh=true
-                        return true
-                    }
-                }
-                if(deleteAcknowledged)markUnconfirmed()
-                return false
+                tracker.simklSeason=fresh!!.copy(watched=emptySet(),listStatus=SyncWatchType.NONE)
+                tracker.repo.requireLibraryRefresh=true
+                return true
             }
 
             if (countDiff == 0 && !statusChanged) {
@@ -1792,21 +1766,15 @@ internal class RatingPlotImageHook(
              catch(e: Exception){
                   return null}
             if(response.code !in 200..299)return null
-            if(response.text.trim()=="null") {
-                // Simkl sometimes returns the JSON literal null (HTTP 200).
-                // Neither treat it as an empty library nor as a saved status.
-                val fallback=simklAnimeWatched(repo,ids)
-                val statuses=ids.mapNotNull { fallback?.statuses?.get(it) }
-                val exact=fallback!=null && statuses.size==ids.size &&
-                    statuses.distinct().size==1
-                val confirmed=if(exact)statuses.firstOrNull() else null
-                return confirmed
-            }
+            if(response.text.trim()=="null")return SyncWatchType.NONE
             val body=runCatching { JSONObject(response.text) }.getOrNull()
             if(body==null) {
                 return null
             }
-            val anime=body.optJSONArray("anime") ?: return null
+            // Missing anime category in a valid response also means no anime entries.
+            val anime=body.optJSONArray("anime") ?: if(!body.has("anime") &&
+                body.keys().asSequence().all { it in setOf("shows","movies") })
+                JSONArray() else return null
             val statuses=linkedMapOf<Int, SyncWatchType>()
             for(i in 0 until anime.length()) {
                 val item=anime.optJSONObject(i) ?: continue
@@ -1816,6 +1784,7 @@ internal class RatingPlotImageHook(
                 val status=simklWatchlistStatus(item.opt("status")) ?: return null
                 if(status==SyncWatchType.NONE || statuses.put(id,status)!=null)return null
             }
+            if(statuses.isEmpty())return SyncWatchType.NONE
             return ids.map { statuses[it] ?: return null }.distinct().singleOrNull()
         }
 
@@ -1843,90 +1812,14 @@ internal class RatingPlotImageHook(
              catch(e:Exception) {
                 return false
              }
-            val ack=runCatching { JSONObject(response.text) }.getOrNull()
-            // A write ACK is not authoritative; verify both membership and
-            // watched state before declaring success or failure.
-            // Read the complete watchlist, not the per-type endpoint that can
-            // reply with the JSON literal null even after a successful DELETE.
-            var confirmedPresent=false
-            var validSnapshots=0
-            for(attempt in 1..4) {
-                if(attempt>1)kotlinx.coroutines.delay(
-                    when(attempt){2->500L;3->1200L;else->2400L})
-                val check=try {
-                    app.get("https://api.simkl.com/sync/all-items/",
-                        headers=headers,cacheTime=0)
-                }catch(e:CancellationException){throw e}
-                 catch(e:Exception){
-                    continue
-                 }
-                val raw=check.text.trim()
-                if(check.code !in 200..299)continue
-                if(raw=="null"){
-                    continue
-                }
-                val body=runCatching { JSONObject(check.text) }.getOrNull()
-                if(body==null){
-                    continue
-                }
-                val keys=body.keys().asSequence().toSet()
-                if((keys.isNotEmpty() && keys.none { it in setOf("anime","shows","movies") }) ||
-                   (body.has("anime") && body.optJSONArray("anime")==null)){
-                    continue
-                }
-                // On a full sync without date_from, missing categories are empty.
-                val anime=body.optJSONArray("anime") ?: JSONArray()
-                val seen=linkedSetOf<Int>()
-                var invalid=false
-                for(i in 0 until anime.length()){
-                    val entry=anime.optJSONObject(i)
-                    val entryIds=entry?.optJSONObject("show")?.optJSONObject("ids")
-                        ?: entry?.optJSONObject("anime")?.optJSONObject("ids")
-                        ?: entry?.optJSONObject("ids")
-                    val id=jsonInt(entryIds,"simkl")
-                    if(id==null || !seen.add(id)){ invalid=true; break }
-                }
-                if(invalid){
-                    continue
-                }
-                validSnapshots++
-                val remaining=ids.intersect(seen)
-                if(remaining.isEmpty()){
-                    val grid=simklAnimeWatched(repo,ids)
-                    val cleared=grid!=null &&
-                        ids.all { grid.statuses[it]==SyncWatchType.NONE } &&
-                        grid.watched.isEmpty()
-                    if(cleared){
-                        return true
-                    }
-                }else confirmedPresent=true
-            }
-            if(confirmedPresent){
-                return false
-            }
-            // A second independent library reader uses CloudStream's native
-            // Simkl parser. Cache must be cleared before that server fetch.
-            val user=repo.authUser()
-            if(user!=null){
-                val key=user.id.toString()
-                removeKey(SimklApi.SIMKL_CACHED_LIST_TIME,key)
-                removeKey(SimklApi.SIMKL_CACHED_LIST,key)
-            }
-            val library=try { repo.library().getOrNull() }
-                catch(e:CancellationException){throw e}
-                catch(e:Exception){
-                    null
-                }
-            val nativeIds=ids.mapTo(linkedSetOf()){it.toString()}
-            val matches=library?.allLibraryLists?.sumOf { page ->
-                page.items.count { it.syncId in nativeIds }
-            }
-            val grid=simklAnimeWatched(repo,ids)
-            val cleared=grid!=null &&
-                ids.all { grid.statuses[it]==SyncWatchType.NONE } &&
-                grid.watched.isEmpty()
-            val confirmed=library!=null && matches==0 && cleared
-            return confirmed
+            if(response.code !in 200..299)return false
+            val ack=runCatching { JSONObject(response.text) }.getOrNull() ?: return false
+            // Every requested independent anime title must be acknowledged as deleted.
+            val deleted=ack.optJSONObject("deleted")?.optInt("shows",-1) ?: -1
+            val notFound=ack.optJSONObject("not_found")
+            val missing=(notFound?.optJSONArray("shows")?.length() ?: 0)+
+                (notFound?.optJSONArray("anime")?.length() ?: 0)
+            return deleted==ids.size && missing==0
         }
 
         private suspend fun simklAnimeRead(
@@ -2211,19 +2104,7 @@ internal class RatingPlotImageHook(
         private fun isWriteInFlight(tracker: Tracker): Boolean =
             tracker.saving || pendingWrites.contains("${tracker.prefix}:${tracker.id}")
 
-        /** Capture raw HTTP only when a Simkl library response cannot be parsed. */
-        private fun logSimklHttpJson(endpoint: String, code: Int, rawJson: String) {
-            val size = 2500
-            val parts = maxOf(1, (rawJson.length + size - 1) / size)
-            for (index in 0 until parts) {
-                val start = index * size
-                val end = minOf(start + size, rawJson.length)
-                android.util.Log.i("STREMIOC_SIMKL_HTTP",
-                    "endpoint=$endpoint code=$code part=${index + 1}/$parts length=${rawJson.length} rawJson=${rawJson.substring(start, end)}")
-            }
-        }
-
-        /** Preserve native cache invalidation and the library reload path. */
+        /** Invalidate native library cache so the existing reload event fetches it. */
         private suspend fun refreshAfterVerifiedWrite(tracker: Tracker, provider: String) {
             val repo = tracker.repo
             repo.requireLibraryRefresh = true
@@ -2234,23 +2115,6 @@ internal class RatingPlotImageHook(
                     removeKey(SimklApi.SIMKL_CACHED_LIST, key)
                 }
             }
-            val library = try { repo.library() }
-                catch (e: CancellationException) { throw e }
-                catch (e: Exception) { null }
-            if (provider == "simkl" && library?.getOrNull() == null) {
-                // Core SimklApi.getSyncListSince() fetches /sync/all-items/.
-                val token = repo.authToken()
-                if (token != null) try {
-                    val response = app.get("https://api.simkl.com/sync/all-items/",
-                        headers = SimklApi.getHeaders(token), cacheTime = 0)
-                    logSimklHttpJson("GET /sync/all-items/", response.code, response.text)
-                } catch (e: CancellationException) { throw e }
-                  catch (e: Exception) {
-                    android.util.Log.i("STREMIOC_SIMKL_HTTP",
-                        "endpoint=GET /sync/all-items/ transportError=${e.javaClass.simpleName}")
-                  }
-            }
-            repo.requireLibraryRefresh = true
         }
 
         private fun <T> observe(
@@ -2831,9 +2695,7 @@ internal class RatingPlotImageHook(
                         draft.explicitNone) {
                         malRemoveFromLibrary(tracker.repo,id)
                     } else if (tracker.simklSeason != null) {
-                        simklSeasonSave(tracker, draft, before, sn) {
-                            writeAcceptedButUnconfirmed=true
-                        }
+                        simklSeasonSave(tracker, draft, before, sn)
                     } else if (tracker.simklAnime != null) {
                         simklAnimeSave(tracker, draft, before, sn)
                     } else {
