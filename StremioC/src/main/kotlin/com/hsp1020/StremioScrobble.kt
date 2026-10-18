@@ -223,9 +223,9 @@ internal class StremioScrobble(context: Context) {
         val speed = current.playbackParameters.speed.toDouble().coerceAtLeast(0.1)
         val timeToThreshold = (remaining / speed).toLong().coerceAtLeast(1000L)
         val seekGrace = if (seekedPastThresholdAt != 0L)
-        syncTrace("COMPLETION_PLAN", "itemId=${active?.id} position=$position duration=$duration threshold=$threshold msUntilThreshold=$timeToThreshold")
             (15_000L - (SystemClock.elapsedRealtime() - seekedPastThresholdAt)).coerceAtLeast(0L)
             else 0L
+        syncTrace("COMPLETION_PLAN", "itemId=${active?.id} position=$position duration=$duration threshold=$threshold msUntilThreshold=$timeToThreshold grace=$seekGrace")
         main.postDelayed(completion, maxOf(timeToThreshold, seekGrace))
     }
 
@@ -290,11 +290,11 @@ internal class StremioScrobble(context: Context) {
         Media3Player.Listener::class.java.classLoader,
         arrayOf(Media3Player.Listener::class.java)
     ) { proxy, method, args ->
+        if (method.name in setOf("onIsPlayingChanged", "onPlayWhenReadyChanged",
+                "onPlaybackStateChanged", "onPlaybackParametersChanged",
+                "onPositionDiscontinuity"))
+            syncTrace("PLAYER_EVENT", "name=${method.name} arg0=${args?.getOrNull(0)} active=${active?.id} last=$lastEvent")
         when (method.name) {
-            if (method.name in setOf("onIsPlayingChanged", "onPlayWhenReadyChanged",
-                    "onPlaybackStateChanged", "onPlaybackParametersChanged",
-                    "onPositionDiscontinuity"))
-                syncTrace("PLAYER_EVENT", "name=${method.name} arg0=${args?.getOrNull(0)} active=${active?.id} last=$lastEvent")
             "onIsPlayingChanged" -> {
                 val changed = refreshEpisode()
                 if (args?.getOrNull(0) == true) {
@@ -339,8 +339,8 @@ internal class StremioScrobble(context: Context) {
             "onPositionDiscontinuity" -> {
                 refreshEpisode()
                 val reason = args?.lastOrNull() as? Int
-                if (reason == Media3Player.DISCONTINUITY_REASON_SEEK ||
                 syncTrace("POSITION_DISCONTINUITY", "reason=$reason active=${active?.id}")
+                if (reason == Media3Player.DISCONTINUITY_REASON_SEEK ||
                     reason == Media3Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) {
                     val current = player
                     val item = active
