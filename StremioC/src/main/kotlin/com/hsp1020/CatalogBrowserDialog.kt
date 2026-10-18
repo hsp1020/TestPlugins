@@ -855,16 +855,14 @@ internal class CatalogBrowserDialog(
         when {
             returning != null && entryId == returning -> {
                 searchReturnEntryId = null
-                suspendedForNavigation = false
                 cancelDestinationCheck()
                 restoreSearchAfterIme()
             }
             returning != null && destination.id == R.id.navigation_quick_search ->
                 awaitDestination(destination.id, entryId)
-            returning != null && destination.id in setOf(
+            returning != null && destination.id !in setOf(
                 R.id.navigation_results_phone, R.id.navigation_results_tv, R.id.navigation_player
-            ) -> Unit
-            returning != null -> awaitDestination(destination.id, entryId)
+            ) -> awaitDestination(destination.id, entryId)
             destination.id == R.id.navigation_home &&
                 (suspendedForNavigation || entryId != originEntryId) -> {
                 cancelDestinationCheck()
@@ -996,7 +994,6 @@ internal class CatalogBrowserDialog(
                     releaseNavigation()
                     focusNativeSearch()
                 } else if (destinationId == R.id.navigation_home) {
-                    suspendedForNavigation = false
                     originEntryId = entryId
                     dialog.show()
                     fitWindowToNavigation(force = true)
