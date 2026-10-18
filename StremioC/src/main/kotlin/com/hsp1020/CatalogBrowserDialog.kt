@@ -18,6 +18,7 @@ import android.view.View
 import android.view.MotionEvent
 import android.view.ViewGroup
 import android.view.Window
+import android.view.WindowManager
 import android.view.ViewConfiguration
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
@@ -70,6 +71,7 @@ import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_SHOW_METADATA
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
 import com.lagradost.cloudstream3.ui.search.SearchHelper
+import com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment
 import com.lagradost.cloudstream3.utils.UIHelper.getSpanCount
 import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import kotlinx.coroutines.CancellationException
@@ -783,6 +785,28 @@ internal class CatalogBrowserDialog(
     private val detailHandoff by lazy {
         StremioDetailHandoff(activity, dialog, navigation, ::dismiss)
     }
+    private var originEntryId: String? = null
+    private var searchReturnEntryId: String? = null
+    private val windowBoundsListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+        fitWindowToNavigation()
+    }
+    private val destinationListener = NavController.OnDestinationChangedListener { controller, destination, _ ->
+        if (closed || detailHandoff.isActive) return@OnDestinationChangedListener
+        val entryId = controller.currentBackStackEntry?.id
+        val returning = searchReturnEntryId
+        when {
+            returning != null && entryId == returning -> {
+                searchReturnEntryId = null
+                dialog.show()
+                fitWindowToNavigation()
+            }
+            returning != null && destination.id !in setOf(
+                R.id.navigation_quick_search, R.id.navigation_results_phone,
+                R.id.navigation_results_tv, R.id.navigation_player
+            ) -> dismiss()
+            returning == null && originEntryId != null && entryId != originEntryId -> dismiss()
+        }
+    }
     private val items = ArrayList<SearchResponse>()
     private val seen = HashSet<String>()
     private val pageSignatures = HashSet<List<String>>()
@@ -805,6 +829,59 @@ internal class CatalogBrowserDialog(
     }
 
     private fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
+
+    private fun fitWindowToNavigation() {
+        if (closed || !dialog.isShowing) return
+        val window = dialog.window ?: return
+        val decor = activity.window.decorView
+        val width = decor.width.takeIf { it > 0 } ?: activity.resources.displayMetrics.widthPixels
+        val height = decor.height.takeIf { it > 0 } ?: activity.resources.displayMetrics.heightPixels
+        val activityOrigin = IntArray(2)
+        decor.getLocationOnScreen(activityOrigin)
+        val rail = activity.findViewById<View>(R.id.nav_rail_view)
+        val railRight = if (rail?.isShown == true && rail.width > 0) {
+            val at = IntArray(2)
+            rail.getLocationOnScreen(at)
+            (at[0] - activityOrigin[0] + rail.width).coerceIn(0, width)
+        } else 0
+        val bottomNavigation = activity.findViewById<View>(R.id.nav_view)
+        val bottom = if (bottomNavigation?.isShown == true && bottomNavigation.height > 0) {
+            val at = IntArray(2)
+            bottomNavigation.getLocationOnScreen(at)
+            (at[1] - activityOrigin[1]).coerceIn(0, height)
+        } else height
+        window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        window.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
+        window.setGravity(Gravity.TOP or Gravity.END)
+        window.setLayout((width - railRight).coerceAtLeast(1), bottom.coerceAtLeast(1))
+    }
+
+    private fun openCatalogSearch() {
+        if (closed || detailHandoff.isActive || searchReturnEntryId != null) return
+        val saved = SettingsRepository.loadLinks(prefs).asSequence()
+            .filter { it.enabled && it.link.isNotBlank() && StremioC.isCatalogAddonEnabled(it.link) }
+            .map { stremioManifestUrl(it.link.fixSourceUrl()) }.toSet()
+        val providers = APIHolder.allProviders.filterIsInstance<StremioC>()
+            .filter { !it.hasMainPage && it.mainUrl.isNotBlank() &&
+                stremioManifestUrl(it.mainUrl.fixSourceUrl()) in saved }
+            .map { it.name }.distinct().toTypedArray()
+        if (providers.isEmpty()) {
+            Toast.makeText(activity, "No searchable catalog addons.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val origin = navigation?.currentBackStackEntry?.id ?: return
+        searchReturnEntryId = origin
+        dialog.hide()
+        try {
+            QuickSearchFragment.pushSearch(activity, "", providers)
+        } catch (_: Exception) {
+            searchReturnEntryId = null
+            dialog.show()
+            fitWindowToNavigation()
+            Toast.makeText(activity, "Unable to open search.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun button(label: String) = MaterialButton(activity).apply {
         id = View.generateViewId()
         text = label
@@ -874,9 +951,31 @@ internal class CatalogBrowserDialog(
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(8), dp(12), 0)
             setBackgroundColor(headerColor)
-            addView(selectorRow("Type", typeSelector, typeArrow), ViewGroup.LayoutParams(-1, -2))
-            addView(selectorRow("Catalog", catalogSelector, catalogArrow), ViewGroup.LayoutParams(-1, -2))
-            addView(selectorRow("Genre", genreSelector, genreArrow), ViewGroup.LayoutParams(-1, -2))
+            val search = ImageView(activity).apply {
+                setImageResource(R.drawable.search_icon)
+                imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.textColor))
+                contentDescription = activity.getString(R.string.search)
+                isFocusable = true
+                isClickable = true
+                val ripple = TypedValue()
+                if (activity.theme.resolveAttribute(
+                        android.R.attr.selectableItemBackgroundBorderless, ripple, true
+                    ) && ripple.resourceId != 0) setBackgroundResource(ripple.resourceId)
+                setPadding(dp(12), dp(12), dp(12), dp(12))
+                setOnClickListener { openCatalogSearch() }
+            }
+            addView(LinearLayout(activity).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                addView(search, LinearLayout.LayoutParams(dp(48), dp(48)))
+                addView(selectorRow("Type", typeSelector, typeArrow),
+                    LinearLayout.LayoutParams(0, -2, 1f))
+            }, ViewGroup.LayoutParams(-1, -2))
+            addView(selectorRow("Catalog", catalogSelector, catalogArrow).apply {
+                setPadding(dp(48), 0, 0, 0)
+            }, ViewGroup.LayoutParams(-1, -2))
+            addView(selectorRow("Genre", genreSelector, genreArrow).apply {
+                setPadding(dp(48), 0, 0, 0)
+            }, ViewGroup.LayoutParams(-1, -2))
         }
         val header = AppBarLayout(activity).apply {
             setBackgroundColor(headerColor)
@@ -964,6 +1063,13 @@ internal class CatalogBrowserDialog(
             prefs.unregisterOnSharedPreferenceChangeListener(settingsListener)
             manifestPrefs.unregisterOnSharedPreferenceChangeListener(manifestListener)
             activity.lifecycle.removeObserver(hostObserver)
+            navigation?.removeOnDestinationChangedListener(destinationListener)
+            activity.window.decorView.removeOnLayoutChangeListener(windowBoundsListener)
+            activity.findViewById<View>(R.id.nav_rail_view)
+                ?.removeOnLayoutChangeListener(windowBoundsListener)
+            activity.findViewById<View>(R.id.nav_view)
+                ?.removeOnLayoutChangeListener(windowBoundsListener)
+            searchReturnEntryId = null
             detailHandoff.close()
             grid.adapter = null
             onDismiss()
@@ -974,11 +1080,19 @@ internal class CatalogBrowserDialog(
                 }
             }
         }
+        originEntryId = navigation?.currentBackStackEntry?.id
+        dialog.setCanceledOnTouchOutside(false)
         dialog.show()
         dialog.window?.let { WindowCompat.setDecorFitsSystemWindows(it, true) }
         ViewCompat.requestApplyInsets(root)
         dialog.window?.setBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryBlackBackground)))
-        dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        fitWindowToNavigation()
+        activity.window.decorView.addOnLayoutChangeListener(windowBoundsListener)
+        activity.findViewById<View>(R.id.nav_rail_view)
+            ?.addOnLayoutChangeListener(windowBoundsListener)
+        activity.findViewById<View>(R.id.nav_view)
+            ?.addOnLayoutChangeListener(windowBoundsListener)
+        navigation?.addOnDestinationChangedListener(destinationListener)
         activity.lifecycle.addObserver(hostObserver)
         prefs.registerOnSharedPreferenceChangeListener(settingsListener)
         manifestPrefs.registerOnSharedPreferenceChangeListener(manifestListener)
