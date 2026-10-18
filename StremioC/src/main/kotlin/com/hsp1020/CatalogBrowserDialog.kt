@@ -800,6 +800,8 @@ internal class CatalogBrowserDialog(
             })
     }
     private var navigationSnapshot: BitmapDrawable? = null
+    private var searchReturnImage: BitmapDrawable? = null
+    private var searchReturnImageVisible = false
     private var pendingSearchReturn: (() -> Unit)? = null
     private var imeAnimationActive = false
     private var trackingSearchIme = false
@@ -937,6 +939,46 @@ internal class CatalogBrowserDialog(
         navigationSnapshot = null
     }
 
+    private fun clearSearchReturnImage() {
+        searchReturnImage?.let { image ->
+            if (searchReturnImageVisible) activity.window.decorView.overlay.remove(image)
+            image.bitmap?.takeUnless { it.isRecycled }?.recycle()
+        }
+        searchReturnImage = null
+        searchReturnImageVisible = false
+    }
+
+    private fun captureSearchReturnImage() {
+        clearSearchReturnImage()
+        if (root.width <= 0 || root.height <= 0) return
+        val bitmap = runCatching {
+            Bitmap.createBitmap(root.width, root.height, Bitmap.Config.RGB_565)
+        }.getOrNull() ?: return
+        try {
+            root.draw(Canvas(bitmap))
+        } catch (_: Exception) {
+            bitmap.recycle()
+            return
+        }
+        val screen = IntArray(2)
+        val origin = IntArray(2)
+        root.getLocationOnScreen(screen)
+        activity.window.decorView.getLocationOnScreen(origin)
+        searchReturnImage = BitmapDrawable(activity.resources, bitmap).apply {
+            setBounds(screen[0] - origin[0], screen[1] - origin[1],
+                screen[0] - origin[0] + root.width,
+                screen[1] - origin[1] + root.height)
+        }
+    }
+
+    private fun showSearchReturnImage() {
+        if (searchReturnImageVisible) return
+        searchReturnImage?.let {
+            activity.window.decorView.overlay.add(it)
+            searchReturnImageVisible = true
+        }
+    }
+
     private fun cancelDestinationCheck() {
         pendingDestinationCheck?.let { activity.window.decorView.removeCallbacks(it) }
         pendingDestinationCheck = null
@@ -988,6 +1030,7 @@ internal class CatalogBrowserDialog(
             if (stable >= 2) {
                 pendingDestinationCheck = null
                 if (destinationId == R.id.navigation_quick_search && searchReturnEntryId != null) {
+                    captureSearchReturnImage()
                     dialog.hide()
                     releaseNavigation()
                     focusNativeSearch()
@@ -997,6 +1040,7 @@ internal class CatalogBrowserDialog(
                     fitWindowToNavigation(force = true)
                 } else {
                     suspendedForNavigation = true
+                    clearSearchReturnImage()
                     dialog.hide()
                     releaseNavigation()
                 }
@@ -1008,6 +1052,7 @@ internal class CatalogBrowserDialog(
 
     private fun restoreSearchAfterIme() {
         pendingSearchReturn?.invoke()
+        showSearchReturnImage()
         searchFocusIssued = false
         val decor = activity.window.decorView
         val tree = decor.viewTreeObserver
@@ -1030,6 +1075,12 @@ internal class CatalogBrowserDialog(
             previousSearchSoftInput = null
             dialog.show()
             fitWindowToNavigation(force = true)
+            val decorView = dialog.window?.decorView
+            if (decorView != null && decorView.isAttachedToWindow) {
+                decorView.doOnPreDraw {
+                    decorView.post { clearSearchReturnImage() }
+                }
+            } else clearSearchReturnImage()
         }
         if (!tree.isAlive) {
             if (ready()) showBrowser()
@@ -1105,6 +1156,7 @@ internal class CatalogBrowserDialog(
             return
         }
         val origin = navigation?.currentBackStackEntry?.id ?: return
+        clearSearchReturnImage()
         searchReturnEntryId = origin
         searchFocusIssued = false
         previousSearchSoftInput = activity.window.attributes.softInputMode
@@ -1312,6 +1364,7 @@ internal class CatalogBrowserDialog(
             activity.lifecycle.removeObserver(hostObserver)
             cancelDestinationCheck()
             pendingSearchReturn?.invoke()
+            clearSearchReturnImage()
             stopSearchImeTracking()
             releaseNavigation()
             previousSearchSoftInput = null
