@@ -1393,7 +1393,8 @@ internal class RatingPlotImageHook(
                         requestBody = JSONObject().put("shows", JSONArray().put(scope))
                             .toString().toRequestBody())
                 } catch (e: CancellationException) { throw e }
-                  catch (e: Exception) { return false }
+                  catch (e: Exception) {
+                  traceError("SYNC_EXCEPTION", e) return false }
                 val missing = runCatching {
                     JSONObject(response.text).optJSONObject("not_found")
                         ?.optJSONArray("shows")?.length() ?: 0
@@ -1430,7 +1431,8 @@ internal class RatingPlotImageHook(
                     app.post(url + "add-to-list", headers = headers,
                         requestBody = payload.toString().toRequestBody())
                 } catch (e: CancellationException) { throw e }
-                  catch (e: Exception) { return false }
+                  catch (e: Exception) {
+                  traceError("SYNC_EXCEPTION", e) return false }
                 trace("TV_STATUS_HTTP", "code=${response.code} length=${response.text.length}")
                 if (response.code !in 200..299) return false
                 val result = runCatching { JSONObject(response.text) }.getOrNull()
@@ -1516,7 +1518,8 @@ internal class RatingPlotImageHook(
                 app.post("https://api.simkl.com/sync/watched?extended=episodes",
                     headers=headers,requestBody=request.toString().toRequestBody())
             }catch(e: CancellationException){throw e}
-             catch(e: Exception){return null}
+             catch(e: Exception){
+                  traceError("SYNC_EXCEPTION", e)return null}
             if(response.code !in 200..299)return null
             trace("ANIME_WATCH_HTTP", "code=${response.code} size=${response.text.length}")
             val rows=runCatching { JSONArray(response.text) }.getOrNull() ?: return null
@@ -1576,7 +1579,8 @@ internal class RatingPlotImageHook(
                 app.post("https://api.simkl.com/sync/add-to-list",
                     headers=headers,requestBody=body.toString().toRequestBody())
             }catch(e: CancellationException){throw e}
-             catch(e: Exception){return null}
+             catch(e: Exception){
+                  traceError("SYNC_EXCEPTION", e)return null}
             if(response.code !in 200..299)return null
             trace("ANIME_STATUS_HTTP", "code=${response.code}")
             val result=runCatching { JSONObject(response.text) }.getOrNull() ?: return null
@@ -1618,7 +1622,8 @@ internal class RatingPlotImageHook(
                 app.get("https://api.simkl.com/sync/all-items/anime",
                     headers=headers,cacheTime=0)
             }catch(e: CancellationException){throw e}
-             catch(e: Exception){return null}
+             catch(e: Exception){
+                  traceError("SYNC_EXCEPTION", e)return null}
             if(response.code !in 200..299)return null
             trace("ANIME_LIBRARY_HTTP", "code=${response.code}")
             val body=runCatching { JSONObject(response.text) }.getOrNull() ?: return null
@@ -1658,7 +1663,8 @@ internal class RatingPlotImageHook(
                 app.post("https://api.simkl.com/sync/history/remove",
                     headers=headers,requestBody=payload.toString().toRequestBody())
             }catch(e: CancellationException){throw e}
-             catch(e: Exception){return false}
+             catch(e: Exception){
+                  traceError("SYNC_EXCEPTION", e)return false}
             if(response.code !in 200..299)return false
             trace("ANIME_DELETE_HTTP", "code=${response.code}")
             val result=runCatching { JSONObject(response.text) }.getOrNull()
@@ -1673,7 +1679,8 @@ internal class RatingPlotImageHook(
                     app.get("https://api.simkl.com/sync/all-items/anime",
                         headers=headers,cacheTime=0)
                 }catch(e: CancellationException){throw e}
-                 catch(e: Exception){return@repeat}
+                 catch(e: Exception){
+                  traceError("SYNC_EXCEPTION", e)return@repeat}
                 if(check.code !in 200..299)return@repeat
                 val body=runCatching { JSONObject(check.text) }.getOrNull()
                     ?: return@repeat
@@ -1723,6 +1730,7 @@ internal class RatingPlotImageHook(
                     if (field=="mal")malSearchMatches.addAll(found.take(24))
                 }catch(e: CancellationException){throw e}
                  catch(e: Exception){
+                  traceError("SYNC_EXCEPTION", e)
                  }
             }
             // Simkl's own native ID resolver, with TVDB parent search to find every cour.
@@ -1797,6 +1805,7 @@ internal class RatingPlotImageHook(
                     }
                 }catch(e: CancellationException){throw e}
                  catch(e: Exception){
+                  traceError("SYNC_EXCEPTION", e)
                  }
             }
             val sorted=slots.sortedWith(compareBy<AnimeSlot> { it.tvdbEpisode }.thenBy { it.simkl })
@@ -1888,7 +1897,8 @@ internal class RatingPlotImageHook(
                     app.post("https://api.simkl.com/sync/$endpoint",
                         headers=headers,requestBody=body.toString().toRequestBody())
                 }catch(e: CancellationException){throw e}
-                 catch(e: Exception){return false}
+                 catch(e: Exception){
+                  traceError("SYNC_EXCEPTION", e)return false}
                 val failures=runCatching {
                     val obj=JSONObject(response.text)
                     val notFound=obj.optJSONObject("not_found")
@@ -2108,6 +2118,7 @@ internal class RatingPlotImageHook(
                             provider.seasonTrackerIds(imdb, sn)
                         } } catch (e: CancellationException) { throw e }
                           catch (e: Exception) {
+                  traceError("SYNC_EXCEPTION", e)
                             null
                         }
                         mappedSeason = mapping
@@ -2205,6 +2216,7 @@ internal class RatingPlotImageHook(
                                         break
                                     }
                                 } catch (e: Exception) {
+                  traceError("SYNC_EXCEPTION", e)
                                 }
                             }
                         }
@@ -2219,6 +2231,7 @@ internal class RatingPlotImageHook(
                                     if (total != null) origin = "mal-lightweight"
                                 }
                             } catch (e: Exception) {
+                  traceError("SYNC_EXCEPTION", e)
                             }
                         }
                         val fields = if (multi && isAnime == true &&
@@ -2454,6 +2467,7 @@ internal class RatingPlotImageHook(
                 plus?.isEnabled = target.writeBlocked == null
                 minus?.isEnabled = target.writeBlocked == null
             } catch (e: Exception) {
+                  traceError("SYNC_EXCEPTION", e)
             } finally { applying = false }
         }
 
@@ -2617,7 +2631,8 @@ internal class RatingPlotImageHook(
             val deleted=try {
                 app.delete(url,headers=headers)
             }catch(e: CancellationException){throw e}
-             catch(e: Exception){return false}
+             catch(e: Exception){
+                  traceError("SYNC_EXCEPTION", e)return false}
             trace("MAL_REMOVE_HTTP", "code=${deleted.code}")
             if(deleted.code !in 200..299 && deleted.code!=404)return false
             repeat(3){ attempt ->
@@ -2627,7 +2642,8 @@ internal class RatingPlotImageHook(
                         headers=headers,params=mapOf("fields" to "my_list_status"),
                         cacheTime=0)
                 }catch(e: CancellationException){throw e}
-                 catch(e: Exception){return@repeat}
+                 catch(e: Exception){
+                  traceError("SYNC_EXCEPTION", e)return@repeat}
                 trace("MAL_REMOVE_VERIFY", "attempt=$attempt http=${response.code}")
                 if(response.code in 200..299) {
                     val data=runCatching { JSONObject(response.text) }.getOrNull()
@@ -2682,6 +2698,7 @@ internal class RatingPlotImageHook(
                     if (response.code in 200..299) return true
                 } catch(e: CancellationException) { throw e }
                 catch(e: Exception) {
+                  traceError("SYNC_EXCEPTION", e)
                 }
             }
             return false
