@@ -1360,6 +1360,44 @@ internal class RatingPlotImageHook(
          * A regular TV show has one watchlist status for the whole Simkl title.
          * Only +/- applies to the selected season; neither path remaps its ID.
          */
+        /** Confirm the real watchlist membership; never infer removal from episode progress. */
+        private suspend fun simklTvLibraryMembership(
+            repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
+            ids: JSONObject
+        ): Boolean? {
+            val headers=SimklApi.getHeaders(repo.authToken() ?: return null)
+            val response=try {
+                app.get("https://api.simkl.com/sync/all-items/shows?extended=ids_only",
+                    headers=headers,cacheTime=0)
+            } catch(e: CancellationException) { throw e }
+              catch(e: Exception) {
+                trace("TV_LIBRARY_EXCEPTION", "type=${e.javaClass.simpleName}")
+                return null
+              }
+            trace("TV_LIBRARY_HTTP", "code=${response.code} bytes=${response.text.length}")
+            if(response.code !in 200..299)return null
+            val root=runCatching { JSONObject(response.text) }.getOrNull()
+            if(root==null) {
+                trace("TV_LIBRARY_SCHEMA", "kind=not-object")
+                return null
+            }
+            val rows=root.optJSONArray("shows") ?: if(root.length()==0) JSONArray() else {
+                trace("TV_LIBRARY_SCHEMA", "kind=missing-shows keys=${root.keys().asSequence().toList()}")
+                return null
+            }
+            var present=false
+            for (i in 0 until rows.length()) {
+                val entry=rows.optJSONObject(i) ?: return null
+                val rowIds=entry.optJSONObject("show")?.optJSONObject("ids")
+                    ?: entry.optJSONObject("ids") ?: return null
+                if(ids.keys().asSequence().any { k ->
+                    ids.optString(k).isNotBlank() && ids.optString(k)==rowIds.optString(k)
+                })present=true
+            }
+            trace("TV_LIBRARY_MEMBERSHIP", "present=$present scanned=${rows.length()} idKeys=${ids.keys().asSequence().toList()}")
+            return present
+        }
+
         private suspend fun simklSeasonSave(
             tracker: Tracker, draft: Draft, baseline: Draft, sn: Int
         ): Boolean {
@@ -1370,9 +1408,8 @@ internal class RatingPlotImageHook(
             val headers = SimklApi.getHeaders(tracker.repo.authToken() ?: return false) +
                 mapOf("content-type" to "application/json")
             val url = "https://api.simkl.com/sync/"
-            // Simkl has one watchlist status for a full TV show.
-            // Explicit NONE must never remove that show or other seasons.
-            // It only clears watched episodes in the selected season.
+            // NONE deletes the title only when all other seasons are unwatched.
+            // Otherwise the selected season's episodes alone are cleared.
             val clearSelectedSeason = draft.status == SyncWatchType.NONE && draft.explicitNone
             // "add-to-list completed" auto-marks every season in Simkl.
             // Selected-season completion must only write season-scoped history.
@@ -1387,9 +1424,62 @@ internal class RatingPlotImageHook(
                 draft.status == SyncWatchType.WATCHING && countDiff > 0
             val statusChanged = !clearSelectedSeason && !seasonCompleted &&
                 draft.status != baseline.status && !autoWatching
-            trace("TV_SAVE_PLAN", "none=$clearSelectedSeason seasonComplete=$seasonCompleted requested=$requestedCount diff=$countDiff statusChanged=$statusChanged autoWatching=$autoWatching statusKnown=${initial.listStatus!=null}")
+            val otherWatched=initial.otherSeasons.values.any { it.isNotEmpty() }
+            val fullDelete=clearSelectedSeason && !otherWatched
+            trace("TV_SAVE_PLAN", "none=$clearSelectedSeason fullDelete=$fullDelete otherWatched=$otherWatched seasonComplete=$seasonCompleted requested=$requestedCount diff=$countDiff statusChanged=$statusChanged autoWatching=$autoWatching statusKnown=${initial.listStatus!=null}")
             if (statusChanged && (initial.listStatus == null ||
                     simklWatchlistDestination(draft.status) == null)) return false
+
+            if(fullDelete) {
+                val fresh=simklSeasonRead(tracker.repo,tracker.id,sn)
+                val safe=fresh!=null && fresh.available==initial.available &&
+                    fresh.watched==initial.watched &&
+                    fresh.otherSeasons==initial.otherSeasons &&
+                    fresh.otherSeasons.values.all { it.isEmpty() }
+                trace("TV_DELETE_PREFLIGHT", "safe=$safe selectedBefore=${initial.watched.size} selectedFresh=${fresh?.watched?.size} otherBefore=${initial.otherSeasons.mapValues { it.value.size }} otherFresh=${fresh?.otherSeasons?.mapValues { it.value.size }}")
+                if(!safe)return false
+                val presentBefore=simklTvLibraryMembership(tracker.repo,initial.ids)
+                trace("TV_DELETE_MEMBERSHIP_BEFORE", "present=$presentBefore listStatus=${fresh?.listStatus}")
+                if(presentBefore==null)return false
+                if(presentBefore) {
+                    // Deliberately no seasons or episodes: remove the full title.
+                    val payload=JSONObject().put("shows",JSONArray().put(
+                        JSONObject().put("ids",initial.ids)))
+                    trace("TV_DELETE_REQUEST", "scope=whole-title season=$sn idKeys=${initial.ids.keys().asSequence().toList()} otherWatched=false")
+                    val response=try {
+                        app.post(url+"history/remove",headers=headers,
+                            requestBody=payload.toString().toRequestBody())
+                    }catch(e:CancellationException){throw e}
+                     catch(e:Exception){
+                        trace("TV_DELETE_EXCEPTION", "type=${e.javaClass.simpleName}")
+                        return false
+                     }
+                    val ack=runCatching { JSONObject(response.text) }.getOrNull()
+                    trace("TV_DELETE_HTTP", "code=${response.code} ackKeys=${ack?.keys()?.asSequence()?.toList()} deleted=${ack?.optJSONObject("deleted")?.opt("shows")} notFound=${ack?.optJSONObject("not_found")?.optJSONArray("shows")?.length()}")
+                }else if(initial.watched.isNotEmpty() || fresh?.listStatus!=SyncWatchType.NONE) {
+                    trace("TV_DELETE_REJECT", "reason=history-membership-conflict")
+                    return false
+                }
+                for(attempt in 1..4) {
+                    if(attempt>1) kotlinx.coroutines.delay(
+                        when(attempt){2->500L;3->1100L;else->2000L})
+                    val present=simklTvLibraryMembership(tracker.repo,initial.ids)
+                    val state=simklSeasonRead(tracker.repo,tracker.id,sn)
+                    val preserved=state==null || state.otherSeasons==initial.otherSeasons
+                    val empty=state==null || state.watched.isEmpty()
+                    trace("TV_DELETE_VERIFY", "attempt=$attempt member=$present progress=${state?.watched?.size} other=${state?.otherSeasons?.mapValues { it.value.size }} preserved=$preserved empty=$empty")
+                    if(present==false && preserved && empty) {
+                        tracker.simklSeason=(state ?: initial).copy(
+                            watched=emptySet(),listStatus=SyncWatchType.NONE)
+                        tracker.repo.requireLibraryRefresh=true
+                        trace("TV_DELETE_FINAL", "success=true reason=absent-from-list")
+                        return true
+                    }
+                }
+                trace("TV_DELETE_FINAL", "success=false reason=readback-not-confirmed")
+                return false
+            }
+
             if (countDiff == 0 && !statusChanged) {
                 // Verify idempotent operations instead of pretending to write.
                 val current = simklSeasonRead(tracker.repo, tracker.id, sn)
