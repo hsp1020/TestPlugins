@@ -2468,6 +2468,7 @@ internal class RatingPlotImageHook(
             val before = initial.snapshot()
             trace("SAVE_BEGIN", "provider=$prefix idHash=${id.hashCode()} prior=${before.status}/${before.watched} requested=${draft.status}/${draft.watched} scoreOld=${before.score?.toInt(10)} scoreNew=${draft.score?.toInt(10)} explicitNone=${draft.explicitNone} blocked=${tracker.writeBlocked} saving=${tracker.saving}")
             if (tracker.writeBlocked != null || tracker.saving) {
+                trace("SAVE_REJECT", "provider=$prefix cause=${if(tracker.saving)"already-saving" else tracker.writeBlocked}")
                 return
             }
             if (draft.status == SyncWatchType.NONE && draft.watched > 0 && !draft.explicitNone) {
@@ -2478,19 +2479,30 @@ internal class RatingPlotImageHook(
             if (!updated) { trace("SAVE_SKIP", "provider=$prefix reason=unchanged"); return }
             if (draft.status == SyncWatchType.NONE && !draft.explicitNone &&
                 (draft.score != before.score || draft.watched != before.watched)) {
+                trace("SAVE_REJECT", "provider=$prefix cause=none-without-explicit-selection")
                 return
             }
             if (draft.watched < 0 || tracker.total?.let { it > 0 && draft.watched > it } == true) {
+                trace("SAVE_REJECT", "provider=$prefix cause=invalid-progress requested=${draft.watched} total=${tracker.total}")
                 return
             }
-            if (tracker.simklSeason != null && draft.score != before.score) return
-            if (tracker.simklAnime != null && draft.score != before.score) return
+            if (tracker.simklSeason != null && draft.score != before.score) {
+                trace("SAVE_REJECT", "provider=$prefix cause=simkl-tv-rating-disabled")
+                return
+            }
+            if (tracker.simklAnime != null && draft.score != before.score) {
+                trace("SAVE_REJECT", "provider=$prefix cause=simkl-anime-rating-disabled")
+                return
+            }
             if (tracker.simklAnime != null && draft.status != before.status &&
                 !(before.status == SyncWatchType.NONE &&
                   draft.status == SyncWatchType.WATCHING && draft.watched > 0) &&
                 (tracker.simklAnime?.statusEditable != true ||
                  (draft.status != SyncWatchType.NONE &&
-                  simklWatchlistDestination(draft.status)==null))) return
+                  simklWatchlistDestination(draft.status)==null))) {
+                trace("SAVE_REJECT", "provider=$prefix cause=anime-status-not-editable")
+                return
+            }
             tracker.saving = true
             trace("SAVE_ROUTE", "provider=$prefix tv=${tracker.simklSeason!=null} anime=${tracker.simklAnime!=null} malRemove=${prefix=="mal"&&draft.explicitNone}")
             render()
@@ -2506,8 +2518,8 @@ internal class RatingPlotImageHook(
                     } else if (tracker.simklAnime != null) {
                         simklAnimeSave(tracker, draft, before, sn)
                     } else {
-                    val fresh = tracker.repo.status(id)
                     trace("CORE_READ_BEFORE_WRITE", "provider=$prefix")
+                    val fresh = tracker.repo.status(id)
                     val remote = fresh.getOrNull()
                     if (remote == null) {
                         false
@@ -2530,8 +2542,8 @@ internal class RatingPlotImageHook(
                                 (draft.status == before.status || got.status == remote.status) &&
                                 (draft.watched == before.watched || (got.watchedEpisodes ?: 0) == (remote.watchedEpisodes ?: 0)) &&
                                 (draft.score == before.score || got.score == remote.score)
-                            if (verified) break
                             trace("CORE_VERIFY", "provider=$prefix attempt=$attempt match=$verified read=${got?.status}/${got?.watchedEpisodes}")
+                            if (verified) break
                         }
                         if (!verified && prefix == "kitsu" && remote.status != SyncWatchType.NONE) {
                             val fallback = kitsuFallback(id, remote, tracker.repo)
@@ -2548,8 +2560,8 @@ internal class RatingPlotImageHook(
                     }
                     }
                 }
-                if (valid(gen, sn) && statuses[prefix] === tracker) {
                 trace("SAVE_FINAL", "provider=$prefix success=$result viewValid=${valid(gen,sn)} currentTracker=${statuses[prefix]===tracker}")
+                if (valid(gen, sn) && statuses[prefix] === tracker) {
                     tracker.saving = false
                     if (result) {
                         val anime = tracker.simklAnime
