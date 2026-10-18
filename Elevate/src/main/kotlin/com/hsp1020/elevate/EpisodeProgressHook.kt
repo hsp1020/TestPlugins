@@ -3,7 +3,6 @@ package com.hsp1020.elevate
 import android.app.Activity
 import android.app.Application
 import android.content.Context
-import android.graphics.Color
 import android.graphics.drawable.ClipDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
@@ -87,19 +86,17 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
 
     private fun bind(fragment: Fragment, root: View) {
         val type = fragment.javaClass.name
-        val home = type == HOME_CLASS
-        if (!home && type !in DETAIL_CLASSES) return
+        if (type !in DETAIL_CLASSES) return
         val previous = screens[fragment]
         if (previous != null && previous.root === root) return
-        trace("SCREEN_BIND kind=${if (home) "home" else "detail"} fragment=$type added=${fragment.isAdded} root=${viewLabel(root)} replacement=${previous != null}")
+        trace("SCREEN_BIND kind=detail fragment=$type added=${fragment.isAdded} root=${viewLabel(root)} replacement=${previous != null}")
         previous?.stop()
-        screens[fragment] = Screen(fragment, root, home).also(Screen::start)
+        screens[fragment] = Screen(fragment, root).also(Screen::start)
     }
 
     private inner class Screen(
         val fragment: Fragment,
-        val root: View,
-        private val home: Boolean
+        val root: View
     ) {
         private val tree = root.viewTreeObserver
         private var list: RecyclerView? = null
@@ -107,7 +104,7 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
         private val rows = mutableMapOf<View, RowProgress>()
         private val rowStates = WeakHashMap<View, String>()
         private var lastListState: String? = null
-        private val screenLabel = if (home) "home" else "detail"
+        private val screenLabel = "detail"
 
         private fun rowTraceOnce(row: View, status: String) {
             if (rowStates[row] == status) return
@@ -159,8 +156,7 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
                 }
                 return
             }
-            val id = if (home) R.id.home_watch_child_recyclerview else R.id.result_episodes
-            val target = root.findViewById<RecyclerView>(id)
+            val target = root.findViewById<RecyclerView>(R.id.result_episodes)
             val status = "target=${viewLabel(target)} adapter=${target?.adapter?.javaClass?.name} items=${target?.adapter?.itemCount} visibleChildren=${target?.childCount} root=${viewLabel(root)}"
             if (lastListState != status) {
                 trace("LIST screen=$screenLabel $status")
@@ -210,15 +206,10 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
         }
 
         private fun refreshRow(row: View) {
-            val nativeProgress = row.findViewById<ProgressBar>(
-                if (home) R.id.watchProgress else R.id.episode_progress
-            )
-            val poster = row.findViewById<ImageView>(
-                if (home) R.id.imageView else R.id.episode_poster
-            )
+            val nativeProgress = row.findViewById<ProgressBar>(R.id.episode_progress)
+            val poster = row.findViewById<ImageView>(R.id.episode_poster)
             val originalOverlay = row.findViewById<View>(R.id.watch_progress_container)
-            val frame = if (home) row.findViewById<FrameLayout>(R.id.background_card)
-                        else poster?.parent as? FrameLayout
+            val frame = poster?.parent as? FrameLayout
             if (nativeProgress == null || poster == null || frame == null || originalOverlay == null) {
                 rowTraceOnce(row, "UNMATCHED progress=${viewLabel(nativeProgress)} poster=${viewLabel(poster)} posterParent=${viewLabel(poster?.parent as? View)} frame=${viewLabel(frame)} overlay=${viewLabel(originalOverlay)}")
                 rows.remove(row)?.restore()
@@ -242,8 +233,7 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
 
         private fun createProgressBar(context: Context): ProgressBar {
             val primary = context.colorFromAttribute(R.attr.colorPrimary)
-            val gray = context.colorFromAttribute(R.attr.grayTextColor)
-            val track = (gray and 0x00ffffff) or ((Color.alpha(gray) * 0.30f).toInt() shl 24)
+            val track = 0xB3FFFFFF.toInt()
             trace("COLORS screen=$screenLabel primary=${Integer.toHexString(primary)} unplayed=${Integer.toHexString(track)}")
             val fill = GradientDrawable().apply { setColor(primary) }
             val background = GradientDrawable().apply { setColor(track) }
@@ -317,7 +307,6 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
 
     private companion object {
         const val TAG = "ElevateProgress"
-        const val HOME_CLASS = "com.lagradost.cloudstream3.ui.home.HomeFragment"
         val DETAIL_CLASSES = setOf(
             "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer",
             "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
