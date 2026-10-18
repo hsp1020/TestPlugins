@@ -2518,6 +2518,11 @@ internal class RatingPlotImageHook(
             saveButton?.setOnClickListener { trace("UI_SAVE_TAP", "provider=$selected"); save() }
             checks?.setOnItemClickListener { _, _, pos, _ ->
                 val tracker = statuses[selected] ?: return@setOnItemClickListener
+                if (tracker.saving || tracker.writeBlocked != null) {
+                    trace("UI_EDIT_REJECT", "kind=status provider=$selected saving=${tracker.saving} blocked=${tracker.writeBlocked}")
+                    render()
+                    return@setOnItemClickListener
+                }
                 val edit = tracker.draft ?: return@setOnItemClickListener
                 edit.status = SyncWatchType.fromInternalId(pos - 1)
                 val tv = tracker.simklSeason
@@ -2541,6 +2546,10 @@ internal class RatingPlotImageHook(
             slider?.addOnChangeListener { _, value, fromUser ->
                 if (!fromUser || applying) return@addOnChangeListener
                 val tracker = statuses[selected] ?: return@addOnChangeListener
+                if (tracker.saving || tracker.writeBlocked != null) {
+                    trace("UI_EDIT_REJECT", "kind=score provider=$selected saving=${tracker.saving}")
+                    return@addOnChangeListener
+                }
                 val draft = tracker.draft ?: return@addOnChangeListener
                 draft.score = Score.from(value, 10)
                 trace("UI_SCORE", "provider=$selected score=$value")
@@ -2551,6 +2560,10 @@ internal class RatingPlotImageHook(
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                     if (applying || current?.hasFocus() != true) return
                     val tracker = statuses[selected] ?: return
+                    if (tracker.saving || tracker.writeBlocked != null) {
+                        trace("UI_EDIT_REJECT", "kind=episode-input provider=$selected saving=${tracker.saving}")
+                        return
+                    }
                     val draft = tracker.draft ?: return
                     val entered = s?.toString()?.toIntOrNull() ?: return
                     val clamped = entered.coerceIn(0, tracker.total?.takeIf { it > 0 } ?: Int.MAX_VALUE)
@@ -2586,6 +2599,10 @@ internal class RatingPlotImageHook(
 
         private fun adjust(delta: Int) {
             val tracker = statuses[selected] ?: return
+            if (tracker.saving || tracker.writeBlocked != null) {
+                trace("UI_EDIT_REJECT", "kind=episode-step provider=$selected saving=${tracker.saving} delta=$delta")
+                return
+            }
             val draft = tracker.draft ?: return
             val upper = tracker.total?.takeIf { it > 0 } ?: Int.MAX_VALUE
             draft.watched = (draft.watched.toLong() + delta).coerceIn(0L, upper.toLong()).toInt()
@@ -2634,7 +2651,7 @@ internal class RatingPlotImageHook(
                 checks?.setItemChecked(data.status.internalId + 1, true)
                 // Simkl anime titles dedicated to the selected season have an
                 // independent watchlist status. Shared multi-season titles do not.
-                checks?.isEnabled = target.writeBlocked == null &&
+                checks?.isEnabled = !target.saving && target.writeBlocked == null &&
                     (target.simklSeason == null || target.simklSeason?.listStatus != null) &&
                     (target.simklAnime == null || target.simklAnime?.statusEditable == true)
                 val sig = "$selected:${data.status}:${data.watched}:${target.saving}:${target.writeBlocked}:${target.simklSeason?.listStatus}:${target.simklAnime?.statusEditable}"
@@ -2642,14 +2659,16 @@ internal class RatingPlotImageHook(
                     lastDiagnosticUi = sig
                     trace("UI_RENDER", "state=$sig total=${target.total} statusEnabled=${checks?.isEnabled} score=${data.score?.toInt(10)} error=${target.error}")
                 }
-                slider?.isEnabled = target.writeBlocked == null &&
+                slider?.isEnabled = !target.saving && target.writeBlocked == null &&
                     target.simklSeason == null && target.simklAnime == null
                 val valScore = data.score?.toFloat(10) ?: 0f
                 slider?.value = valScore.coerceIn(0f,10f).toInt().toFloat()
                 scoreLabel?.text = data.score?.toInt(10)?.toString()?.plus("/10") ?: "?"
                 saveButton?.isEnabled = !target.saving && target.writeBlocked == null
-                plus?.isEnabled = target.writeBlocked == null
-                minus?.isEnabled = target.writeBlocked == null
+                current?.isEnabled = !target.saving && target.writeBlocked == null
+                plus?.isEnabled = !target.saving && target.writeBlocked == null
+                minus?.isEnabled = !target.saving && target.writeBlocked == null
+                trace("UI_LOCK_STATE", "provider=$selected saving=${target.saving} statusEnabled=${checks?.isEnabled} progressEnabled=${current?.isEnabled} plusEnabled=${plus?.isEnabled} saveEnabled=${saveButton?.isEnabled}")
             } catch (e: Exception) {
                   traceError("SYNC_EXCEPTION", e)
             } finally { applying = false }
@@ -2806,6 +2825,7 @@ internal class RatingPlotImageHook(
                             tracker.draft?.let { if (it == draft) it.explicitNone = false }
                         }
                     } else tracker.error = "save-or-readback-failed"
+                    trace("SAVE_UI_RESULT", "provider=$prefix saved=$result baseline=${tracker.baseline?.status}/${tracker.baseline?.watched} draft=${tracker.draft?.status}/${tracker.draft?.watched} error=${tracker.error} selected=$selected")
                     render()
                 } else {
                 }
