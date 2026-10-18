@@ -1407,57 +1407,33 @@ internal class RatingPlotImageHook(
             }
 
             if (statusChanged) {
-                // Reuse CloudStream's Simkl status-only builder. In contrast to
-                // updateStatus(), this does not populate episodes or rating;
-                // COMPLETED therefore cannot mark other seasons as watched.
-                val coreIds = SimklApi.MediaObject.Ids(
-                    simkl = jsonInt(initial.ids, "simkl"),
-                    imdb = initial.ids.optString("imdb").takeIf { it.isNotBlank() },
-                    mal = initial.ids.optString("mal").takeIf { it.isNotBlank() },
-                    anilist = initial.ids.optString("anilist").takeIf { it.isNotBlank() }
-                )
-                val supported = coreIds.simkl != null || coreIds.imdb != null ||
-                    coreIds.mal != null || coreIds.anilist != null
-                val issued = if (supported) {
-                    try {
-                        SimklApi.SimklScoreBuilder.Builder()
-                            .apiUrl(tracker.repo.api.mainUrl)
-                            .token(tracker.repo.authToken() ?: return false)
-                            .ids(coreIds)
-                            .status(draft.status.internalId, initial.listStatus?.internalId)
-                            .execute()
-                    } catch (e: CancellationException) { throw e }
-                      catch (e: Exception) { false }
-                } else {
-                    // Core's Ids DTO has no TVDB field; retain the existing
-                    // status-only request when that is the only available ID.
-                    val destination = simklWatchlistDestination(draft.status) ?: return false
-                    val payload = JSONObject().put("shows", JSONArray().put(
-                        JSONObject().put("ids", initial.ids).put("to", destination)))
-                    val response = try {
-                        app.post(url + "add-to-list", headers = headers,
-                            requestBody = payload.toString().toRequestBody())
-                    } catch (e: CancellationException) { throw e }
-                      catch (e: Exception) { return false }
-                    val result = runCatching { JSONObject(response.text) }.getOrNull()
-                    response.code in 200..299 && result != null &&
-                        (result.optJSONObject("not_found")?.optJSONArray("shows")?.length() ?: 0) == 0
-                }
-                if (!issued) return false
-                tracker.repo.requireLibraryRefresh = true
-                val expectedStatus = if (draft.status == SyncWatchType.REWATCHING)
-                    SyncWatchType.WATCHING else draft.status
-                val stable = tracker.simklSeason ?: initial
+                // The pre-release host API is not guaranteed to export the core
+                // builder. Send only the show's status, without episode/score
+                // changes; episode updates remain season-scoped above.
+                val destination = simklWatchlistDestination(draft.status) ?: return false
+                val payload = JSONObject().put("shows", JSONArray().put(
+                    JSONObject().put("ids", initial.ids).put("to", destination)))
+                val response = try {
+                    app.post(url + "add-to-list", headers = headers,
+                        requestBody = payload.toString().toRequestBody())
+                } catch (e: CancellationException) { throw e }
+                  catch (e: Exception) { return false }
+                if (response.code !in 200..299) return false
+                val result = runCatching { JSONObject(response.text) }.getOrNull()
+                    ?: return false
+                if ((result.optJSONObject("not_found")?.optJSONArray("shows")?.length() ?: 0) > 0)
+                    return false
+                val accepted = result.optJSONObject("added")?.optJSONArray("shows")
+                    ?.optJSONObject(0)?.opt("to")?.let { simklWatchlistStatus(it) }
+                    ?.takeIf { it != SyncWatchType.NONE } ?: draft.status
                 for (attempt in 1..3) {
                     if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
                     val current = simklSeasonRead(tracker.repo, tracker.id, sn)
-                    val statusMatches = current?.listStatus == expectedStatus ||
-                        (draft.status == SyncWatchType.COMPLETED &&
-                            current?.listStatus == SyncWatchType.WATCHING)
-                    if (current != null && statusMatches &&
-                        current.watched == stable.watched &&
-                        current.otherSeasons == stable.otherSeasons) {
+                    if (current?.listStatus == accepted &&
+                        current.watched == (tracker.simklSeason ?: initial).watched &&
+                        current.otherSeasons == (tracker.simklSeason ?: initial).otherSeasons) {
                         tracker.simklSeason = current
+                        tracker.repo.requireLibraryRefresh = true
                         return true
                     }
                 }
