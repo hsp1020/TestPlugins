@@ -71,10 +71,8 @@ import android.widget.FrameLayout
 import com.google.android.material.chip.ChipGroup
 import com.google.android.material.progressindicator.CircularProgressIndicator
 import androidx.core.content.ContextCompat
-import androidx.appcompat.widget.SearchView
 import androidx.appcompat.widget.AppCompatSpinner
 import androidx.recyclerview.widget.RecyclerView
-import com.google.android.material.navigation.NavigationBarView
 import androidx.navigation.NavOptions
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
@@ -853,68 +851,6 @@ internal class RatingPlotImageHook(
     private var previewPageObserver: Observer<Resource<ResultData>?>? = null
     private var previewPageModel: ResultViewModel2? = null
 
-    private var lastSearchQuery: String? = null
-    private var stremioSearchSession = false
-    private var freshSearchPending = false
-    private var homeMenuOwner: Fragment? = null
-    private var homeMenuItems = emptyList<android.view.MenuItem>()
-
-    private fun releaseHomeMenu(owner: Fragment? = null) {
-        if (owner != null && homeMenuOwner !== owner) return
-        homeMenuItems.forEach { it.setOnMenuItemClickListener(null) }
-        homeMenuItems = emptyList()
-        homeMenuOwner = null
-    }
-
-    private fun setupSearchNavigation(f: Fragment, root: View) {
-        val marked = f.arguments?.getBoolean("stremioc_detail_search") == true
-        if (!marked && !stremioSearchSession) return
-        stremioSearchSession = true
-        val fresh = marked && freshSearchPending
-        freshSearchPending = false
-        val activity = f.activity ?: return
-        fun id(name: String) = root.resources.getIdentifier(name, "id", root.context.packageName)
-        val searchView = id("main_search").takeIf { it != 0 }?.let { root.findViewById<SearchView>(it) }
-        if (!fresh && searchView?.query.isNullOrEmpty() &&
-            f.arguments?.getString("search_query").isNullOrBlank() &&
-            MainActivity.nextSearchQuery.isNullOrBlank()) {
-            lastSearchQuery?.let { searchView?.setQuery(it, false) }
-        }
-
-        val homeId = id("navigation_home")
-        val searchId = id("navigation_search")
-        val hostId = id("nav_host_fragment")
-        if (homeId == 0 || searchId == 0 || hostId == 0) return
-        val navHost = activity.supportFragmentManager.findFragmentById(hostId)
-            as? androidx.navigation.fragment.NavHostFragment ?: return
-        releaseHomeMenu()
-        homeMenuOwner = f
-        homeMenuItems = listOf("nav_view", "nav_rail_view").mapNotNull { name ->
-            val barId = id(name)
-            val bar = if (barId == 0) null else activity.findViewById<NavigationBarView>(barId)
-            bar?.menu?.findItem(homeId)?.apply {
-                setOnMenuItemClickListener {
-                    if (!f.isAdded || f.view !== root ||
-                        navHost.navController.currentDestination?.id != searchId) {
-                        false
-                    } else {
-                        runCatching {
-                            val nav = navHost.navController
-                            if (!nav.popBackStack(homeId, false, false)) {
-                                nav.navigate(homeId, null, NavOptions.Builder()
-                                    .setLaunchSingleTop(true)
-                                    .setRestoreState(false)
-                                    .build())
-                            }
-                            true
-                        }.getOrElse { e ->
-                            false
-                        }
-                    }
-                }
-            }
-        }
-    }
     private val ids = mutableMapOf<String, Int>()
     private val icons = linkedMapOf(
         "Ⓜ️" to "rating_mal", "⭐" to "rating_imdb",
@@ -1018,67 +954,6 @@ internal class RatingPlotImageHook(
         }
     }
 
-    private var detailRevealEnd: (() -> Unit)? = null
-
-    private fun holdDetailReveal(search: Fragment) {
-        if (search.arguments?.getBoolean("stremioc_detail_search") != true) return
-        val activity = search.activity ?: return
-        fun find(name: String): View? {
-            val id = activity.resources.getIdentifier(name, "id", activity.packageName)
-            return if (id == 0) null else activity.findViewById<View>(id)
-        }
-
-        if (listOf("nav_view", "nav_rail_view").any { find(it)?.visibility == View.VISIBLE }) return
-        val navHost = activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)
-            as? androidx.navigation.fragment.NavHostFragment ?: return
-        if (navHost.navController.currentDestination?.id !in setOf(
-                R.id.navigation_results_phone, R.id.navigation_results_tv
-            )) return
-        val content = find("nav_host_fragment") ?: return
-        val bounds = content.parent as? android.view.ViewGroup ?: return
-
-        val observer = content.viewTreeObserver
-        if (!observer.isAlive) return
-        detailRevealEnd?.invoke()
-        val started = android.os.SystemClock.uptimeMillis()
-        var stable = 0
-        lateinit var listener: ViewTreeObserver.OnPreDrawListener
-        lateinit var timeout: Runnable
-        lateinit var release: () -> Unit
-        release = {
-            if (observer.isAlive) observer.removeOnPreDrawListener(listener)
-            main.removeCallbacks(timeout)
-            if (detailRevealEnd === release) detailRevealEnd = null
-        }
-        listener = ViewTreeObserver.OnPreDrawListener {
-            val elapsed = android.os.SystemClock.uptimeMillis() - started
-            val full = content.visibility == View.VISIBLE &&
-                content.left <= bounds.paddingLeft &&
-                content.top <= bounds.paddingTop &&
-                content.right >= bounds.width - bounds.paddingRight &&
-                content.bottom >= bounds.height - bounds.paddingBottom &&
-                !content.isLayoutRequested
-            stable = if (full) stable + 1 else 0
-            if (stable >= 2 || elapsed >= 600L) {
-                release()
-                true
-            } else {
-
-                content.postInvalidateOnAnimation()
-                false
-            }
-        }
-        timeout = Runnable {
-            if (detailRevealEnd === release) {
-                release()
-                content.postInvalidateOnAnimation()
-            }
-        }
-        detailRevealEnd = release
-        observer.addOnPreDrawListener(listener)
-        main.postDelayed(timeout, 650L)
-    }
-
     private val fragmentCallback = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
             fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?
@@ -1088,36 +963,11 @@ internal class RatingPlotImageHook(
                     homeRoot = v
                     syncHomeHooks()
                 }
-                if (f.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment")
-                    setupSearchNavigation(f, v)
-                if (f.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment" &&
-                    f.arguments?.getBoolean("stremioc_detail_search") == true && isLayout(PHONE)) {
-                    val id = v.resources.getIdentifier("main_search", "id", v.context.packageName)
-                    if (id != 0) v.findViewById<SearchView>(id)?.let { search ->
-                        search.post {
-                            if (f.isAdded && f.view === v) {
-                                search.clearFocus()
-                                com.lagradost.cloudstream3.utils.UIHelper.hideKeyboard(search)
-                            }
-                        }
-                    }
-                } else attach(f, v)
+                attach(f, v)
                 pipSubtitles.watch(f)
                 audioSelector.watch(f)
                 subtitleController.watch(f)
                 scrobble.watch(f)
-            }
-        }
-
-        override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
-            if (f.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment") {
-                if (stremioSearchSession) {
-                    val id = f.view?.resources?.getIdentifier("main_search", "id", f.requireContext().packageName) ?: 0
-                    val query = if (id == 0) null else f.view?.findViewById<SearchView>(id)?.query?.toString()
-                    if (query != null) lastSearchQuery = query.takeIf { it.isNotBlank() }
-                }
-                runCatching { holdDetailReveal(f) }
-
             }
         }
 
@@ -1138,7 +988,6 @@ internal class RatingPlotImageHook(
                 homeRoot = null
                 homeEntries.detach()
             }
-            releaseHomeMenu(f)
             pipSubtitles.detach(f)
             audioSelector.detach(f)
             subtitleController.detach(f)
@@ -1154,13 +1003,6 @@ internal class RatingPlotImageHook(
         (CommonActivity.activity as? MainActivity)?.let(::use)
     }
 
-    private fun resetSearchState() {
-        releaseHomeMenu()
-        stremioSearchSession = false
-        freshSearchPending = false
-        lastSearchQuery = null
-    }
-
     fun stop() {
         scrobble.stop()
         audioSelector.detach()
@@ -1173,8 +1015,6 @@ internal class RatingPlotImageHook(
         homeRoot = null
         homeEntries.detach()
         detachPreview()
-        detailRevealEnd?.invoke()
-        resetSearchState()
         prefs.unregisterOnSharedPreferenceChangeListener(prefListener)
         app.unregisterActivityLifecycleCallbacks(this)
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
@@ -1194,8 +1034,6 @@ internal class RatingPlotImageHook(
         homeRoot = null
         homeEntries.detach()
         detachPreview()
-        detailRevealEnd?.invoke()
-        resetSearchState()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
         watchers.values.toList().forEach { it.detach() }
         watchers.clear()
@@ -2968,12 +2806,6 @@ internal class RatingPlotImageHook(
             return true
         }
 
-        private val searchButton = listOf("result_search_Button", "result_search").firstNotNullOfOrNull {
-            val id = root.resources.getIdentifier(it, "id", root.context.packageName)
-            if (id == 0) null else root.findViewById<View>(id)
-        }
-        private val searchTitle = root.resources.getIdentifier("result_title", "id", root.context.packageName)
-            .takeIf { it != 0 }?.let { root.findViewById<TextView>(it) }
         private val castItems = root.resources.getIdentifier("result_cast_items", "id", root.context.packageName)
             .takeIf { it != 0 }?.let { root.findViewById<RecyclerView>(it) }
         private val episodeList = root.findViewById<RecyclerView>(R.id.result_episodes)
@@ -3095,28 +2927,19 @@ internal class RatingPlotImageHook(
             }
         }
 
-        private fun openSearch(query: String) {
+        private fun openActorSearch(query: String) {
             if (query.isBlank()) return
             val id = root.resources.getIdentifier("navigation_search", "id", root.context.packageName)
+            if (id == 0) return
             val enter = root.resources.getIdentifier("enter_anim", "anim", root.context.packageName)
             val exit = root.resources.getIdentifier("exit_anim", "anim", root.context.packageName)
-            if (id == 0) return
-            val activity = fragment.activity ?: return
-            stremioSearchSession = true
-            freshSearchPending = true
-            lastSearchQuery = query
-            activity.navigate(id, Bundle().apply {
+            fragment.activity?.navigate(id, Bundle().apply {
                 putString("search_query", query)
-                putBoolean("stremioc_detail_search", true)
+                putBoolean("global_detail_search", true)
             }, NavOptions.Builder()
                 .setEnterAnim(enter).setExitAnim(exit)
                 .setPopEnterAnim(enter).setPopExitAnim(exit)
                 .build())
-        }
-
-        private val searchClick = View.OnClickListener {
-            openSearch(searchTitle?.text?.toString()?.trim().orEmpty()
-                .ifEmpty { fragment.arguments?.getString("name")?.trim().orEmpty() })
         }
         private val castClick = View.OnClickListener { card ->
             val list = castItems ?: return@OnClickListener
@@ -3126,13 +2949,12 @@ internal class RatingPlotImageHook(
         }
         private val castLongClick = View.OnLongClickListener { card ->
             if (actorNameId != 0) {
-                openSearch(card.findViewById<TextView>(actorNameId)?.text?.toString()?.trim().orEmpty())
+                openActorSearch(card.findViewById<TextView>(actorNameId)?.text?.toString()?.trim().orEmpty())
             }
             true
         }
         private val detailPreDraw = ViewTreeObserver.OnPreDrawListener {
             if (fragment.isAdded) {
-                if (searchButton?.isShown == true) searchButton.setOnClickListener(searchClick)
                 castItems?.takeIf { it.isShown }?.let { list ->
                     for (i in 0 until list.childCount) {
                         val card = list.getChildAt(i)
@@ -3154,8 +2976,7 @@ internal class RatingPlotImageHook(
             runCatching { seasonSyncProbe.start() }.onFailure {
             }
             view.addTextChangedListener(this)
-            searchButton?.setOnClickListener(searchClick)
-            if (searchButton != null || castItems != null || genreGroup != null)
+            if (castItems != null || genreGroup != null)
                 root.viewTreeObserver.addOnPreDrawListener(detailPreDraw)
             runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() }
         }
@@ -3167,7 +2988,6 @@ internal class RatingPlotImageHook(
             actorInformation.stop()
             view.removeTextChangedListener(this)
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(detailPreDraw)
-            searchButton?.setOnClickListener(null)
             boundGenreChips.keys.forEach { chip ->
                 chip.setOnClickListener(null)
                 chip.setOnTouchListener(null)
@@ -3218,8 +3038,6 @@ internal class RatingPlotImageHook(
         homeRoot = null
         homeEntries.detach()
         detachPreview()
-        detailRevealEnd?.invoke()
-        resetSearchState()
         pipSubtitles.detach()
         audioSelector.detach()
         subtitleController.detach()
