@@ -2234,7 +2234,20 @@ internal class RatingPlotImageHook(
                 }
             val library=resource?.getOrNull()
             val count=library?.allLibraryLists?.sumOf { it.items.size }
-            trace("REFRESH_LIBRARY_RESULT", "request=$request provider=$provider ok=${library!=null} lists=${library?.allLibraryLists?.size} items=$count durationMs=${android.os.SystemClock.elapsedRealtime()-beginMs} error=${resource?.exceptionOrNull()?.javaClass?.simpleName}")
+            val pageCounts=library?.allLibraryLists?.map { it.items.size }
+            val matchedIds: Set<String> = when {
+                provider!="simkl" -> setOf(tracker.id)
+                tracker.simklAnime!=null ->
+                    tracker.simklAnime!!.sourceIds.map { it.toString() }.toSet()
+                else -> simklIds(tracker.id)?.optString("simkl")
+                    ?.takeIf { it.isNotBlank() }?.let { setOf(it) } ?: emptySet()
+            }
+            val matches=if(library!=null && matchedIds.isNotEmpty())
+                library.allLibraryLists.sumOf { list ->
+                    list.items.count { it.syncId in matchedIds }
+                } else null
+            trace("REFRESH_LIBRARY_RESULT",
+                "request=$request provider=$provider ok=${library!=null} lists=${library?.allLibraryLists?.size} items=$count pageCounts=$pageCounts targetIdsKnown=${matchedIds.size} targetMatches=$matches durationMs=${android.os.SystemClock.elapsedRealtime()-beginMs} error=${resource?.exceptionOrNull()?.javaClass?.simpleName}")
             // Preserve the flag for LibraryViewModel, which clears it only after
             // successfully publishing the new pages.
             repo.requireLibraryRefresh=true
@@ -2252,7 +2265,7 @@ internal class RatingPlotImageHook(
         fun start() {
             if (active) return
             active = true
-            trace("PANEL_START", "detailHash=${detailUrl?.hashCode()}")
+            trace("PANEL_START", "detailHash=${detailUrl?.hashCode()} pendingWrites=${pendingWrites.size}")
             val vm = ViewModelProvider(fragment)[ResultViewModel2::class.java]
             syncModel = if (fragment is com.lagradost.cloudstream3.ui.result.ResultFragmentPhone)
                 ViewModelProvider(fragment)[SyncViewModel::class.java] else null
@@ -2587,7 +2600,7 @@ internal class RatingPlotImageHook(
             saveButton?.setOnClickListener { trace("UI_SAVE_TAP", "provider=$selected"); save() }
             checks?.setOnItemClickListener { _, _, pos, _ ->
                 val tracker = statuses[selected] ?: return@setOnItemClickListener
-                if (tracker.saving || tracker.writeBlocked != null) {
+                if (isWriteInFlight(tracker) || tracker.writeBlocked != null) {
                     trace("UI_EDIT_REJECT", "kind=status provider=$selected saving=${tracker.saving} blocked=${tracker.writeBlocked}")
                     render()
                     return@setOnItemClickListener
@@ -2615,7 +2628,7 @@ internal class RatingPlotImageHook(
             slider?.addOnChangeListener { _, value, fromUser ->
                 if (!fromUser || applying) return@addOnChangeListener
                 val tracker = statuses[selected] ?: return@addOnChangeListener
-                if (tracker.saving || tracker.writeBlocked != null) {
+                if (isWriteInFlight(tracker) || tracker.writeBlocked != null) {
                     trace("UI_EDIT_REJECT", "kind=score provider=$selected saving=${tracker.saving}")
                     return@addOnChangeListener
                 }
@@ -2629,7 +2642,7 @@ internal class RatingPlotImageHook(
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                     if (applying || current?.hasFocus() != true) return
                     val tracker = statuses[selected] ?: return
-                    if (tracker.saving || tracker.writeBlocked != null) {
+                    if (isWriteInFlight(tracker) || tracker.writeBlocked != null) {
                         trace("UI_EDIT_REJECT", "kind=episode-input provider=$selected saving=${tracker.saving}")
                         return
                     }
@@ -2684,7 +2697,7 @@ internal class RatingPlotImageHook(
 
         private fun adjust(delta: Int) {
             val tracker = statuses[selected] ?: return
-            if (tracker.saving || tracker.writeBlocked != null) {
+            if (isWriteInFlight(tracker) || tracker.writeBlocked != null) {
                 trace("UI_EDIT_REJECT", "kind=episode-step provider=$selected saving=${tracker.saving} delta=$delta")
                 return
             }
@@ -2737,7 +2750,7 @@ internal class RatingPlotImageHook(
                 checks?.setItemChecked(data.status.internalId + 1, true)
                 // Simkl anime titles dedicated to the selected season have an
                 // independent watchlist status. Shared multi-season titles do not.
-                checks?.isEnabled = !target.saving && target.writeBlocked == null &&
+                checks?.isEnabled = !isWriteInFlight(target) && target.writeBlocked == null &&
                     (target.simklSeason == null || target.simklSeason?.listStatus != null) &&
                     (target.simklAnime == null || target.simklAnime?.statusEditable == true)
                 val sig = "$selected:${data.status}:${data.watched}:${target.saving}:${target.writeBlocked}:${target.simklSeason?.listStatus}:${target.simklAnime?.statusEditable}"
@@ -2745,16 +2758,21 @@ internal class RatingPlotImageHook(
                     lastDiagnosticUi = sig
                     trace("UI_RENDER", "state=$sig total=${target.total} statusEnabled=${checks?.isEnabled} score=${data.score?.toInt(10)} error=${target.error}")
                 }
-                slider?.isEnabled = !target.saving && target.writeBlocked == null &&
+                slider?.isEnabled = !isWriteInFlight(target) && target.writeBlocked == null &&
                     target.simklSeason == null && target.simklAnime == null
                 val valScore = data.score?.toFloat(10) ?: 0f
                 slider?.value = valScore.coerceIn(0f,10f).toInt().toFloat()
                 scoreLabel?.text = data.score?.toInt(10)?.toString()?.plus("/10") ?: "?"
-                saveButton?.isEnabled = !target.saving && target.writeBlocked == null
-                current?.isEnabled = !target.saving && target.writeBlocked == null
-                plus?.isEnabled = !target.saving && target.writeBlocked == null
-                minus?.isEnabled = !target.saving && target.writeBlocked == null
-                trace("UI_LOCK_STATE", "provider=$selected saving=${target.saving} statusEnabled=${checks?.isEnabled} progressEnabled=${current?.isEnabled} plusEnabled=${plus?.isEnabled} saveEnabled=${saveButton?.isEnabled}")
+                saveButton?.isEnabled = !isWriteInFlight(target) && target.writeBlocked == null
+                current?.isEnabled = !isWriteInFlight(target) && target.writeBlocked == null
+                plus?.isEnabled = !isWriteInFlight(target) && target.writeBlocked == null
+                minus?.isEnabled = !isWriteInFlight(target) && target.writeBlocked == null
+                val locked=isWriteInFlight(target)
+                val invariant=!locked || (checks?.isEnabled!=true &&
+                    current?.isEnabled!=true && plus?.isEnabled!=true &&
+                    minus?.isEnabled!=true && saveButton?.isEnabled!=true &&
+                    slider?.isEnabled!=true)
+                trace("UI_LOCK_ASSERT", "provider=$selected locked=$locked localSaving=${target.saving} globalWrite=${pendingWrites.contains("${target.prefix}:${target.id}")} invariant=$invariant statusEnabled=${checks?.isEnabled} progressEnabled=${current?.isEnabled} minusEnabled=${minus?.isEnabled} plusEnabled=${plus?.isEnabled} saveEnabled=${saveButton?.isEnabled} scoreEnabled=${slider?.isEnabled}")
             } catch (e: Exception) {
                   traceError("SYNC_EXCEPTION", e)
             } finally { applying = false }
@@ -3073,9 +3091,11 @@ internal class RatingPlotImageHook(
 
         fun stop() {
             if (!active) return
+            trace("PANEL_DETACH", "pendingWrites=${pendingWrites.size} activeSaves=${statuses.values.count { it.saving }} currentSeason=$season")
             active = false
             generation++
             fetchJob?.cancel()
+            // saveScope intentionally survives this screen, unlike scope.
             scope.cancel()
             observers.forEach { it() }
             observers.clear()
