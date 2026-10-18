@@ -61,7 +61,8 @@ import com.lagradost.cloudstream3.ui.result.VideoWatchState
 private fun installedYouTubeExtractor(): ExtractorApi? {
     for (index in extractorApis.lastIndex downTo 0) {
         val extractor = extractorApis[index]
-        if (extractor.name != "YouTube" ||
+        if (extractor.javaClass.name != "com.hsp1020.youtube.YoutubeExtractor" ||
+            extractor.name != "YouTube" ||
             !extractor.mainUrl.trimEnd('/').equals("https://www.youtube.com", ignoreCase = true) ||
             extractor.sourcePlugin.isNullOrBlank()) continue
         if (APIHolder.allProviders.any { provider ->
@@ -270,12 +271,8 @@ internal class TrailerChooser(
 
     private fun showYouTubeInstallNotice() {
         val activity = fragment.activity ?: return
-        val message = if (activity.resources.configuration.locales[0].language == "ko")
-            "예고편을 재생하려면 YouTube 플러그인을 설치하고 활성화해야 합니다."
-        else
-            "Install and enable the YouTube plugin to play trailers."
         AlertDialog.Builder(activity)
-            .setMessage(message)
+            .setMessage("Install and enable the YouTube plugin to play trailers.")
             .setPositiveButton(android.R.string.ok, null)
             .show()
     }
