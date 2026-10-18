@@ -48,6 +48,7 @@ internal class StremioScrobble(context: Context) {
     private var pendingSeekReport: Runnable? = null
     private var lastSeekReportAtMs = 0L
     /** Seek past 80% requires 60 seconds of uninterrupted actual playback. */
+    private var restartRequested = false
     private var seekCompletionPending = false
     private var seekPlaybackStartedAtMs = 0L
     private fun syncTrace(stage: String, detail: String = "") {
@@ -182,6 +183,7 @@ internal class StremioScrobble(context: Context) {
         cancelCompletion()
         cancelPendingSeek()
         lastSeekReportAtMs = 0L
+        restartRequested = false
         active = next
         lastEvent = null
         lastPosition = 0L
@@ -203,6 +205,7 @@ internal class StremioScrobble(context: Context) {
         lastSeekReportAtMs = 0L
         cancelCompletion()
         player?.removeListener(listener)
+        restartRequested = false // A mirror replacement is not itself a new viewing.
         player = next
         next?.addListener(listener)
         val changed = refreshEpisode()
@@ -230,9 +233,10 @@ internal class StremioScrobble(context: Context) {
 
     /** Reopen a completed watch only when the same/new player is actually playing near the start. */
     private fun restartCompletedWatch(item: Item, current: Media3Player?): Boolean {
-        if (lastEvent != "stop" || current?.isPlaying != true) return false
+        if (!restartRequested || lastEvent != "stop" || current?.isPlaying != true) return false
         val (position, duration) = playbackPosition(item, current)
         if (duration <= 0L || position > minOf(duration / 20L, 60_000L)) return false
+        restartRequested = false
         cancelCompletion()
         cancelPendingSeek()
         lastSeekReportAtMs = 0L
@@ -389,9 +393,14 @@ internal class StremioScrobble(context: Context) {
                 val current = player
                 val item = active
                 if (item != null && current != null) {
-                    if (!restartCompletedWatch(item, current) && lastEvent != "stop" &&
-                        (reason == Media3Player.DISCONTINUITY_REASON_SEEK ||
-                            reason == Media3Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT)) {
+                    val isSeek = reason == Media3Player.DISCONTINUITY_REASON_SEEK ||
+                        reason == Media3Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT
+                    if (lastEvent == "stop" && isSeek) {
+                        val (position, duration) = playbackPosition(item, current)
+                        restartRequested = duration > 0L &&
+                            position <= minOf(duration / 20L, 60_000L)
+                    }
+                    if (!restartCompletedWatch(item, current) && lastEvent != "stop" && isSeek) {
                         val (position, duration) = playbackPosition(item, current)
                         updateSeekCompletion(current, position, duration)
                         scheduleCompletion()
@@ -446,6 +455,7 @@ internal class StremioScrobble(context: Context) {
         model = null
         active = null
         lastEvent = null
+        restartRequested = false
         lastPosition = 0L
         lastDuration = 0L
         resetSeekCompletion()
