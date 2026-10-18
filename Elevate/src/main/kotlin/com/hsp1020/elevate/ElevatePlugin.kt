@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.os.Bundle
+import android.util.Log
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -37,6 +38,7 @@ class ElevatePlugin : Plugin() {
     private var episodeProgress: EpisodeProgressHook? = null
 
     override fun load(context: Context) {
+        Log.i("ElevateProgress", "PLUGIN_LOAD context=${context.javaClass.name} app=${context.applicationContext.javaClass.name}")
         hook?.stop()
         pipSubtitles?.stop()
         episodeProgress?.stop()
@@ -47,6 +49,7 @@ class ElevatePlugin : Plugin() {
     }
 
     override fun beforeUnload() {
+        Log.i("ElevateProgress", "PLUGIN_UNLOAD")
         hook?.stop()
         hook = null
         pipSubtitles?.stop()
