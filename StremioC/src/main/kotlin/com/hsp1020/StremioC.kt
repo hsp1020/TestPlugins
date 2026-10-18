@@ -3158,19 +3158,18 @@ open class StremioC(
         val mapped = fetchAnimeSeasonMapping(LoadData(
             id = imdbId, imdbId = imdbId, imdbSeason = season, isAnime = true
         )) ?: return null
-        )) ?: return null
         if (mapped.imdbId != imdbId) {
             syncDiag("SEASON_MAP_REJECT", "reason=imdbMismatch requested=$imdbId actual=${mapped.imdbId}")
             return null
         }
         // A multi-season IMDb page must never attach a different season's tracker ID.
-        syncDiag("SEASON_MAP_MATCH", "simkl=${mapped.simklId} mal=${mapped.malId} al=${mapped.aniListId} kitsu=${mapped.kitsuId} tvdb=${mapped.tvdbId} imdbSeason=${mapped.imdbSeason} tvdbSeason=${mapped.tvdbSeason}")
         if (season > 1 && mapped.imdbSeason != season &&
             mapped.tvdbSeason != season && mapped.traktSeason != season &&
             mapped.tmdbSeason != season) {
             syncDiag("SEASON_MAP_REJECT", "reason=seasonMismatch requested=$season imdb=${mapped.imdbSeason} tvdb=${mapped.tvdbSeason} trakt=${mapped.traktSeason} tmdb=${mapped.tmdbSeason}")
             return null
         }
+        syncDiag("SEASON_MAP_MATCH", "simkl=${mapped.simklId} mal=${mapped.malId} al=${mapped.aniListId} kitsu=${mapped.kitsuId} tvdb=${mapped.tvdbId} imdbSeason=${mapped.imdbSeason} tvdbSeason=${mapped.tvdbSeason}")
         return SeasonTrackerIds(mapped.malId, mapped.aniListId,
             mapped.kitsuId?.toIntOrNull(), mapped.simklId, mapped.tvdbId,
             mapped.tvdbSeason, mapped.tmdbSeason)
