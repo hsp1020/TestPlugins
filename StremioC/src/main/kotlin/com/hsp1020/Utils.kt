@@ -34,6 +34,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.lagradost.cloudstream3.Score
 import com.lagradost.cloudstream3.syncproviders.providers.SimklApi
+import com.lagradost.cloudstream3.CloudStreamApp.Companion.removeKey
 import com.lagradost.cloudstream3.syncproviders.AccountManager
 import com.lagradost.cloudstream3.syncproviders.SyncAPI
 import com.lagradost.cloudstream3.ui.SyncWatchType
@@ -1234,6 +1235,9 @@ internal class RatingPlotImageHook(
             val allowed = setOf("mal", "anilist", "kitsu", "simkl")
             val titles = mapOf("mal" to "MAL", "anilist" to "AniList",
                 "kitsu" to "Kitsu", "simkl" to "Simkl")
+            // Shared across detail screens; protects the same tracker entry from
+            // simultaneous saves after a season change or navigation.
+            val pendingWrites = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         }
 
         private data class Draft(
@@ -2151,6 +2155,9 @@ internal class RatingPlotImageHook(
         }
 
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        // Writes must finish even after the detail fragment is destroyed.
+        // Only the view observers and page fetches belong to the screen scope.
+        private val saveScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         private val observers = mutableListOf<() -> Unit>()
         private var active = false
         private var generation = 0L
@@ -2193,6 +2200,45 @@ internal class RatingPlotImageHook(
 
         private fun valid(g: Long, n: Int?): Boolean =
             active && generation == g && season == n
+
+        private fun isWriteInFlight(tracker: Tracker): Boolean =
+            tracker.saving || pendingWrites.contains("${tracker.prefix}:${tracker.id}")
+
+        /** Explicit cache invalidation must precede native library reload:
+         * Simkl ignores the SyncRepo refresh flag when choosing its cached list.
+         */
+        private suspend fun refreshAfterVerifiedWrite(
+            tracker: Tracker, provider: String, request: Long
+        ) {
+            val repo=tracker.repo
+            val before=repo.requireLibraryRefresh
+            repo.requireLibraryRefresh=true
+            trace("REFRESH_BEGIN", "request=$request provider=$provider flagBefore=$before")
+            if(provider=="simkl") {
+                val account=repo.authUser()
+                if(account!=null) {
+                    val key=account.id.toString()
+                    removeKey(SimklApi.SIMKL_CACHED_LIST_TIME,key)
+                    removeKey(SimklApi.SIMKL_CACHED_LIST,key)
+                    trace("REFRESH_CACHE_INVALIDATE", "request=$request provider=simkl accountHash=${key.hashCode()} keys=list-and-time")
+                } else trace("REFRESH_CACHE_INVALIDATE", "request=$request provider=simkl skipped=no-account")
+            } else trace("REFRESH_CACHE_INVALIDATE", "request=$request provider=$provider coreFlag=true")
+            // A real provider library fetch is the verification point. The
+            // UI event is sent independently even when this check fails.
+            val beginMs=android.os.SystemClock.elapsedRealtime()
+            val resource=try { repo.library() }
+                catch(e:CancellationException){throw e}
+                catch(e:Exception){
+                    trace("REFRESH_LIBRARY_EXCEPTION", "request=$request provider=$provider type=${e.javaClass.simpleName}")
+                    null
+                }
+            val library=resource?.getOrNull()
+            val count=library?.allLibraryLists?.sumOf { it.items.size }
+            trace("REFRESH_LIBRARY_RESULT", "request=$request provider=$provider ok=${library!=null} lists=${library?.allLibraryLists?.size} items=$count durationMs=${android.os.SystemClock.elapsedRealtime()-beginMs} error=${resource?.exceptionOrNull()?.javaClass?.simpleName}")
+            // Preserve the flag for LibraryViewModel, which clears it only after
+            // successfully publishing the new pages.
+            repo.requireLibraryRefresh=true
+        }
 
         private fun <T> observe(
             data: androidx.lifecycle.LiveData<T>, owner: androidx.lifecycle.LifecycleOwner,
@@ -2247,6 +2293,8 @@ internal class RatingPlotImageHook(
             }
             syncModel?.let { model ->
                 observe(model.userData, owner) { result ->
+                    val user=(result as? Resource.Success)?.value
+                    trace("NATIVE_USERDATA_OBS", "kind=${result?.javaClass?.simpleName} status=${user?.status} watched=${user?.watchedEpisodes}")
                     if (combo != null) {
                         root.post { if (active) render() }
                     }
@@ -2722,8 +2770,8 @@ internal class RatingPlotImageHook(
             val id = tracker.id
             val before = initial.snapshot()
             trace("SAVE_BEGIN", "provider=$prefix idHash=${id.hashCode()} prior=${before.status}/${before.watched} requested=${draft.status}/${draft.watched} scoreOld=${before.score?.toInt(10)} scoreNew=${draft.score?.toInt(10)} explicitNone=${draft.explicitNone} blocked=${tracker.writeBlocked} saving=${tracker.saving}")
-            if (tracker.writeBlocked != null || tracker.saving) {
-                trace("SAVE_REJECT", "provider=$prefix cause=${if(tracker.saving)"already-saving" else tracker.writeBlocked}")
+            if (tracker.writeBlocked != null || isWriteInFlight(tracker)) {
+                trace("SAVE_REJECT", "provider=$prefix cause=${if(isWriteInFlight(tracker))"already-saving" else tracker.writeBlocked}")
                 return
             }
             if (prefix == "mal" && draft.status == SyncWatchType.COMPLETED &&
@@ -2772,13 +2820,20 @@ internal class RatingPlotImageHook(
                 trace("SAVE_REJECT", "provider=$prefix cause=anime-status-not-editable")
                 return
             }
+            val operationKey="$prefix:$id"
+            if(!pendingWrites.add(operationKey)) {
+                trace("SAVE_REJECT", "provider=$prefix cause=other-screen-save-in-progress")
+                return
+            }
+            val request=System.nanoTime()
             tracker.saving = true
-            trace("SAVE_ROUTE", "provider=$prefix tv=${tracker.simklSeason!=null} anime=${tracker.simklAnime!=null} malRemove=${prefix=="mal"&&draft.explicitNone}")
+            trace("SAVE_ROUTE", "request=$request provider=$prefix tv=${tracker.simklSeason!=null} anime=${tracker.simklAnime!=null} malRemove=${prefix=="mal"&&draft.explicitNone}")
             render()
-            // Detached/changed screens do not receive this result, but the snapshot
-            // keeps writes directed to the user's original chosen service/season.
-            scope.launch {
-                val result = withContext(Dispatchers.IO) {
+            // A durable write is never cancelled by season switching,
+            // fragment teardown, or navigating away from the detail page.
+            saveScope.launch {
+                trace("SAVE_JOB_BEGIN", "request=$request provider=$prefix idHash=${id.hashCode()} panelActive=$active gen=$gen")
+                val result = try { withContext(Dispatchers.IO) {
                     if(prefix=="mal" && draft.status==SyncWatchType.NONE &&
                         draft.explicitNone) {
                         malRemoveFromLibrary(tracker.repo,id)
@@ -2803,15 +2858,16 @@ internal class RatingPlotImageHook(
                         val issued = tracker.repo.updateStatus(id, remote)
                         trace("CORE_WRITE", "provider=$prefix request=${remote.status}/${remote.watchedEpisodes} result=${issued.getOrNull()} error=${issued.exceptionOrNull()?.javaClass?.simpleName}")
                         var verified = false
-                        for (attempt in 1..3) {
-                            if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
+                        for (attempt in 1..5) {
+                            if (attempt > 1) kotlinx.coroutines.delay(
+                                when(attempt) { 2 -> 350L; 3 -> 900L; 4 -> 1800L; else -> 3000L })
                             val read = tracker.repo.status(id)
                             val got = read.getOrNull()
                             verified = got != null &&
                                 (draft.status == before.status || got.status == remote.status) &&
                                 (draft.watched == before.watched || (got.watchedEpisodes ?: 0) == (remote.watchedEpisodes ?: 0)) &&
                                 (draft.score == before.score || got.score == remote.score)
-                            trace("CORE_VERIFY", "provider=$prefix attempt=$attempt match=$verified read=${got?.status}/${got?.watchedEpisodes}")
+                            trace("CORE_VERIFY", "request=$request provider=$prefix attempt=$attempt match=$verified read=${got?.status}/${got?.watchedEpisodes} writeAck=${issued.getOrNull()} statusExpected=${remote.status} countExpected=${remote.watchedEpisodes}")
                             if (verified) break
                         }
                         if (!verified && prefix == "kitsu" && remote.status != SyncWatchType.NONE) {
@@ -2828,11 +2884,29 @@ internal class RatingPlotImageHook(
                         verified
                     }
                     }
+                } } catch(e:CancellationException) {
+                    trace("SAVE_JOB_CANCEL", "request=$request provider=$prefix type=CancellationException")
+                    false
+                } catch(e:Exception) {
+                    trace("SAVE_JOB_EXCEPTION", "request=$request provider=$prefix type=${e.javaClass.simpleName}")
+                    false
                 }
-                trace("SAVE_FINAL", "provider=$prefix success=$result viewValid=${valid(gen,sn)} currentTracker=${statuses[prefix]===tracker}")
+                trace("SAVE_VERIFY_FINISH", "request=$request provider=$prefix success=$result active=$active originalGen=$gen currentGen=$generation")
+                if(result) {
+                    try {
+                        withContext(Dispatchers.IO) { refreshAfterVerifiedWrite(tracker,prefix,request) }
+                    } catch(e:CancellationException) {
+                        trace("REFRESH_CANCEL", "request=$request provider=$prefix")
+                    } catch(e:Exception) {
+                        trace("REFRESH_EXCEPTION", "request=$request provider=$prefix type=${e.javaClass.simpleName}")
+                    }
+                }
+                pendingWrites.remove(operationKey)
+                trace("SAVE_FINAL", "request=$request provider=$prefix success=$result viewValid=${valid(gen,sn)} currentTracker=${statuses[prefix]===tracker} retainedJob=true")
                 if (valid(gen, sn) && statuses[prefix] === tracker) {
                     tracker.saving = false
                     if (result) {
+                        tracker.error = null
                         val anime = tracker.simklAnime
                         if (anime != null) {
                             val count=anime.watched.size
@@ -2866,7 +2940,20 @@ internal class RatingPlotImageHook(
                     trace("SAVE_UI_RESULT", "provider=$prefix saved=$result baseline=${tracker.baseline?.status}/${tracker.baseline?.watched} draft=${tracker.draft?.status}/${tracker.draft?.watched} error=${tracker.error} selected=$selected")
                     render()
                 } else {
+                    trace("SAVE_DETACHED", "request=$request provider=$prefix originalGen=$gen currentGen=$generation originalSeason=$sn currentSeason=$season active=$active")
                 }
+                if(result) {
+                    trace("REFRESH_EVENT", "request=$request provider=$prefix source=verified-write libraryReload=true")
+                    MainActivity.reloadLibraryEvent(true)
+                    val model=syncModel
+                    if(active && model!=null) {
+                        trace("REFRESH_NATIVE_BEGIN", "request=$request provider=$prefix modelPresent=true")
+                        model.updateUserData()
+                        model.updateSynced()
+                    } else {
+                        trace("REFRESH_NATIVE_DETACHED", "request=$request provider=$prefix active=$active modelPresent=${model!=null}")
+                    }
+                } else trace("REFRESH_SKIPPED", "request=$request provider=$prefix reason=write-not-verified")
             }
         }
 
