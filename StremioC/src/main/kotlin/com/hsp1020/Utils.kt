@@ -1735,8 +1735,13 @@ internal class RatingPlotImageHook(
                     actual+=state
                 }
             }
-            trace("ANIME_STATUS_ACK", "echoed=$echoed requested=$ids normalized=$actual")
-            return actual.singleOrNull()?.takeIf { echoed==ids }
+            val stored=actual.singleOrNull()?.takeIf { echoed==ids }
+            trace("ANIME_STATUS_ACK", "echoed=$echoed requested=$ids normalized=$stored intended=$requested matches=${stored==requested}")
+            if(stored!=requested) {
+                trace("ANIME_STATUS_MISMATCH", "requested=$requested server=$stored ids=$ids")
+                return null
+            }
+            return stored
         }
 
         /**
@@ -1788,51 +1793,84 @@ internal class RatingPlotImageHook(
             trace("ANIME_DELETE_BEGIN", "nativeIds=$ids noTvdbParent=true")
             val headers=SimklApi.getHeaders(repo.authToken() ?: return false)+
                 mapOf("content-type" to "application/json")
-            val payload=JSONObject().put("shows",JSONArray().also { shows ->
+            val payload=JSONObject().put("shows",JSONArray().also { items ->
                 ids.forEach { id ->
-                    shows.put(JSONObject().put("ids",JSONObject().put("simkl",id)))
+                    items.put(JSONObject().put("ids",JSONObject().put("simkl",id)))
                 }
             })
             val response=try {
                 app.post("https://api.simkl.com/sync/history/remove",
                     headers=headers,requestBody=payload.toString().toRequestBody())
-            }catch(e: CancellationException){throw e}
-             catch(e: Exception){
-                  traceError("SYNC_EXCEPTION", e)
-                  return false}
+            }catch(e:CancellationException){throw e}
+             catch(e:Exception) {
+                trace("ANIME_DELETE_WRITE_EXCEPTION", "type=${e.javaClass.simpleName}")
+                return false
+             }
             val ack=runCatching { JSONObject(response.text) }.getOrNull()
-            val missing=ack?.optJSONObject("not_found")?.optJSONArray("shows")?.length()
-            trace("ANIME_DELETE_HTTP", "code=${response.code} parsedAck=${ack!=null} missing=$missing")
-            // A server write can succeed with a non-JSON acknowledgement.
-            // Judge deletion by authoritative library readback, not ACK shape.
-            repeat(3){ attempt ->
-                if(attempt>0)kotlinx.coroutines.delay(if(attempt==1)350L else 900L)
+            trace("ANIME_DELETE_HTTP",
+                "code=${response.code} ackValid=${ack!=null} keys=${ack?.keys()?.asSequence()?.toList()} deleted=${ack?.optJSONObject("deleted")?.opt("shows")} missing=${ack?.optJSONObject("not_found")?.optJSONArray("shows")?.length()} bytes=${response.text.length}")
+            // A write ACK is not authoritative; verify both membership and
+            // watched state before declaring success or failure.
+            var confirmedPresent=false
+            for(attempt in 1..4){
+                if(attempt>1)kotlinx.coroutines.delay(when(attempt){2->500L;3->1200L;else->2400L})
                 val check=try {
                     app.get("https://api.simkl.com/sync/all-items/anime",
                         headers=headers,cacheTime=0)
-                }catch(e: CancellationException){throw e}
-                 catch(e: Exception){
-                  traceError("SYNC_EXCEPTION", e)
-                  return@repeat}
-                if(check.code !in 200..299)return@repeat
+                }catch(e:CancellationException){throw e}
+                 catch(e:Exception){
+                    trace("ANIME_DELETE_READ_EXCEPTION", "attempt=$attempt type=${e.javaClass.simpleName}")
+                    continue
+                 }
+                trace("ANIME_DELETE_READ_HTTP", "attempt=$attempt code=${check.code} bytes=${check.text.length} prefix=${check.text.trim().firstOrNull()}")
+                if(check.code !in 200..299)continue
                 val body=runCatching { JSONObject(check.text) }.getOrNull()
-                    ?: return@repeat
-                // Simkl returns {} if the entire anime library is empty.
-                val anime=if(body.length()==0) JSONArray() else body.optJSONArray("anime")
-                if(anime==null) {
-                    trace("ANIME_DELETE_VERIFY", "attempt=$attempt malformedResponseKeys=${body.keys().asSequence().toList()}")
-                    return@repeat
+                if(body==null){
+                    trace("ANIME_DELETE_READ_SCHEMA", "attempt=$attempt type=non-object")
+                    continue
                 }
-                val present=linkedSetOf<Int>()
-                for(i in 0 until (anime?.length() ?: 0)){
-                    val item=anime?.optJSONObject(i) ?: continue
-                    val id=jsonInt(item.optJSONObject("show")?.optJSONObject("ids"),"simkl")
-                    if(id!=null)present+=id
+                val anime=body.optJSONArray("anime")
+                    ?: if(body.length()==0) JSONArray() else {
+                        trace("ANIME_DELETE_READ_SCHEMA", "attempt=$attempt type=no-anime-list keys=${body.keys().asSequence().toList()}")
+                        continue
+                    }
+                val seen=linkedSetOf<Int>()
+                var invalid=false
+                for(i in 0 until anime.length()) {
+                    val entry=anime.optJSONObject(i)
+                    val entryIds=entry?.optJSONObject("show")?.optJSONObject("ids")
+                        ?: entry?.optJSONObject("anime")?.optJSONObject("ids")
+                        ?: entry?.optJSONObject("ids")
+                    val id=jsonInt(entryIds,"simkl")
+                    if(id==null){ invalid=true; break }
+                    seen+=id
                 }
-                trace("ANIME_DELETE_VERIFY", "attempt=$attempt stillPresent=${ids.intersect(present)} libraryCount=${present.size}")
-                if(ids.none { it in present })return true
+                if(invalid){
+                    trace("ANIME_DELETE_READ_SCHEMA", "attempt=$attempt type=invalid-entry itemCount=${anime.length()}")
+                    continue
+                }
+                val remaining=ids.intersect(seen)
+                trace("ANIME_DELETE_VERIFY", "attempt=$attempt total=${anime.length()} stillPresent=$remaining confirmedAbsent=${remaining.isEmpty()}")
+                if(remaining.isEmpty()){
+                    trace("ANIME_DELETE_FINAL", "source=all-items result=removed")
+                    return true
+                }
+                confirmedPresent=true
             }
-            return false
+            // A positive library membership overrules missing/ambiguous grid
+            // results; never claim removal when a valid library read shows it.
+            if(confirmedPresent){
+                trace("ANIME_DELETE_FINAL", "source=all-items result=still-listed")
+                return false
+            }
+            // For malformed/blocked all-items responses, /sync/watched is an
+            // independent authenticated source for both list status and history.
+            val grid=simklAnimeWatched(repo,ids)
+            val removed=grid!=null && ids.all { grid.statuses[it]==SyncWatchType.NONE } &&
+                grid.watched.isEmpty()
+            trace("ANIME_DELETE_FALLBACK", "available=${grid!=null} statuses=${grid?.statuses} watched=${grid?.watched?.size} confirmed=$removed")
+            trace("ANIME_DELETE_FINAL", "source=watched result=${if(removed)"removed" else "unconfirmed"}")
+            return removed
         }
 
         private suspend fun simklAnimeRead(
@@ -2483,6 +2521,9 @@ internal class RatingPlotImageHook(
                 val edit = tracker.draft ?: return@setOnItemClickListener
                 edit.status = SyncWatchType.fromInternalId(pos - 1)
                 val tv = tracker.simklSeason
+                val anime = tracker.simklAnime
+                if (anime != null && edit.status == SyncWatchType.COMPLETED)
+                    edit.watched = anime.mapped.size
                 if (tv != null) {
                     if (edit.status == SyncWatchType.COMPLETED)
                         edit.watched = tv.available.size
