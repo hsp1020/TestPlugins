@@ -1264,6 +1264,17 @@ internal class RatingPlotImageHook(
             val listStatus: SyncWatchType?
         )
 
+        /** Simkl TV stores a global list status but independent season progress. */
+        private fun simklSeasonStatus(snap: SimklSeasonSnapshot): SyncWatchType {
+            if (snap.watched.size == snap.available.size) return SyncWatchType.COMPLETED
+            val global = snap.listStatus
+            if (global == SyncWatchType.ONHOLD || global == SyncWatchType.DROPPED ||
+                global == SyncWatchType.PLANTOWATCH || global == SyncWatchType.REWATCHING)
+                return global
+            return if (snap.watched.isEmpty()) SyncWatchType.NONE
+                else SyncWatchType.WATCHING
+        }
+
         private fun simklIds(id: String): JSONObject? {
             val obj = runCatching { JSONObject(id) }.getOrNull() ?: return null
             val ids = JSONObject()
@@ -1363,16 +1374,46 @@ internal class RatingPlotImageHook(
             // Explicit NONE must never remove that show or other seasons.
             // It only clears watched episodes in the selected season.
             val clearSelectedSeason = draft.status == SyncWatchType.NONE && draft.explicitNone
-            val countDiff = if (clearSelectedSeason) -initial.watched.size
-                else draft.watched - initial.watched.size
+            // "add-to-list completed" auto-marks every season in Simkl.
+            // Selected-season completion must only write season-scoped history.
+            val seasonCompleted = draft.status == SyncWatchType.COMPLETED
+            val requestedCount = when {
+                clearSelectedSeason -> 0
+                seasonCompleted -> initial.available.size
+                else -> draft.watched
+            }
+            val countDiff = requestedCount - initial.watched.size
             val autoWatching = baseline.status == SyncWatchType.NONE &&
                 draft.status == SyncWatchType.WATCHING && countDiff > 0
-            val statusChanged = !clearSelectedSeason &&
+            val statusChanged = !clearSelectedSeason && !seasonCompleted &&
                 draft.status != baseline.status && !autoWatching
-            trace("TV_SAVE_PLAN", "none=$clearSelectedSeason diff=$countDiff statusChanged=$statusChanged autoWatching=$autoWatching statusKnown=${initial.listStatus!=null}")
+            trace("TV_SAVE_PLAN", "none=$clearSelectedSeason seasonComplete=$seasonCompleted requested=$requestedCount diff=$countDiff statusChanged=$statusChanged autoWatching=$autoWatching statusKnown=${initial.listStatus!=null}")
             if (statusChanged && (initial.listStatus == null ||
                     simklWatchlistDestination(draft.status) == null)) return false
-            if (countDiff == 0 && !statusChanged) return true
+            if (countDiff == 0 && !statusChanged) {
+                // Verify idempotent operations instead of pretending to write.
+                val current = simklSeasonRead(tracker.repo, tracker.id, sn)
+                val unchanged = current != null &&
+                    current.available == initial.available &&
+                    current.watched == initial.watched &&
+                    current.otherSeasons == initial.otherSeasons &&
+                    (if (clearSelectedSeason) current.watched.isEmpty()
+                     else if (seasonCompleted) current.watched.size == current.available.size
+                     else true)
+                trace("TV_SAVE_NOOP", "unchanged=$unchanged season=$sn watched=${current?.watched?.size}")
+                if (unchanged) tracker.simklSeason = current
+                return unchanged
+            }
+
+            // Reject stale reads before writing any episode. Other seasons are
+            // never put in the write payload and are also verified afterwards.
+            val fresh = simklSeasonRead(tracker.repo, tracker.id, sn)
+            if (fresh == null || fresh.available != initial.available ||
+                fresh.watched != initial.watched ||
+                fresh.otherSeasons != initial.otherSeasons) {
+                trace("TV_SAVE_STALE", "season=$sn was=${initial.watched.size} now=${fresh?.watched?.size} otherWas=${initial.otherSeasons.mapValues { it.value.size }} otherNow=${fresh?.otherSeasons?.mapValues { it.value.size }}")
+                return false
+            }
 
             if (countDiff != 0) {
                 val delta = if (countDiff > 0)
@@ -1408,9 +1449,7 @@ internal class RatingPlotImageHook(
                     val current = simklSeasonRead(tracker.repo, tracker.id, sn)
                     trace("TV_EPISODE_VERIFY_START", "attempt=$attempt beforeOther=${initial.otherSeasons.mapValues { it.value.size }} expected=$expected")
                     confirmed = current?.watched == expected &&
-                        initial.otherSeasons.all { (key, seen) ->
-                            current.otherSeasons[key] == seen
-                        }
+                        current.otherSeasons == initial.otherSeasons
                     trace("TV_EPISODE_VERIFY", "attempt=$attempt match=$confirmed now=${current?.watched} otherNow=${current?.otherSeasons?.mapValues { it.value.size }}")
                     if (confirmed) {
                         tracker.simklSeason = current
@@ -1671,14 +1710,11 @@ internal class RatingPlotImageHook(
              catch(e: Exception){
                   traceError("SYNC_EXCEPTION", e)
                   return false}
-            if(response.code !in 200..299)return false
-            trace("ANIME_DELETE_HTTP", "code=${response.code}")
-            val result=runCatching { JSONObject(response.text) }.getOrNull()
-                ?: return false
-            val missing=result.optJSONObject("not_found")?.optJSONArray("shows")
-            if(missing!=null && missing.length()>0)return false
-            // Simkl returns {} when the entire anime library is empty.
-            // A successful remove still requires authoritative readback.
+            val ack=runCatching { JSONObject(response.text) }.getOrNull()
+            val missing=ack?.optJSONObject("not_found")?.optJSONArray("shows")?.length()
+            trace("ANIME_DELETE_HTTP", "code=${response.code} parsedAck=${ack!=null} missing=$missing")
+            // A server write can succeed with a non-JSON acknowledgement.
+            // Judge deletion by authoritative library readback, not ACK shape.
             repeat(3){ attempt ->
                 if(attempt>0)kotlinx.coroutines.delay(if(attempt==1)350L else 900L)
                 val check=try {
@@ -1691,8 +1727,12 @@ internal class RatingPlotImageHook(
                 if(check.code !in 200..299)return@repeat
                 val body=runCatching { JSONObject(check.text) }.getOrNull()
                     ?: return@repeat
-                val anime=body.optJSONArray("anime")
-                if(body.has("anime") && anime==null)return@repeat
+                // Simkl returns {} if the entire anime library is empty.
+                val anime=if(body.length()==0) JSONArray() else body.optJSONArray("anime")
+                if(anime==null) {
+                    trace("ANIME_DELETE_VERIFY", "attempt=$attempt malformedResponseKeys=${body.keys().asSequence().toList()}")
+                    return@repeat
+                }
                 val present=linkedSetOf<Int>()
                 for(i in 0 until (anime?.length() ?: 0)){
                     val item=anime?.optJSONObject(i) ?: continue
@@ -2249,8 +2289,8 @@ internal class RatingPlotImageHook(
                                   else if (watched==it.mapped.size) SyncWatchType.COMPLETED
                                   else SyncWatchType.WATCHING, watched, null)
                         } else remote?.let {
-                            Draft(if (generalSimkl && repo.idPrefix == "simkl")
-                                simklExact?.listStatus ?: it.status else it.status,
+                            Draft(if (generalSimkl && repo.idPrefix == "simkl" && simklExact != null)
+                                simklSeasonStatus(simklExact) else it.status,
                                 if (generalSimkl && repo.idPrefix == "simkl")
                                     simklExact?.watched?.size ?: 0
                                 else it.watchedEpisodes ?: 0, it.score)
@@ -2352,6 +2392,16 @@ internal class RatingPlotImageHook(
                 val tracker = statuses[selected] ?: return@setOnItemClickListener
                 val edit = tracker.draft ?: return@setOnItemClickListener
                 edit.status = SyncWatchType.fromInternalId(pos - 1)
+                val tv = tracker.simklSeason
+                if (tv != null) {
+                    if (edit.status == SyncWatchType.COMPLETED)
+                        edit.watched = tv.available.size
+                    else if (edit.status == SyncWatchType.NONE) edit.watched = 0
+                } else if (tracker.prefix == "mal" &&
+                    edit.status == SyncWatchType.COMPLETED &&
+                    tracker.totalSource == "mal-lightweight") {
+                    tracker.total?.takeIf { it > 0 }?.let { edit.watched = it }
+                }
                 trace("UI_STATUS_TAP", "provider=$selected index=$pos previous=${tracker.baseline?.status} requested=${edit.status} watched=${edit.watched}")
                 edit.explicitNone = edit.status == SyncWatchType.NONE
                 render()
@@ -2488,6 +2538,20 @@ internal class RatingPlotImageHook(
                 trace("SAVE_REJECT", "provider=$prefix cause=${if(tracker.saving)"already-saving" else tracker.writeBlocked}")
                 return
             }
+            if (prefix == "mal" && draft.status == SyncWatchType.COMPLETED &&
+                before.status != SyncWatchType.COMPLETED) {
+                // MAL's core writes the supplied progress; it does not fill it.
+                // Require the title's own verified MAL episode count.
+                val total = tracker.total?.takeIf {
+                    it > 0 && tracker.totalSource == "mal-lightweight"
+                }
+                if (total == null) {
+                    trace("SAVE_REJECT", "provider=mal cause=completion-total-unverified source=${tracker.totalSource}")
+                    return
+                }
+                draft.watched = total
+                tracker.draft?.watched = total
+            }
             if (draft.status == SyncWatchType.NONE && draft.watched > 0 && !draft.explicitNone) {
                 draft.status = SyncWatchType.WATCHING
                 tracker.draft?.status = SyncWatchType.WATCHING
@@ -2599,7 +2663,7 @@ internal class RatingPlotImageHook(
                             }
                         } else if (tracker.simklSeason != null) {
                             val actual = tracker.simklSeason!!
-                            tracker.baseline = Draft(actual.listStatus ?: draft.status,
+                            tracker.baseline = Draft(simklSeasonStatus(actual),
                                 actual.watched.size, draft.score)
                             tracker.draft = tracker.baseline?.snapshot()
                         } else if(prefix=="mal" && draft.status==SyncWatchType.NONE &&
