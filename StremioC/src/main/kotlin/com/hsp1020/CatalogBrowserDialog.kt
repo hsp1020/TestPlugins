@@ -13,6 +13,9 @@ import android.content.res.Resources
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.Rect
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.Typeface
 import android.text.TextUtils
 import android.view.View
@@ -174,7 +177,8 @@ internal class StremioDetailHandoff(
     private val navigation: NavController?,
     private val onLeave: () -> Unit,
     private val onReturn: () -> Unit = { dialog.show() },
-    private val onReady: () -> Unit = {}
+    private val onReady: () -> Unit = {},
+    private val onReturnStart: () -> Unit = {}
 ) {
     val isActive get() = returnEntryId != null
 
@@ -248,6 +252,7 @@ internal class StremioDetailHandoff(
         returnStarted = SystemClock.uptimeMillis()
         handler.removeCallbacks(navigationTimeout)
         handler.removeCallbacks(returnTimeout)
+        if (toOrigin) onReturnStart()
         currentDestinationView()?.let(::watchReturnFrame)
         handler.postDelayed(returnTimeout, 1000L)
     }
@@ -640,6 +645,7 @@ internal class CatalogBrowserDialog(
             SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
             SEARCH_ACTION_LOAD -> {
                 val covered = detailHandoff.begin()
+                if (covered) preserveNavigation()
                 SearchHelper.handleSearchClickCallback(click)
                 if (!covered) dismiss()
             }
@@ -779,11 +785,21 @@ internal class CatalogBrowserDialog(
         StremioDetailHandoff(activity, dialog, navigation, ::dismiss,
             onReturn = {
                 if (!closed) {
+                    fitWindowToNavigation(force = true)
+                    if (!dialog.isShowing) dialog.show()
+                }
+            },
+            onReady = ::releaseNavigation,
+            onReturnStart = {
+                releaseNavigation()
+                if (!closed) {
+                    fitWindowToNavigation(force = true)
                     dialog.show()
-                    fitWindowToNavigation()
                 }
             })
     }
+    private var navigationSnapshot: BitmapDrawable? = null
+    private var pendingSearchReturn: (() -> Unit)? = null
     private var originEntryId: String? = null
     private var searchReturnEntryId: String? = null
     private val windowBoundsListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
@@ -796,8 +812,7 @@ internal class CatalogBrowserDialog(
         when {
             returning != null && entryId == returning -> {
                 searchReturnEntryId = null
-                dialog.show()
-                fitWindowToNavigation()
+                restoreSearchAfterIme()
             }
             returning != null && destination.id !in setOf(
                 R.id.navigation_quick_search, R.id.navigation_results_phone,
@@ -846,8 +861,72 @@ internal class CatalogBrowserDialog(
 
     private fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
 
-    private fun fitWindowToNavigation() {
-        if (closed || !dialog.isShowing) return
+    private fun preserveNavigation() {
+        releaseNavigation()
+        val source = listOf(R.id.nav_rail_view, R.id.nav_view)
+            .mapNotNull { activity.findViewById<View>(it) }
+            .firstOrNull { it.isShown && it.width > 0 && it.height > 0 } ?: return
+        val decor = activity.window.decorView
+        val origin = IntArray(2)
+        val location = IntArray(2)
+        decor.getLocationOnScreen(origin)
+        source.getLocationOnScreen(location)
+        val snapshot = runCatching {
+            Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888).also {
+                source.draw(Canvas(it))
+            }
+        }.getOrNull() ?: return
+        navigationSnapshot = BitmapDrawable(activity.resources, snapshot).apply {
+            setBounds(location[0] - origin[0], location[1] - origin[1],
+                location[0] - origin[0] + source.width,
+                location[1] - origin[1] + source.height)
+            decor.overlay.add(this)
+        }
+    }
+
+    private fun releaseNavigation() {
+        navigationSnapshot?.let { activity.window.decorView.overlay.remove(it) }
+        navigationSnapshot = null
+    }
+
+    private fun restoreSearchAfterIme() {
+        pendingSearchReturn?.invoke()
+        val decor = activity.window.decorView
+        val tree = decor.viewTreeObserver
+        if (!tree.isAlive) {
+            dialog.show()
+            fitWindowToNavigation(force = true)
+            return
+        }
+        var settled = 0
+        val started = SystemClock.uptimeMillis()
+        lateinit var listener: ViewTreeObserver.OnPreDrawListener
+        val release = {
+            if (tree.isAlive) tree.removeOnPreDrawListener(listener)
+            pendingSearchReturn = null
+        }
+        listener = ViewTreeObserver.OnPreDrawListener {
+            val insets = ViewCompat.getRootWindowInsets(decor)
+            val keyboard = insets?.isVisible(WindowInsetsCompat.Type.ime()) == true ||
+                (insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0) >
+                (insets?.getInsets(WindowInsetsCompat.Type.systemBars())?.bottom ?: 0) + dp(8)
+            settled = if (!keyboard) settled + 1 else 0
+            if (closed || navigation?.currentBackStackEntry?.id != originEntryId) {
+                release()
+            } else if (settled >= 2 || SystemClock.uptimeMillis() - started >= 3000L) {
+                release()
+                fitWindowToNavigation(force = true)
+                dialog.show()
+            } else decor.postInvalidateOnAnimation()
+            true
+        }
+        pendingSearchReturn = release
+        tree.addOnPreDrawListener(listener)
+        decor.postInvalidateOnAnimation()
+    }
+
+    private fun fitWindowToNavigation(force: Boolean = false) {
+        if (closed || (!dialog.isShowing && !force) || (detailHandoff.isActive && !force)) return
         val window = dialog.window ?: return
         val decor = activity.window.decorView
         val width = decor.width.takeIf { it > 0 } ?: activity.resources.displayMetrics.widthPixels
@@ -971,7 +1050,7 @@ internal class CatalogBrowserDialog(
         val headerColor = activity.colorFromAttribute(R.attr.primaryBlackBackground)
         val controls = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(8), dp(12), 0)
+            setPadding(dp(2), dp(8), dp(12), 0)
             setBackgroundColor(headerColor)
             val labelInset = dp(48) +
                 (dp(82) - selectorLabelStyle.paint.measureText("Type") - dp(12))
@@ -986,7 +1065,7 @@ internal class CatalogBrowserDialog(
                 if (activity.theme.resolveAttribute(
                         android.R.attr.selectableItemBackgroundBorderless, ripple, true
                     ) && ripple.resourceId != 0) setBackgroundResource(ripple.resourceId)
-                setPadding(dp(12), dp(12), dp(12), dp(12))
+                setPadding(0, dp(12), dp(24), dp(12))
                 setOnClickListener { openCatalogSearch() }
             }
             addView(LinearLayout(activity).apply {
@@ -1090,6 +1169,8 @@ internal class CatalogBrowserDialog(
             prefs.unregisterOnSharedPreferenceChangeListener(settingsListener)
             manifestPrefs.unregisterOnSharedPreferenceChangeListener(manifestListener)
             activity.lifecycle.removeObserver(hostObserver)
+            pendingSearchReturn?.invoke()
+            releaseNavigation()
             activity.supportFragmentManager.unregisterFragmentLifecycleCallbacks(searchFocusCallbacks)
             navigation?.removeOnDestinationChangedListener(destinationListener)
             activity.window.decorView.removeOnLayoutChangeListener(windowBoundsListener)
@@ -1115,6 +1196,7 @@ internal class CatalogBrowserDialog(
         ViewCompat.requestApplyInsets(root)
         dialog.window?.setBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryBlackBackground)))
         fitWindowToNavigation()
+        dialog.window?.setWindowAnimations(0)
         activity.window.decorView.addOnLayoutChangeListener(windowBoundsListener)
         activity.findViewById<View>(R.id.nav_rail_view)
             ?.addOnLayoutChangeListener(windowBoundsListener)
