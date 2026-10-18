@@ -852,6 +852,15 @@ internal class CatalogBrowserDialog(
         if (closed || detailHandoff.isActive) return@OnDestinationChangedListener
         val entryId = controller.currentBackStackEntry?.id
         val returning = searchReturnEntryId
+        if (destination.id == R.id.navigation_search || destination.id == R.id.navigation_library) {
+            cancelDestinationCheck()
+            if (dialog.window?.decorView?.visibility == View.VISIBLE) {
+                suspendedForNavigation = true
+                dialog.hide()
+                releaseNavigation()
+            }
+            return@OnDestinationChangedListener
+        }
         when {
             returning != null && entryId == returning -> {
                 searchReturnEntryId = null
