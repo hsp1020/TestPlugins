@@ -174,8 +174,7 @@ internal class StremioDetailHandoff(
     private val navigation: NavController?,
     private val onLeave: () -> Unit,
     private val onReturn: () -> Unit = { dialog.show() },
-    private val onReady: () -> Unit = {},
-    private val immediateOriginReturn: Boolean = false
+    private val onReady: () -> Unit = {}
 ) {
     val isActive get() = returnEntryId != null
 
@@ -446,12 +445,7 @@ internal class StremioDetailHandoff(
             val current = controller.currentBackStackEntry?.id
             when {
                 current == origin -> {
-                    if (detailEntryId != null) {
-                        if (immediateOriginReturn) {
-                            close()
-                            onReturn()
-                        } else scheduleReturn(origin)
-                    }
+                    if (detailEntryId != null) scheduleReturn(origin)
                 }
                 recoveringHome && controller.currentDestination?.id == R.id.navigation_home -> {
                     if (current != null) scheduleReturn(current, false)
@@ -788,12 +782,10 @@ internal class CatalogBrowserDialog(
                     dialog.show()
                     fitWindowToNavigation()
                 }
-            },
-            immediateOriginReturn = true)
+            })
     }
     private var originEntryId: String? = null
     private var searchReturnEntryId: String? = null
-    private var releaseImeReturn: (() -> Unit)? = null
     private val windowBoundsListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
         fitWindowToNavigation()
     }
@@ -804,7 +796,8 @@ internal class CatalogBrowserDialog(
         when {
             returning != null && entryId == returning -> {
                 searchReturnEntryId = null
-                restoreAfterSearch()
+                dialog.show()
+                fitWindowToNavigation()
             }
             returning != null && destination.id !in setOf(
                 R.id.navigation_quick_search, R.id.navigation_results_phone,
@@ -883,42 +876,6 @@ internal class CatalogBrowserDialog(
         window.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
         window.setGravity(Gravity.TOP or Gravity.END)
         window.setLayout((width - railRight).coerceAtLeast(1), bottom.coerceAtLeast(1))
-    }
-
-    private fun restoreAfterSearch() {
-        val decor = activity.window.decorView
-        val imeVisible = ViewCompat.getRootWindowInsets(decor)
-            ?.isVisible(WindowInsetsCompat.Type.ime()) == true
-        if (imeVisible) dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-        dialog.show()
-        fitWindowToNavigation()
-        if (!imeVisible) return
-        val tree = decor.viewTreeObserver
-        if (!tree.isAlive) {
-            dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-            return
-        }
-        releaseImeReturn?.invoke()
-        var stable = 0
-        lateinit var listener: ViewTreeObserver.OnPreDrawListener
-        lateinit var timeout: Runnable
-        lateinit var release: () -> Unit
-        release = {
-            if (tree.isAlive) tree.removeOnPreDrawListener(listener)
-            decor.removeCallbacks(timeout)
-            dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-            if (releaseImeReturn === release) releaseImeReturn = null
-        }
-        listener = ViewTreeObserver.OnPreDrawListener {
-            stable = if (ViewCompat.getRootWindowInsets(decor)
-                ?.isVisible(WindowInsetsCompat.Type.ime()) != true) stable + 1 else 0
-            if (stable >= 2 || closed || !dialog.isShowing) release()
-            true
-        }
-        timeout = Runnable { if (releaseImeReturn === release) release() }
-        releaseImeReturn = release
-        tree.addOnPreDrawListener(listener)
-        decor.postDelayed(timeout, 1500L)
     }
 
     private fun openCatalogSearch() {
@@ -1014,7 +971,7 @@ internal class CatalogBrowserDialog(
         val headerColor = activity.colorFromAttribute(R.attr.primaryBlackBackground)
         val controls = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(2), dp(8), dp(12), 0)
+            setPadding(dp(12), dp(8), dp(12), 0)
             setBackgroundColor(headerColor)
             val labelInset = dp(48) +
                 (dp(82) - selectorLabelStyle.paint.measureText("Type") - dp(12))
@@ -1029,7 +986,7 @@ internal class CatalogBrowserDialog(
                 if (activity.theme.resolveAttribute(
                         android.R.attr.selectableItemBackgroundBorderless, ripple, true
                     ) && ripple.resourceId != 0) setBackgroundResource(ripple.resourceId)
-                setPadding(0, dp(12), dp(24), dp(12))
+                setPadding(dp(12), dp(12), dp(12), dp(12))
                 setOnClickListener { openCatalogSearch() }
             }
             addView(LinearLayout(activity).apply {
@@ -1133,7 +1090,6 @@ internal class CatalogBrowserDialog(
             prefs.unregisterOnSharedPreferenceChangeListener(settingsListener)
             manifestPrefs.unregisterOnSharedPreferenceChangeListener(manifestListener)
             activity.lifecycle.removeObserver(hostObserver)
-            releaseImeReturn?.invoke()
             activity.supportFragmentManager.unregisterFragmentLifecycleCallbacks(searchFocusCallbacks)
             navigation?.removeOnDestinationChangedListener(destinationListener)
             activity.window.decorView.removeOnLayoutChangeListener(windowBoundsListener)
@@ -1159,7 +1115,6 @@ internal class CatalogBrowserDialog(
         ViewCompat.requestApplyInsets(root)
         dialog.window?.setBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryBlackBackground)))
         fitWindowToNavigation()
-        dialog.window?.setWindowAnimations(0)
         activity.window.decorView.addOnLayoutChangeListener(windowBoundsListener)
         activity.findViewById<View>(R.id.nav_rail_view)
             ?.addOnLayoutChangeListener(windowBoundsListener)
