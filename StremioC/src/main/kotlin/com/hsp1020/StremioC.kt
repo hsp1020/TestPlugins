@@ -3218,8 +3218,8 @@ open class StremioC(
         }
         val season = loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 }
         val episode = loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 }
+        syncDiag("AIO_MAP_ID", "resolved=$id imdb=$imdbId kitsu=$kitsuId mal=$malLookupId al=$aniListLookupId byMal=$byMal byKitsu=$byKitsu byAl=$byAniList season=$season episode=$episode")
         val query = when {
-            syncDiag("AIO_MAP_ID", "resolved=$id imdb=$imdbId kitsu=$kitsuId mal=$malLookupId al=$aniListLookupId byMal=$byMal byKitsu=$byKitsu byAl=$byAniList season=$season episode=$episode")
             byMal -> "idType=malId&idValue=$id"
             byAniList -> "idType=anilistId&idValue=$id"
             byKitsu || (id == kitsuId && imdbId == null) -> "idType=kitsuId&idValue=$id"
