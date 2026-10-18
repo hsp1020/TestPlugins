@@ -1,4 +1,4 @@
-// 파일명: hsp1020/StremioCPlugin.kt
+
 package com.hsp1020
 
 import android.content.Context
@@ -81,7 +81,7 @@ class StremioCPlugin : Plugin() {
         for (providerName in original) {
             val home = homeByName[providerName]
             if (home != null) {
-                // CloudStream ranks pinned names in reverse: keep manifest catalog order on screen.
+
                 for (child in searchByUrl[home.mainUrl].orEmpty().asReversed()) {
                     if (child.name !in originalNames && newManaged.add(child.name)) {
                         target.add(child.name)
@@ -109,12 +109,10 @@ class StremioCPlugin : Plugin() {
     }
 
     private fun dismissProviderPicker(host: AppCompatActivity) {
-        // selectHomepage keeps its BottomSheetDialog local and passes only the Activity
-        // to openSettings. Invoke that specific sheet's existing Cancel action once.
-        // This installs no window/lifecycle/navigation hooks and never applies a provider.
+
         runCatching {
             val roots = if (Build.VERSION.SDK_INT >= 29) WindowInspector.getGlobalWindowViews() else {
-                // WindowInspector's equivalent on Android 23-28 (no public API there).
+
                 val manager = Class.forName("android.view.WindowManagerGlobal")
                 val instance = manager.getMethod("getInstance").invoke(null)
                 @Suppress("UNCHECKED_CAST")
@@ -136,8 +134,7 @@ class StremioCPlugin : Plugin() {
         }
         isUnloaded = false
         val appContext = context.applicationContext
-        // CloudStream stores this setting as a JSON string (e.g. "\"en\"").
-        // Repair only legacy bare language tags; leave valid settings untouched.
+
         val subtitlePrefs = appContext.getSharedPrefs()
         val subtitleLanguage = subtitlePrefs.getString(SUBTITLE_AUTO_SELECT_KEY, null)?.trim()
         if (subtitleLanguage != null &&
@@ -147,7 +144,6 @@ class StremioCPlugin : Plugin() {
             ).apply()
         }
 
-        // --- 1. StremioC 자체 부팅 복원 엔진 (Flag Guard + Checksum 검증) ---
         try {
             val stremioCBackupStr = try {
                 CloudStreamApp.getKey<String>("native_backup_stremioc")
@@ -173,7 +169,6 @@ class StremioCPlugin : Plugin() {
         } catch (e: Throwable) {
         }
 
-        // --- 2. StreamPlay 대리 부팅 복원 엔진 (Read-Only 플러그인 기생 복구) ---
         try {
             val streamPlayBackupStr = try {
                 CloudStreamApp.getKey<String>("native_backup_streamplay")
@@ -199,7 +194,6 @@ class StremioCPlugin : Plugin() {
         } catch (e: Throwable) {
         }
 
-        // --- 3. Restore only missing manifests in the background. No catalog rows are prefetched. ---
         pluginIoScope.launch {
             try {
                 val prefs = appContext.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
@@ -216,7 +210,7 @@ class StremioCPlugin : Plugin() {
                 }
 
                 val manifestPrefs = appContext.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
-                
+
                 val manifestFetchSemaphore = Semaphore(4)
                 coroutineScope {
                     links.distinct().map { link ->
@@ -253,8 +247,6 @@ class StremioCPlugin : Plugin() {
         reload(appContext)
         watchPinnedProviders(appContext)
 
-        // Only overlays existing MDBList emojis with bundled logos.
-        // No changes to MDBList fetching, metadata, stream URLs, subtitles or ranking.
         ratingUiHandler.post {
             runCatching { ratingPlotHook?.stop() }
             ratingPlotHook = resources?.let { pluginResources ->
@@ -267,7 +259,7 @@ class StremioCPlugin : Plugin() {
                 }.getOrNull()
             }
         }
-        
+
         openSettings = { currentContext ->
             (currentContext.getActivity() as? AppCompatActivity)?.let { host ->
                 if (host.isFinishing || host.isDestroyed) return@let
@@ -298,7 +290,7 @@ class StremioCPlugin : Plugin() {
         if (closeProviderPicker) dismissProviderPicker(host)
         val prefs = host.applicationContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
         lateinit var browser: CatalogBrowserDialog
-        // Cinemeta's built-in "top" catalog is not an AIOMetadata catalog.
+
         val catalogTarget = if (target?.catalogId == "top" && !target.genre.isNullOrBlank())
             target.copy(addonUrl = "https://v3-cinemeta.strem.io/manifest.json")
         else target
@@ -348,7 +340,7 @@ class StremioCPlugin : Plugin() {
                 try {
                 val prefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
                 val json = prefs.getString(PREF_KEY_LINKS, null) ?: "[]"
-                
+
                 val arr = JSONArray(json)
                 val links = mutableListOf<LinkEntry>()
                 for (i in 0 until arr.length()) {
@@ -363,7 +355,7 @@ class StremioCPlugin : Plugin() {
                         )
                     )
                 }
-                // Replace only providers registered by this instance, preserving the static StremioC router.
+
                 registeredProviders.forEach { provider ->
                     APIHolder.allProviders.remove(provider)
                     APIHolder.removePluginMapping(provider)
@@ -372,7 +364,7 @@ class StremioCPlugin : Plugin() {
                 val manifestPrefs = appContext.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
                 val pluginsOnline: Array<PluginData> = PluginManager.getPluginsOnline()
                 val unloadedPluginPaths = mutableSetOf<String>()
-                
+
                 for (item in links) {
                     var found: PluginData? = null
                     for (p in pluginsOnline) {
@@ -388,13 +380,12 @@ class StremioCPlugin : Plugin() {
                         } catch (e: Throwable) {
                         }
                     } 
-                    
+
                     try {
                         val rawManifest = withContext(Dispatchers.IO) {
                             stremioReadManifest(manifestPrefs, item.link, requireFresh = true)
                                 ?: (runCatching {
                                     StremioC.customSession.get(stremioManifestUrl(item.link), timeout = 15L)
-                                }.onFailure { error ->
                                 }.getOrNull()?.let { response ->
                                     val raw = response.text.takeIf { it.isNotBlank() }
                                         ?: return@let null
@@ -433,7 +424,6 @@ class StremioCPlugin : Plugin() {
                             .filter { it.supportsSearch() && !it.id.isNullOrBlank() && !it.type.isNullOrBlank() }
                             .distinctBy { it.id to it.type }
 
-                        // The original addon owns Home and metadata only; it never contributes search results.
                         val homeProvider = StremioC(item.link, item.name, item.id, disableSearch = true)
                         manifest?.let {
                             val noStore = manifestPrefs.getBoolean(

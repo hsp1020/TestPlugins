@@ -252,7 +252,7 @@ open class YoutubeExtractor : ExtractorApi() {
             try {
                 var pkg: String? = null
                 var targetUrl: String? = null
-                
+
                 val pairs = queryParams.split("&")
                 for (pair in pairs) {
                     val idx = pair.indexOf("=")
@@ -266,12 +266,12 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
                 }
-                
+
                 if (targetUrl != null && pkg != null) {
                     val triggerKey = "$pkg|$targetUrl"
                     val now = System.currentTimeMillis()
                     val lastTrigger = recentTriggers[triggerKey] ?: 0L
-                    
+
                     if (now - lastTrigger > 3000L) {
                         recentTriggers[triggerKey] = now
                         openInExternalApp(pkg, targetUrl)
@@ -307,7 +307,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 val request = requestBuilder.build()
-                
+
                 proxyHttpClient.newCall(request).await().use { response ->
                     val output = socket.getOutputStream()
                     val rawOutWriter = java.io.PrintWriter(output, false)
@@ -516,10 +516,9 @@ open class YoutubeExtractor : ExtractorApi() {
     ): Triple<JSONObject?, Long, String> = withContext(Dispatchers.IO) {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         val context = CloudStreamApp.context
-        // Shared extractor must work without the YouTube provider being installed.
-        // Preserve the existing YouTube plugin's named preferences when it is installed.
+
         val prefs = context?.getSharedPreferences("YouTube", android.content.Context.MODE_PRIVATE)
-        
+
         val langCode = prefs?.getString("youtube_language", "en") ?: "en"
         val countryCode = java.util.Locale.getDefault().country.ifEmpty { "US" }
         val visitorData = prefs?.getString("yt_visitor_data", null) ?: "_Mk3UVhY40g"
@@ -554,7 +553,6 @@ open class YoutubeExtractor : ExtractorApi() {
         var finalJson: JSONObject? = null
         var lengthSeconds = 3600L
 
-        // 1. [1순위: VISIONOS Client]
         try {
             val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$DESKTOP_API_KEY&prettyPrint=false"
             val visionHeaders = mapOf(
@@ -597,7 +595,6 @@ open class YoutubeExtractor : ExtractorApi() {
         } catch (e: Exception) {
         }
 
-        // 2. [2순위: WEB_EMBEDDED_PLAYER Client]
         if (finalJson == null || !finalJson.has("streamingData")) {
             try {
                 val embedApiUrl = "https://www.youtube.com/youtubei/v1/player?key=$DESKTOP_API_KEY&prettyPrint=false"
@@ -639,7 +636,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
 
-        // 3. [3순위: Safari Web HTML]
         if (finalJson == null || !finalJson.has("streamingData")) {
             try {
                 val safariHeaders = mapOf(
@@ -666,7 +662,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         Triple(finalJson, lengthSeconds, playerId)
     }
-    
+
     private suspend fun parseHlsManifest(
         hlsUrl: String,
         playerId: String,
@@ -696,7 +692,7 @@ open class YoutubeExtractor : ExtractorApi() {
         langCode: String,
         callback: (ExtractorLink) -> Unit
     ) {
-        // 1. 직접 재생 결합 포맷(formats - itag 18, 22 등) 등록
+
         val muxedFormats = streamingData.optJSONArray("formats")
         if (muxedFormats != null) {
             for (i in 0 until muxedFormats.length()) {
@@ -720,7 +716,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
 
-        // 2. 분리 스트림(adaptiveFormats) 파싱
         val adaptiveFormats = streamingData.optJSONArray("adaptiveFormats") ?: JSONArray()
         val videoOnlyList = ArrayList<StreamInfo>()
         val audioInfoList = ArrayList<AudioInfo>()
@@ -757,7 +752,7 @@ open class YoutubeExtractor : ExtractorApi() {
             val rawMimeType = format.optString("mimeType", "")
             var cleanMimeType = rawMimeType
             var codec = ""
-            
+
             val semicolonIndex = rawMimeType.indexOf(";")
             if (semicolonIndex != -1) {
                 cleanMimeType = rawMimeType.substring(0, semicolonIndex).trim()
@@ -794,15 +789,14 @@ open class YoutubeExtractor : ExtractorApi() {
                 val height = format.optInt("height", 0)
                 val label = if (height > 0) "${height}p" else "video"
                 if (codec.isEmpty()) codec = if (cleanMimeType.contains("webm")) "vp9" else "avc1.4d401f"
-                
+
                 videoOnlyList.add(StreamInfo(streamUrl, cleanMimeType, codec, height, label, initR, indexR, s, sp, n))
             } else if (cleanMimeType.startsWith("audio/")) {
                 val bitrate = format.optInt("bitrate", 128000)
                 if (codec.isEmpty()) codec = if (cleanMimeType.contains("webm")) "opus" else "mp4a.40.2"
-                
+
                 val audioTrackObj = format.optJSONObject("audioTrack")
-                
-                // 👈 [프로토콜 불리언 판별] audioIsDefault 플래그 (audioTrack 객체 없으면 단일 원본이므로 true)
+
                 val isDefault = if (audioTrackObj != null) {
                     audioTrackObj.optBoolean("audioIsDefault", false)
                 } else {
@@ -818,12 +812,11 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 val rawDisplayName = audioTrackObj?.optString("displayName", "") ?: ""
                 val displayName = if (rawDisplayName.isNotBlank()) rawDisplayName else locale.uppercase()
-                
+
                 audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR, locale, audioTrackId, displayName, isDefault, s, sp, n))
             }
         }
 
-        // 고음질(opus/webm 우선) 트랙 선별
         val groupedAudio = audioInfoList.groupBy { "${it.locale}_${it.audioTrackId}_${it.isDefault}" }
         val bestAudioList = groupedAudio.mapNotNull { (_, tracks) ->
             tracks.maxByOrNull { 
@@ -832,7 +825,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
 
-        // 👈 [100% 동적 메타데이터 선별] 오직 [설정 언어] + [원본 언어(isDefault=true)] 2개만 선별
         val selectedAudioList = mutableListOf<AudioInfo>()
         val targetLang = langCode.lowercase()
 
@@ -922,7 +914,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         val context = CloudStreamApp.context
         val prefs = context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
-            
+
         val langCode = prefs?.getString("youtube_language", "en") ?: "en"
         val downloaderType = prefs?.getString("downloader_app_type", "none") ?: "none"
         val customPkg = prefs?.getString("downloader_custom_package", "") ?: ""
@@ -938,12 +930,11 @@ open class YoutubeExtractor : ExtractorApi() {
         withContext(Dispatchers.IO) {
             try {
                 val (playerResponse, durationSeconds, playerId) = fetchPlayerResponse(videoId)
-                
+
                 if (playerResponse == null) {
                     return@withContext
                 }
 
-                // 1. 자막 수집 (언어 무관 표준 ASR 필터 및 언어별 중복 방지)
                 val captions = playerResponse.optJSONObject("captions")
                     ?.optJSONObject("playerCaptionsTracklistRenderer")
                     ?.optJSONArray("captionTracks")
@@ -955,7 +946,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         val kind = track.optString("kind", "")
                         val vssId = track.optString("vssId", "")
 
-                        // 👈 [언어 무관 ASR 필터링]
                         if (kind.equals("asr", ignoreCase = true) || vssId.startsWith("a.")) {
                             continue
                         }
@@ -997,8 +987,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 val hlsUrl = streamingData.optString("hlsManifestUrl")
                 val dashUrl = streamingData.optString("dashManifestUrl")
                 val isLive = playerResponse.optJSONObject("videoDetails")?.optBoolean("isLive") ?: false
-                
-                // 2. 라이브 스트림
+
                 if (isLive && hlsUrl.isNotBlank()) {
                     callback(
                         newExtractorLink(
@@ -1015,12 +1004,10 @@ open class YoutubeExtractor : ExtractorApi() {
                     return@withContext
                 }
 
-                // 3. 통합 HLS 마스터 등록
                 if (hlsUrl.isNotBlank()) {
                     parseHlsManifest(hlsUrl, playerId, callback)
                 }
 
-                // 4. Adaptive DASH / Direct MP4 포맷 전달 (2개 오디오만 포함)
                 parseAdaptiveFormats(streamingData, playerId, durationSeconds, langCode, callback)
 
                 if (dashUrl.isNotBlank()) {
@@ -1039,7 +1026,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     )
                 }
 
-                // 5. 외부 다운로더 링크
                 val originalUrl = "https://www.youtube.com/watch?v=$videoId"
                 if (pkgName.isNotEmpty()) {
                     val redirectUrl = getAppRedirectUrl(pkgName, originalUrl) ?: originalUrl

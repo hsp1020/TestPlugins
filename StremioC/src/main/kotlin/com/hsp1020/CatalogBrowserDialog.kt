@@ -87,7 +87,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** The host's loading_list placeholders and shimmer animation, without extra poster requests. */
 internal class StremioLoading(context: Context, rows: Int = 1) : FrameLayout(context) {
     private val shimmer = ShimmerFrameLayout(context).apply {
         setShimmer(Shimmer.AlphaHighlightBuilder()
@@ -131,7 +130,6 @@ internal class StremioLoading(context: Context, rows: Int = 1) : FrameLayout(con
     }
 }
 
-/** Shared drawable-screen check for actor, catalog and trailer transitions. */
 internal fun stremioDestinationReady(activity: FragmentActivity, destination: View): Boolean {
     val host = activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)?.view
         ?: return false
@@ -145,7 +143,6 @@ internal fun stremioDestinationReady(activity: FragmentActivity, destination: Vi
         !destination.isLayoutRequested && destination.animation?.hasEnded() != false
 }
 
-/** Finds the actual current destination, not a stale Fragment left in the NavHost. */
 internal fun stremioCurrentDestinationView(
     activity: FragmentActivity, navigation: NavController?
 ): View? {
@@ -168,7 +165,6 @@ internal fun stremioCurrentDestinationView(
     return primary.view
 }
 
-/** Keeps the source dialog covering navigation until the actual destination is drawable. */
 internal class StremioDetailHandoff(
     private val activity: FragmentActivity,
     private val dialog: AppCompatDialog,
@@ -299,8 +295,7 @@ internal class StremioDetailHandoff(
                 }
             }
             recoveryAttempts++
-            // A failed pop must not expose an unready ResultFragment.
-            // First retry the return, then recover to a drawable Home destination.
+
             if (recoveryAttempts >= 2 && recoverHome()) return
             handler.postDelayed(this, 1000L)
         }
@@ -318,8 +313,7 @@ internal class StremioDetailHandoff(
             if (returnToOrigin && SystemClock.uptimeMillis() - returnStarted >= 6000L) {
                 if (recoverHome()) return
             }
-            // No unconditional dismiss: retain the covering dialog while the
-            // destination has no drawable frame, including after popBackStack fails.
+
             handler.postDelayed(this, 1000L)
         }
     }
@@ -453,7 +447,7 @@ internal class StremioDetailHandoff(
                 recoveringHome && controller.currentDestination?.id == R.id.navigation_home -> {
                     if (current != null) scheduleReturn(current, false)
                 }
-                recovering -> Unit // Recovery is still unwinding navigation.
+                recovering -> Unit 
                 detailEntryId == null -> detailEntryId = current
                 current != detailEntryId -> {
                     close()
@@ -464,7 +458,6 @@ internal class StremioDetailHandoff(
     }
 }
 
-/** Shared native CloudStream-styled catalog selector: used by Browse Genre and sync panel. */
 internal fun catalogStyledSelector(activity: FragmentActivity): AppCompatSpinner {
     fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
     return object : AppCompatSpinner(
@@ -509,7 +502,7 @@ internal fun catalogStyledSelector(activity: FragmentActivity): AppCompatSpinner
                     isPressed = false
                 }
             }
-            return true // Never forward a long press or a drag into the popup list.
+            return true 
         }
     }.apply {
         id = View.generateViewId()
@@ -557,7 +550,7 @@ internal fun catalogStyledAdapter(
                             background?.setHotspot(event.x, event.y)
                             isPressed = true
                         }
-                        // Keep ListView in control of selection, scrolling and dismissal.
+
                         return super.dispatchTouchEvent(event)
                     }
 
@@ -600,7 +593,6 @@ internal fun catalogStyledAdapter(
 
 }
 
-/** One dialog, one in-flight page; only All pages are shared with Home. */
 internal class CatalogBrowserDialog(
     private val activity: FragmentActivity,
     private val pluginResources: Resources,
@@ -625,7 +617,7 @@ internal class CatalogBrowserDialog(
     }
     private val retry = button("Retry").apply { visibility = View.GONE }
     private var initialSkeleton = false
-    // The appended-page shimmer is a view overlay, not an adapter item or catalog record.
+
     private val pageSkeleton = ShimmerFrameLayout(activity).apply {
         setShimmer(Shimmer.AlphaHighlightBuilder()
             .setBaseAlpha(0.2f).setHighlightAlpha(0.3f).setDuration(2000L).build())
@@ -670,7 +662,7 @@ internal class CatalogBrowserDialog(
     private var loading = false
     private var hasNext = false
     private var autoFillCount = 0
-    // Stop pathological one-item pages without leaving normal short TV catalogs stranded.
+
     private val maxAutoFillPages = 12
     private val homeTitleFocus = if (initialCatalog != null)
         activity.currentFocus?.takeIf { it.id == R.id.home_child_more_info } else null
@@ -689,8 +681,7 @@ internal class CatalogBrowserDialog(
         initialSkeleton = false
         pageSkeleton.visibility = if (active) View.VISIBLE else View.GONE
         if (active) pageSkeleton.startShimmer() else pageSkeleton.stopShimmer()
-        // When the preceding row is complete, let the grid scroll far enough to
-        // expose placeholders on the next row without inserting fake SearchResponses.
+
         val last = grid.layoutManager?.findViewByPosition(items.lastIndex)
         val extra = if (active && items.isNotEmpty() &&
             items.size % grid.spanCount.coerceAtLeast(1) == 0) last?.height ?: dp(190) else 0
@@ -714,8 +705,7 @@ internal class CatalogBrowserDialog(
         if (pageSkeleton.visibility != View.VISIBLE) return
         val columns = grid.spanCount.coerceAtLeast(1)
         if (initialSkeleton) {
-            // No results are present yet: mirror SearchAdapter's 0.68 cover ratio
-            // and the native grid's 2dp poster margins without adding adapter items.
+
             val cellWidth = grid.itemWidth
             if (cellWidth <= dp(4) || grid.height <= 0) return
             val posterHeight = (cellWidth / 0.68).roundToInt()
@@ -765,7 +755,7 @@ internal class CatalogBrowserDialog(
             pageSkeletonSlots.removeViewAt(pageSkeletonSlots.childCount - 1)
         while (pageSkeletonSlots.childCount < count) {
             pageSkeletonSlots.addView(CardView(activity).apply {
-                // Use CloudStream's loading_poster resources, not the normal poster style.
+
                 radius = activity.resources.getDimension(R.dimen.rounded_image_radius)
                 cardElevation = 0f
                 setCardBackgroundColor(
@@ -943,7 +933,7 @@ internal class CatalogBrowserDialog(
     }
 
     fun show(onDismiss: () -> Unit) {
-        // Header/filters are visible immediately; neither artwork nor a timeout gates the dialog.
+
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         root.setBackgroundColor(activity.colorFromAttribute(R.attr.primaryBlackBackground))
         val headerColor = activity.colorFromAttribute(R.attr.primaryBlackBackground)
@@ -986,7 +976,7 @@ internal class CatalogBrowserDialog(
                     AppBarLayout.LayoutParams.SCROLL_FLAG_ENTER_ALWAYS
             })
         }
-        // The gradient must cover the first posters, not occupy space inside the header.
+
         val edgeFade = View(activity).apply {
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
@@ -1105,7 +1095,7 @@ internal class CatalogBrowserDialog(
         detailHandoff.close()
         generation++
         scope.cancel()
-        dialog.dismiss() // Detaches Spinner popups along with their anchor views.
+        dialog.dismiss() 
     }
 
     private fun pauseRequest() {
@@ -1178,8 +1168,7 @@ internal class CatalogBrowserDialog(
                         try {
                             limit.withPermit {
                                 if (directTarget != null) {
-                                    // Discover links already specify the exact catalog and genre.
-                                    // They may refer to catalogs absent from the addon's manifest.
+
                                     val linked = directTarget
                                     listOf(CatalogSource(url, source, StremioC.Catalog(
                                         name = linked.catalogId,
@@ -1328,8 +1317,7 @@ internal class CatalogBrowserDialog(
         }
         pendingHome = null
         if (home != null) {
-            // Display the already-loaded home SearchResponses without a first-page request.
-            // The browser starts at Home's raw cursor; subsequent All pages synchronize back.
+
             items.addAll(home.items)
             seen.addAll(home.items.map { it.url })
             offset = home.nextSkip
@@ -1341,8 +1329,6 @@ internal class CatalogBrowserDialog(
         }
     }
 
-    // The heading hook can miss the snapshot when CloudStream rebinds its row.
-    // Recover it from the actual displayed Home state, not from a second GET.
     private fun liveHomeSnapshot(source: CatalogSource): CatalogHomeSnapshot? {
         if (genre != null) {
             return null
@@ -1369,8 +1355,6 @@ internal class CatalogBrowserDialog(
         return CatalogHomeSnapshot(target, items.toList(), cursor, displayed.hasNext)
     }
 
-    // The unfiltered catalog shares one raw cursor with Home, but filtered
-    // genre pages must never be inserted into the unfiltered Home list.
     private suspend fun syncHomePage(
         source: StremioC, catalog: StremioC.Catalog, requestedOffset: Int,
         page: List<SearchResponse>, rawCount: Int, more: Boolean
@@ -1386,7 +1370,6 @@ internal class CatalogBrowserDialog(
             return
         }
 
-        // CloudStream HomeViewModel owns another page counter and displayed list.
         val model = ViewModelProvider(activity)[HomeViewModel::class.java]
         if (model.apiName.value != source.name || tab.name in model.lock) {
             return
@@ -1415,7 +1398,6 @@ internal class CatalogBrowserDialog(
             return
         }
 
-        // This checks the native page-flight and offset under the provider mutex.
         val accepted = source.adoptBrowserPage(target, requestedOffset, page, rawCount)
         if (accepted == null) {
             return
@@ -1481,7 +1463,7 @@ internal class CatalogBrowserDialog(
                 val fresh = page.filter { seen.add(it.url) }
                 val repeated = !pageSignatures.add(page.map { it.url })
                 items.addAll(fresh)
-                offset += rawCount // Never advance by the deduplicated display count.
+                offset += rawCount 
                 hasNext = selectedCatalog.supportsExtra("skip") && rawCount > 0 && !repeated && fresh.isNotEmpty()
                 adapter.submitList(items.toList()) {
                     if (ticket == generation && !closed && firstPage) initialProgress(false)
@@ -1521,7 +1503,6 @@ internal data class CatalogHomeSnapshot(
     val hasNext: Boolean
 )
 
-/** Route StremioC home-row headings without modifying native poster data. */
 internal class CatalogHomeEntryHook(
     private val open: (CatalogShortcutTarget, CatalogHomeSnapshot?) -> Unit,
     private val onPreviewView: (TextView?) -> Unit,

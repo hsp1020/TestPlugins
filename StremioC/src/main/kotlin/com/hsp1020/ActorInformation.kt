@@ -59,7 +59,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** All actor-detail models, lookup, view and navigation live in this one file. */
 internal data class ActorPersonRef(
     val id: Int?,
     val name: String,
@@ -109,8 +108,7 @@ internal object ActorInformation {
         item: ActorData
     ): Pair<String, ActorPersonRef>? {
         if (position < 0 || page.actors?.getOrNull(position) !== item) return null
-        // Use the exact load-response actor list first: translated names and recycled
-        // rows must never select an unrelated person by matching names alone.
+
         val matches = snapshots.values.distinct().filter { snapshot ->
             snapshot.actors === page.actors && snapshot.actors.getOrNull(position) === item &&
                 snapshot.people.getOrNull(position)?.name == item.actor.name &&
@@ -124,7 +122,6 @@ internal object ActorInformation {
         return matched.providerUrl to matched.people[position]
     }
 
-    // Use the originating metadata addon's custom-poster choice, when enabled.
     @Synchronized
     private fun posterFor(source: String?, detailUrl: String, credit: Credit): String? {
         val snapshot = source?.let { snapshots[key(it, detailUrl)] }
@@ -134,10 +131,6 @@ internal object ActorInformation {
         )
     }
 
-    // A small, bounded cache avoids repeated person/credit requests. Failed or partial
-    // HTTP responses are never stored as successful empty credits.
-    // Keep only the serialized JSON bytes in the LRU: both entry count and
-    // retained payload bytes are now strictly bounded, independent of cast size.
     private data class CacheEntry(val bytes: ByteArray, val time: Long)
     private val cache = LinkedHashMap<String, CacheEntry>(50, 0.75f, true)
     private var cacheBytes = 0L
@@ -391,8 +384,7 @@ internal object ActorInformation {
                     } else windowDialog.show()
                 },
                 onReady = {
-                    // A destroyed source Fragment no longer owns a usable dialog.
-                    // Keep it visible until the new detail is ready, then release it.
+
                     if (closed && dialog === windowDialog) {
                         preserve = true
                         windowDialog.dismiss()
@@ -448,8 +440,7 @@ internal object ActorInformation {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.TOP
             }
-            // Use the native actor's centerCrop and border, with a responsive circle
-            // spanning the name through the last available biography fact.
+
             val portraitHolder = CardView(activity).apply {
                 radius = dp(35).toFloat()
                 setCardBackgroundColor(activity.colorFromAttribute(R.attr.primaryGrayBackground))
@@ -464,7 +455,7 @@ internal object ActorInformation {
                     actor.photo?.let { loadImage(it) }
                 }, ViewGroup.LayoutParams(-1, -1))
             }
-            // Align the portrait with the visible top of the padded Popular heading.
+
             profileRow.addView(portraitHolder, LinearLayout.LayoutParams(dp(70), dp(70)).apply {
                 topMargin = dp(12)
             })
@@ -472,15 +463,15 @@ internal object ActorInformation {
                 setPadding(dp(8), dp(3), dp(8), dp(3))
             }
             val details = column()
-            // Nuvio headlineMedium / titleLarge = 28 / 22; Popular is 19sp here.
+
             details.addView(label(actor.name, 24f, true))
             profileRow.addView(details, LinearLayout.LayoutParams(0, -2, 1f))
             var profileLoaded = false
             details.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
                 if (!profileLoaded || dialog !== windowDialog) return@addOnLayoutChangeListener
-                // Preserve enough space for the text on compact phones.
+
                 val maxDiameter = (profileRow.width - dp(140)).coerceAtLeast(dp(70))
-                // End the circle at the last fact's visible bottom edge.
+
                 val lastPadding = (details.getChildAt(details.childCount - 1) as? TextView)
                     ?.paddingBottom ?: 0
                 val diameter = (details.height - dp(12) - lastPadding)
@@ -502,8 +493,7 @@ internal object ActorInformation {
                 isFocusable = true
                 foreground = themedPressedForeground(this)
             }
-            // Measure the full text at its actual width; a character threshold is not
-            // equivalent to truncation on tablets, TV or landscape layouts.
+
             var biographyReady = false
             fun updateBiographyToggle() {
                 if (!biographyReady || dialog !== windowDialog) return
@@ -540,7 +530,7 @@ internal object ActorInformation {
             }
             aboutPane.addView(biography)
             aboutPane.addView(toggle)
-            // In landscape, match Nuvio's approximate 25:75 info/credits split.
+
             body.addView(aboutPane, if (wide) LinearLayout.LayoutParams(0, -2, 1f)
                 else LinearLayout.LayoutParams(-1, -2))
             val filmArea = column()
@@ -667,8 +657,7 @@ internal object ActorInformation {
                     workResult.onSuccess {
                         val all = credits(it, actor.preferCrew)
                         if (all.isNotEmpty()) {
-                            // As in Nuvio Mobile, count distinct TMDB IDs and use the
-                            // earliest available release/first-air year among credits.
+
                             val counted = all.distinctBy(Credit::id)
                             val firstYear = counted.mapNotNull { credit ->
                                 credit.date?.take(4)?.toIntOrNull()
@@ -698,7 +687,7 @@ internal object ActorInformation {
                                         setPadding(dp(5), dp(3), dp(5), dp(8))
                                         setOnClickListener { openCredit(originProvider, credit, it) }
                                     }
-                                    // Native home poster corner radius and crop.
+
                                     val posterHolder = CardView(activity).apply {
                                         radius = activity.resources.getDimension(R.dimen.rounded_image_radius)
                                         cardElevation = 0f
@@ -713,7 +702,7 @@ internal object ActorInformation {
                                             else loadImage(R.drawable.default_cover)
                                         }, ViewGroup.LayoutParams(-1, -1))
                                     }
-                                    // Use the same 114 x 180dp portrait size as the native Home card.
+
                                     val posterWidth = dp(114)
                                     card.addView(posterHolder, LinearLayout.LayoutParams(posterWidth, dp(180)))
                                     card.addView(label(credit.title, 13f).apply {
@@ -762,9 +751,8 @@ internal object ActorInformation {
         }
 
         private fun openCredit(providerUrl: String?, credit: Credit, view: View) {
-            if (detailHandoff?.isActive == true) return // Avoid duplicate touch / TV OK navigation.
-            // A single addon URL now registers a Home provider plus search-only
-            // providers. Route actor credits through the original Home provider.
+            if (detailHandoff?.isActive == true) return 
+
             val source = providerUrl ?: (model.currentRepo?.api as? StremioC)
                 ?.mainUrl?.let(::stremioManifestUrl)
             val provider = getSafeAllProviders().filterIsInstance<StremioC>()
@@ -800,8 +788,7 @@ internal object ActorInformation {
             closed = true
             preserve = true
             requestJob?.cancel()
-            // Source view destruction precedes destination readiness on navigation.
-            // Leave handoff alive so the old detail cannot flash through.
+
             if (detailHandoff?.isActive != true) {
                 detailHandoff?.close()
                 dialog?.dismiss()

@@ -1,4 +1,4 @@
-// 파일명: hsp1020/Utils.kt
+
 package com.hsp1020
 
 import com.hsp1020.pip.PipSubtitleScaler
@@ -122,7 +122,6 @@ internal fun themedPressedForeground(view: View): Drawable? {
     else null
 }
 
-/** Use the episode foreground ripple, not a second hardcoded Chip ripple. */
 internal fun applyEpisodeChipFeedback(chip: Chip) {
     chip.rippleColor = android.content.res.ColorStateList.valueOf(android.graphics.Color.TRANSPARENT)
     chip.foreground = themedPressedForeground(chip)
@@ -161,7 +160,7 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false, mediaType:
 
     val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return emptyList()
     val prefs = context.getSharedPreferences("StremioC", android.content.Context.MODE_PRIVATE)
-    
+
     val mdbListEnabled = prefs.getBoolean("mdblist_enabled", false)
     val mdbListApiKey = prefs.getString("mdblist_api_key", "") ?: ""
     if (!mdbListEnabled || mdbListApiKey.isBlank()) {
@@ -194,14 +193,14 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false, mediaType:
         }.toSet()
 
         val results = mutableListOf<Pair<RatingMeta, Double>>()
-        
+
         for (i in 0 until ratingsArray.length()) {
             val ratingObj = ratingsArray.optJSONObject(i) ?: continue
             val sourceKey = ratingObj.optString("source", "").lowercase()
             val value = if (ratingObj.has("value")) ratingObj.optDouble("value") else ratingObj.optDouble("score")
-            
+
             if (value.isNaN() || value <= 0.0) continue
-            
+
             val scaledValue = when (sourceKey) {
                 "rogerebert", "re" -> value * 2.5
                 "letterboxd", "lb" -> ratingObj.optDouble("score").takeUnless { it.isNaN() }
@@ -209,10 +208,10 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false, mediaType:
                 "tmdb", "trakt", "metacritic", "mc", "tomatoes", "rottentomatoes", "rt", "tomatoesaudience", "audiencescore", "popcorn", "audience" -> value / 10.0
                 else -> value
             }
-            
+
             val roundedValue = round(scaledValue * 10) / 10.0
             if (roundedValue <= 0.0) continue
-            
+
             if (sourceKey == "metacriticuser") continue
             val meta = RATING_SOURCES[sourceKey] ?: RatingMeta(sourceKey.uppercase(), "🏷️", 99)
             val icon = when (meta.name) {
@@ -230,7 +229,7 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false, mediaType:
             }
             results.add(meta.copy(icon = icon) to roundedValue)
         }
-        
+
         results.sortBy { it.first.sortOrder }
         results.map { (meta, score) ->
             "${meta.icon} ${String.format(Locale.US, "%.1f", score)}"
@@ -296,7 +295,6 @@ internal fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
     }
 }
 
-/** StremioC-only subtitle ordering and embedded selection; native player UI is preserved. */
 @OptIn(UnstableApi::class)
 internal class StremioSubtitleController {
     private var fragment: GeneratorPlayer? = null
@@ -363,7 +361,6 @@ internal class StremioSubtitleController {
             ?.takeIf { it.matches(Regex("[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*")) }
             ?: "en"
 
-
     private fun currentLinkUrl(f: GeneratorPlayer): String? =
         runCatching { (linkField?.get(f.player) as? ExtractorLink)?.url }.getOrNull()
 
@@ -386,7 +383,6 @@ internal class StremioSubtitleController {
         }
     }
 
-    /** Mark only tracks that Media3 has actually exposed as active to the native picker. */
     private fun markActive(f: GeneratorPlayer, embedded: SubtitleData): Boolean =
         runCatching {
             val helper = helperField?.get(f.player) as? PlayerSubtitleHelper
@@ -425,7 +421,7 @@ internal class StremioSubtitleController {
                     lastPlayer?.removeListener(subtitleListener)
                     val sourceUrl = currentLinkUrl(f)
                     if (lastPlayer != null && (sourceUrl == null || sourceUrl != lastLinkUrl)) {
-                        // New source: old embedded IDs and the prior track override are invalid.
+
                         model?.modifyState {
                             set(subtitles.filterNot { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO })
                         }
@@ -484,7 +480,7 @@ internal class StremioSubtitleController {
         val available = tracks ?: current.currentTracks
         val subtitles = model?.state?.subtitles ?: return
         val embeddedTracks = available.groups.filter { it.type == C.TRACK_TYPE_TEXT }
-        // Expose only tracks belonging to this actual video to the native picker.
+
         for (subtitle in subtitles) {
             if (subtitle.origin != SubtitleOrigin.EMBEDDED_IN_VIDEO) continue
             val found = embeddedTracks.any { group ->
@@ -515,7 +511,7 @@ internal class StremioSubtitleController {
             embeddedApplied = true
             return
         }
-        // Direct Media3 track override, never GeneratorPlayer.setSubtitles/loadLink.
+
         runCatching {
             current.trackSelectionParameters = current.trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
@@ -531,7 +527,7 @@ internal class StremioSubtitleController {
         val wrapper = list.adapter
         val adapter = (if (wrapper is HeaderViewListAdapter) wrapper.wrappedAdapter else wrapper)
             as? ArrayAdapter<*> ?: return false
-        // Match the exact grouping and item positions used by the CloudStream dialog.
+
         val grouped = sortSubs(state.subtitles).groupBy { it.originalName }.values.toList()
         if (adapter.count != grouped.size + 1) return false
         val texts = (0 until adapter.count).map { adapter.getItem(it) as? Spanned ?: return false }
@@ -552,8 +548,7 @@ internal class StremioSubtitleController {
         val order = grouped.indices.sortedWith(
             compareBy<Int> { starts[langs[it]] ?: it }.thenBy { ranks[it] }.thenBy { it }
         )
-        // Change the displayed label only. Keep originalName and URL unchanged so
-        // CloudStream's grouping, selection and embedded track matching still work.
+
         val names = grouped.indices.map { index ->
             val group = grouped[index]
             if (group.isNotEmpty() && group.all { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }) {
@@ -608,7 +603,6 @@ internal class StremioSubtitleController {
     }
 }
 
-/** Auto-select StremioC audio without changing CloudStream's saved language. */
 @OptIn(UnstableApi::class)
 internal class StremioAudioSelector {
     private var fragment: GeneratorPlayer? = null
@@ -620,7 +614,6 @@ internal class StremioAudioSelector {
     private var anime = false
     private var selected = false
 
-    // Avoid Kotlin default-interface bridges: the host Media3 listener ABI can differ.
     private val audioListener = java.lang.reflect.Proxy.newProxyInstance(
         Media3Player.Listener::class.java.classLoader,
         arrayOf(Media3Player.Listener::class.java)
@@ -707,7 +700,7 @@ internal class StremioAudioSelector {
             current.trackSelectionParameters = current.trackSelectionParameters.buildUpon()
                 .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, index)).build()
         }
-        // No matching language: keep Media3's selected default track.
+
     }
 
     private fun stopWaiting() {
@@ -728,7 +721,6 @@ internal class StremioAudioSelector {
     }
 }
 
-/** Only replaces known MDBList glyphs on rows marked by StremioC.kt. */
 internal class RatingPlotImageHook(
     context: Context,
     private val resources: Resources,
@@ -861,7 +853,6 @@ internal class RatingPlotImageHook(
     private var previewPageObserver: Observer<Resource<ResultData>?>? = null
     private var previewPageModel: ResultViewModel2? = null
 
-    // Keep the native Activity-scoped SearchViewModel's results visible when its Fragment is recreated.
     private var lastSearchQuery: String? = null
     private var stremioSearchSession = false
     private var freshSearchPending = false
@@ -980,7 +971,7 @@ internal class RatingPlotImageHook(
         if (source != "StremioC" && APIHolder.allProviders.none {
                 it is StremioC && it.name.equals(source, ignoreCase = true)
             }) return
-        // The native preview is an independent Dialog window, not part of Activity.findViewById.
+
         val dialog = runCatching {
             activity.javaClass.getDeclaredField("bottomPreviewPopup").apply {
                 isAccessible = true
@@ -993,8 +984,7 @@ internal class RatingPlotImageHook(
             description.setText(it, TextView.BufferType.SPANNABLE)
         }
         if (isLayout(PHONE)) description.setOnClickListener {
-            // The native secondary plot dialog is created from plain HTML and would lose our
-            // ImageSpans. Recreate only that click action with the identical data/title/style.
+
             val raw = data.plotText.asString(activity).html()
             AlertDialog.Builder(activity, com.lagradost.cloudstream3.R.style.AlertDialogCustom)
                 .setMessage(decoratedRatings(raw, description.textSize) ?: raw)
@@ -1027,8 +1017,7 @@ internal class RatingPlotImageHook(
             runCatching { renderHomePreview() }
         }
     }
-    // A search-back transition can expose an intermediate NavHost size for several frames.
-    // Keep the last drawn search frame until the restored detail fills the host.
+
     private var detailRevealEnd: (() -> Unit)? = null
 
     private fun holdDetailReveal(search: Fragment) {
@@ -1038,7 +1027,7 @@ internal class RatingPlotImageHook(
             val id = activity.resources.getIdentifier(name, "id", activity.packageName)
             return if (id == 0) null else activity.findViewById<View>(id)
         }
-        // Do not affect navigation between ordinary search/home/library screens.
+
         if (listOf("nav_view", "nav_rail_view").any { find(it)?.visibility == View.VISIBLE }) return
         val navHost = activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)
             as? androidx.navigation.fragment.NavHostFragment ?: return
@@ -1047,7 +1036,7 @@ internal class RatingPlotImageHook(
             )) return
         val content = find("nav_host_fragment") ?: return
         val bounds = content.parent as? android.view.ViewGroup ?: return
-        // Observe only the NavHost; never block drawing of the whole Activity.
+
         val observer = content.viewTreeObserver
         if (!observer.isAlive) return
         detailRevealEnd?.invoke()
@@ -1074,7 +1063,7 @@ internal class RatingPlotImageHook(
                 release()
                 true
             } else {
-                // Keep the previous search frame until the result fills the NavHost.
+
                 content.postInvalidateOnAnimation()
                 false
             }
@@ -1128,7 +1117,7 @@ internal class RatingPlotImageHook(
                     if (query != null) lastSearchQuery = query.takeIf { it.isNotBlank() }
                 }
                 runCatching { holdDetailReveal(f) }
-                    
+
             }
         }
 
@@ -1140,7 +1129,7 @@ internal class RatingPlotImageHook(
             subtitleController.watch(f)
             scrobble.watch(f)
             watchers[f]?.let { watcher ->
-                watcher.render() // CloudStream may reuse an old LoadResponse without calling load().
+                watcher.render() 
             }
         }
 
@@ -1255,7 +1244,6 @@ internal class RatingPlotImageHook(
         }
     }
 
-    /** Plugin-owned independent tracker states. Native detail, episode selector and panel stay intact. */
     private class SeasonSyncProbe(
         private val fragment: Fragment, private val root: View, private val detailUrl: String?,
         private val pluginResources: Resources
@@ -1265,8 +1253,7 @@ internal class RatingPlotImageHook(
             val allowed = setOf("mal", "anilist", "kitsu", "simkl")
             val titles = mapOf("mal" to "MAL", "anilist" to "AniList",
                 "kitsu" to "Kitsu", "simkl" to "Simkl")
-            // Shared across detail screens; protects the same tracker entry from
-            // simultaneous saves after a season change or navigation.
+
             val pendingWrites = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         }
 
@@ -1283,12 +1270,10 @@ internal class RatingPlotImageHook(
             var total: Int? = null, var totalSource: String = "unknown",
             var error: String? = null, var loading: Boolean = true, var saving: Boolean = false,
             var writeBlocked: String? = null, var simklSeason: SimklSeasonSnapshot? = null,
-            var simklAnimeVerified: Boolean = false,
             var simklAnime: AnimeSnapshot? = null,
             var seasonMapping: SeasonTrackerIds? = null
         )
 
-        /** Exact Simkl episode keys, never the aggregate watchedEpisodesCount. */
         private data class SimklSeasonSnapshot(
             val ids: JSONObject,
             val seasonNumber: Int,
@@ -1298,7 +1283,6 @@ internal class RatingPlotImageHook(
             val listStatus: SyncWatchType?
         )
 
-        /** Simkl TV stores a global list status but independent season progress. */
         private fun simklSeasonStatus(snap: SimklSeasonSnapshot): SyncWatchType {
             if (snap.watched.size == snap.available.size) return SyncWatchType.COMPLETED
             val global = snap.listStatus
@@ -1384,43 +1368,39 @@ internal class RatingPlotImageHook(
               }
         }
 
-        /**
-         * A regular TV show has one watchlist status for the whole Simkl title.
-         * Only +/- applies to the selected season; neither path remaps its ID.
-         */
-        /** Confirm the real watchlist membership; never infer removal from episode progress. */
+        private suspend fun simklLibraryObject(
+            repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
+            endpoint: String
+        ): JSONObject? {
+            val headers=SimklApi.getHeaders(repo.authToken() ?: return null)
+            val response=try {
+                app.get("https://api.simkl.com/sync/all-items/$endpoint",
+                    headers=headers,cacheTime=0)
+            } catch(e: CancellationException) { throw e }
+              catch(e: Exception) { return null }
+            if(response.code !in 200..299)return null
+            val body=response.text.trim()
+            return if(body=="null") JSONObject()
+                else runCatching { JSONObject(body) }.getOrNull()
+        }
+
         private suspend fun simklTvLibraryMembership(
             repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
             ids: JSONObject
         ): Boolean? {
-            val headers=SimklApi.getHeaders(repo.authToken() ?: return null)
-            val response=try {
-                app.get("https://api.simkl.com/sync/all-items/shows?extended=ids_only",
-                    headers=headers,cacheTime=0)
-            } catch(e: CancellationException) { throw e }
-              catch(e: Exception) {
-                return null
-              }
-            if(response.code !in 200..299)return null
-            val body=response.text.trim()
-            if(body=="null")return false // A successful empty Simkl watchlist.
-            if(body.isEmpty())return null
-            val root=runCatching { JSONObject(body) }.getOrNull() ?: return null
+            val root=simklLibraryObject(repo,"shows?extended=ids_only") ?: return null
             val rows=root.optJSONArray("shows") ?: if(root.length()==0) {
                 JSONArray()
-            } else {
-                return null
-            }
-            var present=false
-            for (i in 0 until rows.length()) {
+            } else return null
+            for(i in 0 until rows.length()) {
                 val entry=rows.optJSONObject(i) ?: return null
                 val rowIds=entry.optJSONObject("show")?.optJSONObject("ids")
                     ?: entry.optJSONObject("ids") ?: return null
                 if(ids.keys().asSequence().any { k ->
                     ids.optString(k).isNotBlank() && ids.optString(k)==rowIds.optString(k)
-                })present=true
+                })return true
             }
-            return present
+            return false
         }
 
         private suspend fun simklSeasonSave(
@@ -1432,11 +1412,9 @@ internal class RatingPlotImageHook(
             val headers = SimklApi.getHeaders(tracker.repo.authToken() ?: return false) +
                 mapOf("content-type" to "application/json")
             val url = "https://api.simkl.com/sync/"
-            // NONE deletes the title only when all other seasons are unwatched.
-            // Otherwise the selected season's episodes alone are cleared.
+
             val clearSelectedSeason = draft.status == SyncWatchType.NONE && draft.explicitNone
-            // "add-to-list completed" auto-marks every season in Simkl.
-            // Selected-season completion must only write season-scoped history.
+
             val seasonCompleted = draft.status == SyncWatchType.COMPLETED
             val requestedCount = when {
                 clearSelectedSeason -> 0
@@ -1448,8 +1426,7 @@ internal class RatingPlotImageHook(
                 draft.status == SyncWatchType.WATCHING && countDiff > 0
             val progressDemotion = draft.status == SyncWatchType.WATCHING &&
                 baseline.status == SyncWatchType.COMPLETED && countDiff < 0
-            // Manually reducing a completed season changes its local display,
-            // not the title-wide Simkl watchlist category.
+
             val statusChanged = !clearSelectedSeason && !seasonCompleted &&
                 draft.status != baseline.status && !autoWatching &&
                 !progressDemotion && initial.listStatus != draft.status
@@ -1459,8 +1436,7 @@ internal class RatingPlotImageHook(
                     simklWatchlistDestination(draft.status) == null)) return false
 
             if(fullDelete) {
-                // Recheck the selected season and ensure all other seasons are
-                // unwatched before allowing a whole-title removal.
+
                 val fresh=simklSeasonRead(tracker.repo,tracker.id,sn)
                 val safe=fresh!=null && fresh.available==initial.available &&
                     fresh.watched==initial.watched &&
@@ -1484,7 +1460,7 @@ internal class RatingPlotImageHook(
                     val notFound=ack?.optJSONObject("not_found")?.optJSONArray("shows")?.length() ?: 0
                     if(response.code !in 200..299 || deleted<=0 || notFound!=0)return false
                 }else if(initial.watched.isNotEmpty() || fresh?.listStatus!=SyncWatchType.NONE) {
-                    // Already absent: succeed only for an unchanged empty title.
+
                     return false
                 }
                 tracker.simklSeason=fresh!!.copy(watched=emptySet(),listStatus=SyncWatchType.NONE)
@@ -1493,7 +1469,7 @@ internal class RatingPlotImageHook(
             }
 
             if (countDiff == 0 && !statusChanged) {
-                // Verify idempotent operations instead of pretending to write.
+
                 val current = simklSeasonRead(tracker.repo, tracker.id, sn)
                 val unchanged = current != null &&
                     current.available == initial.available &&
@@ -1506,8 +1482,6 @@ internal class RatingPlotImageHook(
                 return unchanged
             }
 
-            // Reject stale reads before writing any episode. Other seasons are
-            // never put in the write payload and are also verified afterwards.
             val fresh = simklSeasonRead(tracker.repo, tracker.id, sn)
             if (fresh == null || fresh.available != initial.available ||
                 fresh.watched != initial.watched ||
@@ -1555,9 +1529,7 @@ internal class RatingPlotImageHook(
             }
 
             if (statusChanged) {
-                // The pre-release host API is not guaranteed to export the core
-                // builder. Send only the show's status, without episode/score
-                // changes; episode updates remain season-scoped above.
+
                 val destination = simklWatchlistDestination(draft.status) ?: return false
                 val payload = JSONObject().put("shows", JSONArray().put(
                     JSONObject().put("ids", initial.ids).put("to", destination)))
@@ -1591,7 +1563,6 @@ internal class RatingPlotImageHook(
             return true
         }
 
-        /** Season-exact TVDB episode map; never inferred from a title's total count. */
         private data class AnimeSlot(val simkl: Int, val native: Int, val tvdbSeason: Int, val tvdbEpisode: Int) {
             val key get() = "$simkl:$native"
         }
@@ -1601,7 +1572,7 @@ internal class RatingPlotImageHook(
             val mode: String, val sourceIds: Set<Int>,
             val status: SyncWatchType?, val statusEditable: Boolean
         )
-        /** Shared Simkl anime ID: title status remains global, season progress does not. */
+
         private fun animeSeasonDisplayStatus(snap: AnimeSnapshot): SyncWatchType {
             val count=snap.watched.size
             if(!snap.statusEditable && snap.status==SyncWatchType.COMPLETED &&
@@ -1641,10 +1612,6 @@ internal class RatingPlotImageHook(
             else -> null
         }
 
-        /**
-         * Query per-episode watched flags for the season's validated Simkl anime IDs.
-         * Do not cross-check a separate endpoint's episode count or summary total.
-         */
         private suspend fun simklAnimeWatched(
             repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
             ids: Set<Int>
@@ -1694,11 +1661,6 @@ internal class RatingPlotImageHook(
             return AnimeWatchGrid(watched,statuses).takeIf { returned==ids }
         }
 
-        /**
-         * Change the watchlist state of native Simkl anime titles only.
-         * The API can normalize a requested state (e.g. completed -> watching);
-         * verify the returned destinations and then re-read the episode grid.
-         */
         private suspend fun simklAnimeSetStatus(
             repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
             ids: Set<Int>, requested: SyncWatchType
@@ -1707,8 +1669,7 @@ internal class RatingPlotImageHook(
             if(ids.isEmpty())return null
             val headers=SimklApi.getHeaders(repo.authToken() ?: return null)+
                 mapOf("content-type" to "application/json")
-            // Simkl accepts anime under both arrays, but normalizes the
-            // /sync/add-to-list response under "added.shows".
+
             val body=JSONObject().put("shows",JSONArray().also { items ->
                 ids.forEach { id ->
                     items.put(JSONObject().put("to",destination)
@@ -1748,30 +1709,13 @@ internal class RatingPlotImageHook(
             return stored
         }
 
-        /**
-         * /sync/all-items/anime is authoritative for library categories, whereas
-         * /sync/watched is used for individual episode flags. Read this only after
-         * an explicit watchlist write, not on every detail page visit.
-         */
         private suspend fun simklAnimeLibraryStatus(
             repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
             ids: Set<Int>
         ): SyncWatchType? {
             if(ids.isEmpty())return null
-            val headers=SimklApi.getHeaders(repo.authToken() ?: return null)
-            val response=try {
-                app.get("https://api.simkl.com/sync/all-items/anime",
-                    headers=headers,cacheTime=0)
-            }catch(e: CancellationException){throw e}
-             catch(e: Exception){
-                  return null}
-            if(response.code !in 200..299)return null
-            if(response.text.trim()=="null")return SyncWatchType.NONE
-            val body=runCatching { JSONObject(response.text) }.getOrNull()
-            if(body==null) {
-                return null
-            }
-            // Missing anime category in a valid response also means no anime entries.
+            val body=simklLibraryObject(repo,"anime") ?: return null
+
             val anime=body.optJSONArray("anime") ?: if(!body.has("anime") &&
                 body.keys().asSequence().all { it in setOf("shows","movies") })
                 JSONArray() else return null
@@ -1788,11 +1732,6 @@ internal class RatingPlotImageHook(
             return ids.map { statuses[it] ?: return null }.distinct().singleOrNull()
         }
 
-        /**
-         * Explicit None removes entire independent Simkl anime entries, including
-         * their history and ratings. Never send TVDB parent IDs: these would also
-         * remove other anime seasons belonging to the same show.
-         */
         private suspend fun simklAnimeRemoveFromLibrary(
             repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
             ids: Set<Int>
@@ -1814,7 +1753,7 @@ internal class RatingPlotImageHook(
              }
             if(response.code !in 200..299)return false
             val ack=runCatching { JSONObject(response.text) }.getOrNull() ?: return false
-            // Every requested independent anime title must be acknowledged as deleted.
+
             val deleted=ack.optJSONObject("deleted")?.optInt("shows",-1) ?: -1
             val notFound=ack.optJSONObject("not_found")
             val missing=(notFound?.optJSONArray("shows")?.length() ?: 0)+
@@ -1853,7 +1792,7 @@ internal class RatingPlotImageHook(
                  catch(e: Exception){
                  }
             }
-            // Simkl's own native ID resolver, with TVDB parent search to find every cour.
+
             mapped.mal?.let { search("mal",it) }
             mapped.tvdb?.let { search("tvdb",it) }
             if(candidates.isEmpty()){
@@ -1881,7 +1820,7 @@ internal class RatingPlotImageHook(
                     if(jsonInt(ids,"simkl") != id){
                         continue
                     }
-                    // Only the mapped direct ID may be accepted by native MAL identity.
+
                     val malMatched=mapped.mal != null &&
                         jsonInt(ids,"mal")==mapped.mal
                     val direct=mapped.simkl==id
@@ -1926,17 +1865,14 @@ internal class RatingPlotImageHook(
             }
             val sorted=slots.sortedWith(compareBy<AnimeSlot> { it.tvdbEpisode }.thenBy { it.simkl })
             val keys=sorted.map { it.tvdbEpisode }
-            // Different providers may expose different episode counts and TVDB ranges.
-            // Only accept episode slots with an unambiguous, unique mapping.
+
             if(sorted.isEmpty() || keys.distinct().size != keys.size){
                 return null
             }
             val grid=simklAnimeWatched(repo,validated) ?: return null
             val targetKeys=sorted.mapTo(linkedSetOf()) { it.key }
             val unifiedStatus=grid.statuses.values.distinct().singleOrNull()
-            // A single Simkl anime ID can span several TVDB seasons (e.g. One Piece).
-            // In that case the Simkl watchlist state is title-wide, not season-wide:
-            // keep progress editing, but never write a season-local status to it.
+
             val seasonLocalTitles=validated.all { id ->
                 val episodes=animeEpisodeCache[id].orEmpty()
                 episodes.isNotEmpty() && (tvdbSeason==null ||
@@ -2022,17 +1958,11 @@ internal class RatingPlotImageHook(
                 if(response.code !in 200..299 || failures==null || failures>0)return false
             }
 
-            // Explicit status edits must be directed at each validated native anime
-            // title, never at the common TVDB/IMDb parent shared by other seasons.
             val acceptedStatus=if(statusChanged)
                 simklAnimeSetStatus(tracker.repo,before.sourceIds,draft.status)
                     ?: return false
             else null
 
-            // On status-only writes, verify the actual Simkl library rather
-            // than treating the episode-grid lookup as a watchlist write ack.
-            // This also avoids a second sync/watched request while Simkl holds
-            // its per-user write lock.
             if(statusChanged && diff==0) {
                 for(attempt in 1..3) {
                     if(attempt>1)kotlinx.coroutines.delay(if(attempt==2)350L else 900L)
@@ -2049,9 +1979,7 @@ internal class RatingPlotImageHook(
                 if(attempt>1)kotlinx.coroutines.delay(if(attempt==2)350L else 900L)
                 val mapped=tracker.seasonMapping ?: return false
                 val after=simklAnimeRead(tracker.repo,mapped,seasonNumber)
-                // A Completed status may legitimately update the underlying
-                // watch history. Honor that server-side change on status-only
-                // writes; keep strict episode verification for +/- edits.
+
                 val watchedMatches=diff==0 && statusChanged ||
                     after?.watched==expected
                 val outsidePreserved=after?.outside==before.outside
@@ -2065,8 +1993,7 @@ internal class RatingPlotImageHook(
         }
 
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-        // Writes must finish even after the detail fragment is destroyed.
-        // Only the view observers and page fetches belong to the screen scope.
+
         private val saveScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         private val observers = mutableListOf<() -> Unit>()
         private var active = false
@@ -2104,7 +2031,6 @@ internal class RatingPlotImageHook(
         private fun isWriteInFlight(tracker: Tracker): Boolean =
             tracker.saving || pendingWrites.contains("${tracker.prefix}:${tracker.id}")
 
-        /** Invalidate native library cache so the existing reload event fetches it. */
         private suspend fun refreshAfterVerifiedWrite(tracker: Tracker, provider: String) {
             val repo = tracker.repo
             repo.requireLibraryRefresh = true
@@ -2233,8 +2159,7 @@ internal class RatingPlotImageHook(
                             mapping?.mal?.let { put("mal", it.toString()) }
                             mapping?.aniList?.let { put("anilist", it.toString()) }
                             mapping?.kitsu?.let { put("kitsu", it.toString()) }
-                            // Prefer the authoritative season Simkl ID supplied by
-                            // AIOStreams; Simkl's native search is the fallback.
+
                             if (mapping?.simkl != null) {
                                 put("simkl", JSONObject().put("Simkl",mapping.simkl.toString()).toString())
                             } else mapping?.mal?.let { mal ->
@@ -2267,9 +2192,6 @@ internal class RatingPlotImageHook(
                         val id = ids.getValue(repo.idPrefix)
                         val state = repo.status(id)
 
-                        // MAL's general load() parses unrelated statistics fields with
-                        // unstable string/number types. Use the minimal num_episodes API
-                        // below instead, avoiding a second failing full-document parse.
                         val meta = if (repo.idPrefix == "mal" || repo.idPrefix == "kitsu")
                             null else repo.load(id)
                         val remote = state.getOrNull()
@@ -2283,8 +2205,6 @@ internal class RatingPlotImageHook(
                         } else null
                         if (multi && isAnime == true && repo.idPrefix == "simkl" &&
                             animeExact != null) simklAnimeReplies["simkl"] = animeExact
-                        if (multi && isAnime == true && repo.idPrefix == "simkl") {
-                        }
                         var total = when {
                             generalSimkl && repo.idPrefix == "simkl" -> simklExact?.available?.size
                             multi && isAnime == true && repo.idPrefix == "simkl" ->
@@ -2366,10 +2286,7 @@ internal class RatingPlotImageHook(
                             if (multi) "season-mapped-peer" else "single-season-peer"
                         } else "unknown"
                     target.error = if (draft == null) "status-unavailable" else null
-                    // The catalog episode list may contain 24 entries while a verified
-                    // tracker season is a 12-episode anime entry. Never equate
-                    // catalog count with the service's actual episode total.
-                    // A missing/invalid season ID is excluded before reaching here.
+
                     target.writeBlocked = when {
                         generalSimkl && prefix == "simkl" && target.simklSeason == null ->
                             "simkl-season-episodes-unverified"
@@ -2391,7 +2308,7 @@ internal class RatingPlotImageHook(
             oldNames = names
             val activity = fragment.requireActivity()
             val dp = root.resources.displayMetrics.density
-            // The exact selector and dropdown adapter are shared with Browse Genre.
+
             val spinner = catalogStyledSelector(activity)
             val width = (208 * dp).toInt()
             spinner.dropDownWidth = width
@@ -2507,9 +2424,6 @@ internal class RatingPlotImageHook(
             } finally { applying = false }
         }
 
-        /** A partial episode count cannot retain a completed local state.
-         * NONE remains an explicit selection (and may delete watchlist data).
-         */
         private fun reconcileManualProgress(tracker: Tracker, edit: Draft) {
             val total=tracker.total?.takeIf { it>0 }
             if(total!=null && edit.status==SyncWatchType.COMPLETED &&
@@ -2535,8 +2449,7 @@ internal class RatingPlotImageHook(
             if (!active || combo == null) return
             val target = statuses[selected]
             if (target == null || target.loading || target.draft == null) {
-                // The selector lives inside the native holder. Never hide it when
-                // an individual provider fails or is still loading.
+
                 applying = true
                 try {
                     holder?.visibility = View.VISIBLE
@@ -2569,8 +2482,7 @@ internal class RatingPlotImageHook(
                     current?.setSelection(newText.length)
                 }
                 checks?.setItemChecked(data.status.internalId + 1, true)
-                // Simkl anime titles dedicated to the selected season have an
-                // independent watchlist status. Shared multi-season titles do not.
+
                 checks?.isEnabled = !isWriteInFlight(target) && target.writeBlocked == null &&
                     (target.simklSeason == null || target.simklSeason?.listStatus != null) &&
                     (target.simklAnime == null || target.simklAnime?.statusEditable == true)
@@ -2587,8 +2499,6 @@ internal class RatingPlotImageHook(
             } finally { applying = false }
         }
 
-        /** Independent MAL readback, used when the core status parser or
-         * asynchronous MAL readback has not confirmed an acknowledged write. */
         private suspend fun malDirectVerify(
             tracker: Tracker, expected: com.lagradost.cloudstream3.syncproviders.SyncAPI.AbstractSyncStatus,
             compareStatus: Boolean, compareProgress: Boolean, compareScore: Boolean
@@ -2638,8 +2548,7 @@ internal class RatingPlotImageHook(
             }
             if (prefix == "mal" && draft.status == SyncWatchType.COMPLETED &&
                 before.status != SyncWatchType.COMPLETED) {
-                // MAL's core writes the supplied progress; it does not fill it.
-                // Require the title's own verified MAL episode count.
+
                 val total = tracker.total?.takeIf {
                     it > 0 && tracker.totalSource == "mal-lightweight"
                 }
@@ -2687,8 +2596,7 @@ internal class RatingPlotImageHook(
             var writeAcceptedButUnconfirmed=false
             tracker.saving = true
             render()
-            // A durable write is never cancelled by season switching,
-            // fragment teardown, or navigating away from the detail page.
+
             saveScope.launch {
                 val result = try { withContext(Dispatchers.IO) {
                     if(prefix=="mal" && draft.status==SyncWatchType.NONE &&
@@ -2812,11 +2720,6 @@ internal class RatingPlotImageHook(
             }
         }
 
-        /**
-         * MAL's NONE is not a watchlist status. Explicitly remove the anime
-         * entry, then check the authoritative per-title list_status field.
-         * A successful DELETE may return [] rather than a JSON object.
-         */
         private suspend fun malRemoveFromLibrary(
             repo: com.lagradost.cloudstream3.syncproviders.SyncRepo,
             id: String
@@ -2923,7 +2826,7 @@ internal class RatingPlotImageHook(
             active = false
             generation++
             fetchJob?.cancel()
-            // saveScope intentionally survives this screen, unlike scope.
+
             scope.cancel()
             observers.forEach { it() }
             observers.clear()
@@ -2983,7 +2886,7 @@ internal class RatingPlotImageHook(
         }
 
         private fun positionEpisodeIndicator(row: View) {
-            // The compact text-only episode row has no thumbnail and must remain native.
+
             if (row.findViewById<View>(R.id.episode_poster) == null) return
             val indicator = row.findViewById<View>(R.id.watch_progress_container) ?: return
             if (episodeIndicatorRestores.containsKey(indicator)) return
@@ -2991,7 +2894,7 @@ internal class RatingPlotImageHook(
             val progress = row.findViewById<CircularProgressIndicator>(R.id.episode_progress) ?: return
             val originalInset = progress.indicatorInset
             val originalColors = progress.indicatorColor.copyOf()
-            // Leave the CloudStream native white 20% track color untouched.
+
             val themeColor = row.context.colorFromAttribute(R.attr.colorPrimary)
             val inset = (1.5f * indicator.resources.displayMetrics.density + 0.5f).toInt()
             val positioned = FrameLayout.LayoutParams(original).apply {
@@ -3004,7 +2907,7 @@ internal class RatingPlotImageHook(
             val scaleY = indicator.scaleY
             val pivotX = indicator.pivotX
             val pivotY = indicator.pivotY
-            // Scale toward the bottom-left, so 1.5dp is the visible circle's inset.
+
             val pivotListener = View.OnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
                 v.pivotX = 0f
                 v.pivotY = v.height.toFloat()
@@ -3023,7 +2926,7 @@ internal class RatingPlotImageHook(
             }
             progress.setIndicatorInset(0)
             progress.setIndicatorColor(themeColor)
-            // Material's inset setter only invalidates drawing; force the new 40dp measure.
+
             progress.requestLayout()
             indicator.addOnLayoutChangeListener(pivotListener)
             indicator.layoutParams = positioned
@@ -3063,7 +2966,7 @@ internal class RatingPlotImageHook(
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> view.isPressed = false
                 }
-                false // Preserve actor search, scrolling and long-press behavior.
+                false 
             }
             actorCardForegrounds[card] = original
         }

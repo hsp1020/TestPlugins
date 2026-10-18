@@ -53,7 +53,7 @@ import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.player.VideoGenerator
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.ui.result.VideoWatchState
-// Shared by the first trailer launch and subsequent playlist entries.
+
 private suspend fun extractTrailerMedia(youtubeId: String): Pair<List<ExtractorLink>, List<SubtitleData>> =
     withContext(Dispatchers.IO) {
         val links = Collections.synchronizedList(mutableListOf<ExtractorLink>())
@@ -72,7 +72,6 @@ private suspend fun extractTrailerMedia(youtubeId: String): Pair<List<ExtractorL
                 .distinctBy { it.url }.map { PlayerSubtitleHelper.getSubtitleData(it) }
     }
 
-/** StremioC-only trailer picker: no fake episodes or modifications to player internals. */
 internal class TrailerChooser(
     private val fragment: Fragment,
     private val root: View,
@@ -113,7 +112,7 @@ internal class TrailerChooser(
     private val pickerClick = View.OnClickListener { showPicker() }
     private val tvPreDraw = ViewTreeObserver.OnPreDrawListener {
         if (fragment.isAdded) {
-            // Host trailer LiveData may reset the native TV button after page metadata arrives.
+
             refresh()
             syncTvButton()
         }
@@ -151,8 +150,7 @@ internal class TrailerChooser(
         fragment.lifecycle.addObserver(resumeObserver)
         title?.addTextChangedListener(titleWatcher)
         if (isTv) {
-            // This is CloudStream's native ResultSmallButtonTV: keep its
-            // built-in ripple, focus and DPAD click handling untouched.
+
             tvButton?.setOnClickListener(pickerClick)
             root.viewTreeObserver.addOnPreDrawListener(tvPreDraw)
         }
@@ -163,7 +161,7 @@ internal class TrailerChooser(
         if (!isTv) return
         val desired = if (items.isEmpty()) View.GONE else View.VISIBLE
         if (tvContainer?.visibility != desired) tvContainer?.visibility = desired
-        // The host can replace the click listener or button style after metadata arrives.
+
         if (desired == View.VISIBLE) {
             tvButton?.setOnClickListener(pickerClick)
         }
@@ -215,7 +213,7 @@ internal class TrailerChooser(
         if (hero == null) return
         if (button == null) {
             button = Chip(context).apply {
-                // Use the exact genre-tag Chip style, preserving its font size, padding and shape.
+
                 setChipDrawable(ChipDrawable.createFromAttributes(context, null, 0, R.style.ChipFilled).apply {
                     alpha = 0x80
                 })
@@ -228,7 +226,7 @@ internal class TrailerChooser(
                 isCheckable = false
                 isClickable = true
                 isFocusable = true
-                // Chip handles DOWN/UP/CANCEL; do not set pressed state manually.
+
                 setOnClickListener { showPicker() }
             }.also {
                 hero.addView(it, FrameLayout.LayoutParams(
@@ -265,7 +263,7 @@ internal class TrailerChooser(
                 textSize = 17f
                 typeface = Typeface.create(typeface, Typeface.NORMAL)
             }
-            // The font can render "(2)" as ② through ligatures.
+
             fontFeatureSettings = "'liga' 0, 'clig' 0, 'calt' 0, 'dlig' 0"
             setTextColor(foreground)
             setPadding(dp(4), dp(8), 0, dp(4))
@@ -368,8 +366,6 @@ internal class TrailerChooser(
         return true
     }
 
-    // Keep the picker above the previous detail until the player can draw.
-    // Failure recovery must also wait for a drawable result/home screen.
     private fun dismissPickerOnPlayerFrame(
         picker: BottomSheetDialog, controller: androidx.navigation.NavController
     ) {
@@ -472,7 +468,7 @@ internal class TrailerChooser(
                 val popped = runCatching { controller.popBackStack() }.getOrDefault(false)
                 if (!popped || controller.currentDestination?.id == R.id.navigation_player)
                     recoveryAttempts++
-                // Repeated failed pops must not dismiss the cover over a blank player.
+
                 if (recoveryAttempts >= 2) recoverHome()
             }
             currentView()?.let(::watch)
@@ -497,7 +493,7 @@ internal class TrailerChooser(
                     else if (!homeRecovery &&
                         android.os.SystemClock.uptimeMillis() - recoveryStarted >= 6000L) recoverHome()
                 }
-                // Only the observed destination's stable frames may dismiss the picker.
+
                 handler.postDelayed(this, 1000L)
             }
         }
@@ -514,7 +510,7 @@ internal class TrailerChooser(
                 if (destination.id == R.id.navigation_player) {
                     visitedPlayer = true
                 } else if (visitedPlayer && !rollingBack) {
-                    // Explicit Back/Home before the 6s watchdog: wait only for its first stable frame.
+
                     rollingBack = true
                     recoveryStarted = android.os.SystemClock.uptimeMillis()
                     handler.removeCallbacks(timeout)
@@ -544,7 +540,7 @@ internal class TrailerChooser(
                     toast(fragment.requireContext().getString(R.string.no_links_found_toast))
                     return@launch
                 }
-                // Pass every MP4/HLS/DASH quality and track-bearing DASH MPD to the host player.
+
                 val selectedIndex = items.indexOf(entry).takeIf { it >= 0 } ?: return@launch
                 val heading = title?.text?.toString()?.trim().orEmpty()
                     .ifBlank { root.context.getString(R.string.trailer) }
@@ -567,7 +563,7 @@ internal class TrailerChooser(
                     saved.remove<String>(returnKey)
                     saved.remove<Int>(returnScrollKey)
                     saved.remove<Int>(returnFocusKey)
-                    throw error // The original picker is still visible.
+                    throw error 
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -591,8 +587,7 @@ internal class TrailerChooser(
         if (isTv) {
             if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(tvPreDraw)
         }
-        // Navigation is transferring visibility to the player; its one-shot
-        // callback owns dialog dismissal until the next drawable frame.
+
         extractionJob?.cancel()
         extractionJob = null
         if (finishPlayerHandoff == null) dialog?.dismiss()
@@ -604,10 +599,6 @@ internal class TrailerChooser(
     }
 }
 
-/**
- * Player-only playlist. None of these trailers become StremioC seasons or episodes.
- * ResultEpisode metadata enables CloudStream's built-in title, episode list and next controls.
- */
 internal class TrailerPlaybackGenerator(
     private val trailers: List<TrailerChoice>,
     heading: String,

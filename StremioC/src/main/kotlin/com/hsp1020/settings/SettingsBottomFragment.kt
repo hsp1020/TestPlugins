@@ -1,4 +1,4 @@
-// hsp1020/settings/SettingsBottomFragment.kt
+
 package com.hsp1020
 
 import android.annotation.SuppressLint
@@ -100,7 +100,7 @@ object SettingsRepository {
     const val PREF_KEY_HISTORY_SYNC_URL = "history_sync_url"
     const val PREF_KEY_STREAM_SUBTITLE_URLS = "stream_subtitle_addon_urls"
     const val PREF_KEY_STREAM_SUBTITLE_EXPANDED = "stream_subtitle_urls_expanded"
-    
+
     const val PREF_KEY_TMDB_LANG_CODE = "tmdb_language_code"
 
     const val PREF_KEY_TMDB_API_KEY = "tmdb_api_key"
@@ -170,7 +170,7 @@ class SettingsBottomFragment(
     private val sharedPref: SharedPreferences,
     private val hostContext: Context
 ) {
-    // The sheet is not restored by FragmentManager during Activity recreation.
+
     private val settingsDialog = object : AppCompatDialog(hostContext) {
         override fun cancel() {
             if (backHandler?.invoke() != true) super.cancel()
@@ -210,7 +210,7 @@ class SettingsBottomFragment(
 
     private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
     private val resourceCache = mutableMapOf<String, Int>()
-    
+
     private fun getCachedResId(name: String, type: String): Int {
         return resourceCache.getOrPut("$type/$name") {
             res.getIdentifier(name, type, BuildConfig.LIBRARY_PACKAGE_NAME)
@@ -226,7 +226,7 @@ class SettingsBottomFragment(
     private var searchJob: Job? = null 
 
     private fun dp(value: Int) = (value * hostContext.resources.displayMetrics.density + 0.5f).toInt()
-    // Inherit the host font while retaining each existing field's emphasis.
+
     private val hostTypeface by lazy { TextView(hostContext).typeface }
     private fun normalizeTypeface(view: View) {
         if (view is TextView) {
@@ -320,7 +320,6 @@ class SettingsBottomFragment(
         } catch (t: Throwable) {}
     }
 
-
     private enum class SettingsPage { HUB, SOURCES, METADATA, BACKUP }
     private var backHandler: (() -> Boolean)? = null
     private var refreshSummaries: (() -> Unit)? = null
@@ -333,8 +332,7 @@ class SettingsBottomFragment(
 
     private fun catalogLinks(): MutableList<LinkItem> {
         var links = SettingsRepository.loadLinks(sharedPref)
-        // Older builds inserted new registrations at index 0. Migrate that legacy
-        // display order once; never reverse user-defined order on subsequent opens.
+
         if (!sharedPref.getBoolean("catalog_oldest_first_v1", false)) {
             links.reverse()
             if (links.isNotEmpty()) SettingsRepository.saveLinks(sharedPref, links)
@@ -401,8 +399,7 @@ class SettingsBottomFragment(
         if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) {
             requestFocus()
             performClick()
-            // CineStream opens its number editor explicitly. Do the same for TV:
-            // focusing alone must not pop up the keyboard on every D-pad movement.
+
             post {
                 if (isAttachedToWindow && hasFocus() && !imeVisible(this))
                     (hostContext.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
@@ -529,8 +526,7 @@ class SettingsBottomFragment(
             base.height() else metrics.heightPixels
         var heightCap = (baseHeight * 0.88f).toInt().coerceAtLeast(1)
         val initialPadding = intArrayOf(root.paddingLeft, root.paddingTop, root.paddingRight, root.paddingBottom)
-        // RecyclerView is nested in catalogListBody. Exclude its direct child of
-        // root from chrome(), otherwise the list height is counted twice.
+
         val bodySlot = generateSequence(body) { it.parent as? View }
             .firstOrNull { it.parent === root } ?: body
         val title = root.getChildAt(0)?.takeIf { it !== bodySlot }
@@ -592,7 +588,7 @@ class SettingsBottomFragment(
             if (target == next && (motion != null || imeAnimation != null || placed == next)) return
             target = next
             if (placed?.width != next.width) { imeAnimation = null }
-            if (imeAnimation != null) return // The keyboard's own progress drives this transition.
+            if (imeAnimation != null) return 
             cancelMotion()
             val from = placed
             if (!animate || from == null || from.width != next.width || from == next) {
@@ -635,7 +631,7 @@ class SettingsBottomFragment(
                 val width = minOf(dp(capDp), (availableWidth * 0.9f).toInt()).coerceAtLeast(1)
                 val bodyWidth = (width - root.paddingLeft - root.paddingRight).coerceAtLeast(1)
                 val insets = windowInsets ?: ViewCompat.getRootWindowInsets(root)
-                // Only the active window owns IME state; frozen parent windows can retain stale insets.
+
                 val keyboard = if (imeAnimation != null && insets != null)
                     insets.getInsets(WindowInsetsCompat.Type.ime()).bottom >
                         insets.getInsets(WindowInsetsCompat.Type.systemBars()).bottom
@@ -650,8 +646,7 @@ class SettingsBottomFragment(
                             (insets?.getInsets(WindowInsetsCompat.Type.systemBars())?.bottom ?: 0)).coerceAtLeast(1)
                     heightCap = (baseHeight * 0.88f).toInt().coerceAtLeast(1)
                 }
-                // A floating window can report only its overlap; the host supplies full-screen height,
-                // never keyboard visibility. Stale host insets therefore cannot prevent restoration.
+
                 val imeBottom = if (imeAnimation != null && insets != null)
                     insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
                 else maxOf(insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0,
@@ -668,7 +663,7 @@ class SettingsBottomFragment(
                     scrollBeforeIme = null
                 }
                 keyboardShown = keyboard
-                // The floating window's visible frame depends on its own position.
+
                 val visibleHeight = if (imeBottom > 0)
                     minOf(baseHeight, (metrics.heightPixels - imeBottom - base.top).coerceAtLeast(1))
                 else baseHeight
@@ -770,7 +765,7 @@ class SettingsBottomFragment(
                 if (animation != null && animation in runningAnimations &&
                     alive(dialog) && topDialog() === dialog) {
                     windowInsets = insets
-                    // Follow each actual IME inset instead of animating toward a stale target.
+
                     resize()
                     target?.let { place(it) }
                 }
@@ -925,8 +920,6 @@ class SettingsBottomFragment(
         }
     }
 
-    // CineStream-style native IME resize. Keep the existing footer visible;
-    // only the dialog body scrolls if the keyboard reduces the available height.
     private fun nativeImeView(content: LinearLayout): View {
         if (isLayout(TV)) return content
         val footer = content.getChildAt(content.childCount - 1) as? LinearLayout ?: return content
@@ -1024,13 +1017,13 @@ class SettingsBottomFragment(
                 x = 0; y = 0
                 if (!nativeIme) windowAnimations = 0
             }
-            // Override the theme's initial window width before show()/first draw.
+
             if (nativeIme) setLayout(
                 minOf(dp(capDp), (hostContext.resources.displayMetrics.widthPixels * 0.9f).toInt()),
                 WindowManager.LayoutParams.WRAP_CONTENT
             )
         }
-        // Input dialogs rely on Android's native IME resize, not fitDialog().
+
         if (root != null && !nativeIme) fitDialog(dialog, root, body, capDp)
         dialog.setOnShowListener {
             if (isLayout(TV) || initialFocus != null) {
@@ -1085,7 +1078,7 @@ class SettingsBottomFragment(
         if (effect != null) {
             when {
                 navigationRow -> {
-                    // Keep a single host ripple or TV outline for every navigation row.
+
                     if (android.os.Build.VERSION.SDK_INT >= 23) foreground = null
                     background = effect
                 }
@@ -1100,7 +1093,6 @@ class SettingsBottomFragment(
         setTag(key, true)
     }
 
-    // Plugin XML cannot reference the host app's custom attrs at AAPT2 link time.
     private fun themeLayoutText(view: View) {
         if (view is TextView && view.tag != "stremioc_keep_color") {
             val attr = if (view.tag == "stremioc_secondary") HostR.attr.grayTextColor else HostR.attr.textColor
@@ -1129,7 +1121,6 @@ class SettingsBottomFragment(
                StremioC.loadProviderDynamically("phisher", "com.phisher98.StreamPlay") != null
     }
 
-    // Mirror the TextView actions in settingsFooter (font, minimum height and ripple).
     private fun dialogButton(ctx: Context, label: String, params: LinearLayout.LayoutParams) = TextView(ctx).apply {
         text = label
         textSize = 14f
@@ -1174,7 +1165,7 @@ class SettingsBottomFragment(
         }
         dlg.show()
     }
-    
+
     @SuppressLint("DiscouragedApi")
     fun show(onDismiss: () -> Unit = {}) {
         settingsDialog.setCancelable(true)
@@ -1267,10 +1258,10 @@ class SettingsBottomFragment(
                 try {
                     val backupStr = withContext(Dispatchers.IO) {
                         val json = JSONObject()
-                        
+
                         json.put("stremio_c_data", prefsToJson(sharedPref))
                         json.put("plugin_name", "StremioC_Bundle")
-                        
+
                         json.put("stream_play_enabled", isStreamPlayExportActive)
                         if (isStreamPlayExportActive) {
                             val streamPlayPrefs = appContext.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
@@ -1282,7 +1273,7 @@ class SettingsBottomFragment(
                             val cineStreamJson = JSONObject()
                             try {
                                 val dynamicKeys = getCineStreamDynamicKeys()
-                                
+
                                 dynamicKeys.forEach { cKey ->
                                     var found = false
                                     try { 
@@ -1293,7 +1284,7 @@ class SettingsBottomFragment(
                                         }
                                     } catch (t: Throwable) {
                                     }
-                                    
+
                                     if (!found) {
                                         try {
                                             val boolVal = CloudStreamApp.getKey<Boolean>(cKey)
@@ -1304,7 +1295,7 @@ class SettingsBottomFragment(
                                         } catch (t: Throwable) {
                                         }
                                     }
-                                    
+
                                     if (!found) {
                                         try {
                                             val intVal = CloudStreamApp.getKey<Int>(cKey)
@@ -1319,7 +1310,7 @@ class SettingsBottomFragment(
                             }
                             json.put("cine_stream_data", cineStreamJson)
                         }                        
-                                              
+
                         val jsonString = json.toString()
                         val bos = java.io.ByteArrayOutputStream()
                         java.util.zip.GZIPOutputStream(bos).use { it.write(jsonString.toByteArray(Charsets.UTF_8)) }
@@ -1402,7 +1393,7 @@ class SettingsBottomFragment(
                     if (pluginName != "StremioC_Bundle" && pluginName != "StremioC") {
                         throw Exception("Plugin mismatch")
                     }
-                    
+
                     if (!isActive) return@launch
 
                     val cancelBtn = dialogButton(ctx, "Cancel", LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, dp(8), 0) })
@@ -1420,7 +1411,7 @@ class SettingsBottomFragment(
                             setPadding(0, 0, 0, 20)
                             gravity = android.view.Gravity.CENTER
                         })
-                        
+
                         val msgBuilder = StringBuilder("Valid backup data found in clipboard!\n")
                         if (pluginName == "StremioC_Bundle") {
                             val isSPAvailable = parsedJson.optBoolean("stream_play_enabled", false)
@@ -1452,7 +1443,7 @@ class SettingsBottomFragment(
                     cancelBtn.setOnClickListener { dlg.dismiss() }
                     restoreBtn.setOnClickListener {
                         dlg.dismiss() 
-                        
+
                         val loadingContainer = LinearLayout(ctx).apply {
                             orientation = LinearLayout.VERTICAL
                             setPadding(40, 40, 40, 40)
@@ -1480,7 +1471,7 @@ class SettingsBottomFragment(
                         uiScope.launch {
                             withContext(Dispatchers.IO) {
                                 val editor = sharedPref.edit()
-                                
+
                                 if (pluginName == "StremioC_Bundle") {
                                     val stremioCData = parsedJson.optJSONObject("stremio_c_data")
                                     if (stremioCData != null) {
@@ -1512,8 +1503,7 @@ class SettingsBottomFragment(
                                         val cineStreamData = parsedJson.optJSONObject("cine_stream_data")
                                         if (cineStreamData != null) {
                                             val dynamicKeys = getCineStreamDynamicKeys()
-                                            
-                                            // 1. CloudStreamApp 전역 데이터베이스 복원
+
                                             dynamicKeys.forEach { cKey ->
                                                 if (cineStreamData.has(cKey)) {
                                                     val cValue = cineStreamData.get(cKey)
@@ -1539,7 +1529,7 @@ class SettingsBottomFragment(
                                     recordBackupSnapshot(sharedPref, "stremio_c_restore_complete", "stremio_c_last_applied_backup_hash", "native_backup_stremioc")
                                 }
                             }
-                            
+
                             delay(1500)
                             if (isActive && settingsDialog.isShowing) {
                                 loadingDlg.dismiss()
@@ -1759,7 +1749,7 @@ class SettingsBottomFragment(
             editor.putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
             editor.remove("custom_poster_url").remove("custom_poster_enabled")
             editor.putBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, switchMdbList.isChecked)
-            
+
             editor.putBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, switchCineStream.isChecked)
             editor.putBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, switchStreamPlay.isChecked)
             editor.putBoolean(SettingsRepository.PREF_KEY_VIXSRC_ENABLED, switchVixSrc.isChecked)
@@ -1824,7 +1814,6 @@ class SettingsBottomFragment(
         settingsDialog.show()
         if (isLayout(TV)) (view.optional("rowCatalogs") ?: showlinks).requestFocus()
     }
-
 
     private fun showSavedLinksDialog() = showAddonListDialog(onDraftChanged = { refreshSummaries?.invoke() })
 
@@ -2058,7 +2047,7 @@ class SettingsBottomFragment(
 private fun showLanguageSelectDialog() {
         val context = hostContext
         val currentSavedCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "en-US") ?: "en-US"
-        
+
         var selectedCode = currentSavedCode
         var selectedLangName = LANGUAGES.find { it.second == currentSavedCode }?.first ?: "United States (English)"
 
@@ -2103,10 +2092,9 @@ private fun showLanguageSelectDialog() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)))
         container.addView(languageBody)
 
-        // 언어 목록 어댑터
         class LangAdapter(
             private val originalList: List<Pair<String, String>>,
-            var selectedCode: String, // 선택 상상 추적을 위해 var로 변경
+            var selectedCode: String, 
             private val onClick: (String, String) -> Unit
         ) : RecyclerView.Adapter<LangAdapter.VH>() {
 
@@ -2124,7 +2112,7 @@ private fun showLanguageSelectDialog() {
                     minimumHeight = dp(48)
                     layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 }
-                // 가로 전체를 차지하여 체크 아이콘을 우측 끝으로 밀어냅니다.
+
                 val tvName = TextView(context).apply {
                     textSize = 14f
                     maxLines = 2
@@ -2152,7 +2140,7 @@ private fun showLanguageSelectDialog() {
                 val (langName, code) = filteredList[position]
                 val isSelected = code == selectedCode
                 holder.tvName.text = langName
-                
+
                 updateSelection(holder, isSelected)
                 holder.view.contentDescription = langName
                 holder.tvName.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
@@ -2197,7 +2185,6 @@ private fun showLanguageSelectDialog() {
             }
         }
 
-        // 어댑터 생성 및 연결 (항목 클릭 시 UI만 즉각 업데이트)
         lateinit var adapter: LangAdapter
         adapter = LangAdapter(LANGUAGES, selectedCode) { code, langName ->
             selectedCode = code
@@ -2246,7 +2233,6 @@ private fun showLanguageSelectDialog() {
         })
         onClose(langDialog) { searchBar.removeTextChangedListener(searchWatcher); searchJob?.cancel(); searchJob = null }
 
-        // Apply 버튼 클릭 시에만 SharedPreferences에 값을 저장하고 토스트 메시지를 표시한 후 창을 닫습니다.
         applyBtn.setOnClickListener {
             val code = selectedCode
             val langName = selectedLangName
@@ -2270,7 +2256,7 @@ private fun showLanguageSelectDialog() {
         val owner = topDialog()
         migrateStremioCatalogSettings(sharedPref, item.link)
         val uniqueId = stremioCatalogKey(item.link) 
-        
+
         val progressContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(40, 40, 40, 40)
@@ -2308,7 +2294,7 @@ private fun showLanguageSelectDialog() {
             progressDialog.dismiss()
 
             if (manifestText.isNullOrBlank()) {
-                // 토스트 대신 기존 테마 맞춤형 팝업(showSavedPopup) 표시
+
                 showSavedPopup(context, "Error", "Failed to load manifest. Check link.")
                 return@launch
             }
@@ -2346,7 +2332,7 @@ private fun showLanguageSelectDialog() {
                         val type = cat.type ?: "movie"
                         val name = cat.name ?: id
                         val displayType = type.replaceFirstChar { it.uppercase() }
-                        
+
                         flatTabs.add(ConfigFlatTab(
                             key = "${id}_${type}_default", 
                             displayName = "$name - $displayType", 
@@ -2357,7 +2343,7 @@ private fun showLanguageSelectDialog() {
             } catch (e: Exception) {}
 
             if (flatTabs.isEmpty()) { 
-                // 3. 토스트 대신 기존 테마 맞춤형 팝업(showSavedPopup) 표시
+
                 showSavedPopup(context, "Error", "No catalogs found in manifest.")
                 return@launch 
             }
@@ -2372,7 +2358,7 @@ private fun showLanguageSelectDialog() {
         migrateStremioCatalogSettings(prefs, linkUrl)
         val uniqueId = stremioCatalogKey(linkUrl)
         val orderKey = "catalog_order_$uniqueId"
-        
+
         val orderJson = prefs.getString(orderKey, null)
         val orderedKeys = mutableListOf<String>()
         if (orderJson != null) {
@@ -2421,10 +2407,10 @@ private fun showLanguageSelectDialog() {
         lateinit var touchHelper: ItemTouchHelper
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.VH>() {
             var visibleTabs = mutableListOf<ConfigFlatTab>()
-            
+
             fun updateVisibleTabs() {
                 visibleTabs = masterTabs.toMutableList()
-                
+
                 if (rv.isComputingLayout) {
                     rv.post { notifyDataSetChanged() }
                 } else {
@@ -2454,7 +2440,7 @@ private fun showLanguageSelectDialog() {
                     layoutParams = LinearLayout.LayoutParams(dp(24), dp(24))
                     makeTvCompatible()
                 }
-                
+
                 val etOrder = EditText(context).apply {
                     inputType = InputType.TYPE_CLASS_NUMBER
                     imeOptions = EditorInfo.IME_ACTION_DONE
@@ -2471,7 +2457,7 @@ private fun showLanguageSelectDialog() {
                         imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
                     }
                 }
-                
+
                 val checkbox = CheckBox(context).apply {
                     textSize = 14f
                     setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
@@ -2498,7 +2484,7 @@ private fun showLanguageSelectDialog() {
 
             override fun onBindViewHolder(holder: VH, position: Int) {
                 val tab = visibleTabs[position]
-                
+
                 holder.checkbox.setOnCheckedChangeListener(null)
                 holder.checkbox.isChecked = tab.isChecked
                 holder.checkbox.text = tab.displayName
@@ -2509,7 +2495,7 @@ private fun showLanguageSelectDialog() {
                 holder.checkbox.setOnCheckedChangeListener { _, isChecked ->
                     (rv.findFocus() as? EditText)?.clearFocus()
                     tab.isChecked = isChecked 
-                    
+
                     val checkedTabs = masterTabs.filter { it.isChecked }
                     val uncheckedTabs = masterTabs.filter { !it.isChecked }
                     masterTabs.clear()
@@ -2527,7 +2513,7 @@ private fun showLanguageSelectDialog() {
                 holder.etOrder.setOnFocusChangeListener(null)
                 holder.displayedOrder = position + 1
                 holder.etOrder.setText(holder.displayedOrder.toString())
-                
+
                 holder.etOrder.setOnFocusChangeListener { _, hasFocus ->
                     if (hasFocus) {
                         rv.postDelayed({
@@ -2546,7 +2532,7 @@ private fun showLanguageSelectDialog() {
                         }
                     }
                 }
-                
+
                 holder.etOrder.setOnEditorActionListener { _, actionId, _ ->
                     if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_NEXT) {
                         holder.etOrder.clearFocus()
@@ -2558,7 +2544,7 @@ private fun showLanguageSelectDialog() {
             }
 
             override fun getItemCount() = visibleTabs.size
-            
+
             fun shiftItemInRecyclerView(tabKey: String, newOrder: Int) {
                 rv.post {
                     if (activeDialog?.isShowing != true || closing) return@post
@@ -2569,27 +2555,27 @@ private fun showLanguageSelectDialog() {
                     val focusedKey = focusedIndex?.let { visibleTabs.getOrNull(it)?.key }
                     val orderFocused = focused is EditText
                     val item = visibleTabs[oldPos]
-                    
+
                     val isEnabled = item.isChecked 
                     val checkedCount = visibleTabs.count { it.isChecked } 
-                    
+
                     val groupMin = if (isEnabled) 1 else checkedCount + 1
                     val groupMax = if (isEnabled) checkedCount else visibleTabs.size
-                    
+
                     val clampedOrder = newOrder.coerceIn(groupMin, groupMax)
                     val newPos = clampedOrder - 1
-                    
+
                     if (oldPos != newPos) {
                         visibleTabs.removeAt(oldPos)
                         visibleTabs.add(newPos, item)
-                        
+
                         val masterFrom = masterTabs.indexOf(item)
                         if (masterFrom != -1) {
                             masterTabs.removeAt(masterFrom)
-                            
+
                             val referenceTab = if (newPos + 1 in visibleTabs.indices) visibleTabs[newPos + 1] else if (newPos - 1 in visibleTabs.indices) visibleTabs[newPos - 1] else null
                             var masterTo = if (referenceTab != null) masterTabs.indexOf(referenceTab) else -1
-                            
+
                             if (masterTo != -1) {
                                 if (referenceTab == visibleTabs.getOrNull(newPos - 1)) {
                                     masterTo += 1
@@ -2599,7 +2585,7 @@ private fun showLanguageSelectDialog() {
                                 masterTabs.add(item)
                             }
                         }
-                        
+
                         notifyItemMoved(oldPos, newPos)
                         notifyItemRangeChanged(minOf(oldPos, newPos), kotlin.math.abs(newPos - oldPos) + 1)
                     } else {
@@ -2620,21 +2606,20 @@ private fun showLanguageSelectDialog() {
         adapter.updateVisibleTabs()
         rv.adapter = adapter
 
-
         touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
             override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
                 val fromPos = viewHolder.adapterPosition
                 val toPos = target.adapterPosition
-                
+
                 if (fromPos == RecyclerView.NO_POSITION || toPos == RecyclerView.NO_POSITION) return false
-                
+
                 val movedTab = adapter.visibleTabs[fromPos]
                 Collections.swap(adapter.visibleTabs, fromPos, toPos)
-                
+
                 val masterFrom = masterTabs.indexOf(movedTab)
                 val targetTab = adapter.visibleTabs[fromPos]
                 val masterTo = masterTabs.indexOf(targetTab)
-                
+
                 if (masterFrom != -1 && masterTo != -1) {
                     masterTabs.removeAt(masterFrom)
                     masterTabs.add(masterTo, movedTab)
@@ -2651,7 +2636,7 @@ private fun showLanguageSelectDialog() {
 
             override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
         })
-        
+
         touchHelper.attachToRecyclerView(rv)
 
         val footer = LinearLayout(context).apply {
@@ -2680,17 +2665,17 @@ private fun showLanguageSelectDialog() {
             if (!dialog.isShowing || closing) return@post
             val editor = prefs.edit()
             val keysToSave = JSONArray()
-            
+
             masterTabs.forEach { 
                 keysToSave.put(it.key) 
                 editor.putBoolean("tab_enabled_${uniqueId}_${it.key}", it.isChecked)
             }
-            // Preserve dormant genre/removed-catalog order keys for compatibility; never clear their settings.
+
             val currentKeys = masterTabs.map { it.key }.toSet()
             orderedKeys.filterNot { it in currentKeys }.forEach { keysToSave.put(it) }
             editor.putString(orderKey, keysToSave.toString())
             editor.commit() 
-            
+
             dialog.dismiss()
             showSavedPopup(context, "Catalog Settings", "Catalog settings saved. Reload to apply.")
             }
@@ -2767,7 +2752,7 @@ private fun showLanguageSelectDialog() {
             view.background = null
             val wrapper = LinearLayout(parent.context).apply {
                 orientation = LinearLayout.HORIZONTAL
-                // Match the reorder controls to the first (addon-name) line, not the full row.
+
                 gravity = Gravity.TOP
                 layoutParams = RecyclerView.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -2798,8 +2783,7 @@ private fun showLanguageSelectDialog() {
             })
             wrapper.addView(view, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             normalizeTypeface(wrapper)
-            // Keep native addon controls prepared without stretching the compact order
-            // input to 48dp: its center must line up with the addon name.
+
             prepareControls(view)
             etOrder.makeTvCompatible()
             if (isLayout(TV)) {

@@ -30,7 +30,6 @@ import org.json.JSONObject
 import java.net.URI
 import java.util.UUID
 
-/** Plugin-only Media3 events; CloudStream owns all persisted playback positions. */
 @OptIn(UnstableApi::class)
 internal class StremioScrobble(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
@@ -46,7 +45,7 @@ internal class StremioScrobble(context: Context) {
     private var lastEvent: String? = null
     private var lastPosition = 0L
     private var lastDuration = 0L
-    // The last duration approved from this Media3 item, not persisted playback history.
+
     private var approvedDurationMs = 0L
     private var pendingSeekReport: Runnable? = null
     private var lastSeekReportAtMs = 0L
@@ -129,12 +128,6 @@ internal class StremioScrobble(context: Context) {
             (duration ?: saved?.duration?.takeIf { it > 0L } ?: lastDuration).coerceAtLeast(0L)
     }
 
-
-    /**
-     * Only accept the current Media3 item's real duration: at least 50% of
-     * metadata runtime, or at least 60 seconds when metadata has no runtime.
-     * Unknown duration is not approval. No network requests or polling.
-     */
     private fun approvedRuntime(item: Item, current: Media3Player?): Boolean {
         val actual = current?.duration?.takeIf { it > 0L }
         if (actual != null) {
@@ -144,12 +137,10 @@ internal class StremioScrobble(context: Context) {
                 approvedDurationMs = if (passed) actual else 0L
             return passed
         }
-        // An old episode's stop may run after the player has been replaced.
-        // Approve only if this exact item was already checked against Media3.
+
         return current == null && active?.key == item.key && approvedDurationMs > 0L
     }
 
-    /** Only state transitions and Seek send reports; no recurring polling. */
     private fun emit(event: String, item: Item, current: Media3Player? = player, played: Boolean? = null, allowRepeat: Boolean = false) {
         if (lastEvent == "stop" ||
             (event == "start" && current?.isPlaying != true) ||
@@ -158,7 +149,6 @@ internal class StremioScrobble(context: Context) {
             return
         }
 
-        // Reject every event (start, pause, stop) from a short/error stream.
         if (!approvedRuntime(item, current)) return
         val openingSession = event == "start" && lastEvent == null
         val (pos, rawDuration) = playbackPosition(item, current)
@@ -167,7 +157,7 @@ internal class StremioScrobble(context: Context) {
         lastDuration = duration
         lastEvent = event
         if (openingSession && duration > 0L && pos.toDouble() / duration >= 0.80) {
-            // A new playback opened past 80% has not crossed the threshold naturally.
+
             seekCompletionPending = true
             seekPlaybackStartedAtMs = SystemClock.elapsedRealtime()
         }
@@ -176,12 +166,11 @@ internal class StremioScrobble(context: Context) {
         }
         val report = Report(item, event, pos, duration, target, played)
         if (queue.trySend(report).isFailure) {
-            // Lifecycle reports must not be lost if earlier requests are slow.
+
             senderScope.launch { runCatching { queue.send(report) } }
         }
     }
 
-    /** Deserialize only when the actual episode changes. */
     private fun refreshEpisode(): Boolean {
         val state = model?.state?.generatorState ?: return false
         val response = state.response ?: return false
@@ -190,7 +179,7 @@ internal class StremioScrobble(context: Context) {
 
         val next = snapshot()
         active?.let { old ->
-            // The old stop must use its stored position, never the new episode's player.
+
             if (lastEvent != null && lastEvent != "stop") emit("stop", old, null)
         }
         approvedDurationMs = 0L
@@ -210,7 +199,6 @@ internal class StremioScrobble(context: Context) {
         return true
     }
 
-    /** Rebind if CloudStream replaces the Media3 player (for example, mirror change). */
     private fun attachPlayer() {
         val next = fragment?.playerView?.player
         if (next === player) return
@@ -221,7 +209,7 @@ internal class StremioScrobble(context: Context) {
         player = next
         next?.addListener(listener)
         val changed = refreshEpisode()
-        // A mirror can replace the Media3 item without changing the episode.
+
         if (!changed) approvedDurationMs = 0L
         if (!changed && next?.isPlaying == true) {
             active?.let { emit("start", it) }
@@ -229,10 +217,6 @@ internal class StremioScrobble(context: Context) {
         }
     }
 
-    /**
-     * One scheduled completion check. A seek beyond 80% requires 60 seconds of
-     * continuous playback; no periodic position polling or network requests.
-     */
     private fun scheduleCompletion() {
         main.removeCallbacks(completion)
         val current = player ?: return
@@ -272,7 +256,6 @@ internal class StremioScrobble(context: Context) {
         main.removeCallbacks(completion)
     }
 
-    /** Seek-only rate limit: first report now, further seeks at most once per 15 seconds. */
     private fun reportSeek(item: Item) {
         if (lastEvent == null || lastEvent == "stop") return
         val now = SystemClock.elapsedRealtime()
@@ -287,7 +270,7 @@ internal class StremioScrobble(context: Context) {
         pendingSeekReport = Runnable {
             pendingSeekReport = null
             if (active?.key == item.key && lastEvent != null && lastEvent != "stop") {
-                // Read the actual latest position at send time, not the original seek target.
+
                 emit(if (player?.isPlaying == true) "start" else "pause", item, allowRepeat = true)
                 lastSeekReportAtMs = SystemClock.elapsedRealtime()
             }
@@ -299,15 +282,12 @@ internal class StremioScrobble(context: Context) {
         pendingSeekReport = null
     }
 
-    // Layout events are only used to discover a new player, not to parse episode JSON.
     private val layout = ViewTreeObserver.OnGlobalLayoutListener {
         attachPlayer()
-        // Cheap key comparison; snapshot JSON is parsed only for a new episode.
+
         if (player?.isPlaying == true) refreshEpisode()
     }
 
-
-    // Dynamic proxy avoids default-method ABI differences across Media3 versions.
     private val listener = java.lang.reflect.Proxy.newProxyInstance(
         Media3Player.Listener::class.java.classLoader,
         arrayOf(Media3Player.Listener::class.java)
@@ -316,7 +296,7 @@ internal class StremioScrobble(context: Context) {
             "onIsPlayingChanged" -> {
                 val changed = refreshEpisode()
                 if (args?.getOrNull(0) == true) {
-                    // A real resume reports the current position immediately.
+
                     cancelPendingSeek()
                     lastSeekReportAtMs = 0L
                     if (!changed) active?.let { emit("start", it) }
@@ -342,7 +322,7 @@ internal class StremioScrobble(context: Context) {
                 when (args?.getOrNull(0)) {
                     Media3Player.STATE_READY -> {
                         refreshEpisode()
-                        // A pending start is emitted once Media3 knows the duration.
+
                         if (player?.isPlaying == true && lastEvent == null)
                             active?.let { emit("start", it) }
                         scheduleCompletion()
@@ -447,7 +427,7 @@ internal class StremioScrobble(context: Context) {
 
     fun stop() {
         detach()
-        queue.close() // Drain final events on IO without blocking view destruction.
+        queue.close() 
     }
 
     private suspend fun send(report: Report) {

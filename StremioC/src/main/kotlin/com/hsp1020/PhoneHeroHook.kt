@@ -30,7 +30,6 @@ import com.lagradost.cloudstream3.utils.AppContextUtils.html
 import com.lagradost.cloudstream3.utils.UIHelper.populateChips
 import kotlin.math.max
 
-/** Retain CloudStream's phone pager, image requests and action buttons; restyle only its pages. */
 internal class PhoneHeroHook(
     private val activity: FragmentActivity,
     private val ratingImages: (CharSequence, Float) -> CharSequence?

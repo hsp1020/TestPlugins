@@ -28,10 +28,6 @@ import com.lagradost.cloudstream3.ui.player.VideoLive
 import com.lagradost.cloudstream3.ui.subtitles.SaveCaptionStyle
 import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment
 
-/**
- * Per-provider PiP subtitles: Media3 fractional size (1.5x) and default bottom inset.
- * CloudStream retains ownership of normal playback subtitle styles and layout.
- */
 @OptIn(UnstableApi::class)
 class PipSubtitleScaler(private val acceptsProvider: (String) -> Boolean) {
     private var watched: Fragment? = null
@@ -42,7 +38,7 @@ class PipSubtitleScaler(private val acceptsProvider: (String) -> Boolean) {
     private var inPip = false
     private var pipPositionObserver: ViewTreeObserver? = null
     private val pipPositionGuard = ViewTreeObserver.OnPreDrawListener {
-        // CloudStream's independently started ObjectAnimator can change this after PiP entry.
+
         if (inPip) subtitle?.let { view ->
             if (view.translationY != 0f) view.translationY = 0f
         }
@@ -53,7 +49,7 @@ class PipSubtitleScaler(private val acceptsProvider: (String) -> Boolean) {
         if (event.isInPictureInPictureMode) enterPip() else leavePip()
     }
     private val subtitleStyleListener: (SaveCaptionStyle) -> Unit = {
-        // Core restores its fixed font size and elevation when settings change.
+
         val view = subtitle
         view?.post {
             if (inPip && subtitle === view) applyPipStyle(view)
@@ -66,7 +62,7 @@ class PipSubtitleScaler(private val acceptsProvider: (String) -> Boolean) {
             detach()
             watched = candidate
             val model = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
-            // onFragmentViewCreated can run before loadLinks() has attached the page.
+
             val observer = Observer<VideoLive<Resource<Unit>>> { bind(candidate) }
             model.loadingLinks.observe(candidate.viewLifecycleOwner, observer)
             removeObserver = { model.loadingLinks.removeObserver(observer) }
@@ -96,8 +92,7 @@ class PipSubtitleScaler(private val acceptsProvider: (String) -> Boolean) {
     }
 
     private fun applyPipStyle(view: SubtitleView) {
-        // Next Player uses a full-size SubtitleView with Media3's default 8% bottom inset.
-        // CloudStream's fixed elevation (paddingTop + translationY) must not remain in PiP.
+
         if (view.paddingTop != 0) {
             view.setPadding(view.paddingLeft, 0, view.paddingRight, view.paddingBottom)
         }
@@ -135,7 +130,7 @@ class PipSubtitleScaler(private val acceptsProvider: (String) -> Boolean) {
         stopPositionGuard()
         subtitle?.let { view ->
             val style = SubtitlesFragment.getCurrentSavedStyle()
-            // Restore CloudStream's original font size, padding and elevation.
+
             SubtitlesFragment.setSubtitleViewStyle(view, style, true)
             view.translationY = -TypedValue.applyDimension(
                 TypedValue.COMPLEX_UNIT_DIP,
@@ -164,7 +159,6 @@ class PipSubtitleScaler(private val acceptsProvider: (String) -> Boolean) {
     }
 }
 
-/** Activates PiP subtitle handling for a standalone provider plugin. */
 class PipSubtitleLifecycle(
     private val application: Application,
     acceptsProvider: (String) -> Boolean

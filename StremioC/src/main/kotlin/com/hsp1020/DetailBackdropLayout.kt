@@ -36,7 +36,6 @@ import android.widget.TextView
 import kotlinx.coroutines.*
 import kotlin.math.*
 
-/** StremioC detail backdrop and native preview suppression; standalone player is untouched. */
 internal class DetailBackdropLayout(private val root: View, private val detailUrl: String? = null) {
     private fun find(name: String): View? {
         val id = root.resources.getIdentifier(name, "id", root.context.packageName)
@@ -66,7 +65,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private val originalTitleAlpha = title?.alpha ?: 1f
     private val originalLogoAlpha = logo?.alpha ?: 1f
     private val originalPictureAlpha = picture?.alpha ?: 1f
-    private val shadow = holder?.getChildAt(1) // Existing CloudStream bottom shadow.
+    private val shadow = holder?.getChildAt(1) 
     private var previousHolderBackground: Drawable? = null
     private var appliedHolderBackground: Drawable? = null
     private var fadeColor = Color.BLACK
@@ -83,15 +82,12 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             mix(Color.blue(a), Color.blue(b)))
     }
 
-    // Palette-inspired whole-image histogram with center prominence and side color averages.
-    // Runs on Dispatchers.Default, not in the layout/pre-draw callback.
     private fun sampleArtwork(source: Bitmap): ArtworkColors? {
         if (source.isRecycled || source.width <= 0 || source.height <= 0) return null
         val w = 72
         val h = 40
         val hardware = android.os.Build.VERSION.SDK_INT >= 26 && source.config == Bitmap.Config.HARDWARE
-        // Hardware artwork is downsampled by the renderer before the small readback.
-        // Older devices / failing drivers retain the original bounded fallback.
+
         val gpuThumb = if (hardware && android.os.Build.VERSION.SDK_INT >= 28) {
             try {
                 val recording = Picture()
@@ -172,7 +168,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         }
     }
 
-    // The original CloudStream background is retained by identity and never mutated.
     private fun replaceBackground(background: Drawable) {
         val container = holder ?: return
         if (appliedHolderBackground == null) previousHolderBackground = container.background
@@ -201,7 +196,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             if (tv) replaceBackground(horizontal) else {
                 val bottom = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
                     intArrayOf(Color.TRANSPARENT, fadeColor))
-                // Keep the original bottom scrim for phone/tablet.
+
                 replaceBackground(object : LayerDrawable(arrayOf(horizontal, bottom)) {
                     override fun onBoundsChange(bounds: Rect) {
                         super.onBoundsChange(bounds)
@@ -215,8 +210,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     }
     private fun paletteBitmap(drawable: Drawable?): Bitmap? {
         if (drawable is BitmapDrawable) return drawable.bitmap
-        // CloudStream's Coil 3 loader uses a 200ms CrossfadeDrawable. Its public
-        // "end" is the finished image; reflection avoids a new plugin dependency.
+
         if (drawable?.javaClass?.name != "coil3.transition.CrossfadeDrawable") return null
         val end = runCatching { drawable.javaClass.getMethod("getEnd").invoke(drawable) }.getOrNull()
         return (end as? BitmapDrawable)?.bitmap
@@ -225,11 +219,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (trackedArtwork === drawable) return
         trackedArtwork = drawable
         val bitmap = paletteBitmap(drawable)
-        // Coil may replace its crossfade wrapper while retaining the decoded bitmap.
+
         if (bitmap != null && trackedBitmap === bitmap) return
         trackedBitmap = bitmap
         paletteJob?.cancel()
-        showArtworkPalette(null) // Never retain colors from the previous image.
+        showArtworkPalette(null) 
         if (bitmap == null) return
         paletteJob = paletteScope.launch {
             val colors = runCatching { sampleArtwork(bitmap) }.getOrNull() ?: return@launch
@@ -240,7 +234,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             }
         }
     }
-    // Four original narrow compositing strips in one View, without full-screen layers.
+
     private class EdgeFadeView(private val frame: FrameLayout) : View(frame.context) {
         private val masks = Array(4) { Paint(Paint.ANTI_ALIAS_FLAG).apply {
             xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
@@ -297,7 +291,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private var edge: EdgeFadeView? = null
     private var topScrim: View? = null
     private fun installTopScrim(context: android.content.Context) {
-        // result_top_bar and result_top_holder are siblings; render above the hero.
+
         val barAttr = context.resources.getIdentifier("primaryGrayBackground", "attr", context.packageName)
         val barColors = context.theme.obtainStyledAttributes(
             intArrayOf(if (barAttr != 0) barAttr else android.R.attr.colorBackground))
@@ -329,9 +323,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private var portraitTitleOnly = false
     private var forcedPortraitTitle = false
 
-    // The core bindLogo() switches result_title between GONE and VISIBLE even
-    // after the metadata row has been measured. Keep its measured slot stable
-    // without intercepting Coil callbacks or changing native animations.
     private var titleSlot: FrameLayout? = null
     private var titleSlotParent: LinearLayout? = null
     private var titleSlotIndex = -1
@@ -347,8 +338,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val original = native.layoutParams as? LinearLayout.LayoutParams ?: return
         val portraitForeign = portraitMode() &&
             detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true
-        // In split/TV layouts the logo and title have their own independent
-        // overlay; the native title is never part of the visible detail column.
+
         if (!portraitForeign && !splitMode()) return
         val lp = LinearLayout.LayoutParams(original)
         if (!portraitForeign) {
@@ -374,10 +364,10 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             setLineSpacing(native.lineSpacingExtra, native.lineSpacingMultiplier)
             setPadding(native.paddingLeft, native.paddingTop, native.paddingRight, native.paddingBottom)
             text = native.text
-            visibility = View.INVISIBLE // Measured but never painted.
+            visibility = View.INVISIBLE 
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         } else null
-        // Preserve the host's original title TextView, text handlers and font.
+
         parent.removeViewAt(index)
         parent.addView(slot, index, lp)
         proxy?.let {
@@ -415,11 +405,10 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         titleOriginalParams = null
         titleSlotIndex = -1
     }
-    // If an image is still missing at the existing six-second fallback, hold
-    // its reserved geometry so a late Coil success cannot move visible artwork.
+
     private var reservedLateLogoSlot = false
     private var reservedLateBackgroundFrame = false
-    // Asset alphas are staged once during start(); no re-staging on pre-draw.
+
     private var splitFallback = false
     private var nativeRecoveryFrames = 0
     private data class LayoutKey(
@@ -449,9 +438,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private fun clipTvBackdrop(container: FrameLayout) {
         val column = tvColumn ?: return
         if (column.height <= 0) return
-        // The TV scroll view moves the content column in screen coordinates.
-        // Clip at its unscrolled top margin instead, so scrolling or dialog
-        // focus changes cannot cut off the fixed backdrop and logo.
+
         val contentTop = (column.layoutParams as? ViewGroup.MarginLayoutParams)?.topMargin ?: return
         val bottom = (contentTop - 1).coerceIn(0, container.height)
         tvClip.set(0, 0, container.width, bottom)
@@ -480,7 +467,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         place(view, width, height, left, top)
         if (view.width != width || view.height != height || view.left != left || view.top != top) {
             view.layout(left, top, left + width, top + height)
-            view.invalidate() // Moving a strip changes its holder-background sample coordinates.
+            view.invalidate() 
         }
     }
     private fun scaleLogo(factor: Float = 1f) {
@@ -489,8 +476,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (logo?.scaleX != x) logo?.scaleX = x
         if (logo?.scaleY != y) logo?.scaleY = y
     }
-    // Fit the complete title into at most four lines and the actual backdrop image height.
-    // No minimum readable size or ellipsis: extremely long titles may become very small.
+
     private fun fitTitle(overlay: TextView, text: String, width: Int, maxHeight: Int) {
         if (text.isEmpty() || (text == lastFitText && width == lastFitWidth && maxHeight == lastFitHeight)) return
         val paint = TextPaint(baseTitlePaint ?: overlay.paint)
@@ -539,8 +525,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         runCatching { suppressNativePreview(); update() }.onFailure {
             recoverOriginalLayout()
         }
-        // A new slot or a native-title restoration requires another measure.
-        // Do not draw the intermediate layout where the metadata row overlaps.
+
         titleSlot === oldSlot && title?.visibility == oldTitleVisibility
     }
     private fun splitMode() = phoneHero == null ||
@@ -552,8 +537,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (picture?.alpha != imageAlpha) picture?.alpha = imageAlpha
         if (logo?.alpha != logoAlpha) logo?.alpha = logoAlpha
     }
-    // Do not display the first decoded image alone while the paired artwork is pending.
-    // Fail open after a bounded interval so a missing/failed remote image cannot blank the hero.
+
     private fun artworkReady(): Boolean {
         val background = picture?.drawable
         if (background == null || background.intrinsicWidth <= 0 || background.intrinsicHeight <= 0)
@@ -565,7 +549,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             SystemClock.uptimeMillis() - artworkRevealStart >= 6000L
     }
     private fun stage() {
-        // Neither async drawable may paint at CloudStream's original geometry.
+
         picture?.alpha = 0f
         logo?.alpha = 0f
         title?.alpha = 0f
@@ -598,13 +582,12 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         lastLayout = null
         useThemeBackground(false)
         if (!splitMode()) { visibility(true); return }
-        splitFallback = true // Do not re-enter the split layout and cause a visible jump.
+        splitFallback = true 
         nativeRecoveryFrames = 0
         edge?.let { placeEdge(it, 0, 0, 0, 0) }
         topScrim?.visibility = View.INVISIBLE
         restoreOriginalGeometry()
-        // The restored native layoutParams must pass through measure/layout before
-        // we reveal them; otherwise fallback itself can produce a visible jump.
+
         stage()
     }
     private fun revealRecoveredLayout() {
@@ -623,7 +606,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private fun maskPortraitTitle(): Boolean {
         if (detailUrl?.let { StremioC.expectedLogoByUrl[it] } != true) return false
         val image = logo ?: return false
-        // Respect the host onError fallback (GONE), including failed/expired requests.
+
         if (image.visibility == View.GONE) return false
         val ready = image.visibility == View.VISIBLE && image.drawable != null && image.width > 0
         if (!ready && started && SystemClock.uptimeMillis() - artworkRevealStart >= 6000L) return false
@@ -640,8 +623,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (detailUrl?.let { StremioC.fallbackLogoTitles[it] } == true &&
             logo?.visibility == View.VISIBLE && !title?.text.isNullOrBlank()) {
             val logoReady = logo.drawable != null && logo.width > 0
-            // INVISIBLE and VISIBLE share the same measured space. Reserve the
-            // native title before Coil's asynchronous success hides it with GONE.
+
             val visibility = if (logoReady) View.VISIBLE else View.INVISIBLE
             if (title?.visibility != visibility) {
                 title?.visibility = visibility
@@ -652,10 +634,9 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     fun start() {
         val container = holder ?: return
         if (started || picture == null) return
-        // Keep identical artwork and logo geometry with trailers enabled or disabled.
+
         val context = root.context
-        // Install the already-defined device geometry before the first native
-        // measure; do not resize the visible hero from the first onPreDraw.
+
         val tablet = root.resources.configuration.smallestScreenWidthDp >= 600
         if (tv) {
             height(holder, dp(400))
@@ -677,9 +658,9 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         suppressNativePreview()
         splitFallback = false
         nativeRecoveryFrames = 0
-        stage() // Hide native title, logo and backdrop until the entire hero is ready.
+        stage() 
         root.postDelayed({ if (started) root.invalidate() }, 6050L)
-        // Use the host app's active theme color so the edge fade also matches light themes.
+
         val colorAttr = context.resources.getIdentifier("primaryBlackBackground", "attr", context.packageName)
         val colors = context.theme.obtainStyledAttributes(
             intArrayOf(if (colorAttr != 0) colorAttr else android.R.attr.colorBackground)
@@ -716,14 +697,14 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (title?.alpha != alpha) title?.alpha = alpha
     }
     private fun update() {
-        // An already-queued pre-draw can run after stop() removed the edge views.
+
         if (!started) return
         if (portraitTitleOnly) { updatePortraitTitle(); return }
         if (splitFallback) { revealRecoveredLayout(); return }
         val edgeView = edge ?: return
         val container = holder ?: return
         val image = picture ?: return
-        // A not-yet-measured tablet/TV is loading, not a failed layout.
+
         if (container.width <= 0 || root.width <= 0) return
         val landscape = root.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val tablet = root.resources.configuration.smallestScreenWidthDp >= 600
@@ -772,7 +753,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             scaleLogo()
             updatePortraitTitle()
             val ready = artworkReady()
-            // A single final alpha decision avoids 0 -> 1 -> 0 per frame.
+
             showTitle(false, hideOriginal = !ready || maskPortraitTitle())
             visibility(ready)
             return
@@ -780,7 +761,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
 
         useThemeBackground(true)
         if (topScrim?.visibility != View.VISIBLE) topScrim?.visibility = View.VISIBLE
-        // logo visibility becomes VISIBLE before Coil has finished decoding its drawable.
+
         val hasLogo = logo?.visibility == View.VISIBLE && logo.drawable != null && logo.width > 0
         val expectedLogo = detailUrl?.let { StremioC.expectedLogoByUrl[it] } == true
         val logoPending = expectedLogo && !hasLogo
@@ -803,7 +784,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val iw = drawable?.intrinsicWidth ?: 0
         val ih = drawable?.intrinsicHeight ?: 0
         if ((iw <= 0 || ih <= 0) && timeoutReached) reservedLateBackgroundFrame = true
-        // Reserve 16:9 geometry while the image or logo is still decoding.
+
         val imageWidth = if (!reservedLateBackgroundFrame && iw > 0 && ih > 0)
             min(maxWidth, (bannerHeight.toDouble() * iw / ih).roundToInt().coerceAtLeast(1))
             else min(maxWidth, (bannerHeight.toDouble() * 16 / 9).roundToInt().coerceAtLeast(1))
@@ -814,7 +795,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val imageLeft = groupLeft + labelWidth + gap
         val imageTop = (bannerHeight - imageHeight) / 2
         if (image.scaleType != ImageView.ScaleType.FIT_CENTER) image.scaleType = ImageView.ScaleType.FIT_CENTER
-        // Commit geometry before reveal; never restage assets every frame.
+
         place(image, imageWidth, imageHeight, imageLeft, imageTop)
         if (image.width != imageWidth || image.height != imageHeight ||
             image.left != imageLeft || image.top != imageTop) {
@@ -824,9 +805,9 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val featherY = min(dp(84), imageHeight / 4)
         edgeView.setFeather(featherX, featherY)
         placeEdge(edgeView, imageWidth, imageHeight, imageLeft, imageTop)
-        // Avoid double-darkening the bottom: the built-in shadow covered the whole parent.
+
         shadow?.visibility = if (tv) View.VISIBLE else View.INVISIBLE
-        // Enforce both the 36%-wide label and the actual FIT_CENTER image bounds.
+
         val baseLogoWidth = if (hasLogo) logo!!.width * abs(originalLogoScaleX) else 0f
         val baseLogoHeight = if (hasLogo) logo!!.height * abs(originalLogoScaleY) else 0f
         var logoFactor = if (hasLogo && baseLogoWidth > 0f)
@@ -858,7 +839,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         val logoHeight = if (hasLogo) (logo!!.height * abs(logo.scaleY)).roundToInt() else 0
         val groupTop = ((bannerHeight - logoHeight - verticalGap - titleHeight) / 2f).coerceAtLeast(0f)
         if (hasLogo) {
-            // Account for the centered pivot when scaling the original ImageView.
+
             val newX = groupLeft + (labelWidth - logoWidth) / 2 -
                 logo!!.left + (logo.scaleX - 1f) * logo.pivotX
             val newY = (if (foreignLogo) groupTop else (bannerHeight - logoHeight) / 2f) -
@@ -885,7 +866,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 overlay.gravity = if (foreignLogo) Gravity.CENTER else Gravity.START
             }
         }
-        // Reveal only decoded assets after final layout.
+
         if (image.width == imageWidth && image.height == imageHeight &&
             image.left == imageLeft && image.top == imageTop) {
             val ready = artworkReady()
@@ -893,7 +874,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 (!logoPending || SystemClock.uptimeMillis() - artworkRevealStart >= 6000L),
                 hideOriginal = !ready || (expectedLogo && !foreignLogo))
             visibility(ready)
-            // Cache only ready assets after their geometry has finished relayout.
+
             if (iw > 0 && ih > 0 && !logoPending && !root.isLayoutRequested &&
                 !container.isLayoutRequested && !image.isLayoutRequested) {
                 lastLayout = layoutKey(container, image)
