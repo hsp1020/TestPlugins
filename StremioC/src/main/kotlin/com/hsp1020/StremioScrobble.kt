@@ -52,10 +52,6 @@ internal class StremioScrobble(context: Context) {
     private var lastSeekReportAtMs = 0L
     private var seekCompletionPending = false
     private var seekPlaybackStartedAtMs = 0L
-    private fun syncTrace(stage: String, detail: String = "") {
-        android.util.Log.i("STREMIOC_SYNC", "component=PLAYBACK stage=$stage $detail")
-    }
-
     private data class Item(
         val id: Int, val url: String, val api: String,
         val movie: Boolean, val season: Int?, val episode: Int?,
@@ -74,7 +70,6 @@ internal class StremioScrobble(context: Context) {
             for (report in queue) try {
                 send(report)
             } catch (e: Exception) {
-                syncTrace("SEND_EXCEPTION", "event=${report.event} itemHash=${report.item.key.hashCode()} type=${e.javaClass.simpleName}")
             }
         }
     }
@@ -105,7 +100,6 @@ internal class StremioScrobble(context: Context) {
         val expectedMinutes = if (movie) (response as? MovieLoadResponse)?.duration
             ?: episode.runTime else episode.runTime
         val expectedDurationMs = expectedMinutes?.takeIf { it > 0 }?.toLong()?.times(60_000L)
-        syncTrace("EPISODE_SNAPSHOT", "itemId=${episode.id} urlHash=${response.url.hashCode()} movie=$movie season=${episode.season} episode=${episode.episode} isAnime=${data?.isAnime} ids=${ids.keys} dataParsed=${data != null}")
         return Item(episode.id, response.url, response.apiName, movie,
             if (movie) null else episode.season, if (movie) null else episode.episode,
             data?.isAnime == true || episode.tvType in setOf(TvType.Anime, TvType.AnimeMovie),
@@ -116,7 +110,6 @@ internal class StremioScrobble(context: Context) {
         val url = prefs.getString("history_sync_url", null)?.trim()
             ?.replace("stremio://", "https://") ?: return null
         return runCatching {
-            syncTrace("PLAYBACK_TARGET", "configured=true configuredHash=${url.hashCode()}")
             val uri = URI(url)
             val parts = uri.path.split('/').filter { it.isNotEmpty() }
             val index = parts.indexOf("stremio")
@@ -132,7 +125,6 @@ internal class StremioScrobble(context: Context) {
         val duration = current?.duration?.takeIf { it > 0L }
         if (position != null && duration != null) return position to duration
         val saved = DataStoreHelper.getViewPos(item.id)
-        syncTrace("POSITION_FALLBACK", "itemId=${item.id} playerPosition=$position playerDuration=$duration savedPosition=${saved?.position} savedDuration=${saved?.duration}")
         return (position ?: saved?.position ?: lastPosition).coerceAtLeast(0L) to
             (duration ?: saved?.duration?.takeIf { it > 0L } ?: lastDuration).coerceAtLeast(0L)
     }
@@ -163,7 +155,6 @@ internal class StremioScrobble(context: Context) {
             (event == "start" && current?.isPlaying != true) ||
             (event != "start" && lastEvent == null) ||
             (event != "start" && !allowRepeat && lastEvent == event)) {
-            syncTrace("EMIT_SUPPRESSED", "event=$event previous=$lastEvent playing=${current?.isPlaying} repeat=$allowRepeat")
             return
         }
 
@@ -172,7 +163,6 @@ internal class StremioScrobble(context: Context) {
         val openingSession = event == "start" && lastEvent == null
         val (pos, rawDuration) = playbackPosition(item, current)
         val duration = if (current == null) approvedDurationMs else rawDuration
-        syncTrace("EMIT_POSITION", "event=$event itemId=${item.id} season=${item.season} episode=${item.episode} pos=$pos duration=$duration played=$played")
         lastPosition = pos
         lastDuration = duration
         lastEvent = event
@@ -182,13 +172,10 @@ internal class StremioScrobble(context: Context) {
             seekPlaybackStartedAtMs = SystemClock.elapsedRealtime()
         }
         val target = playbackBase() ?: run {
-            syncTrace("EMIT_NO_TARGET", "event=$event itemId=${item.id}")
             return
         }
         val report = Report(item, event, pos, duration, target, played)
-        syncTrace("EMIT_QUEUED", "event=$event itemId=${item.id} position=$pos duration=$duration urlHash=${item.url.hashCode()}")
         if (queue.trySend(report).isFailure) {
-            syncTrace("EMIT_QUEUE_FULL", "event=$event itemId=${item.id}")
             // Lifecycle reports must not be lost if earlier requests are slow.
             senderScope.launch { runCatching { queue.send(report) } }
         }
@@ -202,7 +189,6 @@ internal class StremioScrobble(context: Context) {
         if (active?.key == response.url + "#" + episode.id) return false
 
         val next = snapshot()
-        syncTrace("EPISODE_TRANSITION", "fromItem=${active?.id} toItem=${next?.id} fromSeason=${active?.season} toSeason=${next?.season} fromEpisode=${active?.episode} toEpisode=${next?.episode}")
         active?.let { old ->
             // The old stop must use its stored position, never the new episode's player.
             if (lastEvent != null && lastEvent != "stop") emit("stop", old, null)
@@ -228,7 +214,6 @@ internal class StremioScrobble(context: Context) {
     private fun attachPlayer() {
         val next = fragment?.playerView?.player
         if (next === player) return
-        syncTrace("PLAYER_CHANGED", "old=${player!=null} new=${next!=null} activeItem=${active?.id}")
         cancelPendingSeek()
         lastSeekReportAtMs = 0L
         cancelCompletion()
@@ -265,7 +250,6 @@ internal class StremioScrobble(context: Context) {
         val seekWait = if (seekCompletionPending)
             (60_000L - (SystemClock.elapsedRealtime() - seekPlaybackStartedAtMs)).coerceAtLeast(0L)
             else 0L
-        syncTrace("COMPLETION_PLAN", "itemId=${active?.id} position=$position duration=$duration threshold=$threshold msUntilThreshold=$timeToThreshold seekWait=$seekWait")
         main.postDelayed(completion, maxOf(timeToThreshold, seekWait))
     }
 
@@ -277,7 +261,6 @@ internal class StremioScrobble(context: Context) {
             val (position, duration) = playbackPosition(item, current)
             val seekWaitSatisfied = seekPlaybackStartedAtMs != 0L &&
                 SystemClock.elapsedRealtime() - seekPlaybackStartedAtMs >= 60_000L
-            syncTrace("COMPLETION_CHECK", "itemId=${item.id} position=$position duration=$duration seekPending=$seekCompletionPending ready=$seekWaitSatisfied")
             if (duration > 0L && position.toDouble() / duration >= 0.80 &&
                 (!seekCompletionPending || seekWaitSatisfied)) {
                 emit("stop", item, current, played = true)
@@ -294,12 +277,10 @@ internal class StremioScrobble(context: Context) {
         if (lastEvent == null || lastEvent == "stop") return
         val now = SystemClock.elapsedRealtime()
         val elapsed = now - lastSeekReportAtMs
-        syncTrace("SEEK_INPUT", "itemId=${item.id} elapsedMs=$elapsed priorEvent=$lastEvent playing=${player?.isPlaying} pending=${pendingSeekReport!=null}")
         if (lastSeekReportAtMs == 0L || elapsed >= 15_000L) {
             cancelPendingSeek()
             emit(if (player?.isPlaying == true) "start" else "pause", item, allowRepeat = true)
             lastSeekReportAtMs = now
-            syncTrace("SEEK_IMMEDIATE", "itemId=${item.id} elapsedMs=$elapsed")
             return
         }
         if (pendingSeekReport != null) return
@@ -309,7 +290,6 @@ internal class StremioScrobble(context: Context) {
                 // Read the actual latest position at send time, not the original seek target.
                 emit(if (player?.isPlaying == true) "start" else "pause", item, allowRepeat = true)
                 lastSeekReportAtMs = SystemClock.elapsedRealtime()
-                syncTrace("SEEK_DELAYED", "itemId=${item.id}")
             }
         }.also { main.postDelayed(it, 15_000L - elapsed) }
     }
@@ -332,10 +312,6 @@ internal class StremioScrobble(context: Context) {
         Media3Player.Listener::class.java.classLoader,
         arrayOf(Media3Player.Listener::class.java)
     ) { proxy, method, args ->
-        if (method.name in setOf("onIsPlayingChanged", "onPlayWhenReadyChanged",
-                "onPlaybackStateChanged", "onPlaybackParametersChanged",
-                "onPositionDiscontinuity"))
-            syncTrace("PLAYER_EVENT", "name=${method.name} arg0=${args?.getOrNull(0)} active=${active?.id} last=$lastEvent")
         when (method.name) {
             "onIsPlayingChanged" -> {
                 val changed = refreshEpisode()
@@ -403,7 +379,6 @@ internal class StremioScrobble(context: Context) {
             "onPositionDiscontinuity" -> {
                 refreshEpisode()
                 val reason = args?.lastOrNull() as? Int
-                syncTrace("POSITION_DISCONTINUITY", "reason=$reason active=${active?.id}")
                 if (reason == Media3Player.DISCONTINUITY_REASON_SEEK ||
                     reason == Media3Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) {
                     val current = player
@@ -428,7 +403,6 @@ internal class StremioScrobble(context: Context) {
     } as Media3Player.Listener
 
     fun watch(fragment: Fragment) {
-        syncTrace("WATCH_ATTACH", "fragmentType=${fragment.javaClass.simpleName} already=${fragment===this.fragment}")
         if (fragment !is GeneratorPlayer) return
         if (fragment === this.fragment) {
             attachPlayer()
@@ -451,7 +425,6 @@ internal class StremioScrobble(context: Context) {
     }
 
     fun detach(candidate: Fragment? = null) {
-        syncTrace("WATCH_DETACH", "candidatePresent=${candidate!=null} active=${active?.id} lastEvent=$lastEvent")
         if (candidate != null && candidate !== fragment) return
         cancelCompletion()
         cancelPendingSeek()
@@ -473,7 +446,6 @@ internal class StremioScrobble(context: Context) {
     }
 
     fun stop() {
-        syncTrace("WATCH_STOP", "queueClosing=true")
         detach()
         queue.close() // Drain final events on IO without blocking view destruction.
     }
@@ -482,7 +454,6 @@ internal class StremioScrobble(context: Context) {
         val item = report.item
         val ids = item.ids.toMutableMap()
         val data = item.source
-        syncTrace("SEND_BEGIN", "event=${report.event} itemId=${item.id} season=${item.season} episode=${item.episode} movie=${item.movie} anime=${item.anime} position=${report.position} duration=${report.duration} ids=${ids.keys} targetHash=${report.target.hashCode()}")
         if (item.anime && data != null &&
             ((item.season ?: 0) > 1 || ids["imdb"].isNullOrBlank() && ids["kitsu"].isNullOrBlank())) {
             val mapped = if (trackerMappings.containsKey(item.key)) trackerMappings[item.key]
@@ -496,7 +467,6 @@ internal class StremioScrobble(context: Context) {
                     }
                 }
             mapped?.kitsu?.let { ids["kitsu"] = it.toString() }
-            syncTrace("SEND_MAPPING", "itemId=${item.id} mapped=${mapped!=null} mal=${mapped?.mal} al=${mapped?.aniList} kitsu=${mapped?.kitsu}")
             mapped?.mal?.let { ids["mal"] = it.toString() }
             mapped?.aniList?.let { ids["anilist"] = it.toString() }
         }
@@ -515,7 +485,6 @@ internal class StremioScrobble(context: Context) {
             } ?: return
         }
         val episode = item.episode
-        syncTrace("SEND_RESOLVE_IDS", "itemId=${item.id} resolvedBase=$base availableIds=${ids.keys}")
         val season = if (base.startsWith("kitsu:") || base.startsWith("mal:")) 1
             else data?.imdbSeason?.takeIf { it > 0 } ?: item.season
         val videoId = if (item.movie) base else {
@@ -539,13 +508,11 @@ internal class StremioScrobble(context: Context) {
             body.put("played", report.played ?: (report.duration > 0L &&
                 report.position.toDouble() / report.duration >= 0.80))
         val type = if (item.movie) "movie" else "series"
-        syncTrace("SEND_REQUEST", "event=${report.event} type=$type videoId=$videoId position=${report.position} duration=${report.duration} stopPlayed=${body.opt("played")}")
-        val response = app.post(
+        app.post(
             report.target + "/playback/" + type + "/" + Uri.encode(videoId) + ".json",
             headers = mapOf("Content-Type" to "application/json"),
             requestBody = body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()),
             timeout = 15L
         )
-        syncTrace("SEND_HTTP", "event=${report.event} type=$type itemId=${item.id} code=${response.code} bytes=${response.text.length}")
     }
 }
