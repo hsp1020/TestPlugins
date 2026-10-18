@@ -125,10 +125,9 @@ class UltimaEvoSettingsDialog : DialogFragment() {
         dialog?.window?.apply {
             val metrics = resources.displayMetrics
             val width = minOf((1000 * metrics.density).toInt(), (metrics.widthPixels * 0.9f).toInt()).coerceAtLeast(1)
-            val height = (metrics.heightPixels * 0.88f).toInt().coerceAtLeast(1)
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setGravity(Gravity.CENTER)
-            setLayout(width, height)
+            setLayout(width, WindowManager.LayoutParams.WRAP_CONTENT)
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
     }
@@ -212,7 +211,15 @@ class UltimaEvoSettingsDialog : DialogFragment() {
             ))
         }
 
-        val scrollView = androidx.core.widget.NestedScrollView(ctx).apply { 
+        val scrollView = object : androidx.core.widget.NestedScrollView(ctx) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val maxHeight = (resources.displayMetrics.heightPixels * 0.88f).toInt().coerceAtLeast(1)
+                val available = if (View.MeasureSpec.getMode(heightMeasureSpec) == View.MeasureSpec.UNSPECIFIED)
+                    maxHeight else minOf(maxHeight, View.MeasureSpec.getSize(heightMeasureSpec))
+                super.onMeasure(widthMeasureSpec,
+                    View.MeasureSpec.makeMeasureSpec(available, View.MeasureSpec.AT_MOST))
+            }
+        }.apply { 
             background = getDarkThemeBg()
             isVerticalFadingEdgeEnabled = true
             setFadingEdgeLength(120)

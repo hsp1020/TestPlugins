@@ -956,6 +956,21 @@ class SettingsBottomFragment(
         }
     }
 
+
+    private fun nativeMainDialogContent(content: LinearLayout): View =
+        object : FrameLayout(hostContext) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val maxHeight = (resources.displayMetrics.heightPixels * 0.88f).toInt().coerceAtLeast(1)
+                val available = if (View.MeasureSpec.getMode(heightMeasureSpec) == View.MeasureSpec.UNSPECIFIED)
+                    maxHeight else minOf(maxHeight, View.MeasureSpec.getSize(heightMeasureSpec))
+                super.onMeasure(widthMeasureSpec,
+                    View.MeasureSpec.makeMeasureSpec(available, View.MeasureSpec.AT_MOST))
+            }
+        }.apply {
+            addView(content, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+
     private fun setupCustomDialog(
         dialog: AlertDialog, contentView: View, bodyView: View? = null, capDp: Int = 480,
         owner: Dialog = topDialog(), initialFocus: (() -> View?)? = null,
@@ -1170,13 +1185,6 @@ class SettingsBottomFragment(
     fun show(onDismiss: () -> Unit = {}) {
         settingsDialog.setCancelable(true)
         settingsDialog.setCanceledOnTouchOutside(false)
-        val hostWindow = (hostContext as? Activity)?.window
-        val hostInputMode = hostWindow?.attributes?.softInputMode
-        if (hostInputMode != null) {
-            hostWindow.setSoftInputMode((hostInputMode and WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST.inv()) or
-                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
-            onClose(settingsDialog) { hostWindow.setSoftInputMode(hostInputMode) }
-        }
         var finished = false
         val finish: () -> Unit = {
             if (!finished) {
@@ -1802,15 +1810,26 @@ class SettingsBottomFragment(
         if (hub != null) listOf(addlinks, showlinks, saveIcon, btnSelectLanguage).forEach {
             it.isFocusable = false; it.isClickable = false; it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
-        settingsDialog.setContentView(view)
+        val mobile = !isLayout(TV)
+        if (mobile) {
+            (viewport.layoutParams as? LinearLayout.LayoutParams)?.let {
+                it.height = 0
+                it.weight = 1f
+                viewport.layoutParams = it
+            }
+        }
+        settingsDialog.setContentView(if (mobile) nativeMainDialogContent(view) else view)
         hostOwner?.lifecycle?.addObserver(closeOnDestroy)
         settingsDialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setGravity(Gravity.CENTER)
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            if (mobile) setLayout(
+                minOf(dp(800), (hostContext.resources.displayMetrics.widthPixels * 0.9f).toInt()),
+                WindowManager.LayoutParams.WRAP_CONTENT)
         }
         showPage(SettingsPage.HUB)
-        fitDialog(settingsDialog, view, viewport, 800)
+        if (!mobile) fitDialog(settingsDialog, view, viewport, 800)
         settingsDialog.show()
         if (isLayout(TV)) (view.optional("rowCatalogs") ?: showlinks).requestFocus()
     }
