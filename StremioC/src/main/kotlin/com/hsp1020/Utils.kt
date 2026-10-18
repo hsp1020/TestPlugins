@@ -1282,6 +1282,7 @@ internal class RatingPlotImageHook(
             val headers = SimklApi.getHeaders(repo.authToken() ?: return null) +
                 mapOf("content-type" to "application/json")
             val ids = simklIds(id)
+            trace("TV_READ_ID", "requested=$requested keys=${ids?.keys()?.asSequence()?.toList()} idHash=${id.hashCode()}")
             if (ids == null) {
                 return null
             }
@@ -1289,10 +1290,12 @@ internal class RatingPlotImageHook(
                 val payload = JSONArray().put(ids)
                 val response = app.post("https://api.simkl.com/sync/watched?extended=episodes",
                     headers=headers, requestBody=payload.toString().toRequestBody())
+                trace("TV_HTTP", "code=${response.code} length=${response.text.length}")
                 if (response.code !in 200..299) {
                     return null
                 }
                 val records = JSONArray(response.text)
+                trace("TV_SCHEMA", "rows=${records.length()} topMatch=${(0 until records.length()).count { n -> records.optJSONObject(n)?.let { row -> ids.keys().asSequence().any { k -> row.optString(k).isNotBlank() && row.optString(k)==ids.optString(k) } }==true }} nestedMatch=${(0 until records.length()).count { n -> records.optJSONObject(n)?.optJSONObject("ids")?.let { row -> ids.keys().asSequence().any { k -> row.optString(k).isNotBlank() && row.optString(k)==ids.optString(k) } }==true }} firstKeys=${records.optJSONObject(0)?.keys()?.asSequence()?.toList()}")
                 val record = (0 until records.length()).mapNotNull { records.optJSONObject(it) }
                     .singleOrNull { row ->
                         ids.keys().asSequence().any { key ->
@@ -1326,8 +1329,10 @@ internal class RatingPlotImageHook(
                     parsed[n] = all.sorted() to viewed
                 }
                 val chosen = parsed[requested]
+                trace("TV_SEASON_PARSED", "allSeasons=${parsed.keys} chosenSize=${chosen?.first?.size} watched=${chosen?.second?.size} other=${parsed.filterKeys { it!=requested }.mapValues { it.value.second.size }} malformed=$malformed match=${record!=null}")
                 val listStatus = record?.takeIf { it.has("list") }
                     ?.let { simklWatchlistStatus(it.opt("list")) }
+                trace("TV_STATUS_READ", "rawStatus=${record?.opt("list")} parsed=$listStatus")
                 val result = if (!malformed && chosen != null && chosen.first.isNotEmpty())
                     SimklSeasonSnapshot(ids, requested, chosen.first, chosen.second,
                         parsed.filterKeys { it != requested }.mapValues { it.value.second }, listStatus)
@@ -1335,6 +1340,7 @@ internal class RatingPlotImageHook(
                 result
             } catch (e: CancellationException) { throw e }
               catch (e: Exception) {
+                  traceError("TV_READ_EXCEPTION", e)
                   null
               }
         }
@@ -1347,6 +1353,7 @@ internal class RatingPlotImageHook(
             tracker: Tracker, draft: Draft, baseline: Draft, sn: Int
         ): Boolean {
             val initial = tracker.simklSeason ?: return false
+            trace("TV_SAVE_BEGIN", "selected=$sn draft=${draft.status}/${draft.watched} before=${baseline.status}/${baseline.watched} explicitNone=${draft.explicitNone} other=${initial.otherSeasons.mapValues { it.value.size }}")
             if (draft.score != baseline.score || draft.watched !in 0..initial.available.size)
                 return false
             val headers = SimklApi.getHeaders(tracker.repo.authToken() ?: return false) +
@@ -1362,6 +1369,7 @@ internal class RatingPlotImageHook(
                 draft.status == SyncWatchType.WATCHING && countDiff > 0
             val statusChanged = !clearSelectedSeason &&
                 draft.status != baseline.status && !autoWatching
+            trace("TV_SAVE_PLAN", "none=$clearSelectedSeason diff=$countDiff statusChanged=$statusChanged autoWatching=$autoWatching statusKnown=${initial.listStatus!=null}")
             if (statusChanged && (initial.listStatus == null ||
                     simklWatchlistDestination(draft.status) == null)) return false
             if (countDiff == 0 && !statusChanged) return true
@@ -1379,6 +1387,7 @@ internal class RatingPlotImageHook(
                             delta.forEach { arr.put(JSONObject().put("number", it)) }
                         })))
                 val endpoint = if (countDiff > 0) "history" else "history/remove"
+                trace("TV_EPISODE_REQUEST", "endpoint=$endpoint season=$sn episodeNumbers=${delta.joinToString(",")} expectedCount=${expected.size}")
                 val response = try {
                     app.post(url + endpoint, headers = headers,
                         requestBody = JSONObject().put("shows", JSONArray().put(scope))
@@ -1390,14 +1399,18 @@ internal class RatingPlotImageHook(
                         ?.optJSONArray("shows")?.length() ?: 0
                 }.getOrDefault(-1)
                 if (response.code !in 200..299 || missing != 0) return false
+                trace("TV_EPISODE_RESPONSE", "code=${response.code} missing=$missing")
                 var confirmed = false
                 for (attempt in 1..3) {
                     if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
                     val current = simklSeasonRead(tracker.repo, tracker.id, sn)
+                    trace("TV_STATUS_VERIFY", "attempt=$attempt accepted=$accepted actual=${current?.listStatus} watched=${current?.watched} other=${current?.otherSeasons?.mapValues { it.value.size }}")
+                    trace("TV_EPISODE_VERIFY_START", "attempt=$attempt beforeOther=${initial.otherSeasons.mapValues { it.value.size }} expected=$expected")
                     confirmed = current?.watched == expected &&
                         initial.otherSeasons.all { (key, seen) ->
                             current.otherSeasons[key] == seen
                         }
+                    trace("TV_EPISODE_VERIFY", "attempt=$attempt match=$confirmed now=${current?.watched} otherNow=${current?.otherSeasons?.mapValues { it.value.size }}")
                     if (confirmed) {
                         tracker.simklSeason = current
                         break
@@ -1413,12 +1426,14 @@ internal class RatingPlotImageHook(
                 val destination = simklWatchlistDestination(draft.status) ?: return false
                 val payload = JSONObject().put("shows", JSONArray().put(
                     JSONObject().put("ids", initial.ids).put("to", destination)))
+                trace("TV_STATUS_REQUEST", "target=$destination idKeys=${initial.ids.keys().asSequence().toList()} noEpisodes=true")
                 val response = try {
                     app.post(url + "add-to-list", headers = headers,
                         requestBody = payload.toString().toRequestBody())
                 } catch (e: CancellationException) { throw e }
                   catch (e: Exception) { return false }
                 if (response.code !in 200..299) return false
+                trace("TV_STATUS_HTTP", "code=${response.code} length=${response.text.length}")
                 val result = runCatching { JSONObject(response.text) }.getOrNull()
                     ?: return false
                 if ((result.optJSONObject("not_found")?.optJSONArray("shows")?.length() ?: 0) > 0)
@@ -1426,6 +1441,7 @@ internal class RatingPlotImageHook(
                 val accepted = result.optJSONObject("added")?.optJSONArray("shows")
                     ?.optJSONObject(0)?.opt("to")?.let { simklWatchlistStatus(it) }
                     ?.takeIf { it != SyncWatchType.NONE } ?: draft.status
+                trace("TV_STATUS_ACK", "accepted=$accepted responseKeys=${result.keys().asSequence().toList()}")
                 for (attempt in 1..3) {
                     if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
                     val current = simklSeasonRead(tracker.repo, tracker.id, sn)
@@ -1488,6 +1504,7 @@ internal class RatingPlotImageHook(
             ids: Set<Int>
         ): AnimeWatchGrid? {
             if(ids.isEmpty())return null
+            trace("ANIME_WATCH_BEGIN", "ids=$ids")
             val headers=SimklApi.getHeaders(repo.authToken() ?: return null)+
                 mapOf("content-type" to "application/json")
             val request=JSONArray().also { array ->
@@ -1501,6 +1518,7 @@ internal class RatingPlotImageHook(
             }catch(e: CancellationException){throw e}
              catch(e: Exception){return null}
             if(response.code !in 200..299)return null
+            trace("ANIME_WATCH_HTTP", "code=${response.code} size=${response.text.length}")
             val rows=runCatching { JSONArray(response.text) }.getOrNull() ?: return null
             if(rows.length()!=ids.size)return null
             val watched=linkedSetOf<String>()
@@ -1529,6 +1547,7 @@ internal class RatingPlotImageHook(
                 }
             }
             return AnimeWatchGrid(watched,statuses).takeIf { returned==ids }
+            trace("ANIME_WATCH_PARSED", "returned=$returned wanted=$ids status=$statuses watched=${watched.size} examined=${observed.size}")
         }
 
         /**
@@ -1541,6 +1560,7 @@ internal class RatingPlotImageHook(
             ids: Set<Int>, requested: SyncWatchType
         ): SyncWatchType? {
             val destination=simklWatchlistDestination(requested) ?: return null
+            trace("ANIME_STATUS_BEGIN", "ids=$ids request=$requested dest=$destination")
             if(ids.isEmpty())return null
             val headers=SimklApi.getHeaders(repo.authToken() ?: return null)+
                 mapOf("content-type" to "application/json")
@@ -1558,6 +1578,7 @@ internal class RatingPlotImageHook(
             }catch(e: CancellationException){throw e}
              catch(e: Exception){return null}
             if(response.code !in 200..299)return null
+            trace("ANIME_STATUS_HTTP", "code=${response.code}")
             val result=runCatching { JSONObject(response.text) }.getOrNull() ?: return null
             val notFound=result.optJSONObject("not_found")
             if((notFound?.optJSONArray("anime")?.length() ?: 0)>0 ||
@@ -1578,6 +1599,7 @@ internal class RatingPlotImageHook(
                 }
             }
             return actual.singleOrNull()?.takeIf { echoed==ids }
+            trace("ANIME_STATUS_ACK", "echoed=$echoed requested=$ids normalized=$actual")
         }
 
         /**
@@ -1590,6 +1612,7 @@ internal class RatingPlotImageHook(
             ids: Set<Int>
         ): SyncWatchType? {
             if(ids.isEmpty())return null
+            trace("ANIME_LIBRARY_BEGIN", "ids=$ids")
             val headers=SimklApi.getHeaders(repo.authToken() ?: return null)
             val response=try {
                 app.get("https://api.simkl.com/sync/all-items/anime",
@@ -1597,6 +1620,7 @@ internal class RatingPlotImageHook(
             }catch(e: CancellationException){throw e}
              catch(e: Exception){return null}
             if(response.code !in 200..299)return null
+            trace("ANIME_LIBRARY_HTTP", "code=${response.code}")
             val body=runCatching { JSONObject(response.text) }.getOrNull() ?: return null
             val anime=body.optJSONArray("anime") ?: return null
             val statuses=linkedMapOf<Int, SyncWatchType>()
@@ -1609,6 +1633,7 @@ internal class RatingPlotImageHook(
                 if(status==SyncWatchType.NONE || statuses.put(id,status)!=null)return null
             }
             return ids.map { statuses[it] ?: return null }.distinct().singleOrNull()
+            trace("ANIME_LIBRARY_PARSED", "found=$statuses requested=$ids")
         }
 
         /**
@@ -1621,6 +1646,7 @@ internal class RatingPlotImageHook(
             ids: Set<Int>
         ): Boolean {
             if(ids.isEmpty())return false
+            trace("ANIME_DELETE_BEGIN", "nativeIds=$ids noTvdbParent=true")
             val headers=SimklApi.getHeaders(repo.authToken() ?: return false)+
                 mapOf("content-type" to "application/json")
             val payload=JSONObject().put("shows",JSONArray().also { shows ->
@@ -1634,6 +1660,7 @@ internal class RatingPlotImageHook(
             }catch(e: CancellationException){throw e}
              catch(e: Exception){return false}
             if(response.code !in 200..299)return false
+            trace("ANIME_DELETE_HTTP", "code=${response.code}")
             val result=runCatching { JSONObject(response.text) }.getOrNull()
                 ?: return false
             val missing=result.optJSONObject("not_found")?.optJSONArray("shows")
@@ -1659,6 +1686,7 @@ internal class RatingPlotImageHook(
                     if(id!=null)present+=id
                 }
                 if(ids.none { it in present })return true
+                trace("ANIME_DELETE_VERIFY", "attempt=$attempt stillPresent=${ids.intersect(present)} libraryCount=${present.size}")
             }
             return false
         }
@@ -1668,6 +1696,7 @@ internal class RatingPlotImageHook(
             mapped: SeasonTrackerIds, targetSeason: Int
         ): AnimeSnapshot? {
             val auth = repo.authToken()
+            trace("ANIME_MAP_REQUEST", "season=$targetSeason mal=${mapped.mal} simkl=${mapped.simkl} tvdb=${mapped.tvdb} tvdbSeason=${mapped.tvdbSeason} aniList=${mapped.aniList}")
             val headers = SimklApi.getHeaders(auth ?: return null)
             val candidates = linkedSetOf<Int>()
             val tvdbSearchMatches = linkedSetOf<Int>()
@@ -1678,6 +1707,7 @@ internal class RatingPlotImageHook(
                     val resp=app.get("https://api.simkl.com/search/id",
                         params=mapOf(field to value.toString()),headers=headers,cacheTime=0)
                     val array=if (resp.code in 200..299)
+                    trace("ANIME_MAP_SEARCH", "field=$field value=$value code=${resp.code}")
                         runCatching { JSONArray(resp.text) }.getOrNull() else null
                     val found=mutableListOf<Int>()
                     for(i in 0 until (array?.length() ?: 0)){
@@ -1688,6 +1718,7 @@ internal class RatingPlotImageHook(
                         if (id != null) found+=id
                     }
                     candidates.addAll(found.take(24))
+                    trace("ANIME_MAP_CANDIDATES_FROM_SEARCH", "field=$field found=$found")
                     if (field=="tvdb")tvdbSearchMatches.addAll(found.take(24))
                     if (field=="mal")malSearchMatches.addAll(found.take(24))
                 }catch(e: CancellationException){throw e}
@@ -1698,6 +1729,7 @@ internal class RatingPlotImageHook(
             mapped.mal?.let { search("mal",it) }
             mapped.tvdb?.let { search("tvdb",it) }
             if(candidates.isEmpty()){
+            trace("ANIME_MAP_CANDIDATES", "ids=$candidates malHits=$malSearchMatches tvdbHits=$tvdbSearchMatches")
                 return null
             }
             val tvdbSeason=mapped.tvdbSeason
@@ -1709,6 +1741,7 @@ internal class RatingPlotImageHook(
                     val detail=app.get("https://api.simkl.com/anime/$id",
                         headers=headers,cacheTime=600)
                     if(detail.code !in 200..299){
+                    trace("ANIME_MAP_DETAIL_HTTP", "id=$id code=${detail.code}")
                         continue
                     }
                     val info=runCatching { JSONObject(detail.text) }.getOrNull()
@@ -1743,6 +1776,8 @@ internal class RatingPlotImageHook(
                         if(found.map { it.native }.distinct().size != found.size)
                             throw IllegalStateException("duplicate-native-episodes")
                         animeEpisodeCache[id]=found
+                        trace("ANIME_MAP_EPISODES", "id=$id total=${found.size} byTvdbSeason=${found.groupingBy { it.tvdbSeason }.eachCount()}")
+                        animeEpisodeCache[id]=found
                         found
                     }
                     if(tvdbId!=null && tvdbSeason!=null){
@@ -1770,6 +1805,7 @@ internal class RatingPlotImageHook(
             // Different providers may expose different episode counts and TVDB ranges.
             // Only accept episode slots with an unambiguous, unique mapping.
             if(sorted.isEmpty() || keys.distinct().size != keys.size){
+            trace("ANIME_MAP_VALIDATE", "validIds=$validated slots=${sorted.size} duplicate=${keys.distinct().size != keys.size}")
                 return null
             }
             val grid=simklAnimeWatched(repo,validated) ?: return null
@@ -1784,6 +1820,7 @@ internal class RatingPlotImageHook(
                     episodes.all { it.tvdbSeason==tvdbSeason })
             }
             val result=AnimeSnapshot(tvdbId,tvdbSeason,sorted,
+            trace("ANIME_MAP_RESULT", "validIds=$validated mapped=${sorted.size} status=$unifiedStatus editable=$seasonLocalTitles watched=${grid.watched.size} outside=${grid.watched.minus(targetKeys).size}")
                 grid.watched.intersect(targetKeys),grid.watched-targetKeys,
                 if(tvdbId!=null && tvdbSeason!=null)"tvdb" else "native",validated,
                 unifiedStatus,unifiedStatus!=null && seasonLocalTitles)
@@ -1793,6 +1830,7 @@ internal class RatingPlotImageHook(
         private suspend fun simklAnimeSave(tracker: Tracker, draft: Draft,
             initial: Draft, seasonNumber: Int): Boolean {
             val before=tracker.simklAnime ?: return false
+            trace("ANIME_SAVE_BEGIN", "season=$seasonNumber nativeIds=${before.sourceIds} mode=${before.mode} status=${draft.status} prior=${initial.status} watched=${draft.watched} oldWatched=${before.watched.size} outside=${before.outside.size} explicitNone=${draft.explicitNone} editable=${before.statusEditable}")
             if(draft.status==SyncWatchType.NONE && draft.explicitNone) {
                 if(!before.statusEditable)return false
                 val removed=simklAnimeRemoveFromLibrary(tracker.repo,before.sourceIds)
@@ -1806,6 +1844,7 @@ internal class RatingPlotImageHook(
             val autoWatching=initial.status==SyncWatchType.NONE &&
                 draft.status==SyncWatchType.WATCHING && diff>0
             val statusChanged=draft.status!=initial.status && !autoWatching
+            trace("ANIME_SAVE_PLAN", "diff=$diff statusChanged=$statusChanged autoWatching=$autoWatching")
             if(statusChanged && (!before.statusEditable ||
                 simklWatchlistDestination(draft.status)==null))return false
             if(diff==0 && !statusChanged)return true
@@ -1843,6 +1882,7 @@ internal class RatingPlotImageHook(
                         })))
                 }
                 val endpoint=if(diff>0)"history" else "history/remove"
+                trace("ANIME_EPISODE_REQUEST", "endpoint=$endpoint mode=${before.mode} changed=${changes.map { it.key }} tvdb=${before.tvdbId} tvdbSeason=${before.tvdbSeason}")
                 val headers=SimklApi.getHeaders(tracker.repo.authToken() ?: return false)+
                     mapOf("content-type" to "application/json")
                 val response=try {
@@ -1857,6 +1897,7 @@ internal class RatingPlotImageHook(
                         (notFound?.optJSONArray("anime")?.length() ?: 0)
                 }.getOrNull()
                 if(response.code !in 200..299 || failures==null || failures>0)return false
+                trace("ANIME_EPISODE_RESPONSE", "code=${response.code} rejected=$failures")
             }
 
             // Explicit status edits must be directed at each validated native anime
@@ -1874,6 +1915,7 @@ internal class RatingPlotImageHook(
                 for(attempt in 1..3) {
                     if(attempt>1)kotlinx.coroutines.delay(if(attempt==2)350L else 900L)
                     val stored=simklAnimeLibraryStatus(tracker.repo,before.sourceIds)
+                    trace("ANIME_STATUS_VERIFY", "attempt=$attempt stored=$stored expected=$acceptedStatus")
                     if(stored!=null && stored==acceptedStatus) {
                         tracker.simklAnime=before.copy(status=stored)
                         return true
@@ -1892,6 +1934,7 @@ internal class RatingPlotImageHook(
                 val watchedMatches=diff==0 && statusChanged ||
                     after?.watched==expected
                 val outsidePreserved=after?.outside==before.outside
+                trace("ANIME_EPISODE_VERIFY", "attempt=$attempt actual=${after?.watched?.size} expected=${expected.size} outsideActual=${after?.outside?.size} outsideBefore=${before.outside.size} actualStatus=${after?.status} expectedStatus=$acceptedStatus")
                 val statusMatches=!statusChanged || after?.status==acceptedStatus
                 if(after!=null && watchedMatches && outsidePreserved && statusMatches) {
                     tracker.simklAnime=after
@@ -1932,6 +1975,15 @@ internal class RatingPlotImageHook(
         private val checks by lazy { root.findViewById<ListView>(R.id.result_sync_check) }
         private val holder by lazy { root.findViewById<View>(R.id.result_sync_holder) }
         private val shimmer by lazy { root.findViewById<View>(R.id.result_sync_loading_shimmer) }
+        private val diagnosticsId = java.lang.Long.toHexString(System.nanoTime())
+        private var lastDiagnosticUi: String? = null
+        private fun trace(stage: String, detail: String = "") {
+            // No credentials, raw addon URLs, HTTP payloads or account profile fields.
+            android.util.Log.i("STREMIOC_SYNC",
+                "panel=$diagnosticsId gen=$generation season=$season stage=$stage $detail")
+        }
+        private fun traceError(stage: String, e: Exception) =
+            trace(stage, "type=${e.javaClass.simpleName}")
 
         private fun valid(g: Long, n: Int?): Boolean =
             active && generation == g && season == n
@@ -1948,10 +2000,12 @@ internal class RatingPlotImageHook(
         fun start() {
             if (active) return
             active = true
+            trace("PANEL_START", "detailHash=${detailUrl?.hashCode()}")
             val vm = ViewModelProvider(fragment)[ResultViewModel2::class.java]
             syncModel = if (fragment is com.lagradost.cloudstream3.ui.result.ResultFragmentPhone)
                 ViewModelProvider(fragment)[SyncViewModel::class.java] else null
             val owner = fragment.viewLifecycleOwner
+            trace("HOST", "hasModel=${syncModel!=null} fragment=${fragment.javaClass.simpleName}")
             observe(vm.page, owner) { value ->
                 when(value) {
                     is Resource.Success -> {
@@ -1960,6 +2014,7 @@ internal class RatingPlotImageHook(
                             generation++
                             pageUrl = data.url
                             rawSyncs = data.syncData.toMap()
+                            trace("PAGE_SWITCH", "pageHash=${data.url.hashCode()} syncProviders=${data.syncData.keys}")
                             seasonNumbers = emptyList()
                             selectionIndex = null
                             season = null
@@ -1968,6 +2023,7 @@ internal class RatingPlotImageHook(
                             rawSyncs = data.syncData.toMap()
                         }
                         resolve()
+                        trace("PAGE_RECV", "pageHash=${data.url.hashCode()} providers=${rawSyncs.keys}")
                     }
                     is Resource.Failure -> {}
                     else -> {}
@@ -1975,10 +2031,12 @@ internal class RatingPlotImageHook(
             }
             observe(vm.seasonSelections, owner) { items ->
                 seasonNumbers = items.map { it.second }
+                trace("SEASON_OPTIONS", "seasons=$seasonNumbers")
                 resolve()
             }
             observe(vm.selectedSeasonIndex, owner) { index ->
                 selectionIndex = index
+                trace("SEASON_SELECT", "index=$index available=$seasonNumbers")
                 resolve()
             }
             syncModel?.let { model ->
@@ -2000,15 +2058,18 @@ internal class RatingPlotImageHook(
 
         private fun resolve() {
             val chosen = selectionIndex?.let { seasonNumbers.getOrNull(it) }
+            trace("RESOLVE", "index=$selectionIndex chosen=$chosen previous=$season")
             if (pageUrl == null || chosen == null || chosen <= 0) return
             if (chosen == season) return
             season = chosen
             generation++
             begin()
+            trace("SEASON_CHANGE", "newSeason=$chosen newGen=$generation")
         }
 
         private fun reset() {
             fetchJob?.cancel()
+            trace("RESET", "existing=${statuses.keys} selected=$selected priorJob=${fetchJob!=null}")
             fetchJob = null
             statuses.clear()
             selected = null
@@ -2022,6 +2083,7 @@ internal class RatingPlotImageHook(
                 ?: detailUrl?.let { StremioC.animeAudioByUrl[it] }
             val multi = seasonNumbers.size > 1
             val generalSimkl = isAnime != true && multi && rawSyncs.containsKey("simkl")
+            trace("CLASSIFY", "isAnime=$isAnime multi=$multi generalSimkl=$generalSimkl hasModel=${syncModel!=null} season=$sn providers=${rawSyncs.keys}")
             if ((isAnime != true && !generalSimkl) || syncModel == null) {
                 reset()
                 teardownUi()
@@ -2032,6 +2094,7 @@ internal class RatingPlotImageHook(
             ensureUi()
             fetchJob = scope.launch {
                 var mappedSeason: SeasonTrackerIds? = null
+                trace("FETCH_BEGIN", "generation=$gen")
                 val ids = if (!multi) rawSyncs.filterKeys { it in allowed }
                     else if (generalSimkl) rawSyncs.filterKeys { it == "simkl" } else {
                     val imdb = IMDb.find(url)?.value ?: IMDb.find(detailUrl.orEmpty())?.value
@@ -2043,11 +2106,14 @@ internal class RatingPlotImageHook(
                     } else {
                         val mapping = try { withContext(Dispatchers.IO) {
                             provider.seasonTrackerIds(imdb, sn)
+                            trace("TRACKER_MAPPING_BEGIN", "imdb=$imdb season=$sn provider=${provider.name}")
+                            provider.seasonTrackerIds(imdb, sn)
                         } } catch (e: CancellationException) { throw e }
                           catch (e: Exception) {
                             null
                         }
                         mappedSeason = mapping
+                        trace("TRACKER_MAPPING_END", "present=${mapping!=null} mal=${mapping?.mal} anilist=${mapping?.aniList} kitsu=${mapping?.kitsu} simkl=${mapping?.simkl} tvdb=${mapping?.tvdb} tvdbSeason=${mapping?.tvdbSeason}")
                         linkedMapOf<String,String>().apply {
                             mapping?.mal?.let { put("mal", it.toString()) }
                             mapping?.aniList?.let { put("anilist", it.toString()) }
@@ -2064,7 +2130,9 @@ internal class RatingPlotImageHook(
                 }
                 if (!valid(gen, sn)) { return@launch }
                 val matched = AccountManager.syncApis.filter { ids.containsKey(it.idPrefix) }
+                trace("TRACKER_IDS", "providerKeys=${ids.keys} hashedIds=${ids.mapValues { it.value.hashCode() }}")
                     .filter { it.authUser() != null }
+                trace("TRACKER_AUTH", "authorized=${matched.map { it.idPrefix }} excluded=${ids.keys.filter { key -> matched.none { it.idPrefix == key } }}")
                 if (matched.isEmpty()) {
                     render()
                     return@launch
@@ -2085,17 +2153,22 @@ internal class RatingPlotImageHook(
                     async(Dispatchers.IO) {
                         val id = ids.getValue(repo.idPrefix)
                         val state = repo.status(id)
-                        if(repo.idPrefix=="simkl"){
-                        }
+                        trace("PROVIDER_STATUS_REQUEST", "provider=${repo.idPrefix} idHash=${id.hashCode()}")
+                        val statusStart=android.os.SystemClock.elapsedRealtime()
+                        val state = repo.status(id)
+                        trace("PROVIDER_STATUS_RESULT", "provider=${repo.idPrefix} timeMs=${android.os.SystemClock.elapsedRealtime()-statusStart} ok=${state.isSuccess} error=${state.exceptionOrNull()?.javaClass?.simpleName} status=${state.getOrNull()?.status} watched=${state.getOrNull()?.watchedEpisodes} total=${state.getOrNull()?.maxEpisodes} score=${state.getOrNull()?.score?.toInt(10)}")
+
                         // MAL's general load() parses unrelated statistics fields with
                         // unstable string/number types. Use the minimal num_episodes API
                         // below instead, avoiding a second failing full-document parse.
                         val meta = if (repo.idPrefix == "mal" || repo.idPrefix == "kitsu")
                             null else repo.load(id)
                         val remote = state.getOrNull()
+                        trace("PROVIDER_METADATA", "provider=${repo.idPrefix} success=${meta?.isSuccess} error=${meta?.exceptionOrNull()?.javaClass?.simpleName} total=${meta?.getOrNull()?.totalEpisodes}")
                         val simklExact = if (generalSimkl && repo.idPrefix == "simkl")
                             simklSeasonRead(repo, id, sn) else null
                         if (generalSimkl && repo.idPrefix == "simkl" && simklExact != null)
+                        trace("SPECIAL_TV_READ", "provider=${repo.idPrefix} attempted=$generalSimkl present=${simklExact!=null} state=${simklExact?.listStatus} watched=${simklExact?.watched?.size}")
                             simklSeasonReplies["simkl"] = simklExact
                         val animeExact = if (multi && isAnime == true &&
                             repo.idPrefix == "simkl" && mappedSeason != null) {
@@ -2103,6 +2176,7 @@ internal class RatingPlotImageHook(
                         } else null
                         if (multi && isAnime == true && repo.idPrefix == "simkl" &&
                             animeExact != null) simklAnimeReplies["simkl"] = animeExact
+                        trace("SPECIAL_ANIME_READ", "provider=${repo.idPrefix} anime=$isAnime exact=${animeExact!=null} canEdit=${animeExact?.statusEditable} mapped=${animeExact?.mapped?.size}")
                         if (multi && isAnime == true && repo.idPrefix == "simkl") {
                         }
                         var total = when {
@@ -2164,6 +2238,8 @@ internal class RatingPlotImageHook(
                                 else it.watchedEpisodes ?: 0, it.score)
                         }
                         Triple(repo.idPrefix, fields, Pair(total, origin))
+                        trace("DRAFT", "provider=${repo.idPrefix} status=${fields?.status} watched=${fields?.watched} total=$total source=$origin")
+                        Triple(repo.idPrefix, fields, Pair(total, origin))
                     }
                 }.awaitAll()
                 if (!valid(gen, sn)) { return@launch }
@@ -2200,12 +2276,18 @@ internal class RatingPlotImageHook(
                     }
                 }
                 updateOptions()
+                        else -> null
+                    }
+                    trace("TRACKER_READY", "provider=$prefix blocked=${target.writeBlocked} error=${target.error} status=${target.draft?.status} watched=${target.draft?.watched} total=${target.total}")
+                }
+                updateOptions()
                 render()
             }
         }
 
         private fun ensureUi() {
             if (combo != null) return
+            trace("UI_ENSURE", "already=${combo!=null}")
             val names = root.findViewById<TextView>(R.id.result_sync_names) ?: return
             val parent = names.parent as? android.widget.LinearLayout ?: return
             val index = parent.indexOfChild(names)
@@ -2245,17 +2327,19 @@ internal class RatingPlotImageHook(
                     val key = statuses.keys.toList().getOrNull(position) ?: return
                     if (key == selected) return
                     selected = key
+                    trace("UI_PROVIDER", "from=$selected to=$key")
                     preferred = key
                     render()
                 }
             }
             plus?.setOnClickListener { adjust(1) }
             minus?.setOnClickListener { adjust(-1) }
-            saveButton?.setOnClickListener { save() }
+            saveButton?.setOnClickListener { trace("UI_SAVE_TAP", "provider=$selected"); save() }
             checks?.setOnItemClickListener { _, _, pos, _ ->
                 val tracker = statuses[selected] ?: return@setOnItemClickListener
                 val edit = tracker.draft ?: return@setOnItemClickListener
                 edit.status = SyncWatchType.fromInternalId(pos - 1)
+                trace("UI_STATUS_TAP", "provider=$selected index=$pos previous=${tracker.baseline?.status} requested=${edit.status} watched=${edit.watched}")
                 edit.explicitNone = edit.status == SyncWatchType.NONE
                 render()
             }
@@ -2265,6 +2349,7 @@ internal class RatingPlotImageHook(
                 val tracker = statuses[selected] ?: return@addOnChangeListener
                 val draft = tracker.draft ?: return@addOnChangeListener
                 draft.score = Score.from(value, 10)
+                trace("UI_SCORE", "provider=$selected score=$value")
                 render()
             }
             current?.addTextChangedListener(object : TextWatcher {
@@ -2276,6 +2361,7 @@ internal class RatingPlotImageHook(
                     val entered = s?.toString()?.toIntOrNull() ?: return
                     val clamped = entered.coerceIn(0, tracker.total?.takeIf { it > 0 } ?: Int.MAX_VALUE)
                     draft.watched = clamped
+                    trace("UI_EPISODE_INPUT", "provider=$selected input=$entered clamped=$clamped")
                     root.post { if (active && selected == tracker.prefix) render() }
                 }
                 override fun afterTextChanged(s: Editable?) {}
@@ -2309,6 +2395,7 @@ internal class RatingPlotImageHook(
             val draft = tracker.draft ?: return
             val upper = tracker.total?.takeIf { it > 0 } ?: Int.MAX_VALUE
             draft.watched = (draft.watched.toLong() + delta).coerceIn(0L, upper.toLong()).toInt()
+            trace("UI_EPISODE_STEP", "provider=$selected delta=$delta value=${draft.watched} limit=$upper")
             render()
         }
 
@@ -2316,6 +2403,7 @@ internal class RatingPlotImageHook(
             if (!active || combo == null) return
             val target = statuses[selected]
             if (target == null || target.loading || target.draft == null) {
+                trace("UI_BLOCKED_LOADING", "provider=$selected loading=${target?.loading} draft=${target?.draft!=null} blocked=${target?.writeBlocked} error=${target?.error}")
                 // The selector lives inside the native holder. Never hide it when
                 // an individual provider fails or is still loading.
                 applying = true
@@ -2353,6 +2441,11 @@ internal class RatingPlotImageHook(
                 // Simkl anime titles dedicated to the selected season have an
                 // independent watchlist status. Shared multi-season titles do not.
                 checks?.isEnabled = target.writeBlocked == null &&
+                val sig = "$selected:${data.status}:${data.watched}:${target.saving}:${target.writeBlocked}:${target.simklSeason?.listStatus}:${target.simklAnime?.statusEditable}"
+                if (sig != lastDiagnosticUi) {
+                    lastDiagnosticUi = sig
+                    trace("UI_RENDER", "state=$sig total=${target.total} statusEnabled=${target.writeBlocked==null && (target.simklSeason==null || target.simklSeason?.listStatus!=null) && (target.simklAnime==null || target.simklAnime?.statusEditable==true)} score=${data.score?.toInt(10)} error=${target.error}")
+                }
                     (target.simklSeason == null || target.simklSeason?.listStatus != null) &&
                     (target.simklAnime == null || target.simklAnime?.statusEditable == true)
                 slider?.isEnabled = target.writeBlocked == null &&
@@ -2376,6 +2469,7 @@ internal class RatingPlotImageHook(
             val prefix = tracker.prefix
             val id = tracker.id
             val before = initial.snapshot()
+            trace("SAVE_BEGIN", "provider=$prefix idHash=${id.hashCode()} prior=${before.status}/${before.watched} requested=${draft.status}/${draft.watched} scoreOld=${before.score?.toInt(10)} scoreNew=${draft.score?.toInt(10)} explicitNone=${draft.explicitNone} blocked=${tracker.writeBlocked} saving=${tracker.saving}")
             if (tracker.writeBlocked != null || tracker.saving) {
                 return
             }
@@ -2384,7 +2478,7 @@ internal class RatingPlotImageHook(
                 tracker.draft?.status = SyncWatchType.WATCHING
             }
             val updated = draft != before
-            if (!updated) { return }
+            if (!updated) { trace("SAVE_SKIP", "provider=$prefix reason=unchanged"); return }
             if (draft.status == SyncWatchType.NONE && !draft.explicitNone &&
                 (draft.score != before.score || draft.watched != before.watched)) {
                 return
@@ -2401,6 +2495,7 @@ internal class RatingPlotImageHook(
                  (draft.status != SyncWatchType.NONE &&
                   simklWatchlistDestination(draft.status)==null))) return
             tracker.saving = true
+            trace("SAVE_ROUTE", "provider=$prefix tv=${tracker.simklSeason!=null} anime=${tracker.simklAnime!=null} malRemove=${prefix=="mal"&&draft.explicitNone}")
             render()
             // Detached/changed screens do not receive this result, but the snapshot
             // keeps writes directed to the user's original chosen service/season.
@@ -2415,6 +2510,7 @@ internal class RatingPlotImageHook(
                         simklAnimeSave(tracker, draft, before, sn)
                     } else {
                     val fresh = tracker.repo.status(id)
+                    trace("CORE_READ_BEFORE_WRITE", "provider=$prefix")
                     val remote = fresh.getOrNull()
                     if (remote == null) {
                         false
@@ -2427,6 +2523,7 @@ internal class RatingPlotImageHook(
                         if (remote.status != SyncWatchType.NONE && remote.watchedEpisodes == null)
                             remote.watchedEpisodes = 0
                         val issued = tracker.repo.updateStatus(id, remote)
+                        trace("CORE_WRITE", "provider=$prefix request=${remote.status}/${remote.watchedEpisodes} result=${issued.getOrNull()} error=${issued.exceptionOrNull()?.javaClass?.simpleName}")
                         var verified = false
                         for (attempt in 1..3) {
                             if (attempt > 1) kotlinx.coroutines.delay(if (attempt == 2) 350L else 900L)
@@ -2437,6 +2534,7 @@ internal class RatingPlotImageHook(
                                 (draft.watched == before.watched || (got.watchedEpisodes ?: 0) == (remote.watchedEpisodes ?: 0)) &&
                                 (draft.score == before.score || got.score == remote.score)
                             if (verified) break
+                            trace("CORE_VERIFY", "provider=$prefix attempt=$attempt match=$verified read=${got?.status}/${got?.watchedEpisodes}")
                         }
                         if (!verified && prefix == "kitsu" && remote.status != SyncWatchType.NONE) {
                             val fallback = kitsuFallback(id, remote, tracker.repo)
@@ -2454,6 +2552,7 @@ internal class RatingPlotImageHook(
                     }
                 }
                 if (valid(gen, sn) && statuses[prefix] === tracker) {
+                trace("SAVE_FINAL", "provider=$prefix success=$result viewValid=${valid(gen,sn)} currentTracker=${statuses[prefix]===tracker}")
                     tracker.saving = false
                     if (result) {
                         val anime = tracker.simklAnime
@@ -2502,6 +2601,7 @@ internal class RatingPlotImageHook(
             id: String
         ): Boolean {
             val animeId=id.toIntOrNull()?.takeIf { it>0 } ?: return false
+            trace("MAL_REMOVE_BEGIN", "idHash=${id.hashCode()}")
             val token=repo.authToken()?.accessToken ?: return false
             val headers=mapOf("Authorization" to "Bearer $token")
             val url="https://api.myanimelist.net/v2/anime/$animeId/my_list_status"
@@ -2510,6 +2610,7 @@ internal class RatingPlotImageHook(
             }catch(e: CancellationException){throw e}
              catch(e: Exception){return false}
             if(deleted.code !in 200..299 && deleted.code!=404)return false
+            trace("MAL_REMOVE_HTTP", "code=${deleted.code}")
             repeat(3){ attempt ->
                 if(attempt>0)kotlinx.coroutines.delay(if(attempt==1)350L else 900L)
                 val response=try {
@@ -2519,6 +2620,7 @@ internal class RatingPlotImageHook(
                 }catch(e: CancellationException){throw e}
                  catch(e: Exception){return@repeat}
                 if(response.code in 200..299) {
+                trace("MAL_REMOVE_VERIFY", "attempt=$attempt http=${response.code}")
                     val data=runCatching { JSONObject(response.text) }.getOrNull()
                     if(data!=null && (data.isNull("my_list_status") ||
                         !data.has("my_list_status")))return true
@@ -2532,6 +2634,7 @@ internal class RatingPlotImageHook(
             repo: com.lagradost.cloudstream3.syncproviders.SyncRepo
         ): Boolean {
             val status = when (expected.status) {
+            trace("KITSU_FALLBACK_BEGIN", "idHash=${id.hashCode()} status=${expected.status} watched=${expected.watchedEpisodes}")
                 SyncWatchType.WATCHING, SyncWatchType.REWATCHING -> "current"
                 SyncWatchType.COMPLETED -> "completed"
                 SyncWatchType.PLANTOWATCH -> "planned"
@@ -2567,6 +2670,7 @@ internal class RatingPlotImageHook(
                     else app.patch("$host/library-entries/$entry", headers=headers, requestBody=body)
 
                     if (response.code in 200..299) return true
+                    trace("KITSU_FALLBACK_HTTP", "host=${host.substringAfter("https://")} code=${response.code} created=${entry==null}")
                 } catch(e: CancellationException) { throw e }
                 catch(e: Exception) {
                 }
