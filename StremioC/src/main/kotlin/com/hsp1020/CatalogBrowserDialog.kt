@@ -50,8 +50,6 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.doOnNextLayout
 import androidx.core.view.doOnPreDraw
 import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsAnimationCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.navigation.NavController
 import androidx.navigation.fragment.NavHostFragment
@@ -803,8 +801,9 @@ internal class CatalogBrowserDialog(
     private var navigationSnapshot: BitmapDrawable? = null
     private var pendingSearchReturn: (() -> Unit)? = null
     private var pendingDestinationCheck: Runnable? = null
-    private var searchReturnCover: ColorDrawable? = null
     private var previousSearchSoftInput: Int? = null
+    private var suspendedForNavigation = false
+    private var searchFocusIssued = false
     private var originEntryId: String? = null
     private var searchReturnEntryId: String? = null
     private val windowBoundsListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
@@ -825,7 +824,22 @@ internal class CatalogBrowserDialog(
             returning != null && destination.id !in setOf(
                 R.id.navigation_results_phone, R.id.navigation_results_tv, R.id.navigation_player
             ) -> awaitDestination(destination.id, entryId)
-            returning == null && originEntryId != null && entryId != originEntryId ->
+            destination.id == R.id.navigation_home &&
+                (suspendedForNavigation || entryId != originEntryId) -> {
+                cancelDestinationCheck()
+                val selected = ViewModelProvider(activity)[HomeViewModel::class.java].apiName.value
+                if (selected != null && APIHolder.allProviders.none {
+                        it is StremioC && it.hasMainPage && it.name == selected
+                    }) dismiss()
+                else {
+                    suspendedForNavigation = false
+                    originEntryId = entryId
+                    dialog.show()
+                    fitWindowToNavigation(force = true)
+                }
+            }
+            suspendedForNavigation -> Unit
+            originEntryId != null && entryId != originEntryId ->
                 awaitDestination(destination.id, entryId)
         }
     }
@@ -891,6 +905,7 @@ internal class CatalogBrowserDialog(
     }
 
     private fun focusNativeSearch() {
+        if (searchFocusIssued) return
         val host = activity.supportFragmentManager
             .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment
         val fragment = host?.childFragmentManager?.primaryNavigationFragment as? QuickSearchFragment
@@ -904,6 +919,7 @@ internal class CatalogBrowserDialog(
             val input = search.findViewById<android.widget.EditText>(
                 androidx.appcompat.R.id.search_src_text
             )
+            searchFocusIssued = true
             (input ?: search).requestFocus()
             (activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
                 ?.showSoftInput(input ?: search, InputMethodManager.SHOW_IMPLICIT)
@@ -935,70 +951,45 @@ internal class CatalogBrowserDialog(
                 pendingDestinationCheck = null
                 if (destinationId == R.id.navigation_quick_search && searchReturnEntryId != null) {
                     dialog.hide()
-                    dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+                    releaseNavigation()
                     focusNativeSearch()
-                } else dismiss()
+                } else if (destinationId == R.id.navigation_home) {
+                    originEntryId = entryId
+                    dialog.show()
+                    fitWindowToNavigation(force = true)
+                } else {
+                    suspendedForNavigation = true
+                    dialog.hide()
+                    releaseNavigation()
+                }
             } else decor.postOnAnimation(check)
         }
         pendingDestinationCheck = check
         decor.postOnAnimation(check)
     }
 
-    private fun clearSearchReturnCover() {
-        searchReturnCover?.let { activity.window.decorView.overlay.remove(it) }
-        searchReturnCover = null
-    }
-
     private fun restoreSearchAfterIme() {
         pendingSearchReturn?.invoke()
-        clearSearchReturnCover()
-        val decor = activity.window.decorView
-        searchReturnCover = ColorDrawable(activity.colorFromAttribute(R.attr.primaryBlackBackground)).apply {
-            setBounds(0, 0, decor.width, decor.height)
-            decor.overlay.add(this)
-        }
-        val softInput = previousSearchSoftInput ?: activity.window.attributes.softInputMode
+        searchFocusIssued = false
+        previousSearchSoftInput?.let(activity.window::setSoftInputMode)
         previousSearchSoftInput = null
-        activity.window.setSoftInputMode(
-            (softInput and WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST) or
-                WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
-        )
-        activity.currentFocus?.clearFocus()
-        val navHost = activity.findViewById<View>(R.id.nav_host_fragment)
-        var imeAnimating = false
-        navHost?.let { view ->
-            ViewCompat.setWindowInsetsAnimationCallback(view,
-                object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
-                    override fun onPrepare(animation: WindowInsetsAnimationCompat) {
-                        if (animation.typeMask and WindowInsetsCompat.Type.ime() != 0)
-                            imeAnimating = true
-                    }
-                    override fun onProgress(
-                        insets: WindowInsetsCompat,
-                        runningAnimations: MutableList<WindowInsetsAnimationCompat>
-                    ): WindowInsetsCompat = insets
-                    override fun onEnd(animation: WindowInsetsAnimationCompat) {
-                        if (animation.typeMask and WindowInsetsCompat.Type.ime() != 0) {
-                            imeAnimating = false
-                            decor.postInvalidateOnAnimation()
-                        }
-                    }
-                })
+        dialog.window?.apply {
+            addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+            setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
         }
-        WindowInsetsControllerCompat(activity.window, decor).hide(WindowInsetsCompat.Type.ime())
+        dialog.show()
+        fitWindowToNavigation(force = true)
+        val decor = activity.window.decorView
         val tree = decor.viewTreeObserver
         if (!tree.isAlive) {
-            navHost?.let { ViewCompat.setWindowInsetsAnimationCallback(it, null) }
-            fitWindowToNavigation(force = true)
-            dialog.show()
-            clearSearchReturnCover()
+            dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
             return
         }
-        var settled = 0
+        var stable = 0
         lateinit var listener: ViewTreeObserver.OnPreDrawListener
         val release = {
             if (tree.isAlive) tree.removeOnPreDrawListener(listener)
-            navHost?.let { ViewCompat.setWindowInsetsAnimationCallback(it, null) }
+            if (!closed) dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
             pendingSearchReturn = null
         }
         listener = ViewTreeObserver.OnPreDrawListener {
@@ -1006,16 +997,10 @@ internal class CatalogBrowserDialog(
             val keyboard = insets?.isVisible(WindowInsetsCompat.Type.ime()) == true ||
                 (insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0) >
                 (insets?.getInsets(WindowInsetsCompat.Type.systemBars())?.bottom ?: 0) + dp(8)
-            settled = if (!keyboard && !imeAnimating) settled + 1 else 0
-            if (closed || navigation?.currentBackStackEntry?.id != originEntryId) {
-                release()
-                clearSearchReturnCover()
-            } else if (settled >= 3) {
-                release()
-                fitWindowToNavigation(force = true)
-                dialog.show()
-                root.doOnPreDraw { clearSearchReturnCover() }
-            } else decor.postInvalidateOnAnimation()
+            stable = if (!keyboard) stable + 1 else 0
+            if (closed || navigation?.currentBackStackEntry?.id != originEntryId ||
+                stable >= 3) release()
+            else decor.postInvalidateOnAnimation()
             true
         }
         pendingSearchReturn = release
@@ -1025,7 +1010,8 @@ internal class CatalogBrowserDialog(
 
     private fun fitWindowToNavigation(force: Boolean = false) {
         if (closed || (!dialog.isShowing && !force) ||
-            ((detailHandoff.isActive || pendingDestinationCheck != null) && !force)) return
+            ((detailHandoff.isActive || pendingDestinationCheck != null ||
+                suspendedForNavigation) && !force)) return
         val window = dialog.window ?: return
         val decor = activity.window.decorView
         val width = decor.width.takeIf { it > 0 } ?: activity.resources.displayMetrics.widthPixels
@@ -1071,14 +1057,15 @@ internal class CatalogBrowserDialog(
         }
         val origin = navigation?.currentBackStackEntry?.id ?: return
         searchReturnEntryId = origin
+        searchFocusIssued = false
         previousSearchSoftInput = activity.window.attributes.softInputMode
-        dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+        preserveNavigation()
         try {
             QuickSearchFragment.pushSearch(activity, "", providers)
         } catch (_: Exception) {
             searchReturnEntryId = null
             previousSearchSoftInput = null
-            dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
+            releaseNavigation()
             fitWindowToNavigation()
             Toast.makeText(activity, "Unable to open search.", Toast.LENGTH_SHORT).show()
         }
@@ -1153,9 +1140,10 @@ internal class CatalogBrowserDialog(
             orientation = LinearLayout.VERTICAL
             setPadding(dp(2), dp(8), dp(12), 0)
             setBackgroundColor(headerColor)
-            val labelInset = dp(48) +
-                (dp(82) - selectorLabelStyle.paint.measureText("Type") - dp(12))
-                    .roundToInt().coerceAtLeast(0)
+            val searchGap = (dp(82) -
+                selectorLabelStyle.paint.measureText("Type").roundToInt() - dp(12))
+                .coerceAtLeast(0) / 2
+            val labelInset = dp(48) + searchGap
             val search = ImageView(activity).apply {
                 setImageResource(R.drawable.search_icon)
                 imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.textColor))
@@ -1172,7 +1160,7 @@ internal class CatalogBrowserDialog(
             addView(LinearLayout(activity).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 addView(search, LinearLayout.LayoutParams(dp(48), dp(48)).apply {
-                    marginEnd = labelInset - dp(48)
+                    marginEnd = searchGap
                 })
                 addView(selectorRow("Type", typeSelector, typeArrow),
                     LinearLayout.LayoutParams(0, -2, 1f))
@@ -1272,7 +1260,6 @@ internal class CatalogBrowserDialog(
             activity.lifecycle.removeObserver(hostObserver)
             cancelDestinationCheck()
             pendingSearchReturn?.invoke()
-            clearSearchReturnCover()
             releaseNavigation()
             previousSearchSoftInput = null
             activity.supportFragmentManager.unregisterFragmentLifecycleCallbacks(searchFocusCallbacks)
