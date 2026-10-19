@@ -5,8 +5,9 @@ import android.app.Application
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
 import android.view.View
-import android.view.ViewTreeObserver
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
@@ -20,86 +21,104 @@ import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
+import java.util.IdentityHashMap
 
+/**
+ * Repairs a visibly stale first card only after its row and the new provider data
+ * have actually been attached. Never changes image caches or the shared view pool.
+ */
 internal class HomeRecyclerCacheGuard(
     private val application: Application
 ) : Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
-    private val audit = HomeTransitionAudit(main) { previousProvider }
     @Volatile private var enabled = false
-    private var transitionId = 0
+    private var started = false
     private var activity: FragmentActivity? = null
     private var model: HomeViewModel? = null
-    private var homeView: View? = null
-    private var homeFragment: Fragment? = null
+    private var fragment: Fragment? = null
     private var master: RecyclerView? = null
-    private val touchedChildren = LinkedHashSet<RecyclerView>()
     private var previousProvider: String? = null
-    private var switched = false
-    private var sawLoading = false
-    private var restoring = false
-    private var started = false
-    private var pendingDraw: ViewTreeObserver.OnPreDrawListener? = null
+    private var targetProvider: String? = null
+    private var latestPageReady = false
+    private var activeUntil = 0L
+    private var generation = 0
+    private val watchers = IdentityHashMap<RecyclerView, RowWatch>()
+    private val repairs = HashSet<String>()
 
-    private val providerObserver = Observer<String> { provider ->
-        val previous = previousProvider
-        if (previous != null && previous != provider) {
-            audit.transition(previous, provider)
-            HomeCacheTrace.snapshot("provider-before:$previous->$provider", provider, master)
-            beginSwitch()
-            HomeCacheTrace.snapshot("provider-after-prune:$previous->$provider", provider, master)
+    private val providerObserver = Observer<String> { next ->
+        val old = previousProvider
+        previousProvider = next
+        if (old != null && old != next) {
+            generation++
+            targetProvider = next
+            latestPageReady = false
+            activeUntil = SystemClock.uptimeMillis() + WINDOW_MS
+            repairs.clear()
+            // The old cards must never be refreshed with the new provider's identity.
+            clearRowWatchers()
         }
-        previousProvider = provider
     }
 
-    private val pageObserver = Observer<Resource<Map<String, HomeViewModel.ExpandableHomepageList>>> { resource ->
-        when (resource) {
-            is Resource.Loading -> audit.modelLoading()
-            is Resource.Success -> audit.modelSuccess(resource.value)
-            is Resource.Failure -> audit.modelFailure(resource.errorString)
-        }
-        if (!switched) return@Observer
-        when (resource) {
-            is Resource.Loading -> {
-                sawLoading = true
-                HomeCacheTrace.snapshot("model-loading-before-prune", previousProvider, master)
-                pruneOldViewCache()
-                HomeCacheTrace.snapshot("model-loading-after-prune", previousProvider, master)
-            }
+    private val pageObserver = Observer<Resource<Map<String, HomeViewModel.ExpandableHomepageList>>> { data ->
+        val target = targetProvider ?: return@Observer
+        when (data) {
+            is Resource.Loading -> latestPageReady = false
             is Resource.Success -> {
-                HomeCacheTrace.snapshot("model-success-before-commit", previousProvider, master)
-                val provider = previousProvider
-                val matchesProvider = resource.value.values.any { row ->
-                    row.list.list.firstOrNull()?.apiName == provider
+                // Ignore an outdated result from a provider that was just cancelled.
+                val values = data.value.values.flatMap { it.list.list.take(1) }
+                if (values.isNotEmpty() && values.none { it.apiName == target }) return@Observer
+                latestPageReady = true
+                activeUntil = SystemClock.uptimeMillis() + WINDOW_MS
+                val current = generation
+                // Parent AsyncListDiffer and child RecyclerViews can settle on different frames.
+                for (delay in CHECKPOINTS) {
+                    main.postDelayed({
+                        if (isCurrent(current)) scanVisibleRows(current)
+                    }, delay)
                 }
-                if (sawLoading || matchesProvider || resource.value.isEmpty()) finishAfterNextDraw()
+                main.postDelayed({
+                    if (generation == current) {
+                        clearRowWatchers()
+                        targetProvider = null
+                        latestPageReady = false
+                    }
+                }, WINDOW_MS + 500L)
             }
             is Resource.Failure -> {
-                HomeCacheTrace.snapshot("model-failure", previousProvider, master)
-                if (sawLoading) finishAfterNextDraw()
+                latestPageReady = false
+                targetProvider = null
+                clearRowWatchers()
             }
         }
     }
 
-    private val childrenListener = object : RecyclerView.OnChildAttachStateChangeListener {
+    private val parentAttachment = object : RecyclerView.OnChildAttachStateChangeListener {
         override fun onChildViewAttachedToWindow(view: View) {
-            if (switched) {
-                HomeCacheTrace.snapshot("row-child-attached", previousProvider, master)
-                findChildRecycler(view)?.let(::pruneChildCache)
+            if (!canCheck()) return
+            val current = generation
+            main.post {
+                if (isCurrent(current)) {
+                    watchRow(view)
+                    verifyVisible(current)
+                }
             }
         }
-        override fun onChildViewDetachedFromWindow(view: View) = Unit
+        override fun onChildViewDetachedFromWindow(view: View) {
+            view.findViewById<RecyclerView>(R.id.home_child_recyclerview)?.let { recycler ->
+                watchers.remove(recycler)?.close()
+            }
+        }
     }
 
-    private val fragmentListener = object : FragmentManager.FragmentLifecycleCallbacks() {
+    private val fragmentCallback = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
             fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?
         ) {
-            if (f.javaClass.name == HOME_CLASS) bindHome(f, v)
+            if (f.javaClass.name == HOME_CLASS) attachHome(f, v)
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
-            if (f === homeFragment) unbindHome()
+            if (f === fragment) detachHome()
         }
     }
 
@@ -109,8 +128,7 @@ internal class HomeRecyclerCacheGuard(
             if (!enabled || started) return@post
             started = true
             application.registerActivityLifecycleCallbacks(this)
-            (CommonActivity.activity as? MainActivity)?.let(::watchActivity)
-            HomeCacheTrace.info("hook-started", "registered=true")
+            (CommonActivity.activity as? MainActivity)?.let(::attachActivity)
         }
     }
 
@@ -120,174 +138,171 @@ internal class HomeRecyclerCacheGuard(
             if (!started) return@post
             started = false
             application.unregisterActivityLifecycleCallbacks(this)
-            clearActivity()
-            HomeCacheTrace.info("hook-stopped", "registered=false")
+            detachActivity()
         }
     }
 
-    private fun watchActivity(next: FragmentActivity) {
+    private fun attachActivity(next: FragmentActivity) {
         if (!started || activity === next) return
-        clearActivity()
+        detachActivity()
         activity = next
         val vm = ViewModelProvider(next)[HomeViewModel::class.java]
         model = vm
         previousProvider = vm.apiName.value
-        next.supportFragmentManager.registerFragmentLifecycleCallbacks(fragmentListener, true)
+        next.supportFragmentManager.registerFragmentLifecycleCallbacks(fragmentCallback, true)
         vm.apiName.observe(next, providerObserver)
         vm.page.observe(next, pageObserver)
         fun scan(fm: FragmentManager) {
             fm.fragments.forEach { f ->
-                if (f.javaClass.name == HOME_CLASS) f.view?.let { bindHome(f, it) }
+                if (f.javaClass.name == HOME_CLASS) f.view?.let { attachHome(f, it) }
                 if (f.isAdded) scan(f.childFragmentManager)
             }
         }
         scan(next.supportFragmentManager)
     }
 
-    private fun clearActivity() {
-        transitionId++
+    private fun detachActivity() {
+        generation++
         model?.apiName?.removeObserver(providerObserver)
         model?.page?.removeObserver(pageObserver)
-        activity?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentListener)
-        unbindHome()
+        activity?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)
+        detachHome()
         model = null
         activity = null
         previousProvider = null
-        switched = false
-        sawLoading = false
+        targetProvider = null
+        latestPageReady = false
+        repairs.clear()
     }
 
-    private fun bindHome(fragment: Fragment, root: View) {
-        if (homeView === root) return
-        unbindHome()
-        homeFragment = fragment
-        homeView = root
-        master = root.findViewById<RecyclerView>(R.id.home_master_recycler)?.also {
-            it.addOnChildAttachStateChangeListener(childrenListener)
-        }
-        audit.attach(master)
-        if (switched) pruneOldViewCache()
+    private fun attachHome(homeFragment: Fragment, root: View) {
+        val recycler = root.findViewById<RecyclerView>(R.id.home_master_recycler)
+        if (fragment === homeFragment && master === recycler) return
+        detachHome()
+        fragment = homeFragment
+        master = recycler
+        recycler?.addOnChildAttachStateChangeListener(parentAttachment)
     }
 
-    private fun unbindHome() {
-        audit.detach()
-        cancelDraw()
-        restoreCaches()
-        master?.removeOnChildAttachStateChangeListener(childrenListener)
+    private fun detachHome() {
+        clearRowWatchers()
+        master?.removeOnChildAttachStateChangeListener(parentAttachment)
         master = null
-        homeView = null
-        homeFragment = null
+        fragment = null
     }
 
-    private fun beginSwitch() {
-        transitionId++
-        cancelDraw()
-        switched = true
-        sawLoading = false
-        pruneOldViewCache()
+    private fun canCheck(): Boolean =
+        started && latestPageReady && targetProvider != null &&
+            SystemClock.uptimeMillis() <= activeUntil
+
+    private fun isCurrent(seq: Int): Boolean = generation == seq && canCheck()
+
+    private fun clearRowWatchers() {
+        watchers.values.toList().forEach { it.close() }
+        watchers.clear()
     }
 
-    private fun findChildRecycler(row: View): RecyclerView? =
-        row.findViewById(R.id.home_child_recyclerview)
-
-    private fun pruneChildCache(recycler: RecyclerView) {
-        touchedChildren.add(recycler)
-        recycler.setItemViewCacheSize(0)
-    }
-
-    private fun pruneOldViewCache() {
-        val parent = master ?: return
-        parent.setItemViewCacheSize(0)
-        for (index in 0 until parent.childCount) {
-            findChildRecycler(parent.getChildAt(index))?.let(::pruneChildCache)
+    private fun watchRow(row: View) {
+        val recycler = row.findViewById<RecyclerView>(R.id.home_child_recyclerview) ?: return
+        val watcher = watchers[recycler]
+        if (watcher == null) {
+            RowWatch(recycler).also {
+                watchers[recycler] = it
+                it.start()
+            }
+        } else {
+            watcher.sync()
         }
     }
 
-    private fun finishAfterNextDraw() {
-        if (!switched || restoring) return
-        val parent = master ?: run {
-            switched = false
-            sawLoading = false
+    private inner class RowWatch(private val recycler: RecyclerView) {
+        private var adapter: RecyclerView.Adapter<*>? = null
+        private val events = object : RecyclerView.AdapterDataObserver() {
+            override fun onChanged() = queue()
+            override fun onItemRangeInserted(start: Int, count: Int) = queue()
+            override fun onItemRangeRemoved(start: Int, count: Int) = queue()
+            override fun onItemRangeChanged(start: Int, count: Int) = queue()
+            override fun onItemRangeChanged(start: Int, count: Int, payload: Any?) = queue()
+            override fun onItemRangeMoved(fromPosition: Int, toPosition: Int, itemCount: Int) = queue()
+        }
+        private val attachments = object : RecyclerView.OnChildAttachStateChangeListener {
+            override fun onChildViewAttachedToWindow(view: View) = queue()
+            override fun onChildViewDetachedFromWindow(view: View) = Unit
+        }
+        private fun queue() {
+            val seq = generation
+            recycler.post {
+                if (isCurrent(seq)) verifyVisible(seq)
+            }
+        }
+        fun start() {
+            recycler.addOnChildAttachStateChangeListener(attachments)
+            sync()
+            queue()
+        }
+        fun sync() {
+            val next = recycler.adapter
+            if (adapter === next) return
+            adapter?.unregisterAdapterDataObserver(events)
+            adapter = next
+            next?.registerAdapterDataObserver(events)
+            queue()
+        }
+        fun close() {
+            adapter?.unregisterAdapterDataObserver(events)
+            adapter = null
+            recycler.removeOnChildAttachStateChangeListener(attachments)
+        }
+    }
+
+    private fun scanVisibleRows(seq: Int) {
+        if (!isCurrent(seq)) return
+        val outer = master ?: return
+        for (i in 0 until outer.childCount) watchRow(outer.getChildAt(i))
+        verifyVisible(seq)
+    }
+
+    private fun verifyVisible(seq: Int) {
+        if (!isCurrent(seq)) return
+        val outer = master ?: return
+        if (outer.isComputingLayout) {
+            outer.post { if (isCurrent(seq)) verifyVisible(seq) }
             return
         }
-        restoring = true
-        val finishId = transitionId
-        val listener = object : ViewTreeObserver.OnPreDrawListener {
-            override fun onPreDraw(): Boolean {
-                cancelDraw()
-                parent.post {
-                    if (finishId != transitionId || master !== parent || !started) return@post
-                    audit.phase("draw-before-restore")
-                    HomeCacheTrace.snapshot("draw-before-restore", previousProvider, parent)
-                    restoreCaches()
-                    repairStaleFirstCards(parent)
-                    HomeCacheTrace.snapshot("draw-after-repair", previousProvider, parent)
-                    audit.phase("draw-after-repair")
-                    for (delay in listOf(120L, 500L, 1500L)) {
-                        main.postDelayed({
-                            if (finishId == transitionId && master === parent && started) {
-                                HomeCacheTrace.snapshot("settled-$delay", previousProvider, parent)
-                                audit.phase("settled-$delay")
-                            }
-                        }, delay)
-                    }
-                    switched = false
-                    sawLoading = false
-                    restoring = false
-                }
-                return true
-            }
-        }
-        pendingDraw = listener
-        parent.viewTreeObserver.takeIf { it.isAlive }?.addOnPreDrawListener(listener)
-            ?: run {
-                restoring = false
-                restoreCaches()
-                switched = false
-                sawLoading = false
-            }
-    }
-
-    private fun cancelDraw() {
-        pendingDraw?.let { listener ->
-            master?.viewTreeObserver?.let { observer ->
-                if (observer.isAlive) observer.removeOnPreDrawListener(listener)
-            }
-        }
-        pendingDraw = null
-        restoring = false
-    }
-
-    private fun restoreCaches() {
-        master?.setItemViewCacheSize(DEFAULT_CACHE_SIZE)
-        touchedChildren.forEach { it.setItemViewCacheSize(DEFAULT_CACHE_SIZE) }
-        touchedChildren.clear()
-    }
-
-    private fun repairStaleFirstCards(parent: RecyclerView) {
-        for (rowIndex in 0 until parent.childCount) {
-            val child = findChildRecycler(parent.getChildAt(rowIndex)) ?: continue
+        for (rowIndex in 0 until outer.childCount) {
+            val child = outer.getChildAt(rowIndex).findViewById<RecyclerView>(
+                R.id.home_child_recyclerview
+            ) ?: continue
             val adapter = child.adapter as? HomeChildItemAdapter ?: continue
-            for (index in 0 until minOf(DEFAULT_CACHE_SIZE, adapter.itemCount)) {
-                val holder = child.findViewHolderForAdapterPosition(index) ?: continue
-                val shown = holder.itemView.findViewById<TextView>(R.id.imageText)?.text?.toString()
-                val expected = adapter.getItemOrNull(index)?.name
-                if (shown != null && expected != null && shown != expected) {
-                    HomeCacheTrace.info("repair", "index=$index actual=$shown expected=$expected")
-                    adapter.notifyItemChanged(index)
+            if (child.isComputingLayout) continue
+            for (position in 0 until minOf(2, adapter.itemCount)) {
+                val item = adapter.getItemOrNull(position) ?: continue
+                val holder = child.findViewHolderForAdapterPosition(position) ?: continue
+                val displayed = holder.itemView.findViewById<TextView>(R.id.imageText)
+                    ?.text?.toString() ?: continue
+                if (displayed == item.name) continue
+                val key = "${System.identityHashCode(holder.itemView)}:$position:${item.url}"
+                if (!repairs.add(key)) continue
+                Log.w(
+                    TAG, "provider=${targetProvider} row=$rowIndex position=$position " +
+                        "old=$displayed expected=${item.name} holder=${System.identityHashCode(holder)}"
+                )
+                // Never notify while an adapter is computing a layout.
+                child.post {
+                    if (!isCurrent(seq) || child.isComputingLayout) return@post
+                    if (adapter !== child.adapter || adapter.getItemOrNull(position)?.url != item.url) return@post
+                    adapter.notifyItemChanged(position)
                 }
             }
         }
     }
 
     override fun onActivityResumed(activity: Activity) {
-        if (activity is MainActivity) watchActivity(activity)
+        if (activity is MainActivity) attachActivity(activity)
     }
-
     override fun onActivityDestroyed(activity: Activity) {
-        if (this.activity === activity) clearActivity()
+        if (this.activity === activity) detachActivity()
     }
-
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
     override fun onActivityStarted(activity: Activity) = Unit
     override fun onActivityPaused(activity: Activity) = Unit
@@ -295,7 +310,9 @@ internal class HomeRecyclerCacheGuard(
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
 
     private companion object {
-        const val DEFAULT_CACHE_SIZE = 2
+        const val TAG = "ELEVATE_HOME_FIX"
+        const val WINDOW_MS = 12_000L
         const val HOME_CLASS = "com.lagradost.cloudstream3.ui.home.HomeFragment"
+        val CHECKPOINTS = longArrayOf(0, 60, 150, 300, 600, 1_200, 2_500, 4_000, 7_000, 11_000)
     }
 }
