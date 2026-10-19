@@ -25,6 +25,7 @@ internal class HomeRecyclerCacheGuard(
     private val application: Application
 ) : Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
+    private val audit = HomeTransitionAudit(main) { previousProvider }
     @Volatile private var enabled = false
     private var transitionId = 0
     private var activity: FragmentActivity? = null
@@ -43,6 +44,7 @@ internal class HomeRecyclerCacheGuard(
     private val providerObserver = Observer<String> { provider ->
         val previous = previousProvider
         if (previous != null && previous != provider) {
+            audit.transition(previous, provider)
             HomeCacheTrace.snapshot("provider-before:$previous->$provider", provider, master)
             beginSwitch()
             HomeCacheTrace.snapshot("provider-after-prune:$previous->$provider", provider, master)
@@ -51,6 +53,11 @@ internal class HomeRecyclerCacheGuard(
     }
 
     private val pageObserver = Observer<Resource<Map<String, HomeViewModel.ExpandableHomepageList>>> { resource ->
+        when (resource) {
+            is Resource.Loading -> audit.modelLoading()
+            is Resource.Success -> audit.modelSuccess(resource.value)
+            is Resource.Failure -> audit.modelFailure(resource.errorString)
+        }
         if (!switched) return@Observer
         when (resource) {
             is Resource.Loading -> {
@@ -158,10 +165,12 @@ internal class HomeRecyclerCacheGuard(
         master = root.findViewById<RecyclerView>(R.id.home_master_recycler)?.also {
             it.addOnChildAttachStateChangeListener(childrenListener)
         }
+        audit.attach(master)
         if (switched) pruneOldViewCache()
     }
 
     private fun unbindHome() {
+        audit.detach()
         cancelDraw()
         restoreCaches()
         master?.removeOnChildAttachStateChangeListener(childrenListener)
@@ -208,14 +217,17 @@ internal class HomeRecyclerCacheGuard(
                 cancelDraw()
                 parent.post {
                     if (finishId != transitionId || master !== parent || !started) return@post
+                    audit.phase("draw-before-restore")
                     HomeCacheTrace.snapshot("draw-before-restore", previousProvider, parent)
                     restoreCaches()
                     repairStaleFirstCards(parent)
                     HomeCacheTrace.snapshot("draw-after-repair", previousProvider, parent)
+                    audit.phase("draw-after-repair")
                     for (delay in listOf(120L, 500L, 1500L)) {
                         main.postDelayed({
                             if (finishId == transitionId && master === parent && started) {
                                 HomeCacheTrace.snapshot("settled-$delay", previousProvider, parent)
+                                audit.phase("settled-$delay")
                             }
                         }, delay)
                     }
