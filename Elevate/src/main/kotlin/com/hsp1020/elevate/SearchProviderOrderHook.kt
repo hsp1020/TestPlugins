@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
+import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -31,7 +32,6 @@ import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
-import androidx.recyclerview.widget.AsyncListDiffer
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -41,7 +41,6 @@ import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.R
-import com.lagradost.cloudstream3.ui.BaseAdapter
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.ui.home.ParentItemAdapter
 import com.lagradost.cloudstream3.ui.search.ExpandableSearchList
@@ -53,7 +52,6 @@ import com.lagradost.cloudstream3.utils.DataStoreHelper
 import com.lagradost.cloudstream3.utils.USER_PINNED_PROVIDERS
 import com.lagradost.cloudstream3.utils.AppContextUtils.filterSearchResultByFilmQuality
 import org.json.JSONArray
-import java.util.concurrent.CopyOnWriteArrayList
 
 internal class SearchProviderOrderHook(private val app: Application) :
     Application.ActivityLifecycleCallbacks {
@@ -65,10 +63,15 @@ internal class SearchProviderOrderHook(private val app: Application) :
     private var home: HomeScreen? = null
     private var search: SearchScreen? = null
     private var pinnedPrefs: SharedPreferences? = null
+    private var traceSeq = 0
     private val pinListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key == USER_PINNED_PROVIDERS) handler.post { syncSearchPins() }
+        if (key == USER_PINNED_PROVIDERS) {
+            trace("PIN_PREF_EVENT", "newPinned=${DataStoreHelper.pinnedProviders.toList()}")
+            handler.post { syncSearchPins() }
+        }
     }
-    private val pluginListener: (Boolean) -> Unit = {
+    private val pluginListener: (Boolean) -> Unit = { loaded ->
+        trace("PLUGIN_EVENT", "loaded=${loaded} allProviders=${APIHolder.allProviders.size}")
         handler.post {
             if (started) {
                 syncSearchPins()
@@ -78,16 +81,22 @@ internal class SearchProviderOrderHook(private val app: Application) :
     }
 
     private fun relatedSearchProviders(home: MainAPI): List<MainAPI> {
-        val source = home.sourcePlugin ?: return emptyList()
-        if (home.mainUrl.isBlank()) return emptyList()
-        return APIHolder.allProviders.filter {
-            !it.hasMainPage && it.mainUrl == home.mainUrl && it.sourcePlugin == source
-        }
+        val source = home.sourcePlugin
+        val url = home.mainUrl
+        val related = if (source == null || url.isBlank()) emptyList() else
+            APIHolder.allProviders.filter { !it.hasMainPage && it.mainUrl == url && it.sourcePlugin == source }
+        val sameUrl = APIHolder.allProviders.filter { !it.hasMainPage && it.mainUrl == url }.map { it.name }
+        val samePlugin = APIHolder.allProviders.filter { !it.hasMainPage && it.sourcePlugin == source }.map { it.name }
+        trace("LINK", "home=${providerLabel(home)} matches=${related.map { it.name }} sameUrlChildren=$sameUrl samePluginChildren=$samePlugin")
+        return related
     }
 
     private fun syncSearchPins() {
+        trace("PIN_CALL", "started=$started")
         if (!started) return
+        dumpProviders("PIN_REGISTRY")
         val pinned = DataStoreHelper.pinnedProviders.toList()
+        trace("PIN_START", "pinned=$pinned managedSaved=${prefs.getStringSet("managed_search_pins", null)}")
         val homeByName = APIHolder.allProviders.filter { it.hasMainPage }.associateBy { it.name }
         val previouslyManaged = if (prefs.contains("managed_search_pins")) {
             prefs.getStringSet("managed_search_pins", emptySet())?.toSet().orEmpty()
@@ -104,6 +113,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
             }
         }
         val original = pinned.filterNot { it in previouslyManaged }
+        trace("PIN_MANAGED", "managedBefore=$previouslyManaged original=$original")
         val explicitNames = original.toHashSet()
         val newlyManaged = mutableSetOf<String>()
         val target = mutableListOf<String>()
@@ -125,7 +135,40 @@ internal class SearchProviderOrderHook(private val app: Application) :
                 prefs.edit().putStringSet("managed_search_pins", newlyManaged).apply()
             }
         }
+        trace("PIN_TARGET", "before=$pinned after=$target managedNew=$newlyManaged writing=${target != pinned}")
         if (target != pinned) DataStoreHelper.pinnedProviders = target.toTypedArray()
+        trace("PIN_FINISHED", "actual=${DataStoreHelper.pinnedProviders.toList()} managedStored=${prefs.getStringSet("managed_search_pins", null)}")
+    }
+
+    private fun trace(stage: String, message: String) {
+        Log.i("ElevateOrderTrace", "${++traceSeq} [$stage] $message")
+    }
+
+    private fun providerLabel(provider: MainAPI): String {
+        val url = provider.mainUrl
+        val source = provider.sourcePlugin
+        val urlKey = if (url.isBlank()) "empty" else "${url.hashCode().toString(16)}:len${url.length}"
+        val sourceKey = source?.let { "${it.substringAfterLast('/')}:hash${it.hashCode().toString(16)}" } ?: "null"
+        return "name=${provider.name} home=${provider.hasMainPage} source=$sourceKey urlKey=$urlKey"
+    }
+
+    private fun dumpProviders(stage: String) {
+        trace(stage, "registrationCount=${APIHolder.allProviders.size} storedHomeOrder=$order pinned=${DataStoreHelper.pinnedProviders.toList()}")
+        APIHolder.allProviders.forEachIndexed { i, provider ->
+            trace(stage, "registry[$i] ${providerLabel(provider)}")
+        }
+    }
+
+    private fun describeRank(name: String): String {
+        val matches = APIHolder.allProviders.withIndex().filter { it.value.name == name }
+        val provider = matches.firstOrNull()?.value
+        val possibleHomes = if (provider == null) emptyList() else
+            APIHolder.allProviders.filter { it.hasMainPage &&
+                (it.mainUrl == provider.mainUrl || it.sourcePlugin == provider.sourcePlugin) }
+                .map { "${it.name}(urlSame=${it.mainUrl == provider.mainUrl},sourceSame=${it.sourcePlugin == provider.sourcePlugin},savedPos=${order.indexOf(it.name)})" }
+        return "name=$name computedRank=${rank(name)} directSavedPos=${order.indexOf(name)} pinnedPos=${DataStoreHelper.pinnedProviders.indexOf(name)} " +
+            "registryPos=${matches.map { it.index }} provider=${provider?.let(::providerLabel) ?: "MISSING"} " +
+            "candidateHomes=$possibleHomes"
     }
 
     private data class Row(val name: String, val nativeIndex: Int)
@@ -137,13 +180,16 @@ internal class SearchProviderOrderHook(private val app: Application) :
                 val name = saved.optString(i)
                 if (name.isNotBlank() && name !in order) order.add(name)
             }
-        }
+        }.onFailure { trace("INIT_ERROR", "error=${it.javaClass.simpleName} msg=${it.message}") }
+        trace("INIT", "persistedHomeOrder=$order rawSaved=${prefs.getString("providers", null)}")
     }
 
     fun start() {
         handler.post {
             if (started) return@post
             started = true
+            trace("START", "hookStarted=true savedOrder=$order")
+            dumpProviders("START_REGISTRY")
             pinnedPrefs = app.getSharedPrefs().also {
                 it.registerOnSharedPreferenceChangeListener(pinListener)
             }
@@ -157,6 +203,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
     fun stop() {
         handler.post {
             if (!started) return@post
+            trace("STOP", "hookStopping=true savedOrder=$order")
             started = false
             pinnedPrefs?.unregisterOnSharedPreferenceChangeListener(pinListener)
             pinnedPrefs = null
@@ -183,15 +230,21 @@ internal class SearchProviderOrderHook(private val app: Application) :
     }
 
     private fun saveVisible(visible: List<String>) {
+        trace("HOME_SAVE_START", "requestedVisible=$visible oldOrder=$order")
+        dumpProviders("HOME_SAVE_REGISTRY")
         val all = (order + APIHolder.allProviders.filter { it.hasMainPage }
             .map { it.name }.sortedBy { it.lowercase() }).distinct().toMutableList()
         val names = visible.toSet()
         val positions = all.indices.filter { all[it] in names }
-        if (positions.size != visible.size) return
+        if (positions.size != visible.size) {
+            trace("HOME_SAVE_REJECT", "positions=$positions visible=$visible all=$all")
+            return
+        }
         positions.forEachIndexed { index, pos -> all[pos] = visible[index] }
         order.clear()
         order.addAll(all)
         prefs.edit().putString("providers", JSONArray(order).toString()).apply()
+        trace("HOME_SAVE_DONE", "newOrder=$order prefsValue=${prefs.getString("providers", null)}")
         search?.refresh()
     }
 
@@ -218,6 +271,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
     }
 
     private fun attachActivity(next: FragmentActivity) {
+        trace("ATTACH_ACTIVITY", "started=$started alreadySame=${activity === next} activity=${next.javaClass.simpleName}")
         if (!started || activity === next) return
         detachActivity()
         activity = next
@@ -246,12 +300,14 @@ internal class SearchProviderOrderHook(private val app: Application) :
     }
 
     private fun attachHome(fragment: Fragment, root: View) {
+        trace("ATTACH_HOME", "class=${fragment.javaClass.name} same=${home?.fragment === fragment && home?.root === root}")
         if (home?.fragment === fragment && home?.root === root) return
         home?.close()
         home = HomeScreen(fragment, root).also { it.open() }
     }
 
     private fun attachSearch(fragment: Fragment, root: View) {
+        trace("ATTACH_SEARCH", "class=${fragment.javaClass.name} same=${search?.fragment === fragment && search?.root === root}")
         if (search?.fragment === fragment && search?.root === root) return
         search?.close()
         search = SearchScreen(fragment, root).also { it.open() }
@@ -260,8 +316,6 @@ internal class SearchProviderOrderHook(private val app: Application) :
     private inner class SearchScreen(val fragment: Fragment, val root: View) {
         private val recycler = root.findViewById<RecyclerView>(R.id.search_master_recycler)
         private var vm: SearchViewModel? = null
-        private var differOwner: ParentItemAdapter? = null
-        private var orderedDiffer: AsyncListDiffer<HomeViewModel.ExpandableHomepageList>? = null
         private val tv = isLayout(TV)
         private var followTop = true
         private var manuallyFocused = false
@@ -269,7 +323,68 @@ internal class SearchProviderOrderHook(private val app: Application) :
         private var updating = false
         private var autoProvider: String? = null
         private var lastQuery: String? = null
+        private var observation = 0
+        private var snapshotCount = 0
         private val focusTree = root.viewTreeObserver
+
+        private fun snapshot(stage: String, id: Int = observation) {
+            if (snapshotCount++ > 100) return
+            val list = recycler
+            val adapter = list?.adapter as? ParentItemAdapter
+            val layout = list?.layoutManager as? LinearLayoutManager
+            val focused = root.findFocus()
+            val focusedParent = runCatching {
+                focused?.let { list?.findContainingViewHolder(it)?.bindingAdapterPosition }
+            }.getOrNull()
+            trace(stage, "id=$id adapter=${list?.adapter?.javaClass?.name} rowCount=${adapter?.itemCount} " +
+                "firstVisible=${layout?.findFirstVisibleItemPosition()} lastVisible=${layout?.findLastVisibleItemPosition()} " +
+                "scrollState=${list?.scrollState} rootShown=${root.isShown} listShown=${list?.isShown} " +
+                "focusedView=${focused?.javaClass?.simpleName} focusRow=$focusedParent manuallyFocused=$manuallyFocused " +
+                "autoProvider=$autoProvider saved=$order pinned=${DataStoreHelper.pinnedProviders.toList()}")
+            adapter?.immutableCurrentList?.forEachIndexed { index, item ->
+                trace(stage, "id=$id adapterRow[$index]=${item.list.name} resultCount=${item.list.list.size} rank=${rank(item.list.name)}")
+            }
+            if (list != null && adapter != null) {
+                for (i in 0 until list.childCount) {
+                    val child = list.getChildAt(i)
+                    val pos = list.getChildAdapterPosition(child)
+                    val label = adapter.getItemOrNull(pos)?.list?.name
+                    trace(stage, "id=$id visibleRow[$i] adapterPos=$pos name=$label top=${child.top} bottom=${child.bottom} hasFocus=${child.hasFocus()}")
+                }
+            }
+        }
+
+        private fun checkpoints(id: Int, stage: String) {
+            recycler?.post {
+                if (search === this && fragment.view === root) snapshot("${stage}_FRAME", id)
+            }
+            handler.postDelayed({
+                if (search === this && fragment.view === root) snapshot("${stage}_250MS", id)
+            }, 250L)
+            handler.postDelayed({
+                if (search === this && fragment.view === root) snapshot("${stage}_1200MS", id)
+            }, 1200L)
+        }
+
+        private val adapterWatch = object : RecyclerView.AdapterDataObserver() {
+            override fun onChanged() { snapshot("ADAPTER_CHANGED") }
+            override fun onItemRangeInserted(positionStart: Int, itemCount: Int) {
+                trace("ADAPTER_INSERT", "at=$positionStart count=$itemCount")
+                snapshot("ADAPTER_INSERT_STATE")
+            }
+            override fun onItemRangeRemoved(positionStart: Int, itemCount: Int) {
+                trace("ADAPTER_REMOVE", "at=$positionStart count=$itemCount")
+                snapshot("ADAPTER_REMOVE_STATE")
+            }
+            override fun onItemRangeMoved(fromPosition: Int, toPosition: Int, itemCount: Int) {
+                trace("ADAPTER_MOVE", "from=$fromPosition to=$toPosition count=$itemCount")
+                snapshot("ADAPTER_MOVE_STATE")
+            }
+            override fun onItemRangeChanged(positionStart: Int, itemCount: Int) {
+                trace("ADAPTER_UPDATE", "at=$positionStart count=$itemCount")
+                snapshot("ADAPTER_UPDATE_STATE")
+            }
+        }
 
         private fun inside(view: View?, parent: View?): Boolean {
             var current = view
@@ -281,9 +396,12 @@ internal class SearchProviderOrderHook(private val app: Application) :
         }
 
         private val focusWatch = ViewTreeObserver.OnGlobalFocusChangeListener { old, next ->
+            trace("TV_FOCUS_CHANGE", "old=${old?.javaClass?.simpleName} next=${next?.javaClass?.simpleName} " +
+                "oldList=${inside(old, recycler)} newList=${inside(next, recycler)} changing=$changingFocus updating=$updating")
             if (tv && !changingFocus && !updating && old != null &&
                 (inside(old, recycler) || inside(next, recycler))) {
                 manuallyFocused = true
+                trace("TV_MANUAL_FOCUS", "manual=true")
             }
         }
         private val layoutWatch = ViewTreeObserver.OnGlobalLayoutListener { focusBestProvider() }
@@ -299,10 +417,14 @@ internal class SearchProviderOrderHook(private val app: Application) :
             val index = adapter.immutableCurrentList.indexOfFirst { it.list.list.isNotEmpty() }
             if (index < 0) return
             val provider = adapter.getItem(index).list.name
+            trace("TV_TARGET", "index=$index provider=$provider autoWas=$autoProvider")
             val holder = list.findViewHolderForAdapterPosition(index)
             if (holder == null) {
                 if ((list.layoutManager as? LinearLayoutManager)
-                    ?.findFirstVisibleItemPosition() != index) list.scrollToPosition(index)
+                    ?.findFirstVisibleItemPosition() != index) {
+                    trace("TV_SCROLL_TARGET", "index=$index provider=$provider holderMissing=true")
+                    list.scrollToPosition(index)
+                }
                 return
             }
             if (provider == autoProvider && inside(focused, holder.itemView)) return
@@ -310,7 +432,9 @@ internal class SearchProviderOrderHook(private val app: Application) :
             val poster = row?.findViewHolderForAdapterPosition(0)?.itemView ?: return
             changingFocus = true
             try {
-                if (poster.requestFocus()) autoProvider = provider
+                val success = poster.requestFocus()
+                trace("TV_REQUEST_FOCUS", "index=$index provider=$provider result=$success")
+                if (success) autoProvider = provider
             } finally {
                 changingFocus = false
             }
@@ -318,6 +442,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
 
         private val scroll = object : RecyclerView.OnScrollListener() {
             override fun onScrollStateChanged(view: RecyclerView, state: Int) {
+                trace("SCROLL_STATE", "state=$state first=${(view.layoutManager as? LinearLayoutManager)?.findFirstVisibleItemPosition()} followTop=$followTop tv=$tv")
                 if (state != RecyclerView.SCROLL_STATE_IDLE) {
                     followTop = false
                 } else {
@@ -326,32 +451,21 @@ internal class SearchProviderOrderHook(private val app: Application) :
                 }
             }
         }
-        private fun submitInProviderOrder(
-            adapter: ParentItemAdapter,
-            items: List<HomeViewModel.ExpandableHomepageList>,
-            committed: Runnable
-        ) {
-            if (differOwner !== adapter) {
-                differOwner = adapter
-                orderedDiffer = runCatching {
-                    val field = BaseAdapter::class.java.declaredFields.first {
-                        AsyncListDiffer::class.java.isAssignableFrom(it.type)
-                    }.apply { isAccessible = true }
-                    @Suppress("UNCHECKED_CAST")
-                    (field.get(adapter) as AsyncListDiffer<HomeViewModel.ExpandableHomepageList>)
-                }.getOrNull()
-            }
-            val differ = orderedDiffer
-            if (differ != null) {
-                differ.submitList(if (items.isEmpty()) null else CopyOnWriteArrayList(items), committed)
-            } else {
-                adapter.submitList(items, committed)
-            }
-        }
-
         private val changes = Observer<Map<String, ExpandableSearchList>> { lists ->
-            val context = fragment.context ?: return@Observer
-            val adapter = recycler?.adapter as? ParentItemAdapter ?: return@Observer
+            val id = ++observation
+            val queryView = root.findViewById<SearchView>(R.id.main_search)?.query?.toString().orEmpty()
+            trace("SEARCH_EMIT", "id=$id queryHash=${queryView.hashCode().toString(16)} queryLength=${queryView.length} " +
+                "incomingCount=${lists.size} nativePinned=${DataStoreHelper.pinnedProviders.toList()} homeSaved=$order")
+            lists.entries.forEachIndexed { pos, entry ->
+                trace("SEARCH_INPUT", "id=$id arrivalPos=$pos name=${entry.key} resultCount=${entry.value.list.size} " +
+                    "page=${entry.value.currentPage} hasNext=${entry.value.hasNext} ${describeRank(entry.key)}")
+            }
+            val context = fragment.context
+            val adapter = recycler?.adapter as? ParentItemAdapter
+            if (context == null || adapter == null) {
+                trace("SEARCH_SKIP", "id=$id contextNull=${context == null} adapter=${recycler?.adapter?.javaClass?.name}")
+                return@Observer
+            }
             val rows = lists.entries.sortedWith(
                 compareBy<Map.Entry<String, ExpandableSearchList>> { rank(it.key) }
                     .thenBy { entry ->
@@ -366,6 +480,10 @@ internal class SearchProviderOrderHook(private val app: Application) :
                     value.hasNext
                 )
             }
+            rows.forEachIndexed { pos, row ->
+                trace("SEARCH_SORTED", "id=$id sortedPos=$pos name=${row.list.name} count=${row.list.list.size} rank=${rank(row.list.name)}")
+            }
+            snapshot("SEARCH_BEFORE_SUBMIT", id)
             val query = root.findViewById<SearchView>(R.id.main_search)?.query?.toString()
             if (lists.isEmpty() || query != lastQuery) {
                 followTop = true
@@ -373,9 +491,13 @@ internal class SearchProviderOrderHook(private val app: Application) :
                 autoProvider = null
             }
             lastQuery = query
+            trace("SEARCH_SUBMIT", "id=$id targetOrder=${rows.map { it.list.name }} adapterBefore=${adapter.immutableCurrentList.map { it.list.name }}")
             updating = true
-            submitInProviderOrder(adapter, rows, Runnable {
+            adapter.submitList(rows, Runnable {
                 updating = false
+                trace("SEARCH_COMMITTED", "id=$id afterNative=${adapter.immutableCurrentList.map { it.list.name }}")
+                snapshot("SEARCH_COMMIT_STATE", id)
+                checkpoints(id, "SEARCH_COMMIT")
                 if (tv) {
                     focusBestProvider()
                 } else if (followTop && search === this@SearchScreen &&
@@ -383,29 +505,43 @@ internal class SearchProviderOrderHook(private val app: Application) :
                     recycler.scrollToPosition(0)
                 }
             })
+            checkpoints(id, "SEARCH_EMIT")
         }
 
         fun open() {
+            trace("SEARCH_SCREEN_OPEN", "tv=$tv root=${root.javaClass.name} recyclerFound=${recycler != null} visible=${recycler?.isShown}")
             root.post {
-                if (search !== this || fragment.view !== root) return@post
+                if (search !== this || fragment.view !== root) {
+                    trace("SEARCH_SCREEN_ABORT", "screenChanged=${search !== this} rootChanged=${fragment.view !== root}")
+                    return@post
+                }
                 runCatching {
                     val model = ViewModelProvider(fragment.requireActivity())[SearchViewModel::class.java]
                     vm = model
+                    trace("SEARCH_VM_BOUND", "model=${model.javaClass.name} adapter=${recycler?.adapter?.javaClass?.name}")
+                    dumpProviders("SEARCH_REGISTRY")
+                    recycler?.adapter?.registerAdapterDataObserver(adapterWatch)
                     recycler?.addOnScrollListener(scroll)
+                    snapshot("SEARCH_BOUND")
                     if (tv && focusTree.isAlive) {
                         focusTree.addOnGlobalFocusChangeListener(focusWatch)
                         focusTree.addOnGlobalLayoutListener(layoutWatch)
                     }
                     model.currentSearch.observe(fragment.viewLifecycleOwner, changes)
+                }.onFailure {
+                    trace("SEARCH_OPEN_ERROR", "error=${it.javaClass.name} message=${it.message}")
                 }
             }
         }
 
         fun refresh() {
+            trace("SEARCH_REFRESH", "vm=${vm != null} currentKeys=${vm?.currentSearch?.value?.keys}")
             vm?.currentSearch?.value?.let(changes::onChanged)
         }
 
         fun close() {
+            trace("SEARCH_CLOSE", "observations=$observation snapshots=$snapshotCount")
+            recycler?.adapter?.unregisterAdapterDataObserver(adapterWatch)
             recycler?.removeOnScrollListener(scroll)
             if (tv && focusTree.isAlive) {
                 focusTree.removeOnGlobalFocusChangeListener(focusWatch)
@@ -413,8 +549,6 @@ internal class SearchProviderOrderHook(private val app: Application) :
             }
             vm?.currentSearch?.removeObserver(changes)
             vm = null
-            differOwner = null
-            orderedDiffer = null
         }
     }
 
@@ -429,6 +563,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
         )
 
         fun open() {
+            trace("HOME_SCREEN_OPEN", "selectors=${selectors.size} stored=$order")
             root.viewTreeObserver.addOnWindowFocusChangeListener(windowFocus)
             selectors.forEach { button ->
                 button.setOnTouchListener { _, event ->
@@ -479,6 +614,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
                     val row = runCatching { adapter.getView(0, null, list) }.getOrNull()
                     row?.findViewById<View>(R.id.pinicon) != null
                 } ?: return
+            trace("HOME_POPUP_FOUND", "nativeCount=${native.adapter?.count} samePopup=${popup?.native === native}")
             if (popup?.native === native) return
             popup?.close()
             popup = Popup(native).also {
@@ -512,6 +648,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
             }
 
             fun open() {
+                trace("HOME_POPUP_OPEN", "nativeCount=${native.adapter?.count} currentSaved=$order")
                 val frame = native.parent as? FrameLayout ?: return
                 list.adapter = adapter
                 frame.addView(list, frame.indexOfChild(native) + 1, FrameLayout.LayoutParams(
@@ -580,21 +717,29 @@ internal class SearchProviderOrderHook(private val app: Application) :
                             else names.firstOrNull { label.endsWith(it) } ?: label
                         Row(name, index)
                     }
+                    next.forEachIndexed { position, row ->
+                        trace("HOME_NATIVE_ROW", "nativePos=$position label=${source.getItem(position)} parsedName=${row.name} ${describeRank(row.name)}")
+                    }
                     val specials = next.take(2)
                     val ordered = next.drop(2).sortedWith(
                         compareBy<Row> { rank(it.name) }.thenBy { it.name.lowercase() }
                     )
                     entries.clear()
                     entries.addAll(specials + ordered)
+                    entries.forEachIndexed { index, row ->
+                        trace("HOME_DISPLAY_ROW", "displayPos=$index name=${row.name} nativePos=${row.nativeIndex} rank=${rank(row.name)}")
+                    }
                     adapter.notifyDataSetChanged()
                 }
             }
 
             private fun saveOrder() {
+                trace("HOME_SAVE_INVOKED", "rowOrder=${entries.map { it.name }}")
                 saveVisible(entries.drop(2).map { it.name })
             }
 
             private fun move(name: String, destination: Int) {
+                trace("HOME_MOVE_REQUEST", "name=$name destination=$destination existing=${entries.map { it.name }}")
                 val from = entries.indexOfFirst { it.name == name }
                 if (from < 2) return
                 val to = destination.coerceIn(2, entries.lastIndex)
