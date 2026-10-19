@@ -36,17 +36,20 @@ class ElevatePlugin : Plugin() {
     private var pipSubtitles: PipSubtitleLifecycle? = null
     private var episodeProgress: EpisodeProgressHook? = null
     private var subtitleRetry: SubtitleRefererRetry? = null
+    private var homeRecyclerGuard: HomeRecyclerCacheGuard? = null
 
     override fun load(context: Context) {
         hook?.stop()
         pipSubtitles?.stop()
         episodeProgress?.stop()
         subtitleRetry?.stop()
+        homeRecyclerGuard?.stop()
         val application = context.applicationContext as? Application
         hook = application?.let { NativeDetailSearchHook(it).also(NativeDetailSearchHook::start) }
         pipSubtitles = application?.let { PipSubtitleLifecycle(it) { true }.also { service -> service.start() } }
         episodeProgress = application?.let { EpisodeProgressHook(it).also(EpisodeProgressHook::start) }
         subtitleRetry = application?.let { SubtitleRefererRetry(it).also(SubtitleRefererRetry::start) }
+        homeRecyclerGuard = application?.let { HomeRecyclerCacheGuard(it).also(HomeRecyclerCacheGuard::start) }
     }
 
     override fun beforeUnload() {
@@ -58,6 +61,8 @@ class ElevatePlugin : Plugin() {
         episodeProgress = null
         subtitleRetry?.stop()
         subtitleRetry = null
+        homeRecyclerGuard?.stop()
+        homeRecyclerGuard = null
         super.beforeUnload()
     }
 }

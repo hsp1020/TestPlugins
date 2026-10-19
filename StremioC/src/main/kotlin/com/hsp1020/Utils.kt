@@ -737,44 +737,6 @@ internal class RatingPlotImageHook(
     private val homeEntries = CatalogHomeEntryHook(openCatalog, ::bindHomePreview, ::bindPhoneHero)
     private var homeRoot: View? = null
     private var removeHomeProviderObserver: (() -> Unit)? = null
-    private var removeHomePageObserver: (() -> Unit)? = null
-    private var previousHomeProvider: String? = null
-    private var homeSwapPending = false
-    private var originalHomeRecycler: RecyclerView? = null
-
-    private fun homeRecycler(): RecyclerView? =
-        homeRoot?.findViewById(R.id.home_master_recycler)
-
-    private fun onHomeProviderChanged(name: String?) {
-        val previous = previousHomeProvider
-        if (previous != null && name != previous) {
-            homeSwapPending = true
-            homeRecycler()?.let { recycler ->
-                recycler.setItemViewCacheSize(0)
-                recycler.recycledViewPool.clear()
-                originalHomeRecycler = recycler
-            }
-        }
-        previousHomeProvider = name
-        syncHomeHooks()
-    }
-
-    private fun finishHomeProviderSwap(clearPool: Boolean) {
-        if (!homeSwapPending) return
-        homeSwapPending = false
-        val recycler = homeRecycler()
-        if (clearPool) recycler?.recycledViewPool?.clear()
-        originalHomeRecycler?.setItemViewCacheSize(2)
-        originalHomeRecycler = null
-    }
-
-    private fun onHomePageChanged(result: Resource<Map<String, HomeViewModel.ExpandableHomepageList>>) {
-        if (!homeSwapPending) return
-        if (result is Resource.Success || result is Resource.Failure) {
-            finishHomeProviderSwap(clearPool = true)
-        }
-    }
-
     private fun syncHomeHooks() {
         val activity = host
         val selected = activity?.let { ViewModelProvider(it)[HomeViewModel::class.java].apiName.value }
@@ -1039,10 +1001,6 @@ internal class RatingPlotImageHook(
         StremioCMdbUiBridge.listen(null)
         removeHomeProviderObserver?.invoke()
         removeHomeProviderObserver = null
-        removeHomePageObserver?.invoke()
-        removeHomePageObserver = null
-        finishHomeProviderSwap(clearPool = false)
-        previousHomeProvider = null
         homeRoot = null
         homeEntries.detach()
         detachPreview()
@@ -1061,10 +1019,6 @@ internal class RatingPlotImageHook(
         scrobble.detach()
         removeHomeProviderObserver?.invoke()
         removeHomeProviderObserver = null
-        removeHomePageObserver?.invoke()
-        removeHomePageObserver = null
-        finishHomeProviderSwap(clearPool = false)
-        previousHomeProvider = null
         homeRoot = null
         homeEntries.detach()
         detachPreview()
@@ -1074,14 +1028,9 @@ internal class RatingPlotImageHook(
         host = activity
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragmentCallback, true)
         val homeModel = ViewModelProvider(activity)[HomeViewModel::class.java]
-        val homeObserver = Observer<String?> { onHomeProviderChanged(it) }
+        val homeObserver = Observer<String?> { syncHomeHooks() }
         homeModel.apiName.observe(activity, homeObserver)
         removeHomeProviderObserver = { homeModel.apiName.removeObserver(homeObserver) }
-        val homePageObserver = Observer<Resource<Map<String, HomeViewModel.ExpandableHomepageList>>> {
-            onHomePageChanged(it)
-        }
-        homeModel.page.observe(activity, homePageObserver)
-        removeHomePageObserver = { homeModel.page.removeObserver(homePageObserver) }
         observePreview(activity)
         fun scan(fm: FragmentManager) {
             fm.fragments.forEach { f ->
