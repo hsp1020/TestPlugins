@@ -54,7 +54,6 @@ class StremioCPlugin : Plugin() {
     private var isUnloaded = false
     private val ratingUiHandler = Handler(Looper.getMainLooper())
     private var ratingPlotHook: RatingPlotImageHook? = null
-    private var homeCatalogDiagnostics: HomeCatalogDiagnostics? = null
     private var activeSettingsDialog: SettingsBottomFragment? = null
     private var activeBrowser: CatalogBrowserDialog? = null
     private val registeredProviders = mutableListOf<StremioC>()
@@ -249,10 +248,6 @@ class StremioCPlugin : Plugin() {
         watchPinnedProviders(appContext)
 
         ratingUiHandler.post {
-            homeCatalogDiagnostics?.stop()
-            homeCatalogDiagnostics = (appContext as? android.app.Application)?.let { application ->
-                HomeCatalogDiagnostics(application).also { it.start() }
-            }
             runCatching { ratingPlotHook?.stop() }
             ratingPlotHook = resources?.let { pluginResources ->
                 runCatching {
@@ -324,8 +319,6 @@ class StremioCPlugin : Plugin() {
         pinSourcePrefs = null
         pinStatePrefs = null
         ratingUiHandler.post {
-            homeCatalogDiagnostics?.stop()
-            homeCatalogDiagnostics = null
             activeBrowser?.dismiss()
             activeBrowser = null
             activeSettingsDialog?.dismiss()
