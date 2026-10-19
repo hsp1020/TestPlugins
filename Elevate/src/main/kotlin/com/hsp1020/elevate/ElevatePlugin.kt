@@ -18,7 +18,6 @@ import androidx.fragment.app.FragmentManager
 import androidx.navigation.NavOptions
 import androidx.navigation.fragment.NavHostFragment
 import com.google.android.material.navigation.NavigationBarView
-import com.hsp1020.pip.PipSubtitleLifecycle
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R

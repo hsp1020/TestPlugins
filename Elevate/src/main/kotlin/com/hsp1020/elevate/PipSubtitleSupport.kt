@@ -1,4 +1,4 @@
-package com.hsp1020.pip
+package com.hsp1020.elevate
 
 import android.app.Activity
 import android.app.Application

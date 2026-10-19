@@ -19,6 +19,7 @@ import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.getActivity
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.ui.subtitles.SUBTITLE_AUTO_SELECT_KEY
+import com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.CoroutineScope
