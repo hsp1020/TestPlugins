@@ -283,13 +283,16 @@ internal class SearchProviderOrderHook(private val app: Application) :
             private var touchHelper: ItemTouchHelper? = null
             private var data: DataSetObserver? = null
             private var queued = false
+            private var closed = false
             private val oldVisibility = native.visibility
             private val detach = object : View.OnAttachStateChangeListener {
                 override fun onViewAttachedToWindow(view: View) = Unit
                 override fun onViewDetachedFromWindow(view: View) {
-                    if (popup === this@Popup) {
-                        popup = null
-                        close()
+                    handler.post {
+                        if (popup === this@Popup) {
+                            popup = null
+                            close()
+                        }
                     }
                 }
             }
@@ -337,13 +340,15 @@ internal class SearchProviderOrderHook(private val app: Application) :
             }
 
             fun close() {
+                if (closed) return
+                closed = true
                 native.removeOnAttachStateChangeListener(detach)
                 data?.let { observer -> native.adapter?.unregisterDataSetObserver(observer) }
                 data = null
                 touchHelper?.attachToRecyclerView(null)
                 touchHelper = null
                 (list.parent as? ViewGroup)?.removeView(list)
-                native.visibility = oldVisibility
+                if (native.isAttachedToWindow) native.visibility = oldVisibility
             }
 
             private fun update() {
@@ -405,6 +410,10 @@ internal class SearchProviderOrderHook(private val app: Application) :
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         minimumHeight = dp(52)
+                        layoutParams = RecyclerView.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
                     }
                     val handle = TextView(context).apply {
                         text = "≡"
