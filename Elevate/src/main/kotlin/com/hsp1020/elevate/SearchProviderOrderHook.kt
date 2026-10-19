@@ -80,12 +80,22 @@ internal class SearchProviderOrderHook(private val app: Application) :
         }
     }
 
+    private fun sameProviderEndpoint(left: String, right: String): Boolean {
+        if (left.isBlank() || right.isBlank()) return false
+        fun normalized(value: String): String {
+            val parts = value.trim().split('?', limit = 2)
+            val base = parts[0].trimEnd('/').removeSuffix("/manifest.json").trimEnd('/')
+            return base + (parts.getOrNull(1)?.let { "?" + it } ?: "")
+        }
+        return normalized(left) == normalized(right)
+    }
+
     private fun relatedSearchProviders(home: MainAPI): List<MainAPI> {
         val source = home.sourcePlugin
         val url = home.mainUrl
         val related = if (source == null || url.isBlank()) emptyList() else
-            APIHolder.allProviders.filter { !it.hasMainPage && it.mainUrl == url && it.sourcePlugin == source }
-        val sameUrl = APIHolder.allProviders.filter { !it.hasMainPage && it.mainUrl == url }.map { it.name }
+            APIHolder.allProviders.filter { !it.hasMainPage && sameProviderEndpoint(it.mainUrl, url) && it.sourcePlugin == source }
+        val sameUrl = APIHolder.allProviders.filter { !it.hasMainPage && sameProviderEndpoint(it.mainUrl, url) }.map { it.name }
         val samePlugin = APIHolder.allProviders.filter { !it.hasMainPage && it.sourcePlugin == source }.map { it.name }
         trace("LINK", "home=${providerLabel(home)} matches=${related.map { it.name }} sameUrlChildren=$sameUrl samePluginChildren=$samePlugin")
         return related
@@ -222,7 +232,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
         }
         return APIHolder.allProviders.asSequence()
             .filter {
-                it.hasMainPage && it.mainUrl == child.mainUrl &&
+                it.hasMainPage && sameProviderEndpoint(it.mainUrl, child.mainUrl) &&
                     it.sourcePlugin == child.sourcePlugin
             }
             .map { order.indexOf(it.name) }.filter { it >= 0 }
@@ -726,6 +736,10 @@ internal class SearchProviderOrderHook(private val app: Application) :
                     )
                     entries.clear()
                     entries.addAll(specials + ordered)
+                    if (order.isEmpty() && entries.size > 2) {
+                        trace("HOME_INITIAL_ORDER", "persist first displayed numbers")
+                        saveVisible(entries.drop(2).map { it.name })
+                    }
                     entries.forEachIndexed { index, row ->
                         trace("HOME_DISPLAY_ROW", "displayPos=$index name=${row.name} nativePos=${row.nativeIndex} rank=${rank(row.name)}")
                     }
@@ -744,6 +758,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
                 if (from < 2) return
                 val to = destination.coerceIn(2, entries.lastIndex)
                 if (from == to) {
+                    saveOrder()
                     adapter.notifyItemChanged(from)
                     return
                 }
