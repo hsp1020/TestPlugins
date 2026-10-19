@@ -339,7 +339,17 @@ internal class SearchProviderOrderHook(private val app: Application) :
         private var lastQuery: String? = null
         private var observation = 0
         private var snapshotCount = 0
+        private var snapshotRetryQueued = false
         private val focusTree = root.viewTreeObserver
+
+        private fun retrySearchSnapshot() {
+            if (snapshotRetryQueued) return
+            snapshotRetryQueued = true
+            handler.postDelayed({
+                snapshotRetryQueued = false
+                if (search === this && fragment.view === root) refresh()
+            }, 50L)
+        }
 
         private fun snapshot(stage: String, id: Int = observation) {
             if (snapshotCount++ > 100) return
@@ -468,11 +478,20 @@ internal class SearchProviderOrderHook(private val app: Application) :
         private val changes = Observer<Map<String, ExpandableSearchList>> { lists ->
             val id = ++observation
             val queryView = root.findViewById<SearchView>(R.id.main_search)?.query?.toString().orEmpty()
+            val stableEntries = try {
+                lists.entries.map { (name, value) ->
+                    name to ExpandableSearchList(value.list.toList(), value.currentPage, value.hasNext)
+                }
+            } catch (error: ConcurrentModificationException) {
+                trace("SEARCH_MAP_RACE", "id=$id map changed while taking snapshot; retry scheduled")
+                retrySearchSnapshot()
+                return@Observer
+            }
             trace("SEARCH_EMIT", "id=$id queryHash=${queryView.hashCode().toString(16)} queryLength=${queryView.length} " +
-                "incomingCount=${lists.size} nativePinned=${DataStoreHelper.pinnedProviders.toList()} homeSaved=$order")
-            lists.entries.forEachIndexed { pos, entry ->
-                trace("SEARCH_INPUT", "id=$id arrivalPos=$pos name=${entry.key} resultCount=${entry.value.list.size} " +
-                    "page=${entry.value.currentPage} hasNext=${entry.value.hasNext} ${describeRank(entry.key)}")
+                "incomingCount=${stableEntries.size} nativePinned=${DataStoreHelper.pinnedProviders.toList()} homeSaved=$order")
+            stableEntries.forEachIndexed { pos, (name, value) ->
+                trace("SEARCH_INPUT", "id=$id arrivalPos=$pos name=$name resultCount=${value.list.size} " +
+                    "page=${value.currentPage} hasNext=${value.hasNext} ${describeRank(name)}")
             }
             val context = fragment.context
             val adapter = recycler?.adapter as? ParentItemAdapter
@@ -480,13 +499,13 @@ internal class SearchProviderOrderHook(private val app: Application) :
                 trace("SEARCH_SKIP", "id=$id contextNull=${context == null} adapter=${recycler?.adapter?.javaClass?.name}")
                 return@Observer
             }
-            val rows = lists.entries.sortedWith(
-                compareBy<Map.Entry<String, ExpandableSearchList>> { rank(it.key) }
+            val rows = stableEntries.sortedWith(
+                compareBy<Pair<String, ExpandableSearchList>> { rank(it.first) }
                     .thenBy { entry ->
-                        APIHolder.allProviders.indexOfFirst { it.name == entry.key }
+                        APIHolder.allProviders.indexOfFirst { it.name == entry.first }
                             .takeIf { it >= 0 } ?: Int.MAX_VALUE
                     }
-                    .thenBy { it.key.lowercase() }
+                    .thenBy { it.first.lowercase() }
             ).map { (name, value) ->
                 HomeViewModel.ExpandableHomepageList(
                     HomePageList(name, context.filterSearchResultByFilmQuality(value.list)),
@@ -499,7 +518,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
             }
             snapshot("SEARCH_BEFORE_SUBMIT", id)
             val query = root.findViewById<SearchView>(R.id.main_search)?.query?.toString()
-            if (lists.isEmpty() || query != lastQuery) {
+            if (stableEntries.isEmpty() || query != lastQuery) {
                 followTop = true
                 manuallyFocused = false
                 autoProvider = null
@@ -549,7 +568,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
         }
 
         fun refresh() {
-            trace("SEARCH_REFRESH", "vm=${vm != null} currentKeys=${vm?.currentSearch?.value?.keys}")
+            trace("SEARCH_REFRESH", "vm=${vm != null} currentSize=${vm?.currentSearch?.value?.size}")
             vm?.currentSearch?.value?.let(changes::onChanged)
         }
 
