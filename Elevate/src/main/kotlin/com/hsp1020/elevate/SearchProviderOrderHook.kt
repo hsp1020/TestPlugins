@@ -418,7 +418,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
                         inputType = InputType.TYPE_CLASS_NUMBER
                         imeOptions = EditorInfo.IME_ACTION_DONE
                         setSingleLine(true)
-                        selectAllOnFocus = true
+                        setSelectAllOnFocus(true)
                         if (context.resources.configuration.uiMode and
                                 android.content.res.Configuration.UI_MODE_TYPE_MASK ==
                             android.content.res.Configuration.UI_MODE_TYPE_TELEVISION) {
