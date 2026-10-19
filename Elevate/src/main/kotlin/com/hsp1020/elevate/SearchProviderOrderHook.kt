@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.SharedPreferences
 import android.database.DataSetObserver
 import android.os.Build
 import android.os.Bundle
@@ -24,6 +25,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
+import androidx.appcompat.widget.SearchView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
@@ -36,11 +38,17 @@ import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.MainActivity
+import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.ui.home.ParentItemAdapter
 import com.lagradost.cloudstream3.ui.search.ExpandableSearchList
 import com.lagradost.cloudstream3.ui.search.SearchViewModel
+import com.lagradost.cloudstream3.ui.settings.Globals.TV
+import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
+import com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs
+import com.lagradost.cloudstream3.utils.DataStoreHelper
+import com.lagradost.cloudstream3.utils.USER_PINNED_PROVIDERS
 import com.lagradost.cloudstream3.utils.AppContextUtils.filterSearchResultByFilmQuality
 import org.json.JSONArray
 
@@ -53,6 +61,69 @@ internal class SearchProviderOrderHook(private val app: Application) :
     private var activity: FragmentActivity? = null
     private var home: HomeScreen? = null
     private var search: SearchScreen? = null
+    private var pinnedPrefs: SharedPreferences? = null
+    private val pinListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == USER_PINNED_PROVIDERS) handler.post { syncSearchPins() }
+    }
+    private val pluginListener: (Boolean) -> Unit = {
+        handler.post {
+            if (started) {
+                syncSearchPins()
+                search?.refresh()
+            }
+        }
+    }
+
+    private fun relatedSearchProviders(home: MainAPI): List<MainAPI> {
+        val source = home.sourcePlugin ?: return emptyList()
+        if (home.mainUrl.isBlank()) return emptyList()
+        return APIHolder.allProviders.filter {
+            !it.hasMainPage && it.mainUrl == home.mainUrl && it.sourcePlugin == source
+        }
+    }
+
+    private fun syncSearchPins() {
+        if (!started) return
+        val pinned = DataStoreHelper.pinnedProviders.toList()
+        val homeByName = APIHolder.allProviders.filter { it.hasMainPage }.associateBy { it.name }
+        val previouslyManaged = if (prefs.contains("managed_search_pins")) {
+            prefs.getStringSet("managed_search_pins", emptySet())?.toSet().orEmpty()
+        } else {
+            buildSet {
+                pinned.forEachIndexed { index, name ->
+                    val home = homeByName[name] ?: return@forEachIndexed
+                    val expected = relatedSearchProviders(home).asReversed().map { it.name }
+                    if (expected.isNotEmpty() && index >= expected.size &&
+                        pinned.subList(index - expected.size, index) == expected) {
+                        addAll(expected)
+                    }
+                }
+            }
+        }
+        val original = pinned.filterNot { it in previouslyManaged }
+        val explicitNames = original.toHashSet()
+        val newlyManaged = mutableSetOf<String>()
+        val target = mutableListOf<String>()
+        for (name in original) {
+            homeByName[name]?.let { home ->
+                for (child in relatedSearchProviders(home).asReversed()) {
+                    if (child.name !in explicitNames && newlyManaged.add(child.name)) {
+                        target.add(child.name)
+                    }
+                }
+            }
+            target.add(name)
+        }
+        if (prefs.contains("managed_search_pins") ||
+            newlyManaged.isNotEmpty() || previouslyManaged.isNotEmpty()) {
+            if (previouslyManaged != newlyManaged) {
+                prefs.edit().putStringSet("managed_search_pins", newlyManaged).apply()
+            } else if (!prefs.contains("managed_search_pins")) {
+                prefs.edit().putStringSet("managed_search_pins", newlyManaged).apply()
+            }
+        }
+        if (target != pinned) DataStoreHelper.pinnedProviders = target.toTypedArray()
+    }
 
     private data class Row(val name: String, val nativeIndex: Int)
 
@@ -70,7 +141,12 @@ internal class SearchProviderOrderHook(private val app: Application) :
         handler.post {
             if (started) return@post
             started = true
+            pinnedPrefs = app.getSharedPrefs().also {
+                it.registerOnSharedPreferenceChangeListener(pinListener)
+            }
+            MainActivity.afterPluginsLoadedEvent += pluginListener
             app.registerActivityLifecycleCallbacks(this)
+            syncSearchPins()
             (CommonActivity.activity as? MainActivity)?.let(::attachActivity)
         }
     }
@@ -79,14 +155,28 @@ internal class SearchProviderOrderHook(private val app: Application) :
         handler.post {
             if (!started) return@post
             started = false
+            pinnedPrefs?.unregisterOnSharedPreferenceChangeListener(pinListener)
+            pinnedPrefs = null
+            MainActivity.afterPluginsLoadedEvent -= pluginListener
             app.unregisterActivityLifecycleCallbacks(this)
             detachActivity()
         }
     }
 
     private fun rank(name: String): Int {
-        val index = order.indexOf(name)
-        return if (index < 0) Int.MAX_VALUE else index
+        val direct = order.indexOf(name)
+        if (direct >= 0) return direct
+        val child = APIHolder.allProviders.firstOrNull { it.name == name } ?: return Int.MAX_VALUE
+        if (child.hasMainPage || child.mainUrl.isBlank() || child.sourcePlugin == null) {
+            return Int.MAX_VALUE
+        }
+        return APIHolder.allProviders.asSequence()
+            .filter {
+                it.hasMainPage && it.mainUrl == child.mainUrl &&
+                    it.sourcePlugin == child.sourcePlugin
+            }
+            .map { order.indexOf(it.name) }.filter { it >= 0 }
+            .minOrNull() ?: Int.MAX_VALUE
     }
 
     private fun saveVisible(visible: List<String>) {
@@ -167,7 +257,60 @@ internal class SearchProviderOrderHook(private val app: Application) :
     private inner class SearchScreen(val fragment: Fragment, val root: View) {
         private val recycler = root.findViewById<RecyclerView>(R.id.search_master_recycler)
         private var vm: SearchViewModel? = null
+        private val tv = isLayout(TV)
         private var followTop = true
+        private var manuallyFocused = false
+        private var changingFocus = false
+        private var updating = false
+        private var autoProvider: String? = null
+        private var lastQuery: String? = null
+        private val focusTree = root.viewTreeObserver
+
+        private fun inside(view: View?, parent: View?): Boolean {
+            var current = view
+            while (current != null) {
+                if (current === parent) return true
+                current = current.parent as? View
+            }
+            return false
+        }
+
+        private val focusWatch = ViewTreeObserver.OnGlobalFocusChangeListener { old, next ->
+            if (tv && !changingFocus && !updating && old != null &&
+                (inside(old, recycler) || inside(next, recycler))) {
+                manuallyFocused = true
+            }
+        }
+        private val layoutWatch = ViewTreeObserver.OnGlobalLayoutListener { focusBestProvider() }
+
+        private fun focusBestProvider() {
+            val list = recycler ?: return
+            if (!tv || manuallyFocused || updating || !list.isShown ||
+                search !== this || fragment.view !== root) return
+            val focused = root.findFocus()
+            val searchBox = root.findViewById<View>(R.id.main_search)
+            if (focused != null && !inside(focused, list) && !inside(focused, searchBox)) return
+            val adapter = list.adapter as? ParentItemAdapter ?: return
+            val index = adapter.immutableCurrentList.indexOfFirst { it.list.list.isNotEmpty() }
+            if (index < 0) return
+            val provider = adapter.getItem(index).list.name
+            val holder = list.findViewHolderForAdapterPosition(index)
+            if (holder == null) {
+                if ((list.layoutManager as? LinearLayoutManager)
+                    ?.findFirstVisibleItemPosition() != index) list.scrollToPosition(index)
+                return
+            }
+            if (provider == autoProvider && inside(focused, holder.itemView)) return
+            val row = holder.itemView.findViewById<RecyclerView>(R.id.home_child_recyclerview)
+            val poster = row?.findViewHolderForAdapterPosition(0)?.itemView ?: return
+            changingFocus = true
+            try {
+                if (poster.requestFocus()) autoProvider = provider
+            } finally {
+                changingFocus = false
+            }
+        }
+
         private val scroll = object : RecyclerView.OnScrollListener() {
             override fun onScrollStateChanged(view: RecyclerView, state: Int) {
                 if (state != RecyclerView.SCROLL_STATE_IDLE) {
@@ -183,6 +326,10 @@ internal class SearchProviderOrderHook(private val app: Application) :
             val adapter = recycler?.adapter as? ParentItemAdapter ?: return@Observer
             val rows = lists.entries.sortedWith(
                 compareBy<Map.Entry<String, ExpandableSearchList>> { rank(it.key) }
+                    .thenBy { entry ->
+                        APIHolder.allProviders.indexOfFirst { it.name == entry.key }
+                            .takeIf { it >= 0 } ?: Int.MAX_VALUE
+                    }
                     .thenBy { it.key.lowercase() }
             ).map { (name, value) ->
                 HomeViewModel.ExpandableHomepageList(
@@ -191,9 +338,19 @@ internal class SearchProviderOrderHook(private val app: Application) :
                     value.hasNext
                 )
             }
-            if (lists.isEmpty()) followTop = true
+            val query = root.findViewById<SearchView>(R.id.main_search)?.query?.toString()
+            if (lists.isEmpty() || query != lastQuery) {
+                followTop = true
+                manuallyFocused = false
+                autoProvider = null
+            }
+            lastQuery = query
+            updating = true
             adapter.submitList(rows, Runnable {
-                if (followTop && search === this@SearchScreen &&
+                updating = false
+                if (tv) {
+                    focusBestProvider()
+                } else if (followTop && search === this@SearchScreen &&
                     recycler?.scrollState == RecyclerView.SCROLL_STATE_IDLE) {
                     recycler.scrollToPosition(0)
                 }
@@ -207,6 +364,10 @@ internal class SearchProviderOrderHook(private val app: Application) :
                     val model = ViewModelProvider(fragment.requireActivity())[SearchViewModel::class.java]
                     vm = model
                     recycler?.addOnScrollListener(scroll)
+                    if (tv && focusTree.isAlive) {
+                        focusTree.addOnGlobalFocusChangeListener(focusWatch)
+                        focusTree.addOnGlobalLayoutListener(layoutWatch)
+                    }
                     model.currentSearch.observe(fragment.viewLifecycleOwner, changes)
                 }
             }
@@ -218,6 +379,10 @@ internal class SearchProviderOrderHook(private val app: Application) :
 
         fun close() {
             recycler?.removeOnScrollListener(scroll)
+            if (tv && focusTree.isAlive) {
+                focusTree.removeOnGlobalFocusChangeListener(focusWatch)
+                focusTree.removeOnGlobalLayoutListener(layoutWatch)
+            }
             vm?.currentSearch?.removeObserver(changes)
             vm = null
         }
