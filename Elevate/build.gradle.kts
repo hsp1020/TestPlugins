@@ -12,4 +12,5 @@ dependencies {
     compileOnly("androidx.navigation:navigation-common:2.9.8")
     compileOnly("androidx.navigation:navigation-fragment:2.9.8")
     compileOnly("androidx.media3:media3-ui:1.9.3")
+    compileOnly("org.jetbrains.kotlinx:kotlinx-collections-immutable-jvm:0.4.0")
 }
