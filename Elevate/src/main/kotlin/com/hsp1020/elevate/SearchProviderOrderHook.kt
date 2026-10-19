@@ -410,6 +410,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
                         orientation = LinearLayout.HORIZONTAL
                         gravity = Gravity.CENTER_VERTICAL
                         minimumHeight = dp(52)
+                        setPadding(dp(8), 0, 0, 0)
                         layoutParams = RecyclerView.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.WRAP_CONTENT
@@ -480,6 +481,10 @@ internal class SearchProviderOrderHook(private val app: Application) :
                     val original = native.adapter?.getView(item.nativeIndex, null, native) ?: return
                     holder.content.removeAllViews()
                     (original.parent as? ViewGroup)?.removeView(original)
+                    original.findViewById<TextView>(R.id.text1)?.apply {
+                        setCompoundDrawablesRelative(null, null, null, null)
+                        setPaddingRelative(0, paddingTop, paddingEnd, paddingBottom)
+                    }
                     holder.content.addView(original, FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
                     ))
