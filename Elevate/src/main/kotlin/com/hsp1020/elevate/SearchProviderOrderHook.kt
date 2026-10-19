@@ -31,6 +31,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
+import androidx.recyclerview.widget.AsyncListDiffer
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -40,6 +41,7 @@ import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.ui.BaseAdapter
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.ui.home.ParentItemAdapter
 import com.lagradost.cloudstream3.ui.search.ExpandableSearchList
@@ -51,6 +53,7 @@ import com.lagradost.cloudstream3.utils.DataStoreHelper
 import com.lagradost.cloudstream3.utils.USER_PINNED_PROVIDERS
 import com.lagradost.cloudstream3.utils.AppContextUtils.filterSearchResultByFilmQuality
 import org.json.JSONArray
+import java.util.concurrent.CopyOnWriteArrayList
 
 internal class SearchProviderOrderHook(private val app: Application) :
     Application.ActivityLifecycleCallbacks {
@@ -257,6 +260,8 @@ internal class SearchProviderOrderHook(private val app: Application) :
     private inner class SearchScreen(val fragment: Fragment, val root: View) {
         private val recycler = root.findViewById<RecyclerView>(R.id.search_master_recycler)
         private var vm: SearchViewModel? = null
+        private var differOwner: ParentItemAdapter? = null
+        private var orderedDiffer: AsyncListDiffer<HomeViewModel.ExpandableHomepageList>? = null
         private val tv = isLayout(TV)
         private var followTop = true
         private var manuallyFocused = false
@@ -321,6 +326,29 @@ internal class SearchProviderOrderHook(private val app: Application) :
                 }
             }
         }
+        private fun submitInProviderOrder(
+            adapter: ParentItemAdapter,
+            items: List<HomeViewModel.ExpandableHomepageList>,
+            committed: Runnable
+        ) {
+            if (differOwner !== adapter) {
+                differOwner = adapter
+                orderedDiffer = runCatching {
+                    val field = BaseAdapter::class.java.declaredFields.first {
+                        AsyncListDiffer::class.java.isAssignableFrom(it.type)
+                    }.apply { isAccessible = true }
+                    @Suppress("UNCHECKED_CAST")
+                    (field.get(adapter) as AsyncListDiffer<HomeViewModel.ExpandableHomepageList>)
+                }.getOrNull()
+            }
+            val differ = orderedDiffer
+            if (differ != null) {
+                differ.submitList(if (items.isEmpty()) null else CopyOnWriteArrayList(items), committed)
+            } else {
+                adapter.submitList(items, committed)
+            }
+        }
+
         private val changes = Observer<Map<String, ExpandableSearchList>> { lists ->
             val context = fragment.context ?: return@Observer
             val adapter = recycler?.adapter as? ParentItemAdapter ?: return@Observer
@@ -346,7 +374,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
             }
             lastQuery = query
             updating = true
-            adapter.submitList(rows, Runnable {
+            submitInProviderOrder(adapter, rows, Runnable {
                 updating = false
                 if (tv) {
                     focusBestProvider()
@@ -385,6 +413,8 @@ internal class SearchProviderOrderHook(private val app: Application) :
             }
             vm?.currentSearch?.removeObserver(changes)
             vm = null
+            differOwner = null
+            orderedDiffer = null
         }
     }
 
