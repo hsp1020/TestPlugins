@@ -16,7 +16,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
-import android.view.WindowInspector
+import android.view.inspector.WindowInspector
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.CheckBox
@@ -394,7 +394,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
                         textSize = 14f
                         setSingleLine(true)
                         gravity = Gravity.CENTER
-                        selectAllOnFocus = true
+                        setSelectAllOnFocus(true)
                         layoutParams = LinearLayout.LayoutParams(dp(52), dp(46))
                     }
                     val check = CheckBox(ctx).apply {
@@ -429,7 +429,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
                         queueUpdate()
                     }
                     holder.number.onFocusChangeListener = null
-                    if (!holder.number.hasFocus) holder.number.setText((position + 1).toString())
+                    if (!holder.number.hasFocus()) holder.number.setText((position + 1).toString())
                     holder.number.onFocusChangeListener = View.OnFocusChangeListener { _, focused ->
                         if (!focused) {
                             val value = holder.number.text.toString().toIntOrNull()
