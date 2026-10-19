@@ -1433,7 +1433,7 @@ internal class CatalogBrowserDialog(
         val sources = if (directTarget != null) {
             listOf(directTarget.addonUrl to StremioC(directTarget.addonUrl, "StremioC"))
         } else {
-            links.asReversed().distinctBy { it.link }.mapNotNull { link ->
+            links.distinctBy { it.link }.mapNotNull { link ->
                 providerFor(link.link)?.let { source ->
                     link.link to if (source.hasMainPage) source else StremioC(link.link, link.name, link.id)
                 }
