@@ -224,7 +224,11 @@ internal class SearchProviderOrderHook(private val app: Application) :
     }
 
     private fun rank(name: String): Int {
-        val direct = order.indexOf(name)
+        val activeOrder = if (order.isEmpty()) {
+            APIHolder.allProviders.filter { it.hasMainPage }
+                .map { it.name }.distinct().sortedBy { it.lowercase() }
+        } else order
+        val direct = activeOrder.indexOf(name)
         if (direct >= 0) return direct
         val child = APIHolder.allProviders.firstOrNull { it.name == name } ?: return Int.MAX_VALUE
         if (child.hasMainPage || child.mainUrl.isBlank() || child.sourcePlugin == null) {
@@ -235,7 +239,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
                 it.hasMainPage && sameProviderEndpoint(it.mainUrl, child.mainUrl) &&
                     it.sourcePlugin == child.sourcePlugin
             }
-            .map { order.indexOf(it.name) }.filter { it >= 0 }
+            .map { activeOrder.indexOf(it.name) }.filter { it >= 0 }
             .minOrNull() ?: Int.MAX_VALUE
     }
 
