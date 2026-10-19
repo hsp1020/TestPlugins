@@ -167,6 +167,17 @@ internal class SearchProviderOrderHook(private val app: Application) :
     private inner class SearchScreen(val fragment: Fragment, val root: View) {
         private val recycler = root.findViewById<RecyclerView>(R.id.search_master_recycler)
         private var vm: SearchViewModel? = null
+        private var followTop = true
+        private val scroll = object : RecyclerView.OnScrollListener() {
+            override fun onScrollStateChanged(view: RecyclerView, state: Int) {
+                if (state != RecyclerView.SCROLL_STATE_IDLE) {
+                    followTop = false
+                } else {
+                    followTop = (view.layoutManager as? LinearLayoutManager)
+                        ?.findFirstVisibleItemPosition() == 0
+                }
+            }
+        }
         private val changes = Observer<Map<String, ExpandableSearchList>> { lists ->
             val context = fragment.context ?: return@Observer
             val adapter = recycler?.adapter as? ParentItemAdapter ?: return@Observer
@@ -180,7 +191,13 @@ internal class SearchProviderOrderHook(private val app: Application) :
                     value.hasNext
                 )
             }
-            adapter.submitList(rows)
+            if (lists.isEmpty()) followTop = true
+            adapter.submitList(rows, Runnable {
+                if (followTop && search === this@SearchScreen &&
+                    recycler?.scrollState == RecyclerView.SCROLL_STATE_IDLE) {
+                    recycler.scrollToPosition(0)
+                }
+            })
         }
 
         fun open() {
@@ -189,6 +206,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
                 runCatching {
                     val model = ViewModelProvider(fragment.requireActivity())[SearchViewModel::class.java]
                     vm = model
+                    recycler?.addOnScrollListener(scroll)
                     model.currentSearch.observe(fragment.viewLifecycleOwner, changes)
                 }
             }
@@ -199,6 +217,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
         }
 
         fun close() {
+            recycler?.removeOnScrollListener(scroll)
             vm?.currentSearch?.removeObserver(changes)
             vm = null
         }
@@ -436,12 +455,13 @@ internal class SearchProviderOrderHook(private val app: Application) :
                         }
                         gravity = Gravity.CENTER
                         textSize = 14f
-                        layoutParams = LinearLayout.LayoutParams(dp(52), dp(44))
+                        setPadding(dp(2), paddingTop, dp(2), paddingBottom)
+                        layoutParams = LinearLayout.LayoutParams(dp(32), dp(44))
                     }
                     val content = FrameLayout(context).apply {
                         layoutParams = LinearLayout.LayoutParams(
                             0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
-                        )
+                        ).apply { marginStart = dp(6) }
                     }
                     layout.addView(handle)
                     layout.addView(number)
@@ -481,9 +501,12 @@ internal class SearchProviderOrderHook(private val app: Application) :
                     val original = native.adapter?.getView(item.nativeIndex, null, native) ?: return
                     holder.content.removeAllViews()
                     (original.parent as? ViewGroup)?.removeView(original)
+                    val selected = native.isItemChecked(item.nativeIndex)
+                    original.isActivated = selected
                     original.findViewById<TextView>(R.id.text1)?.apply {
                         setCompoundDrawablesRelative(null, null, null, null)
                         setPaddingRelative(0, paddingTop, paddingEnd, paddingBottom)
+                        isActivated = selected
                     }
                     holder.content.addView(original, FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
