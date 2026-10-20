@@ -7,7 +7,6 @@ import com.lagradost.cloudstream3.MainActivity
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
-import java.time.Instant
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
@@ -72,26 +71,69 @@ internal object SyncCoordinator {
             }
 
             val cipher = backend.cipher()
-            val remotes = backend.list()
-            stage = "decrypting remote data"
-            val remoteValues = remotes.associate { item ->
+            // A full snapshot is required only for the first run, or when the
+            // server has not yet installed the v340 change journal migration.
+            val previousCursor = if (config.preferences.contains("remote_cursor"))
+                config.preferences.getLong("remote_cursor", 0L) else null
+            val pull = backend.pull(previousCursor)
+            stage = "decrypting remote changes"
+            val remoteValues = pull.entries.associate { item ->
                 item.key to if (item.deleted) null else cipher.decrypt(
                     item.key, item.cipher ?: error("Missing encrypted value for " + item.key)
                 )
             }
-            val remoteByKey = remotes.associateBy { it.key }
+            val remoteByKey = pull.entries.associateBy { it.key }
+            val versions = mutableMapOf<String, Long>()
+            if (!pull.full) {
+                val old = JSONObject(config.preferences.getString("remote_versions", "{}") ?: "{}")
+                for (key in old.keys()) versions[key] = old.getLong(key)
+            }
+            for (entry in pull.entries) versions[entry.key] = entry.version
+
+            stage = "reconciling CloudStream profiles"
+            val previousProfiles = config.preferences.getString("profile_baseline", null)
+            val profileServer = if (pull.full || remoteValues.containsKey("x/profiles")) {
+                remoteValues["x/profiles"]
+            } else config.preferences.getString("profile_remote_snapshot", null)
+            val profileLocal = ProfileSync.snapshot(context)
+            val profileMerge = ProfileSync.merge(profileLocal, profileServer, previousProfiles)
+            val targetProfiles = ProfileSync.encode(profileMerge.target)
+            if (profileMerge.changedRemote) {
+                verifyAccount()
+                backend.upload(mapOf("x/profiles" to targetProfiles), cipher, versions)
+                versions["x/profiles"] = (versions["x/profiles"] ?: 0L) + 1L
+            }
+            verifyAccount()
+            applying = true
+            try {
+                ProfileSync.apply(context, profileMerge.target)
+            } finally {
+                applying = false
+            }
+            // Profile metadata is an independently committed unit. A later failure
+            // in extension restoration cannot undo an already applied profile.
+            check(config.preferences.edit()
+                .putString("profile_baseline", targetProfiles)
+                .putString("profile_remote_snapshot", targetProfiles).commit())
+            val activeProfiles = profileMerge.target.items.keys
+
             stage = "reading local preferences"
             val local = SyncData.snapshot(context)
             val currentPlugins = PluginInventory.snapshot(context)
             val base = baseline(context)
-            stage = "comparing settings changes"
+            stage = "comparing changed settings"
             val apply = mutableMapOf<String, String?>()
             val upload = mutableMapOf<String, String?>()
             val next = base.toMutableMap()
-            // x/plugins is reconciled separately, including deletion tombstones.
             next.remove("x/plugins")
+            next.remove("x/profiles")
             val all = (remoteValues.keys + local.keys + base.keys)
-                .filter { it != "x/plugins" }.toSortedSet()
+                .filter { it != "x/plugins" && it != "x/profiles" }.toSortedSet()
+            val conflicts = mutableMapOf<String, String>()
+            val savedLists = config.preferences.getString("list_baselines", null)
+            val priorLists = if (savedLists == null) JSONObject() else JSONObject(
+                String(LocalVault.decrypt(savedLists), Charsets.UTF_8)
+            )
 
             for (key in all) {
                 val current = local[key]
@@ -100,7 +142,20 @@ internal object SyncCoordinator {
                 val old = base[key]
                 val currentHash = fingerprint(current)
                 val remoteHash = fingerprint(remote)
-                val modified = config.preferences.getLong("modified/" + key, 0L)
+
+                // A removed profile's stale local or remote rows must not be
+                // replayed into a later profile that reuses the same keyIndex.
+                val profileId = if (key.startsWith("d/")) {
+                    key.removePrefix("d/").substringBefore('/').toIntOrNull()
+                } else null
+                if (profileId != null && profileId !in activeProfiles) {
+                    if ((old != null && old != fingerprint(null)) || remote != null) {
+                        upload[key] = null
+                    }
+                    next[key] = fingerprint(null)
+                    continue
+                }
+
                 if (old == null) {
                     if (remotePresent) {
                         if (remote != current) apply[key] = remote
@@ -113,32 +168,57 @@ internal object SyncCoordinator {
                 }
                 val changedLocal = currentHash != old
                 val changedRemote = remotePresent && remoteHash != old
-                if (changedRemote && changedLocal) {
-                    // No local timestamp means the key was not observed as modified:
-                    // do not let the local system clock or a stale value win.
-                    val remoteTime = try {
-                        Instant.parse(remoteByKey[key]?.updatedAt).toEpochMilli()
-                    } catch (_: Exception) { Long.MAX_VALUE }
-                    if (modified > 0L && modified > remoteTime) {
-                        upload[key] = current
-                        next[key] = currentHash
-                    } else {
+                when {
+                    changedLocal && changedRemote && currentHash == remoteHash -> {
+                        next[key] = remoteHash
+                    }
+                    changedLocal && changedRemote -> {
+                        // Collection keys are merged by independent membership
+                        // additions/removals, using the last applied raw ancestry.
+                        val collectionMerge = SharedListSync.merge(
+                            key, priorLists.optString(key).takeIf {
+                                priorLists.has(key)
+                            }, current, remote
+                        )
+                        if (collectionMerge != null && collectionMerge != remote) {
+                            upload[key] = collectionMerge
+                            apply[key] = collectionMerge
+                            next[key] = fingerprint(collectionMerge)
+                        } else {
+                            // Single-valued keys: the committed server version
+                            // wins; retain the losing local value for recovery.
+                            if (collectionMerge == null && current != null) conflicts[key] = current
+                            apply[key] = remote
+                            next[key] = remoteHash
+                        }
+                    }
+                    changedRemote -> {
                         apply[key] = remote
                         next[key] = remoteHash
                     }
-                } else if (changedRemote) {
-                    apply[key] = remote
-                    next[key] = remoteHash
-                } else if (changedLocal) {
-                    upload[key] = current
-                    next[key] = currentHash
+                    changedLocal -> {
+                        upload[key] = current
+                        next[key] = currentHash
+                    }
                 }
             }
 
+            if (conflicts.isNotEmpty()) {
+                val saved = config.preferences.getString("pending_conflicts", null)
+                val retained = if (saved == null) JSONObject() else JSONObject(
+                    String(LocalVault.decrypt(saved), Charsets.UTF_8)
+                )
+                for ((key, raw) in conflicts) retained.put(key, raw)
+                check(config.preferences.edit().putString("pending_conflicts",
+                    LocalVault.encrypt(retained.toString().toByteArray(Charsets.UTF_8))).commit())
+            }
+
             stage = "checking plugin installation and deletions"
-            var inventoryBase = config.preferences.getString("plugin_baseline", null)
-            var pluginsOnServer = remoteValues["x/plugins"]
-            var inventoryVersion = remoteByKey["x/plugins"]?.version
+            val inventoryBase = config.preferences.getString("plugin_baseline", null)
+            var pluginsOnServer = if (pull.full || remoteValues.containsKey("x/plugins")) {
+                remoteValues["x/plugins"]
+            } else config.preferences.getString("plugin_remote_snapshot", null)
+            var inventoryVersion = versions["x/plugins"]
             var merge = PluginSync.merge(currentPlugins, pluginsOnServer,
                 inventoryBase, SyncRuntime.pluginsLoaded)
             var pluginTarget = PluginSync.encode(merge.target)
@@ -155,6 +235,9 @@ internal object SyncCoordinator {
                 try {
                     backend.upload(mapOf("x/plugins" to pluginTarget), cipher,
                         inventoryVersion?.let { mapOf("x/plugins" to it) } ?: emptyMap())
+                    inventoryVersion = (inventoryVersion ?: 0L) + 1L
+                    versions["x/plugins"] = inventoryVersion ?: 1L
+                    pluginsOnServer = pluginTarget
                     break
                 } catch (error: IOException) {
                     if (!isConflict(error) || attempt == 2) throw error
@@ -163,11 +246,16 @@ internal object SyncCoordinator {
                         cipher.decrypt("x/plugins", newest.cipher)
                     } else null
                     inventoryVersion = newest?.version
+                    if (inventoryVersion != null) versions["x/plugins"] = inventoryVersion
                     merge = PluginSync.merge(currentPlugins, pluginsOnServer,
                         inventoryBase, SyncRuntime.pluginsLoaded)
                     pluginTarget = PluginSync.encode(merge.target)
                 }
             }
+
+            // Re-fetching a changed manifest is unnecessary on subsequent
+            // incremental polls; cache only its current encrypted-account value.
+            val serverPluginManifest = if (merge.changedRemote) pluginTarget else pluginsOnServer
 
             stage = "restoring repositories"
             // Repo data must be available before installing extension packages.
@@ -222,7 +310,8 @@ internal object SyncCoordinator {
             // write rejects this batch, do not overwrite local state before retry.
             stage = "uploading settings changes"
             verifyAccount()
-            backend.upload(upload, cipher, remoteByKey.mapValues { it.value.version })
+            backend.upload(upload, cipher, versions)
+            for (key in upload.keys) versions[key] = (versions[key] ?: 0L) + 1L
 
             stage = "restoring preferences"
             verifyAccount()
@@ -237,7 +326,28 @@ internal object SyncCoordinator {
             verifyAccount()
             val baseJson = JSONObject()
             for ((key, hash) in next) baseJson.put(key, hash)
-            check(config.preferences.edit().putString("base", baseJson.toString()).commit())
+            val revisionJson = JSONObject()
+            versions.forEach { (key, version) -> revisionJson.put(key, version) }
+            val listBaselineJson = JSONObject()
+            for (key in local.keys + apply.keys) {
+                val raw = if (apply.containsKey(key)) apply[key] else local[key]
+                if (raw != null && SharedListSync.isCollection(key, raw)) {
+                    listBaselineJson.put(key, raw)
+                }
+            }
+            val persisted = config.preferences.edit()
+                .putString("base", baseJson.toString())
+                .putString("remote_versions", revisionJson.toString())
+                .putString("list_baselines", LocalVault.encrypt(
+                    listBaselineJson.toString().toByteArray(Charsets.UTF_8)))
+            if (pull.cursor != null) persisted.putLong("remote_cursor", pull.cursor)
+            else persisted.remove("remote_cursor")
+            if (serverPluginManifest != null) {
+                persisted.putString("plugin_remote_snapshot", serverPluginManifest)
+            } else {
+                persisted.remove("plugin_remote_snapshot")
+            }
+            check(persisted.commit())
             val editor = config.preferences.edit()
             for (key in apply.keys + upload.keys) editor.remove("modified/" + key)
             editor.apply()
@@ -245,7 +355,8 @@ internal object SyncCoordinator {
                 MainActivity.bookmarksUpdatedEvent.invoke(true)
             }
             var result = "Synced: downloaded " + apply.size + ", uploaded " +
-                (upload.size + if (merge.changedRemote) 1 else 0)
+                (upload.size + (if (merge.changedRemote) 1 else 0) +
+                    (if (profileMerge.changedRemote) 1 else 0))
             result += installation
             if (installation.contains("plugins pending:")) {
                 result = result.replaceFirst("Synced:", "Sync incomplete:")

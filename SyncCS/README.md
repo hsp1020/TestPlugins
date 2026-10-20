@@ -1,5 +1,18 @@
 # SyncCS v2 — GitHub sign-in and encrypted cloud sync
 
+## v340 — server-authoritative CloudStream profiles and incremental updates
+
+- CloudStream's existing `keyIndex` values and profile metadata are synchronized through the encrypted `x/profiles` manifest; no second profile UI or device-specific UUID mapping is introduced. Existing server profile slots are authoritative on a newly linked device.
+- Profile-scoped bookmarks, history and playback state stay under CloudStream's original `<keyIndex>/...` keys. Installed extensions and explicitly shared plugin preferences remain application-wide. The selected profile stays local to each device.
+- After the first full snapshot, `sync_change_events` enables event-cursor pulls of changed rows only, including deletion tombstones. The client replays events after its initial snapshot to avoid missing concurrent writes. A server without the migration remains on v339-compatible full reads.
+- Concurrent scalar edits use server version compare-and-swap (CAS); the committed remote value wins and a losing local value is retained in encrypted local `pending_conflicts`. Supported collection preferences use raw-value three-way membership merging.
+- A failed sync never advances the successful cursor. Pending plugin installs/deletions and missed events are retried after restart. Installation verification and the first-login restart flow remain unchanged.
+
+**Required deployment:** run the updated `SyncCS/supabase.sql` in the connected Supabase project before expecting incremental reads; a plugin-only upgrade is not sufficient to create database change events. Run v340 on all devices connected to an account before relying on its profile manifest or cursor semantics.
+
+**Scope:** v340 does not claim a cross-system atomic transaction across the Android preferences, extension files and Supabase. Android TV / Android 11+ local `.cs3` recovery and two-device concurrent-update scenarios still require device execution tests. Cross-GitHub-account migration UI remains outside this release.
+
+
 CloudStream **users sign in with GitHub only**. They never need a Supabase account, a separate SyncCS email/password, or an email-verification message. The server is operated centrally and all user records remain isolated by Supabase Auth user ID plus RLS.
 
 ## Using SyncCS

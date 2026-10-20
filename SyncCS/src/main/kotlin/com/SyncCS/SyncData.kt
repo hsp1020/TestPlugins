@@ -11,6 +11,7 @@ import com.lagradost.cloudstream3.plugins.PLUGINS_KEY
 import com.lagradost.cloudstream3.plugins.PluginData
 import com.lagradost.cloudstream3.ui.settings.extensions.RepositoryData
 import com.lagradost.cloudstream3.utils.DataStore
+import com.lagradost.cloudstream3.utils.DataStoreHelper
 import com.lagradost.cloudstream3.utils.PREFERENCES_NAME
 import org.json.JSONArray
 import org.json.JSONObject
@@ -24,7 +25,7 @@ internal object SyncData {
         "video_watch_state/", "result_season/", "result_episode/", "result_dub/",
         "video_source_priority/", "video_quality_priority/", "video_profile_name/",
         "video_profile_types_2/", "video_profile_settings/",
-        "auth_tokens/", "auth_ids/", "download_header_cache/"
+        "auth_tokens/", "auth_ids/"
     )
     private val globallyShared = setOf(
         "user_pinned_providers", "user_custom_sites", "REPOSITORIES_KEY",
@@ -158,6 +159,14 @@ internal object SyncData {
             pluginScoped(rest) || rest in cineStreamDiscoveredKeys ||
             (cineStreamDomainKey(rest) && cineStreamKeyAllowed(rest))
     }
+    // A removed CloudStream profile must not resurrect its old stored rows.
+    // Default account 0 is always present in CloudStream's account list.
+    private fun belongsToInstalledProfile(key: String, indices: Set<Int>): Boolean {
+        val prefix = key.substringBefore('/', "")
+        if (prefix.isEmpty() || !prefix.all(Char::isDigit) || !key.contains('/')) return true
+        return prefix.toIntOrNull() in indices
+    }
+
     private fun pluginPreferenceAllowed(file: String, key: String): Boolean {
         // StreamPlay telemetry depends on the current device and isn't a setting.
         if (file.equals("StreamPlay", true) &&
@@ -213,7 +222,10 @@ internal object SyncData {
         val result = mutableMapOf<String, String>()
         val data = with(DataStore) { context.getSharedPrefs() }
         refreshCineStreamKeys()
+        val profileIndices = DataStoreHelper.getAccounts(context)
+            .mapTo(mutableSetOf()) { it.keyIndex }
         for ((name, value) in data.all) {
+            if (!belongsToInstalledProfile(name, profileIndices)) continue
             if (!dataAllowed(name) || name.length > 500) continue
             valueJson(value)?.let { if (it.length <= 524288) result["d/" + name] = it }
         }
@@ -352,11 +364,14 @@ internal object SyncData {
         val pluginEditors = mutableMapOf<String, SharedPreferences.Editor>()
         var accountsChanged = false
         var priorityChanged = false
+        val profileIndices = DataStoreHelper.getAccounts(context)
+            .mapTo(mutableSetOf()) { it.keyIndex }
         for ((key, value) in changes) {
             when {
                 key.startsWith("d/") -> {
                     val original = key.removePrefix("d/")
-                    if (!dataAllowed(original)) continue
+                    if (!dataAllowed(original) ||
+                        !belongsToInstalledProfile(original, profileIndices)) continue
                     edit(dataEdit, original, value)
                     if (original.contains("video_source_priority/") ||
                         original.contains("video_quality_priority/")) priorityChanged = true

@@ -22,6 +22,26 @@ create policy "SyncCS own rows" on public.sync_entries
 revoke all on table public.sync_entries from anon;
 grant select, insert, update, delete on table public.sync_entries to authenticated;
 
+-- v340 incremental change journal. Each authenticated writer appends events in the
+-- same transaction as its sync_entries update. Old entries need no backfill:
+-- clients bootstrap with a full snapshot and then follow the journal.
+create table if not exists public.sync_change_events (
+    event_id bigint generated always as identity primary key,
+    user_id uuid not null references auth.users(id) on delete cascade,
+    item_key text not null check (length(item_key) between 1 and 512),
+    changed_at timestamptz not null default clock_timestamp()
+);
+create index if not exists sync_change_events_user_cursor_idx
+    on public.sync_change_events (user_id, event_id);
+alter table public.sync_change_events enable row level security;
+drop policy if exists "SyncCS own changes" on public.sync_change_events;
+create policy "SyncCS own changes" on public.sync_change_events
+    for all to authenticated using (user_id = (select auth.uid()))
+    with check (user_id = (select auth.uid()));
+revoke all on table public.sync_change_events from anon;
+grant select, insert on table public.sync_change_events to authenticated;
+grant usage, select on sequence public.sync_change_events_event_id_seq to authenticated;
+
 create or replace function public.sync_apply_changes(p_changes jsonb)
 returns integer
 language plpgsql
@@ -37,6 +57,9 @@ declare
     changed integer := 0;
 begin
     if owner is null then raise exception 'Authentication required'; end if;
+    -- Serialize a user's writers before allocating journal IDs. Without this,
+    -- a late commit could become visible after a higher event cursor.
+    perform pg_advisory_xact_lock(hashtextextended(owner::text, 0));
     if jsonb_typeof(p_changes) <> 'array' or jsonb_array_length(p_changes) > 50 then
         raise exception 'Invalid change batch';
     end if;
@@ -73,6 +96,8 @@ begin
                 version = version + 1
             where user_id = owner and item_key = key_name;
         end if;
+        insert into public.sync_change_events(user_id, item_key)
+            values (owner, key_name);
         changed := changed + 1;
     end loop;
     return changed;

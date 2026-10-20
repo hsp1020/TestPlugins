@@ -57,6 +57,10 @@ internal class SyncConfiguration(context: Context) {
         check(editor.remove("session").remove("secret").remove("base")
             .remove("configured").remove("oauth_pending")
             .remove("pending_plugins").remove("plugin_baseline")
+            .remove("remote_cursor").remove("remote_versions")
+            .remove("plugin_remote_snapshot").remove("profile_remote_snapshot")
+            .remove("profile_baseline").remove("pending_conflicts")
+            .remove("list_baselines")
             .commit())
     }
 }
@@ -271,6 +275,10 @@ internal class SyncBackend(private val config: SyncConfiguration) {
             .remove("oauth_pending")
         if (previousAccount != session.userId) {
             editor.remove("base").remove("pending_plugins").remove("plugin_baseline")
+                .remove("remote_cursor").remove("remote_versions")
+                .remove("plugin_remote_snapshot").remove("profile_remote_snapshot")
+                .remove("profile_baseline").remove("pending_conflicts")
+                .remove("list_baselines")
             for (key in config.preferences.all.keys) {
                 if (key.startsWith("modified/") || key.startsWith("file_")) editor.remove(key)
             }
@@ -356,6 +364,86 @@ internal class SyncBackend(private val config: SyncConfiguration) {
             if (rows.length() < 500) break
         }
         return out
+    }
+
+
+    data class PullResult(
+        val entries: List<RemoteEntry>,
+        val cursor: Long?,
+        val full: Boolean
+    )
+
+    /**
+     * A missing event table is an unmigrated v339 server, not an empty delta.
+     * In that case keep using the original full listing.
+     */
+    private fun newestEventId(): Long? {
+        val body = try {
+            call("/rest/v1/sync_change_events?select=event_id&order=event_id.desc&limit=1",
+                "GET", session().access)
+        } catch (error: IOException) {
+            if (error.message.orEmpty().contains("HTTP 404")) return null
+            throw error
+        }
+        val events = JSONArray(String(body, Charsets.UTF_8))
+        return if (events.length() == 0) 0L else events.getJSONObject(0).getLong("event_id")
+    }
+
+    private fun changedSince(startCursor: Long): Pair<List<RemoteEntry>, Long> {
+        val token = session().access
+        var cursor = startCursor
+        val names = linkedSetOf<String>()
+        while (true) {
+            val events = JSONArray(String(call(
+                "/rest/v1/sync_change_events?select=event_id,item_key" +
+                    "&event_id=gt." + cursor + "&order=event_id.asc&limit=500",
+                "GET", token
+            ), Charsets.UTF_8))
+            if (events.length() == 0) break
+            for (index in 0 until events.length()) {
+                val event = events.getJSONObject(index)
+                val id = event.getLong("event_id")
+                check(id > cursor) { "Sync change cursor did not advance" }
+                cursor = id
+                names.add(event.getString("item_key"))
+            }
+            check(names.size <= 100000) { "Sync delta exceeds supported page limit" }
+            if (events.length() < 500) break
+        }
+        val result = mutableListOf<RemoteEntry>()
+        for (keys in names.toList().chunked(30)) {
+            val inFilter = keys.joinToString(",") { "\"" + it.replace("\\", "\\\\").replace("\"", "\\\"") + "\"" }
+            val encoded = java.net.URLEncoder.encode("(" + inFilter + ")", "UTF-8")
+            val rows = JSONArray(String(call(
+                "/rest/v1/sync_entries?select=item_key,payload,deleted,updated_at,device_id,version" +
+                    "&item_key=in." + encoded,
+                "GET", token
+            ), Charsets.UTF_8))
+            for (index in 0 until rows.length()) result.add(readEntry(rows.getJSONObject(index)))
+        }
+        check(result.size == names.size) { "Sync event referenced a missing server entry" }
+        return result to cursor
+    }
+
+    fun pull(previousCursor: Long?): PullResult {
+        if (previousCursor == null) {
+            // Taking the cursor BEFORE the snapshot and replaying its events
+            // prevents a write concurrent with the snapshot from being lost.
+            val start = newestEventId()
+            val snapshot = list()
+            if (start == null) return PullResult(snapshot, null, true)
+            val (delta, cursor) = changedSince(start)
+            val items = snapshot.associateByTo(linkedMapOf()) { it.key }
+            delta.forEach { items[it.key] = it }
+            return PullResult(items.values.toList(), cursor, true)
+        }
+        return try {
+            val (delta, cursor) = changedSince(previousCursor)
+            PullResult(delta, cursor, false)
+        } catch (error: IOException) {
+            if (!error.message.orEmpty().contains("HTTP 404")) throw error
+            PullResult(list(), null, true)
+        }
     }
 
     fun upload(changes: Map<String, String?>, cipher: SyncCipher, revisions: Map<String, Long>) {
