@@ -56,7 +56,6 @@ internal class SyncConfiguration(context: Context) {
 
 internal object LocalVault {
     private const val KEY_ALIAS = "synccs_local_protection_v2"
-    private val random = SecureRandom()
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (store.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
@@ -71,10 +70,13 @@ internal object LocalVault {
         return generator.generateKey()
     }
     fun encrypt(plain: ByteArray): String {
-        val iv = ByteArray(12).also(random::nextBytes)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, key(), GCMParameterSpec(128, iv))
-        return Base64.encodeToString(iv + cipher.doFinal(plain), Base64.NO_WRAP)
+        // AndroidKeyStore requires the provider to generate the IV for AES-GCM encryption.
+        cipher.init(Cipher.ENCRYPT_MODE, key())
+        val iv = cipher.iv
+        check(iv.size == 12) { "Unexpected AndroidKeyStore GCM nonce length" }
+        val ciphertext = cipher.doFinal(plain)
+        return Base64.encodeToString(iv + ciphertext, Base64.NO_WRAP)
     }
     fun decrypt(data: String): ByteArray {
         val bytes = Base64.decode(data, Base64.DEFAULT)

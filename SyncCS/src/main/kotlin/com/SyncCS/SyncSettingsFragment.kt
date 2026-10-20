@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.text.InputType
+import android.text.method.PasswordTransformationMethod
 import android.util.TypedValue
 import android.view.View
 import android.view.ViewGroup
@@ -175,6 +176,9 @@ class SyncSettingsFragment : DialogFragment() {
         val field = EditText(context).apply {
             inputType = kind
             setSingleLine(true)
+            if ((kind and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_PASSWORD) {
+                transformationMethod = PasswordTransformationMethod.getInstance()
+            }
             textSize = 16f
             this.hint = hint
             setText(value)
