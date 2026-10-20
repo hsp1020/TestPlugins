@@ -56,3 +56,14 @@ GitHub OAuth requires separate operator configuration on both **GitHub** and **S
 - User data from the **old email/password-based SyncCS account does not automatically move** to a new GitHub Auth user ID. Account migration requires a separately authorized export/import process.
 - The OAuth callback is asynchronous: after browser login, return to CloudStream to complete session exchange.
 - The latest code has **not been Android-built or exercised against a fully configured GitHub OAuth provider**. Server migrations and Edge Function deployment alone do not prove end-to-end login success.
+
+## Extension installation and preference recovery fixes
+
+- CloudStream compares plugin downloads against hashes prefixed with `sha256-`. SyncCS now passes the host-expected hash string instead of a raw 64-character digest.
+- On a new device, the saved extension repository list is restored **before** the downloaded plugin files; missing repositories are reconstructed from the encrypted plugin manifest where possible. All missing online plugins are downloaded and registered in the host plugin inventory. Existing archived binary files are used as fallback.
+- Android scoped-storage restrictions may prevent writing standalone local `.cs3` files to the legacy external storage folder. In that case SyncCS registers the verified archived binary in the app-private plugin directory so CloudStream loads it after restart.
+- Plugin-prefixed CloudStream DataStore and default SharedPreferences keys are now included for CineStream, StreamPlay, StremioC, Ultima Evo, Elevate and YouTube, in addition to their dedicated preference files. Device-level settings and runtime caches are excluded.
+- An incomplete plugin restore reports `Sync incomplete`, **not** `Synced`. Failures preserve the pending plugin inventory so the next sync can retry.
+- The current per-device selected CloudStream account is not synchronized.
+- After updating, sync the source device again before restoring another device; previously untracked settings cannot be recreated from older cloud snapshots.
+- The code change addresses known omission paths but real-device validation is still required to establish complete plugin and preference restoration. CloudStream's own crash handler stores uncaught stack traces in the private `last_error` file, which may be needed if a device continues to exit.

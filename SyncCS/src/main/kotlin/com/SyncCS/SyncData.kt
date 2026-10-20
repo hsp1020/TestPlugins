@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.plugins.PluginManager
 import com.lagradost.cloudstream3.plugins.RepositoryManager
 import com.lagradost.cloudstream3.plugins.PLUGINS_KEY
 import com.lagradost.cloudstream3.plugins.PluginData
+import com.lagradost.cloudstream3.ui.settings.extensions.RepositoryData
 import com.lagradost.cloudstream3.ui.player.source_priority.QualityDataHelper
 import com.lagradost.cloudstream3.syncproviders.AccountManager
 import com.lagradost.cloudstream3.utils.DataStore
@@ -30,11 +31,26 @@ internal object SyncData {
     private val globallyShared = setOf(
         "user_pinned_providers", "user_custom_sites", "REPOSITORIES_KEY",
         "provider_order", "seen_providers", "stremio_addons",
-        "data_store_helper/account", "home_api_used",
+        "home_api_used",
         "search_pref_providers", "search_pref_tags", "home_pref_homepage",
         "home_bookmarked_last_list", "library_sorting_mode", "results_sorting_mode"
     )
+    private val pluginPrefixes = listOf(
+        "cinestream", "streamplay", "stremioc", "ultimaevo", "ultima_evo",
+        "elevate", "youtube"
+    )
     private val defaultShared = emptySet<String>()
+    private fun pluginScoped(key: String): Boolean {
+        val value = key.substringAfter('/', key).lowercase()
+        if (listOf("cache", "crash", "logcat", "history_temp", "download_path",
+                "device_id", "keystore").any { value.contains(it) }) return false
+        val compact = value.replace(Regex("[^a-z0-9]"), "")
+        return pluginPrefixes.any { prefix ->
+            value.startsWith(prefix) || compact.startsWith(prefix.replace("_", "")) ||
+                value.contains("_" + prefix + "_") || value.endsWith("_" + prefix) ||
+                value.contains("/" + prefix + "/")
+        }
+    }
     private val forbiddenFileParts = listOf(
         "synccs", "cache", "webview", "com.google", "firebase", "analytics",
         "crashlytics", "androidx", "gms", "advertis", "encrypted"
@@ -45,14 +61,19 @@ internal object SyncData {
         if (slash < 0) return false
         val account = key.substring(0, slash)
         val rest = if (account.all(Char::isDigit)) key.substring(slash + 1) else key
-        return rest in globallyShared || dataPrefixes.any { rest.startsWith(it) }
+        return rest in globallyShared || dataPrefixes.any { rest.startsWith(it) } ||
+            pluginScoped(rest)
     }
     fun isTracked(path: String): Boolean = when {
         path.startsWith("d/") -> dataAllowed(path.removePrefix("d/"))
-        path.startsWith("s/") -> path.removePrefix("s/") in defaultShared
+        path.startsWith("s/") -> path.removePrefix("s/") in defaultShared ||
+            pluginScoped(path.removePrefix("s/"))
         path.startsWith("p/") -> {
+            val file = path.removePrefix("p/").substringBefore('/')
             val key = path.removePrefix("p/").substringAfter('/', "")
-            key.isNotBlank() && key.length <= 300 &&
+            file !in listOf("StremioC_Manifest", "AwOriginVisitLoggerPrefs",
+                "android.app.ActivityThread.IDS") &&
+                key.isNotBlank() && key.length <= 300 &&
                 !key.contains("cache", true) && !key.contains("logcat", true)
         }
         else -> false
@@ -65,7 +86,9 @@ internal object SyncData {
             ?.filter { name ->
                 name != PREFERENCES_NAME && name != context.packageName + "_preferences" &&
                 name.length in 1..80 && !name.contains("..") && !name.contains('/') &&
-                forbiddenFileParts.none { name.contains(it, ignoreCase = true) }
+                forbiddenFileParts.none { name.contains(it, ignoreCase = true) } &&
+                name != "StremioC_Manifest" && name != "AwOriginVisitLoggerPrefs" &&
+                name != "android.app.ActivityThread.IDS"
             }?.toList() ?: emptyList()
     }
 
@@ -93,7 +116,7 @@ internal object SyncData {
         }
         val defaults = PreferenceManager.getDefaultSharedPreferences(context)
         for ((name, value) in defaults.all) {
-            if (name !in defaultShared) continue
+            if (name !in defaultShared && !pluginScoped(name)) continue
             valueJson(value)?.let { result["s/" + name] = it }
         }
         for (file in pluginFiles(context)) {
@@ -149,13 +172,17 @@ internal object SyncData {
                 }
                 key.startsWith("s/") -> {
                     val original = key.removePrefix("s/")
-                    if (original in defaultShared) edit(defaultEdit, original, value)
+                    if (original in defaultShared || pluginScoped(original)) {
+                        edit(defaultEdit, original, value)
+                    }
                 }
                 key.startsWith("p/") -> {
                     val name = key.removePrefix("p/").substringBefore('/')
                     val prefKey = key.removePrefix("p/").substringAfter('/', "")
                     if (name.length !in 1..80 || name.contains("..") ||
                         forbiddenFileParts.any { name.contains(it, true) } ||
+                        name in listOf("StremioC_Manifest", "AwOriginVisitLoggerPrefs",
+                            "android.app.ActivityThread.IDS") ||
                         prefKey.isBlank()) continue
                     val editor = pluginEditors.getOrPut(name) {
                         context.getSharedPreferences(name, Context.MODE_PRIVATE).edit()
@@ -237,8 +264,6 @@ internal object PluginInventory {
     suspend fun restore(context: Context, activity: Activity, backend: SyncBackend, raw: String): List<String> {
         val report = mutableListOf<String>()
         val rows = JSONArray(raw)
-        val repos = RepositoryManager.getRepositories()
-        val existingOnline = PluginManager.getPluginsOnline()
         val existingLocal = PluginManager.getPluginsLocal()
         for (index in 0 until rows.length()) {
             val row = rows.getJSONObject(index)
@@ -248,17 +273,18 @@ internal object PluginInventory {
             if (row.optString("type") == "online") {
                 val url = row.optString("url")
                 val repo = row.optString("repo")
-                if (existingOnline.any { it.internalName == name && it.url == url && File(it.filePath).exists() }) continue
+                if (PluginManager.getPluginsOnline().any {
+                    it.internalName == name && it.url == url && File(it.filePath).exists()
+                }) continue
                 var installed = false
                 if (url.startsWith("https://") && repo.startsWith("https://")) {
-                    if (repos.none { it.url == repo }) {
-                        // Repository records are restored separately from the core data store.
-                        report.add("Repository missing: " + name)
+                    if (RepositoryManager.getRepositories().none { it.url == repo }) {
+                        RepositoryManager.addRepository(RepositoryData("Restored for " + name, repo))
                     }
                     try {
                         installed = PluginManager.downloadPlugin(
                             activity, url,
-                            hash.takeIf { it.matches(Regex("[a-f0-9]{64}")) },
+                            hash.takeIf { it.matches(Regex("[a-f0-9]{64}")) }?.let { "sha256-" + it },
                             name, repo, false
                         )
                     } catch (_: Exception) { }
@@ -281,7 +307,10 @@ internal object PluginInventory {
                         }
                     } catch (_: Exception) { }
                 }
-                if (!installed) report.add("Could not install " + name)
+                if (!installed) report.add(
+                    if (repo.isBlank()) "Missing repository URL for " + name
+                    else "Could not install " + name
+                )
             } else {
                 if (existingLocal.any { it.internalName == name && File(it.filePath).exists() }) continue
                 if (!hash.matches(Regex("[a-f0-9]{64}"))) {
@@ -293,11 +322,38 @@ internal object PluginInventory {
                     check(SyncBackend.digestBytes(bytes) == hash)
                     val filename = row.optString("file").substringAfterLast('/').substringAfterLast('\\')
                     check(filename.endsWith(".cs3", true) && filename.length < 120)
-                    val directory = File(Environment.getExternalStorageDirectory(), "Cloudstream3/plugins")
-                    check(directory.exists() || directory.mkdirs())
-                    File(directory, filename).writeBytes(bytes)
+                    val savedToLegacyFolder = try {
+                        val directory = File(Environment.getExternalStorageDirectory(), "Cloudstream3/plugins")
+                        check(directory.exists() || directory.mkdirs())
+                        File(directory, filename).writeBytes(bytes)
+                        true
+                    } catch (_: Exception) {
+                        false
+                    }
+                    if (!savedToLegacyFolder) {
+                        // Scoped-storage Android devices cannot always write /sdcard/Cloudstream3.
+                        // Register a private extension copy so the existing host loader can load it on restart.
+                        val archiveRepo = "https://synccs.invalid/local-archive"
+                        val privateFile = PluginManager.getPluginPath(context, name, archiveRepo)
+                        check(privateFile.parentFile?.let { it.exists() || it.mkdirs() } == true)
+                        val temp = File(privateFile.parentFile, privateFile.name + ".temp")
+                        temp.writeBytes(bytes)
+                        check(SyncBackend.digestBytes(temp.readBytes()) == hash)
+                        if (privateFile.exists()) check(privateFile.delete())
+                        check(temp.renameTo(privateFile))
+                        val original = PluginManager.getPluginsOnline().filter {
+                            it.filePath != privateFile.absolutePath
+                        }
+                        val archived = PluginData(
+                            name, "https://synccs.invalid/local-archive/" + hash + ".cs3",
+                            true, privateFile.absolutePath, row.optInt("version", 0)
+                        )
+                        com.lagradost.cloudstream3.CloudStreamApp.setKey(
+                            PLUGINS_KEY, (original + archived).toTypedArray()
+                        )
+                    }
                 } catch (_: Exception) {
-                    report.add("Local plugin restore requires storage permission: " + name)
+                    report.add("Could not restore local .cs3: " + name)
                 }
             }
         }

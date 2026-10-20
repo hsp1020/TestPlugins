@@ -38,19 +38,23 @@ internal object SyncCoordinator {
             return@withLock lastStatus
         }
         val backend = SyncBackend(config)
+        var stage = "loading cloud state"
         try {
             val cipher = backend.cipher()
             val remotes = backend.list()
             // Authenticate every entry before modifying any local data.
+            stage = "decrypting remote data"
             val remoteValues = remotes.associate { item ->
                 item.key to if (item.deleted) null else cipher.decrypt(
                     item.key, item.cipher ?: error("Missing encrypted value for " + item.key))
             }
             val remoteByKey = remotes.associateBy { it.key }
+            stage = "reading local preferences"
             val local = SyncData.snapshot(context)
             val localManifest = PluginInventory.snapshot(context)
             local["x/plugins"] = localManifest
             val base = baseline(context)
+            stage = "comparing remote and local state"
             val apply = mutableMapOf<String, String?>()
             val upload = mutableMapOf<String, String?>()
             val next = base.toMutableMap()
@@ -111,6 +115,25 @@ internal object SyncCoordinator {
                 }
             }
 
+            // Restore repositories and extension binaries before large preference imports.
+            // This avoids reporting a successful JSON restore when plugins never installed.
+            var installation = ""
+            if (activity != null && config.preferences.contains("pending_plugins")) {
+                stage = "restoring extension repositories"
+                val repoRestore = apply.remove("d/REPOSITORIES_KEY")
+                if (repoRestore != null) {
+                    applying = true
+                    try {
+                        SyncData.apply(context, mapOf("d/REPOSITORIES_KEY" to repoRestore))
+                    } finally {
+                        applying = false
+                    }
+                }
+                stage = "restoring extension binaries"
+                installation = installPending(context, activity, backend)
+            }
+
+            stage = "restoring preferences"
             applying = true
             try {
                 SyncData.apply(context, apply)
@@ -120,10 +143,13 @@ internal object SyncCoordinator {
 
             // Upload files first so manifest rows never refer to missing new archives.
             if (upload.containsKey("x/plugins")) {
+                stage = "uploading extension archives"
                 PluginInventory.uploadFiles(context, backend, upload["x/plugins"] ?: "[]")
             }
+            stage = "uploading changed preferences"
             backend.upload(upload, cipher, remoteByKey.mapValues { it.value.version })
 
+            stage = "persisting sync baseline"
             val baseJson = JSONObject()
             for ((key, hash) in next) baseJson.put(key, hash)
             check(config.preferences.edit().putString("base", baseJson.toString()).commit())
@@ -134,14 +160,20 @@ internal object SyncCoordinator {
                 MainActivity.bookmarksUpdatedEvent.invoke(true)
             }
             var result = "Synced: downloaded " + apply.size + ", uploaded " + upload.size
-            if (activity != null) {
-                result += installPending(context, activity, backend)
+            if (activity != null && installation.isEmpty()) {
+                stage = "restoring pending extensions"
+                installation = installPending(context, activity, backend)
+            }
+            result += installation
+            if (installation.contains("plugins pending:")) {
+                result = result.replaceFirst("Synced:", "Sync incomplete:")
             }
             lastStatus = result
             result
         } catch (error: Exception) {
-            val message = "Sync failed: " + (error.message ?: error.javaClass.simpleName).take(180)
-            Log.w("SyncCS", message)
+            val message = "Sync failed during " + stage + ": " +
+                (error.message ?: error.javaClass.simpleName).take(160)
+            Log.e("SyncCS", message, error)
             lastStatus = message
             message
         }
