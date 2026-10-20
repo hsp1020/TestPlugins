@@ -1,19 +1,14 @@
-version = 1
+version = 2
 
 cloudstream {
-    description = "Sync CloudStream"
+    description = "Sync CloudStream library, accounts, extensions and shared preferences using Supabase"
     authors = listOf("hsp1020")
     language = "ko"
-    
-    status = 1 // 0: Down, 1: Ok, 2: Slow, 3: Beta
-    tvTypes = listOf(
-        "Other"
-    )
-    
+
+    status = 1
+    tvTypes = listOf("Other")
     iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/SyncCS/cloud-sync.png"
-    
-    // ★★★ 이 옵션이 있어야 Cloudstream이 XML 리소스를 읽어옵니다! ★★★
-    requiresResources = true 
+    requiresResources = false
 }
 
 android {
