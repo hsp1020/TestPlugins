@@ -252,6 +252,8 @@ class SyncSettingsFragment : DialogFragment() {
                             SyncBackend(config).signIn(mail, pass, phrase, register)
                             config.deviceName = name
                             SyncCoordinator.synchronize(host.applicationContext, host)
+                        } catch (pending: EmailConfirmationPending) {
+                            "Verification email sent. Follow the email link, return to SyncCS, and tap Sign in."
                         } catch (error: Exception) {
                             "Connection failed: " +
                                 (error.message ?: error.javaClass.simpleName).take(160)
@@ -259,7 +261,9 @@ class SyncSettingsFragment : DialogFragment() {
                     }
                     statusLabel?.text = outcome
                     if (dialog.isShowing) {
-                        if (outcome.startsWith("Connection failed:")) {
+                        if (outcome.startsWith("Connection failed:") ||
+                            outcome.startsWith("Verification email sent.") ||
+                            outcome.startsWith("Sync failed:")) {
                             feedback.text = outcome
                             busy = false
                             signIn.isEnabled = true

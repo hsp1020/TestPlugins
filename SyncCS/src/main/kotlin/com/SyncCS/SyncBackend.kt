@@ -124,6 +124,8 @@ internal class SyncCipher(private val key: ByteArray) {
     }
 }
 
+internal class EmailConfirmationPending : IOException("Email verification required")
+
 internal class SyncBackend(private val config: SyncConfiguration) {
     private data class Session(val userId: String, val access: String, val refresh: String, val expiry: Long)
     private var cached: Session? = null
@@ -174,7 +176,7 @@ internal class SyncBackend(private val config: SyncConfiguration) {
         val refresh = answer.optString("refresh_token")
         if (access.isBlank() || refresh.isBlank()) {
             if (register && answer.optJSONObject("user") != null) {
-                throw IOException("Account created. Confirm your email, then choose Sign in.")
+                throw EmailConfirmationPending()
             }
             throw IOException("No login session was returned. Verify email confirmation and sign in.")
         }
