@@ -378,6 +378,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 return@withContext Pair(sigResults, nResults)
             }
 
+            val decodeStarted = android.os.SystemClock.elapsedRealtime()
             try {
                 val urlBuilder = StringBuilder("https://api.pipepipe.dev/decoder/decode")
                 urlBuilder.append("?player=").append(playerId)
@@ -397,7 +398,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     .header("User-Agent", "PipePipe/5.3.0")
                     .build()
 
-                val decodeStarted = android.os.SystemClock.elapsedRealtime()
                 android.util.Log.i("YT_HTTP_TRACE", "stage=pipe_decode event=start sig_count=${missingSigs.size} n_count=${missingNs.size}")
                 proxyHttpClient.newCall(request).await().use { response ->
                     val responseBody = response.body?.string() ?: ""
