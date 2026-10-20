@@ -15,15 +15,13 @@ function json(value: unknown, status = 200): Response {
     status, headers: { ...secureHeaders, "content-type": "application/json; charset=utf-8" },
   });
 }
-function html(title: string, description: string, status = 200): Response {
-  const doc = `<!doctype html><html lang="ko"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SyncCS · GitHub 로그인</title><style>
-body{font:16px/1.6 system-ui,sans-serif;background:#15181c;color:#f5f5f5;min-height:100vh;margin:0;display:grid;place-items:center}
-main{margin:16px;padding:28px;max-width:460px;border:1px solid #484b50;border-radius:14px}
-h1{font-size:22px;margin:0 0 12px}p{color:#cbd0d6}</style></head><body><main>
-<h1>${title}</h1><p>${description}</p></main></body></html>`;
-  return new Response(doc, { status, headers: { ...secureHeaders, "content-type": "text/html; charset=utf-8" } });
+// Supabase-hosted Edge Functions intentionally rewrite text/html to text/plain.
+// Return an actual plaintext completion notice rather than raw HTML markup.
+function notice(title: string, description: string, status = 200): Response {
+  return new Response(title + "\n\n" + description + "\n", {
+    status,
+    headers: { ...secureHeaders, "content-type": "text/plain; charset=utf-8" },
+  });
 }
 function validNonce(v: unknown): v is string {
   return typeof v === "string" && /^[A-Za-z0-9_-]{35,90}$/.test(v);
@@ -55,10 +53,10 @@ Deno.serve(async (request: Request) => {
       const code = url.searchParams.get("code");
       const error = url.searchParams.get("error");
       if (error) {
-        return html("로그인 취소 또는 실패", "CloudStream의 SyncCS 설정으로 돌아가 다시 시도해 주세요.", 400);
+        return notice("GitHub sign-in was cancelled or failed.", "Return to CloudStream > SyncCS and try again.", 400);
       }
       if (!validNonce(nonce) || !code || code.length > 2048) {
-        return html("잘못된 인증 요청", "SyncCS에서 GitHub 로그인을 다시 시작해 주세요.", 400);
+        return notice("Invalid GitHub sign-in request.", "Return to CloudStream > SyncCS and try again.", 400);
       }
       // Only the one-time state hash is visible to the database. Never send a code into HTML/URL.
       const hashed = await hashNonce(nonce);
@@ -66,7 +64,7 @@ Deno.serve(async (request: Request) => {
         nonce_hash: hashed, auth_code: code,
         expires_at: new Date(Date.now() + 5 * 60000).toISOString(),
       }]);
-      return html("GitHub 로그인 인증 완료", "CloudStream 앱의 SyncCS 화면으로 돌아가세요. 로그인 처리가 자동으로 계속됩니다.");
+      return notice("GitHub sign-in complete.", "Return to CloudStream > SyncCS. The sign-in will finish automatically. You can close this browser tab.");
     }
     if (request.method !== "POST") {
       return new Response("Method not allowed", { status: 405, headers: { ...secureHeaders, allow: "GET, POST" } });

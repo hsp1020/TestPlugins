@@ -10,7 +10,7 @@ CloudStream **users sign in with GitHub only**. They never need a Supabase accou
 4. The plugin waits for a one-time login result and completes the PKCE code exchange automatically. If the sign-in succeeds, sync starts.
 5. Sign in with the same GitHub account on other devices and supply the **same recovery passphrase**. This passphrase encrypts the backed-up data end to end; it is not a GitHub or Supabase password.
 
-OAuth codes and code verifiers never appear in the displayed browser page. The PKCE verifier is protected locally using the Android Keystore. The one-time callback handoff is keyed by a random 256-bit state, returns a code only to the waiting plugin, and is stored in a server table inaccessible to normal users. No GitHub client secret or Supabase service-role key is embedded in SyncCS.
+Supabase Edge Functions on the default project domain cannot render HTML and rewrite HTML responses to plain text. The OAuth callback therefore shows a short ASCII plaintext success notice instead of raw HTML; no custom domain is needed.\n\nOAuth codes and code verifiers never appear in the displayed browser page. The PKCE verifier is protected locally using the Android Keystore. The one-time callback handoff is keyed by a random 256-bit state, returns a code only to the waiting plugin, and is stored in a server table inaccessible to normal users. No GitHub client secret or Supabase service-role key is embedded in SyncCS.
 
 ## Server setup (operator only, one time)
 
