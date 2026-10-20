@@ -95,6 +95,21 @@ class SyncSettingsFragment : DialogFragment() {
     }
 
 
+    private fun restartCloudStreamAfterFirstSignIn(context: Context): Boolean {
+        val app = context.applicationContext
+        val launchComponent = app.packageManager
+            .getLaunchIntentForPackage(app.packageName)?.component ?: return false
+        return try {
+            // Match StremioC's settings-import restart. Only reached after the
+            // first successful GitHub sign-in AND completed sync.
+            app.startActivity(Intent.makeRestartActivityTask(launchComponent))
+            Runtime.getRuntime().exit(0)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun dp(context: Context, value: Int): Int =
         (value * context.resources.displayMetrics.density + 0.5f).toInt()
 
@@ -407,6 +422,7 @@ class SyncSettingsFragment : DialogFragment() {
                 feedback.text = "Preparing GitHub login..."
                 feedback.visibility = View.VISIBLE
                 val host = requireActivity()
+                val firstConnection = !config.active()
                 githubLoginJob = lifecycleScope.launch {
                     try {
                         // CloudStream's existing deep-link intent handles browser-to-app return.
@@ -441,8 +457,12 @@ class SyncSettingsFragment : DialogFragment() {
                                 SyncCoordinator.synchronize(host.applicationContext, host)
                             }
                             if (finishSyncProgress(progress, report)) {
-                                if (dialog.isShowing) dialog.dismiss()
-                                if (isAdded) dismissAllowingStateLoss()
+                                // A new device needs its restored preferences and plugin
+                                // registrations reloaded by the host before normal use.
+                                if (!(firstConnection && restartCloudStreamAfterFirstSignIn(host))) {
+                                    if (dialog.isShowing) dialog.dismiss()
+                                    if (isAdded) dismissAllowingStateLoss()
+                                }
                             } else {
                                 feedback.text = "Signed in, but synchronization did not complete."
                             }

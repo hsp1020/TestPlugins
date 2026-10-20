@@ -74,3 +74,40 @@ GitHub OAuth requires separate operator configuration on both **GitHub** and **S
 - Try to invalidate priority caches via runtime-reflected getter or backing field, if available. If the cache is absent on that version, preserve saved preferences and request a CloudStream restart for refreshed priorities.
 - Refresh CloudStream service account caches through runtime-detected companion APIs; do not hard-link to cache setters missing in older host builds.
 - `SyncCoordinator` catches and reports `LinkageError` as a host compatibility failure rather than allowing a fatal app restart. Persistent sync database and plugin backups are not reset.
+
+## First GitHub sign-in restore and restart (v7)
+
+After the *first* successful GitHub sign-in and fully successful `SyncCoordinator.synchronize()`, show `Sync complete` for 1.5 seconds, then restart CloudStream using the same `Intent.makeRestartActivityTask`/process exit mechanism already used by StremioC settings imports. Do not restart for manual `Sync now`, subsequent account sign-ins, incomplete plugin installation, or sync errors. This lets CloudStream reload restored plugins and settings before use.
+
+## CineStream / StreamPlay settings audit (v7)
+
+CineStream reference: [CineStream Settings.kt](https://github.com/SaurabhKaperwan/CSX/blob/master/CineStream/src/main/kotlin/com/megix/settings/Settings.kt), [SettingsDialog.kt](https://github.com/SaurabhKaperwan/CSX/blob/master/CineStream/src/main/kotlin/com/megix/settings/SettingsDialog.kt), [SettingsProviders.kt](https://github.com/SaurabhKaperwan/CSX/blob/master/CineStream/src/main/kotlin/com/megix/settings/SettingsProviders.kt). Cross-checked with StremioC `SettingsBottomFragment.kt` export/import.
+
+- Read CineStream global settings from CloudStream's DataStore (not a `CineStream` XML file): concurrency, download-only links, catalog activation, provider ordering/default/seen state, Stremio addon metadata and provider switches, ShowBox/Wyzie/GramCinema tokens, Cloudflare bypass switch and per-domain cookies.
+- Discover keys from CineStream's loaded `com.megix.settings.Settings` string fields where available. Also preserve a safe fallback list for when CineStream hasn't loaded yet; `p_*`, `stremio_*` and `cf_cookie_*` are discovered by namespace.
+- Include all these entries directly as encrypted `d/<key>` DataStore items: no duplicated parallel backups. DataStore change listeners then trigger regular debounced sync for CineStream switches and tokens, and restore writes back to the original CloudStream storage before restart.
+- StreamPlay reference: [settings code](https://github.com/hsp1020/cloudstream-extensions-phisher2/tree/main/StreamPlay/src/main/kotlin/com/Phisher98/settings). Its account token (`token`), Wyzie key (`wyzie_key`), disabled provider set, provider profiles, extension toggles, language, concurrency and Stremio addon/catalog URLs are in the `StreamPlay` preference file and are already represented by `p/StreamPlay/<key>`.
+- Exclude only StreamPlay runtime telemetry `STREAMPLAY_TELEMETRY_V2` and obsolete `provider_stats_*` from backup and restore because they describe device performance, not the user's settings.
+- CineStream cookie values are session material that can expire independently on other devices; exporting them does not guarantee an active session.
+
+## Scheduling and triggers (v7)
+
+All tracked data types share the *same* sync loop; there is no separate polling frequency for movies, account tokens, addons or settings. The loop compares the local snapshot with encrypted cloud entries and only transfers changed items.
+
+| Trigger | Delay / condition |
+| --- | --- |
+| Manual Sync now | Immediately (foreground Activity) |
+| First GitHub login | Immediately after token exchange; successful sync followed by restart |
+| Tracked SharedPreferences change | Debounced 1.8 seconds after last change |
+| Watch/bookmark update event | Debounced 2 seconds |
+| Home/account reload event | Debounced 3 seconds |
+| Plugins loaded event | Debounced 4 seconds; refresh observed preference files |
+| Activity started | Debounced 2.5 seconds (requires signed-in/ready/active owner) |
+| Activity resumed | If last sync started over 120 seconds ago |
+| Activity paused | Debounced 1.5 seconds |
+| Last Activity stopped | Debounced 0.5 seconds |
+| Foreground periodic check | Every 15 minutes while signed in and ready |
+| Restore a missing `.cs3` | Only when pending plugin list exists and an Activity is available; manual or resume-based sync |
+| Upload plugin binaries | When `x/plugins` inventory differs; uploads files before manifest |
+
+Automatic trigger timers replace a previously pending trigger of the same type, so densely clustered changes cause only one sync. The sync mutex serializes concurrent runs. Android does not guarantee execution after the app process is killed; this is **not** a background scheduler or a fixed cloud-backup interval.

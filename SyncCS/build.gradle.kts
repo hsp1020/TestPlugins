@@ -1,4 +1,4 @@
-version = 6
+version = 7
 
 cloudstream {
     description = "Sync CloudStream library, accounts, extensions and shared preferences using Supabase"

@@ -38,6 +38,100 @@ internal object SyncData {
         "elevate", "youtube"
     )
     private val defaultShared = emptySet<String>()
+
+    // Use the same CineStream configuration sources as StremioC's Export / Import.
+    // CineStream stores settings in the CloudStream DataStore under arbitrary key
+    // names, not only names starting with "cinestream" or "Provider".
+    private val cineStreamFallbackKeys = setOf(
+        "ScrapeConcurrency", "DownloadEnable", "ProviderCineStream", "ProviderSimkl",
+        "ProviderTmdb", "showbox_ui_token", "wyzie_subs_api_key",
+        "gramcinema_bearer_token", "stremio_addons", "new_provider_default_on",
+        "seen_providers", "provider_order", "cloudflare_webview_bypass_enabled"
+    )
+    @Volatile private var cineStreamDiscoveredKeys: Set<String> = cineStreamFallbackKeys
+
+    private fun cineStreamKeyAllowed(key: String): Boolean =
+        key.length in 1..200 && key.all {
+            it.isLetterOrDigit() || it == '_' || it == '-' || it == '.'
+        } && !listOf("cache", "crash", "logcat", "download_path", "keystore")
+            .any { key.contains(it, ignoreCase = true) }
+
+    // CineStream's SettingsProviders persists enabled switches by ProviderRegistry
+    // keys, while Cloudflare WebView stores a separate cookie for each domain.
+    private fun cineStreamDomainKey(key: String): Boolean =
+        key.startsWith("p_") || (key.startsWith("stremio_") &&
+            key != "stremio_addons") || key.startsWith("cf_cookie_")
+
+    fun refreshCineStreamKeys(): Set<String> {
+        val keys = cineStreamFallbackKeys.toMutableSet()
+        try {
+            val loaderManager = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
+            val manager = loaderManager.getField("INSTANCE").get(null)
+            var cineLoader: ClassLoader? = null
+            for (field in loaderManager.declaredFields) {
+                val collection = try {
+                    field.isAccessible = true
+                    val content = field.get(
+                        if (java.lang.reflect.Modifier.isStatic(field.modifiers)) null else manager
+                    )
+                    when (content) {
+                        is Map<*, *> -> content.values
+                        is Collection<*> -> content
+                        is Array<*> -> content.toList()
+                        else -> emptyList<Any>()
+                    }
+                } catch (_: Exception) {
+                    emptyList<Any>()
+                }
+                cineLoader = collection.firstOrNull { candidate ->
+                    val className = candidate?.javaClass?.name.orEmpty()
+                    className.contains("megix", true) || className.contains("CineStream", true)
+                }?.javaClass?.classLoader
+                if (cineLoader != null) break
+            }
+            if (cineLoader != null) {
+                val settings = Class.forName("com.megix.settings.Settings", false, cineLoader)
+                val companion = settings.declaredFields.firstOrNull { it.name == "INSTANCE" }?.let {
+                    it.isAccessible = true
+                    it.get(null)
+                }
+                for (field in settings.declaredFields) {
+                    if (field.type != String::class.java) continue
+                    try {
+                        field.isAccessible = true
+                        val owner = if (java.lang.reflect.Modifier.isStatic(field.modifiers)) null else companion
+                        val key = field.get(owner) as? String ?: continue
+                        if (cineStreamKeyAllowed(key)) keys.add(key)
+                    } catch (_: Exception) { }
+                }
+            }
+        } catch (_: Exception) { }
+        catch (_: LinkageError) { }
+
+        // StremioC also derives keys from active and ordered providers/addons.
+        val data = with(DataStore) {
+            com.lagradost.cloudstream3.CloudStreamApp.context?.getSharedPrefs()
+        }
+        try {
+            for (property in listOf("seen_providers", "provider_order")) {
+                (data?.getString(property, null) ?: "").split(',').forEach { item ->
+                    val key = item.trim()
+                    if (cineStreamKeyAllowed(key)) keys.add(key)
+                }
+            }
+            (data?.getString("stremio_addons", null) ?: "").lines().forEach { line ->
+                val name = line.substringBefore('|').trim()
+                if (name.isNotBlank()) {
+                    val suffix = name.lowercase()
+                        .replace(Regex("[^a-z0-9]+"), "_").trim('_')
+                    val key = "stremio_" + suffix
+                    if (cineStreamKeyAllowed(key)) keys.add(key)
+                }
+            }
+        } catch (_: Exception) { }
+        cineStreamDiscoveredKeys = keys
+        return keys
+    }
     private fun pluginScoped(key: String): Boolean {
         val value = key.substringAfter('/', key).lowercase()
         if (listOf("cache", "crash", "logcat", "history_temp", "download_path",
@@ -54,14 +148,23 @@ internal object SyncData {
         "crashlytics", "androidx", "gms", "advertis", "encrypted"
     )
     private fun dataAllowed(key: String): Boolean {
-        if (key in globallyShared) return true
+        if (key in globallyShared || key in cineStreamDiscoveredKeys ||
+            (cineStreamDomainKey(key) && cineStreamKeyAllowed(key))) return true
         val slash = key.indexOf('/')
         if (slash < 0) return false
         val account = key.substring(0, slash)
         val rest = if (account.all(Char::isDigit)) key.substring(slash + 1) else key
         return rest in globallyShared || dataPrefixes.any { rest.startsWith(it) } ||
-            pluginScoped(rest)
+            pluginScoped(rest) || rest in cineStreamDiscoveredKeys ||
+            (cineStreamDomainKey(rest) && cineStreamKeyAllowed(rest))
     }
+    private fun pluginPreferenceAllowed(file: String, key: String): Boolean {
+        // StreamPlay telemetry depends on the current device and isn't a setting.
+        if (file.equals("StreamPlay", true) &&
+            (key == "STREAMPLAY_TELEMETRY_V2" || key.startsWith("provider_stats_"))) return false
+        return true
+    }
+
     fun isTracked(path: String): Boolean = when {
         path.startsWith("d/") -> dataAllowed(path.removePrefix("d/"))
         path.startsWith("s/") -> path.removePrefix("s/") in defaultShared ||
@@ -72,6 +175,7 @@ internal object SyncData {
             file !in listOf("StremioC_Manifest", "AwOriginVisitLoggerPrefs",
                 "android.app.ActivityThread.IDS") &&
                 key.isNotBlank() && key.length <= 300 &&
+                pluginPreferenceAllowed(file, key) &&
                 !key.contains("cache", true) && !key.contains("logcat", true)
         }
         else -> false
@@ -108,6 +212,7 @@ internal object SyncData {
     fun snapshot(context: Context): MutableMap<String, String> {
         val result = mutableMapOf<String, String>()
         val data = with(DataStore) { context.getSharedPrefs() }
+        refreshCineStreamKeys()
         for ((name, value) in data.all) {
             if (!dataAllowed(name) || name.length > 500) continue
             valueJson(value)?.let { if (it.length <= 524288) result["d/" + name] = it }
@@ -120,7 +225,8 @@ internal object SyncData {
         for (file in pluginFiles(context)) {
             val pref = context.getSharedPreferences(file, Context.MODE_PRIVATE)
             for ((key, value) in pref.all) {
-                if (key.length > 300 || key.contains("cache", true) || key.contains("logcat", true)) continue
+                if (key.length > 300 || !pluginPreferenceAllowed(file, key) ||
+                    key.contains("cache", true) || key.contains("logcat", true)) continue
                 valueJson(value)?.let {
                     if (it.length <= 524288) result["p/" + file + "/" + key] = it
                 }
@@ -269,7 +375,7 @@ internal object SyncData {
                         forbiddenFileParts.any { name.contains(it, true) } ||
                         name in listOf("StremioC_Manifest", "AwOriginVisitLoggerPrefs",
                             "android.app.ActivityThread.IDS") ||
-                        prefKey.isBlank()) continue
+                        prefKey.isBlank() || !pluginPreferenceAllowed(name, prefKey)) continue
                     val editor = pluginEditors.getOrPut(name) {
                         context.getSharedPreferences(name, Context.MODE_PRIVATE).edit()
                     }
