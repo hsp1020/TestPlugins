@@ -4,7 +4,6 @@ import android.content.Context
 import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -51,7 +50,7 @@ internal class SyncConfiguration(context: Context) {
         url.startsWith("https://") && anonKey.isNotBlank() &&
         preferences.contains("session") && preferences.contains("secret")
     fun clearAccount() {
-        preferences.edit().remove("session").remove("secret").remove("base").remove("configured").apply()
+        preferences.edit().remove("session").remove("secret").remove("base").remove("configured").remove("oauth_pending").apply()
     }
 }
 
@@ -124,7 +123,7 @@ internal class SyncCipher(private val key: ByteArray) {
     }
 }
 
-internal class EmailConfirmationPending : IOException("Email verification required")
+internal data class GithubLoginRequest(val state: String, val browserUrl: String)
 
 internal class SyncBackend(private val config: SyncConfiguration) {
     private data class Session(val userId: String, val access: String, val refresh: String, val expiry: Long)
@@ -164,52 +163,101 @@ internal class SyncBackend(private val config: SyncConfiguration) {
 
     private fun encode(json: JSONObject): ByteArray = json.toString().toByteArray(Charsets.UTF_8)
     private fun decode(bytes: ByteArray): JSONObject = JSONObject(String(bytes, Charsets.UTF_8))
+    private fun randomToken(): String {
+        val bytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        return Base64.encodeToString(bytes, Base64.NO_PADDING or Base64.NO_WRAP or Base64.URL_SAFE)
+    }
 
-    fun signIn(email: String, password: String, recoveryPassphrase: String, register: Boolean) {
-        require(config.url.startsWith("https://")) { "HTTPS Supabase URL required" }
-        require(config.anonKey.isNotBlank()) { "Supabase publishable/anon key required" }
-        require(recoveryPassphrase.length >= 12) { "Recovery passphrase needs at least 12 characters" }
-        val endpoint = if (register) "/auth/v1/signup" else "/auth/v1/token?grant_type=password"
-        val answer = decode(call(endpoint, "POST", data = encode(JSONObject()
-            .put("email", email.trim()).put("password", password))))
-        val access = answer.optString("access_token")
-        val refresh = answer.optString("refresh_token")
-        if (access.isBlank() || refresh.isBlank()) {
-            if (register && answer.optJSONObject("user") != null) {
-                throw EmailConfirmationPending()
-            }
-            throw IOException("No login session was returned. Verify email confirmation and sign in.")
+    fun beginGithubLogin(): GithubLoginRequest {
+        val authSettings = decode(call("/auth/v1/settings", "GET"))
+        require(authSettings.optJSONObject("external")?.optBoolean("github") == true) {
+            "GitHub login is not enabled on the SyncCS server yet."
         }
-        val user = answer.optJSONObject("user") ?: error("Missing auth user")
-        val userId = user.getString("id")
-        val session = Session(userId, access, refresh,
-            System.currentTimeMillis() / 1000L + answer.optLong("expires_in", 3600L))
-        // A wrong passphrase must never overwrite a valid local recovery key.
-        val newCipher = SyncCipher.derive(recoveryPassphrase, config.url, userId)
-        val existing = config.preferences.getString("secret", null)
-        if (existing != null && config.email == email.trim()) {
-            require(MessageDigest.isEqual(LocalVault.decrypt(existing), newCipherKey(recoveryPassphrase, userId))) {
-                "Recovery passphrase differs from the key saved on this device"
-            }
+        val state = randomToken()
+        val verifier = randomToken()
+        val challengeBytes = MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray(Charsets.UTF_8))
+        val challenge = Base64.encodeToString(
+            challengeBytes, Base64.NO_PADDING or Base64.NO_WRAP or Base64.URL_SAFE
+        )
+        val redirect = android.net.Uri.parse(config.url + "/functions/v1/synccs-github-oauth")
+            .buildUpon().appendPath(state).build().toString()
+        val uri = android.net.Uri.parse(config.url + "/auth/v1/authorize").buildUpon()
+            .appendQueryParameter("provider", "github")
+            .appendQueryParameter("redirect_to", redirect)
+            .appendQueryParameter("flow_type", "pkce")
+            .appendQueryParameter("code_challenge", challenge)
+            .appendQueryParameter("code_challenge_method", "s256")
+            .build().toString()
+        val pending = JSONObject().put("state", state).put("verifier", verifier)
+            .put("created_at", System.currentTimeMillis())
+        check(config.preferences.edit().putString(
+            "oauth_pending",
+            LocalVault.encrypt(pending.toString().toByteArray(Charsets.UTF_8))
+        ).commit())
+        return GithubLoginRequest(state, uri)
+    }
+
+    fun pollGithubLogin(state: String): String? {
+        val reply = decode(call(
+            "/functions/v1/synccs-github-oauth", "POST",
+            data = encode(JSONObject().put("state", state))
+        ))
+        return when (reply.optString("status")) {
+            "pending" -> null
+            "approved" -> reply.getString("code")
+            "expired" -> throw IOException("GitHub login expired; try again.")
+            else -> throw IOException("Unexpected GitHub login response.")
         }
-        // Check that the provided passphrase can decrypt existing cloud content
-        // before overwriting either local credentials or the local sync baseline.
-        cached = session
-        try {
-            val sample = list().firstOrNull { !it.deleted && it.cipher != null }
-            if (sample != null) newCipher.decrypt(sample.key, sample.cipher!!)
-        } catch (error: Exception) {
-            cached = null
-            throw IOException("Cannot verify cloud data with this recovery passphrase", error)
+    }
+
+    fun completeGithubLogin(state: String, authCode: String, recoveryPassphrase: String) {
+        require(recoveryPassphrase.length >= 12) { "Recovery passphrase needs at least 12 characters." }
+        val packed = config.preferences.getString("oauth_pending", null)
+            ?: throw IOException("GitHub login request was not found.")
+        val pending = JSONObject(String(LocalVault.decrypt(packed), Charsets.UTF_8))
+        require(pending.getString("state") == state) { "GitHub login state mismatch." }
+        require(System.currentTimeMillis() - pending.getLong("created_at") in 0L..300000L) {
+            "GitHub login request expired."
         }
+        val answer = decode(call(
+            "/auth/v1/token?grant_type=pkce", "POST",
+            data = encode(JSONObject()
+                .put("auth_code", authCode)
+                .put("code_verifier", pending.getString("verifier")))
+        ))
+        val user = answer.optJSONObject("user") ?: error("Missing authenticated GitHub user.")
+        val session = Session(
+            user.getString("id"),
+            answer.getString("access_token"),
+            answer.getString("refresh_token"),
+            System.currentTimeMillis() / 1000L + answer.optLong("expires_in", 3600L)
+        )
+        val derived = SyncCipher.derive(recoveryPassphrase, config.url, session.userId)
+        val newKey = newCipherKey(recoveryPassphrase, session.userId)
         val priorUser = config.preferences.getString("session", null)?.let {
             try { JSONObject(String(LocalVault.decrypt(it), Charsets.UTF_8)).optString("user_id") }
             catch (_: Exception) { null }
         }
-        config.email = email
-        config.preferences.edit().putString("secret", LocalVault.encrypt(newCipherKey(recoveryPassphrase, userId)))
-            .apply()
-        if (priorUser != userId) config.preferences.edit().remove("base").apply()
+        val savedKey = config.preferences.getString("secret", null)
+        if (priorUser == session.userId && savedKey != null) {
+            require(MessageDigest.isEqual(LocalVault.decrypt(savedKey), newKey)) {
+                "Recovery passphrase differs from the key saved on this device."
+            }
+        }
+        cached = session
+        try {
+            val sample = list().firstOrNull { !it.deleted && it.cipher != null }
+            if (sample != null) derived.decrypt(sample.key, sample.cipher!!)
+        } catch (error: Exception) {
+            cached = null
+            throw IOException("Recovery passphrase cannot decrypt this account's existing sync data.", error)
+        }
+        val editor = config.preferences.edit()
+            .putString("secret", LocalVault.encrypt(newKey))
+            .remove("oauth_pending")
+        if (priorUser != session.userId) editor.remove("base")
+        check(editor.commit())
+        config.email = user.optString("email", "")
         persist(session)
     }
 

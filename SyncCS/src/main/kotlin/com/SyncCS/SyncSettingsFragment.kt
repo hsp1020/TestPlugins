@@ -2,6 +2,8 @@ package com.SyncCS
 
 import android.app.Dialog
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.text.InputType
@@ -18,12 +20,18 @@ import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.DialogFragment
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class SyncSettingsFragment : DialogFragment() {
     private var statusLabel: TextView? = null
     private var accountDialog: AlertDialog? = null
+    private var githubLoginJob: Job? = null
 
     private fun dp(context: Context, value: Int): Int =
         (value * context.resources.displayMetrics.density + 0.5f).toInt()
@@ -86,7 +94,7 @@ class SyncSettingsFragment : DialogFragment() {
         body.addView(settingRow(
             context,
             "Sync account",
-            "Sign in or create a SyncCS account"
+            "Connect your GitHub account"
         ) {
             showAccountDialog()
         })
@@ -186,99 +194,98 @@ class SyncSettingsFragment : DialogFragment() {
         val body = column(context)
         body.addView(secondary(
             context,
-            "SyncCS uses a separate sync account, not your GitHub or Supabase dashboard password."
+            "Sign in using your GitHub account. SyncCS does not need a separate email or password."
         ))
-
-        val email = labeledField(
-            context, body, "Email", "Email address", config.email,
-            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
-        )
-        val password = labeledField(
-            context, body, "SyncCS account password", "Password for your SyncCS account",
-            kind = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        )
         val recovery = labeledField(
             context, body, "Recovery passphrase", "At least 12 characters",
             kind = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         )
         body.addView(secondary(
             context,
-            "Encrypts your sync data. Use the same passphrase on every device."
+            "This encrypts your synced data. Enter the same recovery passphrase on every device."
         ))
         val device = labeledField(
-            context, body, "Device name", "Device name",
-            config.deviceName, done = true
+            context, body, "Device name", "Device name", config.deviceName, done = true
         )
         val feedback = secondary(context, "").apply {
             visibility = View.GONE
             setPadding(0, dp(context, 12), 0, 0)
         }
         body.addView(feedback)
-
         val dialog = AlertDialog.Builder(context)
-            .setTitle("SyncCS account")
+            .setTitle("SyncCS · GitHub")
             .setView(scroll(context, body))
-            .setPositiveButton("Sign in", null)
-            .setNeutralButton("Sign up", null)
+            .setPositiveButton("Sign in with GitHub", null)
             .setNegativeButton("Cancel", null)
             .create()
 
         dialog.setOnShowListener {
             dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN)
-            val signIn = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-            val signUp = dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
-            var busy = false
-
-            fun authenticate(register: Boolean) {
-                if (busy) return
-                val mail = email.text.toString().trim()
-                val pass = password.text.toString()
+            val signInButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            signInButton.setOnClickListener {
+                if (githubLoginJob?.isActive == true) return@setOnClickListener
                 val phrase = recovery.text.toString()
                 val name = device.text.toString().trim().ifEmpty { Build.MODEL }
-                if (!mail.contains('@') || pass.isBlank() || phrase.length < 12) {
-                    feedback.text = "Enter a valid email, account password and recovery passphrase (12+ characters)."
+                if (phrase.length < 12) {
+                    feedback.text = "Enter a recovery passphrase with at least 12 characters."
                     feedback.visibility = View.VISIBLE
-                    return
+                    return@setOnClickListener
                 }
-                busy = true
-                signIn.isEnabled = false
-                signUp.isEnabled = false
-                feedback.text = if (register) "Creating SyncCS account..." else "Signing in..."
+                signInButton.isEnabled = false
+                feedback.text = "Preparing GitHub login..."
                 feedback.visibility = View.VISIBLE
                 val host = requireActivity()
-                lifecycleScope.launch {
-                    val outcome = withContext(Dispatchers.IO) {
-                        try {
-                            SyncBackend(config).signIn(mail, pass, phrase, register)
+                githubLoginJob = lifecycleScope.launch {
+                    try {
+                        val attempt = withContext(Dispatchers.IO) {
+                            SyncBackend(config).beginGithubLogin()
+                        }
+                        host.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(attempt.browserUrl)))
+                        feedback.text = "Complete GitHub login in your browser, then return to CloudStream. Waiting for confirmation..."
+                        val authCode: String = withTimeout(4L * 60L * 1000L) {
+                            var received: String? = null
+                            while (received == null) {
+                                delay(1600L)
+                                received = withContext(Dispatchers.IO) {
+                                    SyncBackend(config).pollGithubLogin(attempt.state)
+                                }
+                            }
+                            received ?: throw java.io.IOException("Missing GitHub authorization code.")
+                        }
+                        feedback.text = "GitHub confirmed. Restoring SyncCS session..."
+                        val report = withContext(Dispatchers.IO) {
+                            SyncBackend(config).completeGithubLogin(
+                                attempt.state, authCode, phrase
+                            )
                             config.deviceName = name
                             SyncCoordinator.synchronize(host.applicationContext, host)
-                        } catch (pending: EmailConfirmationPending) {
-                            "Verification email sent. Follow the email link, return to SyncCS, and tap Sign in."
-                        } catch (error: Exception) {
-                            "Connection failed: " +
+                        }
+                        statusLabel?.text = report
+                        if (report.startsWith("Sync failed:")) {
+                            feedback.text = "Signed in, but synchronization failed: " + report.removePrefix("Sync failed: ")
+                        } else {
+                            if (dialog.isShowing) dialog.dismiss()
+                        }
+                    } catch (timeout: TimeoutCancellationException) {
+                        if (dialog.isShowing) feedback.text = "GitHub login timed out. Please try again."
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        if (dialog.isShowing) {
+                            feedback.text = "GitHub login failed: " +
                                 (error.message ?: error.javaClass.simpleName).take(160)
                         }
-                    }
-                    statusLabel?.text = outcome
-                    if (dialog.isShowing) {
-                        if (outcome.startsWith("Connection failed:") ||
-                            outcome.startsWith("Verification email sent.") ||
-                            outcome.startsWith("Sync failed:")) {
-                            feedback.text = outcome
-                            busy = false
-                            signIn.isEnabled = true
-                            signUp.isEnabled = true
-                        } else {
-                            dialog.dismiss()
-                        }
+                    } finally {
+                        if (dialog.isShowing) signInButton.isEnabled = true
                     }
                 }
             }
-
-            signIn.setOnClickListener { authenticate(false) }
-            signUp.setOnClickListener { authenticate(true) }
         }
-        dialog.setOnDismissListener { if (accountDialog === dialog) accountDialog = null }
+        dialog.setOnDismissListener {
+            githubLoginJob?.cancel()
+            githubLoginJob = null
+            if (accountDialog === dialog) accountDialog = null
+        }
         accountDialog = dialog
         dialog.show()
     }
