@@ -170,7 +170,7 @@ internal class SyncBackend(private val config: SyncConfiguration) {
         return Base64.encodeToString(bytes, Base64.NO_PADDING or Base64.NO_WRAP or Base64.URL_SAFE)
     }
 
-    fun beginGithubLogin(): GithubLoginRequest {
+    fun beginGithubLogin(autoReturn: Boolean = false): GithubLoginRequest {
         val authSettings = decode(call("/auth/v1/settings", "GET"))
         require(authSettings.optJSONObject("external")?.optBoolean("github") == true) {
             "GitHub login is not enabled on the SyncCS server yet."
@@ -182,7 +182,9 @@ internal class SyncBackend(private val config: SyncConfiguration) {
             challengeBytes, Base64.NO_PADDING or Base64.NO_WRAP or Base64.URL_SAFE
         )
         val redirect = android.net.Uri.parse(config.url + "/functions/v1/synccs-github-oauth")
-            .buildUpon().appendPath(state).build().toString()
+            .buildUpon()
+            .apply { if (autoReturn) appendPath("auth-tab") }
+            .appendPath(state).build().toString()
         val uri = android.net.Uri.parse(config.url + "/auth/v1/authorize").buildUpon()
             .appendQueryParameter("provider", "github")
             .appendQueryParameter("redirect_to", redirect)

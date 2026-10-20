@@ -24,9 +24,12 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
+import androidx.browser.auth.AuthTabIntent
+import androidx.browser.customtabs.CustomTabsClient
 import androidx.fragment.app.DialogFragment
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +45,74 @@ class SyncSettingsFragment : DialogFragment() {
     private var statusLabel: TextView? = null
     private var accountDialog: AlertDialog? = null
     private var githubLoginJob: Job? = null
+    private val authTabLauncher = AuthTabIntent.registerActivityResultLauncher(this) { result ->
+        // Auth Tab closes itself on the expected redirect. The one-time code
+        // still comes from our nonce-bound server endpoint via the poll.
+        if (result.resultCode == AuthTabIntent.RESULT_OK) {
+            accountDialog?.takeIf { it.isShowing }?.getButton(AlertDialog.BUTTON_POSITIVE)
+                ?.contentDescription = "GitHub authorization received"
+        }
+    }
+
+    private data class SyncProgress(val dialog: AlertDialog, val bar: ProgressBar, val label: TextView)
+
+    private fun showSyncProgress(): SyncProgress {
+        val context = requireContext()
+        val body = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(context, 22), dp(context, 18), dp(context, 22), dp(context, 18))
+        }
+        val spinner = ProgressBar(context).apply { isIndeterminate = true }
+        body.addView(spinner, LinearLayout.LayoutParams(dp(context, 36), dp(context, 36)))
+        val text = TextView(context).apply {
+            text = "Synchronizing..."
+            textSize = 16f
+            setPadding(dp(context, 18), 0, 0, 0)
+        }
+        body.addView(text, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val dialog = AlertDialog.Builder(context)
+            .setTitle("SyncCS")
+            .setView(body)
+            .setCancelable(false)
+            .create()
+        dialog.show()
+        return SyncProgress(dialog, spinner, text)
+    }
+
+    private suspend fun finishSyncProgress(progress: SyncProgress, result: String): Boolean {
+        val success = result.startsWith("Synced:")
+        statusLabel?.text = result
+        if (success) {
+            progress.bar.visibility = View.GONE
+            progress.label.text = if (result.startsWith("Synced: downloaded 0, uploaded 0")) {
+                "Sync complete · Already up to date"
+            } else {
+                "Sync complete"
+            }
+            delay(1500L)
+            progress.dialog.dismiss()
+        } else {
+            progress.dialog.dismiss()
+            if (isAdded) {
+                AlertDialog.Builder(requireContext())
+                    .setTitle("Sync failed")
+                    .setMessage(result)
+                    .setPositiveButton("Close", null)
+                    .show()
+            }
+        }
+        return success
+    }
+
+    private fun canAutoReturnFromGithub(): Boolean = try {
+        val context = requireContext()
+        val preferred = CustomTabsClient.getPackageName(context, null)
+        val candidate = preferred ?: "com.android.chrome"
+        CustomTabsClient.isAuthTabSupported(context, candidate)
+    } catch (_: Exception) {
+        false
+    }
 
     private fun dp(context: Context, value: Int): Int =
         (value * context.resources.displayMetrics.density + 0.5f).toInt()
@@ -116,16 +187,22 @@ class SyncSettingsFragment : DialogFragment() {
         ) { row ->
             val host = requireActivity()
             row.isEnabled = false
-            statusLabel?.text = "Synchronizing..."
             lifecycleScope.launch {
+                val progress = showSyncProgress()
                 try {
                     val outcome = withContext(Dispatchers.IO) {
                         SyncCoordinator.synchronize(host.applicationContext, host)
                     }
-                    statusLabel?.text = outcome
+                    if (finishSyncProgress(progress, outcome) && isAdded) {
+                        dismissAllowingStateLoss()
+                    }
+                } catch (cancelled: CancellationException) {
+                    progress.dialog.dismiss()
+                    throw cancelled
                 } catch (error: Exception) {
-                    statusLabel?.text = "Sync failed: " +
-                        (error.message ?: error.javaClass.simpleName).take(160)
+                    finishSyncProgress(
+                        progress, "Sync failed: " + (error.message ?: error.javaClass.simpleName).take(160)
+                    )
                 } finally {
                     row.isEnabled = true
                 }
@@ -351,11 +428,19 @@ class SyncSettingsFragment : DialogFragment() {
                 val host = requireActivity()
                 githubLoginJob = lifecycleScope.launch {
                     try {
+                        val useAuthTab = canAutoReturnFromGithub()
                         val attempt = withContext(Dispatchers.IO) {
-                            SyncBackend(config).beginGithubLogin()
+                            SyncBackend(config).beginGithubLogin(autoReturn = useAuthTab)
                         }
-                        host.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(attempt.browserUrl)))
-                        feedback.text = "Complete GitHub login in your browser, then return to CloudStream. Waiting for confirmation..."
+                        if (useAuthTab) {
+                            AuthTabIntent.Builder().build().launch(
+                                authTabLauncher, Uri.parse(attempt.browserUrl), "synccs"
+                            )
+                            feedback.text = "Complete GitHub login. The browser will close automatically."
+                        } else {
+                            host.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(attempt.browserUrl)))
+                            feedback.text = "Complete GitHub login in your browser, then return to CloudStream."
+                        }
                         val authCode: String = withTimeout(4L * 60L * 1000L) {
                             var received: String? = null
                             while (received == null) {
@@ -366,19 +451,29 @@ class SyncSettingsFragment : DialogFragment() {
                             }
                             received ?: throw java.io.IOException("Missing GitHub authorization code.")
                         }
-                        feedback.text = "GitHub confirmed. Restoring SyncCS session..."
-                        val report = withContext(Dispatchers.IO) {
-                            SyncBackend(config).completeGithubLogin(
-                                attempt.state, authCode, phrase
-                            )
-                            config.deviceName = name
-                            SyncCoordinator.synchronize(host.applicationContext, host)
-                        }
-                        statusLabel?.text = report
-                        if (report.startsWith("Sync failed:")) {
-                            feedback.text = "Signed in, but synchronization failed: " + report.removePrefix("Sync failed: ")
-                        } else {
-                            if (dialog.isShowing) dialog.dismiss()
+                        val progress = showSyncProgress()
+                        progress.label.text = "Completing GitHub sign-in..."
+                        try {
+                            withContext(Dispatchers.IO) {
+                                SyncBackend(config).completeGithubLogin(
+                                    attempt.state, authCode, phrase
+                                )
+                                config.deviceName = name
+                            }
+                            feedback.text = "GitHub sign-in complete."
+                            progress.label.text = "Synchronizing..."
+                            val report = withContext(Dispatchers.IO) {
+                                SyncCoordinator.synchronize(host.applicationContext, host)
+                            }
+                            if (finishSyncProgress(progress, report)) {
+                                if (dialog.isShowing) dialog.dismiss()
+                                if (isAdded) dismissAllowingStateLoss()
+                            } else {
+                                feedback.text = "Signed in, but synchronization did not complete."
+                            }
+                        } catch (error: Exception) {
+                            progress.dialog.dismiss()
+                            throw error
                         }
                     } catch (timeout: TimeoutCancellationException) {
                         if (dialog.isShowing) feedback.text = "GitHub login timed out. Please try again."

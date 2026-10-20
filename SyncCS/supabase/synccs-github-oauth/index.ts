@@ -64,6 +64,17 @@ Deno.serve(async (request: Request) => {
         nonce_hash: hashed, auth_code: code,
         expires_at: new Date(Date.now() + 5 * 60000).toISOString(),
       }]);
+      // Android Auth Tab intercepts this private scheme and closes itself,
+      // returning to the caller without requiring a CloudStream manifest edit.
+      if (url.pathname.includes("/auth-tab/")) {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            ...secureHeaders,
+            location: "synccs://login-complete?state=" + encodeURIComponent(nonce),
+          },
+        });
+      }
       return notice("GitHub sign-in complete.", "Return to CloudStream > SyncCS. The sign-in will finish automatically. You can close this browser tab.");
     }
     if (request.method !== "POST") {

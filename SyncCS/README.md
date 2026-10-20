@@ -38,6 +38,14 @@ The SyncCS Seoul Supabase project is **zbmofheqyswjbziecmyn**. The following has
 
 GitHub OAuth requires separate operator configuration on both **GitHub** and **Supabase**. Until the GitHub provider is enabled the plugin stops before opening a browser and explains that server OAuth setup is incomplete.
 
+## Login and sync UI
+
+- On compatible Android browsers, **AndroidX Browser Auth Tab** uses a temporary custom-scheme callback (`synccs://login-complete`). The tab automatically closes and returns focus to CloudStream when the Supabase OAuth callback finishes. The callback does **not** require CloudStream core manifest changes or Digital Asset Links. The PKCE code continues to be delivered via the authenticated, nonce-bound one-time handoff server.
+- On unsupported browsers or TV devices, the extension opens the ordinary external browser; **those browsers cannot be closed forcibly from another app**. The confirmation page tells users to return to CloudStream and polling completes the login.
+- On login completion the plugin displays native themed sync progress and then a brief completion notice before dismissing the dialogs. The same sequence is used by the manual **Sync now** action; errors stay visible instead of being reported as success.
+- **Synced: downloaded 0, uploaded 0** means *this run had no changes*. It is expected once devices are in sync; it does not mean there is no data stored in Supabase.
+- `SyncCS/build.gradle.kts` includes `androidx.browser:browser:1.9.0` for Auth Tab. Requires build and real device testing.
+
 ## Data and compatibility
 
 - Sync data: CloudStream library, bookmarks, watch progress, source/quality priorities and standard SharedPreferences-based plugin settings.
