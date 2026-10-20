@@ -3361,7 +3361,7 @@ class YoutubeProvider(
                     actorList.add(ActorData(Actor(channelName, channelAvatar)))
                 }
                 if (subscriberCount.isNotBlank()) {
-                    actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins-build/refs/heads/master/YouTube/Subscribe.jpg")))
+                    actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/YouTube/Subscribe.jpg")))
                 }
                 if (actorList.isNotEmpty()) {
                     this.actors = actorList
@@ -3624,10 +3624,10 @@ class YoutubeProvider(
                     actorList.add(ActorData(Actor(title, poster ?: "")))
                     
                     if (subscriberCount.isNotBlank()) {
-                        actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins-build/refs/heads/builds/Subscribe.jpg")))
+                        actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/YouTube/Subscribe.jpg")))
                     }
                     if (videoCount.isNotBlank()) {
-                        actorList.add(ActorData(Actor(videoCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins-build/refs/heads/builds/Videos.jpg")))
+                        actorList.add(ActorData(Actor(videoCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/YouTube/Videos.jpg")))
                     }
                     if (actorList.isNotEmpty()) {
                         this.actors = actorList
@@ -3711,10 +3711,10 @@ class YoutubeProvider(
                         actorList.add(ActorData(Actor(author, playlistMeta.channelAvatar)))
                     }
                     if (playlistMeta.subscriberCount.isNotBlank()) {
-                        actorList.add(ActorData(Actor(playlistMeta.subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins-build/refs/heads/builds/Subscribe.jpg")))
+                        actorList.add(ActorData(Actor(playlistMeta.subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/YouTube/Subscribe.jpg")))
                     }
                     if (playlistMeta.videoCount.isNotBlank()) {
-                        actorList.add(ActorData(Actor(playlistMeta.videoCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins-build/refs/heads/builds/Videos.jpg")))
+                        actorList.add(ActorData(Actor(playlistMeta.videoCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/YouTube/Videos.jpg")))
                     }
                     if (actorList.isNotEmpty()) {
                         this.actors = actorList
@@ -3960,7 +3960,7 @@ class YoutubeProvider(
             }
 
             if (subscriberCount.isNotBlank()) {
-                actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins-build/refs/heads/master/YouTube/Subscribe.jpg")))
+                actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/YouTube/Subscribe.jpg")))
             }
 
             if (actorList.isNotEmpty()) {
@@ -3977,13 +3977,19 @@ class YoutubeProvider(
     ): Boolean {
         val videoId = YoutubeUtils.extractYoutubeId(data) ?: data
         val isShort = data.contains("/shorts/")
+        val loadStarted = android.os.SystemClock.elapsedRealtime()
+        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=load_links event=start")
 
         val fullUrl = "https://www.youtube.com/watch?v=$videoId"
 
         var playerResponseJson: String? = null
         try {
             val htmlUrl = if (isShort) "$mainUrl/shorts/$videoId" else fullUrl
-            val htmlResponse = app.get(htmlUrl, interceptor = ytInterceptor).text
+            val htmlResponse = traceYouTubeHttp("provider_html", videoId) {
+                val response = app.get(htmlUrl, interceptor = ytInterceptor)
+                android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=provider_html http=${response.code}")
+                response.text
+            }
             
             val marker1 = "ytInitialPlayerResponse = "
             var startIdx = htmlResponse.indexOf(marker1)
@@ -4013,13 +4019,19 @@ class YoutubeProvider(
                     "Origin" to "https://www.youtube.com",
                     "Referer" to "https://www.youtube.com/"
                 )
-                playerResponseJson = app.post(apiUrl, json = payload, headers = webHeaders).text
+                playerResponseJson = traceYouTubeHttp("provider_web_api", videoId) {
+                    val response = app.post(apiUrl, json = payload, headers = webHeaders)
+                    android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=provider_web_api http=${response.code}")
+                    response.text
+                }
             }            
             
         } catch (e: Exception) {
+            android.util.Log.w("YT_HTTP_TRACE", "video=$videoId stage=provider_prepare result=error type=${e.javaClass.simpleName}")
             logError(e)
         }
 
+        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=provider_prepare parsed=${!playerResponseJson.isNullOrBlank()}")
         if (!playerResponseJson.isNullOrBlank()) {
             try {
                 val root = org.json.JSONObject(playerResponseJson)
@@ -4036,7 +4048,10 @@ class YoutubeProvider(
             }
         }
 
-        com.hsp1020.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
+        traceYouTubeHttp("provider_total_extract", videoId) {
+            com.hsp1020.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
+        }
+        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=load_links event=end elapsed_ms=${android.os.SystemClock.elapsedRealtime() - loadStarted}")
 
         return true
     }                                             
