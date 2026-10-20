@@ -1,150 +1,288 @@
 package com.SyncCS
 
+import android.app.Dialog
 import android.content.Context
 import android.os.Build
 import android.os.Bundle
 import android.text.InputType
-import android.view.Gravity
-import android.view.LayoutInflater
+import android.util.TypedValue
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
+import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
-import com.google.android.material.bottomsheet.BottomSheetDialogFragment
-import com.lagradost.cloudstream3.plugins.Plugin
+import androidx.fragment.app.DialogFragment
 import androidx.lifecycle.lifecycleScope
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragment() {
-    private var label: TextView? = null
+class SyncSettingsFragment : DialogFragment() {
+    private var statusLabel: TextView? = null
+    private var accountDialog: AlertDialog? = null
 
     private fun dp(context: Context, value: Int): Int =
-        (value * context.resources.displayMetrics.density + .5f).toInt()
+        (value * context.resources.displayMetrics.density + 0.5f).toInt()
 
-    private fun field(context: Context, hint: String, value: String = "", secret: Boolean = false): EditText =
-        EditText(context).apply {
-            this.hint = hint
-            setSingleLine(true)
-            setText(value)
-            inputType = if (secret) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-                        else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL
-        }
-
-    private fun container(context: Context) = LinearLayout(context).apply {
+    private fun column(context: Context): LinearLayout = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(context, 20), dp(context, 12), dp(context, 20), dp(context, 16))
+        setPadding(dp(context, 20), dp(context, 8), dp(context, 20), dp(context, 12))
     }
 
-    override fun onCreateView(inflater: LayoutInflater, root: ViewGroup?, state: Bundle?): View {
+    private fun secondary(context: Context, value: String): TextView =
+        TextView(context).apply {
+            text = value
+            textSize = 13f
+            alpha = 0.78f
+        }
+
+    private fun scroll(context: Context, body: View): ScrollView =
+        ScrollView(context).apply {
+            isFillViewport = false
+            addView(body)
+        }
+
+    private fun settingRow(
+        context: Context,
+        title: String,
+        description: String,
+        action: (LinearLayout) -> Unit
+    ): LinearLayout = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(context, 12), dp(context, 12), dp(context, 12), dp(context, 12))
+        minimumHeight = dp(context, 60)
+        val ripple = TypedValue()
+        if (context.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)
+            && ripple.resourceId != 0) {
+            setBackgroundResource(ripple.resourceId)
+        }
+        addView(TextView(context).apply {
+            text = title
+            textSize = 16f
+        })
+        addView(secondary(context, description))
+        isClickable = true
+        isFocusable = true
+        contentDescription = "$title. $description"
+        setOnClickListener { action(this) }
+    }
+
+    override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
         val context = requireContext()
         val config = SyncConfiguration(context)
-        val content = container(context)
-        content.addView(TextView(context).apply {
-            text = "SyncCS – Supabase Sync"
-            textSize = 19f
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(context, 12))
+        val body = column(context)
+
+        val status = secondary(context, "").apply {
+            text = statusText(config)
+            setPadding(dp(context, 12), dp(context, 4), dp(context, 12), dp(context, 12))
+        }
+        statusLabel = status
+        body.addView(status)
+
+        body.addView(settingRow(
+            context,
+            "Sync account",
+            "Sign in or create a SyncCS account"
+        ) {
+            showAccountDialog()
         })
-        label = TextView(context).apply {
-            text = SyncCoordinator.lastStatus + "\nDevice: " + config.deviceName
-            setPadding(0, 0, 0, dp(context, 16))
-            textSize = 14f
-        }
-        content.addView(label)
-        val setup = Button(context).apply {
-            text = "Account and server settings"
-            setOnClickListener { showCredentials(context) }
-        }
-        content.addView(setup)
-        content.addView(Button(context).apply {
-            text = "Sync now"
-            setOnClickListener {
-                val activity = requireActivity()
-                label?.text = "Synchronizing..."
-                lifecycleScope.launch {
-                    val report = withContext(Dispatchers.IO) {
-                        SyncCoordinator.synchronize(activity.applicationContext, activity)
+
+        body.addView(settingRow(
+            context,
+            "Sync now",
+            "Synchronize library, accounts and extensions"
+        ) { row ->
+            val host = requireActivity()
+            row.isEnabled = false
+            statusLabel?.text = "Synchronizing..."
+            lifecycleScope.launch {
+                try {
+                    val outcome = withContext(Dispatchers.IO) {
+                        SyncCoordinator.synchronize(host.applicationContext, host)
                     }
-                    label?.text = report
+                    statusLabel?.text = outcome
+                } catch (error: Exception) {
+                    statusLabel?.text = "Sync failed: " +
+                        (error.message ?: error.javaClass.simpleName).take(160)
+                } finally {
+                    row.isEnabled = true
                 }
             }
         })
-        content.addView(Button(context).apply {
-            text = "Disconnect this device"
-            setOnClickListener {
-                AlertDialog.Builder(context).setTitle("Disconnect SyncCS")
-                    .setMessage("Remove saved sync credentials on this device? Cloud data will be preserved.")
-                    .setPositiveButton("Disconnect") { _, _ ->
-                        config.clearAccount()
-                        label?.text = "Disconnected"
-                    }.setNegativeButton("Cancel", null).show()
-            }
+
+        body.addView(settingRow(
+            context,
+            "Disconnect this device",
+            "Remove this device's sync session only"
+        ) {
+            AlertDialog.Builder(context)
+                .setTitle("Disconnect SyncCS")
+                .setMessage("Disconnect this device? Cloud backups and data on other devices will be preserved.")
+                .setPositiveButton("Disconnect") { _, _ ->
+                    config.clearAccount()
+                    statusLabel?.text = statusText(config)
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
         })
-        content.addView(TextView(context).apply {
-            text = "Shared: library, watch progress, accounts, extensions, plugin settings, source priorities.\n" +
-                "Device-specific: display, decoder, subtitle size, download paths.\n" +
-                "The SyncCS cloud server is already configured. " +
-                "Use the same account and recovery passphrase on each device."
-            textSize = 13f
-            setPadding(0, dp(context, 14), 0, 0)
+
+        body.addView(secondary(
+            context,
+            "Shared: library, accounts, extensions, source priorities.\n" +
+                "Device-only: appearance, decoder, subtitle display."
+        ).apply {
+            setPadding(dp(context, 12), dp(context, 14), dp(context, 12), dp(context, 2))
         })
-        return ScrollView(context).apply {
-            addView(content)
-        }
+
+        return AlertDialog.Builder(context)
+            .setTitle("SyncCS")
+            .setView(scroll(context, body))
+            .setPositiveButton("Close", null)
+            .create()
     }
 
-    private fun showCredentials(context: Context) {
+    private fun statusText(config: SyncConfiguration): String {
+        val status = if (config.active()) SyncCoordinator.lastStatus else "Not connected"
+        return "$status  ·  ${config.deviceName}"
+    }
+
+    private fun labeledField(
+        context: Context,
+        body: LinearLayout,
+        title: String,
+        hint: String,
+        value: String = "",
+        kind: Int = InputType.TYPE_CLASS_TEXT,
+        done: Boolean = false
+    ): EditText {
+        body.addView(TextView(context).apply {
+            text = title
+            textSize = 14f
+            setPadding(0, dp(context, 12), 0, dp(context, 2))
+        })
+        val field = EditText(context).apply {
+            inputType = kind
+            setSingleLine(true)
+            textSize = 16f
+            this.hint = hint
+            setText(value)
+            imeOptions = if (done) EditorInfo.IME_ACTION_DONE else EditorInfo.IME_ACTION_NEXT
+        }
+        body.addView(field, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+        return field
+    }
+
+    private fun showAccountDialog() {
+        if (accountDialog?.isShowing == true) return
+        val context = requireContext()
         val config = SyncConfiguration(context)
-        val layout = container(context)
-        val email = field(context, "Email", config.email)
-        val password = field(context, "Supabase account password", secret = true)
-        val phrase = field(context, "Recovery passphrase (12+ characters)", secret = true)
-        val device = field(context, "Device name", config.deviceName)
-        layout.addView(TextView(context).apply { text = "SyncCS Cloud · Seoul server (configured)" })
-        listOf(email, password, phrase, device).forEach { layout.addView(it) }
+        val body = column(context)
+        body.addView(secondary(
+            context,
+            "SyncCS uses a separate sync account, not your GitHub or Supabase dashboard password."
+        ))
+
+        val email = labeledField(
+            context, body, "Email", "Email address", config.email,
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS
+        )
+        val password = labeledField(
+            context, body, "SyncCS account password", "Password for your SyncCS account",
+            kind = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        )
+        val recovery = labeledField(
+            context, body, "Recovery passphrase", "At least 12 characters",
+            kind = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        )
+        body.addView(secondary(
+            context,
+            "Encrypts your sync data. Use the same passphrase on every device."
+        ))
+        val device = labeledField(
+            context, body, "Device name", "Device name",
+            config.deviceName, done = true
+        )
+        val feedback = secondary(context, "").apply {
+            visibility = View.GONE
+            setPadding(0, dp(context, 12), 0, 0)
+        }
+        body.addView(feedback)
+
         val dialog = AlertDialog.Builder(context)
             .setTitle("SyncCS account")
-            .setView(ScrollView(context).apply { addView(layout) })
+            .setView(scroll(context, body))
             .setPositiveButton("Sign in", null)
             .setNeutralButton("Sign up", null)
             .setNegativeButton("Cancel", null)
             .create()
+
         dialog.setOnShowListener {
-            fun runAuth(register: Boolean) {
+            dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN)
+            val signIn = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            val signUp = dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
+            var busy = false
+
+            fun authenticate(register: Boolean) {
+                if (busy) return
                 val mail = email.text.toString().trim()
                 val pass = password.text.toString()
-                val recovery = phrase.text.toString()
+                val phrase = recovery.text.toString()
                 val name = device.text.toString().trim().ifEmpty { Build.MODEL }
-                if (!mail.contains("@") || pass.isBlank() || recovery.length < 12) {
-                    label?.text = "Enter email, account password and recovery passphrase (12+ characters)."
+                if (!mail.contains('@') || pass.isBlank() || phrase.length < 12) {
+                    feedback.text = "Enter a valid email, account password and recovery passphrase (12+ characters)."
+                    feedback.visibility = View.VISIBLE
                     return
                 }
-                dialog.dismiss()
-                val activity = requireActivity()
-                label?.text = "Connecting..."
+                busy = true
+                signIn.isEnabled = false
+                signUp.isEnabled = false
+                feedback.text = if (register) "Creating SyncCS account..." else "Signing in..."
+                feedback.visibility = View.VISIBLE
+                val host = requireActivity()
                 lifecycleScope.launch {
-                    val message = withContext(Dispatchers.IO) {
+                    val outcome = withContext(Dispatchers.IO) {
                         try {
+                            SyncBackend(config).signIn(mail, pass, phrase, register)
                             config.deviceName = name
-                            SyncBackend(config).signIn(mail, pass, recovery, register)
-                            SyncCoordinator.synchronize(activity.applicationContext, activity)
+                            SyncCoordinator.synchronize(host.applicationContext, host)
                         } catch (error: Exception) {
-                            "Connection failed: " + (error.message ?: error.javaClass.simpleName).take(160)
+                            "Connection failed: " +
+                                (error.message ?: error.javaClass.simpleName).take(160)
                         }
                     }
-                    label?.text = message
+                    statusLabel?.text = outcome
+                    if (dialog.isShowing) {
+                        if (outcome.startsWith("Connection failed:")) {
+                            feedback.text = outcome
+                            busy = false
+                            signIn.isEnabled = true
+                            signUp.isEnabled = true
+                        } else {
+                            dialog.dismiss()
+                        }
+                    }
                 }
             }
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { runAuth(false) }
-            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener { runAuth(true) }
+
+            signIn.setOnClickListener { authenticate(false) }
+            signUp.setOnClickListener { authenticate(true) }
         }
+        dialog.setOnDismissListener { if (accountDialog === dialog) accountDialog = null }
+        accountDialog = dialog
         dialog.show()
+    }
+
+    override fun onDestroy() {
+        accountDialog?.dismiss()
+        accountDialog = null
+        statusLabel = null
+        super.onDestroy()
     }
 }

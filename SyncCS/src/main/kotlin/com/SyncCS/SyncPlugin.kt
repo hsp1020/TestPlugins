@@ -151,7 +151,7 @@ class SyncPlugin : Plugin() {
         start(context)
         openSettings = { selected ->
             (selected as? AppCompatActivity)?.let { activity ->
-                SyncSettingsFragment(this).show(activity.supportFragmentManager, "SyncCS")
+                SyncSettingsFragment().show(activity.supportFragmentManager, "SyncCS")
             }
         }
     }
