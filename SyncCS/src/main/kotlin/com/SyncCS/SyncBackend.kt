@@ -26,13 +26,13 @@ internal data class RemoteEntry(
 )
 
 internal class SyncConfiguration(context: Context) {
+    private companion object {
+        const val PROJECT_URL = "https://zbmofheqyswjbziecmyn.supabase.co"
+        const val PUBLISHABLE_KEY = "sb_publishable_AwA37RNRVIv2thMUnepm-g_urhqAUy2"
+    }
     val preferences = context.applicationContext.getSharedPreferences("SyncCS_Private", Context.MODE_PRIVATE)
-    var url: String
-        get() = preferences.getString("url", "")!!.trimEnd('/')
-        set(value) { preferences.edit().putString("url", value.trim().trimEnd('/')).apply() }
-    var anonKey: String
-        get() = preferences.getString("anon", "")!!
-        set(value) { preferences.edit().putString("anon", value.trim()).apply() }
+    val url: String get() = PROJECT_URL
+    val anonKey: String get() = PUBLISHABLE_KEY
     var email: String
         get() = preferences.getString("email", "")!!
         set(value) { preferences.edit().putString("email", value.trim()).apply() }
@@ -173,7 +173,10 @@ internal class SyncBackend(private val config: SyncConfiguration) {
         val access = answer.optString("access_token")
         val refresh = answer.optString("refresh_token")
         if (access.isBlank() || refresh.isBlank()) {
-            throw IOException("Email confirmation may be required before sign-in")
+            if (register && answer.optJSONObject("user") != null) {
+                throw IOException("Account created. Confirm your email, then choose Sign in.")
+            }
+            throw IOException("No login session was returned. Verify email confirmation and sign in.")
         }
         val user = answer.optJSONObject("user") ?: error("Missing auth user")
         val userId = user.getString("id")

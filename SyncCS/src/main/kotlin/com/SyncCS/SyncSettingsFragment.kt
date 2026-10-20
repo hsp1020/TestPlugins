@@ -90,8 +90,8 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         content.addView(TextView(context).apply {
             text = "Shared: library, watch progress, accounts, extensions, plugin settings, source priorities.\n" +
                 "Device-specific: display, decoder, subtitle size, download paths.\n" +
-                "An existing Supabase project with SyncCS schema is required. " +
-                "The same recovery passphrase must be used on every device."
+                "The SyncCS cloud server is already configured. " +
+                "Use the same account and recovery passphrase on each device."
             textSize = 13f
             setPadding(0, dp(context, 14), 0, 0)
         })
@@ -103,13 +103,12 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
     private fun showCredentials(context: Context) {
         val config = SyncConfiguration(context)
         val layout = container(context)
-        val url = field(context, "Supabase URL (https://xxx.supabase.co)", config.url)
-        val key = field(context, "Supabase publishable / anon key", config.anonKey)
         val email = field(context, "Email", config.email)
         val password = field(context, "Supabase account password", secret = true)
         val phrase = field(context, "Recovery passphrase (12+ characters)", secret = true)
         val device = field(context, "Device name", config.deviceName)
-        listOf(url, key, email, password, phrase, device).forEach { layout.addView(it) }
+        layout.addView(TextView(context).apply { text = "SyncCS Cloud · Seoul server (configured)" })
+        listOf(email, password, phrase, device).forEach { layout.addView(it) }
         val dialog = AlertDialog.Builder(context)
             .setTitle("SyncCS account")
             .setView(ScrollView(context).apply { addView(layout) })
@@ -119,15 +118,12 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             .create()
         dialog.setOnShowListener {
             fun runAuth(register: Boolean) {
-                val address = url.text.toString().trim().trimEnd('/')
-                val anon = key.text.toString().trim()
                 val mail = email.text.toString().trim()
                 val pass = password.text.toString()
                 val recovery = phrase.text.toString()
                 val name = device.text.toString().trim().ifEmpty { Build.MODEL }
-                if (!address.startsWith("https://") || anon.isBlank() ||
-                    !mail.contains("@") || pass.isBlank() || recovery.length < 12) {
-                    label?.text = "Fill in HTTPS URL, key, email, password and recovery passphrase (12+ characters)."
+                if (!mail.contains("@") || pass.isBlank() || recovery.length < 12) {
+                    label?.text = "Enter email, account password and recovery passphrase (12+ characters)."
                     return
                 }
                 dialog.dismiss()
@@ -136,8 +132,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 lifecycleScope.launch {
                     val message = withContext(Dispatchers.IO) {
                         try {
-                            config.url = address
-                            config.anonKey = anon
                             config.deviceName = name
                             SyncBackend(config).signIn(mail, pass, recovery, register)
                             SyncCoordinator.synchronize(activity.applicationContext, activity)

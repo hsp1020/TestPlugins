@@ -258,7 +258,7 @@ internal object PluginInventory {
                     try {
                         installed = PluginManager.downloadPlugin(
                             activity, url,
-                            hash.takeIf { it.matches(Regex("[a-f0-9]{64}")) }?.let { "sha256-" + it },
+                            hash.takeIf { it.matches(Regex("[a-f0-9]{64}")) },
                             name, repo, false
                         )
                     } catch (_: Exception) { }

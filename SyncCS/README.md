@@ -6,7 +6,7 @@ This version is **not compatible with the original Gist backend**. No Gist impor
 
 1. Create a Supabase project. Enable email/password authentication.
 2. Run [supabase.sql](supabase.sql) in the SQL editor. The script creates a user-scoped `sync_entries` table, a private `sync-files` bucket and row-level security policies.
-3. Install SyncCS and open its settings. Supply the project HTTPS URL, **publishable/anon** key, email, account password, device name and a recovery passphrase with at least 12 characters.
+3. Install SyncCS and open its settings. The project's HTTPS URL and public publishable key are configured in `SyncBackend.kt`. Enter your email, account password, device name and a recovery passphrase with at least 12 characters.
 4. Choose **Sign up** on the first device, confirm email if the project requires it, then **Sign in**. Sign in on another device with the **same recovery passphrase**. The encryption passphrase cannot be reset if the encrypted backup is the only copy of your data.
 5. Select **Sync now** on the second device to restore data and queued extensions. Restart CloudStream to load extensions registered by restoration.
 
@@ -25,7 +25,7 @@ Do not use the Supabase service_role key in the plugin. E2E-encrypted payloads u
 
 ## Important limitations
 
-- A configured Supabase project and the SQL deployment are mandatory; no shared public backend is bundled.
+- SyncCS uses the provisioned Seoul Supabase project `zbmofheqyswjbziecmyn`. To use an independently hosted server, change the public URL and publishable key in `SyncBackend.kt`.
 - Unknown plugin-owned databases, private files or Android Keystore-bound secrets cannot be moved generically. SharedPreferences-based settings are supported.
 - Local .cs3 automatic restoration may fail on Android versions lacking legacy CloudStream3/plugins filesystem access. In that case, manually install the archived extension.
 - External service sessions are restored without a new login **if their original token remains valid or refreshable**. Revoked or expired non-refreshable tokens require provider reauthentication.
