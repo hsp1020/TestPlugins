@@ -21,6 +21,7 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addTMDbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
 import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.ui.player.Torrent
 import com.lagradost.cloudstream3.syncproviders.AccountManager
 import com.lagradost.cloudstream3.syncproviders.SyncIdName
 import com.lagradost.cloudstream3.syncproviders.providers.SimklApi
@@ -2924,11 +2925,13 @@ open class StremioC(
                 loadData.embeddedStreams?.let { json ->
                     runSuspendCatching {
                         val streams = parseJson<List<Stream>>(json)
-                        streams.forEach { stream ->
-                            val named = if (stream.name == null && stream.title == null && stream.description == null)
-                                stream.copy(title = loadData.embeddedStreamTitle) else stream
-                            named.runCallback(this@StremioC, name,
-                                stremioSubtitleFrom(currentMainUrl), extractorSubtitleFrom(currentMainUrl), wrappedCallback)
+                        coroutineScope {
+                            streams.map { stream -> async(Dispatchers.IO) {
+                                val named = if (stream.name == null && stream.title == null && stream.description == null)
+                                    stream.copy(title = loadData.embeddedStreamTitle) else stream
+                                named.runCallback(this@StremioC, name,
+                                    stremioSubtitleFrom(currentMainUrl), extractorSubtitleFrom(currentMainUrl), wrappedCallback)
+                            } }.awaitAll()
                         }
                     }
                 }
@@ -2942,20 +2945,22 @@ open class StremioC(
                             val response = customSession.get(streamRequestUrl, timeout = 25L)
                             val text = response.text
                             val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
-                            var emitted = 0
-                            res?.streams?.forEach { stream ->
-                                stream.runCallback(
-                                    this@StremioC,
-                                    name,
-                                    stremioSubtitleFrom(currentMainUrl),
-                                    extractorSubtitleFrom(currentMainUrl),
-                                    { link ->
-                                        emitted++
-                                        wrappedCallback(link)
-                                    }
-                                )
+                            val emitted = java.util.concurrent.atomic.AtomicInteger(0)
+                            coroutineScope {
+                                res?.streams?.map { stream -> async(Dispatchers.IO) {
+                                    stream.runCallback(
+                                        this@StremioC,
+                                        name,
+                                        stremioSubtitleFrom(currentMainUrl),
+                                        extractorSubtitleFrom(currentMainUrl),
+                                        { link ->
+                                            emitted.incrementAndGet()
+                                            wrappedCallback(link)
+                                        }
+                                    )
+                                } }?.awaitAll()
                             }
-                            emitted
+                            emitted.get()
                         }
                             .getOrDefault(0)
 
@@ -3019,10 +3024,12 @@ open class StremioC(
                                             val response = customSession.get(requestUrl, timeout = 25L)
                                             val text = response.text
                                             val streams = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
-                                            streams?.streams?.forEach { stream ->
-                                                stream.runCallback(this@StremioC, source,
-                                                    stremioSubtitleFrom(addonUrl), extractorSubtitleFrom(addonUrl), wrappedCallback,
-                                                    preferredName = addon.name)
+                                            coroutineScope {
+                                                streams?.streams?.map { stream -> async(Dispatchers.IO) {
+                                                    stream.runCallback(this@StremioC, source,
+                                                        stremioSubtitleFrom(addonUrl), extractorSubtitleFrom(addonUrl), wrappedCallback,
+                                                        preferredName = addon.name)
+                                                } }?.awaitAll()
                                             }
                                         }
 
@@ -4911,6 +4918,7 @@ open class StremioC(
         @JsonProperty("externalUrl") val externalUrl: String?,
         @JsonProperty("behaviorHints") val behaviorHints: BehaviorHints?,
         @JsonProperty("infoHash") val infoHash: String?,
+        @JsonProperty("fileIdx") val fileIdx: Int? = null,
         @JsonProperty("sources") val sources: List<String> = emptyList(),
         @JsonProperty("subtitles") val subtitles: List<Subtitle> = emptyList()
     ) {
@@ -4923,10 +4931,19 @@ open class StremioC(
             preferredName: String? = null
         ) {
             val displaySource = sourceName.takeIf { it.isNotBlank() } ?: name ?: ""
+            suspend fun torrentLink(raw: String, type: ExtractorLinkType): String {
+                val withTrackers = StremioTorrentFiles.addTrackers(raw, sources)
+                val index = fileIdx?.takeIf { it >= 0 }
+                    ?: StremioTorrentFiles.explicitIndex(withTrackers)
+                    ?: StremioTorrentFiles.largestIndex(withTrackers, type, infoHash)
+                return if (index == null) withTrackers
+                else StremioTorrentFiles.withIndex(withTrackers, type, index)
+            }
 
             if (url != null) {
                 val lowerUrl = url.lowercase()
                 val linkType = when {
+                    lowerUrl.startsWith("magnet:") -> ExtractorLinkType.MAGNET
                     lowerUrl.contains(".m3u8") || 
                     lowerUrl.contains("m3u8") || 
                     lowerUrl.contains("playlist") || 
@@ -4939,7 +4956,9 @@ open class StremioC(
                 }
 
                 val displayTitle = description ?: title ?: name ?: ""
-                callback.invoke(newExtractorLink(displaySource, "[$displaySource] $displayTitle", url, linkType) {
+                val playbackUrl = if (linkType == ExtractorLinkType.MAGNET ||
+                    linkType == ExtractorLinkType.TORRENT) torrentLink(url, linkType) else url
+                callback.invoke(newExtractorLink(displaySource, "[$displaySource] $displayTitle", playbackUrl, linkType) {
                     this.quality = getQuality(listOf(description, title, name))
                     this.headers = behaviorHints?.proxyHeaders?.request ?: behaviorHints?.headers ?: mapOf()
                 })
@@ -4949,7 +4968,8 @@ open class StremioC(
             if (externalUrl != null) loadExtractor(externalUrl, extractorSubtitleCallback, callback)
             if (infoHash != null) {
                 val displayTitle = description ?: title ?: name ?: ""
-                callback.invoke(newExtractorLink(displaySource, "[$displaySource] $displayTitle", "magnet:?xt=urn:btih:${infoHash}") {
+                val magnet = torrentLink("magnet:?xt=urn:btih:" + infoHash, ExtractorLinkType.MAGNET)
+                callback.invoke(newExtractorLink(displaySource, "[$displaySource] $displayTitle", magnet, ExtractorLinkType.MAGNET) {
                     this.quality = Qualities.Unknown.value
                 })
             }
@@ -4960,6 +4980,116 @@ open class StremioC(
                     provider.run { sub.toCloudStreamSubtitle(sourceName, preferredName) }?.let(stremioSubtitleCallback)
                 }
             }
+        }
+    }
+}
+
+private object StremioTorrentFiles {
+    private const val LOOKUP_TIMEOUT_MS = 12_000L
+    private const val CACHE_TTL_MS = 24L * 60 * 60 * 1000
+    private val slots = Semaphore(5)
+    private val firstLookupLock = Mutex()
+    @Volatile private var torrentServerInitialized = false
+    private val pending = ConcurrentHashMap<String, CompletableDeferred<Int?>>()
+    private val cache = lruCacheMap<String, Pair<Int, Long>>(256)
+    private val hashPattern = Regex("""(?i)urn:btih:([0-9a-z]+)""")
+    private val indexPattern = Regex("""(?i)[?&]index=(\d+)""")
+    private val indexParameter = Regex("""(?i)[?&]index=[^&#]*""")
+    private val videoExtensions = setOf(
+        "mkv", "mp4", "avi", "mov", "m4v", "webm", "ts", "m2ts",
+        "mpg", "mpeg", "wmv", "flv", "ogv", "3gp", "vob"
+    )
+
+    fun explicitIndex(url: String): Int? =
+        indexPattern.find(url)?.groupValues?.getOrNull(1)?.toIntOrNull()?.takeIf { it >= 0 }
+
+    fun addTrackers(url: String, sources: List<String>): String {
+        if (!url.startsWith("magnet:", ignoreCase = true)) return url
+        val known = Regex("""(?i)[?&]tr=([^&#]*)""").findAll(url)
+            .mapNotNull {
+                runCatching { URLDecoder.decode(it.groupValues[1], "UTF-8") }.getOrNull()
+            }.toMutableSet()
+        val added = StringBuilder(url)
+        sources.forEach { source ->
+            if (!source.startsWith("tracker:", ignoreCase = true)) return@forEach
+            val tracker = source.substringAfter(':').trim()
+            if (tracker.startsWith("udp://", true) ||
+                tracker.startsWith("http://", true) ||
+                tracker.startsWith("https://", true)) {
+                if (known.add(tracker)) {
+                    added.append("&tr=").append(tracker.urlEncode())
+                }
+            }
+        }
+        return added.toString()
+    }
+
+    fun withIndex(url: String, type: ExtractorLinkType, index: Int): String {
+        val withoutIndex = indexParameter.replace(url, "")
+        if (type == ExtractorLinkType.TORRENT &&
+            (url.startsWith("https://", true) || url.startsWith("http://", true))) {
+            return withoutIndex.substringBefore('#') + "#index=" + index
+        }
+        val base = withoutIndex.substringBefore('#')
+        val fragment = withoutIndex.substringAfter('#', "")
+        val separator = if (base.contains('?')) "&" else "?"
+        return base + separator + "index=" + index +
+            (if (fragment.isEmpty()) "" else "#" + fragment)
+    }
+
+    suspend fun largestIndex(
+        url: String,
+        type: ExtractorLinkType,
+        infoHash: String?
+    ): Int? {
+        if (Torrent.hasAcceptedTorrentForThisSession == false) return null
+        val key = infoHash?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+            ?: hashPattern.find(url)?.groupValues?.getOrNull(1)?.lowercase()
+            ?: url.substringBefore('#')
+        synchronized(cache) {
+            cache[key]?.let { (index, savedAt) ->
+                val age = System.currentTimeMillis() - savedAt
+                if (age >= 0L && age < CACHE_TTL_MS) return index
+            }
+        }
+        val task = CompletableDeferred<Int?>()
+        val existing = pending.putIfAbsent(key, task)
+        if (existing != null) return existing.await()
+        try {
+            val result = slots.withPermit {
+                withTimeoutOrNull(LOOKUP_TIMEOUT_MS) {
+                    val link = newExtractorLink("Torrent", "Torrent", url, type)
+                    val status = if (torrentServerInitialized) {
+                        Torrent.transformLink(link).second
+                    } else {
+                        firstLookupLock.withLock {
+                            val fetched = Torrent.transformLink(link).second
+                            torrentServerInitialized = true
+                            fetched
+                        }
+                    }
+                    val files = status.fileStats.orEmpty().filter {
+                        it.id != null && (it.length ?: 0L) > 0L
+                    }
+                    val videos = files.filter { file ->
+                        file.path?.substringAfterLast('.', "")?.lowercase() in videoExtensions
+                    }
+                    (videos.ifEmpty { files }).maxByOrNull { it.length ?: 0L }?.id
+                }
+            }
+            if (result != null) {
+                synchronized(cache) { cache[key] = result to System.currentTimeMillis() }
+            }
+            task.complete(result)
+            return result
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Exception) {
+            task.complete(null)
+            return null
+        } finally {
+            if (!task.isCompleted) task.complete(null)
+            pending.remove(key, task)
         }
     }
 }
