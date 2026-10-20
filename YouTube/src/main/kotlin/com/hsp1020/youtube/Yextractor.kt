@@ -61,19 +61,6 @@ suspend fun Call.await(): Response = suspendCancellableCoroutine { continuation 
     }
 }
 
-internal suspend fun <T> traceYouTubeHttp(stage: String, videoId: String, block: suspend () -> T): T {
-    val started = android.os.SystemClock.elapsedRealtime()
-    android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=$stage event=start")
-    try {
-        val result = block()
-        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=$stage event=end elapsed_ms=${android.os.SystemClock.elapsedRealtime() - started} result=completed")
-        return result
-    } catch (e: Exception) {
-        android.util.Log.w("YT_HTTP_TRACE", "video=$videoId stage=$stage event=end elapsed_ms=${android.os.SystemClock.elapsedRealtime() - started} result=error type=${e.javaClass.simpleName}")
-        throw e
-    }
-}
-
 open class YoutubeExtractor : ExtractorApi() {
     override val mainUrl = "https://www.youtube.com"
     override val requiresReferer = false
@@ -384,7 +371,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 return@withContext Pair(sigResults, nResults)
             }
 
-            val decodeStarted = android.os.SystemClock.elapsedRealtime()
             try {
                 val urlBuilder = StringBuilder("https://api.pipepipe.dev/decoder/decode")
                 urlBuilder.append("?player=").append(playerId)
@@ -404,13 +390,10 @@ open class YoutubeExtractor : ExtractorApi() {
                     .header("User-Agent", "PipePipe/5.3.0")
                     .build()
 
-                android.util.Log.i("YT_HTTP_TRACE", "stage=pipe_decode event=start sig_count=${missingSigs.size} n_count=${missingNs.size}")
                 pipeHttpClient.newCall(request).await().use { response ->
                     val responseBody = response.body?.string() ?: ""
-                    android.util.Log.i("YT_HTTP_TRACE", "stage=pipe_decode http=${response.code} elapsed_ms=${android.os.SystemClock.elapsedRealtime() - decodeStarted}")
                     val jsonResponse = JSONObject(responseBody)
                     if (jsonResponse.optString("type") != "result") {
-                        android.util.Log.w("YT_HTTP_TRACE", "stage=pipe_decode result=invalid_response elapsed_ms=${android.os.SystemClock.elapsedRealtime() - decodeStarted}")
                         return@withContext Pair(sigResults, nResults)
                     }
 
@@ -449,9 +432,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
                 }
-                android.util.Log.i("YT_HTTP_TRACE", "stage=pipe_decode event=end elapsed_ms=${android.os.SystemClock.elapsedRealtime() - decodeStarted} decoded_sig=${sigResults.size} decoded_n=${nResults.size}")
             } catch (e: Exception) {
-                android.util.Log.w("YT_HTTP_TRACE", "stage=pipe_decode result=error elapsed_ms=${android.os.SystemClock.elapsedRealtime() - decodeStarted} type=${e.javaClass.simpleName}")
             }
 
             Pair(sigResults, nResults)
@@ -537,32 +518,28 @@ open class YoutubeExtractor : ExtractorApi() {
     }
 
 
-    private suspend fun fetchLatestPlayerInfo(videoId: String): Pair<Int, String>? =
+    private suspend fun fetchLatestPlayerInfo(): Pair<Int, String>? =
         try {
-            traceYouTubeHttp("pipe_latest", videoId) {
-                val request = okhttp3.Request.Builder()
-                    .url("https://api.pipepipe.dev/decoder/latest-player")
-                    .header("User-Agent", "PipePipe/5.3.0")
-                    .build()
-                pipeHttpClient.newCall(request).await().use { response ->
-                    android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=pipe_latest http=${response.code}")
-                    if (!response.isSuccessful) null else {
-                        val data = JSONObject(response.body?.string().orEmpty())
-                        val player = data.optString("player")
-                        if (player.isBlank()) null else {
-                            val info = Pair(data.optInt("signatureTimestamp", 20002), player)
-                            cachedSts = info.first
-                            cachedPlayerId = info.second
-                            lastCacheTime = System.currentTimeMillis()
-                            info
-                        }
+            val request = okhttp3.Request.Builder()
+                .url("https://api.pipepipe.dev/decoder/latest-player")
+                .header("User-Agent", "PipePipe/5.3.0")
+                .build()
+            pipeHttpClient.newCall(request).await().use { response ->
+                if (!response.isSuccessful) null else {
+                    val data = JSONObject(response.body?.string().orEmpty())
+                    val player = data.optString("player")
+                    if (player.isBlank()) null else {
+                        val info = Pair(data.optInt("signatureTimestamp", 20002), player)
+                        cachedSts = info.first
+                        cachedPlayerId = info.second
+                        lastCacheTime = System.currentTimeMillis()
+                        info
                     }
                 }
             }
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            android.util.Log.w("YT_HTTP_TRACE", "video=$videoId stage=pipe_latest result=error type=${e.javaClass.simpleName}")
+        } catch (_: Exception) {
             null
         }
 
@@ -594,8 +571,7 @@ open class YoutubeExtractor : ExtractorApi() {
             var sts = if (cacheValid) cachedSts else 20002
             var playerId = if (cacheValid) cachedPlayerId else ""
             val initialSts = sts
-            val pendingPlayer = if (cacheValid) null else async(Dispatchers.IO) { fetchLatestPlayerInfo(videoId) }
-            if (cacheValid) android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=pipe_latest event=cache_hit")
+            val pendingPlayer = if (cacheValid) null else async(Dispatchers.IO) { fetchLatestPlayerInfo() }
 
             suspend fun resolvePlayer() {
                 val info = pendingPlayer?.await() ?: return
@@ -603,7 +579,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 playerId = info.second
             }
 
-            suspend fun requestVision(timestamp: Int, stage: String): JSONObject? {
+            suspend fun requestVision(timestamp: Int): JSONObject? {
                 var finalJson: JSONObject? = null
                 try {
                     val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$DESKTOP_API_KEY&prettyPrint=false"
@@ -638,38 +614,28 @@ open class YoutubeExtractor : ExtractorApi() {
                         "racyCheckOk" to true,
                         "contentCheckOk" to true
                     )
-                    val res = traceYouTubeHttp(stage, videoId) {
-                        val response = app.post(apiUrl, json = visionPayload, headers = visionHeaders)
-                        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=$stage http=${response.code}")
-                        response.text
-                    }
+                    val res = app.post(apiUrl, json = visionPayload, headers = visionHeaders).text
                     val json = JSONObject(res)
-                    android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=$stage streaming=${json.has("streamingData")}")
                     if (json.has("streamingData")) {
                         finalJson = json
                     }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    android.util.Log.w("YT_HTTP_TRACE", "video=$videoId stage=$stage result=parse_error type=${e.javaClass.simpleName}")
                 }
 
                 return finalJson
             }
 
             try {
-                var finalJson = requestVision(sts, "visionos")
+                var finalJson = requestVision(sts)
                 if (finalJson == null) {
                     resolvePlayer()
                     if (sts != initialSts) {
-                        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=visionos_retry event=retry")
-                        finalJson = requestVision(sts, "visionos_retry")
+                        finalJson = requestVision(sts)
                     }
                 } else if (finalJson.optJSONObject("streamingData")?.let { needsPipeDecoding(it) } == true) {
-                    android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=pipe_latest event=required_for_decoding")
                     resolvePlayer()
-                } else {
-                    android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=pipe_latest event=not_required")
                 }
                 var lengthSeconds = finalJson?.optJSONObject("videoDetails")
                     ?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
@@ -705,13 +671,8 @@ open class YoutubeExtractor : ExtractorApi() {
                             "racyCheckOk" to true,
                             "contentCheckOk" to true
                         )
-                        val res = traceYouTubeHttp("embedded", videoId) {
-                            val response = app.post(embedApiUrl, json = embedPayload, headers = embedHeaders)
-                            android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=embedded http=${response.code}")
-                            response.text
-                        }
+                        val res = app.post(embedApiUrl, json = embedPayload, headers = embedHeaders).text
                         val json = JSONObject(res)
-                        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=embedded streaming=${json.has("streamingData")}")
                         if (json.has("streamingData")) {
                             finalJson = json
                             lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
@@ -719,7 +680,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
-                        android.util.Log.w("YT_HTTP_TRACE", "video=$videoId stage=embedded result=parse_error type=${e.javaClass.simpleName}")
                     }
                 }
 
@@ -730,11 +690,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             "Accept-Language" to "$langCode,en-US;q=0.9,en;q=0.8",
                             "Cookie" to "CONSENT=YES+fx.456722336; PREF=f6=40000000&hl=$langCode;"
                         )
-                        val html = traceYouTubeHttp("safari_html", videoId) {
-                            val response = app.get(watchUrl, headers = safariHeaders)
-                            android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=safari_html http=${response.code}")
-                            response.text
-                        }
+                        val html = app.get(watchUrl, headers = safariHeaders).text
                         val marker = "ytInitialPlayerResponse = "
                         val startIdx = html.indexOf(marker)
                         if (startIdx != -1) {
@@ -747,16 +703,13 @@ open class YoutubeExtractor : ExtractorApi() {
                                 }
                             }
                         }
-                        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=safari_html streaming=${finalJson != null}")
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
-                        android.util.Log.w("YT_HTTP_TRACE", "video=$videoId stage=safari_html result=parse_error type=${e.javaClass.simpleName}")
                     }
                 }
 
 
-                android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=player_response final_streaming=${finalJson != null}")
                 Triple(finalJson, lengthSeconds, playerId)
             } finally {
                 pendingPlayer?.cancel()
@@ -1028,16 +981,6 @@ open class YoutubeExtractor : ExtractorApi() {
             else -> Pair("", "")
         }
 
-        val extractorStarted = android.os.SystemClock.elapsedRealtime()
-        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=extractor_total event=start")
-        var firstLinkEmitted = false
-        val timedCallback: (ExtractorLink) -> Unit = { link ->
-            if (!firstLinkEmitted) {
-                firstLinkEmitted = true
-                android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=first_link elapsed_ms=${android.os.SystemClock.elapsedRealtime() - extractorStarted}")
-            }
-            callback(link)
-        }
         withContext(Dispatchers.IO) {
             try {
                 val (playerResponse, durationSeconds, playerId) = fetchPlayerResponse(videoId)
@@ -1100,7 +1043,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 val isLive = playerResponse.optJSONObject("videoDetails")?.optBoolean("isLive") ?: false
 
                 if (isLive && hlsUrl.isNotBlank()) {
-                    timedCallback(
+                    callback(
                         newExtractorLink(
                             this@YoutubeExtractor.name,
                             "YouTube Live (HLS)",
@@ -1116,14 +1059,14 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 if (hlsUrl.isNotBlank()) {
-                    parseHlsManifest(hlsUrl, playerId, timedCallback)
+                    parseHlsManifest(hlsUrl, playerId, callback)
                 }
 
-                parseAdaptiveFormats(streamingData, playerId, durationSeconds, langCode, timedCallback)
+                parseAdaptiveFormats(streamingData, playerId, durationSeconds, langCode, callback)
 
                 if (dashUrl.isNotBlank()) {
                     val finalDashUrl = if (playerId.isNotBlank()) deobfuscateManifestUrl(dashUrl, playerId) else dashUrl
-                    timedCallback(
+                    callback(
                         newExtractorLink(
                             this@YoutubeExtractor.name,
                             "YouTube Auto (DASH)",
@@ -1140,7 +1083,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 val originalUrl = "https://www.youtube.com/watch?v=$videoId"
                 if (pkgName.isNotEmpty()) {
                     val redirectUrl = getAppRedirectUrl(pkgName, originalUrl) ?: originalUrl
-                    timedCallback(newExtractorLink(
+                    callback(newExtractorLink(
                         source = "YouTube Downloader", 
                         name = "$appName Download", 
                         url = redirectUrl, 
@@ -1155,7 +1098,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 logError(e)
             }
         }
-        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=extractor_total event=end elapsed_ms=${android.os.SystemClock.elapsedRealtime() - extractorStarted} first_link=$firstLinkEmitted")
     }
 
     private fun startServerIfNeeded() {
