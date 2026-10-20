@@ -2,6 +2,7 @@ package com.hsp1020.elevate
 
 import android.app.Activity
 import android.app.Application
+import android.content.SharedPreferences
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -9,6 +10,7 @@ import android.os.Looper
 import android.util.TypedValue
 import android.view.View
 import android.view.ViewTreeObserver
+import android.widget.LinearLayout
 import androidx.annotation.OptIn
 import androidx.core.app.PictureInPictureModeChangedInfo
 import androidx.core.util.Consumer
@@ -19,10 +21,14 @@ import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.SubtitleView
+import androidx.preference.PreferenceManager
+import com.google.android.material.button.MaterialButton
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
+import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
+import com.lagradost.cloudstream3.ui.player.PlayerPipHelper.isPIPPossible
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.player.VideoLive
 import com.lagradost.cloudstream3.ui.subtitles.SaveCaptionStyle
@@ -159,12 +165,169 @@ class PipSubtitleScaler(private val acceptsProvider: (String) -> Boolean) {
     }
 }
 
+private class PipControlButton {
+    private var fragment: GeneratorPlayer? = null
+    private var root: View? = null
+    private var button: MaterialButton? = null
+    private var left: MaterialButton? = null
+    private var right: MaterialButton? = null
+    private var originalLeftNext = View.NO_ID
+    private var originalRightPrevious = View.NO_ID
+    private var preferences: SharedPreferences? = null
+
+    private val settingListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        val context = root?.context
+        if (context != null && (key == context.getString(R.string.pip_enabled_key) ||
+            key == context.getString(R.string.hide_player_control_names_key))) {
+            root?.post { refresh() }
+        }
+    }
+
+    fun watch(candidate: Fragment) {
+        if (candidate !is GeneratorPlayer || !candidate.isAdded) return
+        val view = candidate.view ?: return
+        if (fragment !== candidate || root !== view) {
+            detach()
+            fragment = candidate
+            root = view
+            preferences = PreferenceManager.getDefaultSharedPreferences(view.context).also {
+                it.registerOnSharedPreferenceChangeListener(settingListener)
+            }
+        }
+        refresh()
+        if (button == null) {
+            view.post {
+                if (fragment === candidate && root === candidate.view) refresh()
+            }
+        }
+    }
+
+    private fun refresh() {
+        val player = fragment ?: return
+        val view = root ?: return
+        if (!player.isAdded || player.view !== view) return
+        val activity = player.activity ?: return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N || !activity.isPIPPossible()) {
+            removeButton()
+            return
+        }
+        val scroll = view.findViewById<View>(R.id.player_controls_scroll) ?: return
+        if (scroll.visibility == View.GONE) {
+            removeButton()
+            return
+        }
+        val holder = view.findViewById<LinearLayout>(R.id.player_lock_holder) ?: return
+        if (button?.parent !== holder) {
+            removeButton()
+            val sample = holder.findViewById<MaterialButton>(R.id.player_resize_btt)
+                ?.takeIf { it.parent === holder } ?: return
+            val following = holder.findViewById<MaterialButton>(R.id.player_speed_btt)
+                ?.takeIf { it.parent === holder }
+            val iconId = view.resources.getIdentifier(
+                "pip_24px", "drawable", view.context.packageName
+            ).takeIf { it != 0 } ?: R.drawable.ic_baseline_picture_in_picture_alt_24
+
+            val control = MaterialButton(view.context).apply {
+                id = View.generateViewId()
+                layoutParams = LinearLayout.LayoutParams(sample.layoutParams as LinearLayout.LayoutParams)
+                gravity = sample.gravity
+                minWidth = sample.minWidth
+                minHeight = sample.minHeight
+                setPadding(sample.paddingLeft, sample.paddingTop, sample.paddingRight, sample.paddingBottom)
+                backgroundTintList = sample.backgroundTintList
+                rippleColor = sample.rippleColor
+                strokeColor = sample.strokeColor
+                strokeWidth = sample.strokeWidth
+                cornerRadius = sample.cornerRadius
+                icon = androidx.appcompat.content.res.AppCompatResources.getDrawable(context, iconId)
+                iconTint = sample.iconTint
+                iconSize = sample.iconSize
+                iconPadding = sample.iconPadding
+                iconGravity = sample.iconGravity
+                setTextColor(sample.textColors)
+                setTextSize(TypedValue.COMPLEX_UNIT_PX, sample.textSize)
+                typeface = sample.typeface
+                isAllCaps = false
+                stateListAnimator = sample.stateListAnimator
+                isFocusable = sample.isFocusable
+                contentDescription = "PIP"
+                text = "PIP"
+                nextFocusUpId = sample.nextFocusUpId
+                nextFocusDownId = sample.nextFocusDownId
+                setOnClickListener {
+                    val current = fragment ?: return@setOnClickListener
+                    val host = current.activity ?: return@setOnClickListener
+                    if (!current.isResumed || current.view !== root || !host.isPIPPossible()) {
+                        return@setOnClickListener
+                    }
+                    runCatching {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                            @Suppress("DEPRECATION")
+                            host.enterPictureInPictureMode()
+                        }
+                    }
+                }
+            }
+            originalLeftNext = sample.nextFocusRightId
+            originalRightPrevious = following?.nextFocusLeftId ?: View.NO_ID
+            val index = following?.let(holder::indexOfChild) ?: (holder.indexOfChild(sample) + 1)
+            holder.addView(control, index)
+            left = sample
+            right = following
+            sample.nextFocusRightId = control.id
+            following?.nextFocusLeftId = control.id
+            control.nextFocusLeftId = sample.id
+            control.nextFocusRightId = following?.id ?: originalLeftNext
+            button = control
+        }
+
+        val hideName = preferences?.getBoolean(
+            view.context.getString(R.string.hide_player_control_names_key), false
+        ) == true
+        button?.apply {
+            if (hideName) {
+                setTextSize(TypedValue.COMPLEX_UNIT_PX, 0f)
+                iconPadding = 0
+                iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
+                setPadding(0, 0, 0, 0)
+            } else {
+                val sample = left ?: return@apply
+                setTextSize(TypedValue.COMPLEX_UNIT_PX, sample.textSize)
+                iconPadding = sample.iconPadding
+                iconGravity = sample.iconGravity
+                setPadding(sample.paddingLeft, sample.paddingTop, sample.paddingRight, sample.paddingBottom)
+            }
+        }
+    }
+
+    private fun removeButton() {
+        val control = button ?: return
+        left?.takeIf { it.nextFocusRightId == control.id }?.nextFocusRightId = originalLeftNext
+        right?.takeIf { it.nextFocusLeftId == control.id }?.nextFocusLeftId = originalRightPrevious
+        (control.parent as? LinearLayout)?.removeView(control)
+        control.setOnClickListener(null)
+        button = null
+        left = null
+        right = null
+    }
+
+    fun detach(candidate: Fragment? = null) {
+        if (candidate != null && candidate !== fragment) return
+        preferences?.unregisterOnSharedPreferenceChangeListener(settingListener)
+        preferences = null
+        removeButton()
+        fragment = null
+        root = null
+    }
+}
+
 class PipSubtitleLifecycle(
     private val application: Application,
     acceptsProvider: (String) -> Boolean
 ) : Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
     private val scaler = PipSubtitleScaler(acceptsProvider)
+    private val controls = PipControlButton()
     private var host: FragmentActivity? = null
     private var running = false
 
@@ -173,14 +336,17 @@ class PipSubtitleLifecycle(
             fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?
         ) {
             scaler.watch(f)
+            controls.watch(f)
         }
 
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
             scaler.watch(f)
+            controls.watch(f)
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
             scaler.detach(f)
+            controls.detach(f)
         }
     }
 
@@ -198,6 +364,7 @@ class PipSubtitleLifecycle(
             if (!running) return@post
             running = false
             scaler.detach()
+            controls.detach()
             host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
             host = null
             application.unregisterActivityLifecycleCallbacks(this)
@@ -207,12 +374,16 @@ class PipSubtitleLifecycle(
     private fun use(activity: FragmentActivity) {
         if (!running || host === activity) return
         scaler.detach()
+        controls.detach()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         host = activity
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
         fun scan(fm: FragmentManager) {
             fm.fragments.forEach { fragment ->
-                if (fragment.view != null) scaler.watch(fragment)
+                if (fragment.view != null) {
+                    scaler.watch(fragment)
+                    controls.watch(fragment)
+                }
                 if (fragment.isAdded) scan(fragment.childFragmentManager)
             }
         }
@@ -226,6 +397,7 @@ class PipSubtitleLifecycle(
     override fun onActivityDestroyed(activity: Activity) {
         if (host === activity) {
             scaler.detach()
+            controls.detach()
             host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
             host = null
         }
