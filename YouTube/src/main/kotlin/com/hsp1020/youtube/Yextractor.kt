@@ -13,6 +13,8 @@ import com.lagradost.cloudstream3.utils.schemaStripRegex
 import com.lagradost.cloudstream3.utils.Qualities
 import com.hsp1020.youtube.YoutubeUtils
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -141,6 +143,10 @@ open class YoutubeExtractor : ExtractorApi() {
             .retryOnConnectionFailure(true)
             .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+
+        private val pipeHttpClient = proxyHttpClient.newBuilder()
+            .callTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
             .build()
 
         private val CHUNK_ID_REGEX = Regex("id=([^&]+)")
@@ -399,7 +405,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     .build()
 
                 android.util.Log.i("YT_HTTP_TRACE", "stage=pipe_decode event=start sig_count=${missingSigs.size} n_count=${missingNs.size}")
-                proxyHttpClient.newCall(request).await().use { response ->
+                pipeHttpClient.newCall(request).await().use { response ->
                     val responseBody = response.body?.string() ?: ""
                     android.util.Log.i("YT_HTTP_TRACE", "stage=pipe_decode http=${response.code} elapsed_ms=${android.os.SystemClock.elapsedRealtime() - decodeStarted}")
                     val jsonResponse = JSONObject(responseBody)
@@ -530,180 +536,232 @@ open class YoutubeExtractor : ExtractorApi() {
         }
     }
 
-    private suspend fun fetchPlayerResponse(
-        videoId: String
-    ): Triple<JSONObject?, Long, String> = withContext(Dispatchers.IO) {
-        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
-        val context = CloudStreamApp.context
 
-        val prefs = context?.getSharedPreferences("YouTube", android.content.Context.MODE_PRIVATE)
-
-        val langCode = prefs?.getString("youtube_language", "en") ?: "en"
-        val countryCode = java.util.Locale.getDefault().country.ifEmpty { "US" }
-        val visitorData = prefs?.getString("yt_visitor_data", null) ?: "_Mk3UVhY40g"
-
-        var sts = 20002
-        var playerId = ""
+    private suspend fun fetchLatestPlayerInfo(videoId: String): Pair<Int, String>? =
         try {
-            val now = System.currentTimeMillis()
-            if (cachedPlayerId.isNotEmpty() && (now - lastCacheTime < CACHE_TTL)) {
-                sts = cachedSts
-                playerId = cachedPlayerId
-                android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=pipe_latest event=cache_hit")
-            } else {
-                val pipeReq = okhttp3.Request.Builder()
+            traceYouTubeHttp("pipe_latest", videoId) {
+                val request = okhttp3.Request.Builder()
                     .url("https://api.pipepipe.dev/decoder/latest-player")
                     .header("User-Agent", "PipePipe/5.3.0")
                     .build()
-                traceYouTubeHttp("pipe_latest", videoId) {
-                    proxyHttpClient.newCall(pipeReq).await().use { response ->
-                        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=pipe_latest http=${response.code}")
-                        if (response.isSuccessful) {
-                            val body = response.body?.string() ?: ""
-                            val json = JSONObject(body)
-                            cachedSts = json.optInt("signatureTimestamp", 20002)
-                            cachedPlayerId = json.optString("player", "")
-                            lastCacheTime = now
-                            sts = cachedSts
-                            playerId = cachedPlayerId
+                pipeHttpClient.newCall(request).await().use { response ->
+                    android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=pipe_latest http=${response.code}")
+                    if (!response.isSuccessful) null else {
+                        val data = JSONObject(response.body?.string().orEmpty())
+                        val player = data.optString("player")
+                        if (player.isBlank()) null else {
+                            val info = Pair(data.optInt("signatureTimestamp", 20002), player)
+                            cachedSts = info.first
+                            cachedPlayerId = info.second
+                            lastCacheTime = System.currentTimeMillis()
+                            info
                         }
                     }
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            android.util.Log.w("YT_HTTP_TRACE", "video=$videoId stage=pipe_latest result=parse_error type=${e.javaClass.simpleName}")
+            android.util.Log.w("YT_HTTP_TRACE", "video=$videoId stage=pipe_latest result=error type=${e.javaClass.simpleName}")
+            null
         }
 
-        var finalJson: JSONObject? = null
-        var lengthSeconds = 3600L
-
-        try {
-            val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$DESKTOP_API_KEY&prettyPrint=false"
-            val visionHeaders = mapOf(
-                "Content-Type" to "application/json",
-                "User-Agent" to VISIONOS_USER_AGENT,
-                "Origin" to "https://www.youtube.com",
-                "Referer" to "https://www.youtube.com/"
-            )
-            val visionPayload = mapOf(
-                "context" to mapOf(
-                    "client" to mapOf(
-                        "clientName" to "VISIONOS",
-                        "clientVersion" to "1.02",
-                        "deviceMake" to "Apple",
-                        "deviceModel" to "RealityDevice17,1",
-                        "osName" to "visionOS",
-                        "osVersion" to "26.0",
-                        "hl" to langCode,
-                        "gl" to countryCode,
-                        "visitorData" to visitorData,
-                        "userAgent" to VISIONOS_USER_AGENT
-                    )
-                ),
-                "videoId" to videoId,
-                "playbackContext" to mapOf(
-                    "contentPlaybackContext" to mapOf(
-                        "html5Preference" to "HTML5_PREF_WANTS",
-                        "signatureTimestamp" to sts
-                    )
-                ),
-                "racyCheckOk" to true,
-                "contentCheckOk" to true
-            )
-            val res = traceYouTubeHttp("visionos", videoId) {
-                val response = app.post(apiUrl, json = visionPayload, headers = visionHeaders)
-                android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=visionos http=${response.code}")
-                response.text
-            }
-            val json = JSONObject(res)
-            android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=visionos streaming=${json.has("streamingData")}")
-            if (json.has("streamingData")) {
-                finalJson = json
-                lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
-            }
-        } catch (e: Exception) {
-            android.util.Log.w("YT_HTTP_TRACE", "video=$videoId stage=visionos result=parse_error type=${e.javaClass.simpleName}")
+    private fun needsPipeDecoding(stream: JSONObject): Boolean {
+        if (stream.optString("hlsManifestUrl").contains("/n/") ||
+            stream.optString("dashManifestUrl").contains("/n/")) return true
+        val formats = stream.optJSONArray("adaptiveFormats") ?: return false
+        for (i in 0 until formats.length()) {
+            val f = formats.optJSONObject(i) ?: continue
+            if (f.optString("signatureCipher").isNotBlank() || f.optString("cipher").isNotBlank()) return true
+            val u = f.optString("url")
+            if (u.contains("/n/") || Regex("""[?&]n=""").containsMatchIn(u)) return true
         }
+        return false
+    }
 
-        if (finalJson == null || !finalJson.has("streamingData")) {
-            try {
-                val embedApiUrl = "https://www.youtube.com/youtubei/v1/player?key=$DESKTOP_API_KEY&prettyPrint=false"
-                val embedHeaders = mapOf(
-                    "Content-Type" to "application/json",
-                    "User-Agent" to YoutubeUtils.CHROME_USER_AGENT,
-                    "Origin" to "https://www.youtube.com",
-                    "Referer" to "https://www.youtube.com/"
-                )
-                val embedPayload = mapOf(
-                    "context" to mapOf(
-                        "client" to mapOf(
-                            "clientName" to "WEB_EMBEDDED_PLAYER",
-                            "clientVersion" to "1.20240725.00.00",
-                            "hl" to langCode,
-                            "gl" to countryCode
+    private suspend fun fetchPlayerResponse(
+        videoId: String
+    ): Triple<JSONObject?, Long, String> = withContext(Dispatchers.IO) {
+        coroutineScope {
+            val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+            val context = CloudStreamApp.context
+            val prefs = context?.getSharedPreferences("YouTube", android.content.Context.MODE_PRIVATE)
+            val langCode = prefs?.getString("youtube_language", "en") ?: "en"
+            val countryCode = java.util.Locale.getDefault().country.ifEmpty { "US" }
+            val visitorData = prefs?.getString("yt_visitor_data", null) ?: "_Mk3UVhY40g"
+
+            val cacheValid = cachedPlayerId.isNotEmpty() && System.currentTimeMillis() - lastCacheTime < CACHE_TTL
+            var sts = if (cacheValid) cachedSts else 20002
+            var playerId = if (cacheValid) cachedPlayerId else ""
+            val initialSts = sts
+            val pendingPlayer = if (cacheValid) null else async(Dispatchers.IO) { fetchLatestPlayerInfo(videoId) }
+            if (cacheValid) android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=pipe_latest event=cache_hit")
+
+            suspend fun resolvePlayer() {
+                val info = pendingPlayer?.await() ?: return
+                sts = info.first
+                playerId = info.second
+            }
+
+            suspend fun requestVision(timestamp: Int, stage: String): JSONObject? {
+                var finalJson: JSONObject? = null
+                try {
+                    val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$DESKTOP_API_KEY&prettyPrint=false"
+                    val visionHeaders = mapOf(
+                        "Content-Type" to "application/json",
+                        "User-Agent" to VISIONOS_USER_AGENT,
+                        "Origin" to "https://www.youtube.com",
+                        "Referer" to "https://www.youtube.com/"
+                    )
+                    val visionPayload = mapOf(
+                        "context" to mapOf(
+                            "client" to mapOf(
+                                "clientName" to "VISIONOS",
+                                "clientVersion" to "1.02",
+                                "deviceMake" to "Apple",
+                                "deviceModel" to "RealityDevice17,1",
+                                "osName" to "visionOS",
+                                "osVersion" to "26.0",
+                                "hl" to langCode,
+                                "gl" to countryCode,
+                                "visitorData" to visitorData,
+                                "userAgent" to VISIONOS_USER_AGENT
+                            )
                         ),
-                        "thirdParty" to mapOf(
-                            "embedUrl" to "https://www.youtube.com/watch?v=$videoId"
-                        )
-                    ),
-                    "videoId" to videoId,
-                    "playbackContext" to mapOf(
-                        "contentPlaybackContext" to mapOf(
-                            "html5Preference" to "HTML5_PREF_WANTS",
-                            "signatureTimestamp" to sts
-                        )
-                    ),
-                    "racyCheckOk" to true,
-                    "contentCheckOk" to true
-                )
-                val res = traceYouTubeHttp("embedded", videoId) {
-                    val response = app.post(embedApiUrl, json = embedPayload, headers = embedHeaders)
-                    android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=embedded http=${response.code}")
-                    response.text
+                        "videoId" to videoId,
+                        "playbackContext" to mapOf(
+                            "contentPlaybackContext" to mapOf(
+                                "html5Preference" to "HTML5_PREF_WANTS",
+                                "signatureTimestamp" to timestamp
+                            )
+                        ),
+                        "racyCheckOk" to true,
+                        "contentCheckOk" to true
+                    )
+                    val res = traceYouTubeHttp(stage, videoId) {
+                        val response = app.post(apiUrl, json = visionPayload, headers = visionHeaders)
+                        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=$stage http=${response.code}")
+                        response.text
+                    }
+                    val json = JSONObject(res)
+                    android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=$stage streaming=${json.has("streamingData")}")
+                    if (json.has("streamingData")) {
+                        finalJson = json
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    android.util.Log.w("YT_HTTP_TRACE", "video=$videoId stage=$stage result=parse_error type=${e.javaClass.simpleName}")
                 }
-                val json = JSONObject(res)
-                android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=embedded streaming=${json.has("streamingData")}")
-                if (json.has("streamingData")) {
-                    finalJson = json
-                    lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
-                }
-            } catch (e: Exception) {
-                android.util.Log.w("YT_HTTP_TRACE", "video=$videoId stage=embedded result=parse_error type=${e.javaClass.simpleName}")
-            }
-        }
 
-        if (finalJson == null || !finalJson.has("streamingData")) {
+                return finalJson
+            }
+
             try {
-                val safariHeaders = mapOf(
-                    "User-Agent" to SAFARI_USER_AGENT,
-                    "Accept-Language" to "$langCode,en-US;q=0.9,en;q=0.8",
-                    "Cookie" to "CONSENT=YES+fx.456722336; PREF=f6=40000000&hl=$langCode;"
-                )
-                val html = traceYouTubeHttp("safari_html", videoId) {
-                    val response = app.get(watchUrl, headers = safariHeaders)
-                    android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=safari_html http=${response.code}")
-                    response.text
+                var finalJson = requestVision(sts, "visionos")
+                if (finalJson == null) {
+                    resolvePlayer()
+                    if (sts != initialSts) {
+                        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=visionos_retry event=retry")
+                        finalJson = requestVision(sts, "visionos_retry")
+                    }
+                } else if (finalJson.optJSONObject("streamingData")?.let { needsPipeDecoding(it) } == true) {
+                    android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=pipe_latest event=required_for_decoding")
+                    resolvePlayer()
+                } else {
+                    android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=pipe_latest event=not_required")
                 }
-                val marker = "ytInitialPlayerResponse = "
-                val startIdx = html.indexOf(marker)
-                if (startIdx != -1) {
-                    val jsonStr = extractBalancedJson(html.substring(startIdx + marker.length))
-                    if (!jsonStr.isNullOrBlank()) {
-                        val parsed = JSONObject(jsonStr)
-                        if (parsed.has("streamingData")) {
-                            finalJson = parsed
-                            lengthSeconds = parsed.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
+                var lengthSeconds = finalJson?.optJSONObject("videoDetails")
+                    ?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
+
+                if (finalJson == null || !finalJson.has("streamingData")) {
+                    try {
+                        val embedApiUrl = "https://www.youtube.com/youtubei/v1/player?key=$DESKTOP_API_KEY&prettyPrint=false"
+                        val embedHeaders = mapOf(
+                            "Content-Type" to "application/json",
+                            "User-Agent" to YoutubeUtils.CHROME_USER_AGENT,
+                            "Origin" to "https://www.youtube.com",
+                            "Referer" to "https://www.youtube.com/"
+                        )
+                        val embedPayload = mapOf(
+                            "context" to mapOf(
+                                "client" to mapOf(
+                                    "clientName" to "WEB_EMBEDDED_PLAYER",
+                                    "clientVersion" to "1.20240725.00.00",
+                                    "hl" to langCode,
+                                    "gl" to countryCode
+                                ),
+                                "thirdParty" to mapOf(
+                                    "embedUrl" to "https://www.youtube.com/watch?v=$videoId"
+                                )
+                            ),
+                            "videoId" to videoId,
+                            "playbackContext" to mapOf(
+                                "contentPlaybackContext" to mapOf(
+                                    "html5Preference" to "HTML5_PREF_WANTS",
+                                    "signatureTimestamp" to sts
+                                )
+                            ),
+                            "racyCheckOk" to true,
+                            "contentCheckOk" to true
+                        )
+                        val res = traceYouTubeHttp("embedded", videoId) {
+                            val response = app.post(embedApiUrl, json = embedPayload, headers = embedHeaders)
+                            android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=embedded http=${response.code}")
+                            response.text
                         }
+                        val json = JSONObject(res)
+                        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=embedded streaming=${json.has("streamingData")}")
+                        if (json.has("streamingData")) {
+                            finalJson = json
+                            lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        android.util.Log.w("YT_HTTP_TRACE", "video=$videoId stage=embedded result=parse_error type=${e.javaClass.simpleName}")
                     }
                 }
-                android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=safari_html streaming=${finalJson != null}")
-            } catch (e: Exception) {
-                android.util.Log.w("YT_HTTP_TRACE", "video=$videoId stage=safari_html result=parse_error type=${e.javaClass.simpleName}")
+
+                if (finalJson == null || !finalJson.has("streamingData")) {
+                    try {
+                        val safariHeaders = mapOf(
+                            "User-Agent" to SAFARI_USER_AGENT,
+                            "Accept-Language" to "$langCode,en-US;q=0.9,en;q=0.8",
+                            "Cookie" to "CONSENT=YES+fx.456722336; PREF=f6=40000000&hl=$langCode;"
+                        )
+                        val html = traceYouTubeHttp("safari_html", videoId) {
+                            val response = app.get(watchUrl, headers = safariHeaders)
+                            android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=safari_html http=${response.code}")
+                            response.text
+                        }
+                        val marker = "ytInitialPlayerResponse = "
+                        val startIdx = html.indexOf(marker)
+                        if (startIdx != -1) {
+                            val jsonStr = extractBalancedJson(html.substring(startIdx + marker.length))
+                            if (!jsonStr.isNullOrBlank()) {
+                                val parsed = JSONObject(jsonStr)
+                                if (parsed.has("streamingData")) {
+                                    finalJson = parsed
+                                    lengthSeconds = parsed.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
+                                }
+                            }
+                        }
+                        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=safari_html streaming=${finalJson != null}")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        android.util.Log.w("YT_HTTP_TRACE", "video=$videoId stage=safari_html result=parse_error type=${e.javaClass.simpleName}")
+                    }
+                }
+
+
+                android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=player_response final_streaming=${finalJson != null}")
+                Triple(finalJson, lengthSeconds, playerId)
+            } finally {
+                pendingPlayer?.cancel()
             }
         }
-
-        android.util.Log.i("YT_HTTP_TRACE", "video=$videoId stage=player_response final_streaming=${finalJson != null}")
-        Triple(finalJson, lengthSeconds, playerId)
     }
 
     private suspend fun parseHlsManifest(
