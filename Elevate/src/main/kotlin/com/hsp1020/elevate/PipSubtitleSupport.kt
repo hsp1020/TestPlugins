@@ -291,7 +291,7 @@ private class PipControlButton {
                 iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
                 setPadding(0, 0, 0, 0)
             } else {
-                val sample = left ?: return@apply
+                val sample = this@PipControlButton.left ?: return@apply
                 setTextSize(TypedValue.COMPLEX_UNIT_PX, sample.textSize)
                 iconPadding = sample.iconPadding
                 iconGravity = sample.iconGravity
