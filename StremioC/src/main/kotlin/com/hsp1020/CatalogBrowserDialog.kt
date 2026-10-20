@@ -45,6 +45,7 @@ import android.os.SystemClock
 import android.os.Handler
 import android.os.Looper
 import android.view.ViewTreeObserver
+import androidx.activity.OnBackPressedCallback
 import android.widget.ImageView
 import androidx.core.view.ViewCompat
 import androidx.core.view.doOnNextLayout
@@ -52,6 +53,7 @@ import androidx.core.view.doOnPreDraw
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.navigation.NavController
 import androidx.navigation.fragment.FragmentNavigator
 import androidx.navigation.fragment.NavHostFragment
@@ -841,6 +843,91 @@ internal class CatalogBrowserDialog(
     }
     private var pendingDestinationCheck: Runnable? = null
     private var previousSearchSoftInput: Int? = null
+    private var searchBackCallback: OnBackPressedCallback? = null
+    private var pendingSearchBack: (() -> Unit)? = null
+    private fun clearSearchBack() {
+        pendingSearchBack?.invoke()
+        pendingSearchBack = null
+        searchBackCallback?.remove()
+        searchBackCallback = null
+    }
+    private fun installSearchBack(fragment: QuickSearchFragment) {
+        if (searchBackCallback != null || searchReturnEntryId == null ||
+            navigation?.currentDestination?.id != R.id.navigation_quick_search) return
+        val callback = object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (pendingSearchBack != null) return
+                if (closed || searchReturnEntryId == null ||
+                    navigation?.currentDestination?.id != R.id.navigation_quick_search) {
+                    isEnabled = false
+                    activity.onBackPressedDispatcher.onBackPressed()
+                    return
+                }
+                previousSearchSoftInput?.let(activity.window::setSoftInputMode)
+                previousSearchSoftInput = null
+                val decor = activity.window.decorView
+                val search = fragment.view?.findViewById<SearchView>(R.id.quick_search)
+                search?.findViewById<android.widget.EditText>(
+                    androidx.appcompat.R.id.search_src_text
+                )?.clearFocus()
+                fragment.view?.apply {
+                    isFocusableInTouchMode = true
+                    requestFocus()
+                }
+                fun imeGone(): Boolean {
+                    val insets = ViewCompat.getRootWindowInsets(decor) ?: return false
+                    return !insets.isVisible(WindowInsetsCompat.Type.ime()) &&
+                        insets.getInsets(WindowInsetsCompat.Type.ime()).bottom <=
+                        insets.getInsets(WindowInsetsCompat.Type.systemBars()).bottom + dp(8) &&
+                        !imeAnimationActive
+                }
+                fun navigateBack() {
+                    isEnabled = false
+                    activity.onBackPressedDispatcher.onBackPressed()
+                }
+                if (imeGone()) {
+                    navigateBack()
+                    return
+                }
+                WindowInsetsControllerCompat(activity.window, decor).hide(WindowInsetsCompat.Type.ime())
+                val tree = decor.viewTreeObserver
+                if (!tree.isAlive) {
+                    navigateBack()
+                    return
+                }
+                var stable = 0
+                lateinit var listener: ViewTreeObserver.OnPreDrawListener
+                lateinit var release: () -> Unit
+                val timeout = Runnable {
+                    if (pendingSearchBack === release) release()
+                }
+                release = {
+                    if (tree.isAlive) tree.removeOnPreDrawListener(listener)
+                    decor.removeCallbacks(timeout)
+                    if (pendingSearchBack === release) pendingSearchBack = null
+                }
+                listener = ViewTreeObserver.OnPreDrawListener {
+                    if (closed || !fragment.isAdded || searchReturnEntryId == null ||
+                        navigation?.currentDestination?.id != R.id.navigation_quick_search) {
+                        release()
+                    } else {
+                        stable = if (imeGone()) stable + 1 else 0
+                        if (stable >= 2) {
+                            release()
+                            navigateBack()
+                        } else decor.postInvalidateOnAnimation()
+                    }
+                    true
+                }
+                pendingSearchBack = release
+                tree.addOnPreDrawListener(listener)
+                decor.postDelayed(timeout, 2000L)
+                decor.postInvalidateOnAnimation()
+            }
+        }
+        searchBackCallback = callback
+        activity.onBackPressedDispatcher.addCallback(fragment.viewLifecycleOwner, callback)
+    }
     private var suspendedForNavigation = false
     private var searchFocusIssued = false
     private var originEntryId: String? = null
@@ -893,7 +980,13 @@ internal class CatalogBrowserDialog(
     }
     private val searchFocusCallbacks = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentResumed(fm: FragmentManager, fragment: Fragment) {
-            if (fragment is QuickSearchFragment) focusNativeSearch()
+            if (fragment is QuickSearchFragment) {
+                installSearchBack(fragment)
+                focusNativeSearch()
+            }
+        }
+        override fun onFragmentPaused(fm: FragmentManager, fragment: Fragment) {
+            if (fragment is QuickSearchFragment) clearSearchBack()
         }
     }
     private val items = ArrayList<SearchResponse>()
@@ -1333,6 +1426,7 @@ internal class CatalogBrowserDialog(
             activity.lifecycle.removeObserver(hostObserver)
             cancelDestinationCheck()
             pendingSearchReturn?.invoke()
+            clearSearchBack()
             dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
             stopSearchImeTracking()
             releaseNavigation()
