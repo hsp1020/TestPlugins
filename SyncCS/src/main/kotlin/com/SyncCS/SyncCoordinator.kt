@@ -91,10 +91,16 @@ internal object SyncCoordinator {
             for (entry in pull.entries) versions[entry.key] = entry.version
 
             stage = "reconciling CloudStream profiles"
-            val previousProfiles = config.preferences.getString("profile_baseline", null)
+            fun protectedProfileValue(key: String): String? {
+                val stored = config.preferences.getString(key, null) ?: return null
+                // Accept a manifest briefly stored by the first v340 build.
+                if (stored.startsWith("{")) return stored
+                return String(LocalVault.decrypt(stored), Charsets.UTF_8)
+            }
+            val previousProfiles = protectedProfileValue("profile_baseline")
             val profileServer = if (pull.full || remoteValues.containsKey("x/profiles")) {
                 remoteValues["x/profiles"]
-            } else config.preferences.getString("profile_remote_snapshot", null)
+            } else protectedProfileValue("profile_remote_snapshot")
             val profileLocal = ProfileSync.snapshot(context)
             val profileMerge = ProfileSync.merge(profileLocal, profileServer, previousProfiles)
             val targetProfiles = ProfileSync.encode(profileMerge.target)
@@ -112,9 +118,11 @@ internal object SyncCoordinator {
             }
             // Profile metadata is an independently committed unit. A later failure
             // in extension restoration cannot undo an already applied profile.
+            val protectedProfiles = LocalVault.encrypt(
+                targetProfiles.toByteArray(Charsets.UTF_8))
             check(config.preferences.edit()
-                .putString("profile_baseline", targetProfiles)
-                .putString("profile_remote_snapshot", targetProfiles).commit())
+                .putString("profile_baseline", protectedProfiles)
+                .putString("profile_remote_snapshot", protectedProfiles).commit())
             val activeProfiles = profileMerge.target.items.keys
 
             stage = "reading local preferences"

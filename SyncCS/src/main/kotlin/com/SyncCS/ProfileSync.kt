@@ -79,7 +79,10 @@ internal object ProfileSync {
                 val previous = base.items[id]
                 val remoteItem = remote.items[id]
                 when {
-                    previous == null && id !in remote.items && id !in remote.deleted -> {
+                    previous == null && id !in remote.items -> {
+                        // A new local profile may intentionally reuse a slot
+                        // deleted in a previous synchronized generation.
+                        target.deleted.remove(id)
                         target.items[id] = item
                     }
                     previous != null && previous.toString() != item.toString() &&
