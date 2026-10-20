@@ -64,14 +64,15 @@ Deno.serve(async (request: Request) => {
         nonce_hash: hashed, auth_code: code,
         expires_at: new Date(Date.now() + 5 * 60000).toISOString(),
       }]);
-      // Android Auth Tab intercepts this private scheme and closes itself,
-      // returning to the caller without requiring a CloudStream manifest edit.
-      if (url.pathname.includes("/auth-tab/")) {
+      // The CloudStream app already registers this scheme in its own manifest.
+      // Reopen that app after recording the one-time authorization code.
+      // If the browser blocks external app launches, the visible notice is the fallback.
+      if (url.pathname.includes("/app-return/")) {
         return new Response(null, {
           status: 302,
           headers: {
             ...secureHeaders,
-            location: "synccs://login-complete?state=" + encodeURIComponent(nonce),
+            location: "cloudstreamapp://synccs-login-complete/" + encodeURIComponent(nonce),
           },
         });
       }

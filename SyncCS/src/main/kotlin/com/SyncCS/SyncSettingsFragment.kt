@@ -28,8 +28,6 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
-import androidx.browser.auth.AuthTabIntent
-import androidx.browser.customtabs.CustomTabsClient
 import androidx.fragment.app.DialogFragment
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
@@ -45,15 +43,6 @@ class SyncSettingsFragment : DialogFragment() {
     private var statusLabel: TextView? = null
     private var accountDialog: AlertDialog? = null
     private var githubLoginJob: Job? = null
-    private val authTabLauncher = AuthTabIntent.registerActivityResultLauncher(this) { result ->
-        // Auth Tab closes itself on the expected redirect. The one-time code
-        // still comes from our nonce-bound server endpoint via the poll.
-        if (result.resultCode == AuthTabIntent.RESULT_OK) {
-            accountDialog?.takeIf { it.isShowing }?.getButton(AlertDialog.BUTTON_POSITIVE)
-                ?.contentDescription = "GitHub authorization received"
-        }
-    }
-
     private data class SyncProgress(val dialog: AlertDialog, val bar: ProgressBar, val label: TextView)
 
     private fun showSyncProgress(): SyncProgress {
@@ -105,14 +94,6 @@ class SyncSettingsFragment : DialogFragment() {
         return success
     }
 
-    private fun canAutoReturnFromGithub(): Boolean = try {
-        val context = requireContext()
-        val preferred = CustomTabsClient.getPackageName(context, null)
-        val candidate = preferred ?: "com.android.chrome"
-        CustomTabsClient.isAuthTabSupported(context, candidate)
-    } catch (_: Exception) {
-        false
-    }
 
     private fun dp(context: Context, value: Int): Int =
         (value * context.resources.displayMetrics.density + 0.5f).toInt()
@@ -428,19 +409,13 @@ class SyncSettingsFragment : DialogFragment() {
                 val host = requireActivity()
                 githubLoginJob = lifecycleScope.launch {
                     try {
-                        val useAuthTab = canAutoReturnFromGithub()
+                        // CloudStream's existing deep-link intent handles browser-to-app return.
+                        // No AndroidX Browser classes are required by the host at runtime.
                         val attempt = withContext(Dispatchers.IO) {
-                            SyncBackend(config).beginGithubLogin(autoReturn = useAuthTab)
+                            SyncBackend(config).beginGithubLogin(autoReturn = true)
                         }
-                        if (useAuthTab) {
-                            AuthTabIntent.Builder().build().launch(
-                                authTabLauncher, Uri.parse(attempt.browserUrl), "synccs"
-                            )
-                            feedback.text = "Complete GitHub login. The browser will close automatically."
-                        } else {
-                            host.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(attempt.browserUrl)))
-                            feedback.text = "Complete GitHub login in your browser, then return to CloudStream."
-                        }
+                        host.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(attempt.browserUrl)))
+                        feedback.text = "Complete GitHub sign-in in your browser. CloudStream should reopen automatically; if not, return manually."
                         val authCode: String = withTimeout(4L * 60L * 1000L) {
                             var received: String? = null
                             while (received == null) {

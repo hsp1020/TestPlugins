@@ -40,11 +40,12 @@ GitHub OAuth requires separate operator configuration on both **GitHub** and **S
 
 ## Login and sync UI
 
-- On compatible Android browsers, **AndroidX Browser Auth Tab** uses a temporary custom-scheme callback (`synccs://login-complete`). The tab automatically closes and returns focus to CloudStream when the Supabase OAuth callback finishes. The callback does **not** require CloudStream core manifest changes or Digital Asset Links. The PKCE code continues to be delivered via the authenticated, nonce-bound one-time handoff server.
-- On unsupported browsers or TV devices, the extension opens the ordinary external browser; **those browsers cannot be closed forcibly from another app**. The confirmation page tells users to return to CloudStream and polling completes the login.
-- On login completion the plugin displays native themed sync progress and then a brief completion notice before dismissing the dialogs. The same sequence is used by the manual **Sync now** action; errors stay visible instead of being reported as success.
-- **Synced: downloaded 0, uploaded 0** means *this run had no changes*. It is expected once devices are in sync; it does not mean there is no data stored in Supabase.
-- `SyncCS/build.gradle.kts` includes `androidx.browser:browser:1.9.0` for Auth Tab. Requires build and real device testing.
+- CloudStream already registers `cloudstreamapp://` deep links. GitHub OAuth callback returns to that existing scheme without AndroidX Browser dependencies, so opening the settings dialog cannot fail with `AuthTabIntent` ClassNotFound.
+- Browsers that allow OAuth callbacks to launch apps return to CloudStream automatically. **The browser tab may remain in browser history; Android does not let an ordinary external app forcibly close it.** If a browser blocks the launch, the server displays a short plain-text success notice and the user returns manually.
+- SyncCS verifies the authorization via a one-time nonce-bound server polling endpoint. No OAuth code is exposed through the deep link.
+- Successful login and manual **Sync now** show a native-themed indeterminate progress dialog, then a brief success message before dismissing. Sync failures show a separate error message.
+- `Synced: downloaded 0, uploaded 0` means the current run found no changes; it does not imply an empty cloud backup.
+- All UI code uses framework and AppCompat classes already provided by CloudStream; additional AndroidX Browser dependencies were removed after a runtime class-loading failure.
 
 ## Data and compatibility
 

@@ -1,4 +1,4 @@
-version = 3
+version = 4
 
 cloudstream {
     description = "Sync CloudStream library, accounts, extensions and shared preferences using Supabase"
@@ -15,6 +15,3 @@ android {
     namespace = "com.SyncCS"
 }
 
-dependencies {
-    implementation("androidx.browser:browser:1.9.0")
-}

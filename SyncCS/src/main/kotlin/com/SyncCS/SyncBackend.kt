@@ -183,7 +183,7 @@ internal class SyncBackend(private val config: SyncConfiguration) {
         )
         val redirect = android.net.Uri.parse(config.url + "/functions/v1/synccs-github-oauth")
             .buildUpon()
-            .apply { if (autoReturn) appendPath("auth-tab") }
+            .apply { if (autoReturn) appendPath("app-return") }
             .appendPath(state).build().toString()
         val uri = android.net.Uri.parse(config.url + "/auth/v1/authorize").buildUpon()
             .appendQueryParameter("provider", "github")
