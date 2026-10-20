@@ -244,9 +244,20 @@ private class PipControlButton {
                 iconSize = sample.iconSize
                 iconPadding = sample.iconPadding
                 iconGravity = sample.iconGravity
+                setTextAppearance(
+                    view.context,
+                    if (sample.tag == view.context.getString(R.string.tv_no_focus_tag)) {
+                        R.style.VideoButtonTV
+                    } else {
+                        R.style.VideoButton
+                    }
+                )
                 setTextColor(sample.textColors)
                 setTextSize(TypedValue.COMPLEX_UNIT_PX, sample.textSize)
                 typeface = sample.typeface
+                letterSpacing = sample.letterSpacing
+                textScaleX = sample.textScaleX
+                includeFontPadding = sample.includeFontPadding
                 isAllCaps = false
                 stateListAnimator = sample.stateListAnimator
                 isFocusable = sample.isFocusable
