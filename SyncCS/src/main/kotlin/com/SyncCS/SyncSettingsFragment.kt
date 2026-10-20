@@ -4,16 +4,25 @@ import android.app.Dialog
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.graphics.Canvas
+import android.graphics.ColorFilter
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PixelFormat
+import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
 import android.text.InputType
 import android.text.method.PasswordTransformationMethod
 import android.util.TypedValue
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -159,6 +168,51 @@ class SyncSettingsFragment : DialogFragment() {
         return "$status  ·  ${config.deviceName}"
     }
 
+    private class EyeIcon(private val iconColor: Int, private val visible: Boolean, private val iconSize: Int) : Drawable() {
+        private val pen = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 1.8f
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+            color = iconColor
+        }
+
+        override fun draw(canvas: Canvas) {
+            if (bounds.isEmpty) return
+            val scale = minOf(bounds.width(), bounds.height()) / 24f
+            val saved = canvas.save()
+            canvas.translate(bounds.exactCenterX() - 12f * scale, bounds.exactCenterY() - 12f * scale)
+            canvas.scale(scale, scale)
+            val outline = Path().apply {
+                moveTo(2f, 12f)
+                cubicTo(5f, 8f, 8f, 6f, 12f, 6f)
+                cubicTo(16f, 6f, 19f, 8f, 22f, 12f)
+                cubicTo(19f, 16f, 16f, 18f, 12f, 18f)
+                cubicTo(8f, 18f, 5f, 16f, 2f, 12f)
+                close()
+            }
+            canvas.drawPath(outline, pen)
+            canvas.drawCircle(12f, 12f, 3f, pen)
+            if (!visible) canvas.drawLine(3f, 21f, 21f, 3f, pen)
+            canvas.restoreToCount(saved)
+        }
+
+        override fun setAlpha(alpha: Int) {
+            pen.alpha = alpha
+            invalidateSelf()
+        }
+
+        override fun setColorFilter(colorFilter: ColorFilter?) {
+            pen.colorFilter = colorFilter
+            invalidateSelf()
+        }
+
+        @Suppress("DEPRECATION")
+        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+        override fun getIntrinsicWidth(): Int = iconSize
+        override fun getIntrinsicHeight(): Int = iconSize
+    }
+
     private fun labeledField(
         context: Context,
         body: LinearLayout,
@@ -166,7 +220,8 @@ class SyncSettingsFragment : DialogFragment() {
         hint: String,
         value: String = "",
         kind: Int = InputType.TYPE_CLASS_TEXT,
-        done: Boolean = false
+        done: Boolean = false,
+        revealToggle: Boolean = false
     ): EditText {
         body.addView(TextView(context).apply {
             text = title
@@ -184,10 +239,64 @@ class SyncSettingsFragment : DialogFragment() {
             setText(value)
             imeOptions = if (done) EditorInfo.IME_ACTION_DONE else EditorInfo.IME_ACTION_NEXT
         }
-        body.addView(field, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ))
+        if (revealToggle) {
+            val line = FrameLayout(context)
+            val textParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            line.addView(field, textParams)
+
+            // Reserve space within the native text field; keep its underline across the row.
+            field.setPadding(
+                field.paddingLeft, field.paddingTop,
+                field.paddingRight + dp(context, 48), field.paddingBottom
+            )
+            var revealed = false
+            val toggle = ImageButton(context).apply {
+                val ripple = TypedValue()
+                if (context.theme.resolveAttribute(
+                        android.R.attr.selectableItemBackgroundBorderless, ripple, true
+                    ) && ripple.resourceId != 0
+                ) {
+                    setBackgroundResource(ripple.resourceId)
+                } else {
+                    background = null
+                }
+                scaleType = android.widget.ImageView.ScaleType.CENTER
+                isFocusable = true
+                isFocusableInTouchMode = false
+                isClickable = true
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+                contentDescription = "Show recovery passphrase"
+                setImageDrawable(EyeIcon(field.currentTextColor, false, dp(context, 24)))
+                setOnClickListener {
+                    val selectionStart = field.selectionStart.coerceAtLeast(0)
+                    val selectionEnd = field.selectionEnd.coerceAtLeast(0)
+                    revealed = !revealed
+                    field.transformationMethod =
+                        if (revealed) null else PasswordTransformationMethod.getInstance()
+                    val length = field.text?.length ?: 0
+                    field.setSelection(
+                        selectionStart.coerceAtMost(length),
+                        selectionEnd.coerceAtMost(length)
+                    )
+                    setImageDrawable(EyeIcon(field.currentTextColor, revealed, dp(context, 24)))
+                    contentDescription =
+                        if (revealed) "Hide recovery passphrase" else "Show recovery passphrase"
+                }
+            }
+            line.addView(toggle, FrameLayout.LayoutParams(
+                dp(context, 48), dp(context, 48),
+                Gravity.END or Gravity.CENTER_VERTICAL
+            ))
+            body.addView(line, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+        } else {
+            body.addView(field, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+        }
         return field
     }
 
@@ -202,7 +311,8 @@ class SyncSettingsFragment : DialogFragment() {
         ))
         val recovery = labeledField(
             context, body, "Recovery passphrase", "At least 12 characters",
-            kind = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            kind = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD,
+            revealToggle = true
         )
         body.addView(secondary(
             context,
