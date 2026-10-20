@@ -67,3 +67,10 @@ GitHub OAuth requires separate operator configuration on both **GitHub** and **S
 - The current per-device selected CloudStream account is not synchronized.
 - After updating, sync the source device again before restoring another device; previously untracked settings cannot be recreated from older cloud snapshots.
 - The code change addresses known omission paths but real-device validation is still required to establish complete plugin and preference restoration. CloudStream's own crash handler stores uncaught stack traces in the private `last_error` file, which may be needed if a device continues to exit.
+
+## QualityDataHelper runtime ABI compatibility (v6)
+
+- Do not directly call `QualityDataHelper.getSourcePriorityCache()` or `getQualityPriorityCache()`: older installed CloudStream binaries may not expose the getters, causing `NoSuchMethodError` and an app-wide crash.
+- Try to invalidate priority caches via runtime-reflected getter or backing field, if available. If the cache is absent on that version, preserve saved preferences and request a CloudStream restart for refreshed priorities.
+- Refresh CloudStream service account caches through runtime-detected companion APIs; do not hard-link to cache setters missing in older host builds.
+- `SyncCoordinator` catches and reports `LinkageError` as a host compatibility failure rather than allowing a fatal app restart. Persistent sync database and plugin backups are not reset.

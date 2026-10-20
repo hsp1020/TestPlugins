@@ -170,6 +170,14 @@ internal object SyncCoordinator {
             }
             lastStatus = result
             result
+        } catch (error: LinkageError) {
+            // Plugin binary can be compiled against a newer CloudStream API than
+            // the host currently running it. A missing host getter is recoverable.
+            val message = "Sync incompatible with this CloudStream version during " + stage +
+                ": " + error.javaClass.simpleName
+            Log.e("SyncCS", message, error)
+            lastStatus = message
+            message
         } catch (error: Exception) {
             val message = "Sync failed during " + stage + ": " +
                 (error.message ?: error.javaClass.simpleName).take(160)

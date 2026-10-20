@@ -10,8 +10,6 @@ import com.lagradost.cloudstream3.plugins.RepositoryManager
 import com.lagradost.cloudstream3.plugins.PLUGINS_KEY
 import com.lagradost.cloudstream3.plugins.PluginData
 import com.lagradost.cloudstream3.ui.settings.extensions.RepositoryData
-import com.lagradost.cloudstream3.ui.player.source_priority.QualityDataHelper
-import com.lagradost.cloudstream3.syncproviders.AccountManager
 import com.lagradost.cloudstream3.utils.DataStore
 import com.lagradost.cloudstream3.utils.PREFERENCES_NAME
 import org.json.JSONArray
@@ -151,6 +149,94 @@ internal object SyncData {
         }
     }
 
+    /**
+     * CloudStream versions expose these caches as either fields or Kotlin getters
+     * with different JVM signatures. Do not link to a particular getter at compile time:
+     * a binary mismatch would otherwise terminate the entire host process.
+     */
+    private fun invalidatePriorityCaches(): Boolean {
+        val helper = try {
+            Class.forName("com.lagradost.cloudstream3.ui.player.source_priority.QualityDataHelper")
+        } catch (_: LinkageError) {
+            return false
+        } catch (_: ClassNotFoundException) {
+            return false
+        }
+        val instance = runCatching { helper.getField("INSTANCE").get(null) }.getOrNull()
+        var cleared = 0
+        for (name in listOf("sourcePriorityCache", "qualityPriorityCache")) {
+            val getterName = "get" + name.replaceFirstChar { it.uppercaseChar() }
+            val cache = try {
+                val accessor = helper.methods.firstOrNull {
+                    it.name == getterName && it.parameterCount == 0
+                }
+                if (accessor != null) {
+                    accessor.invoke(instance)
+                } else {
+                    val field = helper.declaredFields.firstOrNull { it.name == name }
+                    field?.also { it.isAccessible = true }?.get(
+                        if (field != null && java.lang.reflect.Modifier.isStatic(field.modifiers)) null
+                        else instance
+                    )
+                }
+            } catch (_: ReflectiveOperationException) {
+                null
+            } catch (_: SecurityException) {
+                null
+            } catch (_: LinkageError) {
+                null
+            }
+            if (cache is MutableMap<*, *>) {
+                try {
+                    cache.clear()
+                    cleared++
+                } catch (_: UnsupportedOperationException) {
+                    // This CloudStream version exposes an immutable cache.
+                }
+            }
+        }
+        return cleared == 2
+    }
+
+    /**
+     * Refresh service-account caches only when the running host exposes the
+     * matching public companion methods. Persisted accounts survive restart even
+     * when immediate in-memory cache refresh is unavailable.
+     */
+    private fun refreshAccountCaches(): Boolean {
+        return try {
+            val owner = Class.forName("com.lagradost.cloudstream3.syncproviders.AccountManager")
+            val companion = owner.getField("Companion").get(null)
+            val methods = companion.javaClass.methods
+            val allApis = methods.firstOrNull { it.name == "getAllApis" && it.parameterCount == 0 }
+                ?.invoke(companion) as? Array<*> ?: return false
+            val accountsMethod = methods.firstOrNull { it.name == "accounts" && it.parameterCount == 1 }
+                ?: return false
+            val setter = methods.firstOrNull {
+                it.name == "setCachedAccounts" && it.parameterCount == 1
+            } ?: return false
+            val accountMap = mutableMapOf<String, Any>()
+            for (api in allApis) {
+                if (api == null) continue
+                val prefix = api.javaClass.methods.firstOrNull {
+                    it.name == "getIdPrefix" && it.parameterCount == 0
+                }?.invoke(api) as? String ?: continue
+                val values = accountsMethod.invoke(companion, prefix) ?: continue
+                accountMap[prefix] = values
+            }
+            setter.invoke(companion, accountMap)
+            methods.firstOrNull { it.name == "updateAccountIds" && it.parameterCount == 0 }
+                ?.invoke(companion)
+            true
+        } catch (_: ReflectiveOperationException) {
+            false
+        } catch (_: SecurityException) {
+            false
+        } catch (_: LinkageError) {
+            false
+        }
+    }
+
     fun apply(context: Context, changes: Map<String, String?>) {
         if (changes.isEmpty()) return
         val data = with(DataStore) { context.getSharedPrefs() }
@@ -194,14 +280,11 @@ internal object SyncData {
         check(dataEdit.commit()) { "CloudStream settings restore failed" }
         check(defaultEdit.commit()) { "Default settings restore failed" }
         pluginEditors.values.forEach { check(it.commit()) { "Plugin settings restore failed" } }
-        if (priorityChanged) {
-            QualityDataHelper.sourcePriorityCache.clear()
-            QualityDataHelper.qualityPriorityCache.clear()
+        if (priorityChanged && !invalidatePriorityCaches()) {
+            android.util.Log.w("SyncCS", "Priority cache APIs unavailable; restart CloudStream to reload priorities.")
         }
-        if (accountsChanged) {
-            val accounts = AccountManager.allApis.associate { it.idPrefix to AccountManager.accounts(it.idPrefix) }.toMutableMap()
-            AccountManager.cachedAccounts = accounts
-            AccountManager.updateAccountIds()
+        if (accountsChanged && !refreshAccountCaches()) {
+            android.util.Log.w("SyncCS", "Account cache APIs unavailable; restart CloudStream to reload accounts.")
         }
     }
 }
