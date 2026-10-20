@@ -4987,7 +4987,7 @@ open class StremioC(
 private object StremioTorrentFiles {
     private const val LOOKUP_TIMEOUT_MS = 12_000L
     private const val CACHE_TTL_MS = 24L * 60 * 60 * 1000
-    private val slots = Semaphore(5)
+    private val slots = Semaphore(10)
     private val firstLookupLock = Mutex()
     @Volatile private var torrentServerInitialized = false
     private val pending = ConcurrentHashMap<String, CompletableDeferred<Int?>>()
