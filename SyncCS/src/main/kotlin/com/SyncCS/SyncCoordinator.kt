@@ -8,6 +8,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.time.Instant
+import java.io.IOException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 
 internal object SyncCoordinator {
     private val lock = Mutex()
@@ -37,28 +40,58 @@ internal object SyncCoordinator {
             lastStatus = "Sign in to enable sync"
             return@withLock lastStatus
         }
+        if (config.preferences.getBoolean("account_switch_blocked", false)) {
+            lastStatus = "Sync paused: account changed. Clear local CloudStream data before linking a different account."
+            return@withLock lastStatus
+        }
+        // The server rejects stale expected_version writes. Re-fetch and re-merge
+        // up to three times rather than dropping either side's pending changes.
+        for (attempt in 0 until 3) {
+            val result = synchronizePass(context, activity)
+            if (!result.startsWith("Sync conflict:")) return@withLock result
+            if (attempt < 2) delay(250L * (attempt + 1))
+        }
+        lastStatus = "Sync failed: repeated concurrent edits; changes retained for retry"
+        lastStatus
+    }
+
+    private suspend fun synchronizePass(context: Context, activity: Activity?): String {
+        val config = SyncConfiguration(context)
         val backend = SyncBackend(config)
         var stage = "loading cloud state"
         try {
+            val startedUser = backend.userId()
+            fun verifyAccount() {
+                val stored = config.preferences.getString("session", null)
+                    ?: error("Sync account removed during operation")
+                val json = JSONObject(String(LocalVault.decrypt(stored), Charsets.UTF_8))
+                check(json.getString("user_id") == startedUser &&
+                    !config.preferences.getBoolean("account_switch_blocked", false)) {
+                    "Sync account changed during operation"
+                }
+            }
+
             val cipher = backend.cipher()
             val remotes = backend.list()
-            // Authenticate every entry before modifying any local data.
             stage = "decrypting remote data"
             val remoteValues = remotes.associate { item ->
                 item.key to if (item.deleted) null else cipher.decrypt(
-                    item.key, item.cipher ?: error("Missing encrypted value for " + item.key))
+                    item.key, item.cipher ?: error("Missing encrypted value for " + item.key)
+                )
             }
             val remoteByKey = remotes.associateBy { it.key }
             stage = "reading local preferences"
             val local = SyncData.snapshot(context)
-            val localManifest = PluginInventory.snapshot(context)
-            local["x/plugins"] = localManifest
+            val currentPlugins = PluginInventory.snapshot(context)
             val base = baseline(context)
-            stage = "comparing remote and local state"
+            stage = "comparing settings changes"
             val apply = mutableMapOf<String, String?>()
             val upload = mutableMapOf<String, String?>()
             val next = base.toMutableMap()
-            val all = (remoteValues.keys + local.keys + base.keys).toSortedSet()
+            // x/plugins is reconciled separately, including deletion tombstones.
+            next.remove("x/plugins")
+            val all = (remoteValues.keys + local.keys + base.keys)
+                .filter { it != "x/plugins" }.toSortedSet()
 
             for (key in all) {
                 val current = local[key]
@@ -70,12 +103,7 @@ internal object SyncCoordinator {
                 val modified = config.preferences.getLong("modified/" + key, 0L)
                 if (old == null) {
                     if (remotePresent) {
-                        if (key == "x/plugins") {
-                            if (remote != current) config.preferences.edit()
-                                .putString("pending_plugins", remote ?: "[]").apply()
-                        } else if (remote != current) {
-                            apply[key] = remote
-                        }
+                        if (remote != current) apply[key] = remote
                         next[key] = remoteHash
                     } else if (current != null) {
                         upload[key] = current
@@ -86,54 +114,118 @@ internal object SyncCoordinator {
                 val changedLocal = currentHash != old
                 val changedRemote = remotePresent && remoteHash != old
                 if (changedRemote && changedLocal) {
+                    // No local timestamp means the key was not observed as modified:
+                    // do not let the local system clock or a stale value win.
                     val remoteTime = try {
                         Instant.parse(remoteByKey[key]?.updatedAt).toEpochMilli()
                     } catch (_: Exception) { Long.MAX_VALUE }
-                    if (modified > remoteTime) {
+                    if (modified > 0L && modified > remoteTime) {
                         upload[key] = current
                         next[key] = currentHash
                     } else {
-                        if (key == "x/plugins") {
-                            if (remote != current) config.preferences.edit()
-                                .putString("pending_plugins", remote ?: "[]").apply()
-                        } else apply[key] = remote
+                        apply[key] = remote
                         next[key] = remoteHash
                     }
                 } else if (changedRemote) {
-                    if (key == "x/plugins") {
-                        if (remote != current) config.preferences.edit()
-                            .putString("pending_plugins", remote ?: "[]").apply()
-                    } else apply[key] = remote
+                    apply[key] = remote
                     next[key] = remoteHash
                 } else if (changedLocal) {
-                    if (key == "x/plugins" && config.preferences.contains("pending_plugins")) {
-                        // Do not erase remote plugins before installation finishes.
-                        continue
-                    }
                     upload[key] = current
                     next[key] = currentHash
                 }
             }
 
-            // Restore repositories and extension binaries before large preference imports.
-            // This avoids reporting a successful JSON restore when plugins never installed.
-            var installation = ""
-            if (activity != null && config.preferences.contains("pending_plugins")) {
-                stage = "restoring extension repositories"
-                val repoRestore = apply.remove("d/REPOSITORIES_KEY")
-                if (repoRestore != null) {
-                    applying = true
-                    try {
-                        SyncData.apply(context, mapOf("d/REPOSITORIES_KEY" to repoRestore))
-                    } finally {
-                        applying = false
-                    }
+            stage = "checking plugin installation and deletions"
+            var inventoryBase = config.preferences.getString("plugin_baseline", null)
+            var pluginsOnServer = remoteValues["x/plugins"]
+            var inventoryVersion = remoteByKey["x/plugins"]?.version
+            var merge = PluginSync.merge(currentPlugins, pluginsOnServer,
+                inventoryBase, SyncRuntime.pluginsLoaded)
+            var pluginTarget = PluginSync.encode(merge.target)
+
+            // A manual local removal is only a deletion after the actual plugin
+            // loader has completed; prevents empty snapshots during startup.
+            // Retry a conflicting manifest with the latest server version.
+            for (attempt in 0 until 3) {
+                if (!merge.changedRemote) break
+                verifyAccount()
+                stage = "uploading plugin archives before manifest"
+                PluginInventory.uploadFiles(context, backend, pluginTarget)
+                stage = "publishing plugin manifest"
+                try {
+                    backend.upload(mapOf("x/plugins" to pluginTarget), cipher,
+                        inventoryVersion?.let { mapOf("x/plugins" to it) } ?: emptyMap())
+                    break
+                } catch (error: IOException) {
+                    if (!isConflict(error) || attempt == 2) throw error
+                    val newest = backend.getEntry("x/plugins")
+                    pluginsOnServer = if (newest?.deleted == false && newest.cipher != null) {
+                        cipher.decrypt("x/plugins", newest.cipher)
+                    } else null
+                    inventoryVersion = newest?.version
+                    merge = PluginSync.merge(currentPlugins, pluginsOnServer,
+                        inventoryBase, SyncRuntime.pluginsLoaded)
+                    pluginTarget = PluginSync.encode(merge.target)
                 }
-                stage = "restoring extension binaries"
-                installation = installPending(context, activity, backend)
             }
 
+            stage = "restoring repositories"
+            // Repo data must be available before installing extension packages.
+            val repositories = apply.remove("d/REPOSITORIES_KEY")
+            if (repositories != null && activity != null) {
+                verifyAccount()
+                applying = true
+                try {
+                    SyncData.apply(context, mapOf("d/REPOSITORIES_KEY" to repositories))
+                } finally {
+                    applying = false
+                }
+            } else if (repositories != null) {
+                apply["d/REPOSITORIES_KEY"] = repositories
+            }
+
+            stage = "restoring plugin binaries and removals"
+            var installation = ""
+            if (!PluginSync.matches(PluginSync.decode(currentPlugins), merge.target)) {
+                check(config.preferences.edit()
+                    .putString("pending_plugins", pluginTarget).commit())
+            } else if (config.preferences.contains("pending_plugins")) {
+                config.preferences.edit().remove("pending_plugins").commit()
+            }
+            if (activity != null && SyncRuntime.pluginsLoaded &&
+                config.preferences.contains("pending_plugins")) {
+                verifyAccount()
+                applying = true
+                try {
+                    installation = installPending(context, activity, backend)
+                } finally {
+                    applying = false
+                }
+            }
+            // A new baseline may only be recorded for installed, verified items.
+            val installedPlugins = PluginInventory.snapshot(context)
+            val installed = PluginSync.matches(PluginSync.decode(installedPlugins), merge.target)
+            if (installed && !config.preferences.contains("pending_plugins")) {
+                check(config.preferences.edit().putString("plugin_baseline", installedPlugins).commit())
+            } else if (installation.isEmpty()) {
+                installation = "; plugins pending: install/remove requires foreground activity"
+            }
+            if (!installed && !config.preferences.contains("pending_plugins")) {
+                check(config.preferences.edit()
+                    .putString("pending_plugins", pluginTarget).commit())
+            }
+            if (!installed && !installation.contains("plugins pending:")) {
+                installation = "; plugins pending: verification mismatch after install/remove"
+            }
+
+            // Commit local changes with the server CAS first. If a concurrent
+            // write rejects this batch, do not overwrite local state before retry.
+            stage = "uploading settings changes"
+            verifyAccount()
+            backend.upload(upload, cipher, remoteByKey.mapValues { it.value.version })
+
             stage = "restoring preferences"
+            verifyAccount()
             applying = true
             try {
                 SyncData.apply(context, apply)
@@ -141,50 +233,48 @@ internal object SyncCoordinator {
                 applying = false
             }
 
-            // Upload files first so manifest rows never refer to missing new archives.
-            if (upload.containsKey("x/plugins")) {
-                stage = "uploading extension archives"
-                PluginInventory.uploadFiles(context, backend, upload["x/plugins"] ?: "[]")
-            }
-            stage = "uploading changed preferences"
-            backend.upload(upload, cipher, remoteByKey.mapValues { it.value.version })
-
-            stage = "persisting sync baseline"
+            stage = "persisting verified settings baseline"
+            verifyAccount()
             val baseJson = JSONObject()
             for ((key, hash) in next) baseJson.put(key, hash)
             check(config.preferences.edit().putString("base", baseJson.toString()).commit())
-            for (key in apply.keys + upload.keys) {
-                config.preferences.edit().remove("modified/" + key).apply()
-            }
+            val editor = config.preferences.edit()
+            for (key in apply.keys + upload.keys) editor.remove("modified/" + key)
+            editor.apply()
             if (apply.keys.any { it.startsWith("d/") || it.startsWith("p/") }) {
                 MainActivity.bookmarksUpdatedEvent.invoke(true)
             }
-            var result = "Synced: downloaded " + apply.size + ", uploaded " + upload.size
-            if (activity != null && installation.isEmpty()) {
-                stage = "restoring pending extensions"
-                installation = installPending(context, activity, backend)
-            }
+            var result = "Synced: downloaded " + apply.size + ", uploaded " +
+                (upload.size + if (merge.changedRemote) 1 else 0)
             result += installation
             if (installation.contains("plugins pending:")) {
                 result = result.replaceFirst("Synced:", "Sync incomplete:")
             }
             lastStatus = result
-            result
+            return result
+        } catch (cancel: CancellationException) {
+            throw cancel
         } catch (error: LinkageError) {
-            // Plugin binary can be compiled against a newer CloudStream API than
-            // the host currently running it. A missing host getter is recoverable.
-            val message = "Sync incompatible with this CloudStream version during " + stage +
-                ": " + error.javaClass.simpleName
+            val message = "Sync incompatible during " + stage + ": " + error.javaClass.simpleName
             Log.e("SyncCS", message, error)
             lastStatus = message
-            message
+            return message
         } catch (error: Exception) {
-            val message = "Sync failed during " + stage + ": " +
-                (error.message ?: error.javaClass.simpleName).take(160)
+            val detail = (error.message ?: error.javaClass.simpleName).take(160)
+            val message = if (error is IOException && isConflict(error)) {
+                "Sync conflict: " + detail
+            } else "Sync failed during " + stage + ": " + detail
             Log.e("SyncCS", message, error)
             lastStatus = message
-            message
+            return message
         }
+    }
+
+    private fun isConflict(error: IOException): Boolean {
+        val detail = error.message.orEmpty()
+        return detail.contains("Sync conflict", true) ||
+            detail.contains("Concurrent sync conflict", true) ||
+            detail.contains("40001")
     }
 
     private suspend fun installPending(context: Context, activity: Activity, backend: SyncBackend): String {

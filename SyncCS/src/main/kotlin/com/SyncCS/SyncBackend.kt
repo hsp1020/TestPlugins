@@ -50,7 +50,14 @@ internal class SyncConfiguration(context: Context) {
         url.startsWith("https://") && anonKey.isNotBlank() &&
         preferences.contains("session") && preferences.contains("secret")
     fun clearAccount() {
-        preferences.edit().remove("session").remove("secret").remove("base").remove("configured").remove("oauth_pending").apply()
+        val editor = preferences.edit()
+        for (key in preferences.all.keys) {
+            if (key.startsWith("modified/") || key.startsWith("file_")) editor.remove(key)
+        }
+        check(editor.remove("session").remove("secret").remove("base")
+            .remove("configured").remove("oauth_pending")
+            .remove("pending_plugins").remove("plugin_baseline")
+            .commit())
     }
 }
 
@@ -242,6 +249,8 @@ internal class SyncBackend(private val config: SyncConfiguration) {
             try { JSONObject(String(LocalVault.decrypt(it), Charsets.UTF_8)).optString("user_id") }
             catch (_: Exception) { null }
         }
+        val previousAccount = priorUser?.takeIf { it.isNotBlank() }
+            ?: config.preferences.getString("last_user_id", null)
         val savedKey = config.preferences.getString("secret", null)
         if (priorUser == session.userId && savedKey != null) {
             require(MessageDigest.isEqual(LocalVault.decrypt(savedKey), newKey)) {
@@ -258,8 +267,16 @@ internal class SyncBackend(private val config: SyncConfiguration) {
         }
         val editor = config.preferences.edit()
             .putString("secret", LocalVault.encrypt(newKey))
+            .putString("last_user_id", session.userId)
             .remove("oauth_pending")
-        if (priorUser != session.userId) editor.remove("base")
+        if (previousAccount != session.userId) {
+            editor.remove("base").remove("pending_plugins").remove("plugin_baseline")
+            for (key in config.preferences.all.keys) {
+                if (key.startsWith("modified/") || key.startsWith("file_")) editor.remove(key)
+            }
+            // Do not automatically upload previous account's local data to the new account.
+            if (!previousAccount.isNullOrBlank()) editor.putBoolean("account_switch_blocked", true)
+        }
         check(editor.commit())
         config.email = user.optString("email", "")
         persist(session)
@@ -303,23 +320,41 @@ internal class SyncBackend(private val config: SyncConfiguration) {
 
     fun userId(): String = session().userId
 
+    private fun readEntry(row: JSONObject): RemoteEntry = RemoteEntry(
+        row.getString("item_key"),
+        row.optString("payload").takeUnless { row.isNull("payload") },
+        row.optBoolean("deleted"), row.optString("updated_at"), row.optString("device_id"),
+        row.optLong("version")
+    )
+
+    fun getEntry(key: String): RemoteEntry? {
+        val encoded = java.net.URLEncoder.encode(key, "UTF-8")
+        val reply = call("/rest/v1/sync_entries?select=item_key,payload,deleted,updated_at,device_id,version" +
+            "&item_key=eq." + encoded + "&limit=1", "GET", session().access)
+        val rows = JSONArray(String(reply, Charsets.UTF_8))
+        return if (rows.length() == 0) null else readEntry(rows.getJSONObject(0))
+    }
+
     fun list(): List<RemoteEntry> {
         val token = session().access
         val out = mutableListOf<RemoteEntry>()
-        var offset = 0
-        do {
+        var cursor: String? = null
+        while (true) {
+            val cursorFilter = cursor?.let {
+                "&item_key=gt." + java.net.URLEncoder.encode(it, "UTF-8")
+            } ?: ""
             val rows = JSONArray(String(call("/rest/v1/sync_entries?select=item_key,payload,deleted,updated_at,device_id,version" +
-                "&order=item_key.asc&limit=500&offset=" + offset, "GET", token), Charsets.UTF_8))
+                "&order=item_key.asc&limit=500" + cursorFilter, "GET", token), Charsets.UTF_8))
+            if (rows.length() == 0) break
             for (index in 0 until rows.length()) {
-                val row = rows.getJSONObject(index)
-                out.add(RemoteEntry(row.getString("item_key"),
-                    row.optString("payload").takeUnless { row.isNull("payload") },
-                    row.optBoolean("deleted"), row.optString("updated_at"), row.optString("device_id"),
-                    row.optLong("version")))
+                val row = readEntry(rows.getJSONObject(index))
+                check(cursor == null || row.key > cursor!!) { "Sync page cursor did not advance" }
+                cursor = row.key
+                out.add(row)
             }
-            offset += rows.length()
+            check(out.size < 100000) { "Sync entry count exceeds supported page limit" }
             if (rows.length() < 500) break
-        } while (offset < 100000)
+        }
         return out
     }
 

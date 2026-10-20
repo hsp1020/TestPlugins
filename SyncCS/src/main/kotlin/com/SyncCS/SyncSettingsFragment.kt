@@ -69,7 +69,9 @@ class SyncSettingsFragment : DialogFragment() {
         return SyncProgress(dialog, spinner, text)
     }
 
-    private suspend fun finishSyncProgress(progress: SyncProgress, result: String): Boolean {
+    private suspend fun finishSyncProgress(
+        progress: SyncProgress, result: String, restartAfter: Boolean = false
+    ): Boolean {
         val success = result.startsWith("Synced:")
         statusLabel?.text = result
         if (success) {
@@ -80,7 +82,13 @@ class SyncSettingsFragment : DialogFragment() {
                 "Sync complete"
             }
             delay(1500L)
-            progress.dialog.dismiss()
+            if (restartAfter) {
+                progress.label.text = "Restarting CloudStream..."
+                // Keep the dialog visible long enough for this transition to render.
+                delay(850L)
+            } else {
+                progress.dialog.dismiss()
+            }
         } else {
             progress.dialog.dismiss()
             if (isAdded) {
@@ -456,13 +464,14 @@ class SyncSettingsFragment : DialogFragment() {
                             val report = withContext(Dispatchers.IO) {
                                 SyncCoordinator.synchronize(host.applicationContext, host)
                             }
-                            if (finishSyncProgress(progress, report)) {
-                                // A new device needs its restored preferences and plugin
-                                // registrations reloaded by the host before normal use.
-                                if (!(firstConnection && restartCloudStreamAfterFirstSignIn(host))) {
-                                    if (dialog.isShowing) dialog.dismiss()
-                                    if (isAdded) dismissAllowingStateLoss()
+                            if (finishSyncProgress(progress, report, restartAfter = firstConnection)) {
+                                // First login completes only after the restored state is reloaded.
+                                if (firstConnection && restartCloudStreamAfterFirstSignIn(host)) {
+                                    return@launch
                                 }
+                                progress.dialog.dismiss()
+                                if (dialog.isShowing) dialog.dismiss()
+                                if (isAdded) dismissAllowingStateLoss()
                             } else {
                                 feedback.text = "Signed in, but synchronization did not complete."
                             }

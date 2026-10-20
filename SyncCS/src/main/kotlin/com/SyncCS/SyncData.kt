@@ -399,7 +399,10 @@ internal object PluginInventory {
     private const val MAX_FILE = 20 * 1024 * 1024
 
     fun snapshot(context: Context): String {
-        val repos = RepositoryManager.getRepositories()
+        // Include CloudStream's built-in repositories as well as user-added ones:
+        // extensions from prebuilt repos otherwise have no recoverable repo URL.
+        val repos = (RepositoryManager.getRepositories().toList() +
+            RepositoryManager.PREBUILT_REPOSITORIES.toList()).distinctBy { it.url }
         val items = JSONArray()
         for (plugin in PluginManager.getPluginsOnline()) {
             if (plugin.internalName.equals("SyncCS", true)) continue
@@ -428,31 +431,102 @@ internal object PluginInventory {
     fun uploadFiles(context: Context, backend: SyncBackend, manifest: String) {
         val config = SyncConfiguration(context)
         val registry = config.preferences
-        val entries = JSONArray(manifest)
-        val online = PluginManager.getPluginsOnline().associateBy { it.internalName }
-        val local = PluginManager.getPluginsLocal().associateBy { it.internalName }
+        val entries = PluginSync.items(manifest)
+        val online = PluginManager.getPluginsOnline().toList()
+        val local = PluginManager.getPluginsLocal().toList()
         for (index in 0 until entries.length()) {
             val row = entries.getJSONObject(index)
             val hash = row.optString("sha")
-            if (hash.isBlank() || registry.getBoolean("file_" + hash, false)) continue
+            if (!hash.matches(Regex("[a-f0-9]{64}")) ||
+                registry.getBoolean("file_" + hash, false)) continue
             val plugin = if (row.optString("type") == "online") {
-                online[row.optString("name")]
-            } else local[row.optString("name")]
+                val repoId = row.optString("repo")
+                online.firstOrNull {
+                    it.internalName == row.optString("name") &&
+                        it.url == row.optString("url") &&
+                        (repoId.isBlank() || File(it.filePath).parentFile?.name ==
+                            PluginManager.getPluginSanitizedFileName(repoId))
+                }
+            } else {
+                local.firstOrNull {
+                    it.internalName == row.optString("name") &&
+                        File(it.filePath).name == row.optString("file")
+                }
+            }
             val file = plugin?.filePath?.let(::File) ?: continue
             if (!file.isFile || file.length() !in 1L..MAX_FILE.toLong()) continue
+            val bytes = file.readBytes()
+            // The object path is content-addressed; never write a differently
+            // named or outdated binary under the manifest's hash.
+            if (SyncBackend.digestBytes(bytes) != hash) {
+                if (row.optString("type") == "local") {
+                    error("Local .cs3 changed during backup: " + row.optString("name"))
+                }
+                continue
+            }
             try {
-                backend.uploadFile(hash, file.readBytes())
+                backend.uploadFile(hash, bytes)
                 registry.edit().putBoolean("file_" + hash, true).apply()
             } catch (error: Exception) {
                 if (row.optString("type") == "local") throw error
-                // Online extensions can still be downloaded from their repository.
+                // Online extensions can also be fetched from their repository.
             }
         }
     }
 
     suspend fun restore(context: Context, activity: Activity, backend: SyncBackend, raw: String): List<String> {
         val report = mutableListOf<String>()
-        val rows = JSONArray(raw)
+        val rows = PluginSync.items(raw)
+        val target = PluginSync.decode(raw).items
+
+        // Use CloudStream's own uninstall path so both the binary and the plugin
+        // registry change together. The merge has already decided which entries
+        // are intentional deletions; never delete SyncCS itself.
+        val current = PluginSync.decode(snapshot(context)).items
+        val onlineNow = PluginManager.getPluginsOnline().toList()
+        val localNow = PluginManager.getPluginsLocal().toList()
+        for ((key, row) in current) {
+            if (key in target || row.optString("name").equals("SyncCS", true)) continue
+            val name = row.optString("name")
+            val installed = if (row.optString("type") == "online") {
+                val repoId = row.optString("repo")
+                onlineNow.firstOrNull {
+                    it.internalName == name && it.url == row.optString("url") &&
+                        (repoId.isBlank() || File(it.filePath).parentFile?.name ==
+                            PluginManager.getPluginSanitizedFileName(repoId))
+                }
+            } else {
+                localNow.firstOrNull {
+                    it.internalName == name &&
+                        File(it.filePath).name == row.optString("file")
+                }
+            }
+            if (installed != null) {
+                try {
+                    val path = File(installed.filePath)
+                    if (!PluginManager.deletePlugin(path)) {
+                        if (!path.exists()) {
+                            val installedOnline = PluginManager.getPluginsOnline()
+                                .filter { it.filePath != installed.filePath }
+                            val installedLocal = PluginManager.getPluginsLocal()
+                                .filter { it.filePath != installed.filePath }
+                            com.lagradost.cloudstream3.CloudStreamApp.setKey(
+                                PLUGINS_KEY, installedOnline.toTypedArray()
+                            )
+                            com.lagradost.cloudstream3.CloudStreamApp.setKey(
+                                com.lagradost.cloudstream3.plugins.PLUGINS_KEY_LOCAL,
+                                installedLocal.toTypedArray()
+                            )
+                        } else report.add("Could not delete " + name)
+                    }
+                } catch (_: Exception) {
+                    report.add("Could not delete " + name)
+                } catch (_: LinkageError) {
+                    report.add("Unsupported uninstall for " + name)
+                }
+            }
+        }
+
         val existingLocal = PluginManager.getPluginsLocal()
         for (index in 0 until rows.length()) {
             val row = rows.getJSONObject(index)
@@ -463,11 +537,15 @@ internal object PluginInventory {
                 val url = row.optString("url")
                 val repo = row.optString("repo")
                 if (PluginManager.getPluginsOnline().any {
-                    it.internalName == name && it.url == url && File(it.filePath).exists()
+                    it.internalName == name && it.url == url &&
+                        File(it.filePath).isFile &&
+                        (hash.isBlank() ||
+                            SyncBackend.digestBytes(File(it.filePath).readBytes()) == hash)
                 }) continue
                 var installed = false
                 if (url.startsWith("https://") && repo.startsWith("https://")) {
-                    if (RepositoryManager.getRepositories().none { it.url == repo }) {
+                    if ((RepositoryManager.getRepositories().toList() +
+                            RepositoryManager.PREBUILT_REPOSITORIES.toList()).none { it.url == repo }) {
                         RepositoryManager.addRepository(RepositoryData("Restored for " + name, repo))
                     }
                     try {
@@ -501,7 +579,12 @@ internal object PluginInventory {
                     else "Could not install " + name
                 )
             } else {
-                if (existingLocal.any { it.internalName == name && File(it.filePath).exists() }) continue
+                val filename = row.optString("file").substringAfterLast('/').substringAfterLast('\\')
+                if (existingLocal.any {
+                        it.internalName == name && File(it.filePath).name == filename &&
+                            File(it.filePath).isFile &&
+                            SyncBackend.digestBytes(File(it.filePath).readBytes()) == hash
+                    }) continue
                 if (!hash.matches(Regex("[a-f0-9]{64}"))) {
                     report.add("No backup for local plugin " + name)
                     continue
@@ -509,38 +592,30 @@ internal object PluginInventory {
                 try {
                     val bytes = backend.downloadFile(hash)
                     check(SyncBackend.digestBytes(bytes) == hash)
-                    val filename = row.optString("file").substringAfterLast('/').substringAfterLast('\\')
                     check(filename.endsWith(".cs3", true) && filename.length < 120)
-                    val savedToLegacyFolder = try {
+                    val destination = try {
                         val directory = File(Environment.getExternalStorageDirectory(), "Cloudstream3/plugins")
                         check(directory.exists() || directory.mkdirs())
-                        File(directory, filename).writeBytes(bytes)
-                        true
+                        val output = File(directory, filename)
+                        output.writeBytes(bytes)
+                        output
                     } catch (_: Exception) {
-                        false
+                        val directory = File(context.filesDir, "synccs-local")
+                        check(directory.exists() || directory.mkdirs())
+                        val output = File(directory, filename)
+                        output.writeBytes(bytes)
+                        output
                     }
-                    if (!savedToLegacyFolder) {
-                        // Scoped-storage Android devices cannot always write /sdcard/Cloudstream3.
-                        // Register a private extension copy so the existing host loader can load it on restart.
-                        val archiveRepo = "https://synccs.invalid/local-archive"
-                        val privateFile = PluginManager.getPluginPath(context, name, archiveRepo)
-                        check(privateFile.parentFile?.let { it.exists() || it.mkdirs() } == true)
-                        val temp = File(privateFile.parentFile, privateFile.name + ".temp")
-                        temp.writeBytes(bytes)
-                        check(SyncBackend.digestBytes(temp.readBytes()) == hash)
-                        if (privateFile.exists()) check(privateFile.delete())
-                        check(temp.renameTo(privateFile))
-                        val original = PluginManager.getPluginsOnline().filter {
-                            it.filePath != privateFile.absolutePath
-                        }
-                        val archived = PluginData(
-                            name, "https://synccs.invalid/local-archive/" + hash + ".cs3",
-                            true, privateFile.absolutePath, row.optInt("version", 0)
-                        )
-                        com.lagradost.cloudstream3.CloudStreamApp.setKey(
-                            PLUGINS_KEY, (original + archived).toTypedArray()
-                        )
-                    }
+                    check(SyncBackend.digestBytes(destination.readBytes()) == hash)
+                    val original = PluginManager.getPluginsLocal()
+                        .filter { it.filePath != destination.absolutePath }
+                    val archived = PluginData(
+                        name, "", false, destination.absolutePath, row.optInt("version", 0)
+                    )
+                    com.lagradost.cloudstream3.CloudStreamApp.setKey(
+                        com.lagradost.cloudstream3.plugins.PLUGINS_KEY_LOCAL,
+                        (original + archived).toTypedArray()
+                    )
                 } catch (_: Exception) {
                     report.add("Could not restore local .cs3: " + name)
                 }

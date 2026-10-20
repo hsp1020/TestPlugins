@@ -20,6 +20,42 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
+import java.lang.ref.WeakReference
+import com.lagradost.cloudstream3.plugins.PLUGINS_KEY
+import com.lagradost.cloudstream3.plugins.PLUGINS_KEY_LOCAL
+
+internal object SyncRuntime {
+    @Volatile var pluginsLoaded = false
+        private set
+
+    fun refreshLoadedState(): Boolean {
+        fun loadedFlag(name: String): Boolean {
+            return try {
+                val type = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
+                val owner = type.getField("INSTANCE").get(null)
+                val getter = type.methods.firstOrNull {
+                    it.name == "get" + name && it.parameterCount == 0
+                }
+                if (getter != null) {
+                    getter.invoke(owner) == true
+                } else {
+                    val field = type.declaredFields.firstOrNull {
+                        it.name == name.replaceFirstChar { c -> c.lowercaseChar() }
+                    } ?: return false
+                    field.isAccessible = true
+                    field.get(if (java.lang.reflect.Modifier.isStatic(field.modifiers)) null else owner) == true
+                }
+            } catch (_: Exception) {
+                false
+            } catch (_: LinkageError) {
+                false
+            }
+        }
+        pluginsLoaded = loadedFlag("LoadedLocalPlugins") && loadedFlag("LoadedOnlinePlugins")
+        return pluginsLoaded
+    }
+}
+
 
 @CloudstreamPlugin
 class SyncPlugin : Plugin() {
@@ -32,6 +68,7 @@ class SyncPlugin : Plugin() {
     private var ready = false
     private var foreground = true
     private var lastSyncAt = 0L
+    private var currentActivity: WeakReference<Activity>? = null
     private val observed = mutableMapOf<String, SharedPreferences>()
     private val observedListener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
         val context = com.lagradost.cloudstream3.CloudStreamApp.context
@@ -45,6 +82,12 @@ class SyncPlugin : Plugin() {
                 if (name.isBlank()) "" else "p/" + name + "/"
             }
         }
+        if (type == "d/" && (key == PLUGINS_KEY || key == PLUGINS_KEY_LOCAL)) {
+            if (SyncCoordinator.applying) return@OnSharedPreferenceChangeListener
+            SyncCoordinator.markChanged(context, "x/plugins")
+            request(700)
+            return@OnSharedPreferenceChangeListener
+        }
         val path = type + key
         if (!SyncData.isTracked(path)) return@OnSharedPreferenceChangeListener
         SyncCoordinator.markChanged(context, path)
@@ -53,6 +96,7 @@ class SyncPlugin : Plugin() {
     private val bookmarks = { _: Boolean -> request(2000) }
     private val loaded = { _: Boolean ->
         ready = true
+        SyncRuntime.refreshLoadedState()
         watchPreferences()
         request(4000)
     }
@@ -90,8 +134,9 @@ class SyncPlugin : Plugin() {
         trigger = scope.launch {
             delay(delayMs)
             if (isOwner(context)) {
-                SyncCoordinator.synchronize(context)
-                lastSyncAt = System.currentTimeMillis()
+                val active = currentActivity?.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
+                val report = SyncCoordinator.synchronize(context, active)
+                if (report.startsWith("Synced:")) lastSyncAt = System.currentTimeMillis()
             }
         }
     }
@@ -106,11 +151,12 @@ class SyncPlugin : Plugin() {
                 request(2500)
             }
             override fun onActivityResumed(activity: Activity) {
+                currentActivity = WeakReference(activity)
                 if (!isOwner(context) || !ready || !config(context).active()) return
                 scope.launch {
                     if (System.currentTimeMillis() - lastSyncAt > 120000L) {
-                        SyncCoordinator.synchronize(context, activity)
-                        lastSyncAt = System.currentTimeMillis()
+                        val report = SyncCoordinator.synchronize(context, activity)
+                        if (report.startsWith("Synced:")) lastSyncAt = System.currentTimeMillis()
                     }
                 }
             }
@@ -126,7 +172,9 @@ class SyncPlugin : Plugin() {
                 }
             }
             override fun onActivitySaveInstanceState(activity: Activity, bundle: Bundle) {}
-            override fun onActivityDestroyed(activity: Activity) {}
+            override fun onActivityDestroyed(activity: Activity) {
+                if (currentActivity?.get() === activity) currentActivity = null
+            }
         }
         app.registerActivityLifecycleCallbacks(callback!!)
         periodic = scope.launch {
@@ -134,8 +182,9 @@ class SyncPlugin : Plugin() {
                 delay(15 * 60 * 1000L)
                 if (!isOwner(context)) break
                 if (foreground && ready && config(context).active()) {
-                    SyncCoordinator.synchronize(context)
-                    lastSyncAt = System.currentTimeMillis()
+                    val active = currentActivity?.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
+                    val report = SyncCoordinator.synchronize(context, active)
+                    if (report.startsWith("Synced:")) lastSyncAt = System.currentTimeMillis()
                 }
             }
         }
@@ -156,6 +205,7 @@ class SyncPlugin : Plugin() {
         }
     }
     fun unload() {
+        currentActivity = null
         scope.cancel()
         trigger?.cancel()
         periodic?.cancel()
