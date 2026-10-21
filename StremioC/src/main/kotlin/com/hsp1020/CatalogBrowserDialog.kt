@@ -1251,7 +1251,7 @@ internal class CatalogBrowserDialog(
         visibility = View.GONE
     }
 
-    private fun selectorRow(title: String, spinner: AppCompatSpinner, arrow: TextView, gap: Int) =
+    private fun selectorRow(title: String, spinner: AppCompatSpinner, arrow: TextView) =
         LinearLayout(activity).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(TextView(activity).apply {
@@ -1260,12 +1260,11 @@ internal class CatalogBrowserDialog(
                 gravity = Gravity.CENTER_VERTICAL
                 setTextColor(activity.colorFromAttribute(R.attr.textColor))
                 setSingleLine(true)
-            }, LinearLayout.LayoutParams(
-                selectorLabelStyle.paint.measureText(title).roundToInt() + gap, dp(48)))
+            }, LinearLayout.LayoutParams(dp(82), dp(36)))
             addView(FrameLayout(activity).apply {
                 addView(spinner, FrameLayout.LayoutParams(-1, -1))
                 addView(arrow, FrameLayout.LayoutParams(dp(40), -1, Gravity.END))
-            }, LinearLayout.LayoutParams(0, dp(48), 1f))
+            }, LinearLayout.LayoutParams(0, dp(36), 1f))
         }
 
     private fun AppCompatSpinner.choices(title: String, labels: List<String>, selected: Int, choose: (Int) -> Unit) {
@@ -1299,44 +1298,71 @@ internal class CatalogBrowserDialog(
         val headerColor = activity.colorFromAttribute(R.attr.primaryBlackBackground)
         val controls = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(2), dp(8), dp(12), 0)
+            setPadding(0, dp(10), 0, 0)
             setBackgroundColor(headerColor)
-            val searchGap = (dp(82) -
-                selectorLabelStyle.paint.measureText("Type").roundToInt() - dp(12))
-                .coerceAtLeast(0) / 2
-            val spinnerStart = dp(24) + searchGap + dp(82)
-            val labelInset = { title: String ->
-                spinnerStart - selectorLabelStyle.paint.measureText(title).roundToInt() - searchGap
-            }
-            val search = ImageView(activity).apply {
-                setImageResource(R.drawable.search_icon)
-                imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.textColor))
-                contentDescription = activity.getString(R.string.search)
-                isFocusable = true
-                isClickable = true
-                val ripple = TypedValue()
-                if (activity.theme.resolveAttribute(
-                        android.R.attr.selectableItemBackgroundBorderless, ripple, true
-                    ) && ripple.resourceId != 0) setBackgroundResource(ripple.resourceId)
-                scaleType = ImageView.ScaleType.FIT_CENTER
-                setPadding(0, 0, 0, 0)
-                setOnClickListener { openCatalogSearch() }
-            }
-            addView(LinearLayout(activity).apply {
+            val navigationRow = LinearLayout(activity).apply {
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(labelInset("Type") - dp(24) - searchGap, 0, 0, 0)
-                addView(search, LinearLayout.LayoutParams(dp(24), dp(24)).apply {
-                    marginEnd = searchGap
+                setPadding(dp(10), 0, dp(10), 0)
+                val back = ImageView(activity).apply {
+                    setImageResource(R.drawable.ic_baseline_arrow_back_24)
+                    imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.white))
+                    contentDescription = activity.getString(R.string.back)
+                    isFocusable = true
+                    isClickable = true
+                    val ripple = TypedValue()
+                    if (activity.theme.resolveAttribute(
+                            android.R.attr.selectableItemBackgroundBorderless, ripple, true
+                        ) && ripple.resourceId != 0) setBackgroundResource(ripple.resourceId)
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    setOnClickListener { dismiss() }
+                }
+                addView(back, LinearLayout.LayoutParams(dp(25), dp(36)))
+                val searchField = FrameLayout(activity).apply {
+                    setBackgroundResource(R.drawable.search_background)
+                    contentDescription = activity.getString(R.string.search)
+                    isFocusable = true
+                    isClickable = true
+                    val ripple = TypedValue()
+                    if (activity.theme.resolveAttribute(
+                            android.R.attr.selectableItemBackground, ripple, true
+                        ) && ripple.resourceId != 0) {
+                        foreground = androidx.core.content.ContextCompat.getDrawable(activity, ripple.resourceId)
+                    }
+                    addView(ImageView(activity).apply {
+                        setImageResource(R.drawable.search_icon)
+                        imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.white))
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                    }, FrameLayout.LayoutParams(dp(24), dp(24),
+                        Gravity.START or Gravity.CENTER_VERTICAL).apply {
+                        marginStart = dp(8)
+                    })
+                    addView(TextView(activity).apply {
+                        text = activity.getString(R.string.search_hint)
+                        setTextColor(activity.colorFromAttribute(R.attr.textColor))
+                        alpha = 0.6f
+                        gravity = Gravity.CENTER_VERTICAL
+                        setSingleLine(true)
+                    }, FrameLayout.LayoutParams(-1, -1).apply {
+                        marginStart = dp(40)
+                    })
+                    setOnClickListener { openCatalogSearch() }
+                }
+                addView(searchField, LinearLayout.LayoutParams(0, dp(36), 1f).apply {
+                    marginStart = dp(10)
                 })
-                addView(selectorRow("Type", typeSelector, typeArrow, searchGap),
-                    LinearLayout.LayoutParams(0, -2, 1f))
-            }, ViewGroup.LayoutParams(-1, -2))
-            addView(selectorRow("Catalog", catalogSelector, catalogArrow, searchGap).apply {
-                setPadding(labelInset("Catalog"), 0, 0, 0)
-            }, ViewGroup.LayoutParams(-1, -2))
-            addView(selectorRow("Genre", genreSelector, genreArrow, searchGap).apply {
-                setPadding(labelInset("Genre"), 0, 0, 0)
-            }, ViewGroup.LayoutParams(-1, -2))
+            }
+            addView(navigationRow, LinearLayout.LayoutParams(-1, dp(36)))
+            for ((title, spinner, arrow) in listOf(
+                Triple("Type", typeSelector, typeArrow),
+                Triple("Catalog", catalogSelector, catalogArrow),
+                Triple("Genre", genreSelector, genreArrow)
+            )) {
+                addView(selectorRow(title, spinner, arrow),
+                    LinearLayout.LayoutParams(-1, dp(36)).apply {
+                        marginStart = dp(10)
+                        marginEnd = dp(12)
+                    })
+            }
         }
         val header = AppBarLayout(activity).apply {
             setBackgroundColor(headerColor)
