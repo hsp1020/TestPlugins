@@ -159,8 +159,8 @@ internal object SyncData {
             pluginScoped(rest) || rest in cineStreamDiscoveredKeys ||
             (cineStreamDomainKey(rest) && cineStreamKeyAllowed(rest))
     }
-    // A removed CloudStream profile must not resurrect its old stored rows.
-    // Default account 0 is always present in CloudStream's account list.
+    // Only sync data for profiles currently present in the native roster.
+    // Inactive profile data is left untouched, not deleted by SyncCS.
     private fun belongsToInstalledProfile(key: String, indices: Set<Int>): Boolean {
         val prefix = key.substringBefore('/', "")
         if (prefix.isEmpty() || !prefix.all(Char::isDigit) || !key.contains('/')) return true

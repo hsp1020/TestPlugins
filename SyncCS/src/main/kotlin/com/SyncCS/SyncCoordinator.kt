@@ -151,16 +151,13 @@ internal object SyncCoordinator {
                 val currentHash = fingerprint(current)
                 val remoteHash = fingerprint(remote)
 
-                // A removed profile's stale local or remote rows must not be
-                // replayed into a later profile that reuses the same keyIndex.
+                // A missing profile is inactive, not a request to delete its
+                // stored history. Keep both server data and the last baseline
+                // intact until that profile index is active again.
                 val profileId = if (key.startsWith("d/")) {
                     key.removePrefix("d/").substringBefore('/').toIntOrNull()
                 } else null
                 if (profileId != null && profileId !in activeProfiles) {
-                    if ((old != null && old != fingerprint(null)) || remote != null) {
-                        upload[key] = null
-                    }
-                    next[key] = fingerprint(null)
                     continue
                 }
 

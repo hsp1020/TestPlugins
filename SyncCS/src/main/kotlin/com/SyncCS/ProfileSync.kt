@@ -2,7 +2,6 @@ package com.SyncCS
 
 import android.content.Context
 import com.lagradost.cloudstream3.MainActivity
-import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.utils.DataStoreHelper
 import org.json.JSONArray
 import org.json.JSONObject
@@ -123,9 +122,8 @@ internal object ProfileSync {
         if (DataStoreHelper.selectedKeyIndex !in valid) {
             DataStoreHelper.setAccount(accounts.first { it.keyIndex == 0 }, showToast = false)
         }
-        for (id in current.items.keys - valid) {
-            if (id > 0) CloudStreamApp.removeKeys(id.toString())
-        }
+        // Only synchronize the profile roster. CloudStream owns the lifecycle
+        // of its stored profile data; a remote roster change must not wipe it.
         MainActivity.reloadAccountEvent.invoke(true)
     }
 }
