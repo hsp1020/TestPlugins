@@ -1306,7 +1306,7 @@ internal class CatalogBrowserDialog(
                 val back = ImageView(activity).apply {
                     setImageResource(R.drawable.ic_baseline_arrow_back_24)
                     imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.white))
-                    contentDescription = activity.getString(R.string.back)
+                    contentDescription = activity.getString(R.string.go_back)
                     isFocusable = true
                     isClickable = true
                     val ripple = TypedValue()
