@@ -52,6 +52,11 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
     private var lastSubtitles: Set<SubtitleData>? = null
     private var lastLinks: Set<VideoLink>? = null
     private val onDraw = ViewTreeObserver.OnPreDrawListener { refresh(); true }
+    private var refreshPending = false
+    private val refreshRunnable = Runnable {
+        refreshPending = false
+        rebuildReferers()
+    }
 
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
@@ -138,16 +143,39 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
     private fun refresh() {
         if (!active) return
         ensureInterceptor()
-        val f = fragment ?: return
         val state = model?.state ?: return
         if (lastInstance == state.instance &&
             lastSubtitles === state.subtitles && lastLinks === state.links) return
+        if (!refreshPending) {
+            refreshPending = true
+            main.postDelayed(refreshRunnable, 100L)
+        }
+    }
+
+    private fun rebuildReferers() {
+        if (!active) return
+        val state = model?.state ?: return
         lastInstance = state.instance
         lastSubtitles = state.subtitles
         lastLinks = state.links
 
-        val links = state.links.mapNotNull { it.first }
-        val referers = state.subtitles.asSequence()
+        val byHost = HashMap<String, MutableSet<String>>()
+        val byDomain = HashMap<String, MutableSet<String>>()
+        state.links.forEach { (video, _) ->
+            video ?: return@forEach
+            val candidate = video.headers.entries.firstOrNull {
+                it.key.equals("Referer", ignoreCase = true) && it.value.isNotBlank()
+            }?.value?.trim() ?: video.referer.trim()
+            val videoReferer = candidate.toHttpUrlOrNull() ?: return@forEach
+            val referer = videoReferer.toString()
+            listOfNotNull(videoReferer, video.url.toHttpUrlOrNull()).forEach { source ->
+                byHost.getOrPut(source.host) { HashSet() }.add(referer)
+                source.topPrivateDomain()?.let { domain ->
+                    byDomain.getOrPut(domain) { HashSet() }.add(referer)
+                }
+            }
+        }
+        subtitleReferers = state.subtitles.asSequence()
             .filter { it.origin == SubtitleOrigin.URL }
             .filter { subtitle ->
                 subtitle.headers.entries.none {
@@ -155,29 +183,18 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
                 }
             }
             .mapNotNull { subtitle ->
-                val subtitleUrl = subtitle.getFixedUrl().toHttpUrlOrNull()
-                    ?: return@mapNotNull null
-                val matching = links.mapNotNull { video ->
-                    val candidate = video.headers.entries.firstOrNull {
-                        it.key.equals("Referer", ignoreCase = true) && it.value.isNotBlank()
-                    }?.value?.trim() ?: video.referer.trim()
-                    val videoReferer = candidate.toHttpUrlOrNull() ?: return@mapNotNull null
-                    val mediaUrl = video.url.toHttpUrlOrNull()
-                    val subtitleDomain = subtitleUrl.topPrivateDomain()
-                    val sourceMatches = listOfNotNull(videoReferer, mediaUrl).any { source ->
-                        val sourceDomain = source.topPrivateDomain()
-                        (subtitleDomain != null && subtitleDomain == sourceDomain) ||
-                            subtitleUrl.host == source.host
-                    }
-                    if (sourceMatches) videoReferer.toString() else null
-                }.distinct()
-                matching.singleOrNull()?.let { subtitleUrl.toString() to it }
+                val url = subtitle.getFixedUrl().toHttpUrlOrNull() ?: return@mapNotNull null
+                val matches = HashSet<String>()
+                byHost[url.host]?.let(matches::addAll)
+                url.topPrivateDomain()?.let { byDomain[it]?.let(matches::addAll) }
+                matches.singleOrNull()?.let { url.toString() to it }
             }.toMap()
-        subtitleReferers = referers
     }
 
     private fun detach(f: Fragment? = null) {
         if (f != null && f !== fragment) return
+        main.removeCallbacks(refreshRunnable)
+        refreshPending = false
         tree?.let { if (it.isAlive) it.removeOnPreDrawListener(onDraw) }
         tree = null
         removeObserver?.invoke()
