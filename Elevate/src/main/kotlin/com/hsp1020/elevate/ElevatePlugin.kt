@@ -44,45 +44,55 @@ class ElevatePlugin : Plugin() {
     private var featureListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
     private var app: Application? = null
     private val main = Handler(Looper.getMainLooper())
+    private val generation = java.util.concurrent.atomic.AtomicInteger()
 
     override fun load(context: Context) {
-        ElevateAudioTrace.log("PLUGIN_LOAD_ENTER",
-            "context=${context.javaClass.name} application=${context.applicationContext.javaClass.name}")
-        stopAll()
-        app = context.applicationContext as? Application ?: run {
-            ElevateAudioTrace.log("PLUGIN_LOAD_ABORT", "application_cast_failed")
-            return
-        }
-        val preferences = app!!.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
-        // Preserve the user's previous visible/hidden choice when changing to "ON = hide".
-        if (!preferences.getBoolean("hero_hide_semantics_v2", false)) {
-            preferences.edit().apply {
-                if (preferences.contains(ElevateFeature.HERO_CAROUSEL.name)) {
-                    putBoolean(
-                        ElevateFeature.HERO_CAROUSEL.name,
-                        !preferences.getBoolean(ElevateFeature.HERO_CAROUSEL.name, true)
-                    )
-                }
-                putBoolean("hero_hide_semantics_v2", true)
-            }.apply()
-        }
-        featurePrefs = preferences
-        featureListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-            if (ElevateFeature.entries.any { it.name == key }) {
-                if (key == ElevateFeature.AUDIO_TRACKS.name) {
-                    ElevateAudioTrace.log("AUDIO_PREF_CHANGED",
-                        "key=$key value=${preferences.getBoolean(key, true)}")
-                }
-                main.post { syncFeatures() }
-            }
-        }.also(preferences::registerOnSharedPreferenceChangeListener)
-        homeHero = HomeHeroToggle(app!!).also { it.start() }
-        syncFeatures()
+        val application = context.applicationContext as? Application ?: return
+        val token = generation.incrementAndGet()
         openSettings = { ctx ->
             (ctx as? FragmentActivity)?.takeUnless { it.isFinishing || it.isDestroyed }?.let { host ->
                 if (host.supportFragmentManager.findFragmentByTag("ElevateSettings") == null) {
                     ElevateSettingsFragment().show(host.supportFragmentManager, "ElevateSettings")
                 }
+            }
+        }
+        main.post {
+            if (generation.get() != token) return@post
+            stopAll()
+            app = application
+            try {
+                val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
+                // Preserve the user's previous visible/hidden choice when changing to "ON = hide".
+                if (!preferences.getBoolean("hero_hide_semantics_v2", false)) {
+                    preferences.edit().apply {
+                        if (preferences.contains(ElevateFeature.HERO_CAROUSEL.name)) {
+                            putBoolean(
+                                ElevateFeature.HERO_CAROUSEL.name,
+                                !preferences.getBoolean(ElevateFeature.HERO_CAROUSEL.name, true)
+                            )
+                        }
+                        putBoolean("hero_hide_semantics_v2", true)
+                    }.apply()
+                }
+                featurePrefs = preferences
+                featureListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+                    if (ElevateFeature.entries.any { it.name == key }) {
+                        main.post {
+                            if (generation.get() == token) {
+                                try {
+                                    syncFeatures()
+                                } catch (failure: Exception) {
+                                    android.util.Log.e("Elevate", "Feature update failed", failure)
+                                }
+                            }
+                        }
+                    }
+                }.also(preferences::registerOnSharedPreferenceChangeListener)
+                homeHero = HomeHeroToggle(application).also { it.start() }
+                syncFeatures()
+            } catch (failure: Exception) {
+                stopAll()
+                android.util.Log.e("Elevate", "Feature initialization failed", failure)
             }
         }
     }
@@ -93,13 +103,8 @@ class ElevatePlugin : Plugin() {
 
     private fun syncFeatures() {
         val application = app ?: run {
-            ElevateAudioTrace.log("FEATURE_SYNC_ABORT", "no_application")
             return
         }
-        ElevateAudioTrace.log("AUDIO_FEATURE_SYNC",
-            "enabled=${enabled(ElevateFeature.AUDIO_TRACKS)} " +
-                "stored=${featurePrefs?.contains(ElevateFeature.AUDIO_TRACKS.name)} " +
-                "selectorExists=${audioSelector != null}")
         if (enabled(ElevateFeature.DETAIL_SEARCH)) {
             if (hook == null) hook = NativeDetailSearchHook(application).also { it.start() }
         } else {
@@ -133,13 +138,9 @@ class ElevatePlugin : Plugin() {
         }
         if (enabled(ElevateFeature.AUDIO_TRACKS)) {
             if (audioSelector == null) {
-                ElevateAudioTrace.log("AUDIO_SELECTOR_CREATE", "creating=true")
                 audioSelector = ElevateAudioTrackSelector(application).also { it.start() }
-            } else {
-                ElevateAudioTrace.log("AUDIO_SELECTOR_REUSED", "creating=false")
             }
         } else {
-            ElevateAudioTrace.log("AUDIO_SELECTOR_DISABLED", "selectorExists=${audioSelector != null}")
             audioSelector?.stop()
             audioSelector = null
         }
@@ -189,8 +190,11 @@ class ElevatePlugin : Plugin() {
     }
 
     override fun beforeUnload() {
-        stopAll()
+        val token = generation.incrementAndGet()
         openSettings = null
+        main.post {
+            if (generation.get() == token) stopAll()
+        }
         super.beforeUnload()
     }
 }
