@@ -1314,7 +1314,7 @@ internal class CatalogBrowserDialog(
                             android.R.attr.selectableItemBackgroundBorderless, ripple, true
                         ) && ripple.resourceId != 0) setBackgroundResource(ripple.resourceId)
                     scaleType = ImageView.ScaleType.FIT_CENTER
-                    setOnClickListener { dismiss() }
+                    setOnClickListener { dialog.onBackPressedDispatcher.onBackPressed() }
                 }
                 addView(back, LinearLayout.LayoutParams(dp(25), dp(36)))
                 val searchField = FrameLayout(activity).apply {
