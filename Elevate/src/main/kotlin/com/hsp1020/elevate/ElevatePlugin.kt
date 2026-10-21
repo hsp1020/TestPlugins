@@ -46,8 +46,13 @@ class ElevatePlugin : Plugin() {
     private val main = Handler(Looper.getMainLooper())
 
     override fun load(context: Context) {
+        ElevateAudioTrace.log("PLUGIN_LOAD_ENTER",
+            "context=${context.javaClass.name} application=${context.applicationContext.javaClass.name}")
         stopAll()
-        app = context.applicationContext as? Application ?: return
+        app = context.applicationContext as? Application ?: run {
+            ElevateAudioTrace.log("PLUGIN_LOAD_ABORT", "application_cast_failed")
+            return
+        }
         val preferences = app!!.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
         // Preserve the user's previous visible/hidden choice when changing to "ON = hide".
         if (!preferences.getBoolean("hero_hide_semantics_v2", false)) {
@@ -64,6 +69,10 @@ class ElevatePlugin : Plugin() {
         featurePrefs = preferences
         featureListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             if (ElevateFeature.entries.any { it.name == key }) {
+                if (key == ElevateFeature.AUDIO_TRACKS.name) {
+                    ElevateAudioTrace.log("AUDIO_PREF_CHANGED",
+                        "key=$key value=${preferences.getBoolean(key, true)}")
+                }
                 main.post { syncFeatures() }
             }
         }.also(preferences::registerOnSharedPreferenceChangeListener)
@@ -83,7 +92,14 @@ class ElevatePlugin : Plugin() {
             ?: ElevateFeaturePrefs.defaultEnabled(feature)
 
     private fun syncFeatures() {
-        val application = app ?: return
+        val application = app ?: run {
+            ElevateAudioTrace.log("FEATURE_SYNC_ABORT", "no_application")
+            return
+        }
+        ElevateAudioTrace.log("AUDIO_FEATURE_SYNC",
+            "enabled=${enabled(ElevateFeature.AUDIO_TRACKS)} " +
+                "stored=${featurePrefs?.contains(ElevateFeature.AUDIO_TRACKS.name)} " +
+                "selectorExists=${audioSelector != null}")
         if (enabled(ElevateFeature.DETAIL_SEARCH)) {
             if (hook == null) hook = NativeDetailSearchHook(application).also { it.start() }
         } else {
@@ -117,9 +133,13 @@ class ElevatePlugin : Plugin() {
         }
         if (enabled(ElevateFeature.AUDIO_TRACKS)) {
             if (audioSelector == null) {
+                ElevateAudioTrace.log("AUDIO_SELECTOR_CREATE", "creating=true")
                 audioSelector = ElevateAudioTrackSelector(application).also { it.start() }
+            } else {
+                ElevateAudioTrace.log("AUDIO_SELECTOR_REUSED", "creating=false")
             }
         } else {
+            ElevateAudioTrace.log("AUDIO_SELECTOR_DISABLED", "selectorExists=${audioSelector != null}")
             audioSelector?.stop()
             audioSelector = null
         }

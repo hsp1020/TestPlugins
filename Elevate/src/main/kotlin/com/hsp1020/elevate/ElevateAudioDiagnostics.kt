@@ -15,6 +15,13 @@ import com.lagradost.cloudstream3.ui.player.CS3IPlayer.Companion.preferredAudioT
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 
 /** Temporary, session-scoped audio diagnostics. Remove this file after validating language selection. */
+internal object ElevateAudioTrace {
+    private const val TAG = "ELEVATE_AUDIO_TRACE"
+    fun log(stage: String, detail: String) {
+        Log.i(TAG, "lifecycle=$stage $detail")
+    }
+}
+
 @OptIn(UnstableApi::class)
 internal class ElevateAudioDiagnostics {
     private val handler = Handler(Looper.getMainLooper())
