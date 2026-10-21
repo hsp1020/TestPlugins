@@ -190,7 +190,8 @@ internal class StremioDetailHandoff(
     private val onLeave: () -> Unit,
     private val onReturn: () -> Unit = { dialog.show() },
     private val onReady: () -> Unit = {},
-    private val onReturnStart: () -> Unit = {}
+    private val onReturnStart: () -> Unit = {},
+    private val preserveNestedNavigation: Boolean = false
 ) {
     val isActive get() = returnEntryId != null
 
@@ -441,7 +442,7 @@ internal class StremioDetailHandoff(
                 }
                 return
             }
-            if (returnEntryId != null &&
+            if (!preserveNestedNavigation && returnEntryId != null &&
                 fragment.javaClass.name == "com.lagradost.cloudstream3.ui.search.SearchFragment") {
                 close()
                 onLeave()
@@ -467,8 +468,21 @@ internal class StremioDetailHandoff(
                 recoveringHome && controller.currentDestination?.id == R.id.navigation_home -> {
                     if (current != null) scheduleReturn(current, false)
                 }
-                recovering -> Unit 
+                recovering -> Unit
                 detailEntryId == null -> detailEntryId = current
+                current != detailEntryId && preserveNestedNavigation &&
+                    controller.currentDestination?.id in setOf(
+                        R.id.navigation_search, R.id.navigation_quick_search,
+                        R.id.navigation_results_phone, R.id.navigation_results_tv,
+                        R.id.navigation_player
+                    ) -> {
+                    if (pendingDetailDraw) {
+                        pendingDetailDraw = false
+                        handler.removeCallbacks(navigationTimeout)
+                        dialog.hide()
+                        onReady()
+                    }
+                }
                 current != detailEntryId -> {
                     close()
                     onLeave()
@@ -950,7 +964,8 @@ internal class CatalogBrowserDialog(
                     fitWindowToNavigation(force = true)
                     dialog.show()
                 }
-            })
+            },
+            preserveNestedNavigation = true)
     }
     private var navigationSnapshot: BitmapDrawable? = null
     private var pendingDestinationCheck: Runnable? = null
@@ -1244,7 +1259,7 @@ internal class CatalogBrowserDialog(
                         marginStart = dp(47)
                     })
                     addView(input, FrameLayout.LayoutParams(-1, -1).apply {
-                        marginStart = dp(77)
+                        marginStart = dp(60)
                     })
                     setOnClickListener {
                         input.requestFocus()
