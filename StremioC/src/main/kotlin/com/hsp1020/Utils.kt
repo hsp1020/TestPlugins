@@ -2,7 +2,6 @@
 package com.hsp1020
 
 import androidx.annotation.OptIn
-import androidx.core.os.ConfigurationCompat
 import androidx.media3.common.C
 import androidx.media3.common.Player as Media3Player
 import androidx.media3.common.TrackSelectionOverride
@@ -599,124 +598,6 @@ internal class StremioSubtitleController {
     }
 }
 
-@OptIn(UnstableApi::class)
-internal class StremioAudioSelector {
-    private var fragment: GeneratorPlayer? = null
-    private var removeObserver: (() -> Unit)? = null
-    private var player: Media3Player? = null
-    private var previousPlayer: Media3Player? = null
-    private var pendingDraw: ViewTreeObserver? = null
-    private var lastInstance: Int? = null
-    private var anime = false
-    private var selected = false
-
-    private val audioListener = java.lang.reflect.Proxy.newProxyInstance(
-        Media3Player.Listener::class.java.classLoader,
-        arrayOf(Media3Player.Listener::class.java)
-    ) { proxy, method, args ->
-        when (method.name) {
-            "onTracksChanged" -> {
-                (args?.getOrNull(0) as? Tracks)?.let(::select)
-                null
-            }
-            "equals" -> proxy === args?.getOrNull(0)
-            "hashCode" -> System.identityHashCode(proxy)
-            "toString" -> "StremioAudioSelectorListener"
-            else -> null
-        }
-    } as Media3Player.Listener
-    private val onDraw = ViewTreeObserver.OnPreDrawListener {
-        val current = fragment?.playerView?.player
-        if (current != null && current !== previousPlayer) {
-            stopWaiting()
-            player = current
-            current.addListener(audioListener)
-            select(current.currentTracks)
-        }
-        true
-    }
-
-    fun watch(candidate: Fragment) {
-        if (candidate !is GeneratorPlayer || fragment === candidate) return
-        detach()
-        fragment = candidate
-        val model = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
-        val observer = Observer<VideoLive<Resource<Unit>>> { state ->
-            val instance = state?.instance ?: return@Observer
-            if (instance == lastInstance) return@Observer
-            val response = model.state.generatorState?.response ?: return@Observer
-            lastInstance = instance
-            val active = response.apiName == "StremioC" || APIHolder.allProviders.any {
-                it is StremioC && it.name.equals(response.apiName, ignoreCase = true)
-            }
-            previousPlayer = player
-            player?.removeListener(audioListener)
-            player = null
-            stopWaiting()
-            if (!active) return@Observer
-            anime = StremioC.animeAudioByUrl[response.url]
-                ?: (response.type == TvType.Anime || response.type == TvType.AnimeMovie)
-            selected = false
-            candidate.view?.viewTreeObserver?.takeIf { it.isAlive }?.let {
-                it.addOnPreDrawListener(onDraw)
-                pendingDraw = it
-            }
-        }
-        model.loadingLinks.observe(candidate.viewLifecycleOwner, observer)
-        removeObserver = { model.loadingLinks.removeObserver(observer) }
-    }
-
-    private fun select(tracks: Tracks) {
-        if (selected) return
-        val current = player ?: return
-        val groups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
-        if (groups.isEmpty()) return
-        val appLanguage = fragment?.context?.resources?.configuration?.let {
-            ConfigurationCompat.getLocales(it).get(0)?.language
-        }
-        val languages = listOfNotNull(appLanguage, if (anime) "ja" else "en",
-            "en".takeIf { anime }).map { it.lowercase(Locale.ROOT) }.distinct()
-        val match = languages.firstNotNullOfOrNull { language ->
-            groups.firstNotNullOfOrNull { group ->
-                (0 until group.length).firstOrNull { i ->
-                    val raw = group.getTrackFormat(i).language?.trim().orEmpty()
-                    val code = SubtitleHelper.fromCodeToLangTagIETF(raw)
-                        ?: SubtitleHelper.fromCodeToLangTagIETF(
-                            raw.replace('_', '-').substringBefore('-')
-                        )
-                    group.isTrackSupported(i) &&
-                        code?.substringBefore('-')?.equals(language, ignoreCase = true) == true
-                }?.let { group to it }
-            }
-        }
-        selected = true
-        current.removeListener(audioListener)
-        if (match != null) {
-            val (group, index) = match
-            current.trackSelectionParameters = current.trackSelectionParameters.buildUpon()
-                .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, index)).build()
-        }
-
-    }
-
-    private fun stopWaiting() {
-        pendingDraw?.let { if (it.isAlive) it.removeOnPreDrawListener(onDraw) }
-        pendingDraw = null
-    }
-
-    fun detach(candidate: Fragment? = null) {
-        if (candidate != null && candidate !== fragment) return
-        stopWaiting()
-        removeObserver?.invoke()
-        removeObserver = null
-        player?.removeListener(audioListener)
-        player = null
-        previousPlayer = null
-        lastInstance = null
-        fragment = null
-    }
-}
-
 internal class RatingPlotImageHook(
     context: Context,
     private val resources: Resources,
@@ -727,7 +608,6 @@ internal class RatingPlotImageHook(
     private val main = Handler(Looper.getMainLooper())
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
-    private val audioSelector = StremioAudioSelector()
     private val subtitleController = StremioSubtitleController()
     private val scrobble = StremioScrobble(context)
     private val mdbUpdate: (String) -> Unit = { cacheKey ->
@@ -957,7 +837,6 @@ internal class RatingPlotImageHook(
                     syncHomeHooks()
                 }
                 attach(f, v)
-                audioSelector.watch(f)
                 subtitleController.watch(f)
                 scrobble.watch(f)
             }
@@ -966,7 +845,6 @@ internal class RatingPlotImageHook(
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
             if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment")
                 syncHomeHooks()
-            audioSelector.watch(f)
             subtitleController.watch(f)
             scrobble.watch(f)
             watchers[f]?.let { watcher ->
@@ -979,7 +857,6 @@ internal class RatingPlotImageHook(
                 homeRoot = null
                 homeEntries.detach()
             }
-            audioSelector.detach(f)
             subtitleController.detach(f)
             scrobble.detach(f)
             watchers.remove(f)?.detach()
@@ -995,7 +872,6 @@ internal class RatingPlotImageHook(
 
     fun stop() {
         scrobble.stop()
-        audioSelector.detach()
         subtitleController.detach()
         scrobble.detach()
         StremioCMdbUiBridge.listen(null)
@@ -1014,7 +890,6 @@ internal class RatingPlotImageHook(
 
     private fun use(activity: FragmentActivity) {
         if (host === activity) return
-        audioSelector.detach()
         subtitleController.detach()
         scrobble.detach()
         removeHomeProviderObserver?.invoke()
@@ -1040,7 +915,6 @@ internal class RatingPlotImageHook(
                         syncHomeHooks()
                     }
                     attach(f, it)
-                    audioSelector.watch(f)
                     subtitleController.watch(f)
                     scrobble.watch(f)
                 }
@@ -2955,7 +2829,6 @@ internal class RatingPlotImageHook(
         homeRoot = null
         homeEntries.detach()
         detachPreview()
-        audioSelector.detach()
         subtitleController.detach()
         scrobble.detach()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragmentCallback)

@@ -334,7 +334,8 @@ private class PipControlButton {
 
 class PipSubtitleLifecycle(
     private val application: Application,
-    acceptsProvider: (String) -> Boolean
+    acceptsProvider: (String) -> Boolean,
+    private val controlsEnabled: () -> Boolean
 ) : Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
     private val scaler = PipSubtitleScaler(acceptsProvider)
@@ -342,18 +343,18 @@ class PipSubtitleLifecycle(
     private var host: FragmentActivity? = null
     private var running = false
 
+    private fun watch(fragment: Fragment) {
+        if (fragment !is GeneratorPlayer || fragment.view == null) return
+        scaler.watch(fragment)
+        if (controlsEnabled()) controls.watch(fragment) else controls.detach(fragment)
+    }
+
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
             fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?
-        ) {
-            scaler.watch(f)
-            controls.watch(f)
-        }
+        ) = watch(f)
 
-        override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
-            scaler.watch(f)
-            controls.watch(f)
-        }
+        override fun onFragmentResumed(fm: FragmentManager, f: Fragment) = watch(f)
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
             scaler.detach(f)
@@ -382,6 +383,21 @@ class PipSubtitleLifecycle(
         }
     }
 
+    fun refresh() {
+        main.post {
+            if (!running) return@post
+            val activity = host ?: return@post
+            if (!controlsEnabled()) controls.detach()
+            fun scan(fm: FragmentManager) {
+                fm.fragments.forEach { fragment ->
+                    if (fragment.view != null) watch(fragment)
+                    if (fragment.isAdded) scan(fragment.childFragmentManager)
+                }
+            }
+            scan(activity.supportFragmentManager)
+        }
+    }
+
     private fun use(activity: FragmentActivity) {
         if (!running || host === activity) return
         scaler.detach()
@@ -389,16 +405,7 @@ class PipSubtitleLifecycle(
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         host = activity
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
-        fun scan(fm: FragmentManager) {
-            fm.fragments.forEach { fragment ->
-                if (fragment.view != null) {
-                    scaler.watch(fragment)
-                    controls.watch(fragment)
-                }
-                if (fragment.isAdded) scan(fragment.childFragmentManager)
-            }
-        }
-        scan(activity.supportFragmentManager)
+        refresh()
     }
 
     override fun onActivityResumed(activity: Activity) {

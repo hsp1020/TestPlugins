@@ -3,6 +3,7 @@ package com.hsp1020.elevate
 import android.app.Activity
 import android.app.Application
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -37,24 +38,104 @@ class ElevatePlugin : Plugin() {
     private var subtitleRetry: SubtitleRefererRetry? = null
     private var homeRecyclerGuard: HomeRecyclerCacheGuard? = null
     private var searchProviderOrder: SearchProviderOrderHook? = null
+    private var audioSelector: ElevateAudioTrackSelector? = null
+    private var homeHero: HomeHeroToggle? = null
+    private var featurePrefs: SharedPreferences? = null
+    private var featureListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
+    private var app: Application? = null
+    private val main = Handler(Looper.getMainLooper())
 
     override fun load(context: Context) {
-        hook?.stop()
-        pipSubtitles?.stop()
-        episodeProgress?.stop()
-        subtitleRetry?.stop()
-        homeRecyclerGuard?.stop()
-        searchProviderOrder?.stop()
-        val application = context.applicationContext as? Application
-        hook = application?.let { NativeDetailSearchHook(it).also(NativeDetailSearchHook::start) }
-        pipSubtitles = application?.let { PipSubtitleLifecycle(it) { true }.also { service -> service.start() } }
-        episodeProgress = application?.let { EpisodeProgressHook(it).also(EpisodeProgressHook::start) }
-        subtitleRetry = application?.let { SubtitleRefererRetry(it).also(SubtitleRefererRetry::start) }
-        homeRecyclerGuard = application?.let { HomeRecyclerCacheGuard(it).also(HomeRecyclerCacheGuard::start) }
-        searchProviderOrder = application?.let { SearchProviderOrderHook(it).also(SearchProviderOrderHook::start) }
+        stopAll()
+        app = context.applicationContext as? Application ?: return
+        val preferences = app!!.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
+        featurePrefs = preferences
+        featureListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (ElevateFeature.entries.any { it.name == key }) {
+                main.post { syncFeatures() }
+            }
+        }.also(preferences::registerOnSharedPreferenceChangeListener)
+        homeHero = HomeHeroToggle(app!!).also { it.start() }
+        syncFeatures()
+        openSettings = { ctx ->
+            (ctx as? FragmentActivity)?.takeUnless { it.isFinishing || it.isDestroyed }?.let { host ->
+                if (host.supportFragmentManager.findFragmentByTag("ElevateSettings") == null) {
+                    ElevateSettingsFragment().show(host.supportFragmentManager, "ElevateSettings")
+                }
+            }
+        }
     }
 
-    override fun beforeUnload() {
+    private fun enabled(feature: ElevateFeature): Boolean =
+        featurePrefs?.getBoolean(feature.name, true) ?: true
+
+    private fun syncFeatures() {
+        val application = app ?: return
+        if (enabled(ElevateFeature.DETAIL_SEARCH)) {
+            if (hook == null) hook = NativeDetailSearchHook(application).also { it.start() }
+        } else {
+            hook?.stop()
+            hook = null
+        }
+        if (enabled(ElevateFeature.PROVIDER_ORDER)) {
+            if (searchProviderOrder == null) {
+                searchProviderOrder = SearchProviderOrderHook(application).also { it.start() }
+            }
+        } else {
+            searchProviderOrder?.stop()
+            searchProviderOrder = null
+        }
+        homeHero?.setEnabled(enabled(ElevateFeature.HERO_CAROUSEL))
+        if (enabled(ElevateFeature.HOME_REPAIR)) {
+            if (homeRecyclerGuard == null) {
+                homeRecyclerGuard = HomeRecyclerCacheGuard(application).also { it.start() }
+            }
+        } else {
+            homeRecyclerGuard?.stop()
+            homeRecyclerGuard = null
+        }
+        if (enabled(ElevateFeature.EPISODE_PROGRESS)) {
+            if (episodeProgress == null) {
+                episodeProgress = EpisodeProgressHook(application).also { it.start() }
+            }
+        } else {
+            episodeProgress?.stop()
+            episodeProgress = null
+        }
+        if (enabled(ElevateFeature.AUDIO_TRACKS)) {
+            if (audioSelector == null) {
+                audioSelector = ElevateAudioTrackSelector(application).also { it.start() }
+            }
+        } else {
+            audioSelector?.stop()
+            audioSelector = null
+        }
+        if (enabled(ElevateFeature.PIP_BUTTON) || enabled(ElevateFeature.PIP_SUBTITLES)) {
+            if (pipSubtitles == null) {
+                pipSubtitles = PipSubtitleLifecycle(
+                    application, { enabled(ElevateFeature.PIP_SUBTITLES) },
+                    { enabled(ElevateFeature.PIP_BUTTON) }
+                ).also { it.start() }
+            }
+            pipSubtitles?.refresh()
+        } else {
+            pipSubtitles?.stop()
+            pipSubtitles = null
+        }
+        if (enabled(ElevateFeature.SUBTITLE_RETRY)) {
+            if (subtitleRetry == null) {
+                subtitleRetry = SubtitleRefererRetry(application).also { it.start() }
+            }
+        } else {
+            subtitleRetry?.stop()
+            subtitleRetry = null
+        }
+    }
+
+    private fun stopAll() {
+        featureListener?.let { featurePrefs?.unregisterOnSharedPreferenceChangeListener(it) }
+        featureListener = null
+        featurePrefs = null
         hook?.stop()
         hook = null
         pipSubtitles?.stop()
@@ -67,6 +148,16 @@ class ElevatePlugin : Plugin() {
         homeRecyclerGuard = null
         searchProviderOrder?.stop()
         searchProviderOrder = null
+        audioSelector?.stop()
+        audioSelector = null
+        homeHero?.stop()
+        homeHero = null
+        app = null
+    }
+
+    override fun beforeUnload() {
+        stopAll()
+        openSettings = null
         super.beforeUnload()
     }
 }

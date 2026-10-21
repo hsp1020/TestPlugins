@@ -1,0 +1,105 @@
+package com.hsp1020.elevate
+
+import android.app.Dialog
+import android.content.Context
+import android.os.Bundle
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.widget.SwitchCompat
+import androidx.fragment.app.DialogFragment
+
+internal enum class ElevateFeature(
+    val section: String,
+    val label: String,
+    val description: String
+) {
+    DETAIL_SEARCH("Navigation & Search", "Native Detail Search",
+        "Open full CloudStream search from the title details and retain back navigation."),
+    PROVIDER_ORDER("Navigation & Search", "Provider Ordering",
+        "Use saved provider order on Home and Search, including related search providers."),
+    HERO_CAROUSEL("Home & Library", "Home Hero Carousel",
+        "Show the featured Home banner. Search and profile controls remain available."),
+    HOME_REPAIR("Home & Library", "Home Poster Refresh",
+        "Repair stale Home cards when switching providers."),
+    EPISODE_PROGRESS("Home & Library", "Episode Progress Indicators",
+        "Show watched progress on large episode thumbnails."),
+    AUDIO_TRACKS("Playback & Subtitles", "Automatic Audio Language",
+        "Select app-language audio, then Japanese for anime or English for other titles."),
+    PIP_BUTTON("Playback & Subtitles", "Picture-in-Picture Button",
+        "Show a native-style PiP player button when PiP is enabled in CloudStream."),
+    PIP_SUBTITLES("Playback & Subtitles", "PiP Subtitle Styling",
+        "Adjust subtitle scale and placement while in Picture-in-Picture."),
+    SUBTITLE_RETRY("Playback & Subtitles", "Subtitle Referer Retry",
+        "Retry blocked subtitle requests with the current video's Referer when needed.")
+}
+
+internal object ElevateFeaturePrefs {
+    const val FILE = "ElevateFeatures"
+    fun enabled(context: Context, feature: ElevateFeature): Boolean =
+        context.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean(feature.name, true)
+}
+
+class ElevateSettingsFragment : DialogFragment() {
+    override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
+        val ctx = requireContext()
+        fun dp(value: Int): Int = (value * ctx.resources.displayMetrics.density + 0.5f).toInt()
+        val scroll = ScrollView(ctx).apply {
+            isFillViewport = false
+            clipToPadding = false
+        }
+        val content = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+        }
+        scroll.addView(content)
+        val preferences = ctx.applicationContext.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
+        ElevateFeature.entries.groupBy { it.section }.forEach { (section, features) ->
+            content.addView(TextView(ctx).apply {
+                text = section
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setPadding(0, dp(13), 0, dp(6))
+            })
+            features.forEach { feature ->
+                val row = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(9), 0, dp(9))
+                }
+                val labels = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.VERTICAL
+                }
+                labels.addView(TextView(ctx).apply {
+                    text = feature.label
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                })
+                labels.addView(TextView(ctx).apply {
+                    text = feature.description
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    alpha = 0.73f
+                    setPadding(0, dp(3), 0, 0)
+                })
+                row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                row.addView(SwitchCompat(ctx).apply {
+                    isChecked = preferences.getBoolean(feature.name, true)
+                    contentDescription = feature.label
+                    setOnCheckedChangeListener { _, checked ->
+                        preferences.edit().putBoolean(feature.name, checked).apply()
+                    }
+                }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
+                content.addView(row)
+            }
+        }
+        return AlertDialog.Builder(ctx)
+            .setTitle("Elevate Settings")
+            .setView(scroll)
+            .setPositiveButton("Close", null)
+            .create()
+    }
+}
