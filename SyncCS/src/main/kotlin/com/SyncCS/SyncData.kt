@@ -413,6 +413,19 @@ internal object SyncData {
 internal object PluginInventory {
     private const val MAX_FILE = 20 * 1024 * 1024
 
+    private suspend fun ensureLoaded(context: Context, name: String, path: String, url: String? = null): Boolean {
+        val current = PluginManager.plugins[path]
+        val instance = if (current != null) current else {
+            val apiName = name.replace("provider", "", ignoreCase = true)
+            if (!PluginManager.loadSinglePlugin(context, apiName)) return false
+            PluginManager.plugins[path] ?: return false
+        }
+        if (url != null) {
+            synchronized(PluginManager.urlPlugins) { PluginManager.urlPlugins[url] = instance }
+        }
+        return true
+    }
+
     fun snapshot(context: Context): String {
         // Include CloudStream's built-in repositories as well as user-added ones:
         // extensions from prebuilt repos otherwise have no recoverable repo URL.
@@ -551,12 +564,18 @@ internal object PluginInventory {
             if (row.optString("type") == "online") {
                 val url = row.optString("url")
                 val repo = row.optString("repo")
-                if (PluginManager.getPluginsOnline().any {
+                val existing = PluginManager.getPluginsOnline().firstOrNull {
                     it.internalName == name && it.url == url &&
                         File(it.filePath).isFile &&
                         (hash.isBlank() ||
                             SyncBackend.digestBytes(File(it.filePath).readBytes()) == hash)
-                }) continue
+                }
+                if (existing != null) {
+                    if (!ensureLoaded(activity, name, existing.filePath, url)) {
+                        report.add("Could not load " + name)
+                    }
+                    continue
+                }
                 var installed = false
                 if (url.startsWith("https://") && repo.startsWith("https://")) {
                     if ((RepositoryManager.getRepositories().toList() +
@@ -567,8 +586,9 @@ internal object PluginInventory {
                         installed = PluginManager.downloadPlugin(
                             activity, url,
                             hash.takeIf { it.matches(Regex("[a-f0-9]{64}")) }?.let { "sha256-" + it },
-                            name, repo, false
-                        )
+                            name, repo, true
+                        ) && ensureLoaded(activity, name,
+                            PluginManager.getPluginPath(context, name, repo).absolutePath, url)
                     } catch (_: Exception) { }
                 }
                 if (!installed && hash.matches(Regex("[a-f0-9]{64}")) && repo.isNotBlank()) {
@@ -578,14 +598,39 @@ internal object PluginInventory {
                             val path = PluginManager.getPluginPath(context, name, repo)
                             path.parentFile?.mkdirs()
                             val temp = File(path.parentFile, path.name + ".temp")
+                            val backup = File(path.parentFile, path.name + ".synccs-old")
                             temp.writeBytes(bytes)
-                            if (path.exists()) path.delete()
-                            check(temp.renameTo(path))
-                            val meta = PluginData(name, url, true, path.absolutePath, row.optInt("version"))
-                            val current = PluginManager.getPluginsOnline().filter { it.filePath != path.absolutePath }
-                            com.lagradost.cloudstream3.CloudStreamApp.setKey(
-                                PLUGINS_KEY, (current + meta).toTypedArray())
-                            installed = true
+                            check(!backup.exists()) { "Unrecovered plugin backup: " + name }
+                            val prior = PluginManager.getPluginsOnline()
+                                .firstOrNull { it.filePath == path.absolutePath }
+                            val hadFile = path.exists()
+                            if (hadFile) check(path.renameTo(backup))
+                            try {
+                                PluginManager.unloadPlugin(path.absolutePath)
+                                check(temp.renameTo(path))
+                                val meta = PluginData(name, url, true, path.absolutePath, row.optInt("version"))
+                                val current = PluginManager.getPluginsOnline()
+                                    .filter { it.filePath != path.absolutePath }
+                                com.lagradost.cloudstream3.CloudStreamApp.setKey(
+                                    PLUGINS_KEY, (current + meta).toTypedArray())
+                                check(ensureLoaded(activity, name, path.absolutePath, url))
+                                installed = true
+                                backup.delete()
+                            } catch (error: Exception) {
+                                PluginManager.unloadPlugin(path.absolutePath)
+                                path.delete()
+                                if (hadFile) check(backup.renameTo(path))
+                                val current = PluginManager.getPluginsOnline()
+                                    .filter { it.filePath != path.absolutePath }
+                                com.lagradost.cloudstream3.CloudStreamApp.setKey(
+                                    PLUGINS_KEY, (current + listOfNotNull(prior)).toTypedArray())
+                                if (hadFile && prior != null) {
+                                    ensureLoaded(activity, name, path.absolutePath, prior.url)
+                                }
+                                throw error
+                            } finally {
+                                temp.delete()
+                            }
                         }
                     } catch (_: Exception) { }
                 }
@@ -595,11 +640,17 @@ internal object PluginInventory {
                 )
             } else {
                 val filename = row.optString("file").substringAfterLast('/').substringAfterLast('\\')
-                if (existingLocal.any {
-                        it.internalName == name && File(it.filePath).name == filename &&
-                            File(it.filePath).isFile &&
-                            SyncBackend.digestBytes(File(it.filePath).readBytes()) == hash
-                    }) continue
+                val existing = existingLocal.firstOrNull {
+                    it.internalName == name && File(it.filePath).name == filename &&
+                        File(it.filePath).isFile &&
+                        SyncBackend.digestBytes(File(it.filePath).readBytes()) == hash
+                }
+                if (existing != null) {
+                    if (!ensureLoaded(activity, name, existing.filePath)) {
+                        report.add("Could not load local .cs3: " + name)
+                    }
+                    continue
+                }
                 if (!hash.matches(Regex("[a-f0-9]{64}"))) {
                     report.add("No backup for local plugin " + name)
                     continue
@@ -631,6 +682,8 @@ internal object PluginInventory {
                         com.lagradost.cloudstream3.plugins.PLUGINS_KEY_LOCAL,
                         (original + archived).toTypedArray()
                     )
+                    PluginManager.unloadPlugin(destination.absolutePath)
+                    check(ensureLoaded(activity, name, destination.absolutePath))
                 } catch (_: Exception) {
                     report.add("Could not restore local .cs3: " + name)
                 }
