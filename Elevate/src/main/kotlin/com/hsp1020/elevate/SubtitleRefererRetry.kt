@@ -101,7 +101,7 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
         try {
             repeat(minOf(4, referers.size)) { launchNext() }
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(12)
-            while (inFlight > 0 && !chain.call().isCanceled) {
+            while (inFlight > 0 && !chain.call().isCanceled()) {
                 val remaining = deadline - System.nanoTime()
                 if (remaining <= 0L) break
                 val completed = finished.poll(
