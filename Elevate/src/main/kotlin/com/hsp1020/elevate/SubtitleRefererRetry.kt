@@ -15,35 +15,31 @@ import androidx.lifecycle.ViewModelProvider
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.ui.player.CS3IPlayer
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
+import com.lagradost.cloudstream3.ui.player.VideoLink
 import com.lagradost.cloudstream3.ui.player.VideoLive
-import com.lagradost.cloudstream3.utils.ExtractorLink
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 
 internal class SubtitleRefererRetry(private val application: Application) : Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
-    private val linkField = runCatching {
-        CS3IPlayer::class.java.getDeclaredField("currentLink").apply { isAccessible = true }
-    }.getOrNull()
     @Volatile private var active = false
     @Volatile private var subtitleReferers: Map<String, String> = emptyMap()
 
     private val retryInterceptor = Interceptor { chain ->
         val request = chain.request()
         val response = chain.proceed(request)
-        val videoReferer = if (active && response.code == 403) {
-            subtitleReferers[request.url.toString()]
-        } else null
-        if (videoReferer == null || videoReferer == request.header("Referer")?.trim()) {
+        val sourceReferer = if (active && response.code == 403 &&
+            request.header("Referer").isNullOrBlank()
+        ) subtitleReferers[request.url.toString()] else null
+        if (sourceReferer == null) {
             response
         } else {
             response.close()
-            chain.proceed(request.newBuilder().header("Referer", videoReferer).build())
+            chain.proceed(request.newBuilder().header("Referer", sourceReferer).build())
         }
     }
 
@@ -53,9 +49,8 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
     private var removeObserver: (() -> Unit)? = null
     private var tree: ViewTreeObserver? = null
     private var lastInstance = -1
-    private var lastLink: ExtractorLink? = null
-    private var lastReferer: String? = null
     private var lastSubtitles: Set<SubtitleData>? = null
+    private var lastLinks: Set<VideoLink>? = null
     private val onDraw = ViewTreeObserver.OnPreDrawListener { refresh(); true }
 
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
@@ -124,9 +119,14 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
             detach()
             fragment = f
             model = ViewModelProvider(f)[PlayerGeneratorViewModel::class.java]
-            val observer = Observer<VideoLive<Set<SubtitleData>>> { refresh() }
-            model?.currentSubtitles?.observe(f.viewLifecycleOwner, observer)
-            removeObserver = { model?.currentSubtitles?.removeObserver(observer) }
+            val subtitlesObserver = Observer<VideoLive<Set<SubtitleData>>> { refresh() }
+            val linksObserver = Observer<VideoLive<Set<VideoLink>>> { refresh() }
+            model?.currentSubtitles?.observe(f.viewLifecycleOwner, subtitlesObserver)
+            model?.currentLinks?.observe(f.viewLifecycleOwner, linksObserver)
+            removeObserver = {
+                model?.currentSubtitles?.removeObserver(subtitlesObserver)
+                model?.currentLinks?.removeObserver(linksObserver)
+            }
             f.view?.viewTreeObserver?.takeIf { it.isAlive }?.let {
                 it.addOnPreDrawListener(onDraw)
                 tree = it
@@ -140,24 +140,40 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
         ensureInterceptor()
         val f = fragment ?: return
         val state = model?.state ?: return
-        val link = runCatching { linkField?.get(f.player) as? ExtractorLink }.getOrNull()
-        val referer = link?.headers?.entries?.firstOrNull {
-            it.key.equals("Referer", true) && it.value.isNotBlank()
-        }?.value?.trim() ?: link?.referer?.trim()
-        if (lastInstance == state.instance && lastLink === link &&
-            lastReferer == referer && lastSubtitles === state.subtitles) return
+        if (lastInstance == state.instance &&
+            lastSubtitles === state.subtitles && lastLinks === state.links) return
         lastInstance = state.instance
-        lastLink = link
-        lastReferer = referer
         lastSubtitles = state.subtitles
-        val safeReferer = referer?.takeIf { it.toHttpUrlOrNull() != null }
-        subtitleReferers = if (safeReferer != null) {
-            state.subtitles.asSequence()
-                .filter { it.origin == SubtitleOrigin.URL }
-                .mapNotNull { sub ->
-                    sub.getFixedUrl().toHttpUrlOrNull()?.toString()?.let { it to safeReferer }
-                }.toMap()
-        } else emptyMap()
+        lastLinks = state.links
+
+        val links = state.links.mapNotNull { it.first }
+        val referers = state.subtitles.asSequence()
+            .filter { it.origin == SubtitleOrigin.URL }
+            .filter { subtitle ->
+                subtitle.headers.entries.none {
+                    it.key.equals("Referer", ignoreCase = true) && it.value.isNotBlank()
+                }
+            }
+            .mapNotNull { subtitle ->
+                val subtitleUrl = subtitle.getFixedUrl().toHttpUrlOrNull()
+                    ?: return@mapNotNull null
+                val matching = links.mapNotNull { video ->
+                    val candidate = video.headers.entries.firstOrNull {
+                        it.key.equals("Referer", ignoreCase = true) && it.value.isNotBlank()
+                    }?.value?.trim() ?: video.referer.trim()
+                    val videoReferer = candidate.toHttpUrlOrNull() ?: return@mapNotNull null
+                    val mediaUrl = video.url.toHttpUrlOrNull()
+                    val subtitleDomain = subtitleUrl.topPrivateDomain()
+                    val sourceMatches = listOfNotNull(videoReferer, mediaUrl).any { source ->
+                        val sourceDomain = source.topPrivateDomain()
+                        (subtitleDomain != null && subtitleDomain == sourceDomain) ||
+                            subtitleUrl.host == source.host
+                    }
+                    if (sourceMatches) videoReferer.toString() else null
+                }.distinct()
+                matching.singleOrNull()?.let { subtitleUrl.toString() to it }
+            }.toMap()
+        subtitleReferers = referers
     }
 
     private fun detach(f: Fragment? = null) {
@@ -169,9 +185,8 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
         fragment = null
         model = null
         lastInstance = -1
-        lastLink = null
-        lastReferer = null
         lastSubtitles = null
+        lastLinks = null
         subtitleReferers = emptyMap()
     }
 

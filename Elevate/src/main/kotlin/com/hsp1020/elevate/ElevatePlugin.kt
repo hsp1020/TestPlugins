@@ -49,6 +49,18 @@ class ElevatePlugin : Plugin() {
         stopAll()
         app = context.applicationContext as? Application ?: return
         val preferences = app!!.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
+        // Preserve the user's previous visible/hidden choice when changing to "ON = hide".
+        if (!preferences.getBoolean("hero_hide_semantics_v2", false)) {
+            preferences.edit().apply {
+                if (preferences.contains(ElevateFeature.HERO_CAROUSEL.name)) {
+                    putBoolean(
+                        ElevateFeature.HERO_CAROUSEL.name,
+                        !preferences.getBoolean(ElevateFeature.HERO_CAROUSEL.name, true)
+                    )
+                }
+                putBoolean("hero_hide_semantics_v2", true)
+            }.apply()
+        }
         featurePrefs = preferences
         featureListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             if (ElevateFeature.entries.any { it.name == key }) {
@@ -67,7 +79,8 @@ class ElevatePlugin : Plugin() {
     }
 
     private fun enabled(feature: ElevateFeature): Boolean =
-        featurePrefs?.getBoolean(feature.name, true) ?: true
+        featurePrefs?.getBoolean(feature.name, ElevateFeaturePrefs.defaultEnabled(feature))
+            ?: ElevateFeaturePrefs.defaultEnabled(feature)
 
     private fun syncFeatures() {
         val application = app ?: return
@@ -85,7 +98,7 @@ class ElevatePlugin : Plugin() {
             searchProviderOrder?.stop()
             searchProviderOrder = null
         }
-        homeHero?.setEnabled(enabled(ElevateFeature.HERO_CAROUSEL))
+        homeHero?.setHidden(enabled(ElevateFeature.HERO_CAROUSEL))
         if (enabled(ElevateFeature.HOME_REPAIR)) {
             if (homeRecyclerGuard == null) {
                 homeRecyclerGuard = HomeRecyclerCacheGuard(application).also { it.start() }

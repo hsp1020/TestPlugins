@@ -22,8 +22,8 @@ internal enum class ElevateFeature(
         "Open full CloudStream search from the title details and retain back navigation."),
     PROVIDER_ORDER("Navigation & Search", "Provider Ordering",
         "Use saved provider order on Home and Search, including related search providers."),
-    HERO_CAROUSEL("Home & Library", "Home Hero Carousel",
-        "Show the featured Home banner. Search and profile controls remain available."),
+    HERO_CAROUSEL("Home & Library", "Hide Home Hero Carousel",
+        "Hide the featured Home banner while keeping search and profile controls available."),
     HOME_REPAIR("Home & Library", "Home Poster Refresh",
         "Repair stale Home cards when switching providers."),
     EPISODE_PROGRESS("Home & Library", "Episode Progress Indicators",
@@ -40,8 +40,10 @@ internal enum class ElevateFeature(
 
 internal object ElevateFeaturePrefs {
     const val FILE = "ElevateFeatures"
+    fun defaultEnabled(feature: ElevateFeature): Boolean = feature != ElevateFeature.HERO_CAROUSEL
     fun enabled(context: Context, feature: ElevateFeature): Boolean =
-        context.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean(feature.name, true)
+        context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+            .getBoolean(feature.name, defaultEnabled(feature))
 }
 
 class ElevateSettingsFragment : DialogFragment() {
@@ -86,7 +88,7 @@ class ElevateSettingsFragment : DialogFragment() {
                 })
                 row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 row.addView(SwitchCompat(ctx).apply {
-                    isChecked = preferences.getBoolean(feature.name, true)
+                    isChecked = preferences.getBoolean(feature.name, ElevateFeaturePrefs.defaultEnabled(feature))
                     contentDescription = feature.label
                     setOnCheckedChangeListener { _, checked ->
                         preferences.edit().putBoolean(feature.name, checked).apply()

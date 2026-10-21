@@ -20,7 +20,7 @@ internal class HomeHeroToggle(private val app: Application) :
     private var home: Fragment? = null
     private var list: RecyclerView? = null
     private var binding: Hero? = null
-    private var enabled = true
+    private var hideHero = false
     private val layout = ViewTreeObserver.OnGlobalLayoutListener { scan() }
     private val childListener = object : RecyclerView.OnChildAttachStateChangeListener {
         override fun onChildViewAttachedToWindow(view: View) { scan() }
@@ -54,10 +54,10 @@ internal class HomeHeroToggle(private val app: Application) :
         host = null
     }
 
-    fun setEnabled(value: Boolean) {
-        if (enabled == value) return
-        enabled = value
-        binding?.apply(value)
+    fun setHidden(value: Boolean) {
+        if (hideHero == value) return
+        hideHero = value
+        binding?.apply(!value)
         scan()
     }
 
@@ -105,12 +105,13 @@ internal class HomeHeroToggle(private val app: Application) :
             binding?.release()
             binding = Hero(header)
         }
-        binding?.apply(enabled)
+        binding?.apply(!hideHero)
     }
 
     private inner class Hero(val root: View) {
         private val mobileHolder = root.findViewById<View>(R.id.home_preview_viewpager_text)
             ?.takeIf { root.findViewById<View>(R.id.home_preview_title_holder) != null }
+        private val toolbar = mobileHolder?.findViewById<View>(R.id.home_padding)
         private val pager = root.findViewById<View>(R.id.home_preview_viewpager)
         private val buttons = root.findViewById<View>(R.id.home_preview_title_holder)
         private val tvCard = root.findViewById<View>(R.id.home_preview_info_btt)
@@ -160,9 +161,16 @@ internal class HomeHeroToggle(private val app: Application) :
         private fun enforceHidden() {
             if (mobileHolder != null) {
                 val density = root.resources.displayMetrics.density
-                val dp50 = (50 * density + 0.5f).toInt()
-                if (mobileHolder.layoutParams.height != dp50) {
-                    mobileHolder.layoutParams = mobileHolder.layoutParams.apply { height = dp50 }
+                val gap = (12 * density + 0.5f).toInt()
+                val controls = toolbar
+                val margins = controls?.layoutParams as? ViewGroup.MarginLayoutParams
+                val controlHeight = controls?.height?.takeIf { it > 0 }
+                    ?: controls?.layoutParams?.height?.takeIf { it > 0 }
+                    ?: (50 * density + 0.5f).toInt()
+                val controlTop = maxOf(controls?.top ?: 0, margins?.topMargin ?: 0)
+                val requiredHeight = controlTop + controlHeight + gap
+                if (mobileHolder.layoutParams.height != requiredHeight) {
+                    mobileHolder.layoutParams = mobileHolder.layoutParams.apply { height = requiredHeight }
                 }
                 if (pager?.visibility != View.GONE) pager?.visibility = View.GONE
                 if (buttons?.visibility != View.GONE) buttons?.visibility = View.GONE

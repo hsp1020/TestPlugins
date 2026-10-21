@@ -42,6 +42,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
     private var lastInstance: Int? = null
     private var isAnime = false
     private var selected = false
+    private val diagnostics = ElevateAudioDiagnostics()
 
     private val audioListener = java.lang.reflect.Proxy.newProxyInstance(
         Media3Player.Listener::class.java.classLoader,
@@ -65,6 +66,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             stopWaiting()
             player?.removeListener(audioListener)
             player = current
+            fragment?.let { diagnostics.bind(current, it) }
             current.addListener(audioListener)
             select(current.currentTracks)
         }
@@ -86,6 +88,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
 
     fun stop() {
         application.unregisterActivityLifecycleCallbacks(this)
+        diagnostics.close()
         activity?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(callbacks)
         detach()
         activity = null
@@ -138,16 +141,22 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             val generator = vm.state.generatorState ?: return@Observer
             val response = generator.response ?: return@Observer
             lastInstance = state.instance
+            diagnostics.detach("loading_links_new_instance")
             player?.removeListener(audioListener)
             player = null
             stopWaiting()
             selected = false
             val episode = generator.meta as? ResultEpisode
             val name = response.apiName
-            if (!isSupportedProvider(name)) return@Observer
-            isAnime = animeFlag(episode) ?: ((episode?.tvType ?: response.type) in setOf(
+            val flag = animeFlag(episode)
+            isAnime = flag ?: ((episode?.tvType ?: response.type) in setOf(
                 TvType.Anime, TvType.AnimeMovie, TvType.OVA
             ))
+            diagnostics.episode(
+                state.instance, name, response.type.toString(), episode?.tvType?.toString(),
+                flag, isAnime, vm.state.links.size, vm.state.subtitles.size
+            )
+            if (!isSupportedProvider(name)) return@Observer
             candidate.view?.viewTreeObserver?.takeIf { it.isAlive }?.let {
                 it.addOnPreDrawListener(onDraw)
                 waitingOn = it
@@ -158,10 +167,16 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
     }
 
     private fun select(tracks: Tracks) {
-        if (selected) return
+        if (selected) {
+            diagnostics.snapshot("SELECT_SKIPPED_ALREADY_SELECTED")
+            return
+        }
         val current = player ?: return
         val groups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
-        if (groups.isEmpty()) return
+        if (groups.isEmpty()) {
+            diagnostics.attempt(emptyList(), false, null, null, selected, "no_audio_groups")
+            return
+        }
         val appLanguage = fragment?.context?.resources?.configuration?.let {
             ConfigurationCompat.getLocales(it).get(0)?.language
         }
@@ -180,13 +195,17 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
                 }?.let { group to it }
             }
         }
+        diagnostics.attempt(languages, true, match?.first?.getTrackFormat(match.second)?.language,
+            match?.second, selected, if (match == null) "no_priority_match" else "priority_match")
         selected = true
         current.removeListener(audioListener)
+        diagnostics.beforeAuto()
         if (match != null) {
             val (group, index) = match
             current.trackSelectionParameters = current.trackSelectionParameters.buildUpon()
                 .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, index)).build()
         }
+        diagnostics.afterAuto()
     }
 
     private fun stopWaiting() {
@@ -199,6 +218,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         stopWaiting()
         removeObserver?.invoke()
         removeObserver = null
+        diagnostics.close()
         player?.removeListener(audioListener)
         player = null
         model = null
