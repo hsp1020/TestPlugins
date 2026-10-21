@@ -25,7 +25,7 @@ internal object SyncData {
         "video_watch_state/", "result_season/", "result_episode/", "result_dub/",
         "video_source_priority/", "video_quality_priority/", "video_profile_name/",
         "video_profile_types_2/", "video_profile_settings/",
-        "auth_tokens/", "auth_ids/"
+        "search_history/", "auth_tokens/", "auth_ids/"
     )
     private val globallyShared = setOf(
         "user_pinned_providers", "user_custom_sites", "REPOSITORIES_KEY",
