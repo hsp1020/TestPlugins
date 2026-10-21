@@ -692,7 +692,7 @@ internal class CatalogBrowserDialog(
             inlineSheet?.dismiss()
             inlineSheet = activity.loadHomepageList(
                 item, dismissCallback = { inlineSheet = null },
-                expandCallback = { provider -> scope.launch { inlineModel.expandAndReturn(provider) } }
+                expandCallback = { provider -> inlineModel.expandAndReturn(provider) }
             )
         },
         expandCallback = { provider -> scope.launch { inlineModel.expandAndReturn(provider) } }
