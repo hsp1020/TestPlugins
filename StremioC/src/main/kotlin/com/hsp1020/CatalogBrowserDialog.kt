@@ -45,21 +45,30 @@ import android.os.SystemClock
 import android.os.Handler
 import android.os.Looper
 import android.view.ViewTreeObserver
-import androidx.activity.OnBackPressedCallback
 import android.widget.ImageView
 import androidx.core.view.ViewCompat
 import androidx.core.view.doOnNextLayout
 import androidx.core.view.doOnPreDraw
 import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.navigation.NavController
 import androidx.navigation.fragment.FragmentNavigator
 import androidx.navigation.fragment.NavHostFragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.Observer
+import androidx.recyclerview.widget.GridLayoutManager
+import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.lagradost.cloudstream3.HomePageList
+import com.lagradost.cloudstream3.ui.search.SearchViewModel
+import com.lagradost.cloudstream3.ui.search.ExpandableSearchList
+import com.lagradost.cloudstream3.ui.home.HomeFragment.Companion.loadHomepageList
+import com.lagradost.cloudstream3.utils.AppContextUtils.filterSearchResultByFilmQuality
+import com.lagradost.cloudstream3.ui.setRecycledViewPool
+import android.widget.ProgressBar
+import android.view.inputmethod.EditorInfo
 import androidx.recyclerview.widget.RecyclerView
 import androidx.coordinatorlayout.widget.CoordinatorLayout
 import com.google.android.material.appbar.AppBarLayout
@@ -81,7 +90,6 @@ import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_SHOW_METADATA
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
 import com.lagradost.cloudstream3.ui.search.SearchHelper
-import com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment
 import com.lagradost.cloudstream3.utils.UIHelper.getSpanCount
 import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import kotlinx.coroutines.CancellationException
@@ -518,7 +526,7 @@ internal fun catalogStyledSelector(activity: FragmentActivity): AppCompatSpinner
         }
     }.apply {
         id = View.generateViewId()
-        minimumHeight = dp(48)
+        minimumHeight = dp(36)
         isFocusable = true
         setPopupBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryGrayBackground)))
         val cardBg = androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, R.drawable.bg_color_both)?.mutate()
@@ -655,6 +663,148 @@ internal class CatalogBrowserDialog(
             }
         }
     }
+
+    private val inlineStore = ViewModelStore()
+    private val inlineModel = ViewModelProvider(
+        inlineStore, ViewModelProvider.NewInstanceFactory()
+    )[SearchViewModel::class.java]
+    private val inlineResults = RecyclerView(activity).apply {
+        layoutManager = GridLayoutManager(activity, 1)
+        setRecycledViewPool(ParentItemAdapter.sharedPool)
+        setBackgroundColor(activity.colorFromAttribute(R.attr.primaryBlackBackground))
+        visibility = View.GONE
+    }
+    private var inlineSheet: BottomSheetDialog? = null
+    private val inlineAdapter = ParentItemAdapter(
+        "StremioCCatalogInlineSearch".hashCode(),
+        { click ->
+            if (!closed && !detailHandoff.isActive) when (click.action) {
+                SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
+                SEARCH_ACTION_LOAD -> {
+                    val covered = detailHandoff.begin()
+                    if (covered) preserveNavigation()
+                    SearchHelper.handleSearchClickCallback(click)
+                    if (!covered) dismiss()
+                }
+            }
+        },
+        { item ->
+            inlineSheet?.dismiss()
+            inlineSheet = activity.loadHomepageList(
+                item, dismissCallback = { inlineSheet = null },
+                expandCallback = { provider -> scope.launch { inlineModel.expandAndReturn(provider) } }
+            )
+        },
+        expandCallback = { provider -> scope.launch { inlineModel.expandAndReturn(provider) } }
+    )
+    private val inlineLoading = ProgressBar(activity).apply { visibility = View.GONE }
+    private val inlineEmpty = TextView(activity).apply {
+        text = "No results."
+        gravity = Gravity.CENTER
+        setTextColor(activity.colorFromAttribute(R.attr.textColor))
+        visibility = View.GONE
+    }
+    private var inlineActive = false
+    private var inlineSubmitted = false
+    private var inlineProviders = emptyList<String>()
+    private var inlineInput: SearchView? = null
+    private var inlineSelectors = emptyList<View>()
+    private var inlineHeader: AppBarLayout? = null
+    private var inlineHeaderFlags = 0
+    private var inlineRetryVisibility = View.GONE
+    private val inlineListObserver = Observer<Map<String, ExpandableSearchList>> { lists ->
+        if (!closed && inlineActive && inlineSubmitted) {
+            val groups = inlineProviders.mapNotNull { name ->
+                lists[name]?.let { result ->
+                    HomeViewModel.ExpandableHomepageList(
+                        HomePageList(name, activity.filterSearchResultByFilmQuality(result.list)),
+                        result.currentPage, result.hasNext
+                    )
+                }
+            }
+            inlineAdapter.submitList(groups)
+            if (groups.any { it.list.list.isNotEmpty() }) inlineEmpty.visibility = View.GONE
+        }
+    }
+    private val inlineStatusObserver = Observer<Resource<ExpandableSearchList>> { state ->
+        if (!closed && inlineActive && inlineSubmitted) {
+            inlineLoading.visibility = if (state is Resource.Loading) View.VISIBLE else View.GONE
+            if (state is Resource.Success || state is Resource.Failure) {
+                inlineEmpty.visibility = if (inlineAdapter.immutableCurrentList.all {
+                    it.list.list.isEmpty()
+                }) View.VISIBLE else View.GONE
+            }
+        }
+    }
+    private fun catalogSearchProviders(): List<String> {
+        val saved = SettingsRepository.loadLinks(prefs).asSequence()
+            .filter { it.enabled && it.link.isNotBlank() && StremioC.isCatalogAddonEnabled(it.link) }
+            .map { stremioManifestUrl(it.link.fixSourceUrl()) }.toSet()
+        return APIHolder.allProviders.filterIsInstance<StremioC>()
+            .filter { !it.hasMainPage && it.mainUrl.isNotBlank() &&
+                stremioManifestUrl(it.mainUrl.fixSourceUrl()) in saved }
+            .map { it.name }.distinct()
+    }
+    private fun enterInlineSearch() {
+        if (closed || inlineActive) return
+        inlineActive = true
+        inlineRetryVisibility = retry.visibility
+        inlineSelectors.forEach { it.visibility = View.GONE }
+        grid.visibility = View.INVISIBLE
+        inlineResults.visibility = View.VISIBLE
+        inlineLoading.visibility = View.GONE
+        inlineEmpty.visibility = View.GONE
+        retry.visibility = View.GONE
+        inlineHeader?.let { header ->
+            header.setExpanded(true, false)
+            (header.getChildAt(0).layoutParams as? AppBarLayout.LayoutParams)?.let { params ->
+                params.scrollFlags = 0
+                header.getChildAt(0).layoutParams = params
+            }
+        }
+    }
+    private fun exitInlineSearch() {
+        if (!inlineActive) return
+        inlineActive = false
+        inlineSubmitted = false
+        inlineModel.searchAndCancel("", providersActive = inlineProviders.toSet())
+        inlineAdapter.submitList(emptyList())
+        inlineResults.visibility = View.GONE
+        inlineLoading.visibility = View.GONE
+        inlineEmpty.visibility = View.GONE
+        inlineSelectors.forEach { it.visibility = View.VISIBLE }
+        grid.visibility = if (initialSkeleton) View.INVISIBLE else View.VISIBLE
+        retry.visibility = inlineRetryVisibility
+        inlineHeader?.let { header ->
+            (header.getChildAt(0).layoutParams as? AppBarLayout.LayoutParams)?.let { params ->
+                params.scrollFlags = inlineHeaderFlags
+                header.getChildAt(0).layoutParams = params
+            }
+        }
+        inlineInput?.clearFocus()
+        (activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+            ?.hideSoftInputFromWindow(inlineInput?.windowToken, 0)
+    }
+    private fun submitInlineSearch(value: String) {
+        val query = value.trim()
+        if (query.length < 2 || closed) return
+        val providers = catalogSearchProviders()
+        if (providers.isEmpty()) {
+            Toast.makeText(activity, "No searchable catalog addons.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        enterInlineSearch()
+        inlineProviders = providers
+        inlineSubmitted = true
+        inlineLoading.visibility = View.VISIBLE
+        inlineEmpty.visibility = View.GONE
+        inlineAdapter.submitList(emptyList())
+        inlineModel.reloadRepos()
+        inlineModel.searchAndCancel(query, providersActive = providers.toSet(), isQuickSearch = false)
+        (activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+            ?.hideSoftInputFromWindow(inlineInput?.windowToken, 0)
+        inlineInput?.clearFocus()
+    }
     private var links = emptyList<LinkItem>()
     private data class CatalogSource(val url: String, val provider: StremioC, val catalog: StremioC.Catalog)
     private var catalogs = emptyList<CatalogSource>()
@@ -681,7 +831,7 @@ internal class CatalogBrowserDialog(
         activity.currentFocus?.takeIf { it.id == R.id.home_child_more_info } else null
     private fun initialProgress(active: Boolean) {
         initialSkeleton = active
-        grid.visibility = if (active) View.INVISIBLE else View.VISIBLE
+        grid.visibility = if (active || inlineActive) View.INVISIBLE else View.VISIBLE
         pageSkeleton.visibility = if (active) View.VISIBLE else View.GONE
         if (active) {
             pageSkeleton.startShimmer()
@@ -803,142 +953,15 @@ internal class CatalogBrowserDialog(
             })
     }
     private var navigationSnapshot: BitmapDrawable? = null
-    private var pendingSearchReturn: (() -> Unit)? = null
-    private var imeAnimationActive = false
-    private var trackingSearchIme = false
-    private val searchImeAnimation = object : WindowInsetsAnimationCompat.Callback(
-        DISPATCH_MODE_CONTINUE_ON_SUBTREE
-    ) {
-        override fun onPrepare(animation: WindowInsetsAnimationCompat) {
-            if (animation.typeMask and WindowInsetsCompat.Type.ime() != 0)
-                imeAnimationActive = true
-        }
-        override fun onProgress(
-            insets: WindowInsetsCompat,
-            runningAnimations: MutableList<WindowInsetsAnimationCompat>
-        ): WindowInsetsCompat {
-            imeAnimationActive = runningAnimations.any {
-                it.typeMask and WindowInsetsCompat.Type.ime() != 0
-            }
-            return insets
-        }
-        override fun onEnd(animation: WindowInsetsAnimationCompat) {
-            if (animation.typeMask and WindowInsetsCompat.Type.ime() != 0) {
-                imeAnimationActive = false
-                activity.window.decorView.postInvalidateOnAnimation()
-            }
-        }
-    }
-    private fun startSearchImeTracking() {
-        if (trackingSearchIme) return
-        trackingSearchIme = true
-        imeAnimationActive = false
-        ViewCompat.setWindowInsetsAnimationCallback(activity.window.decorView, searchImeAnimation)
-    }
-    private fun stopSearchImeTracking() {
-        if (!trackingSearchIme) return
-        trackingSearchIme = false
-        imeAnimationActive = false
-        ViewCompat.setWindowInsetsAnimationCallback(activity.window.decorView, null)
-    }
     private var pendingDestinationCheck: Runnable? = null
-    private var previousSearchSoftInput: Int? = null
-    private var searchBackCallback: OnBackPressedCallback? = null
-    private var pendingSearchBack: (() -> Unit)? = null
-    private fun clearSearchBack() {
-        pendingSearchBack?.invoke()
-        pendingSearchBack = null
-        searchBackCallback?.remove()
-        searchBackCallback = null
-    }
-    private fun installSearchBack(fragment: QuickSearchFragment) {
-        if (searchBackCallback != null || searchReturnEntryId == null ||
-            navigation?.currentDestination?.id != R.id.navigation_quick_search) return
-        val callback = object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                if (pendingSearchBack != null) return
-                if (closed || searchReturnEntryId == null ||
-                    navigation?.currentDestination?.id != R.id.navigation_quick_search) {
-                    isEnabled = false
-                    activity.onBackPressedDispatcher.onBackPressed()
-                    return
-                }
-                previousSearchSoftInput?.let(activity.window::setSoftInputMode)
-                previousSearchSoftInput = null
-                val decor = activity.window.decorView
-                val search = fragment.view?.findViewById<SearchView>(R.id.quick_search)
-                search?.findViewById<android.widget.EditText>(
-                    androidx.appcompat.R.id.search_src_text
-                )?.clearFocus()
-                fragment.view?.apply {
-                    isFocusableInTouchMode = true
-                    requestFocus()
-                }
-                fun imeGone(): Boolean {
-                    val insets = ViewCompat.getRootWindowInsets(decor) ?: return false
-                    return !insets.isVisible(WindowInsetsCompat.Type.ime()) &&
-                        insets.getInsets(WindowInsetsCompat.Type.ime()).bottom <=
-                        insets.getInsets(WindowInsetsCompat.Type.systemBars()).bottom + dp(8) &&
-                        !imeAnimationActive
-                }
-                fun navigateBack() {
-                    isEnabled = false
-                    activity.onBackPressedDispatcher.onBackPressed()
-                }
-                if (imeGone()) {
-                    navigateBack()
-                    return
-                }
-                WindowInsetsControllerCompat(activity.window, decor).hide(WindowInsetsCompat.Type.ime())
-                val tree = decor.viewTreeObserver
-                if (!tree.isAlive) {
-                    navigateBack()
-                    return
-                }
-                var stable = 0
-                lateinit var listener: ViewTreeObserver.OnPreDrawListener
-                lateinit var release: () -> Unit
-                val timeout = Runnable {
-                    if (pendingSearchBack === release) release()
-                }
-                release = {
-                    if (tree.isAlive) tree.removeOnPreDrawListener(listener)
-                    decor.removeCallbacks(timeout)
-                    if (pendingSearchBack === release) pendingSearchBack = null
-                }
-                listener = ViewTreeObserver.OnPreDrawListener {
-                    if (closed || !fragment.isAdded || searchReturnEntryId == null ||
-                        navigation?.currentDestination?.id != R.id.navigation_quick_search) {
-                        release()
-                    } else {
-                        stable = if (imeGone()) stable + 1 else 0
-                        if (stable >= 2) {
-                            release()
-                            navigateBack()
-                        } else decor.postInvalidateOnAnimation()
-                    }
-                    true
-                }
-                pendingSearchBack = release
-                tree.addOnPreDrawListener(listener)
-                decor.postDelayed(timeout, 2000L)
-                decor.postInvalidateOnAnimation()
-            }
-        }
-        searchBackCallback = callback
-        activity.onBackPressedDispatcher.addCallback(fragment.viewLifecycleOwner, callback)
-    }
     private var suspendedForNavigation = false
-    private var searchFocusIssued = false
     private var originEntryId: String? = null
-    private var searchReturnEntryId: String? = null
     private val windowBoundsListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
         fitWindowToNavigation()
     }
     private val destinationListener = NavController.OnDestinationChangedListener { controller, destination, _ ->
         if (closed || detailHandoff.isActive) return@OnDestinationChangedListener
         val entryId = controller.currentBackStackEntry?.id
-        val returning = searchReturnEntryId
         if (destination.id == R.id.navigation_search || destination.id == R.id.navigation_library) {
             cancelDestinationCheck()
             if (dialog.window?.decorView?.visibility == View.VISIBLE) {
@@ -949,16 +972,6 @@ internal class CatalogBrowserDialog(
             return@OnDestinationChangedListener
         }
         when {
-            returning != null && entryId == returning -> {
-                searchReturnEntryId = null
-                cancelDestinationCheck()
-                restoreSearchAfterIme()
-            }
-            returning != null && destination.id == R.id.navigation_quick_search ->
-                awaitDestination(destination.id, entryId)
-            returning != null && destination.id !in setOf(
-                R.id.navigation_results_phone, R.id.navigation_results_tv, R.id.navigation_player
-            ) -> awaitDestination(destination.id, entryId)
             destination.id == R.id.navigation_home &&
                 (suspendedForNavigation || entryId != originEntryId) -> {
                 cancelDestinationCheck()
@@ -976,17 +989,6 @@ internal class CatalogBrowserDialog(
             suspendedForNavigation -> Unit
             originEntryId != null && entryId != originEntryId ->
                 awaitDestination(destination.id, entryId)
-        }
-    }
-    private val searchFocusCallbacks = object : FragmentManager.FragmentLifecycleCallbacks() {
-        override fun onFragmentResumed(fm: FragmentManager, fragment: Fragment) {
-            if (fragment is QuickSearchFragment) {
-                installSearchBack(fragment)
-                focusNativeSearch()
-            }
-        }
-        override fun onFragmentPaused(fm: FragmentManager, fragment: Fragment) {
-            if (fragment is QuickSearchFragment) clearSearchBack()
         }
     }
     private val items = ArrayList<SearchResponse>()
@@ -1045,28 +1047,6 @@ internal class CatalogBrowserDialog(
         pendingDestinationCheck = null
     }
 
-    private fun focusNativeSearch() {
-        if (searchFocusIssued) return
-        val host = activity.supportFragmentManager
-            .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment
-        val fragment = host?.childFragmentManager?.primaryNavigationFragment as? QuickSearchFragment
-            ?: return
-        fragment.view?.post {
-            if (closed || searchReturnEntryId == null || !fragment.isResumed ||
-                navigation?.currentDestination?.id != R.id.navigation_quick_search ||
-                dialog.window?.decorView?.visibility == View.VISIBLE) return@post
-            val search = fragment.view?.findViewById<SearchView>(R.id.quick_search) ?: return@post
-            search.isIconified = false
-            val input = search.findViewById<android.widget.EditText>(
-                androidx.appcompat.R.id.search_src_text
-            )
-            searchFocusIssued = true
-            (input ?: search).requestFocus()
-            (activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
-                ?.showSoftInput(input ?: search, InputMethodManager.SHOW_IMPLICIT)
-        }
-    }
-
     private fun awaitDestination(destinationId: Int, entryId: String?) {
         cancelDestinationCheck()
         val decor = activity.window.decorView
@@ -1091,11 +1071,7 @@ internal class CatalogBrowserDialog(
             stable = if (ready) stable + 1 else 0
             if (stable >= 2) {
                 pendingDestinationCheck = null
-                if (destinationId == R.id.navigation_quick_search && searchReturnEntryId != null) {
-                    dialog.hide()
-                    releaseNavigation()
-                    focusNativeSearch()
-                } else if (destinationId == R.id.navigation_home) {
+                if (destinationId == R.id.navigation_home) {
                     originEntryId = entryId
                     dialog.show()
                     fitWindowToNavigation(force = true)
@@ -1110,66 +1086,10 @@ internal class CatalogBrowserDialog(
         decor.postOnAnimation(check)
     }
 
-    private fun restoreSearchAfterIme() {
-        pendingSearchReturn?.invoke()
-        searchFocusIssued = false
-        val window = dialog.window
-        window?.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-        dialog.show()
-        val decor = activity.window.decorView
-        val tree = decor.viewTreeObserver
-        var stable = 0
-        fun ready(): Boolean {
-            val insets = ViewCompat.getRootWindowInsets(decor)
-            val keyboard = insets?.isVisible(WindowInsetsCompat.Type.ime()) == true ||
-                (insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0) >
-                (insets?.getInsets(WindowInsetsCompat.Type.systemBars())?.bottom ?: 0) + dp(8)
-            val home = stremioCurrentDestinationView(activity, navigation)
-            return !keyboard && !imeAnimationActive &&
-                navigation?.currentDestination?.id == R.id.navigation_home &&
-                home != null && home.isShown && home.width > 0 && home.height > 0 &&
-                !home.isLayoutRequested && home.animation?.hasEnded() != false
-        }
-        fun restoreFocus() {
-            stopSearchImeTracking()
-            previousSearchSoftInput?.let(activity.window::setSoftInputMode)
-            previousSearchSoftInput = null
-            if (!closed) {
-                fitWindowToNavigation(force = true)
-                window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-            }
-        }
-        if (!tree.isAlive) {
-            restoreFocus()
-            return
-        }
-        lateinit var listener: ViewTreeObserver.OnPreDrawListener
-        val release = {
-            if (tree.isAlive) tree.removeOnPreDrawListener(listener)
-            pendingSearchReturn = null
-        }
-        listener = ViewTreeObserver.OnPreDrawListener {
-            if (closed || navigation?.currentBackStackEntry?.id != originEntryId) {
-                release()
-                restoreFocus()
-            } else {
-                stable = if (ready()) stable + 1 else 0
-                if (stable >= 3) {
-                    release()
-                    restoreFocus()
-                } else decor.postInvalidateOnAnimation()
-            }
-            true
-        }
-        pendingSearchReturn = release
-        tree.addOnPreDrawListener(listener)
-        decor.postInvalidateOnAnimation()
-    }
-
     private fun fitWindowToNavigation(force: Boolean = false) {
         if (closed || (!dialog.isShowing && !force) ||
             ((detailHandoff.isActive || pendingDestinationCheck != null ||
-                pendingSearchReturn != null || suspendedForNavigation) && !force)) return
+                suspendedForNavigation) && !force)) return
         val window = dialog.window ?: return
         val decor = activity.window.decorView
         val width = decor.width.takeIf { it > 0 } ?: activity.resources.displayMetrics.widthPixels
@@ -1198,37 +1118,6 @@ internal class CatalogBrowserDialog(
         window.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
         window.setGravity(Gravity.TOP or Gravity.END)
         window.setLayout((width - railRight).coerceAtLeast(1), bottom.coerceAtLeast(1))
-    }
-
-    private fun openCatalogSearch() {
-        if (closed || detailHandoff.isActive || searchReturnEntryId != null) return
-        val saved = SettingsRepository.loadLinks(prefs).asSequence()
-            .filter { it.enabled && it.link.isNotBlank() && StremioC.isCatalogAddonEnabled(it.link) }
-            .map { stremioManifestUrl(it.link.fixSourceUrl()) }.toSet()
-        val providers = APIHolder.allProviders.filterIsInstance<StremioC>()
-            .filter { !it.hasMainPage && it.mainUrl.isNotBlank() &&
-                stremioManifestUrl(it.mainUrl.fixSourceUrl()) in saved }
-            .map { it.name }.distinct().toTypedArray()
-        if (providers.isEmpty()) {
-            Toast.makeText(activity, "No searchable catalog addons.", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val origin = navigation?.currentBackStackEntry?.id ?: return
-        searchReturnEntryId = origin
-        searchFocusIssued = false
-        previousSearchSoftInput = activity.window.attributes.softInputMode
-        preserveNavigation()
-        startSearchImeTracking()
-        try {
-            QuickSearchFragment.pushSearch(activity, "", providers)
-        } catch (_: Exception) {
-            searchReturnEntryId = null
-            previousSearchSoftInput = null
-            stopSearchImeTracking()
-            releaseNavigation()
-            fitWindowToNavigation()
-            Toast.makeText(activity, "Unable to open search.", Toast.LENGTH_SHORT).show()
-        }
     }
 
     private fun button(label: String) = MaterialButton(activity).apply {
@@ -1319,49 +1208,70 @@ internal class CatalogBrowserDialog(
                 addView(back, LinearLayout.LayoutParams(dp(25), dp(36)))
                 val searchField = FrameLayout(activity).apply {
                     setBackgroundResource(R.drawable.search_background)
-                    contentDescription = activity.getString(R.string.search)
-                    isFocusable = true
-                    isClickable = true
-                    val ripple = TypedValue()
-                    if (activity.theme.resolveAttribute(
-                            android.R.attr.selectableItemBackground, ripple, true
-                        ) && ripple.resourceId != 0) {
-                        foreground = androidx.core.content.ContextCompat.getDrawable(activity, ripple.resourceId)
+                    val input = SearchView(activity).apply {
+                        queryHint = activity.getString(R.string.search_hint)
+                        setIconifiedByDefault(false)
+                        isIconified = false
+                        findViewById<View>(androidx.appcompat.R.id.search_mag_icon)?.visibility = View.GONE
+                        imeOptions = EditorInfo.IME_ACTION_SEARCH
+                        setOnQueryTextListener(object : SearchView.OnQueryTextListener {
+                            override fun onQueryTextSubmit(query: String): Boolean {
+                                submitInlineSearch(query)
+                                return true
+                            }
+                            override fun onQueryTextChange(newText: String): Boolean {
+                                if (newText.isBlank()) exitInlineSearch()
+                                else if (inlineActive) {
+                                    inlineSubmitted = false
+                                    inlineLoading.visibility = View.GONE
+                                    inlineEmpty.visibility = View.GONE
+                                    inlineAdapter.submitList(emptyList())
+                                }
+                                return true
+                            }
+                        })
+                        clearFocus()
                     }
+                    inlineInput = input
                     addView(ImageView(activity).apply {
                         setImageResource(R.drawable.search_icon)
                         imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.white))
                         scaleType = ImageView.ScaleType.FIT_CENTER
+                        isClickable = false
+                        isFocusable = false
                     }, FrameLayout.LayoutParams(dp(24), dp(24),
                         Gravity.START or Gravity.CENTER_VERTICAL).apply {
-                        marginStart = dp(8)
+                        marginStart = dp(47)
                     })
-                    addView(TextView(activity).apply {
-                        text = activity.getString(R.string.search_hint)
-                        setTextColor(activity.colorFromAttribute(R.attr.textColor))
-                        alpha = 0.6f
-                        gravity = Gravity.CENTER_VERTICAL
-                        setSingleLine(true)
-                    }, FrameLayout.LayoutParams(-1, -1).apply {
-                        marginStart = dp(40)
+                    addView(input, FrameLayout.LayoutParams(-1, -1).apply {
+                        marginStart = dp(77)
                     })
-                    setOnClickListener { openCatalogSearch() }
+                    setOnClickListener {
+                        input.requestFocus()
+                        input.findViewById<android.widget.EditText>(
+                            androidx.appcompat.R.id.search_src_text
+                        )?.let { editor ->
+                            editor.requestFocus()
+                            (activity.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager)
+                                ?.showSoftInput(editor, InputMethodManager.SHOW_IMPLICIT)
+                        }
+                    }
                 }
                 addView(searchField, LinearLayout.LayoutParams(0, dp(36), 1f).apply {
                     marginStart = dp(10)
                 })
             }
             addView(navigationRow, LinearLayout.LayoutParams(-1, dp(36)))
-            for ((title, spinner, arrow) in listOf(
-                Triple("Type", typeSelector, typeArrow),
-                Triple("Catalog", catalogSelector, catalogArrow),
-                Triple("Genre", genreSelector, genreArrow)
-            )) {
-                addView(selectorRow(title, spinner, arrow),
-                    LinearLayout.LayoutParams(-1, dp(36)).apply {
-                        marginStart = dp(10)
-                        marginEnd = dp(12)
-                    })
+            inlineSelectors = listOf(
+                selectorRow("Type", typeSelector, typeArrow),
+                selectorRow("Catalog", catalogSelector, catalogArrow),
+                selectorRow("Genre", genreSelector, genreArrow)
+            )
+            inlineSelectors.forEach { selector ->
+                addView(selector, LinearLayout.LayoutParams(-1, dp(36)).apply {
+                    marginStart = dp(10)
+                    marginEnd = dp(12)
+                })
             }
         }
         val header = AppBarLayout(activity).apply {
@@ -1371,9 +1281,11 @@ internal class CatalogBrowserDialog(
             addView(controls, AppBarLayout.LayoutParams(-1, -2).apply {
                 scrollFlags = AppBarLayout.LayoutParams.SCROLL_FLAG_SCROLL or
                     AppBarLayout.LayoutParams.SCROLL_FLAG_ENTER_ALWAYS
+                inlineHeaderFlags = scrollFlags
             })
         }
 
+        inlineHeader = header
         val edgeFade = View(activity).apply {
             background = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
@@ -1387,6 +1299,10 @@ internal class CatalogBrowserDialog(
             pageSkeleton.addView(pageSkeletonSlots, FrameLayout.LayoutParams(-1, -1))
             addView(pageSkeleton, FrameLayout.LayoutParams(-1, -1))
             addView(edgeFade, FrameLayout.LayoutParams(-1, dp(15), Gravity.TOP))
+            inlineResults.adapter = inlineAdapter
+            addView(inlineResults, FrameLayout.LayoutParams(-1, -1))
+            addView(inlineEmpty, FrameLayout.LayoutParams(-1, -1))
+            addView(inlineLoading, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER))
         }
         header.addOnOffsetChangedListener(AppBarLayout.OnOffsetChangedListener { bar, offset ->
             val range = bar.totalScrollRange
@@ -1441,6 +1357,8 @@ internal class CatalogBrowserDialog(
             if (catalog == null) reloadLinks() else requestPage()
         }
         dialog.setContentView(root)
+        inlineModel.currentSearch.observe(activity, inlineListObserver)
+        inlineModel.searchResponse.observe(activity, inlineStatusObserver)
         dialog.setOnDismissListener {
             initialProgress(false)
             pageProgress(false)
@@ -1451,20 +1369,20 @@ internal class CatalogBrowserDialog(
             manifestPrefs.unregisterOnSharedPreferenceChangeListener(manifestListener)
             activity.lifecycle.removeObserver(hostObserver)
             cancelDestinationCheck()
-            pendingSearchReturn?.invoke()
-            clearSearchBack()
-            dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
-            stopSearchImeTracking()
+            inlineModel.currentSearch.removeObserver(inlineListObserver)
+            inlineModel.searchResponse.removeObserver(inlineStatusObserver)
+            inlineStore.clear()
+            inlineSheet?.dismiss()
+            inlineSheet = null
+            inlineInput?.setOnQueryTextListener(null)
+            inlineResults.adapter = null
             releaseNavigation()
-            previousSearchSoftInput = null
-            activity.supportFragmentManager.unregisterFragmentLifecycleCallbacks(searchFocusCallbacks)
             navigation?.removeOnDestinationChangedListener(destinationListener)
             activity.window.decorView.removeOnLayoutChangeListener(windowBoundsListener)
             activity.findViewById<View>(R.id.nav_rail_view)
                 ?.removeOnLayoutChangeListener(windowBoundsListener)
             activity.findViewById<View>(R.id.nav_view)
                 ?.removeOnLayoutChangeListener(windowBoundsListener)
-            searchReturnEntryId = null
             detailHandoff.close()
             grid.adapter = null
             onDismiss()
@@ -1483,13 +1401,17 @@ internal class CatalogBrowserDialog(
         dialog.window?.setBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryBlackBackground)))
         fitWindowToNavigation()
         dialog.window?.setWindowAnimations(0)
+        dialog.window?.setSoftInputMode(
+            WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+                WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
+        )
+        inlineInput?.clearFocus()
         activity.window.decorView.addOnLayoutChangeListener(windowBoundsListener)
         activity.findViewById<View>(R.id.nav_rail_view)
             ?.addOnLayoutChangeListener(windowBoundsListener)
         activity.findViewById<View>(R.id.nav_view)
             ?.addOnLayoutChangeListener(windowBoundsListener)
         navigation?.addOnDestinationChangedListener(destinationListener)
-        activity.supportFragmentManager.registerFragmentLifecycleCallbacks(searchFocusCallbacks, true)
         activity.lifecycle.addObserver(hostObserver)
         prefs.registerOnSharedPreferenceChangeListener(settingsListener)
         manifestPrefs.registerOnSharedPreferenceChangeListener(manifestListener)
