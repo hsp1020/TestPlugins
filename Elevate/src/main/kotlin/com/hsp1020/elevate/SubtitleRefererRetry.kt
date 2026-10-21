@@ -23,6 +23,14 @@ import com.lagradost.cloudstream3.ui.player.VideoLink
 import com.lagradost.cloudstream3.ui.player.VideoLive
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Dispatcher
+import okhttp3.Request
+import okhttp3.Response
+import java.io.IOException
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -30,20 +38,100 @@ import java.util.concurrent.Future
 internal class SubtitleRefererRetry(private val application: Application) : Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var active = false
-    @Volatile private var subtitleReferers: Map<String, String> = emptyMap()
+    @Volatile private var subtitleReferers: Map<String, List<String>> = emptyMap()
+
+    private val retryDispatcher = Dispatcher().apply {
+        maxRequests = 8
+        maxRequestsPerHost = 8
+    }
 
     private val retryInterceptor = Interceptor { chain ->
         val request = chain.request()
         val response = chain.proceed(request)
-        val sourceReferer = if (active && response.code == 403 &&
+        val referers = if (active && response.code == 403 &&
             request.header("Referer").isNullOrBlank()
-        ) subtitleReferers[request.url.toString()] else null
-        if (sourceReferer == null) {
-            response
-        } else {
-            response.close()
-            chain.proceed(request.newBuilder().header("Referer", sourceReferer).build())
+        ) subtitleReferers[request.url.toString()].orEmpty() else emptyList()
+        when (referers.size) {
+            0 -> response
+            1 -> {
+                response.close()
+                chain.proceed(request.newBuilder().header("Referer", referers[0]).build())
+            }
+            else -> retryInParallel(chain, request, response, referers)
         }
+    }
+
+    private fun retryInParallel(
+        chain: Interceptor.Chain,
+        request: Request,
+        original: Response,
+        referers: List<String>
+    ): Response {
+        val client = app.baseClient.newBuilder().dispatcher(retryDispatcher).build()
+        val finished = LinkedBlockingQueue<Pair<Call, Response?>>()
+        val lock = Any()
+        val calls = ArrayList<Call>()
+        var accepting = true
+        var nextIndex = 0
+        var inFlight = 0
+        var chosenCall: Call? = null
+        var chosenResponse: Response? = null
+
+        fun launchNext() {
+            val referer = referers[nextIndex++]
+            val call = client.newCall(request.newBuilder().header("Referer", referer).build())
+            calls.add(call)
+            inFlight++
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    synchronized(lock) {
+                        if (accepting) finished.offer(call to null)
+                    }
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    synchronized(lock) {
+                        if (accepting) finished.offer(call to response)
+                        else response.close()
+                    }
+                }
+            })
+        }
+
+        try {
+            repeat(minOf(4, referers.size)) { launchNext() }
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(12)
+            while (inFlight > 0 && !chain.call().isCanceled) {
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0L) break
+                val completed = finished.poll(
+                    minOf(remaining, TimeUnit.MILLISECONDS.toNanos(200)),
+                    TimeUnit.NANOSECONDS
+                ) ?: continue
+                inFlight--
+                val candidate = completed.second
+                if (candidate != null && candidate.isSuccessful) {
+                    chosenCall = completed.first
+                    chosenResponse = candidate
+                    break
+                }
+                candidate?.close()
+                if (nextIndex < referers.size) launchNext()
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        } finally {
+            synchronized(lock) {
+                accepting = false
+                while (true) {
+                    val leftover = finished.poll() ?: break
+                    leftover.second?.close()
+                }
+            }
+            calls.forEach { call -> if (call !== chosenCall) call.cancel() }
+        }
+
+        return chosenResponse?.also { original.close() } ?: original
     }
 
     private var host: FragmentActivity? = null
@@ -96,6 +184,7 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
             if (!active) return@post
             active = false
             detach()
+            retryDispatcher.cancelAll()
             worker?.shutdownNow()
             worker = null
             host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
@@ -173,7 +262,7 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
     private fun buildReferers(
         links: List<VideoLink>,
         subtitles: List<SubtitleData>
-    ): Map<String, String> {
+    ): Map<String, List<String>> {
         val byHost = HashMap<String, MutableSet<String>>()
         val byDomain = HashMap<String, MutableSet<String>>()
         links.forEach { (video, _) ->
@@ -185,23 +274,23 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
             val videoReferer = candidate.toHttpUrlOrNull() ?: return@forEach
             val referer = videoReferer.toString()
             listOfNotNull(videoReferer, video.url.toHttpUrlOrNull()).forEach { source ->
-                byHost.getOrPut(source.host) { HashSet() }.add(referer)
+                byHost.getOrPut(source.host) { LinkedHashSet() }.add(referer)
                 source.topPrivateDomain()?.let { domain ->
-                    byDomain.getOrPut(domain) { HashSet() }.add(referer)
+                    byDomain.getOrPut(domain) { LinkedHashSet() }.add(referer)
                 }
             }
         }
-        val result = HashMap<String, String>()
+        val result = HashMap<String, List<String>>()
         subtitles.forEach { subtitle ->
             if (Thread.currentThread().isInterrupted) return emptyMap()
             if (subtitle.origin != SubtitleOrigin.URL || subtitle.headers.entries.any {
                     it.key.equals("Referer", ignoreCase = true) && it.value.isNotBlank()
                 }) return@forEach
             val url = subtitle.getFixedUrl().toHttpUrlOrNull() ?: return@forEach
-            val matches = HashSet<String>()
+            val matches = LinkedHashSet<String>()
             byHost[url.host]?.let(matches::addAll)
             url.topPrivateDomain()?.let { byDomain[it]?.let(matches::addAll) }
-            matches.singleOrNull()?.let { result[url.toString()] = it }
+            if (matches.isNotEmpty()) result[url.toString()] = matches.toList()
         }
         return result
     }
