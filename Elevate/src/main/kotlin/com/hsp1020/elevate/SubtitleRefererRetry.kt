@@ -6,7 +6,6 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.View
-import android.view.ViewTreeObserver
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
@@ -15,6 +14,7 @@ import androidx.lifecycle.ViewModelProvider
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.player.SubtitleData
@@ -23,6 +23,9 @@ import com.lagradost.cloudstream3.ui.player.VideoLink
 import com.lagradost.cloudstream3.ui.player.VideoLive
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 
 internal class SubtitleRefererRetry(private val application: Application) : Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
@@ -47,15 +50,26 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
     private var fragment: GeneratorPlayer? = null
     private var model: PlayerGeneratorViewModel? = null
     private var removeObserver: (() -> Unit)? = null
-    private var tree: ViewTreeObserver? = null
     private var lastInstance = -1
-    private var lastSubtitles: Set<SubtitleData>? = null
-    private var lastLinks: Set<VideoLink>? = null
-    private val onDraw = ViewTreeObserver.OnPreDrawListener { refresh(); true }
     private var refreshPending = false
+    private var generation = 0L
+    private var worker: ExecutorService? = null
+    private var pendingJob: Future<*>? = null
     private val refreshRunnable = Runnable {
         refreshPending = false
-        rebuildReferers()
+        val state = model?.state ?: return@Runnable
+        ensureInterceptor()
+        val token = generation
+        val links = state.links.toList()
+        val subtitles = state.subtitles.toList()
+        pendingJob = worker?.submit {
+            val referers = buildReferers(links, subtitles)
+            if (!Thread.currentThread().isInterrupted) {
+                main.post {
+                    if (active && generation == token) subtitleReferers = referers
+                }
+            }
+        }
     }
 
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
@@ -71,6 +85,7 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
         main.post {
             if (active) return@post
             active = true
+            worker = Executors.newSingleThreadExecutor()
             application.registerActivityLifecycleCallbacks(this)
             (CommonActivity.activity as? MainActivity)?.let(::use)
         }
@@ -81,6 +96,8 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
             if (!active) return@post
             active = false
             detach()
+            worker?.shutdownNow()
+            worker = null
             host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
             host = null
             application.unregisterActivityLifecycleCallbacks(this)
@@ -126,15 +143,14 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
             model = ViewModelProvider(f)[PlayerGeneratorViewModel::class.java]
             val subtitlesObserver = Observer<VideoLive<Set<SubtitleData>>> { refresh() }
             val linksObserver = Observer<VideoLive<Set<VideoLink>>> { refresh() }
+            val loadingObserver = Observer<VideoLive<Resource<Unit>>> { refresh() }
             model?.currentSubtitles?.observe(f.viewLifecycleOwner, subtitlesObserver)
             model?.currentLinks?.observe(f.viewLifecycleOwner, linksObserver)
+            model?.loadingLinks?.observe(f.viewLifecycleOwner, loadingObserver)
             removeObserver = {
                 model?.currentSubtitles?.removeObserver(subtitlesObserver)
                 model?.currentLinks?.removeObserver(linksObserver)
-            }
-            f.view?.viewTreeObserver?.takeIf { it.isAlive }?.let {
-                it.addOnPreDrawListener(onDraw)
-                tree = it
+                model?.loadingLinks?.removeObserver(loadingObserver)
             }
         }
         refresh()
@@ -142,26 +158,26 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
 
     private fun refresh() {
         if (!active) return
-        ensureInterceptor()
-        val state = model?.state ?: return
-        if (lastInstance == state.instance &&
-            lastSubtitles === state.subtitles && lastLinks === state.links) return
-        if (!refreshPending) {
-            refreshPending = true
-            main.postDelayed(refreshRunnable, 100L)
+        val instance = model?.state?.instance ?: return
+        if (lastInstance != instance) {
+            lastInstance = instance
+            subtitleReferers = emptyMap()
         }
+        if (refreshPending) return
+        refreshPending = true
+        generation++
+        pendingJob?.cancel(true)
+        main.postDelayed(refreshRunnable, 100L)
     }
 
-    private fun rebuildReferers() {
-        if (!active) return
-        val state = model?.state ?: return
-        lastInstance = state.instance
-        lastSubtitles = state.subtitles
-        lastLinks = state.links
-
+    private fun buildReferers(
+        links: List<VideoLink>,
+        subtitles: List<SubtitleData>
+    ): Map<String, String> {
         val byHost = HashMap<String, MutableSet<String>>()
         val byDomain = HashMap<String, MutableSet<String>>()
-        state.links.forEach { (video, _) ->
+        links.forEach { (video, _) ->
+            if (Thread.currentThread().isInterrupted) return emptyMap()
             video ?: return@forEach
             val candidate = video.headers.entries.firstOrNull {
                 it.key.equals("Referer", ignoreCase = true) && it.value.isNotBlank()
@@ -175,35 +191,33 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
                 }
             }
         }
-        subtitleReferers = state.subtitles.asSequence()
-            .filter { it.origin == SubtitleOrigin.URL }
-            .filter { subtitle ->
-                subtitle.headers.entries.none {
+        val result = HashMap<String, String>()
+        subtitles.forEach { subtitle ->
+            if (Thread.currentThread().isInterrupted) return emptyMap()
+            if (subtitle.origin != SubtitleOrigin.URL || subtitle.headers.entries.any {
                     it.key.equals("Referer", ignoreCase = true) && it.value.isNotBlank()
-                }
-            }
-            .mapNotNull { subtitle ->
-                val url = subtitle.getFixedUrl().toHttpUrlOrNull() ?: return@mapNotNull null
-                val matches = HashSet<String>()
-                byHost[url.host]?.let(matches::addAll)
-                url.topPrivateDomain()?.let { byDomain[it]?.let(matches::addAll) }
-                matches.singleOrNull()?.let { url.toString() to it }
-            }.toMap()
+                }) return@forEach
+            val url = subtitle.getFixedUrl().toHttpUrlOrNull() ?: return@forEach
+            val matches = HashSet<String>()
+            byHost[url.host]?.let(matches::addAll)
+            url.topPrivateDomain()?.let { byDomain[it]?.let(matches::addAll) }
+            matches.singleOrNull()?.let { result[url.toString()] = it }
+        }
+        return result
     }
 
     private fun detach(f: Fragment? = null) {
         if (f != null && f !== fragment) return
         main.removeCallbacks(refreshRunnable)
         refreshPending = false
-        tree?.let { if (it.isAlive) it.removeOnPreDrawListener(onDraw) }
-        tree = null
+        generation++
+        pendingJob?.cancel(true)
+        pendingJob = null
         removeObserver?.invoke()
         removeObserver = null
         fragment = null
         model = null
         lastInstance = -1
-        lastSubtitles = null
-        lastLinks = null
         subtitleReferers = emptyMap()
     }
 
