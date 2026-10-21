@@ -28,34 +28,54 @@ internal class ElevateAudioDiagnostics {
     private var lastPreferred = ""
     private var lastDialogOpen = false
 
-    private val listener = object : Player.Listener {
-        override fun onTracksChanged(tracks: Tracks) {
-            log("TRACKS_CHANGED", "groups=${tracks.groups.size} audioGroups=${tracks.groups.count { it.type == C.TRACK_TYPE_AUDIO }}")
-            snapshot("TRACKS_CHANGED")
-        }
-
-        override fun onTrackSelectionParametersChanged(parameters: TrackSelectionParameters) {
-            val elapsed = SystemClock.elapsedRealtime() - lastAutoWrite
-            val origin = when {
-                dialogVisible() -> "manual_dialog_visible"
-                elapsed in 0..300 -> "near_auto_write"
-                else -> "native_or_external"
+    // The plugin is compiled independently of the host app. Implementing Player.Listener
+    // as a Kotlin object can crash with AbstractMethodError when the host Media3 interface
+    // differs. A dynamic proxy safely receives current and future callback methods.
+    private val listener = java.lang.reflect.Proxy.newProxyInstance(
+        Player.Listener::class.java.classLoader,
+        arrayOf(Player.Listener::class.java)
+    ) { proxy, method, args ->
+        when (method.name) {
+            "onTracksChanged" -> {
+                (args?.getOrNull(0) as? Tracks)?.let { tracks ->
+                    log("TRACKS_CHANGED", "groups=${tracks.groups.size} audioGroups=${tracks.groups.count { it.type == C.TRACK_TYPE_AUDIO }}")
+                    snapshot("TRACKS_CHANGED")
+                }
+                null
             }
-            log("PARAMETERS_CHANGED", "originHint=$origin msAfterAuto=$elapsed " +
-                "preferred=${parameters.preferredAudioLanguages} overrides=${parameters.overrides.size}")
-            snapshot("PARAMETERS_CHANGED")
+            "onTrackSelectionParametersChanged" -> {
+                (args?.getOrNull(0) as? TrackSelectionParameters)?.let { parameters ->
+                    val elapsed = SystemClock.elapsedRealtime() - lastAutoWrite
+                    val origin = when {
+                        dialogVisible() -> "manual_dialog_visible"
+                        elapsed in 0..300 -> "near_auto_write"
+                        else -> "native_or_external"
+                    }
+                    log("PARAMETERS_CHANGED", "originHint=$origin msAfterAuto=$elapsed " +
+                        "preferred=${parameters.preferredAudioLanguages} overrides=${parameters.overrides.size}")
+                    snapshot("PARAMETERS_CHANGED")
+                }
+                null
+            }
+            "onPlaybackStateChanged" -> {
+                val state = args?.getOrNull(0) as? Int
+                if (state != null) {
+                    log("PLAYBACK_STATE", "state=$state")
+                    if (state == Player.STATE_READY) schedule("READY")
+                }
+                null
+            }
+            "onMediaItemTransition" -> {
+                log("MEDIA_TRANSITION", "reason=${args?.getOrNull(1)}")
+                schedule("MEDIA_TRANSITION")
+                null
+            }
+            "equals" -> proxy === args?.getOrNull(0)
+            "hashCode" -> System.identityHashCode(proxy)
+            "toString" -> "ElevateAudioDiagnosticsListener"
+            else -> null
         }
-
-        override fun onPlaybackStateChanged(playbackState: Int) {
-            log("PLAYBACK_STATE", "state=$playbackState")
-            if (playbackState == Player.STATE_READY) schedule("READY")
-        }
-
-        override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
-            log("MEDIA_TRANSITION", "reason=$reason")
-            schedule("MEDIA_TRANSITION")
-        }
-    }
+    } as Player.Listener
 
     private fun log(event: String, data: String) {
         Log.i("ELEVATE_AUDIO_TRACE", "session=$session episode=$episodeInstance event=$event $data")
