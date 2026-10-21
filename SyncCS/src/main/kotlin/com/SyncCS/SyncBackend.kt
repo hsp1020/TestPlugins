@@ -346,6 +346,7 @@ internal class SyncBackend(private val config: SyncConfiguration) {
     fun list(): List<RemoteEntry> {
         val token = session().access
         val out = mutableListOf<RemoteEntry>()
+        val seenKeys = HashSet<String>()
         var cursor: String? = null
         while (true) {
             val cursorFilter = cursor?.let {
@@ -356,7 +357,7 @@ internal class SyncBackend(private val config: SyncConfiguration) {
             if (rows.length() == 0) break
             for (index in 0 until rows.length()) {
                 val row = readEntry(rows.getJSONObject(index))
-                check(cursor == null || row.key > cursor!!) { "Sync page cursor did not advance" }
+                check(seenKeys.add(row.key)) { "Sync page returned a duplicate item key" }
                 cursor = row.key
                 out.add(row)
             }
