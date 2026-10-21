@@ -6,7 +6,7 @@ import org.json.JSONObject
 /**
  * Add-on inventory reconciliation. Each manifest includes persistent tombstones.
  * Older v338 array manifests are accepted and upgraded on first write.
- * Identity is URL+repository for remote extensions, name+filename for local .cs3.
+ * Online identity is name+repository (not release URL); local identity is name+filename.
  */
 internal object PluginSync {
     data class State(
@@ -19,10 +19,15 @@ internal object PluginSync {
         return if (row.optString("type") == "local") {
             "local|" + row.optString("name") + "|" + row.optString("file")
         } else {
-            // Repo URL is included because independent repos can use identical names.
-            "online|" + row.optString("url") + "|" + row.optString("repo")
+            // Versioned download URLs must not make an update look like a different plugin.
+            "online|" + row.optString("name") + "|" + row.optString("repo")
         }
     }
+
+    private fun newerOnline(local: JSONObject, remote: JSONObject): Boolean =
+        local.optString("type") == "online" && remote.optString("type") == "online" &&
+            local.optInt("version") > 0 && remote.optInt("version") > 0 &&
+            local.optInt("version") > remote.optInt("version")
 
     fun decode(raw: String?): State {
         val result = State()
@@ -34,7 +39,10 @@ internal object PluginSync {
         for (i in 0 until array.length()) {
             val item = array.getJSONObject(i)
             val key = identity(item)
-            if (key != "online||" && key != "local||") result.items[key] = item
+            if (key != "online||" && key != "local||" &&
+                (result.items[key] == null || !newerOnline(result.items.getValue(key), item))) {
+                result.items[key] = item
+            }
         }
         val removed = root.optJSONArray("deleted") ?: JSONArray()
         for (i in 0 until removed.length()) result.deleted.add(removed.getString(i))
@@ -95,6 +103,11 @@ internal object PluginSync {
         for ((id, item) in local.items) {
             val previous = base.items[id]
             when {
+                // Never replace an already-installed newer release with an older
+                // server snapshot, including on a device with no prior baseline.
+                remote.items[id]?.let { newerOnline(item, it) } == true -> {
+                    output.items[id] = item
+                }
                 previous == null && initialized -> {
                     // New local install: clear tombstone only when this device
                     // previously synced a baseline without the extension.
