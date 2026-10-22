@@ -483,7 +483,7 @@ internal object PluginInventory {
         return items.toString()
     }
 
-    fun uploadFiles(context: Context, backend: SyncBackend, manifest: String) {
+    fun uploadFiles(context: Context, backend: SyncStorage, manifest: String) {
         val config = SyncConfiguration(context)
         val registry = config.preferences
         val entries = PluginSync.items(manifest)
@@ -493,7 +493,7 @@ internal object PluginInventory {
             val row = entries.getJSONObject(index)
             val hash = row.optString("sha")
             if (!hash.matches(Regex("[a-f0-9]{64}")) ||
-                registry.getBoolean("file_" + hash, false)) continue
+                (backend !is GithubSyncAdapter && registry.getBoolean("file_" + hash, false))) continue
             val plugin = if (row.optString("type") == "online") {
                 val repoId = row.optString("repo")
                 online.firstOrNull {
@@ -521,7 +521,9 @@ internal object PluginInventory {
             }
             try {
                 backend.uploadFile(hash, bytes)
-                registry.edit().putBoolean("file_" + hash, true).apply()
+                if (backend !is GithubSyncAdapter) {
+                    registry.edit().putBoolean("file_" + hash, true).apply()
+                }
             } catch (error: Exception) {
                 if (row.optString("type") == "local") throw error
                 // Online extensions can also be fetched from their repository.
@@ -529,7 +531,7 @@ internal object PluginInventory {
         }
     }
 
-    suspend fun restore(context: Context, activity: Activity, backend: SyncBackend, raw: String): List<String> {
+    suspend fun restore(context: Context, activity: Activity, backend: SyncStorage, raw: String): List<String> {
         val report = mutableListOf<String>()
         val rows = PluginSync.items(raw)
         val target = PluginSync.decode(raw).items
@@ -538,6 +540,24 @@ internal object PluginInventory {
         // registry change together. The merge has already decided which entries
         // are intentional deletions; never delete SyncCS itself.
         val current = PluginSync.decode(snapshot(context)).items
+        // Fail closed before the first uninstall. This guarantees that
+        // every binary to be replaced is already available and SHA-verified.
+        for ((id, item) in target) {
+            val desiredHash = item.optString("sha")
+            if (current[id]?.optString("sha") == desiredHash &&
+                desiredHash.matches(Regex("[0-9a-f]{64}"))) continue
+            if (!desiredHash.matches(Regex("[0-9a-f]{64}"))) {
+                return listOf("Unverifiable plugin backup: " + item.optString("name"))
+            }
+            val bytes = try {
+                backend.downloadFile(desiredHash)
+            } catch (error: Exception) {
+                return listOf("Plugin archive is missing: " + item.optString("name"))
+            }
+            if (SyncBackend.digestBytes(bytes) != desiredHash) {
+                return listOf("Plugin archive digest mismatch: " + item.optString("name"))
+            }
+        }
         val onlineNow = PluginManager.getPluginsOnline().toList()
         val localNow = PluginManager.getPluginsLocal().toList()
         for ((key, row) in current) {

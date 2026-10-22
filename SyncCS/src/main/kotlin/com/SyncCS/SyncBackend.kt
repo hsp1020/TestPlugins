@@ -46,9 +46,14 @@ internal class SyncConfiguration(context: Context) {
             preferences.edit().putString("device_id", id).commit()
             return id
         }
+    // Existing Supabase sessions are intentionally inactive after this upgrade.
+    // Explicit GitHub connection is mandatory; never upload legacy data.
     fun active(): Boolean =
-        url.startsWith("https://") && anonKey.isNotBlank() &&
-        preferences.contains("session") && preferences.contains("secret")
+        preferences.getString("sync_transport", null) == "github" &&
+        preferences.contains("github_token") &&
+        preferences.contains("github_login") &&
+        preferences.contains("github_account_id") &&
+        preferences.contains("secret")
     fun clearAccount() {
         val editor = preferences.edit()
         for (key in preferences.all.keys) {
@@ -61,6 +66,10 @@ internal class SyncConfiguration(context: Context) {
             .remove("plugin_remote_snapshot").remove("profile_remote_snapshot")
             .remove("profile_baseline").remove("pending_conflicts")
             .remove("list_baselines")
+            .remove("github_token").remove("github_login")
+            .remove("github_account_id").remove("github_base_revision")
+            .remove("github_generation").remove("sync_transport")
+            .remove("account_switch_blocked")
             .commit())
     }
 }
@@ -125,6 +134,12 @@ internal class SyncCipher(private val key: ByteArray) {
             finally { spec.clearPassword() }
             return SyncCipher(derived)
         }
+        fun storeGithub(config: SyncConfiguration, password: String, userId: String) {
+            val cipher = derive(password, "https://api.github.com", userId)
+            check(config.preferences.edit().putString("secret",
+                LocalVault.encrypt(cipher.key)).commit())
+        }
+
         fun saved(config: SyncConfiguration): SyncCipher {
             val value = config.preferences.getString("secret", null) ?: error("Missing recovery key")
             return SyncCipher(LocalVault.decrypt(value))
@@ -138,7 +153,7 @@ internal class SyncCipher(private val key: ByteArray) {
 
 internal data class GithubLoginRequest(val state: String, val browserUrl: String)
 
-internal class SyncBackend(private val config: SyncConfiguration) {
+internal class SyncBackend(private val config: SyncConfiguration) : SyncStorage {
     private data class Session(val userId: String, val access: String, val refresh: String, val expiry: Long)
     private var cached: Session? = null
 
@@ -326,7 +341,7 @@ internal class SyncBackend(private val config: SyncConfiguration) {
         return next
     }
 
-    fun userId(): String = session().userId
+    override fun userId(): String = session().userId
 
     private fun readEntry(row: JSONObject): RemoteEntry = RemoteEntry(
         row.getString("item_key"),
@@ -335,7 +350,7 @@ internal class SyncBackend(private val config: SyncConfiguration) {
         row.optLong("version")
     )
 
-    fun getEntry(key: String): RemoteEntry? {
+    override fun getEntry(key: String): RemoteEntry? {
         val encoded = java.net.URLEncoder.encode(key, "UTF-8")
         val reply = call("/rest/v1/sync_entries?select=item_key,payload,deleted,updated_at,device_id,version" +
             "&item_key=eq." + encoded + "&limit=1", "GET", session().access)
@@ -426,7 +441,7 @@ internal class SyncBackend(private val config: SyncConfiguration) {
         return result to cursor
     }
 
-    fun pull(previousCursor: Long?): PullResult {
+    override fun pull(previousCursor: Long?): PullResult {
         if (previousCursor == null) {
             // Taking the cursor BEFORE the snapshot and replaying its events
             // prevents a write concurrent with the snapshot from being lost.
@@ -447,7 +462,7 @@ internal class SyncBackend(private val config: SyncConfiguration) {
         }
     }
 
-    fun upload(changes: Map<String, String?>, cipher: SyncCipher, revisions: Map<String, Long>) {
+    override fun upload(changes: Map<String, String?>, cipher: SyncCipher, revisions: Map<String, Long>) {
         if (changes.isEmpty()) return
         val current = session()
         changes.entries.chunked(50).forEach { batch ->
@@ -463,20 +478,20 @@ internal class SyncBackend(private val config: SyncConfiguration) {
         }
     }
 
-    fun uploadFile(hash: String, bytes: ByteArray) {
+    override fun uploadFile(hash: String, bytes: ByteArray) {
         require(hash.matches(Regex("[a-f0-9]{64}")))
         val s = session()
         call("/storage/v1/object/sync-files/" + s.userId + "/" + hash + ".cs3",
             "POST", s.access, bytes, "application/octet-stream", mapOf("x-upsert" to "true"))
     }
 
-    fun downloadFile(hash: String): ByteArray {
+    override fun downloadFile(hash: String): ByteArray {
         require(hash.matches(Regex("[a-f0-9]{64}")))
         val s = session()
         return call("/storage/v1/object/sync-files/" + s.userId + "/" + hash + ".cs3", "GET", s.access)
     }
 
-    fun cipher(): SyncCipher = SyncCipher.saved(config)
+    override fun cipher(): SyncCipher = SyncCipher.saved(config)
     companion object {
         fun digest(data: String): String =
             MessageDigest.getInstance("SHA-256").digest(data.toByteArray(Charsets.UTF_8))

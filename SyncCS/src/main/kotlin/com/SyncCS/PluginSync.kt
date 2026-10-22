@@ -105,7 +105,7 @@ internal object PluginSync {
             when {
                 // Never replace an already-installed newer release with an older
                 // server snapshot, including on a device with no prior baseline.
-                remote.items[id]?.let { newerOnline(item, it) } == true -> {
+                initialized && remote.items[id]?.let { newerOnline(item, it) } == true -> {
                     output.items[id] = item
                 }
                 previous == null && initialized -> {

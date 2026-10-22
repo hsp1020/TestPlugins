@@ -56,15 +56,13 @@ internal object SyncCoordinator {
 
     private suspend fun synchronizePass(context: Context, activity: Activity?): String {
         val config = SyncConfiguration(context)
-        val backend = SyncBackend(config)
+        val backend: SyncStorage = GithubSyncAdapter(context)
         var stage = "loading cloud state"
         try {
             val startedUser = backend.userId()
             fun verifyAccount() {
-                val stored = config.preferences.getString("session", null)
-                    ?: error("Sync account removed during operation")
-                val json = JSONObject(String(LocalVault.decrypt(stored), Charsets.UTF_8))
-                check(json.getString("user_id") == startedUser &&
+                check(config.active() &&
+                    config.preferences.getString("github_account_id", null) == startedUser &&
                     !config.preferences.getBoolean("account_switch_blocked", false)) {
                     "Sync account changed during operation"
                 }
@@ -85,6 +83,7 @@ internal object SyncCoordinator {
             // On first link, an existing cloud account takes precedence over
             // unrelated settings and watch history already stored on this device.
             val firstRemoteRestore = !config.preferences.contains("base") &&
+                !(backend as GithubSyncAdapter).createdFreshBackup &&
                 remoteValues.keys.any {
                     it == "x/profiles" || it == "x/plugins" ||
                         it.startsWith("d/") || it.startsWith("s/") || it.startsWith("p/")
@@ -182,8 +181,13 @@ internal object SyncCoordinator {
                     }
                     continue
                 }
-                val changedLocal = currentHash != old
-                val changedRemote = remotePresent && remoteHash != old
+                // A missing key is NOT evidence of user deletion. Plugin startup,
+                // a failed preferences enumeration, or a filtered snapshot can omit it.
+                val explicitlyChanged = config.preferences.contains("modified/" + key)
+                val changedLocal = currentHash != old &&
+                    (current != null || explicitlyChanged)
+                val changedRemote = if (pull.full) remoteHash != old
+                    else remotePresent && remoteHash != old
                 when {
                     changedLocal && changedRemote && currentHash == remoteHash -> {
                         next[key] = remoteHash
@@ -358,6 +362,10 @@ internal object SyncCoordinator {
                     listBaselineJson.toString().toByteArray(Charsets.UTF_8)))
             if (pull.cursor != null) persisted.putLong("remote_cursor", pull.cursor)
             else persisted.remove("remote_cursor")
+            val (githubRevision, githubGeneration) =
+                (backend as GithubSyncAdapter).verifiedRevision()
+            persisted.putString("github_base_revision", githubRevision)
+                .putInt("github_generation", githubGeneration)
             if (serverPluginManifest != null) {
                 persisted.putString("plugin_remote_snapshot", serverPluginManifest)
             } else {
@@ -404,7 +412,7 @@ internal object SyncCoordinator {
             detail.contains("40001")
     }
 
-    private suspend fun installPending(context: Context, activity: Activity, backend: SyncBackend): String {
+    private suspend fun installPending(context: Context, activity: Activity, backend: SyncStorage): String {
         val prefs = SyncConfiguration(context).preferences
         val pending = prefs.getString("pending_plugins", null) ?: return ""
         val failures = PluginInventory.restore(context, activity, backend, pending)

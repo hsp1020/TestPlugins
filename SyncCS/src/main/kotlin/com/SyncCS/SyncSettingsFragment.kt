@@ -179,7 +179,7 @@ class SyncSettingsFragment : DialogFragment() {
         body.addView(settingRow(
             context,
             "Sync account",
-            "Connect your GitHub account"
+            "Direct encrypted backup in your private GitHub repository"
         ) {
             showAccountDialog()
         })
@@ -386,86 +386,118 @@ class SyncSettingsFragment : DialogFragment() {
         val context = requireContext()
         val config = SyncConfiguration(context)
         val body = column(context)
-        body.addView(secondary(
-            context,
-            "Sign in using your GitHub account. SyncCS does not need a separate email or password."
-        ))
-        val recovery = labeledField(
-            context, body, "Recovery passphrase", "At least 12 characters",
+        body.addView(secondary(context,
+            "Direct GitHub backup · Your account owns a private repository. " +
+            "Use the Client ID of a GitHub OAuth App with Device Flow enabled. " +
+            "Authorization requests repository access; only use an app you trust."))
+        val clientId = labeledField(context, body,
+            "GitHub OAuth App Client ID", "Client ID",
+            config.preferences.getString("github_client_id", "") ?: "")
+        val recovery = labeledField(context, body,
+            "Backup recovery passphrase", "At least 12 characters",
             kind = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD,
-            revealToggle = true
-        )
-        body.addView(secondary(
-            context,
-            "This encrypts your synced data. Enter the same recovery passphrase on every device."
-        ))
-        val device = labeledField(
-            context, body, "Device name", "Device name", config.deviceName, done = true
-        )
+            revealToggle = true)
+        val device = labeledField(context, body,
+            "Device name", "Device name", config.deviceName, done = true)
         val feedback = secondary(context, "").apply {
             visibility = View.GONE
             setPadding(0, dp(context, 12), 0, 0)
         }
         body.addView(feedback)
         val dialog = AlertDialog.Builder(context)
-            .setTitle("SyncCS · GitHub")
+            .setTitle("SyncCS · GitHub direct")
             .setView(scroll(context, body))
-            .setPositiveButton("Sign in with GitHub", null)
-            .setNegativeButton("Cancel", null)
-            .create()
+            .setPositiveButton("Connect GitHub", null)
+            .setNegativeButton("Cancel", null).create()
 
         dialog.setOnShowListener {
             dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN)
-            val signInButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-            signInButton.setOnClickListener {
+            val button = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            button.setOnClickListener {
                 if (githubLoginJob?.isActive == true) return@setOnClickListener
+                val client = clientId.text.toString().trim()
                 val phrase = recovery.text.toString()
-                val name = device.text.toString().trim().ifEmpty { Build.MODEL }
-                if (phrase.length < 12) {
-                    feedback.text = "Enter a recovery passphrase with at least 12 characters."
+                val name = device.text.toString().trim().ifBlank { Build.MODEL }
+                if (!client.matches(Regex("[A-Za-z0-9_.-]{8,80}")) || phrase.length < 12) {
+                    feedback.text = "Enter your GitHub OAuth App Client ID and a recovery passphrase of 12+ characters."
                     feedback.visibility = View.VISIBLE
                     return@setOnClickListener
                 }
-                signInButton.isEnabled = false
-                feedback.text = "Preparing GitHub login..."
-                feedback.visibility = View.VISIBLE
+                button.isEnabled = false
                 val host = requireActivity()
                 val firstConnection = !config.active()
+                feedback.visibility = View.VISIBLE
                 githubLoginJob = lifecycleScope.launch {
                     try {
-                        // CloudStream's existing deep-link intent handles browser-to-app return.
-                        // No AndroidX Browser classes are required by the host at runtime.
-                        val attempt = withContext(Dispatchers.IO) {
-                            SyncBackend(config).beginGithubLogin(autoReturn = true)
+                        val challenge = withContext(Dispatchers.IO) {
+                            GithubDeviceCode.begin(client)
                         }
-                        host.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(attempt.browserUrl)))
-                        feedback.text = "Complete GitHub sign-in in your browser. CloudStream should reopen automatically; if not, return manually."
-                        val authCode: String = withTimeout(4L * 60L * 1000L) {
-                            var received: String? = null
-                            while (received == null) {
-                                delay(1600L)
-                                received = withContext(Dispatchers.IO) {
-                                    SyncBackend(config).pollGithubLogin(attempt.state)
+                        feedback.text = "Open " + challenge.verification +
+                            " and enter this code: " + challenge.userCode +
+                            "\nOn Android TV, enter the code from your phone or computer."
+                        runCatching {
+                            host.startActivity(Intent(Intent.ACTION_VIEW,
+                                Uri.parse(challenge.verification)))
+                        }
+                        var token: String? = null
+                        var interval = challenge.pollSeconds
+                        withTimeout(challenge.expiresSeconds * 1000L) {
+                            while (token == null) {
+                                delay(interval * 1000L)
+                                try {
+                                    token = withContext(Dispatchers.IO) {
+                                        GithubDeviceCode.poll(client, challenge)
+                                    }
+                                } catch (slow: java.io.IOException) {
+                                    if (slow.message?.contains("slower polling") == true) {
+                                        interval += 5
+                                    } else throw slow
                                 }
                             }
-                            received ?: throw java.io.IOException("Missing GitHub authorization code.")
+                        }
+                        val accessToken = token ?: error("GitHub authorization did not complete.")
+                        val profile = withContext(Dispatchers.IO) {
+                            GithubDeviceCode.profile(accessToken)
+                        }
+                        val previous = config.preferences.getString("github_account_id", null)
+                        check(previous == null || previous == profile.id) {
+                            "Different GitHub account: disconnect the current device first."
+                        }
+                        feedback.text = "Verifying private repository and recovery key..."
+                        // Check repository privacy and passphrase BEFORE activating any sync.
+                        withContext(Dispatchers.IO) {
+                            GithubBackupStore(accessToken, profile.login).current(
+                                SyncCipher.derive(phrase, "https://api.github.com", profile.id))
+                        }
+                        withContext(Dispatchers.IO) {
+                            SyncCipher.storeGithub(config, phrase, profile.id)
+                            val edit = config.preferences.edit()
+                                .putString("github_token", LocalVault.encrypt(
+                                    accessToken.toByteArray(Charsets.UTF_8)))
+                                .putString("github_account_id", profile.id)
+                                .putString("github_login", profile.login)
+                                .putString("github_client_id", client)
+                                .putString("sync_transport", "github")
+                                .putString("device_name", name)
+                                .remove("account_switch_blocked")
+                            if (previous == null) {
+                                edit.remove("base").remove("remote_cursor")
+                                    .remove("remote_versions").remove("plugin_baseline")
+                                    .remove("profile_baseline").remove("profile_remote_snapshot")
+                                    .remove("plugin_remote_snapshot").remove("list_baselines")
+                                    .remove("pending_plugins").remove("pending_conflicts")
+                                for (key in config.preferences.all.keys) {
+                                    if (key.startsWith("modified/")) edit.remove(key)
+                                }
+                            }
+                            check(edit.commit()) { "Could not store GitHub session." }
                         }
                         val progress = showSyncProgress()
-                        progress.label.text = "Completing GitHub sign-in..."
                         try {
-                            withContext(Dispatchers.IO) {
-                                SyncBackend(config).completeGithubLogin(
-                                    attempt.state, authCode, phrase
-                                )
-                                config.deviceName = name
-                            }
-                            feedback.text = "GitHub sign-in complete."
-                            progress.label.text = "Synchronizing..."
                             val report = withContext(Dispatchers.IO) {
                                 SyncCoordinator.synchronize(host.applicationContext, host)
                             }
-                            if (finishSyncProgress(progress, report, restartAfter = firstConnection)) {
-                                // First login completes only after the restored state is reloaded.
+                            if (finishSyncProgress(progress, report, firstConnection)) {
                                 if (firstConnection && restartCloudStreamAfterFirstSignIn(host)) {
                                     return@launch
                                 }
@@ -473,23 +505,21 @@ class SyncSettingsFragment : DialogFragment() {
                                 if (dialog.isShowing) dialog.dismiss()
                                 if (isAdded) dismissAllowingStateLoss()
                             } else {
-                                feedback.text = "Signed in, but synchronization did not complete."
+                                feedback.text = "Connection established, but initial sync is incomplete. " +
+                                    "Do not use automatic sync until the error is resolved."
                             }
-                        } catch (error: Exception) {
-                            progress.dialog.dismiss()
-                            throw error
+                        } finally {
+                            if (progress.dialog.isShowing) progress.dialog.dismiss()
                         }
                     } catch (timeout: TimeoutCancellationException) {
-                        if (dialog.isShowing) feedback.text = "GitHub login timed out. Please try again."
+                        if (dialog.isShowing) feedback.text = "GitHub device authorization expired."
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (error: Exception) {
-                        if (dialog.isShowing) {
-                            feedback.text = "GitHub login failed: " +
-                                (error.message ?: error.javaClass.simpleName).take(160)
-                        }
+                        if (dialog.isShowing) feedback.text = "GitHub setup failed: " +
+                            (error.message ?: error.javaClass.simpleName).take(220)
                     } finally {
-                        if (dialog.isShowing) signInButton.isEnabled = true
+                        if (dialog.isShowing) button.isEnabled = true
                     }
                 }
             }
