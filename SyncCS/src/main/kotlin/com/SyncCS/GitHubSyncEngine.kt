@@ -8,6 +8,7 @@ import kotlinx.coroutines.sync.withLock
 import com.lagradost.cloudstream3.utils.DataStore
 import com.lagradost.cloudstream3.plugins.PLUGINS_KEY
 import com.lagradost.cloudstream3.plugins.PLUGINS_KEY_LOCAL
+import com.lagradost.cloudstream3.plugins.PluginManager
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -47,6 +48,27 @@ internal object GitHubSyncEngine {
             PluginInventory.snapshot(context), settings,
             deviceName = GitHubSyncConfig(context).deviceName)
     }
+    private fun installedArchives(manifest: String): Map<String, ByteArray> {
+        val installed = PluginManager.getPluginsOnline().toList() +
+            PluginManager.getPluginsLocal().toList()
+        val result = linkedMapOf<String, ByteArray>()
+        for (row in PluginSync.decode(manifest).items.values) {
+            val required = row.optString("sha")
+            require(required.matches(Regex("[a-f0-9]{64}"))) {
+                "Installed plugin is missing a verified backup hash"
+            }
+            if (required in result) continue
+            val name = row.optString("name")
+            val matching = installed.asSequence().filter { it.internalName == name }
+                .map { File(it.filePath) }.firstOrNull {
+                    it.isFile && it.length() in 1L..(20L * 1024 * 1024) &&
+                        SyncBackend.digestBytes(it.readBytes()) == required
+                } ?: error("Cannot archive missing plugin " + name)
+            result[required] = matching.readBytes()
+        }
+        return result
+    }
+
     private fun baselineFile(context: Context) =
         File(context.filesDir, "synccs-github-baseline-v1.enc")
 
@@ -108,7 +130,8 @@ internal object GitHubSyncEngine {
             require(state.settings.isNotEmpty()) {
                 "Local settings snapshot is empty. Refusing to initialize a backup."
             }
-            val head = backend.save(state, null)
+            val archives = installedArchives(state.plugins)
+            val head = backend.save(state, null, archives)
             saveBaseline(context, state)
             check(config.preferences.edit()
                 .putString("generation", state.generation).putString("head", head).commit())
@@ -166,6 +189,7 @@ internal object GitHubSyncEngine {
             val config = GitHubSyncConfig(context)
             val backend = GitHubSyncTransport(config)
             val remote = backend.read() ?: error("No GitHub backup exists")
+            backend.verifyArchivedPlugins(remote)
             val prior = getBaseline(context)
             check(prior == null || prior.generation == remote.snapshot.generation) {
                 "Different backup generation; disconnect and inspect before relinking"
@@ -191,6 +215,7 @@ internal object GitHubSyncEngine {
             val backend = GitHubSyncTransport(config)
             val head = backend.read() ?: error("No existing GitHub backup")
             val previous = backend.readAt(commitSha)
+            backend.verifyArchivedPlugins(previous)
             require(head.sha != previous.sha) { "Already on the requested checkpoint" }
             // Increment the generation: old device baselines cannot publish into
             // the restored account until explicitly reinitialized from this epoch.

@@ -210,7 +210,38 @@ internal class GitHubSyncTransport(private val config: GitHubSyncConfig) {
         return Remote(sha, decode(value))
     }
 
-    fun save(snapshot: GitHubSnapshot, expectedHead: String?): String {
+    fun verifyArchivedPlugins(remote: Remote) {
+        val required = PluginSync.decode(remote.snapshot.plugins).items.values
+            .map { it.optString("sha") }.toSet()
+        if (required.isEmpty()) return
+        check(required.all { it.matches(Regex("[a-f0-9]{64}")) }) {
+            "Backup manifest contains a plugin without a verified SHA-256"
+        }
+        val contents = request(api("/git/trees/" + commitTree(remote.sha) + "?recursive=1"))
+        check(!contents.optBoolean("truncated")) { "Incomplete Git tree" }
+        val tree = contents.getJSONArray("tree")
+        val existing = mutableMapOf<String, String>()
+        for (i in 0 until tree.length()) {
+            val entry = tree.getJSONObject(i)
+            existing[entry.optString("path")] = entry.optString("sha")
+        }
+        val encryptor = cipher()
+        for (hash in required) {
+            val path = "synccs-binaries/" + hash + ".enc.json"
+            val blobId = existing[path] ?: error("Missing backup archive for plugin SHA " + hash)
+            val blob = request(api("/git/blobs/" + blobId))
+            val encodedJson = String(Base64.decode(blob.getString("content"), Base64.DEFAULT), Charsets.UTF_8)
+            val encrypted = JSONObject(encodedJson).getString("encrypted")
+            val clear = encryptor.decrypt("github-sync-binary-" + hash, encrypted)
+            val bytes = Base64.decode(clear, Base64.DEFAULT)
+            check(SyncBackend.digestBytes(bytes) == hash) {
+                "Plugin archive integrity verification failed for " + hash
+            }
+        }
+    }
+
+    fun save(snapshot: GitHubSnapshot, expectedHead: String?,
+             binaryFiles: Map<String, ByteArray> = emptyMap()): String {
         checkPrivateRepository()
         val actualHead = refSha()
         require(actualHead == expectedHead) { "Backup changed on another device; refresh first" }
@@ -218,15 +249,40 @@ internal class GitHubSyncTransport(private val config: GitHubSyncConfig) {
         val parent = actualHead ?: request(api("/git/ref/heads/" +
             repoInfo.getString("default_branch"))).getJSONObject("object").getString("sha")
         val baseTree = commitTree(parent)
+        val contents = request(api("/git/trees/" + baseTree + "?recursive=1"))
+        check(!contents.optBoolean("truncated")) { "Cannot verify complete backup tree" }
+        val existing = mutableSetOf<String>()
+        val old = contents.getJSONArray("tree")
+        for (i in 0 until old.length()) existing.add(old.getJSONObject(i).optString("path"))
+        val required = PluginSync.decode(snapshot.plugins).items.values
+            .map { it.optString("sha") }.toSet()
+        check(required.all { it.matches(Regex("[a-f0-9]{64}")) }) {
+            "Refusing a backup with unverified plugin archives"
+        }
+        val entries = JSONArray()
+        val binaryCipher = if (binaryFiles.isNotEmpty()) cipher() else null
+        for (hash in required) {
+            val path = "synccs-binaries/" + hash + ".enc.json"
+            if (path in existing) continue
+            val binary = binaryFiles[hash] ?: error("Plugin archive missing for SHA " + hash)
+            check(binary.size in 1..(20 * 1024 * 1024))
+            check(SyncBackend.digestBytes(binary) == hash)
+            val encrypted = binaryCipher!!.encrypt("github-sync-binary-" + hash,
+                Base64.encodeToString(binary, Base64.NO_WRAP))
+            val binaryJson = JSONObject().put("format", 1).put("encrypted", encrypted).toString()
+            val fileBlob = request(api("/git/blobs"), "POST", JSONObject()
+                .put("content", binaryJson).put("encoding", "utf-8")).getString("sha")
+            entries.put(JSONObject().put("path", path).put("mode", "100644")
+                .put("type", "blob").put("sha", fileBlob))
+        }
         val content = encode(snapshot)
         require(content.toByteArray(Charsets.UTF_8).size < 20 * 1024 * 1024)
         val blob = request(api("/git/blobs"), "POST",
             JSONObject().put("content", content).put("encoding", "utf-8")).getString("sha")
+        entries.put(JSONObject().put("path", "synccs-backup.enc.json")
+            .put("mode", "100644").put("type", "blob").put("sha", blob))
         val updatedTree = request(api("/git/trees"), "POST", JSONObject()
-            .put("base_tree", baseTree)
-            .put("tree", JSONArray().put(JSONObject()
-                .put("path", "synccs-backup.enc.json").put("mode", "100644")
-                .put("type", "blob").put("sha", blob)))).getString("sha")
+            .put("base_tree", baseTree).put("tree", entries)).getString("sha")
         val newCommit = request(api("/git/commits"), "POST", JSONObject()
             .put("message", "SyncCS encrypted checkpoint")
             .put("tree", updatedTree).put("parents", JSONArray().put(parent))).getString("sha")

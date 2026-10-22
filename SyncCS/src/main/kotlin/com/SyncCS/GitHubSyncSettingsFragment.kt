@@ -86,6 +86,7 @@ class GitHubSyncSettingsFragment : DialogFragment() {
             confirm("Replace local settings?",
                 "CloudStream profiles and backed-up preferences will be restored. " +
                     "An encrypted local rollback checkpoint is saved FIRST. " +
+                    "Every referenced encrypted plugin archive is hash-checked first. " +
                     "Installed plugin binaries are not modified in this safety build.") {
                 GitHubSyncEngine.restoreExisting(requireContext())
             }

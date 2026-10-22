@@ -37,3 +37,7 @@ Initial interrupted upload; initial second device with pre-existing catalogs; in
 ## Historical recovery
 
 Enter a verified 40-character Git commit SHA from the dedicated backup branch. The engine reads and authenticates the old encrypted snapshot, creates a new Git commit with a NEW generation, then applies it locally. Old devices cannot publish again until explicit reinitialization. This is not equivalent to restoring the contaminated Supabase database.
+
+## Plugin file safety
+
+Initial backups now refuse any installed extension with a missing SHA-256 or missing binary. All referenced plugin binary files are stored as individually encrypted Git blobs under content-addressed names in the same atomic Git commit as the settings snapshot. Restores and historical rollbacks preflight-decrypt and hash-verify every referenced .cs3 archive before touching profile preferences. Actual plugin installation/removal is deliberately still disabled pending host-specific transactional tests.
