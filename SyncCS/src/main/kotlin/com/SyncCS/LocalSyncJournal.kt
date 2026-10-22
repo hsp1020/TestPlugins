@@ -34,6 +34,17 @@ internal object LocalSyncJournal {
         "profile_retired_slots_v2"
     )
 
+    // OAuth credentials and the local encryption key are *session state*, not
+    // rollback data. A stale transaction must never replace a recently renewed
+    // GitHub access token or restore a previously rejected credential.
+    private val liveSessionKeys = setOf(
+        "sync_transport", "github_token", "github_login",
+        "github_account_id", "github_client_id", "secret"
+    )
+
+    internal fun canRestoreJournalKey(key: String): Boolean =
+        key in transactionKeys && key !in liveSessionKeys
+
     private fun privateMetadata(context: Context): JSONObject {
         val preferences = SyncConfiguration(context).preferences
         val output = JSONObject()
@@ -58,9 +69,12 @@ internal object LocalSyncJournal {
 
     private fun restorePrivateMetadata(context: Context, snapshot: JSONObject) {
         val editor = SyncConfiguration(context).preferences.edit()
-        for (key in transactionKeys) editor.remove(key)
+        for (key in transactionKeys) {
+            if (canRestoreJournalKey(key)) editor.remove(key)
+        }
         for (key in snapshot.keys()) {
             check(key in transactionKeys)
+            if (!canRestoreJournalKey(key)) continue
             val item = snapshot.getJSONObject(key)
             when (item.getString("type")) {
                 "string" -> editor.putString(key, item.getString("value"))
@@ -77,6 +91,9 @@ internal object LocalSyncJournal {
             }
         }
         check(editor.commit()) { "Could not restore SyncCS sync baselines." }
+        SyncTrace.info("journal-auth-preserved",
+            "sessionPresent=${SyncConfiguration(context).active()} " +
+                "credentialsNotRestored=true")
     }
 
     private val addonBackups = listOf("native_backup_stremioc", "native_backup_streamplay")

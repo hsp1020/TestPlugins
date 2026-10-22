@@ -79,6 +79,9 @@ internal object SyncCoordinator {
         if (!config.active()) {
             return@withLock pause("not-authenticated", "Sign in to enable sync")
         }
+        if (SyncAuthGuard.needsReauthentication(config)) {
+            return@withLock pause("github-credential-rejected", SyncAuthGuard.MESSAGE)
+        }
         if (config.preferences.getBoolean("github_recovery_in_progress", false)) {
             return@withLock pause("github-restore-in-progress",
                 "Sync paused: a GitHub backup revision is being restored.")
@@ -109,12 +112,21 @@ internal object SyncCoordinator {
                         PluginSync.matches(PluginSync.decode(PluginInventory.snapshot(context)),
                             PluginSync.decode(savedPlugins)))
                 if (localRoster == savedRoster && samePlugins) {
-                    val remoteRevision = runCatching {
+                    val headAttempt = runCatching {
                         GithubSyncAdapter(context).remoteHead()
-                    }.onFailure {
+                    }
+                    val headError = headAttempt.exceptionOrNull()
+                    if (headError is GithubBackupStore.ApiException &&
+                        headError.code == 401) {
+                        SyncAuthGuard.reject(config, 401)
+                        return@withLock pause("github-401-head-check",
+                            SyncAuthGuard.MESSAGE)
+                    }
+                    if (headError != null) {
                         SyncTrace.info("head-check-error",
-                            "type=${it.javaClass.simpleName}")
-                    }.getOrNull()
+                            "type=${headError.javaClass.simpleName}")
+                    }
+                    val remoteRevision = headAttempt.getOrNull()
                     if (remoteRevision != null) {
                         SyncTrace.info("head-check", "known=${known.take(12)} " +
                             "remote=${remoteRevision.take(12)} localDirty=false")
@@ -770,6 +782,15 @@ internal object SyncCoordinator {
             val rollbackError = undoIfNeeded()
             SyncTrace.info("failure", "step=$stage type=${error.javaClass.simpleName} " +
                 "rollback=${rollbackError == null}")
+            if (error is GithubBackupStore.ApiException && error.code == 401) {
+                SyncAuthGuard.reject(config, 401)
+                lastStatus = SyncAuthGuard.MESSAGE +
+                    (rollbackError?.let { "; $it" } ?: "")
+                SyncTrace.info("sync-auth-paused",
+                    "phase=$stage reason=github-http-401 " +
+                        "rollbackSucceeded=${rollbackError == null}")
+                return lastStatus
+            }
             val detail = (error.message ?: error.javaClass.simpleName).take(160)
             val message = if (error is IOException && isConflict(error)) {
                 "Sync conflict: " + detail

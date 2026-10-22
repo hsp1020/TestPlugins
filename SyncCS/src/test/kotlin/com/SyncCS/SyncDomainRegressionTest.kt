@@ -242,4 +242,27 @@ class SyncDomainRegressionTest {
     }
 
 
+    @Test fun rejectedCredentialIsOnlyBlockedUntilNewEncryptedTokenArrives() {
+        val old = "encrypted-session-before-reauth"
+        val renewed = "encrypted-session-after-reauth"
+        val rejected = SyncAuthGuard.tokenHash(old)
+        assertNotNull(rejected)
+        assertTrue(SyncAuthGuard.matchesRejectedToken(old, rejected))
+        assertFalse(SyncAuthGuard.matchesRejectedToken(renewed, rejected))
+        assertFalse(SyncAuthGuard.matchesRejectedToken(null, rejected))
+        assertFalse(SyncAuthGuard.matchesRejectedToken(old, null))
+    }
+
+    @Test fun interruptedSyncMustNotRollbackNewGithubCredentials() {
+        for (key in listOf("github_token", "github_login", "github_account_id",
+                "github_client_id", "sync_transport", "secret")) {
+            assertFalse(LocalSyncJournal.canRestoreJournalKey(key))
+        }
+        for (key in listOf("base", "remote_cursor", "profile_baseline",
+                "plugin_baseline", "remote_versions", "pending_plugins")) {
+            assertTrue(LocalSyncJournal.canRestoreJournalKey(key))
+        }
+    }
+
+
 }

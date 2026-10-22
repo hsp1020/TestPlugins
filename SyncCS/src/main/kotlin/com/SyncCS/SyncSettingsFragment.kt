@@ -285,7 +285,9 @@ class SyncSettingsFragment : DialogFragment() {
     }
 
     private fun statusText(config: SyncConfiguration): String {
-        val status = if (config.preferences.getBoolean("github_recovery_in_progress", false)) {
+        val status = if (SyncAuthGuard.needsReauthentication(config)) {
+            "GitHub authorization expired or revoked (HTTP 401). Open Sync account to reauthorize."
+        } else if (config.preferences.getBoolean("github_recovery_in_progress", false)) {
             "Backup revision recovery in progress"
         } else if (config.active()) SyncCoordinator.lastStatus else "Not connected"
         return "$status  ·  ${config.deviceName}"
@@ -790,6 +792,7 @@ class SyncSettingsFragment : DialogFragment() {
                                 }
                             }
                             check(edit.commit()) { "Could not store GitHub session." }
+                            SyncAuthGuard.clearAfterLogin(config)
                         }
                         val progress = showSyncProgress()
                         try {

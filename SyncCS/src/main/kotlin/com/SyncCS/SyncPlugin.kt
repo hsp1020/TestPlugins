@@ -67,6 +67,7 @@ class SyncPlugin : Plugin() {
     private var worker: Job? = null
     private var rerunRequested = false
     @Volatile private var lastAutomaticFailureAt = 0L
+    @Volatile private var authPausedLogged = false
     private var periodic: Job? = null
     private var callback: Application.ActivityLifecycleCallbacks? = null
     @Volatile private var activityCount = 0
@@ -177,7 +178,16 @@ class SyncPlugin : Plugin() {
     private fun queueSync(reason: String) {
         val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
         if (!isOwner(context) || !config(context).active()) return
-         synchronized(workerGuard) {
+        if (SyncAuthGuard.needsReauthentication(config(context))) {
+            if (!authPausedLogged) {
+                authPausedLogged = true
+                SyncTrace.info("auth-queue-suppressed",
+                    "reason=github-401 action=reauthorize; pending changes retained")
+            }
+            return
+        }
+        authPausedLogged = false
+        synchronized(workerGuard) {
             rerunRequested = true
             if (worker?.isActive == true) {
                 SyncTrace.info("coalesce", "reason=$reason pending=1")
@@ -236,6 +246,14 @@ class SyncPlugin : Plugin() {
     private fun request(delayMs: Long, reason: String) {
         val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
         if (!ready || !isOwner(context) || !config(context).active()) return
+        if (SyncAuthGuard.needsReauthentication(config(context))) {
+            if (!authPausedLogged) {
+                authPausedLogged = true
+                SyncTrace.info("auth-trigger-suppressed",
+                    "reason=github-401 action=reauthorize; pending changes retained")
+            }
+            return
+        }
         SyncTrace.info("trigger", "reason=$reason delayMs=$delayMs")
         trigger?.cancel()
         trigger = scope.launch {
@@ -307,7 +325,8 @@ class SyncPlugin : Plugin() {
                 // A changed HEAD (or local edits) triggers a complete verified merge.
                 delay(20 * 1000L)
                 if (!isOwner(context)) break
-                if (foreground && ready && config(context).active()) {
+                if (foreground && ready && config(context).active() &&
+                    !SyncAuthGuard.needsReauthentication(config(context))) {
                     SyncTrace.info("trigger", "reason=remote-head-poll-20s")
                     queueSync("remote-head-poll-20s")
                 }
@@ -319,6 +338,11 @@ class SyncPlugin : Plugin() {
             "classloader=${javaClass.classLoader?.javaClass?.simpleName}")
         SyncTrace.memory("plugin-load")
         config(context).preferences.edit().putString("active_instance", owner).commit()
+        val session = config(context)
+        SyncTrace.info("github-credential-state",
+            "present=${session.preferences.contains("github_token")} " +
+                "tokenId=${SyncAuthGuard.tokenHash(session.preferences.getString("github_token", null))?.take(12) ?: "missing"} " +
+                "rejected=${SyncAuthGuard.needsReauthentication(session)}")
         ready = SyncRuntime.refreshLoadedState()
         ProfileIdentity.observe(context)
         MainActivity.bookmarksUpdatedEvent += bookmarks
