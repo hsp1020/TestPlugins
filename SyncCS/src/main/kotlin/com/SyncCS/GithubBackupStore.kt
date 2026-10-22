@@ -184,6 +184,22 @@ internal class GithubBackupStore(
     }
 
 
+    private fun nestedDeletions(previous: Map<String, String>,
+                                target: Map<String, String>): Set<String> {
+        val removed = linkedSetOf<String>()
+        if (previous["x/plugins"] != target["x/plugins"]) {
+            val before = PluginSync.decode(previous["x/plugins"])
+            val after = PluginSync.decode(target["x/plugins"])
+            for (id in before.items.keys - after.items.keys) removed.add("x/plugins/$id")
+        }
+        if (previous["x/profiles"] != target["x/profiles"]) {
+            val before = ProfileSync.decode(previous["x/profiles"])
+            val after = ProfileSync.decode(target["x/profiles"])
+            for (id in before.items.keys - after.items.keys) removed.add("x/profiles/$id")
+        }
+        return removed
+    }
+
     private fun auditBlob(existing: Map<String, String>, cipher: SyncCipher,
                           changed: List<String>, deleted: Set<String>): ByteArray {
         val previous = existing["synccs/audit.enc"]?.let { hash ->
@@ -316,6 +332,7 @@ internal class GithubBackupStore(
         }
         val deleted = previous.values.keys - target.keys
         SyncSafety.validateDeletes(deleted, explicitDeletes, previous.values.size)
+        val logicalDeletions = deleted + nestedDeletions(previous.values, target)
         val changed = (previous.values.keys + target.keys)
             .filter { previous.values[it] != target[it] }
         if (changed.isEmpty() && archives.isEmpty()) return previous.revision
@@ -333,7 +350,7 @@ internal class GithubBackupStore(
         }
         val (_, existing) = index(previous.revision)
         changes.putAll(archiveChanges(existing, archives))
-        changes["synccs/audit.enc"] = auditBlob(existing, cipher, changed, deleted)
+        changes["synccs/audit.enc"] = auditBlob(existing, cipher, changed, logicalDeletions)
         return commit(previous.revision, previous.tree, previous.branch, changes)
     }
 

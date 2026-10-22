@@ -152,13 +152,6 @@ internal object LocalSyncJournal {
         }
         for (key in now.keys - backup.keys) restore[key] = null
         SyncData.apply(context, restore)
-        // Native import backups must not be overwritten by the plugin-settings
-        // refreshNativeBackup step; reapply original DataStore values afterward.
-        val native = restore.filterKeys {
-            it == "d/native_backup_stremioc" ||
-                it == "d/native_backup_streamplay"
-        }
-        if (native.isNotEmpty()) SyncData.apply(context, native)
 
         val originalManifest = metadata.getString("plugins")
         val source = object : SyncStorage by storage {
@@ -173,6 +166,11 @@ internal object LocalSyncJournal {
         }
         val errors = PluginInventory.restore(context, activity, source, originalManifest)
         check(errors.isEmpty()) { "Plugin rollback incomplete: " + errors.joinToString(" | ") }
+        // Restore the originally saved native backup AFTER extension reload,
+        // which can replay or refresh settings during plugin initialization.
+        val nativeKeys = setOf("d/native_backup_stremioc", "d/native_backup_streamplay")
+        val nativeBackup = nativeKeys.associateWith { backup[it] }
+        SyncData.apply(context, nativeBackup)
         val restored = SyncData.snapshot(context)
         check(backup.all { (key, value) -> restored[key] == value }) {
             "Local settings verification failed after rollback."

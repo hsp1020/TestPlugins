@@ -277,8 +277,16 @@ class SyncSettingsFragment : DialogFragment() {
                 .setTitle("Disconnect SyncCS")
                 .setMessage("Disconnect this device? Cloud backups and data on other devices will be preserved.")
                 .setPositiveButton("Disconnect") { _, _ ->
-                    config.clearAccount()
-                    statusLabel?.text = statusText(config)
+                    if (LocalSyncJournal.pending(context)) {
+                        AlertDialog.Builder(context)
+                            .setTitle("Local rollback must finish")
+                            .setMessage("A previous restore did not complete. Open CloudStream " +
+                                "in the foreground and complete recovery before disconnecting.")
+                            .setPositiveButton("Close", null).show()
+                    } else {
+                        config.clearAccount()
+                        statusLabel?.text = statusText(config)
+                    }
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
@@ -300,7 +308,9 @@ class SyncSettingsFragment : DialogFragment() {
     }
 
     private fun statusText(config: SyncConfiguration): String {
-        val status = if (config.active()) SyncCoordinator.lastStatus else "Not connected"
+        val status = if (config.preferences.getBoolean("github_recovery_in_progress", false)) {
+            "Backup revision recovery in progress"
+        } else if (config.active()) SyncCoordinator.lastStatus else "Not connected"
         return "$status  ·  ${config.deviceName}"
     }
 
@@ -438,6 +448,12 @@ class SyncSettingsFragment : DialogFragment() {
 
     private fun showBackupHistory() {
         val host = requireActivity()
+        if (LocalSyncJournal.pending(host)) {
+            AlertDialog.Builder(host).setTitle("Local rollback pending")
+                .setMessage("Complete the interrupted local recovery before changing Git history.")
+                .setPositiveButton("Close", null).show()
+            return
+        }
         val config = SyncConfiguration(host)
         if (!config.active()) {
             AlertDialog.Builder(host).setTitle("Sign in required")
@@ -540,6 +556,12 @@ class SyncSettingsFragment : DialogFragment() {
     private fun showAccountDialog() {
         if (accountDialog?.isShowing == true) return
         val context = requireContext()
+        if (LocalSyncJournal.pending(context)) {
+            AlertDialog.Builder(context).setTitle("Local rollback pending")
+                .setMessage("Finish recovering the previous local restore before linking an account.")
+                .setPositiveButton("Close", null).show()
+            return
+        }
         val config = SyncConfiguration(context)
         val body = column(context)
         body.addView(secondary(context,
