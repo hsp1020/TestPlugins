@@ -114,7 +114,9 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
 
     private fun checkGeneration(snapshot: GithubBackupStore.Snapshot) {
         val expected = preferences.getInt("github_generation", 0)
-        if (!SyncSafety.acceptGeneration(expected, snapshot.generation)) {
+        val enrolled = preferences.contains("github_base_revision") ||
+            preferences.contains("base")
+        if (!SyncSafety.acceptGeneration(expected, snapshot.generation, enrolled)) {
             throw IOException("Backup recovery generation changed. This device must be re-linked " +
                 "before uploading changes; no local data was published.")
         }
