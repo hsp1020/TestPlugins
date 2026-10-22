@@ -209,6 +209,12 @@ internal class GithubBackupStore(
             encrypted, canonical)
     }
 
+    /** Cheap Git HEAD check, without fetching or decrypting any backup shard. */
+    fun remoteHead(): String {
+        val branch = ensurePrivateRepository()
+        return revision(branch)
+    }
+
     fun current(cipher: SyncCipher): Snapshot? {
         val branch = ensurePrivateRepository()
         return readAt(revision(branch), branch, cipher)
@@ -393,8 +399,8 @@ internal class GithubBackupStore(
         previous: Snapshot, cipher: SyncCipher, target: Map<String, String>,
         explicitDeletes: Set<String>, archives: Map<String, ByteArray> = emptyMap()
     ): String {
-        check(revision(previous.branch) == previous.revision) {
-            "Sync conflict: remote revision changed."
+        if (revision(previous.branch) != previous.revision) {
+            throw IOException("Sync conflict: remote revision changed.")
         }
         val deleted = previous.values.keys - target.keys
         SyncSafety.validateDeletes(deleted, explicitDeletes, previous.values.size)

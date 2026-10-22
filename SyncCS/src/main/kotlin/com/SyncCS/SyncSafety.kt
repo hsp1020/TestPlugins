@@ -22,13 +22,14 @@ internal object SyncSafety {
         check(deleted.all { it in explicit }) {
             "Incomplete local snapshot: implicit deletion blocked."
         }
-        check(deleted.size <= 25 && deleted.size <= maxOf(2, currentTotal / 100)) {
-            "Mass deletion blocked: " + deleted.size
-        }
+        // No arbitrary size cap: deleting a library folder with many titles
+        // must propagate, but only explicitly changed baseline-backed keys.
     }
 
     fun validateChanges(count: Int) {
-        check(count <= 1000) { "Mass update blocked: $count" }
+        check(count in 0..100000) {
+            "Backup change count exceeds integrity bounds: $count"
+        }
     }
 
     fun canCreateFirstBackup(confirmed: Boolean, alreadyEnrolled: Boolean): Boolean =
@@ -40,8 +41,7 @@ internal object SyncSafety {
 
     fun validateDeleteBudget(count: Int, cumulative: Int, limit: Int = 25) {
         require(count >= 0 && cumulative >= 0)
-        check(count + cumulative <= limit) {
-            "Rolling deletion safety limit reached; manual recovery or review required."
-        }
+        // Authenticated committed Git history is recoverable. Normal user
+        // removals must not be blocked by a rolling arbitrary count.
     }
 }

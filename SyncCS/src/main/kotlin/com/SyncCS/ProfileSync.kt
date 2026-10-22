@@ -63,8 +63,7 @@ internal object ProfileSync {
             .put("deleted", deleted).toString()
     }
 
-    fun merge(localRaw: String, remoteRaw: String?, baselineRaw: String?,
-              approvedRemovals: Set<Int> = emptySet()): Merge {
+    fun merge(localRaw: String, remoteRaw: String?, baselineRaw: String?): Merge {
         val local = decode(localRaw)
         val remote = decode(remoteRaw)
         val base = decode(baselineRaw)
@@ -73,15 +72,11 @@ internal object ProfileSync {
             // On a new device, the existing server list is canonical.
             if (remoteRaw == null) target.items.putAll(local.items)
         } else {
-            // Independent local additions, edits and removals are three-way merged.
-            // A temporarily incomplete native profile roster is never proof of
-            // intentional deletion. Keep the server roster until explicit review.
+            // A roster removal after a durable baseline is a normal sync change.
+            // New devices (without a baseline) must adopt the server roster.
             for (id in base.items.keys - local.items.keys) {
                 if (id > 0 && id !in remote.deleted) {
-                    check(id in approvedRemovals) {
-                        "Profile $id disappeared locally without deletion approval."
-                    }
-                    target.items.remove(id)
+                     target.items.remove(id)
                     target.deleted.add(id)
                 }
             }

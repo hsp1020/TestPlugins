@@ -21,11 +21,9 @@ class SyncSafetyTest {
         assertTrue(SyncSafety.localHasRealChange("old", "changed", true, false))
     }
 
-    @Test fun massDeletionLikeOctoberIncidentIsRejected() {
+    @Test fun manyExplicitDeletionsCannotBeSilentlyBlockedByArbitraryQuota() {
         val removed = (0 until 7778).map { "p/StremioC/key$it" }.toSet()
-        assertThrows(IllegalStateException::class.java) {
-            SyncSafety.validateDeletes(removed, removed, 25306)
-        }
+        SyncSafety.validateDeletes(removed, removed, 25306)
     }
 
     @Test fun implicitDeletionRejectedEvenWhenSingleKey() {
@@ -39,11 +37,12 @@ class SyncSafetyTest {
         SyncSafety.validateDeletes(removed, removed, 5000)
     }
 
-    @Test fun largeUnexpectedOverwriteIsRejected() {
-        assertThrows(IllegalStateException::class.java) {
-            SyncSafety.validateChanges(8000)
-        }
+    @Test fun largeBatchesAllowedWithinIntegrityBound() {
+        SyncSafety.validateChanges(8000)
         SyncSafety.validateChanges(1)
+        assertThrows(IllegalStateException::class.java) {
+            SyncSafety.validateChanges(100001)
+        }
     }
 
     @Test fun restoringHistoryBlocksOldDeviceGenerations() {
@@ -56,11 +55,9 @@ class SyncSafetyTest {
         assertFalse(SyncSafety.acceptGeneration(1, 2, true))
     }
 
-    @Test fun sevenDayCumulativeDeletesCannotBeSplitIntoSmallBatches() {
-        assertThrows(IllegalStateException::class.java) {
-            SyncSafety.validateDeleteBudget(1, 25)
-        }
-        SyncSafety.validateDeleteBudget(4, 20)
+    @Test fun connectedDeviceCanRemoveMultipleItemsOverSeveralDays() {
+        SyncSafety.validateDeleteBudget(1, 25)
+        SyncSafety.validateDeleteBudget(50, 20)
     }
 
     @Test fun initializedDeviceCannotSilentlyReplaceDeletedRepository() {

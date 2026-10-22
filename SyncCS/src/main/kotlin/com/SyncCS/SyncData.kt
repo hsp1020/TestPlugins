@@ -149,10 +149,11 @@ internal object SyncData {
         "crashlytics", "androidx", "gms", "advertis", "encrypted"
     )
     private fun dataAllowed(key: String): Boolean {
-        // UUID marker belongs to SyncCS local identity state. It must be
-        // deleted with CloudStream's profile slot but never uploaded as a
-        // normal setting or replayed into another profile.
-        if (key.endsWith("/synccs_profile_uuid")) return false
+        // UUID marker and native import snapshots are device-side derived data.
+        if (key.endsWith("/synccs_profile_uuid") ||
+            key.endsWith("/native_backup_stremioc") ||
+            key.endsWith("/native_backup_streamplay") ||
+            key == "native_backup_stremioc" || key == "native_backup_streamplay") return false
         if (key in globallyShared || key in cineStreamDiscoveredKeys ||
             (cineStreamDomainKey(key) && cineStreamKeyAllowed(key))) return true
         val slash = key.indexOf('/')
@@ -172,6 +173,11 @@ internal object SyncData {
     }
 
     private fun pluginPreferenceAllowed(file: String, key: String): Boolean {
+        // Native import bookkeeping is recomputed by refreshNativeBackup after
+        // a settings restore. Synchronizing it causes A/B restore ping-pong.
+        if (key in setOf("stremio_c_restore_complete",
+                "stremio_c_last_applied_backup_hash", "streamplay_restore_complete",
+                "streamplay_last_applied_backup_hash")) return false
         // StreamPlay telemetry depends on the current device and isn't a setting.
         if (file.equals("StreamPlay", true) &&
             (key == "STREAMPLAY_TELEMETRY_V2" || key.startsWith("provider_stats_"))) return false

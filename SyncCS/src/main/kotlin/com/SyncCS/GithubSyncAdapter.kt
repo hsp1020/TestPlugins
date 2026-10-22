@@ -42,12 +42,18 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
     var createdFreshBackup: Boolean = false
         private set
 
+    fun remoteHead(): String = github.remoteHead()
+
     fun verifiedRevision(): Pair<String, Int> {
         val snapshot = latest ?: error("GitHub backup not loaded")
         return snapshot.revision to snapshot.generation
     }
     private val archives = linkedMapOf<String, ByteArray>()
     private val stagedChanges = linkedMapOf<String, String?>()
+    private val verifiedDeletionPaths = linkedSetOf<String>()
+    fun allowVerifiedDeletions(paths: Set<String>) {
+        verifiedDeletionPaths.addAll(paths)
+    }
     private var cachedCipher: SyncCipher? = null
 
     override fun userId() = accountId
@@ -144,8 +150,14 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         // Verify that any desired plugin missing locally can be fetched BEFORE
         // ProfileSync applies profile changes or installation removes binaries.
         val localPluginIds = PluginSync.decode(PluginInventory.snapshot(context)).items
+        val previouslySyncedPlugins = PluginSync.decode(
+            preferences.getString("plugin_baseline", null)).items
+        val removedLocally = previouslySyncedPlugins.keys - localPluginIds.keys
         val remotePluginIds = PluginSync.decode(snapshot.values["x/plugins"]).items
         for ((id, plugin) in remotePluginIds) {
+            // A verified local removal will be published as a tombstone; do
+            // not download that removed package just to stage the deletion.
+            if (id in removedLocally) continue
             val sha = plugin.optString("sha")
             if (localPluginIds[id]?.optString("sha") == sha &&
                 sha.matches(Regex("[0-9a-f]{64}"))) continue
@@ -181,11 +193,22 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
             if (value == null) target.remove(key) else target[key] = value
         }
         val deletions = stagedChanges.filterValues { it == null }.keys
-        // No deletion may pass solely because a SharedPreferences listener fired.
-        val allowed = SyncDeletionGate.approved(config, deletions, current.revision)
-        check(deletions.all { it in allowed }) {
-            "Deletion approval missing; GitHub snapshot remains unchanged."
+        val nested = linkedSetOf<String>()
+        if (target["x/plugins"] != current.values["x/plugins"]) {
+            val before = PluginSync.decode(current.values["x/plugins"])
+            val after = PluginSync.decode(target["x/plugins"])
+            nested.addAll((before.items.keys - after.items.keys).map { "x/plugins/$it" })
         }
+        if (target["x/profiles"] != current.values["x/profiles"]) {
+            val before = ProfileSync.decode(current.values["x/profiles"])
+            val after = ProfileSync.decode(target["x/profiles"])
+            nested.addAll((before.items.keys - after.items.keys).map { "x/profiles/$it" })
+        }
+        check((deletions + nested).all { it in verifiedDeletionPaths }) {
+            "Unrecognized deletion outside an established local baseline."
+        }
+        val allowed = deletions + nested
+        SyncTrace.keys("github-delete-authorized", allowed)
         SyncTrace.info("github-publish", "base=${current.revision.take(12)} " +
             "writes=${stagedChanges.size} deletions=${deletions.size} archives=${archives.size}")
         github.update(current, cipher, target, allowed, archives)
@@ -194,6 +217,7 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         SyncTrace.info("github-publish-verified", "revision=${latest!!.revision.take(12)}")
         stagedChanges.clear()
         archives.clear()
+        verifiedDeletionPaths.clear()
     }
 
     override fun getEntry(key: String): RemoteEntry? {

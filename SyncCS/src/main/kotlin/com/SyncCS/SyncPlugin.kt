@@ -62,6 +62,9 @@ class SyncPlugin : Plugin() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val owner = UUID.randomUUID().toString()
     private var trigger: Job? = null
+    private val workerGuard = Any()
+    private var worker: Job? = null
+    private var rerunRequested = false
     private var periodic: Job? = null
     private var callback: Application.ActivityLifecycleCallbacks? = null
     private var activityCount = 0
@@ -107,12 +110,7 @@ class SyncPlugin : Plugin() {
         watchPreferences()
         val context = com.lagradost.cloudstream3.CloudStreamApp.context
         if (context != null && LocalSyncJournal.pending(context)) {
-            scope.launch {
-                val active = currentActivity?.get()?.takeIf {
-                    !it.isFinishing && !it.isDestroyed
-                }
-                SyncCoordinator.synchronize(context, active)
-            }
+            queueSync("unfinished-local-journal")
         } else request(4000, "plugins-loaded")
         Unit
     }
@@ -129,10 +127,7 @@ class SyncPlugin : Plugin() {
     private fun isOwner(context: Context): Boolean =
         config(context).preferences.getString("active_instance", "") == owner
 
-    private fun resumeSyncDue(): Boolean =
-        System.currentTimeMillis() - SyncCoordinator.lastSuccessfulSyncAt > 120000L
-
-    private fun watchPreferences() {
+     private fun watchPreferences() {
         val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
         val prefs = with(DataStore) { context.getSharedPrefs() }
         observe("core", prefs)
@@ -153,6 +148,42 @@ class SyncPlugin : Plugin() {
         observed[name] = pref
         pref.registerOnSharedPreferenceChangeListener(observedListener)
     }
+    private fun queueSync(reason: String) {
+        val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
+        if (!isOwner(context) || !config(context).active()) return
+        synchronized(workerGuard) {
+            rerunRequested = true
+            if (worker?.isActive == true) {
+                SyncTrace.info("coalesce", "reason=$reason pending=1")
+                return
+            }
+            worker = scope.launch {
+                while (true) {
+                    val next = synchronized(workerGuard) {
+                        if (rerunRequested) {
+                            rerunRequested = false
+                            true
+                        } else {
+                            worker = null
+                            false
+                        }
+                    }
+                    if (!next) break
+                    if (!isOwner(context) || !config(context).active()) {
+                        synchronized(workerGuard) { worker = null }
+                        break
+                    }
+                    val active = currentActivity?.get()?.takeIf {
+                        !it.isFinishing && !it.isDestroyed
+                    }
+                    SyncTrace.info("worker-dispatch", "reason=$reason")
+                    SyncTrace.memory("scheduled-sync")
+                    SyncCoordinator.synchronize(context, active)
+                }
+            }
+        }
+    }
+
     private fun request(delayMs: Long, reason: String) {
         val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
         if (!ready || !isOwner(context) || !config(context).active()) return
@@ -161,12 +192,9 @@ class SyncPlugin : Plugin() {
         trigger = scope.launch {
             delay(delayMs)
             if (isOwner(context)) {
-                // Debounce only the pending timer, never an in-flight sync.
-                scope.launch {
-                    val active = currentActivity?.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
-                    SyncTrace.memory("scheduled-sync")
-                    SyncCoordinator.synchronize(context, active)
-                }
+                // Debounce only the pending timer; collapse in-flight events
+                // into one follow-up pass without discarding any new changes.
+                queueSync(reason)
             }
         }
     }
@@ -178,7 +206,7 @@ class SyncPlugin : Plugin() {
                 if (!isOwner(context)) return
                 activityCount += 1
                 foreground = true
-                if (resumeSyncDue()) request(2500, "activity-started")
+                // onResumed performs the single HEAD check for this transition.
             }
             override fun onActivityResumed(activity: Activity) {
                 currentActivity = WeakReference(activity)
@@ -186,12 +214,11 @@ class SyncPlugin : Plugin() {
                 // An interrupted original restore may have disconnected the
                 // account. Always finish its local journal before normal sync.
                 if (LocalSyncJournal.pending(context)) {
-                    scope.launch { SyncCoordinator.synchronize(context, activity) }
+                    queueSync("local-journal-on-resume")
                     return
                 }
                 if (!config(context).active()) return
-                // Replace the onStarted timer rather than scheduling a second sync.
-                if (resumeSyncDue()) request(0, "activity-resumed")
+                request(750, "activity-resumed")
             }
             override fun onActivityPaused(activity: Activity) {
                 request(1500, "activity-paused")
@@ -212,18 +239,19 @@ class SyncPlugin : Plugin() {
         app.registerActivityLifecycleCallbacks(callback!!)
         periodic = scope.launch {
             while (isActive) {
-                delay(15 * 60 * 1000L)
+                // Poll only the remote Git revision during steady state.
+                // A changed HEAD (or local edits) triggers a complete verified merge.
+                delay(20 * 1000L)
                 if (!isOwner(context)) break
                 if (foreground && ready && config(context).active()) {
-                    val active = currentActivity?.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
-                    SyncTrace.info("trigger", "reason=periodic-15m")
-                    SyncCoordinator.synchronize(context, active)
+                    SyncTrace.info("trigger", "reason=remote-head-poll-20s")
+                    queueSync("remote-head-poll-20s")
                 }
             }
         }
     }
     override fun load(context: Context) {
-        SyncTrace.info("plugin-loaded", "version=P0P2-isolated-delete-20261022 " +
+        SyncTrace.info("plugin-loaded", "version=P0P2-auto-sync-headpoll-20261022 " +
             "classloader=${javaClass.classLoader?.javaClass?.simpleName}")
         SyncTrace.memory("plugin-load")
         config(context).preferences.edit().putString("active_instance", owner).commit()

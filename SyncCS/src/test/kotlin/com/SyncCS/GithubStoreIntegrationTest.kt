@@ -187,13 +187,13 @@ class GithubStoreIntegrationTest {
         val oldA = a.current(c)!!
         val oldB = b.current(c)!!
         a.update(oldA, c, oldA.values + ("d/0/video_pos_dur/1" to "120"), emptySet())
-        assertThrows(IllegalStateException::class.java) {
+        assertThrows(IOException::class.java) {
             b.update(oldB, c, oldB.values + ("d/0/video_pos_dur/1" to "90"), emptySet())
         }
         assertEquals("120", b.current(c)!!.values["d/0/video_pos_dur/1"])
     }
 
-    @Test fun humanAuthorizedDeletionAndRecoveryPreserveHistory() {
+    @Test fun verifiedDeletionAndRecoveryPreserveHistory() {
         val api = FakeGit()
         val a = store(api, "A")
         val c = cipher()
@@ -213,6 +213,43 @@ class GithubStoreIntegrationTest {
         assertEquals(initial, restored.values)
         assertEquals(before.generation + 1, restored.generation)
         assertFalse(SyncSafety.acceptGeneration(before.generation, restored.generation, true))
+    }
+
+    @Test fun eightLibraryDeletionsFromBReachAWithoutManualReview() {
+        val api = FakeGit()
+        val a = store(api, "A")
+        val b = store(api, "B")
+        val c = cipher()
+        val original = (0 until 13).associate { i ->
+            "u/11111111-1111-4111-8111-111111111111/result_watch_state_data/$i" to "item-$i"
+        }
+        a.initialize(c, original)
+        val onB = b.current(c)!!
+        val removed = original.keys.take(8).toSet()
+        b.update(onB, c, original.filterKeys { it !in removed }, removed)
+        val onA = a.current(c)!!
+        assertEquals(5, onA.values.size)
+        assertTrue(removed.none(onA.values::containsKey))
+    }
+
+    @Test fun retryAfterConcurrentGitCommitPreservesIndependentDeviceChanges() {
+        val api = FakeGit()
+        val a = store(api, "A")
+        val b = store(api, "B")
+        val c = cipher()
+        a.initialize(c, mapOf("d/0/video_pos_dur/movie" to "100"))
+        val oldA = a.current(c)!!
+        val oldB = b.current(c)!!
+        a.update(oldA, c, oldA.values + ("d/0/video_pos_dur/movie" to "200"), emptySet())
+        assertThrows(IOException::class.java) {
+            b.update(oldB, c, oldB.values + ("d/0/result_watch_state_data/show" to "saved"), emptySet())
+        }
+        val latest = b.current(c)!!
+        b.update(latest, c,
+            latest.values + ("d/0/result_watch_state_data/show" to "saved"), emptySet())
+        val final = a.current(c)!!.values
+        assertEquals("200", final["d/0/video_pos_dur/movie"])
+        assertEquals("saved", final["d/0/result_watch_state_data/show"])
     }
 
     @Test fun corruptedShardCannotBeSilentlyAppliedToDevice() {

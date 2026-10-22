@@ -43,24 +43,34 @@ class SyncDomainRegressionTest {
         assertEquals("https://server/4.cs3", installed.getString("url"))
     }
 
-    @Test fun unapprovedPluginRemovalCannotReachGithub() {
+    @Test fun removingPluginAfterFirstSyncPropagatesWithoutManualApproval() {
         val original = inventory(plugin("StremioC", 3, "https://server/3.cs3"))
-        assertThrows(IllegalStateException::class.java) {
-            PluginSync.merge(inventory(), original, original, true)
-        }
         val key = PluginSync.decode(original).items.keys.single()
-        val approved = PluginSync.merge(inventory(), original, original, true, setOf(key))
-        assertTrue(key in approved.target.deleted)
+        val merged = PluginSync.merge(inventory(), original, original, true)
+        assertTrue(key in merged.target.deleted)
+        assertTrue(key !in merged.target.items)
+        assertTrue(merged.changedRemote)
     }
 
-    @Test fun inactiveNativeProfileCannotBeDeletedWithoutApproval() {
+    @Test fun unlinkedOldDeviceCannotDeleteServerPlugin() {
+        val original = inventory(plugin("StremioC", 3, "https://server/3.cs3"))
+        val merged = PluginSync.merge(inventory(), original, null, true)
+        assertFalse(merged.changedRemote)
+        assertEquals(1, merged.target.items.size)
+    }
+
+    @Test fun connectedDeviceProfileRemovalCreatesTombstoneAutomatically() {
         val original = roster(profile(0, "Main"), profile(1, "Movies"))
         val local = roster(profile(0, "Main"))
-        assertThrows(IllegalStateException::class.java) {
-            ProfileSync.merge(local, original, original)
-        }
-        val allowed = ProfileSync.merge(local, original, original, setOf(1))
-        assertEquals(setOf(1), allowed.target.deleted)
+        val merged = ProfileSync.merge(local, original, original)
+        assertEquals(setOf(1), merged.target.deleted)
+    }
+
+    @Test fun unlinkedOldDeviceCannotDeleteRemoteProfile() {
+        val original = roster(profile(0, "Main"), profile(1, "Movies"))
+        val merged = ProfileSync.merge(roster(profile(0, "Main")), original, null)
+        assertEquals(2, merged.target.items.size)
+        assertTrue(merged.target.deleted.isEmpty())
     }
 
     @Test fun deletedProfileNumberCanBeReusedWithNewUuid() {
@@ -128,43 +138,9 @@ class SyncDomainRegressionTest {
         })
     }
 
-    @Test fun deletingOnePreferenceRequiresManualApprovalOfExactProposal() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val config = SyncConfiguration(context)
-        config.preferences.edit().clear().commit()
-        val requested = setOf("p/StremioC/stremio_saved_links")
-        assertThrows(IllegalStateException::class.java) {
-            SyncDeletionGate.requireApproval(config, requested, "a".repeat(40))
-        }
-        assertEquals(requested, SyncDeletionGate.pending(config).toSet())
-        SyncDeletionGate.authorizePending(config)
-        SyncDeletionGate.requireApproval(config, requested, "a".repeat(40))
-        assertTrue(SyncDeletionGate.approved(config, requested, "a".repeat(40)).containsAll(requested))
-        assertTrue(SyncDeletionGate.approved(config, setOf("p/Other/unknown"), "a".repeat(40)).isEmpty())
-        assertTrue(SyncDeletionGate.approved(config, requested, "b".repeat(40)).isEmpty())
-        assertTrue(SyncDeletionGate.approved(config,
-            requested + "p/StremioC/other", "a".repeat(40)).isEmpty())
-        SyncDeletionGate.consumed(config)
-        assertTrue(SyncDeletionGate.approved(config, requested, "a".repeat(40)).isEmpty())
-    }
-    @Test fun deferredDeletionDoesNotAuthorizeASeparateSyncCommit() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val config = SyncConfiguration(context)
-        config.preferences.edit().clear().commit()
-        val oldHead = "a".repeat(40)
-        val newHead = "b".repeat(40)
-        val removed = setOf("x/plugins/online|StremioC|repo")
-        assertEquals(emptySet<String>(),
-            SyncDeletionGate.reviewOrDefer(config, removed, oldHead))
-        assertEquals(removed, SyncDeletionGate.pending(config).toSet())
-        // Independent sync commits must rebind approval without permitting deletion.
-        SyncDeletionGate.rebasePending(config, removed, newHead)
-        assertEquals(removed, SyncDeletionGate.pending(config).toSet())
-        assertTrue(SyncDeletionGate.approved(config, removed, oldHead).isEmpty())
-        SyncDeletionGate.authorizePending(config)
-        assertEquals(removed, SyncDeletionGate.reviewOrDefer(config, removed, newHead))
-        SyncDeletionGate.rebasePending(config, emptySet(), newHead)
-        assertTrue(SyncDeletionGate.pending(config).isEmpty())
+    @Test fun baselineBackedLibraryDeleteIsOrdinaryChange() {
+        assertTrue(SyncSafety.localHasRealChange("stored", "<deleted>", false, true))
+        assertFalse(SyncSafety.localHasRealChange("stored", "<deleted>", false, false))
     }
 
     @Test fun authenticatedManifestRootRejectsUntrustedShardList() {
@@ -180,22 +156,49 @@ class SyncDomainRegressionTest {
         }
     }
 
-    @Test fun onlyReviewedDeletionSetAndRevisionAreAccepted() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val config = SyncConfiguration(context)
-        config.preferences.edit().clear().commit()
-        val reviewed = setOf("d/0/search_history/one")
-        val revA = "a".repeat(40)
-        val revB = "b".repeat(40)
-        assertThrows(IllegalStateException::class.java) {
-            SyncDeletionGate.requireApproval(config, reviewed, revA)
-        }
-        SyncDeletionGate.authorizePending(config)
-        assertEquals(reviewed, SyncDeletionGate.approved(config, reviewed, revA))
-        assertTrue(SyncDeletionGate.approved(config, reviewed, revB).isEmpty())
-        assertTrue(SyncDeletionGate.approved(config,
-            reviewed + "d/0/search_history/two", revA).isEmpty())
-        SyncDeletionGate.consumed(config)
+    @Test fun libraryRemovalAfterPairingCreatesCloudDeletion() {
+        val state = ProfileSync.decode(roster(profile(0, "Main")))
+        val uuid = ProfileIdentity.uuid(state.items.getValue(0))
+        val key = "u/$uuid/result_watch_state_data/movie"
+        val saved = JSONObject().put("type", "string").put("value", "stored").toString()
+        val plan = SyncPreferencePlanner.reconcile(
+            mapOf(key to saved), emptyMap(),
+            mutableMapOf(key to SyncBackend.digest(saved)), state,
+            setOf(0), emptySet(), setOf(key), JSONObject(), false, true)
+        assertTrue(plan.upload.containsKey(key))
+        assertNull(plan.upload[key])
+        assertTrue(plan.apply.isEmpty())
+    }
+
+    @Test fun firstLinkIgnoresOldLocalWatchHistory() {
+        val state = ProfileSync.decode(roster(profile(0, "Main")))
+        val uuid = ProfileIdentity.uuid(state.items.getValue(0))
+        val canonical = "u/$uuid/result_watch_state_data/new"
+        val stale = "u/$uuid/result_watch_state_data/old"
+        val newValue = JSONObject().put("type", "string").put("value", "server").toString()
+        val oldValue = JSONObject().put("type", "string").put("value", "stale").toString()
+        val plan = SyncPreferencePlanner.reconcile(
+            mapOf(canonical to newValue), mapOf(stale to oldValue),
+            mutableMapOf(), state, setOf(0), emptySet(), emptySet(),
+            JSONObject(), true, true)
+        assertEquals(newValue, plan.apply[canonical])
+        assertTrue(plan.apply.containsKey(stale))
+        assertNull(plan.apply[stale])
+        assertTrue(plan.upload.isEmpty())
+    }
+
+    @Test fun olderDeviceReceivesRemoteDeletionInsteadOfResurrectingIt() {
+        val state = ProfileSync.decode(roster(profile(0, "Main")))
+        val uuid = ProfileIdentity.uuid(state.items.getValue(0))
+        val key = "u/$uuid/result_watch_state_data/movie"
+        val current = JSONObject().put("type", "string").put("value", "stale").toString()
+        val plan = SyncPreferencePlanner.reconcile(
+            emptyMap(), mapOf(key to current),
+            mutableMapOf(key to SyncBackend.digest(current)), state,
+            setOf(0), emptySet(), emptySet(), JSONObject(), false, true)
+        assertTrue(plan.apply.containsKey(key))
+        assertNull(plan.apply[key])
+        assertTrue(plan.upload.isEmpty())
     }
 
 }

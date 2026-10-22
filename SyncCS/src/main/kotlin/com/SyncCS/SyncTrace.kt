@@ -113,10 +113,47 @@ internal object SyncTrace {
         }.onFailure { info(stage, "plugin-delta-unavailable") }
     }
 
-    fun applied(stage: String, expected: Map<String, String?>, actual: Map<String, String>) {
-        val mismatched = expected.filter { (key, value) -> actual[key] != value }.keys
+    private fun equivalent(left: String?, right: String?): Boolean {
+        if (left == right) return true
+        if (left == null || right == null) return false
+        return runCatching {
+            val a = org.json.JSONObject(left)
+            val b = org.json.JSONObject(right)
+            val type = a.getString("type")
+            if (type != b.getString("type")) return@runCatching false
+            if (type == "set") {
+                val x = a.getJSONArray("value")
+                val y = b.getJSONArray("value")
+                (0 until x.length()).map(x::getString).toSet() ==
+                    (0 until y.length()).map(y::getString).toSet()
+            } else a.get("value").toString() == b.get("value").toString()
+        }.getOrDefault(false)
+    }
+
+    fun actions(stage: String, changes: Map<String, String?>) {
+        info("actions", "phase=$stage changes=${changes.size} deletes=${changes.values.count { it == null }}")
+        changes.entries.asSequence().take(100).forEach { (key, value) ->
+            info("transfer", "phase=$stage action=${if (value == null) "DELETE" else "UPSERT"} " +
+                "kind=${category(key)} id=${fingerprint(key)} bytes=${value?.length ?: 0}")
+        }
+    }
+
+    fun applied(stage: String, expected: Map<String, String?>,
+                actual: Map<String, String>): Boolean {
+        val mismatched = expected.filter { (key, value) ->
+            !equivalent(value, actual[key])
+        }.keys
         info(stage, "checked=${expected.size} matched=${expected.size - mismatched.size} " +
             "mismatch=${mismatched.size}")
         keys("$stage-mismatch", mismatched)
+        mismatched.take(25).forEach { key ->
+            val expectedVal = expected[key]
+            val actualVal = actual[key]
+            info("apply-mismatch-detail", "kind=${category(key)} id=${fingerprint(key)} " +
+                "expected=${expectedVal?.length ?: -1} actual=${actualVal?.length ?: -1} " +
+                "expectedHash=${expectedVal?.let(::fingerprint) ?: "deleted"} " +
+                "actualHash=${actualVal?.let(::fingerprint) ?: "deleted"}")
+        }
+        return mismatched.isEmpty()
     }
 }

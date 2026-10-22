@@ -86,7 +86,7 @@ internal object PluginSync {
      * explicitly restore a deleted entry. An uninitialized device never can.
      */
     fun merge(localRaw: String, remoteRaw: String?, baselineRaw: String?,
-              allowLocalDeletions: Boolean, approvedRemovals: Set<String> = emptySet()): Merge {
+              allowLocalDeletions: Boolean): Merge {
         val local = decode(localRaw)
         val remote = decode(remoteRaw)
         val base = decode(baselineRaw)
@@ -98,10 +98,7 @@ internal object PluginSync {
         if (initialized && allowLocalDeletions) {
             for (id in base.items.keys - local.items.keys) {
                 if (id !in remote.deleted) {
-                    check(id in approvedRemovals) {
-                        "Extension removed locally without deletion approval: $id"
-                    }
-                    output.items.remove(id)
+                     output.items.remove(id)
                     output.deleted.add(id)
                 }
             }
