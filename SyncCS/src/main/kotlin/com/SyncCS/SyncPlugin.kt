@@ -67,7 +67,6 @@ class SyncPlugin : Plugin() {
     private var activityCount = 0
     private var ready = false
     private var foreground = true
-    private var lastSyncAt = 0L
     private var currentActivity: WeakReference<Activity>? = null
     private val observed = mutableMapOf<String, SharedPreferences>()
     private val observedListener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
@@ -129,6 +128,9 @@ class SyncPlugin : Plugin() {
     private fun isOwner(context: Context): Boolean =
         config(context).preferences.getString("active_instance", "") == owner
 
+    private fun resumeSyncDue(): Boolean =
+        System.currentTimeMillis() - SyncCoordinator.lastSuccessfulSyncAt > 120000L
+
     private fun watchPreferences() {
         val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
         val prefs = with(DataStore) { context.getSharedPrefs() }
@@ -157,9 +159,11 @@ class SyncPlugin : Plugin() {
         trigger = scope.launch {
             delay(delayMs)
             if (isOwner(context)) {
-                val active = currentActivity?.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
-                val report = SyncCoordinator.synchronize(context, active)
-                if (report.startsWith("Synced:")) lastSyncAt = System.currentTimeMillis()
+                // Debounce only the pending timer, never an in-flight sync.
+                scope.launch {
+                    val active = currentActivity?.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
+                    SyncCoordinator.synchronize(context, active)
+                }
             }
         }
     }
@@ -171,7 +175,7 @@ class SyncPlugin : Plugin() {
                 if (!isOwner(context)) return
                 activityCount += 1
                 foreground = true
-                request(2500)
+                if (resumeSyncDue()) request(2500)
             }
             override fun onActivityResumed(activity: Activity) {
                 currentActivity = WeakReference(activity)
@@ -183,12 +187,8 @@ class SyncPlugin : Plugin() {
                     return
                 }
                 if (!config(context).active()) return
-                scope.launch {
-                    if (System.currentTimeMillis() - lastSyncAt > 120000L) {
-                        val report = SyncCoordinator.synchronize(context, activity)
-                        if (report.startsWith("Synced:")) lastSyncAt = System.currentTimeMillis()
-                    }
-                }
+                // Replace the onStarted timer rather than scheduling a second sync.
+                if (resumeSyncDue()) request(0)
             }
             override fun onActivityPaused(activity: Activity) {
                 request(1500)
@@ -213,8 +213,7 @@ class SyncPlugin : Plugin() {
                 if (!isOwner(context)) break
                 if (foreground && ready && config(context).active()) {
                     val active = currentActivity?.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
-                    val report = SyncCoordinator.synchronize(context, active)
-                    if (report.startsWith("Synced:")) lastSyncAt = System.currentTimeMillis()
+                    SyncCoordinator.synchronize(context, active)
                 }
             }
         }

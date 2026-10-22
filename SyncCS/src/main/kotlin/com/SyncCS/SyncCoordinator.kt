@@ -17,6 +17,8 @@ internal object SyncCoordinator {
         private set
     @Volatile var lastStatus: String = "Not connected"
         private set
+    @Volatile var lastSuccessfulSyncAt: Long = 0L
+        private set
 
     private fun fingerprint(raw: String?): String =
         if (raw == null) "<deleted>" else SyncBackend.digest(raw)
@@ -75,7 +77,12 @@ internal object SyncCoordinator {
         // up to three times rather than dropping either side's pending changes.
         for (attempt in 0 until 3) {
             val result = synchronizePass(context, activity)
-            if (!result.startsWith("Sync conflict:")) return@withLock result
+            if (!result.startsWith("Sync conflict:")) {
+                if (result.startsWith("Synced:")) {
+                    lastSuccessfulSyncAt = System.currentTimeMillis()
+                }
+                return@withLock result
+            }
             if (attempt < 2) delay(250L * (attempt + 1))
         }
         lastStatus = "Sync failed: repeated concurrent edits; changes retained for retry"
