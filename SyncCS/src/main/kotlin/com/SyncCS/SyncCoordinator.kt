@@ -76,8 +76,10 @@ internal object SyncCoordinator {
         // A resume without any local changes needs only a Git HEAD check.
         // After a restart lastSuccessfulSyncAt is zero: do one complete read so
         // changes missed while the plugin was unloaded cannot be skipped.
+        val pendingPlugins = config.preferences.contains("pending_plugins")
+        val restoreActivity = activity?.takeIf { !it.isFinishing && !it.isDestroyed }
         if (lastSuccessfulSyncAt > 0L &&
-            !config.preferences.contains("pending_plugins") &&
+            (!pendingPlugins || restoreActivity == null) &&
             config.preferences.all.keys.none { it.startsWith("modified/") }) {
             val known = config.preferences.getString("github_base_revision", null)
             if (known != null && SyncRuntime.refreshLoadedState()) {
@@ -88,9 +90,10 @@ internal object SyncCoordinator {
                         encrypted?.let { String(LocalVault.decrypt(it), Charsets.UTF_8) }))
                 }.getOrNull()
                 val savedPlugins = config.preferences.getString("plugin_baseline", null)
-                val samePlugins = savedPlugins != null &&
-                    PluginSync.matches(PluginSync.decode(PluginInventory.snapshot(context)),
-                        PluginSync.decode(savedPlugins))
+                val samePlugins = (pendingPlugins && restoreActivity == null) ||
+                    (savedPlugins != null &&
+                        PluginSync.matches(PluginSync.decode(PluginInventory.snapshot(context)),
+                            PluginSync.decode(savedPlugins)))
                 if (localRoster == savedRoster && samePlugins) {
                     val remoteRevision = runCatching {
                         GithubSyncAdapter(context).remoteHead()
@@ -103,7 +106,9 @@ internal object SyncCoordinator {
                             "remote=${remoteRevision.take(12)} localDirty=false")
                         if (remoteRevision == known) {
                             lastSuccessfulSyncAt = System.currentTimeMillis()
-                            lastStatus = "Synced: verified current revision; no changes"
+                            lastStatus = if (pendingPlugins)
+                                "Sync incomplete: plugins waiting for foreground; other data up to date"
+                            else "Synced: verified current revision; no changes"
                             return@withLock lastStatus
                         }
                     }
@@ -114,7 +119,12 @@ internal object SyncCoordinator {
         for (attempt in 0 until 3) {
             val result = synchronizePass(context, activity)
             if (!result.startsWith("Sync conflict:")) {
-                if (result.startsWith("Synced:")) {
+                if (result.startsWith("Synced:") ||
+                    (result.startsWith("Sync incomplete:") &&
+                        result.contains("plugins pending:") &&
+                        !result.contains("screen refresh dispatch failed"))) {
+                    // Verified independent data is current even while a plugin
+                    // binary is waiting for a foreground Activity.
                     lastSuccessfulSyncAt = System.currentTimeMillis()
                 }
                 return@withLock result
@@ -216,6 +226,8 @@ internal object SyncCoordinator {
         val backend: SyncStorage = GithubSyncAdapter(context)
         val traceId = SyncTrace.start()
         val elapsedStart = android.os.SystemClock.elapsedRealtime()
+        val dirtyBarrier = System.currentTimeMillis()
+        val lastAcknowledgedRevision = config.preferences.getString("github_base_revision", null)
         SyncTrace.memory("sync-start")
         var stage = "loading cloud state"
         var undoStarted = false
@@ -267,6 +279,11 @@ internal object SyncCoordinator {
             val previousCursor = if (config.preferences.contains("remote_cursor"))
                 config.preferences.getLong("remote_cursor", 0L) else null
             val pull = backend.pull(previousCursor)
+            val receivedRevision = (backend as GithubSyncAdapter).verifiedRevision().first
+            SyncTrace.info("receive-revision",
+                "previous=${lastAcknowledgedRevision?.take(12) ?: "none"} " +
+                    "incoming=${receivedRevision.take(12)} " +
+                    "changed=${lastAcknowledgedRevision != receivedRevision}")
             SyncTrace.info("pull", "full=${pull.full} entries=${pull.entries.size}")
             stage = "decrypting remote changes"
             val remoteValues = pull.entries.associate { item ->
@@ -518,29 +535,40 @@ internal object SyncCoordinator {
 
             stage = "restoring plugin binaries and removals"
             var installation = ""
+            val pluginActivity = activity?.takeIf { !it.isFinishing && !it.isDestroyed }
+            val pluginReady = SyncRuntime.refreshLoadedState()
+            SyncTrace.info("plugin-activity",
+                "present=${pluginActivity != null} pluginsLoaded=$pluginReady " +
+                    "pending=${config.preferences.contains("pending_plugins")}")
             if (!PluginSync.matches(PluginSync.decode(currentPlugins), merge.target)) {
-                check(activity != null && SyncRuntime.pluginsLoaded) {
-                    "Plugin restore must complete in the foreground before settings are applied."
-                }
-                ensureUndo()
+                // Missing foreground access cannot block independent library and
+                // playback changes. Keep plugin recovery pending for a usable Activity.
                 check(config.preferences.edit()
                     .putString("pending_plugins", pluginTarget).commit())
             } else if (config.preferences.contains("pending_plugins")) {
-                config.preferences.edit().remove("pending_plugins").commit()
+                check(config.preferences.edit().remove("pending_plugins").commit())
             }
-            if (activity != null && SyncRuntime.pluginsLoaded &&
+            val pluginInstallAllowed = SyncPluginRestorePolicy.canRestoreNow(
+                pluginActivity != null, pluginReady)
+            if (pluginInstallAllowed &&
                 config.preferences.contains("pending_plugins")) {
                 verifyAccount()
                 applying = true
                 try {
                     ensureUndo()
-                    installation = installPending(context, activity, backend)
-                    check(!installation.contains("plugins pending:")) {
-                        "Plugin restore was incomplete."
+                    installation = installPending(context, pluginActivity!!, backend)
+                    if (installation.contains("plugins pending:")) {
+                        SyncTrace.info("plugin-deferred",
+                            "reason=restore-incomplete independent-data-continues")
                     }
                 } finally {
                     applying = false
                 }
+            } else if (config.preferences.contains("pending_plugins")) {
+                installation = "; plugins pending: foreground activity required"
+                SyncTrace.info("plugin-deferred",
+                    "reason=${if (pluginActivity == null) "no-activity" else "loader-not-ready"} " +
+                        "independent-data-continues")
             }
             // A new baseline may only be recorded for installed, verified items.
             val installedPlugins = PluginInventory.snapshot(context)
@@ -621,6 +649,9 @@ internal object SyncCoordinator {
                 persisted.remove("plugin_remote_snapshot")
             }
             check(persisted.commit())
+            SyncTrace.info("receive-revision-ack",
+                "incoming=${receivedRevision.take(12)} committed=${githubRevision.take(12)} " +
+                    "applied=${nativeApply.size} uploaded=${upload.size}")
             if ((backend as GithubSyncAdapter).createdFreshBackup) {
                 check(config.preferences.edit()
                     .remove("github_initial_backup_confirmed").commit())
@@ -630,21 +661,47 @@ internal object SyncCoordinator {
                 LocalSyncJournal.finish(context)
                 undoStarted = false
             }
-            val editor = config.preferences.edit()
-            for (key in apply.keys + upload.keys) editor.remove("modified/" + key)
-            editor.apply()
+            val cleanStats = runCatching {
+                SyncDirtyMarkerCleaner.prune(
+                    context, next, profileMerge.target, dirtyBarrier,
+                    config.preferences.contains("pending_plugins"))
+            }.onFailure {
+                SyncTrace.info("dirty-cleanup-failure",
+                    "type=${it.javaClass.simpleName}; cloud commit remains verified")
+            }.getOrNull()
+            if (cleanStats != null) {
+                SyncTrace.info("dirty-cleanup-result",
+                    "removed=${cleanStats.removed} pending=${cleanStats.pending}")
+            }
+            var uiRefreshFailed = false
             if (nativeApply.keys.any { it.startsWith("d/") || it.startsWith("p/") }) {
-                MainActivity.bookmarksUpdatedEvent.invoke(true)
                 SyncTrace.info("ui-refresh-request",
-                    "event=bookmarksUpdated changed=${nativeApply.size} " +
+                    "event=bookmarksUpdated incoming=${receivedRevision.take(12)} " +
+                        "changed=${nativeApply.size} " +
                         "profileKeys=${apply.keys.count { it.startsWith("u/") }}")
+                try {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        MainActivity.bookmarksUpdatedEvent.invoke(true)
+                    }
+                    SyncTrace.info("ui-refresh-dispatched",
+                        "event=bookmarksUpdated incoming=${receivedRevision.take(12)} " +
+                            "verifiedNativeKeys=${nativeApply.size}")
+                } catch (error: Exception) {
+                    uiRefreshFailed = true
+                    SyncTrace.info("ui-refresh-failed",
+                        "type=${error.javaClass.simpleName} incoming=${receivedRevision.take(12)}")
+                }
+            } else {
+                SyncTrace.info("ui-refresh-not-needed",
+                    "incoming=${receivedRevision.take(12)} nativeChanges=0")
             }
             var result = "Synced: downloaded " + apply.size + ", uploaded " +
                 (upload.size + (if (merge.changedRemote) 1 else 0) +
                     (if (profileMerge.changedRemote) 1 else 0))
             result += installation
-             if (installation.contains("plugins pending:")) {
+             if (installation.contains("plugins pending:") || uiRefreshFailed) {
                 result = result.replaceFirst("Synced:", "Sync incomplete:")
+                if (uiRefreshFailed) result += "; screen refresh dispatch failed"
             }
             lastStatus = result
             SyncTrace.info("success", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - elapsedStart} " +

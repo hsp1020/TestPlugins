@@ -65,12 +65,13 @@ class SyncPlugin : Plugin() {
     private val workerGuard = Any()
     private var worker: Job? = null
     private var rerunRequested = false
+    @Volatile private var lastAutomaticFailureAt = 0L
     private var periodic: Job? = null
     private var callback: Application.ActivityLifecycleCallbacks? = null
-    private var activityCount = 0
+    @Volatile private var activityCount = 0
     private var ready = false
-    private var foreground = true
-    private var currentActivity: WeakReference<Activity>? = null
+    @Volatile private var foreground = true
+    @Volatile private var currentActivity: WeakReference<Activity>? = null
     private val observed = mutableMapOf<String, SharedPreferences>()
     private val observedListener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
         val context = com.lagradost.cloudstream3.CloudStreamApp.context
@@ -103,7 +104,11 @@ class SyncPlugin : Plugin() {
         SyncTrace.keys("local-change", listOf(path))
         request(1800, "preference-change")
     }
-    private val bookmarks = { _: Boolean -> request(2000, "bookmarks") }
+    private val bookmarks = { _: Boolean ->
+        SyncTrace.info("ui-bookmarks-event-observed",
+            "thread=${Thread.currentThread().name}")
+        request(2000, "bookmarks")
+    }
     private val loaded = { _: Boolean ->
         ready = true
         SyncRuntime.refreshLoadedState()
@@ -151,7 +156,7 @@ class SyncPlugin : Plugin() {
     private fun queueSync(reason: String) {
         val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
         if (!isOwner(context) || !config(context).active()) return
-        synchronized(workerGuard) {
+         synchronized(workerGuard) {
             rerunRequested = true
             if (worker?.isActive == true) {
                 SyncTrace.info("coalesce", "reason=$reason pending=1")
@@ -174,11 +179,37 @@ class SyncPlugin : Plugin() {
                         break
                     }
                     val active = currentActivity?.get()?.takeIf {
-                        !it.isFinishing && !it.isDestroyed
+                        foreground && activityCount > 0 &&
+                            !it.isFinishing && !it.isDestroyed
                     }
-                    SyncTrace.info("worker-dispatch", "reason=$reason")
+                    // A repeated failed poll skips expensive work only when the
+                    // remote revision is unchanged. A new commit bypasses backoff.
+                    if (reason == "remote-head-poll-20s" &&
+                        lastAutomaticFailureAt != 0L &&
+                        android.os.SystemClock.elapsedRealtime() - lastAutomaticFailureAt < 90000L &&
+                        config(context).preferences.all.keys.none { it.startsWith("modified/") }) {
+                        val current = config(context).preferences.getString("github_base_revision", null)
+                        val head = runCatching { GithubSyncAdapter(context).remoteHead() }.getOrNull()
+                        if (current != null && head == current) {
+                            SyncTrace.info("failure-backoff",
+                                "reason=$reason head=${head.take(12)} unchanged=true")
+                            continue
+                        }
+                    }
+                    SyncTrace.info("worker-dispatch",
+                        "reason=$reason activityPresent=${active != null} " +
+                            "foreground=$foreground startedActivities=$activityCount")
                     SyncTrace.memory("scheduled-sync")
-                    SyncCoordinator.synchronize(context, active)
+                    val result = SyncCoordinator.synchronize(context, active)
+                    if (result.startsWith("Sync failed:") ||
+                        result.startsWith("Sync failed during") ||
+                        result.startsWith("Sync conflict:")) {
+                        lastAutomaticFailureAt = android.os.SystemClock.elapsedRealtime()
+                        SyncTrace.info("worker-failed", "reason=$reason " +
+                            "statusHash=${java.lang.Integer.toHexString(result.hashCode())}")
+                    } else {
+                        lastAutomaticFailureAt = 0L
+                    }
                 }
             }
         }
@@ -201,15 +232,23 @@ class SyncPlugin : Plugin() {
     private fun start(context: Context) {
         val app = context.applicationContext as? Application ?: return
         callback = object : Application.ActivityLifecycleCallbacks {
-            override fun onActivityCreated(activity: Activity, state: Bundle?) {}
+            override fun onActivityCreated(activity: Activity, state: Bundle?) {
+                if (isOwner(context)) currentActivity = WeakReference(activity)
+            }
             override fun onActivityStarted(activity: Activity) {
                 if (!isOwner(context)) return
+                currentActivity = WeakReference(activity)
                 activityCount += 1
                 foreground = true
-                // onResumed performs the single HEAD check for this transition.
+                SyncTrace.info("activity-started", "started=$activityCount " +
+                    "activity=${activity.javaClass.simpleName}")
             }
             override fun onActivityResumed(activity: Activity) {
                 currentActivity = WeakReference(activity)
+                foreground = true
+                if (activityCount == 0) activityCount = 1
+                SyncTrace.info("activity-resumed", "activity=${activity.javaClass.simpleName} " +
+                    "started=$activityCount")
                 if (!isOwner(context) || !ready) return
                 // An interrupted original restore may have disconnected the
                 // account. Always finish its local journal before normal sync.
@@ -228,6 +267,7 @@ class SyncPlugin : Plugin() {
                 activityCount = maxOf(0, activityCount - 1)
                 if (activityCount == 0) {
                     foreground = false
+                    if (currentActivity?.get() === activity) currentActivity = null
                     request(500, "activity-stopped")
                 }
             }
@@ -251,7 +291,7 @@ class SyncPlugin : Plugin() {
         }
     }
     override fun load(context: Context) {
-        SyncTrace.info("plugin-loaded", "version=P0P2-auto-sync-headpoll-20261022 " +
+        SyncTrace.info("plugin-loaded", "version=P0P1-isolated-restore-acked-20261022 " +
             "classloader=${javaClass.classLoader?.javaClass?.simpleName}")
         SyncTrace.memory("plugin-load")
         config(context).preferences.edit().putString("active_instance", owner).commit()
@@ -266,6 +306,8 @@ class SyncPlugin : Plugin() {
         start(context)
         openSettings = { selected ->
             (selected as? AppCompatActivity)?.let { activity ->
+                currentActivity = WeakReference(activity)
+                SyncTrace.info("activity-from-settings", "activity=${activity.javaClass.simpleName}")
                 SyncSettingsFragment().show(activity.supportFragmentManager, "SyncCS")
             }
         }

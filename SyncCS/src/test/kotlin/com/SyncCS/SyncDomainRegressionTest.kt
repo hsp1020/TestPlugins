@@ -201,4 +201,22 @@ class SyncDomainRegressionTest {
         assertTrue(plan.upload.isEmpty())
     }
 
+    @Test fun pluginRestoreRequiresActivityButIsIndependentFromLibrarySync() {
+        assertFalse(SyncPluginRestorePolicy.canRestoreNow(false, true))
+        assertFalse(SyncPluginRestorePolicy.canRestoreNow(true, false))
+        assertTrue(SyncPluginRestorePolicy.canRestoreNow(true, true))
+    }
+
+    @Test fun staleDirtyMarkersAreOnlyRemovedAfterValueMatchesVerifiedBaseline() {
+        val saved = JSONObject().put("type", "string").put("value", "saved").toString()
+        val altered = JSONObject().put("type", "string").put("value", "local-change").toString()
+        val hash = SyncBackend.digest(saved)
+        assertTrue(SyncDirtyMarkerCleaner.matchesVerifiedBaseline(saved, hash))
+        assertFalse(SyncDirtyMarkerCleaner.matchesVerifiedBaseline(altered, hash))
+        assertFalse(SyncDirtyMarkerCleaner.matchesVerifiedBaseline(null, hash))
+        assertTrue(SyncDirtyMarkerCleaner.matchesVerifiedBaseline(null, null))
+        assertFalse(SyncDirtyMarkerCleaner.matchesVerifiedBaseline(saved, null))
+    }
+
+
 }

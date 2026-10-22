@@ -147,25 +147,34 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         SyncTrace.info("github-pull", "revision=${snapshot.revision.take(12)} " +
             "records=${snapshot.values.size} newBackup=$createdFreshBackup")
         SyncTrace.keys("github-pull-keys", snapshot.values.keys)
-        // Verify that any desired plugin missing locally can be fetched BEFORE
-        // ProfileSync applies profile changes or installation removes binaries.
+        // First enrollment requires a complete verified restore, including
+        // all missing plugin archives. Already linked devices may synchronize
+        // independent preferences while binary installation is deferred.
+        val firstEnrollment = !preferences.contains("base") &&
+            !preferences.contains("github_base_revision") && !createdFreshBackup
         val localPluginIds = PluginSync.decode(PluginInventory.snapshot(context)).items
         val previouslySyncedPlugins = PluginSync.decode(
             preferences.getString("plugin_baseline", null)).items
         val removedLocally = previouslySyncedPlugins.keys - localPluginIds.keys
         val remotePluginIds = PluginSync.decode(snapshot.values["x/plugins"]).items
+        var deferredArchives = 0
         for ((id, plugin) in remotePluginIds) {
-            // A verified local removal will be published as a tombstone; do
-            // not download that removed package just to stage the deletion.
             if (id in removedLocally) continue
             val sha = plugin.optString("sha")
             if (localPluginIds[id]?.optString("sha") == sha &&
                 sha.matches(Regex("[0-9a-f]{64}"))) continue
+            if (!firstEnrollment) {
+                deferredArchives++
+                continue
+            }
             check(sha.matches(Regex("[0-9a-f]{64}"))) {
                 "Remote plugin archive has no verifiable hash."
             }
             github.readArchive(snapshot, sha)
         }
+        SyncTrace.info("plugin-archive-preflight",
+            "firstEnrollment=$firstEnrollment deferred=$deferredArchives " +
+                "remotePlugins=${remotePluginIds.size}")
         val rows = snapshot.values.keys.map { key ->
             RemoteEntry(key, snapshot.encrypted[key], false, "",
                 "github", 1L)
