@@ -2672,6 +2672,25 @@ open class StremioC(
         val seenLinks = Collections.synchronizedSet(mutableSetOf<Triple<String, String, Map<String, String>>>())
 
         val seenStremioSubtitles = Collections.synchronizedSet(mutableSetOf<String>())
+        val forwardedSubtitles = java.util.concurrent.atomic.AtomicInteger()
+        val duplicateSubtitles = java.util.concurrent.atomic.AtomicInteger()
+        fun emitUniqueSubtitle(sub: SubtitleFile) {
+            if (sub.url.isBlank()) return
+            if (seenStremioSubtitles.add(sub.url)) {
+                val count = forwardedSubtitles.incrementAndGet()
+                if (count == 1 || count % 32 == 0) {
+                    android.util.Log.i("StremioC-Subtitle", "forwarded=$count " +
+                        "duplicates=${duplicateSubtitles.get()}")
+                }
+                subtitleCallback(sub)
+            } else {
+                val duplicates = duplicateSubtitles.incrementAndGet()
+                if (duplicates == 32 || duplicates % 128 == 0) {
+                    android.util.Log.i("StremioC-Subtitle",
+                        "forwarded=${forwardedSubtitles.get()} duplicates=$duplicates")
+                }
+            }
+        }
         val stremioSourceNames = Collections.synchronizedSet(mutableSetOf<String>()).apply {
             name.trim().takeIf { it.isNotEmpty() }?.let { add(it.lowercase()) }
             getIntegrationStremioAddons().forEach { addon ->
@@ -2808,20 +2827,17 @@ open class StremioC(
 
                 if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
                     val newLang = "${sub.lang} (Stremio)"
-                    subtitleCallback.invoke(SubtitleFile(newLang, subtitleUrl))
+                    emitUniqueSubtitle(SubtitleFile(newLang, subtitleUrl))
                 } else {
-                    subtitleCallback.invoke(sub)
+                    emitUniqueSubtitle(sub)
                 }
             } catch (e: Exception) {
-                subtitleCallback.invoke(sub)
+                emitUniqueSubtitle(sub)
             }
         }
 
         val stremioSubtitleCallback: (SubtitleFile) -> Unit = { sub ->
-            if (sub.url.isNotBlank() && seenStremioSubtitles.add(sub.url)) {
-
-                subtitleCallback.invoke(sub)
-            }
+            emitUniqueSubtitle(sub)
         }
 
         fun stremioSubtitleFrom(addonUrl: String, group: Int = 0): (SubtitleFile) -> Unit = { sub ->
@@ -2834,7 +2850,7 @@ open class StremioC(
         }
         fun extractorSubtitleFrom(addonUrl: String, group: Int = 0): (SubtitleFile) -> Unit = { sub ->
             rankSubtitle(sub, group, addonUrl)
-            subtitleCallback(sub)
+            emitUniqueSubtitle(sub)
         }
 
         val requestedSubtitleUrls = Collections.synchronizedSet(mutableSetOf<String>())

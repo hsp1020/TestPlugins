@@ -164,6 +164,7 @@ class SyncPlugin : Plugin() {
                 // Debounce only the pending timer, never an in-flight sync.
                 scope.launch {
                     val active = currentActivity?.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
+                    SyncTrace.memory("scheduled-sync")
                     SyncCoordinator.synchronize(context, active)
                 }
             }
@@ -222,6 +223,9 @@ class SyncPlugin : Plugin() {
         }
     }
     override fun load(context: Context) {
+        SyncTrace.info("plugin-loaded", "version=P0P2-isolated-delete-20261022 " +
+            "classloader=${javaClass.classLoader?.javaClass?.simpleName}")
+        SyncTrace.memory("plugin-load")
         config(context).preferences.edit().putString("active_instance", owner).commit()
         ready = SyncRuntime.refreshLoadedState()
         ProfileIdentity.observe(context)

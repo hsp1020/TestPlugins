@@ -147,6 +147,26 @@ class SyncDomainRegressionTest {
         SyncDeletionGate.consumed(config)
         assertTrue(SyncDeletionGate.approved(config, requested, "a".repeat(40)).isEmpty())
     }
+    @Test fun deferredDeletionDoesNotAuthorizeASeparateSyncCommit() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val config = SyncConfiguration(context)
+        config.preferences.edit().clear().commit()
+        val oldHead = "a".repeat(40)
+        val newHead = "b".repeat(40)
+        val removed = setOf("x/plugins/online|StremioC|repo")
+        assertEquals(emptySet<String>(),
+            SyncDeletionGate.reviewOrDefer(config, removed, oldHead))
+        assertEquals(removed, SyncDeletionGate.pending(config).toSet())
+        // Independent sync commits must rebind approval without permitting deletion.
+        SyncDeletionGate.rebasePending(config, removed, newHead)
+        assertEquals(removed, SyncDeletionGate.pending(config).toSet())
+        assertTrue(SyncDeletionGate.approved(config, removed, oldHead).isEmpty())
+        SyncDeletionGate.authorizePending(config)
+        assertEquals(removed, SyncDeletionGate.reviewOrDefer(config, removed, newHead))
+        SyncDeletionGate.rebasePending(config, emptySet(), newHead)
+        assertTrue(SyncDeletionGate.pending(config).isEmpty())
+    }
+
     @Test fun authenticatedManifestRootRejectsUntrustedShardList() {
         val cipher = SyncCipher.derive("an-example-passphrase-123",
             "https://api.github.com", "device-1")

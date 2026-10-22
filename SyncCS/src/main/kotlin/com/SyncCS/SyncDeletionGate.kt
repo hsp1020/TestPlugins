@@ -69,6 +69,29 @@ internal object SyncDeletionGate {
             " items. Open SyncCS > Review deletions; nothing was deleted remotely.")
     }
 
+    /** Defer unapproved deletions without blocking unrelated non-deleting updates. */
+    fun reviewOrDefer(config: SyncConfiguration, candidates: Set<String>,
+                      revision: String): Set<String> {
+        if (candidates.isEmpty()) return emptySet()
+        check(revision.matches(Regex("[0-9a-f]{40}")))
+        check(candidates.size <= 25) { "Unsafe deletion request blocked: ${candidates.size}" }
+        val accepted = approved(config, candidates, revision)
+        if (accepted == candidates) return accepted
+        check(config.preferences.edit().putString(PROPOSAL,
+            record(candidates, System.currentTimeMillis(), revision)).commit())
+        return emptySet()
+    }
+
+    fun rebasePending(config: SyncConfiguration, pending: Set<String>, revision: String) {
+        if (pending.isEmpty()) {
+            consumed(config)
+            return
+        }
+        check(revision.matches(Regex("[0-9a-f]{40}")))
+        check(config.preferences.edit().remove(APPROVAL)
+            .putString(PROPOSAL, record(pending, System.currentTimeMillis(), revision)).commit())
+    }
+
     fun pending(config: SyncConfiguration): List<String> {
         val proposal = parse(config.preferences.getString(PROPOSAL, null))
         return if (System.currentTimeMillis() <= proposal.expires &&

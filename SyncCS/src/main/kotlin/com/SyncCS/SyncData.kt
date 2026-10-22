@@ -445,6 +445,20 @@ internal object SyncData {
 internal object PluginInventory {
     private const val MAX_FILE = 20 * 1024 * 1024
 
+    /** Verify .cs3 content without allocating whole extension packages in Java heap. */
+    private fun sha256(file: File): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().buffered(64 * 1024).use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
+    }
+
     private suspend fun ensureLoaded(context: Context, name: String, path: String, url: String? = null): Boolean {
         val current = PluginManager.plugins[path]
         val instance = if (current != null) current else {
@@ -459,6 +473,7 @@ internal object PluginInventory {
     }
 
     fun snapshot(context: Context): String {
+        val scanStart = android.os.SystemClock.elapsedRealtime()
         // Include CloudStream's built-in repositories as well as user-added ones:
         // extensions from prebuilt repos otherwise have no recoverable repo URL.
         val repos = (RepositoryManager.getRepositories().toList() +
@@ -472,7 +487,7 @@ internal object PluginInventory {
             }?.url ?: ""
             val file = File(plugin.filePath)
             val sha = if (file.isFile && file.length() in 1L..MAX_FILE.toLong()) {
-                SyncBackend.digestBytes(file.readBytes())
+                sha256(file)
             } else ""
             items.put(JSONObject().put("type", "online").put("name", plugin.internalName)
                 .put("url", plugin.url ?: "").put("repo", repo).put("version", plugin.version)
@@ -483,8 +498,10 @@ internal object PluginInventory {
             val file = File(plugin.filePath)
             if (!file.isFile || file.length() !in 1L..MAX_FILE.toLong()) continue
             items.put(JSONObject().put("type", "local").put("name", plugin.internalName)
-                .put("file", file.name).put("sha", SyncBackend.digestBytes(file.readBytes())))
+                .put("file", file.name).put("sha", sha256(file)))
         }
+        val duration = android.os.SystemClock.elapsedRealtime() - scanStart
+        SyncTrace.info("plugin-inventory-scan", "count=${items.length()} elapsedMs=$duration")
         return items.toString()
     }
 
@@ -576,7 +593,7 @@ internal object PluginInventory {
                     it.internalName == name && it.url == url &&
                         File(it.filePath).isFile &&
                         (hash.isBlank() ||
-                            SyncBackend.digestBytes(File(it.filePath).readBytes()) == hash)
+                            sha256(File(it.filePath)) == hash)
                 }
                 if (existing != null) {
                     if (!ensureLoaded(activity, name, existing.filePath, url)) {
@@ -659,7 +676,7 @@ internal object PluginInventory {
                 val existing = existingLocal.firstOrNull {
                     it.internalName == name && File(it.filePath).name == filename &&
                         File(it.filePath).isFile &&
-                        SyncBackend.digestBytes(File(it.filePath).readBytes()) == hash
+                        sha256(File(it.filePath)) == hash
                 }
                 if (existing != null) {
                     if (!ensureLoaded(activity, name, existing.filePath)) {

@@ -348,8 +348,11 @@ internal class GithubBackupStore(
             write(branchEndpoint(branch), "PATCH",
                 JSONObject().put("sha", next).put("force", false))
         } catch (e: ApiException) {
-            if (e.code == 409 || e.code == 422)
+            if (e.code == 409 || e.code == 422) {
+                SyncTrace.info("github-cas-rejected",
+                    "status=${e.code} parent=${parent.take(12)}")
                 throw IOException("Sync conflict: GitHub backup advanced.", e)
+            }
             throw e
         }
         return next

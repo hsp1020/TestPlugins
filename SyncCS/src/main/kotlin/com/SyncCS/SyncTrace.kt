@@ -1,6 +1,7 @@
 package com.SyncCS
 
 import android.util.Log
+import android.os.Debug
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicLong
 
@@ -20,6 +21,15 @@ internal object SyncTrace {
     fun finish(id: Long) {
         info("end")
         if (active == id) active = 0L
+    }
+
+    /** Lightweight heap samples for correlating player stalls with sync work. */
+    fun memory(stage: String) {
+        val runtime = Runtime.getRuntime()
+        val javaMiB = (runtime.totalMemory() - runtime.freeMemory()) / (1024L * 1024L)
+        val nativeMiB = Debug.getNativeHeapAllocatedSize() / (1024L * 1024L)
+        info("memory", "point=$stage javaMiB=$javaMiB nativeMiB=$nativeMiB " +
+            "maxMiB=${runtime.maxMemory() / (1024L * 1024L)}")
     }
 
     fun info(stage: String, detail: String = "") {

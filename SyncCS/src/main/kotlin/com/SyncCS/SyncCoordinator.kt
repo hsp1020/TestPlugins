@@ -83,7 +83,11 @@ internal object SyncCoordinator {
                 }
                 return@withLock result
             }
-            if (attempt < 2) delay(250L * (attempt + 1))
+            if (attempt < 2) {
+                val backoff = 250L * (attempt + 1)
+                SyncTrace.info("conflict-retry", "attempt=${attempt + 1} backoffMs=$backoff")
+                delay(backoff)
+            }
         }
         lastStatus = "Sync failed: repeated concurrent edits; changes retained for retry"
         lastStatus
@@ -175,6 +179,7 @@ internal object SyncCoordinator {
         val config = SyncConfiguration(context)
         val backend: SyncStorage = GithubSyncAdapter(context)
         val traceId = SyncTrace.start()
+        SyncTrace.memory("sync-start")
         var stage = "loading cloud state"
         var undoStarted = false
         fun ensureUndo() {
@@ -219,6 +224,7 @@ internal object SyncCoordinator {
                 "CloudStream plugins have not finished loading. No backup was published; retry Sync now after loading completes."
             }
             stage = "loading cloud state"
+            SyncTrace.memory("before-github-pull")
             // A full snapshot is required only for the first run, or when the
             // server has not yet installed the v340 change journal migration.
             val previousCursor = if (config.preferences.contains("remote_cursor"))
@@ -281,14 +287,14 @@ internal object SyncCoordinator {
                 profileRemovals.map { "x/profiles/$it" } +
                 pluginRemovals.map { "x/plugins/$it" }
             SyncTrace.keys("deletion-review", destructiveProposals)
-            SyncDeletionGate.requireApproval(config, destructiveProposals,
-                (backend as GithubSyncAdapter).verifiedRevision().first)
-            val approvedProfiles = profileRemovals.filter {
-                "x/profiles/$it" in destructiveProposals
-            }.toSet()
-            val approvedPlugins = pluginRemovals.filter {
-                "x/plugins/$it" in destructiveProposals
-            }.toSet()
+            val approvedRemovals = SyncDeletionGate.reviewOrDefer(config,
+                destructiveProposals, (backend as GithubSyncAdapter).verifiedRevision().first)
+            val deferredRemovals = destructiveProposals - approvedRemovals
+            val profileQuarantined = deferredRemovals.any { it.startsWith("x/profiles/") }
+            val pluginQuarantined = deferredRemovals.any { it.startsWith("x/plugins/") }
+            SyncTrace.keys("deletion-deferred", deferredRemovals)
+            val approvedProfiles = profileRemovals.filter { "x/profiles/$it" in approvedRemovals }.toSet()
+            val approvedPlugins = pluginRemovals.filter { "x/plugins/$it" in approvedRemovals }.toSet()
 
             stage = "reconciling CloudStream profiles"
             fun protectedProfileValue(key: String): String? {
@@ -302,7 +308,10 @@ internal object SyncCoordinator {
                 remoteValues["x/profiles"]
             } else protectedProfileValue("profile_remote_snapshot")
             val profileLocal = ProfileSync.snapshot(context)
-            val profileMerge = ProfileSync.merge(
+            // Do not restore a locally removed profile while its deletion awaits review.
+            val profileMerge = if (profileQuarantined) {
+                ProfileSync.Merge(ProfileSync.decode(profileLocal), false)
+            } else ProfileSync.merge(
                 profileLocal, profileServer, previousProfiles, approvedProfiles)
             val targetProfiles = ProfileSync.encode(profileMerge.target)
             SyncTrace.profiles("target-profiles", targetProfiles)
@@ -358,12 +367,15 @@ internal object SyncCoordinator {
             // in extension restoration cannot undo an already applied profile.
             val protectedProfiles = LocalVault.encrypt(
                 targetProfiles.toByteArray(Charsets.UTF_8))
-            check(config.preferences.edit()
-                .putString("profile_baseline", protectedProfiles)
-                .putString("profile_remote_snapshot", protectedProfiles).commit())
+            if (!profileQuarantined) {
+                check(config.preferences.edit()
+                    .putString("profile_baseline", protectedProfiles)
+                    .putString("profile_remote_snapshot", protectedProfiles).commit())
+            }
             val activeProfiles = profileMerge.target.items.keys
 
             stage = "reading local preferences"
+            SyncTrace.memory("before-local-snapshot")
             val local = ProfileIdentity.toRemote(SyncData.snapshot(context),
                 profileMerge.target)
             SyncTrace.keys("local-state", local.keys)
@@ -385,6 +397,8 @@ internal object SyncCoordinator {
 
             for (key in all) {
                 val current = local[key]
+                // Preserve the absent local key, its modified marker, and its old baseline.
+                if (key in deferredRemovals && current == null) continue
                 val remotePresent = remoteValues.containsKey(key)
                 val remote = remoteValues[key]
                 val old = base[key]
@@ -496,7 +510,10 @@ internal object SyncCoordinator {
                 remoteValues["x/plugins"]
             } else config.preferences.getString("plugin_remote_snapshot", null)
             var inventoryVersion = versions["x/plugins"]
-            var merge = PluginSync.merge(currentPlugins, pluginsOnServer,
+            // Freeze only the plugin inventory domain; no accidental reinstallation.
+            var merge = if (pluginQuarantined) {
+                PluginSync.Merge(PluginSync.decode(pluginsOnServer), false)
+            } else PluginSync.merge(currentPlugins, pluginsOnServer,
                 inventoryBase, SyncRuntime.pluginsLoaded, approvedPlugins)
             var pluginTarget = PluginSync.encode(merge.target)
             SyncTrace.plugins("local-plugins", currentPlugins)
@@ -555,17 +572,18 @@ internal object SyncCoordinator {
 
             stage = "restoring plugin binaries and removals"
             var installation = ""
-            if (!PluginSync.matches(PluginSync.decode(currentPlugins), merge.target)) {
+            if (!pluginQuarantined &&
+                !PluginSync.matches(PluginSync.decode(currentPlugins), merge.target)) {
                 check(activity != null && SyncRuntime.pluginsLoaded) {
                     "Plugin restore must complete in the foreground before settings are applied."
                 }
                 ensureUndo()
                 check(config.preferences.edit()
                     .putString("pending_plugins", pluginTarget).commit())
-            } else if (config.preferences.contains("pending_plugins")) {
+            } else if (!pluginQuarantined && config.preferences.contains("pending_plugins")) {
                 config.preferences.edit().remove("pending_plugins").commit()
             }
-            if (activity != null && SyncRuntime.pluginsLoaded &&
+            if (!pluginQuarantined && activity != null && SyncRuntime.pluginsLoaded &&
                 config.preferences.contains("pending_plugins")) {
                 verifyAccount()
                 applying = true
@@ -584,16 +602,19 @@ internal object SyncCoordinator {
             val installed = PluginSync.matches(PluginSync.decode(installedPlugins), merge.target)
             SyncTrace.info("plugin-verification", "matched=$installed " +
                 "pending=${config.preferences.contains("pending_plugins")}")
-            if (installed && !config.preferences.contains("pending_plugins")) {
+            if (!pluginQuarantined && installed &&
+                !config.preferences.contains("pending_plugins")) {
                 check(config.preferences.edit().putString("plugin_baseline", installedPlugins).commit())
-            } else if (installation.isEmpty()) {
+            } else if (!pluginQuarantined && installation.isEmpty()) {
                 installation = "; plugins pending: install/remove requires foreground activity"
             }
-            if (!installed && !config.preferences.contains("pending_plugins")) {
+            if (!pluginQuarantined && !installed &&
+                !config.preferences.contains("pending_plugins")) {
                 check(config.preferences.edit()
                     .putString("pending_plugins", pluginTarget).commit())
             }
-            if (!installed && !installation.contains("plugins pending:")) {
+            if (!pluginQuarantined && !installed &&
+                !installation.contains("plugins pending:")) {
                 installation = "; plugins pending: verification mismatch after install/remove"
             }
 
@@ -620,9 +641,11 @@ internal object SyncCoordinator {
 
             // A single Git commit publishes profile, plugin inventory and
             // preferences together, only after local apply has succeeded.
+            SyncTrace.memory("before-github-commit")
             stage = "publishing complete GitHub snapshot"
             backend.flush(cipher)
             SyncTrace.info("publish-complete")
+            SyncTrace.memory("after-github-commit")
             stage = "persisting verified settings baseline"
             verifyAccount()
             val baseJson = JSONObject()
@@ -657,13 +680,15 @@ internal object SyncCoordinator {
                 check(config.preferences.edit()
                     .remove("github_initial_backup_confirmed").commit())
             }
-            SyncDeletionGate.consumed(config)
+            SyncDeletionGate.rebasePending(config, deferredRemovals, githubRevision)
             if (undoStarted) {
                 LocalSyncJournal.finish(context)
                 undoStarted = false
             }
             val editor = config.preferences.edit()
-            for (key in apply.keys + upload.keys) editor.remove("modified/" + key)
+            for (key in (apply.keys + upload.keys) - deferredRemovals) {
+                editor.remove("modified/" + key)
+            }
             editor.apply()
             if (apply.keys.any { it.startsWith("d/") || it.startsWith("p/") }) {
                 MainActivity.bookmarksUpdatedEvent.invoke(true)
@@ -673,6 +698,9 @@ internal object SyncCoordinator {
                 (upload.size + (if (merge.changedRemote) 1 else 0) +
                     (if (profileMerge.changedRemote) 1 else 0))
             result += installation
+            if (deferredRemovals.isNotEmpty()) {
+                result += "; deletions awaiting review: ${deferredRemovals.size}"
+            }
             if (installation.contains("plugins pending:")) {
                 result = result.replaceFirst("Synced:", "Sync incomplete:")
             }
