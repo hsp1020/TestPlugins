@@ -122,10 +122,10 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
                 alreadyEnrolled)) {
                 "Automatic first backup blocked: enrolled device or missing source approval."
             }
-            preserveUnlinkedDeviceState()
-            check(SyncRuntime.pluginsLoaded) {
+            check(SyncRuntime.refreshLoadedState()) {
                 "Waiting for CloudStream plugins before publishing initial backup."
             }
+            preserveUnlinkedDeviceState()
             val initial = localState()
             uploadAvailableArchives(initial.getValue("x/plugins"))
             github.initialize(cipher, initial, archives)

@@ -221,6 +221,7 @@ class SyncPlugin : Plugin() {
     }
     override fun load(context: Context) {
         config(context).preferences.edit().putString("active_instance", owner).commit()
+        ready = SyncRuntime.refreshLoadedState()
         ProfileIdentity.observe(context)
         MainActivity.bookmarksUpdatedEvent += bookmarks
         MainActivity.afterPluginsLoadedEvent += loaded

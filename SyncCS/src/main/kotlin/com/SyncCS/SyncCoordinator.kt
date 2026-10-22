@@ -199,6 +199,18 @@ internal object SyncCoordinator {
             }
 
             val cipher = backend.cipher()
+            // GitHub sign-in can finish before CloudStream's plugin loader.
+            // Never capture or publish a partial inventory while it is loading.
+            stage = "waiting for CloudStream plugins"
+            for (attempt in 0 until 60) {
+                if (SyncRuntime.refreshLoadedState()) break
+                delay(500L)
+                verifyAccount()
+            }
+            check(SyncRuntime.refreshLoadedState()) {
+                "CloudStream plugins have not finished loading. No backup was published; retry Sync now after loading completes."
+            }
+            stage = "loading cloud state"
             // A full snapshot is required only for the first run, or when the
             // server has not yet installed the v340 change journal migration.
             val previousCursor = if (config.preferences.contains("remote_cursor"))
