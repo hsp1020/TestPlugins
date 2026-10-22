@@ -159,7 +159,11 @@ class SyncPlugin : Plugin() {
         currentActivity?.get()?.takeIf {
             !it.isFinishing && !it.isDestroyed
         }?.let { return it }
-        val fallback = (CommonActivity.activity as? MainActivity)?.takeIf {
+        // Keep the host typed as Android Activity. Accessing MainActivity
+        // members requires a CloudStream-only ColorPickerDialogListener
+        // superinterface that is not on the extension compilation classpath.
+        val host: Activity? = CommonActivity.activity as? Activity
+        val fallback = host?.takeIf {
             !it.isFinishing && !it.isDestroyed
         }
         if (fallback != null) {
