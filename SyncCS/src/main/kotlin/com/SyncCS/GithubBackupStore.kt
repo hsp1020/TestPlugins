@@ -17,7 +17,9 @@ import java.security.MessageDigest
 internal class GithubBackupStore(
     private val token: String,
     private val owner: String,
-    private val repository: String = "cloudstream-synccs-backup"
+    private val repository: String = "cloudstream-synccs-backup",
+    private val deviceName: String = "Unspecified device",
+    private val deviceId: String = "unknown"
 ) {
     data class Snapshot(
         val revision: String, val tree: String, val branch: String,
@@ -131,7 +133,8 @@ internal class GithubBackupStore(
         val encrypted = linkedMapOf<String, String>()
         val values = linkedMapOf<String, String>()
         for (i in 0 until 16) {
-            val hash = entries[shard(i)] ?: continue
+            val hash = entries[shard(i)]
+                ?: throw IOException("Corrupted backup: missing shard " + shard(i))
             val part = JSONObject(String(blob(hash), Charsets.UTF_8))
             for (key in part.keys()) {
                 check(bucket(key) == i && !values.containsKey(key)) { "Invalid backup shard." }
@@ -150,6 +153,35 @@ internal class GithubBackupStore(
 
     fun previous(revision: String, branch: String, cipher: SyncCipher): Snapshot? =
         readAt(revision, branch, cipher)
+
+    data class Revision(val id: String, val summary: String, val timestamp: String)
+
+    /** Read-only history for explicit user-directed rollback. */
+    fun history(branch: String, limit: Int = 20): List<Revision> {
+        require(limit in 1..50)
+        return historyArray(branch, limit)
+    }
+
+    private fun historyArray(branch: String, limit: Int): List<Revision> {
+        val url = "https://api.github.com/repos/$owner/$repository/commits?sha=" +
+            URLEncoder.encode(branch, "UTF-8") + "&per_page=$limit"
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.connectTimeout = 12000
+        conn.readTimeout = 25000
+        conn.setRequestProperty("Authorization", "Bearer $token")
+        conn.setRequestProperty("Accept", "application/vnd.github+json")
+        conn.setRequestProperty("User-Agent", "SyncCS-Backup")
+        try {
+            check(conn.responseCode == 200) { "Cannot load GitHub backup revisions." }
+            val rows = JSONArray(String(conn.inputStream.use { it.readBytes() }, Charsets.UTF_8))
+            return (0 until rows.length()).map { i ->
+                val entry = rows.getJSONObject(i)
+                val commit = entry.getJSONObject("commit")
+                Revision(entry.getString("sha"), commit.optString("message").lineSequence().first(),
+                    commit.optJSONObject("committer")?.optString("date").orEmpty())
+            }
+        } finally { conn.disconnect() }
+    }
 
     private fun archivePath(hash: String): String {
         require(hash.matches(Regex("[0-9a-f]{64}")))
@@ -191,7 +223,8 @@ internal class GithubBackupStore(
         val newTree = write("/git/trees", "POST",
             JSONObject().put("base_tree", baseTree).put("tree", paths)).getString("sha")
         val next = write("/git/commits", "POST", JSONObject()
-            .put("message", "SyncCS encrypted snapshot")
+            .put("message", "SyncCS encrypted snapshot · " +
+                deviceName.take(50).replace("\n", " ") + " · " + deviceId.take(8))
             .put("tree", newTree).put("parents", JSONArray().put(parent))).getString("sha")
         try {
             write(branchEndpoint(branch), "PATCH",
@@ -249,7 +282,7 @@ internal class GithubBackupStore(
         }
         val changed = (previous.values.keys + target.keys)
             .filter { previous.values[it] != target[it] }
-        if (changed.isEmpty()) return previous.revision
+        if (changed.isEmpty() && archives.isEmpty()) return previous.revision
         check(changed.size <= 1000) {
             "Mass update blocked: " + changed.size
         }
@@ -294,7 +327,8 @@ internal class GithubBackupStore(
         val newTree = write("/git/trees", "POST", JSONObject()
             .put("base_tree", current.tree).put("tree", paths)).getString("sha")
         val next = write("/git/commits", "POST", JSONObject()
-            .put("message", "SyncCS user-approved snapshot recovery")
+            .put("message", "SyncCS recovered snapshot · " +
+                deviceName.take(50).replace("\n", " ") + " · " + deviceId.take(8))
             .put("tree", newTree).put("parents", JSONArray().put(current.revision)))
             .getString("sha")
         try {

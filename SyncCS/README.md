@@ -1,126 +1,43 @@
-# SyncCS v2 — GitHub sign-in and encrypted cloud sync
+# SyncCS — GitHub-only encrypted sync
 
-## v340 — server-authoritative CloudStream profiles and incremental updates
+**Backend:** GitHub API, private repository owned by the signed-in GitHub account.
+There is no Supabase login, database, Edge Function, or migration dependency.
 
-- CloudStream's existing `keyIndex` values and profile metadata are synchronized through the encrypted `x/profiles` manifest; no second profile UI or device-specific UUID mapping is introduced. Existing server profile slots are authoritative on a newly linked device.
-- Profile-scoped bookmarks, watch history, playback state and native search history stay under CloudStream's original `<keyIndex>/...` keys. Search queries, their native timestamps, individual deletions and clear-all deletions synchronize per profile. Quick Search does not create native history entries in CloudStream, so it has no search-history entries to sync. Installed extensions and explicitly shared plugin preferences remain application-wide. The selected profile stays local to each device.
-- After the first full snapshot, `sync_change_events` enables event-cursor pulls of changed rows only, including deletion tombstones. The client replays events after its initial snapshot to avoid missing concurrent writes. A server without the migration remains on v339-compatible full reads.
-- Concurrent scalar edits use server version compare-and-swap (CAS); the committed remote value wins and a losing local value is retained in encrypted local `pending_conflicts`. Supported collection preferences use raw-value three-way membership merging.
-- A failed sync never advances the successful cursor. Pending plugin installs/deletions and missed events are retried after restart. Installation verification and the first-login restart flow remain unchanged.
+## Connect a source device
 
-**Required deployment:** run the updated `SyncCS/supabase.sql` in the connected Supabase project before expecting incremental reads; a plugin-only upgrade is not sufficient to create database change events. Run v340 on all devices connected to an account before relying on its profile manifest or cursor semantics.
+1. Create a GitHub **OAuth App** in GitHub Developer Settings, and **enable Device Flow**. Copy the app's Client ID. Never embed a GitHub Client Secret in the Android extension.
+2. In SyncCS, open **Sync account** and enter the GitHub Client ID, a recovery passphrase of at least 12 characters, and a device name.
+3. Authorize on the GitHub Device Flow page. Permission scope is **repo**, because GitHub OAuth Apps cannot currently narrow this permission to one automatically created private repository. For the safest isolation, use a separate GitHub account. Do not approve unknown OAuth apps.
+4. SyncCS creates a private repository named **cloudstream-synccs-backup** if missing.
+5. If the repository has no complete SyncCS backup, SyncCS explicitly asks whether **this device is the source**. Only approve a trusted, clean source device. The currently installed settings are backed up as the first Git revision in one atomic commit.
+6. On later devices, authorize the **same GitHub account** and enter the **same recovery passphrase**. The complete GitHub backup replaces synchronized local preferences. A pre-link local recovery copy is stored encrypted in CloudStream's private app directory.
 
-**Scope:** v340 does not claim a cross-system atomic transaction across the Android preferences, extension files and Supabase. Android TV / Android 11+ local `.cs3` recovery and two-device concurrent-update scenarios still require device execution tests. Cross-GitHub-account migration UI remains outside this release.
+**Do not use the GitHub source-device confirmation on a device whose settings were contaminated by the previous SyncCS implementation.** This backend deliberately performs **no import** from the old Supabase cloud account.
 
+The repository is **always private**. SyncCS refuses to use a public repository. The GitHub API access token and derived AES key are encrypted by Android Keystore before storage on the device. Content is encrypted per key with AES-256-GCM, derived using PBKDF2-HMAC-SHA256 (210,000 rounds). GitHub can see path names and commit messages but not decrypted preference values.
 
-CloudStream **users sign in with GitHub only**. They never need a Supabase account, a separate SyncCS email/password, or an email-verification message. The server is operated centrally and all user records remain isolated by Supabase Auth user ID plus RLS.
+## Safety guarantees and limitations
 
-## Using SyncCS
+- New GitHub backups are published as a **single Git commit** after all 16 encrypted data shards and plugin binary archives have been uploaded as Git objects. Crashes prior to the ref update do not publish an incomplete backup.
+- Writes are guarded by the last observed Git commit and use **non-forced fast-forward ref updates**. Conflicting writes are rejected for retry; no force push.
+- Scalar settings retain server-authoritative conflict behavior. Only keys with a local change listener event may be sent as deletions; unexpected local snapshot omissions are repaired from the server.
+- Automatic deletion is rejected when it would remove more than 25 keys or 1% of the snapshot. More than 1,000 value changes in one write are also rejected.
+- Plugin archives are SHA-256 verified before replacement. An absent archive stops restore instead of silently discarding an installed plugin.
+- Every successful Git commit remains a versioned rollback point. **Restore previous GitHub backup** creates a new commit, preserving the earlier history and increasing recovery generation. Devices with an old generation cannot upload until re-linked.
+- GitHub is not a real-time transactional database. CloudStream's native profiles, app preferences, and plugin binaries cannot be changed atomically across the Android filesystem. Restoration failures may still leave partial local changes, even when a pre-link encrypted copy exists. Test with a disposable account before production use.
+- Each device must finish initialization before synchronizing normally; the first backup requires user confirmation.
+- The encrypted local pre-link snapshot is stored in the app's private files and is **not** a substitute for a portable export or an off-device backup. Clearing app data destroys its Keystore key.
+- GitHub commit history preserves earlier snapshots even when current data is deleted; plan long-term retention and sensitive-data erasure accordingly.
 
-1. Update SyncCS and open **Sync account**.
-2. Enter a recovery passphrase of at least 12 characters and choose a device name.
-3. Tap **Sign in with GitHub**. Complete the sign-in in your external browser and return to CloudStream.
-4. The plugin waits for a one-time login result and completes the PKCE code exchange automatically. If the sign-in succeeds, sync starts.
-5. Sign in with the same GitHub account on other devices and supply the **same recovery passphrase**. This passphrase encrypts the backed-up data end to end; it is not a GitHub or Supabase password.
+## Development/testing
 
-Supabase Edge Functions on the default project domain cannot render HTML and rewrite HTML responses to plain text. The OAuth callback therefore shows a short ASCII plaintext success notice instead of raw HTML; no custom domain is needed.\n\nOAuth codes and code verifiers never appear in the displayed browser page. The PKCE verifier is protected locally using the Android Keystore. The one-time callback handoff is keyed by a random 256-bit state, returns a code only to the waiting plugin, and is stored in a server table inaccessible to normal users. No GitHub client secret or Supabase service-role key is embedded in SyncCS.
+The branch-specific workflow **SyncCS GitHub Backend CI** compiles the extension without publishing the .cs3 file to the public build repository.
 
-## Server setup (operator only, one time)
+Before release, validate with two disposable devices and a test GitHub account:
+- first backup / interrupted initial commit / B-device restore with obsolete catalogs
+- conflicting A-B writes / explicit delete vs missing preference key
+- first installation failure / missing archived .cs3 / network loss
+- manual rollback / re-link stale device / profile changes
+- OAuth errors and expiry / Android TV device code entry
 
-The SyncCS Seoul Supabase project is **zbmofheqyswjbziecmyn**. The following has already been deployed:
-
-- [supabase.sql](supabase.sql): original sync tables, RLS and extension archive bucket.
-- [github_oauth.sql](github_oauth.sql): private five-minute OAuth code handoff table (applied).
-- [supabase/synccs-github-oauth/index.ts](supabase/synccs-github-oauth/index.ts): GitHub PKCE callback + one-time polling endpoint (deployed and active).
-
-**Additional manual OAuth provider configuration is required.** GitHub OAuth does *not* automatically become enabled when you sign in to the Supabase dashboard using GitHub. These controls are not exposed by the current connected management tools.
-
-1. Open **[GitHub Developer Settings → OAuth Apps](https://github.com/settings/developers)** and create an OAuth App (name: `SyncCS`; homepage: `https://github.com/hsp1020/TestPlugins`). Use the **Authorization callback URL**:
-
-   `https://zbmofheqyswjbziecmyn.supabase.co/auth/v1/callback`
-
-2. Copy the generated **Client ID** and **Client Secret** directly into **[Supabase Authentication → Providers](https://supabase.com/dashboard/project/zbmofheqyswjbziecmyn/auth/providers)** → **GitHub**; switch it on and save. Do **not** commit the Client Secret to GitHub or put it in a CloudStream plugin.
-
-3. In **[Supabase Authentication → URL Configuration](https://supabase.com/dashboard/project/zbmofheqyswjbziecmyn/auth/url-configuration)**, add this **Redirect URL allowlist pattern** (the final `/**` permits the nonce path segment):
-
-   `https://zbmofheqyswjbziecmyn.supabase.co/functions/v1/synccs-github-oauth/**`
-
-   Remove the default `http://localhost:3000` as the production **Site URL**, and change the Site URL to `https://zbmofheqyswjbziecmyn.supabase.co/functions/v1/synccs-github-oauth`. OAuth sign-in specifically relies on the explicit allowlisted redirect URL, not on a generic home page.
-
-4. No SMTP provider is needed when GitHub is the only sign-in method.
-
-GitHub OAuth requires separate operator configuration on both **GitHub** and **Supabase**. Until the GitHub provider is enabled the plugin stops before opening a browser and explains that server OAuth setup is incomplete.
-
-## Login and sync UI
-
-- CloudStream already registers `cloudstreamapp://` deep links. GitHub OAuth callback returns to that existing scheme without AndroidX Browser dependencies, so opening the settings dialog cannot fail with `AuthTabIntent` ClassNotFound.
-- Browsers that allow OAuth callbacks to launch apps return to CloudStream automatically. **The browser tab may remain in browser history; Android does not let an ordinary external app forcibly close it.** If a browser blocks the launch, the server displays a short plain-text success notice and the user returns manually.
-- SyncCS verifies the authorization via a one-time nonce-bound server polling endpoint. No OAuth code is exposed through the deep link.
-- Successful login and manual **Sync now** show a native-themed indeterminate progress dialog, then a brief success message before dismissing. Sync failures show a separate error message.
-- `Synced: downloaded 0, uploaded 0` means the current run found no changes; it does not imply an empty cloud backup.
-- All UI code uses framework and AppCompat classes already provided by CloudStream; additional AndroidX Browser dependencies were removed after a runtime class-loading failure.
-
-## Data and compatibility
-
-- Sync data: CloudStream library, bookmarks, watch progress, source/quality priorities and standard SharedPreferences-based plugin settings.
-- Provider account sessions saved by CloudStream may be transferred when valid or refreshable.
-- Online plugin installation is best-effort; some local `.cs3` restorations require extra filesystem permissions or restart.
-- Hardware decoder, subtitle layout, appearance, and download paths are device-local.
-- User data from the **old email/password-based SyncCS account does not automatically move** to a new GitHub Auth user ID. Account migration requires a separately authorized export/import process.
-- The OAuth callback is asynchronous: after browser login, return to CloudStream to complete session exchange.
-- The latest code has **not been Android-built or exercised against a fully configured GitHub OAuth provider**. Server migrations and Edge Function deployment alone do not prove end-to-end login success.
-
-## Extension installation and preference recovery fixes
-
-- CloudStream compares plugin downloads against hashes prefixed with `sha256-`. SyncCS now passes the host-expected hash string instead of a raw 64-character digest.
-- On a new device, the saved extension repository list is restored **before** the downloaded plugin files; missing repositories are reconstructed from the encrypted plugin manifest where possible. All missing online plugins are downloaded and registered in the host plugin inventory. Existing archived binary files are used as fallback.
-- Android scoped-storage restrictions may prevent writing standalone local `.cs3` files to the legacy external storage folder. In that case SyncCS registers the verified archived binary in the app-private plugin directory so CloudStream loads it after restart.
-- Plugin-prefixed CloudStream DataStore and default SharedPreferences keys are now included for CineStream, StreamPlay, StremioC, Ultima Evo, Elevate and YouTube, in addition to their dedicated preference files. Device-level settings and runtime caches are excluded.
-- An incomplete plugin restore reports `Sync incomplete`, **not** `Synced`. Failures preserve the pending plugin inventory so the next sync can retry.
-- The current per-device selected CloudStream account is not synchronized.
-- After updating, sync the source device again before restoring another device; previously untracked settings cannot be recreated from older cloud snapshots.
-- The code change addresses known omission paths but real-device validation is still required to establish complete plugin and preference restoration. CloudStream's own crash handler stores uncaught stack traces in the private `last_error` file, which may be needed if a device continues to exit.
-
-## QualityDataHelper runtime ABI compatibility (v6)
-
-- Do not directly call `QualityDataHelper.getSourcePriorityCache()` or `getQualityPriorityCache()`: older installed CloudStream binaries may not expose the getters, causing `NoSuchMethodError` and an app-wide crash.
-- Try to invalidate priority caches via runtime-reflected getter or backing field, if available. If the cache is absent on that version, preserve saved preferences and request a CloudStream restart for refreshed priorities.
-- Refresh CloudStream service account caches through runtime-detected companion APIs; do not hard-link to cache setters missing in older host builds.
-- `SyncCoordinator` catches and reports `LinkageError` as a host compatibility failure rather than allowing a fatal app restart. Persistent sync database and plugin backups are not reset.
-
-## First GitHub sign-in restore and restart (v7)
-
-After the *first* successful GitHub sign-in and fully successful `SyncCoordinator.synchronize()`, show `Sync complete` for 1.5 seconds, then restart CloudStream using the same `Intent.makeRestartActivityTask`/process exit mechanism already used by StremioC settings imports. Do not restart for manual `Sync now`, subsequent account sign-ins, incomplete plugin installation, or sync errors. This lets CloudStream reload restored plugins and settings before use.
-
-## CineStream / StreamPlay settings audit (v7)
-
-CineStream reference: [CineStream Settings.kt](https://github.com/SaurabhKaperwan/CSX/blob/master/CineStream/src/main/kotlin/com/megix/settings/Settings.kt), [SettingsDialog.kt](https://github.com/SaurabhKaperwan/CSX/blob/master/CineStream/src/main/kotlin/com/megix/settings/SettingsDialog.kt), [SettingsProviders.kt](https://github.com/SaurabhKaperwan/CSX/blob/master/CineStream/src/main/kotlin/com/megix/settings/SettingsProviders.kt). Cross-checked with StremioC `SettingsBottomFragment.kt` export/import.
-
-- Read CineStream global settings from CloudStream's DataStore (not a `CineStream` XML file): concurrency, download-only links, catalog activation, provider ordering/default/seen state, Stremio addon metadata and provider switches, ShowBox/Wyzie/GramCinema tokens, Cloudflare bypass switch and per-domain cookies.
-- Discover keys from CineStream's loaded `com.megix.settings.Settings` string fields where available. Also preserve a safe fallback list for when CineStream hasn't loaded yet; `p_*`, `stremio_*` and `cf_cookie_*` are discovered by namespace.
-- Include all these entries directly as encrypted `d/<key>` DataStore items: no duplicated parallel backups. DataStore change listeners then trigger regular debounced sync for CineStream switches and tokens, and restore writes back to the original CloudStream storage before restart.
-- StreamPlay reference: [settings code](https://github.com/hsp1020/cloudstream-extensions-phisher2/tree/main/StreamPlay/src/main/kotlin/com/Phisher98/settings). Its account token (`token`), Wyzie key (`wyzie_key`), disabled provider set, provider profiles, extension toggles, language, concurrency and Stremio addon/catalog URLs are in the `StreamPlay` preference file and are already represented by `p/StreamPlay/<key>`.
-- Exclude only StreamPlay runtime telemetry `STREAMPLAY_TELEMETRY_V2` and obsolete `provider_stats_*` from backup and restore because they describe device performance, not the user's settings.
-- CineStream cookie values are session material that can expire independently on other devices; exporting them does not guarantee an active session.
-
-## Scheduling and triggers (v7)
-
-All tracked data types share the *same* sync loop; there is no separate polling frequency for movies, account tokens, addons or settings. The loop compares the local snapshot with encrypted cloud entries and only transfers changed items.
-
-| Trigger | Delay / condition |
-| --- | --- |
-| Manual Sync now | Immediately (foreground Activity) |
-| First GitHub login | Immediately after token exchange; successful sync followed by restart |
-| Tracked SharedPreferences change | Debounced 1.8 seconds after last change |
-| Watch/bookmark update event | Debounced 2 seconds |
-| Home/account reload event | Debounced 3 seconds |
-| Plugins loaded event | Debounced 4 seconds; refresh observed preference files |
-| Activity started | Debounced 2.5 seconds (requires signed-in/ready/active owner) |
-| Activity resumed | If last sync started over 120 seconds ago |
-| Activity paused | Debounced 1.5 seconds |
-| Last Activity stopped | Debounced 0.5 seconds |
-| Foreground periodic check | Every 15 minutes while signed in and ready |
-| Restore a missing `.cs3` | Only when pending plugin list exists and an Activity is available; manual or resume-based sync |
-| Upload plugin binaries | When `x/plugins` inventory differs; uploads files before manifest |
-
-Automatic trigger timers replace a previously pending trigger of the same type, so densely clustered changes cause only one sync. The sync mutex serializes concurrent runs. Android does not guarantee execution after the app process is killed; this is **not** a background scheduler or a fixed cloud-backup interval.
+No Supabase data is automatically migrated or restored. Removing the previous Supabase project is a separate administrative action and does not happen during GitHub sign-in.

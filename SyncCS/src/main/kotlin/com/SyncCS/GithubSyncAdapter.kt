@@ -35,7 +35,8 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         ?: error("Missing GitHub login")
     private val accountId = preferences.getString("github_account_id", null)
         ?: error("Missing GitHub account identifier")
-    private val github = GithubBackupStore(token, login)
+    private val github = GithubBackupStore(token, login,
+        deviceName = config.deviceName, deviceId = config.deviceId)
     private var latest: GithubBackupStore.Snapshot? = null
     var createdFreshBackup: Boolean = false
         private set
@@ -97,7 +98,8 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         val protected = LocalVault.encrypt(json.toByteArray(Charsets.UTF_8))
         val folder = File(context.filesDir, "synccs-recovery")
         check(folder.exists() || folder.mkdirs())
-        val name = "pre-github-link-" + config.deviceId.take(8) + ".enc"
+        val name = "pre-github-link-" + config.deviceId.take(8) +
+            "-" + System.currentTimeMillis() + ".enc"
         val destination = File(folder, name)
         check(!destination.exists()) {
             "A previous device recovery snapshot already exists; refusing overwrite."
@@ -120,6 +122,9 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         val cipher = cipher()
         var snapshot = github.current(cipher)
         if (snapshot == null) {
+            check(preferences.getBoolean("github_initial_backup_confirmed", false)) {
+                "New GitHub backup requires explicit source-device confirmation."
+            }
             preserveUnlinkedDeviceState()
             check(SyncRuntime.pluginsLoaded) {
                 "Waiting for CloudStream plugins before publishing initial backup."
@@ -136,6 +141,19 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
             preserveUnlinkedDeviceState()
         }
         latest = snapshot
+        // Verify that any desired plugin missing locally can be fetched BEFORE
+        // ProfileSync applies profile changes or installation removes binaries.
+        val localPluginIds = PluginSync.decode(PluginInventory.snapshot(context)).items
+        val remotePluginIds = PluginSync.decode(snapshot.values["x/plugins"]).items
+        for ((id, plugin) in remotePluginIds) {
+            val sha = plugin.optString("sha")
+            if (localPluginIds[id]?.optString("sha") == sha &&
+                sha.matches(Regex("[0-9a-f]{64}"))) continue
+            check(sha.matches(Regex("[0-9a-f]{64}"))) {
+                "Remote plugin archive has no verifiable hash."
+            }
+            github.readArchive(snapshot, sha)
+        }
         val rows = snapshot.values.keys.map { key ->
             RemoteEntry(key, snapshot.encrypted[key], false, "",
                 "github", 1L)

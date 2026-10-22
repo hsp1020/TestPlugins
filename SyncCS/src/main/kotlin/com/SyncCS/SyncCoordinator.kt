@@ -39,6 +39,10 @@ internal object SyncCoordinator {
             lastStatus = "Sign in to enable sync"
             return@withLock lastStatus
         }
+        if (config.preferences.getBoolean("github_recovery_in_progress", false)) {
+            lastStatus = "Sync paused: a GitHub backup revision is being restored."
+            return@withLock lastStatus
+        }
         if (config.preferences.getBoolean("account_switch_blocked", false)) {
             lastStatus = "Sync paused: account changed. Clear local CloudStream data before linking a different account."
             return@withLock lastStatus
@@ -184,6 +188,14 @@ internal object SyncCoordinator {
                 // A missing key is NOT evidence of user deletion. Plugin startup,
                 // a failed preferences enumeration, or a filtered snapshot can omit it.
                 val explicitlyChanged = config.preferences.contains("modified/" + key)
+                if (current == null && !explicitlyChanged &&
+                    remotePresent && remote != null) {
+                    // A temporarily missing local preference must be repaired
+                    // from the complete remote snapshot, never uploaded as delete.
+                    apply[key] = remote
+                    next[key] = remoteHash
+                    continue
+                }
                 val changedLocal = currentHash != old &&
                     (current != null || explicitlyChanged)
                 val changedRemote = if (pull.full) remoteHash != old

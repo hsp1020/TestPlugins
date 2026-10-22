@@ -1,7 +1,7 @@
 version = 10
 
 cloudstream {
-    description = "Sync CloudStream library, accounts, extensions and shared preferences using Supabase"
+    description = "Encrypt and synchronize CloudStream settings and watch history through a private GitHub repository"
     authors = listOf("hsp1020")
     language = "ko"
 
@@ -14,4 +14,3 @@ cloudstream {
 android {
     namespace = "com.SyncCS"
 }
-
