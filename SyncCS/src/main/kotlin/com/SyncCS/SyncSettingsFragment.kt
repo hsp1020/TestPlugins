@@ -1,6 +1,11 @@
 package com.SyncCS
 
 import android.app.Dialog
+import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.graphics.Color
+import android.graphics.Typeface
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -21,6 +26,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
+import android.widget.Toast
 import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
@@ -104,6 +110,22 @@ class SyncSettingsFragment : DialogFragment() {
         return success
     }
 
+
+    // Device Flow has no OAuth redirect. Bring our existing task forward once
+    // GitHub confirms the code. This removes an authorization tab when the
+    // browser shares our task; Android may block cross-task foreground jumps.
+    private fun returnToCloudStreamAfterAuthorization(host: Activity) {
+        if (host.isFinishing || host.isDestroyed) return
+        try {
+            host.startActivity(Intent(host, host.javaClass).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            })
+        } catch (_: Exception) {
+            // An external browser owns its own task; it cannot be closed by an
+            // extension. The user can return with Android Back or Recents.
+        }
+    }
 
     private fun restartCloudStreamAfterFirstSignIn(context: Context): Boolean {
         val app = context.applicationContext
@@ -669,9 +691,32 @@ class SyncSettingsFragment : DialogFragment() {
             setPadding(0, dp(context, 12), 0, 0)
         }
         body.addView(feedback)
+        val deviceCode = TextView(context).apply {
+            textSize = 36f
+            setTextColor(Color.rgb(229, 57, 53))
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            letterSpacing = 0.08f
+            setPadding(0, dp(context, 16), 0, dp(context, 12))
+            visibility = View.GONE
+            isClickable = true
+            isFocusable = true
+            contentDescription = "GitHub authorization code. Tap to copy."
+            setOnClickListener {
+                val code = text.toString()
+                if (code.isNotBlank()) {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                        as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("GitHub device code", code))
+                    Toast.makeText(context, "GitHub code copied", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        body.addView(deviceCode)
+        val accountScroll = scroll(context, body)
         val dialog = AlertDialog.Builder(context)
             .setTitle("SyncCS · GitHub direct")
-            .setView(scroll(context, body))
+            .setView(accountScroll)
             .setPositiveButton("Connect GitHub", null)
             .setNegativeButton("Cancel", null).create()
 
@@ -697,12 +742,18 @@ class SyncSettingsFragment : DialogFragment() {
                         val challenge = withContext(Dispatchers.IO) {
                             GithubDeviceCode.begin(client)
                         }
-                        feedback.text = "Open " + challenge.verification +
-                            " and enter this code: " + challenge.userCode +
-                            "\nOn Android TV, enter the code from your phone or computer."
-                        runCatching {
+                        deviceCode.text = challenge.userCode
+                        deviceCode.visibility = View.VISIBLE
+                        feedback.text = "Enter this code at " + challenge.verification +
+                            ". Tap the red code to copy it. " +
+                            "On Android TV, use a phone or computer."
+                        accountScroll.post { accountScroll.fullScroll(View.FOCUS_DOWN) }
+                        try {
                             host.startActivity(Intent(Intent.ACTION_VIEW,
                                 Uri.parse(challenge.verification)))
+                        } catch (_: Exception) {
+                            feedback.text = "Open " + challenge.verification +
+                                " on a browser and enter the red code above."
                         }
                         var token: String? = null
                         var interval = challenge.pollSeconds
@@ -721,6 +772,8 @@ class SyncSettingsFragment : DialogFragment() {
                             }
                         }
                         val accessToken = token ?: error("GitHub authorization did not complete.")
+                        feedback.text = "GitHub authorized. Returning to CloudStream..."
+                        returnToCloudStreamAfterAuthorization(host)
                         val profile = withContext(Dispatchers.IO) {
                             GithubDeviceCode.profile(accessToken)
                         }
