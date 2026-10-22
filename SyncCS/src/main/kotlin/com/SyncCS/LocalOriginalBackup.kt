@@ -34,7 +34,8 @@ internal object LocalOriginalBackup {
             if (!candidate.name.startsWith("pre-github-link-")) return@mapNotNull null
             val manifest = when {
                 candidate.isFile && candidate.extension == "enc" -> candidate
-                candidate.isDirectory -> File(candidate, "snapshot.enc")
+                candidate.isDirectory && !candidate.name.endsWith(".staging") ->
+                    File(candidate, "snapshot.enc")
                 else -> return@mapNotNull null
             }
             if (!manifest.isFile) return@mapNotNull null
@@ -177,7 +178,10 @@ internal object LocalOriginalBackup {
         for ((identity, row) in PluginSync.decode(content.plugins).items) {
             val hash = row.optString("sha")
             check(hash.matches(SHA)) { "Unverifiable original plugin: " + row.optString("name") }
-            if (installed[identity]?.optString("sha") == hash) continue
+            if (content.format == 2 && installed[identity]?.optString("sha") == hash) {
+                // Legacy backup has no binary; unchanged installed archives suffice.
+                continue
+            }
             val bytes = archivedBinary(content, hash)
             check(SyncBackend.digestBytes(bytes) == hash) {
                 "Original plugin archive digest mismatch: " + row.optString("name")

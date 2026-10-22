@@ -139,8 +139,10 @@ internal object SyncCoordinator {
             // disconnect, this durable flag blocks every automatic upload.
             check(config.preferences.edit()
                 .putBoolean("github_local_restore_pause", true).commit())
-            LocalSyncJournal.finish(context)
+            // Restore is local only. Clear account while the rollback journal
+            // still exists, so an interrupted disconnect can also be undone.
             config.clearAccount()
+            LocalSyncJournal.finish(context)
             lastStatus = "Original device backup restored locally. GitHub backup unchanged; sync disconnected."
             lastStatus
         } catch (error: Throwable) {

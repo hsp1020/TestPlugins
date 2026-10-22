@@ -105,7 +105,15 @@ class SyncPlugin : Plugin() {
         ready = true
         SyncRuntime.refreshLoadedState()
         watchPreferences()
-        request(4000)
+        val context = com.lagradost.cloudstream3.CloudStreamApp.context
+        if (context != null && LocalSyncJournal.pending(context)) {
+            scope.launch {
+                val active = currentActivity?.get()?.takeIf {
+                    !it.isFinishing && !it.isDestroyed
+                }
+                SyncCoordinator.synchronize(context, active)
+            }
+        } else request(4000)
     }
     private val home = { _: Boolean -> request(3000) }
     private val accountRoster = { _: Boolean ->
@@ -166,7 +174,14 @@ class SyncPlugin : Plugin() {
             }
             override fun onActivityResumed(activity: Activity) {
                 currentActivity = WeakReference(activity)
-                if (!isOwner(context) || !ready || !config(context).active()) return
+                if (!isOwner(context) || !ready) return
+                // An interrupted original restore may have disconnected the
+                // account. Always finish its local journal before normal sync.
+                if (LocalSyncJournal.pending(context)) {
+                    scope.launch { SyncCoordinator.synchronize(context, activity) }
+                    return
+                }
+                if (!config(context).active()) return
                 scope.launch {
                     if (System.currentTimeMillis() - lastSyncAt > 120000L) {
                         val report = SyncCoordinator.synchronize(context, activity)

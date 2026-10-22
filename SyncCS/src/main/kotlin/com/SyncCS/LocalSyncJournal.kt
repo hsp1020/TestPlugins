@@ -27,6 +27,9 @@ internal object LocalSyncJournal {
         "remote_cursor", "remote_versions", "list_baselines",
         "github_base_revision", "github_generation", "pending_conflicts",
         "github_local_restore_pause",
+        "sync_transport", "github_token", "github_login", "github_account_id",
+        "secret", "github_client_id", "github_initial_backup_confirmed",
+        "github_local_recovery_saved", "account_switch_blocked",
         "profile_slot_identities_v2", "profile_last_seen_slots_v2",
         "profile_retired_slots_v2"
     )
