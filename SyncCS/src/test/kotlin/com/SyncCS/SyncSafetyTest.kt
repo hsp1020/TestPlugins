@@ -73,4 +73,10 @@ class SyncSafetyTest {
         SyncSafety.validateDeleteBudget(4, 20)
     }
 
+    @Test fun initializedDeviceCannotSilentlyReplaceDeletedRepository() {
+        assertFalse(SyncSafety.canCreateFirstBackup(true, true))
+        assertFalse(SyncSafety.canCreateFirstBackup(false, false))
+        assertTrue(SyncSafety.canCreateFirstBackup(true, false))
+    }
+
 }

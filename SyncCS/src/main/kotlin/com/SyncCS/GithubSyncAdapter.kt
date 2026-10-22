@@ -126,8 +126,12 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         val cipher = cipher()
         var snapshot = github.current(cipher)
         if (snapshot == null) {
-            check(preferences.getBoolean("github_initial_backup_confirmed", false)) {
-                "New GitHub backup requires explicit source-device confirmation."
+            val alreadyEnrolled = preferences.contains("github_base_revision") ||
+                preferences.contains("base")
+            check(SyncSafety.canCreateFirstBackup(
+                preferences.getBoolean("github_initial_backup_confirmed", false),
+                alreadyEnrolled)) {
+                "Automatic first backup blocked: enrolled device or missing source approval."
             }
             preserveUnlinkedDeviceState()
             check(SyncRuntime.pluginsLoaded) {

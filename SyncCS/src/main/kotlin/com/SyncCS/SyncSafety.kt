@@ -31,6 +31,9 @@ internal object SyncSafety {
         check(count <= 1000) { "Mass update blocked: $count" }
     }
 
+    fun canCreateFirstBackup(confirmed: Boolean, alreadyEnrolled: Boolean): Boolean =
+        confirmed && !alreadyEnrolled
+
     fun acceptGeneration(local: Int, remote: Int, enrolled: Boolean): Boolean =
         if (enrolled) local > 0 && local == remote
         else local == 0 || local == remote

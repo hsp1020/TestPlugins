@@ -476,6 +476,10 @@ internal object SyncCoordinator {
                 persisted.remove("plugin_remote_snapshot")
             }
             check(persisted.commit())
+            if ((backend as GithubSyncAdapter).createdFreshBackup) {
+                check(config.preferences.edit()
+                    .remove("github_initial_backup_confirmed").commit())
+            }
             SyncDeletionGate.consumed(config)
             if (undoStarted) {
                 LocalSyncJournal.finish(context)
