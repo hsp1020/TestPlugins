@@ -29,14 +29,42 @@ internal object SyncCoordinator {
     fun markChanged(context: Context, path: String) {
         if (applying) return
         val config = SyncConfiguration(context)
-        val key = "modified/" + path
+        val remotePath = if (path.startsWith("d/")) {
+            ProfileIdentity.remotePath(path, ProfileSync.decode(ProfileSync.snapshot(context)))
+        } else path
+        val key = "modified/" + remotePath
         config.preferences.edit().putLong(key, System.currentTimeMillis()).apply()
     }
 
     suspend fun synchronize(context: Context, activity: Activity? = null): String = lock.withLock {
         val config = SyncConfiguration(context)
+        if (LocalSyncJournal.pending(context)) {
+            val activityReady = activity != null && !activity.isFinishing && !activity.isDestroyed
+            if (!activityReady) {
+                lastStatus = "Sync paused: incomplete local restore requires a foreground activity."
+                return@withLock lastStatus
+            }
+            applying = true
+            try {
+                LocalSyncJournal.recover(context, activity, LocalOriginalBackup.offlineRecoverySource())
+            } catch (recovery: Exception) {
+                lastStatus = "Sync blocked: local rollback incomplete: " +
+                    (recovery.message ?: recovery.javaClass.simpleName).take(170)
+                return@withLock lastStatus
+            } finally {
+                applying = false
+            }
+        }
+        if (config.preferences.getBoolean("github_local_restore_pause", false)) {
+            lastStatus = "Sync paused after local original restore. Disconnect or relink explicitly."
+            return@withLock lastStatus
+        }
         if (!config.active()) {
             lastStatus = "Sign in to enable sync"
+            return@withLock lastStatus
+        }
+        if (config.preferences.getBoolean("github_recovery_in_progress", false)) {
+            lastStatus = "Sync paused: a GitHub backup revision is being restored."
             return@withLock lastStatus
         }
         if (config.preferences.getBoolean("account_switch_blocked", false)) {
@@ -54,17 +82,117 @@ internal object SyncCoordinator {
         lastStatus
     }
 
+    suspend fun restoreOriginal(context: Context, activity: Activity,
+                                entry: LocalOriginalBackup.Entry): String = lock.withLock {
+        check(!activity.isFinishing && !activity.isDestroyed) {
+            "Original backup restore requires a foreground CloudStream activity."
+        }
+        check(!LocalSyncJournal.pending(context)) {
+            "Finish the previous local rollback before restoring an original backup."
+        }
+        check(SyncRuntime.pluginsLoaded) {
+            "Wait until CloudStream has loaded installed plugins before restoring."
+        }
+        val saved = LocalOriginalBackup.read(context, entry)
+        LocalOriginalBackup.preflight(context, saved)
+        val roster = ProfileSync.decode(saved.profiles)
+        val source = LocalOriginalBackup.storage(saved)
+        val rollbackSource = LocalOriginalBackup.offlineRecoverySource()
+        // A crash or failed installation must not erase the previous local state.
+        LocalSyncJournal.capture(context)
+        applying = true
+        try {
+            ProfileSync.apply(context, roster)
+            fun restoreSettings() {
+                val existing = SyncData.snapshot(context)
+                val changes = linkedMapOf<String, String?>()
+                for ((key, value) in saved.values) {
+                    if (existing[key] != value) changes[key] = value
+                }
+                for (key in existing.keys - saved.values.keys) changes[key] = null
+                SyncData.apply(context, changes, refreshNativeSnapshots = false)
+            }
+            restoreSettings()
+            val installErrors = PluginInventory.restore(context, activity, source, saved.plugins)
+            check(installErrors.isEmpty()) {
+                "Original plugin restore failed: " + installErrors.joinToString("; ").take(220)
+            }
+            // Plugin activation may replay its own settings; restore their exact
+            // pre-link values a second time and verify the final state.
+            restoreSettings()
+            LocalOriginalBackup.restoreNativeAddons(context, saved.nativeAddons)
+            val observed = SyncData.snapshot(context)
+            check(observed.keys == saved.values.keys &&
+                saved.values.all { (key, value) -> observed[key] == value }) {
+                "Original preferences were not fully restored; local rollback required."
+            }
+            check(ProfileSync.encode(ProfileSync.decode(ProfileSync.snapshot(context))) ==
+                ProfileSync.encode(roster)) {
+                "Restored profile identities do not match the original backup."
+            }
+            check(PluginSync.matches(PluginSync.decode(PluginInventory.snapshot(context)),
+                PluginSync.decode(saved.plugins))) {
+                "Restored plugin binaries do not match the original backup."
+            }
+            val config = SyncConfiguration(context)
+            // Even if the app dies after the journal is retired but before
+            // disconnect, this durable flag blocks every automatic upload.
+            check(config.preferences.edit()
+                .putBoolean("github_local_restore_pause", true).commit())
+            // Restore is local only. Clear account while the rollback journal
+            // still exists, so an interrupted disconnect can also be undone.
+            config.clearAccount()
+            LocalSyncJournal.finish(context)
+            lastStatus = "Original device backup restored locally. GitHub backup unchanged; sync disconnected."
+            lastStatus
+        } catch (error: Throwable) {
+            val recoveryError = try {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    LocalSyncJournal.recover(context, activity, rollbackSource)
+                }
+                null
+            } catch (rollback: Exception) {
+                rollback.message ?: rollback.javaClass.simpleName
+            }
+            if (recoveryError != null) {
+                throw IOException("Local original restore failed; rollback incomplete: " +
+                    recoveryError, error)
+            }
+            throw error
+        } finally {
+            applying = false
+        }
+    }
+
     private suspend fun synchronizePass(context: Context, activity: Activity?): String {
         val config = SyncConfiguration(context)
-        val backend = SyncBackend(config)
+        val backend: SyncStorage = GithubSyncAdapter(context)
         var stage = "loading cloud state"
+        var undoStarted = false
+        fun ensureUndo() {
+            if (!undoStarted) {
+                LocalSyncJournal.capture(context)
+                undoStarted = true
+            }
+        }
+        suspend fun undoIfNeeded(): String? {
+            if (!undoStarted) return null
+            applying = true
+            return try {
+                LocalSyncJournal.recover(context, activity, backend)
+                null
+            } catch (failure: Exception) {
+                "Local rollback incomplete; sync blocked until recovery: " +
+                    (failure.message ?: failure.javaClass.simpleName).take(170)
+            } finally {
+                applying = false
+            }
+        }
         try {
             val startedUser = backend.userId()
             fun verifyAccount() {
-                val stored = config.preferences.getString("session", null)
-                    ?: error("Sync account removed during operation")
-                val json = JSONObject(String(LocalVault.decrypt(stored), Charsets.UTF_8))
-                check(json.getString("user_id") == startedUser &&
+                check(config.active() &&
+                    config.preferences.getString("github_account_id", null) == startedUser &&
                     !config.preferences.getBoolean("account_switch_blocked", false)) {
                     "Sync account changed during operation"
                 }
@@ -84,11 +212,16 @@ internal object SyncCoordinator {
             }
             // On first link, an existing cloud account takes precedence over
             // unrelated settings and watch history already stored on this device.
-            val firstRemoteRestore = !config.preferences.contains("base") &&
+            val firstRemoteRestore = SyncSafety.firstRemoteRestore(
+                config.preferences.contains("base"),
+                (backend as GithubSyncAdapter).createdFreshBackup,
+                config.preferences.getBoolean("github_initial_backup_confirmed", false),
                 remoteValues.keys.any {
                     it == "x/profiles" || it == "x/plugins" ||
-                        it.startsWith("d/") || it.startsWith("s/") || it.startsWith("p/")
+                        it.startsWith("d/") || it.startsWith("u/") ||
+                        it.startsWith("s/") || it.startsWith("p/")
                 }
+            )
             val remoteByKey = pull.entries.associateBy { it.key }
             val versions = mutableMapOf<String, Long>()
             if (!pull.full) {
@@ -96,6 +229,41 @@ internal object SyncCoordinator {
                 for (key in old.keys()) versions[key] = old.getLong(key)
             }
             for (entry in pull.entries) versions[entry.key] = entry.version
+
+            // Gather *all* destructive changes before touching local profiles or
+            // publishing a Git commit. A preference listener only suggests a
+            // candidate; the human must approve the exact removal set.
+            val preflightBase = baseline(context)
+            val preflightLocal = ProfileIdentity.toRemote(SyncData.snapshot(context),
+                ProfileSync.decode(ProfileSync.snapshot(context)))
+            val preferenceRemovals = preflightBase.keys.filter { key ->
+                key !in preflightLocal &&
+                    config.preferences.contains("modified/" + key)
+            }.toSet()
+            val profileBaselineValue = config.preferences.getString("profile_baseline", null)
+            val baseProfileState = ProfileSync.decode(profileBaselineValue?.let {
+                String(LocalVault.decrypt(it), Charsets.UTF_8)
+            })
+            val localProfileState = ProfileSync.decode(ProfileSync.snapshot(context))
+            val profileRemovals = (baseProfileState.items.keys -
+                localProfileState.items.keys).filter { it > 0 }.toSet()
+            val previousInventory = PluginSync.decode(
+                config.preferences.getString("plugin_baseline", null))
+            val localInventory = PluginSync.decode(PluginInventory.snapshot(context))
+            val pluginRemovals = if (SyncRuntime.pluginsLoaded) {
+                previousInventory.items.keys - localInventory.items.keys
+            } else emptySet()
+            val destructiveProposals = preferenceRemovals +
+                profileRemovals.map { "x/profiles/$it" } +
+                pluginRemovals.map { "x/plugins/$it" }
+            SyncDeletionGate.requireApproval(config, destructiveProposals,
+                (backend as GithubSyncAdapter).verifiedRevision().first)
+            val approvedProfiles = profileRemovals.filter {
+                "x/profiles/$it" in destructiveProposals
+            }.toSet()
+            val approvedPlugins = pluginRemovals.filter {
+                "x/plugins/$it" in destructiveProposals
+            }.toSet()
 
             stage = "reconciling CloudStream profiles"
             fun protectedProfileValue(key: String): String? {
@@ -109,14 +277,50 @@ internal object SyncCoordinator {
                 remoteValues["x/profiles"]
             } else protectedProfileValue("profile_remote_snapshot")
             val profileLocal = ProfileSync.snapshot(context)
-            val profileMerge = ProfileSync.merge(profileLocal, profileServer, previousProfiles)
+            val profileMerge = ProfileSync.merge(
+                profileLocal, profileServer, previousProfiles, approvedProfiles)
             val targetProfiles = ProfileSync.encode(profileMerge.target)
+            val nativeBefore = ProfileSync.decode(profileLocal)
+            val obsoleteSlots = nativeBefore.items.keys.filter { slot ->
+                val old = nativeBefore.items.getValue(slot)
+                val adopted = profileMerge.target.items[slot]
+                adopted == null || ProfileIdentity.uuid(old) != ProfileIdentity.uuid(adopted)
+            }.toSet()
+            if (obsoleteSlots.isNotEmpty()) {
+                // An old B profile can leave numeric-slot watch keys behind even
+                // after the roster is replaced. Remove tracked native data
+                // BEFORE adopting the server's UUID, under the undo journal.
+                val obsolete = SyncData.snapshot(context).keys.filter { path ->
+                    val slot = if (path.startsWith("d/")) {
+                        path.removePrefix("d/").substringBefore('/').toIntOrNull()
+                    } else null
+                    slot in obsoleteSlots
+                }
+                if (obsolete.isNotEmpty()) {
+                    ensureUndo()
+                    applying = true
+                    try {
+                        SyncData.apply(context, obsolete.associateWith { null },
+                            refreshNativeSnapshots = false)
+                    } finally {
+                        applying = false
+                    }
+                }
+            }
+            // If another device replaced profile #1 (same number, new UUID),
+            // all records on this stale device's old #1 are untrusted.
+            // They must be restored from the new server UUID, never uploaded.
+            val replacedProfileUuids = ProfileIdentity.replacedByServer(
+                ProfileSync.decode(profileLocal), profileMerge.target)
             if (profileMerge.changedRemote) {
                 verifyAccount()
                 backend.upload(mapOf("x/profiles" to targetProfiles), cipher, versions)
                 versions["x/profiles"] = (versions["x/profiles"] ?: 0L) + 1L
             }
             verifyAccount()
+            if (ProfileSync.encode(ProfileSync.decode(profileLocal)) != targetProfiles) {
+                ensureUndo()
+            }
             applying = true
             try {
                 ProfileSync.apply(context, profileMerge.target)
@@ -133,7 +337,8 @@ internal object SyncCoordinator {
             val activeProfiles = profileMerge.target.items.keys
 
             stage = "reading local preferences"
-            val local = SyncData.snapshot(context)
+            val local = ProfileIdentity.toRemote(SyncData.snapshot(context),
+                profileMerge.target)
             val currentPlugins = PluginInventory.snapshot(context)
             val base = baseline(context)
             stage = "comparing changed settings"
@@ -164,7 +369,18 @@ internal object SyncCoordinator {
                 val profileId = if (key.startsWith("d/")) {
                     key.removePrefix("d/").substringBefore('/').toIntOrNull()
                 } else null
-                if (profileId != null && profileId !in activeProfiles) {
+                if (profileId != null && profileId !in activeProfiles) continue
+                // Never attach archived UUID watch state to a new profile that
+                // happens to reuse the same CloudStream numeric keyIndex.
+                if (key.startsWith("u/") &&
+                    ProfileIdentity.nativePath(key, profileMerge.target) == null) {
+                    continue
+                }
+                val namespace = key.removePrefix("u/").substringBefore('/')
+                if (key.startsWith("u/") && namespace in replacedProfileUuids) {
+                    if (remote != current) apply[key] = remote
+                    if (remotePresent) next[key] = remoteHash
+                    else next.remove(key)
                     continue
                 }
 
@@ -182,8 +398,22 @@ internal object SyncCoordinator {
                     }
                     continue
                 }
-                val changedLocal = currentHash != old
-                val changedRemote = remotePresent && remoteHash != old
+                // A missing key is NOT evidence of user deletion. Plugin startup,
+                // a failed preferences enumeration, or a filtered snapshot can omit it.
+                val explicitlyChanged = config.preferences.contains("modified/" + key)
+                if (current == null && !explicitlyChanged &&
+                    remotePresent && remote != null) {
+                    // A temporarily missing local preference must be repaired
+                    // from the complete remote snapshot, never uploaded as delete.
+                    apply[key] = remote
+                    next[key] = remoteHash
+                    continue
+                }
+                val changedLocal = SyncSafety.localHasRealChange(
+                    old, currentHash, current != null, explicitlyChanged
+                )
+                val changedRemote = if (pull.full) remoteHash != old
+                    else remotePresent && remoteHash != old
                 when {
                     changedLocal && changedRemote && currentHash == remoteHash -> {
                         next[key] = remoteHash
@@ -236,7 +466,7 @@ internal object SyncCoordinator {
             } else config.preferences.getString("plugin_remote_snapshot", null)
             var inventoryVersion = versions["x/plugins"]
             var merge = PluginSync.merge(currentPlugins, pluginsOnServer,
-                inventoryBase, SyncRuntime.pluginsLoaded)
+                inventoryBase, SyncRuntime.pluginsLoaded, approvedPlugins)
             var pluginTarget = PluginSync.encode(merge.target)
 
             // A manual local removal is only a deletion after the actual plugin
@@ -264,7 +494,7 @@ internal object SyncCoordinator {
                     inventoryVersion = newest?.version
                     if (inventoryVersion != null) versions["x/plugins"] = inventoryVersion
                     merge = PluginSync.merge(currentPlugins, pluginsOnServer,
-                        inventoryBase, SyncRuntime.pluginsLoaded)
+                        inventoryBase, SyncRuntime.pluginsLoaded, approvedPlugins)
                     pluginTarget = PluginSync.encode(merge.target)
                 }
             }
@@ -278,6 +508,7 @@ internal object SyncCoordinator {
             val repositories = apply.remove("d/REPOSITORIES_KEY")
             if (repositories != null && activity != null) {
                 verifyAccount()
+                ensureUndo()
                 applying = true
                 try {
                     SyncData.apply(context, mapOf("d/REPOSITORIES_KEY" to repositories))
@@ -291,6 +522,10 @@ internal object SyncCoordinator {
             stage = "restoring plugin binaries and removals"
             var installation = ""
             if (!PluginSync.matches(PluginSync.decode(currentPlugins), merge.target)) {
+                check(activity != null && SyncRuntime.pluginsLoaded) {
+                    "Plugin restore must complete in the foreground before settings are applied."
+                }
+                ensureUndo()
                 check(config.preferences.edit()
                     .putString("pending_plugins", pluginTarget).commit())
             } else if (config.preferences.contains("pending_plugins")) {
@@ -301,7 +536,11 @@ internal object SyncCoordinator {
                 verifyAccount()
                 applying = true
                 try {
+                    ensureUndo()
                     installation = installPending(context, activity, backend)
+                    check(!installation.contains("plugins pending:")) {
+                        "Plugin restore was incomplete."
+                    }
                 } finally {
                     applying = false
                 }
@@ -331,13 +570,19 @@ internal object SyncCoordinator {
 
             stage = "restoring preferences"
             verifyAccount()
+            if (apply.isNotEmpty()) ensureUndo()
             applying = true
             try {
-                SyncData.apply(context, apply)
+                SyncData.apply(context,
+                    ProfileIdentity.toNative(apply, profileMerge.target))
             } finally {
                 applying = false
             }
 
+            // A single Git commit publishes profile, plugin inventory and
+            // preferences together, only after local apply has succeeded.
+            stage = "publishing complete GitHub snapshot"
+            backend.flush(cipher)
             stage = "persisting verified settings baseline"
             verifyAccount()
             val baseJson = JSONObject()
@@ -358,12 +603,25 @@ internal object SyncCoordinator {
                     listBaselineJson.toString().toByteArray(Charsets.UTF_8)))
             if (pull.cursor != null) persisted.putLong("remote_cursor", pull.cursor)
             else persisted.remove("remote_cursor")
+            val (githubRevision, githubGeneration) =
+                (backend as GithubSyncAdapter).verifiedRevision()
+            persisted.putString("github_base_revision", githubRevision)
+                .putInt("github_generation", githubGeneration)
             if (serverPluginManifest != null) {
                 persisted.putString("plugin_remote_snapshot", serverPluginManifest)
             } else {
                 persisted.remove("plugin_remote_snapshot")
             }
             check(persisted.commit())
+            if ((backend as GithubSyncAdapter).createdFreshBackup) {
+                check(config.preferences.edit()
+                    .remove("github_initial_backup_confirmed").commit())
+            }
+            SyncDeletionGate.consumed(config)
+            if (undoStarted) {
+                LocalSyncJournal.finish(context)
+                undoStarted = false
+            }
             val editor = config.preferences.edit()
             for (key in apply.keys + upload.keys) editor.remove("modified/" + key)
             editor.apply()
@@ -380,17 +638,24 @@ internal object SyncCoordinator {
             lastStatus = result
             return result
         } catch (cancel: CancellationException) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                undoIfNeeded()
+            }
             throw cancel
         } catch (error: LinkageError) {
-            val message = "Sync incompatible during " + stage + ": " + error.javaClass.simpleName
+            val rollbackError = undoIfNeeded()
+            val message = "Sync incompatible during " + stage + ": " +
+                error.javaClass.simpleName + (rollbackError?.let { "; " + it } ?: "")
             Log.e("SyncCS", message, error)
             lastStatus = message
             return message
         } catch (error: Exception) {
+            val rollbackError = undoIfNeeded()
             val detail = (error.message ?: error.javaClass.simpleName).take(160)
             val message = if (error is IOException && isConflict(error)) {
                 "Sync conflict: " + detail
-            } else "Sync failed during " + stage + ": " + detail
+            } else "Sync failed during " + stage + ": " + detail +
+                (rollbackError?.let { "; " + it } ?: "")
             Log.e("SyncCS", message, error)
             lastStatus = message
             return message
@@ -404,7 +669,7 @@ internal object SyncCoordinator {
             detail.contains("40001")
     }
 
-    private suspend fun installPending(context: Context, activity: Activity, backend: SyncBackend): String {
+    private suspend fun installPending(context: Context, activity: Activity, backend: SyncStorage): String {
         val prefs = SyncConfiguration(context).preferences
         val pending = prefs.getString("pending_plugins", null) ?: return ""
         val failures = PluginInventory.restore(context, activity, backend, pending)

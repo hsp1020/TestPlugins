@@ -149,6 +149,10 @@ internal object SyncData {
         "crashlytics", "androidx", "gms", "advertis", "encrypted"
     )
     private fun dataAllowed(key: String): Boolean {
+        // UUID marker belongs to SyncCS local identity state. It must be
+        // deleted with CloudStream's profile slot but never uploaded as a
+        // normal setting or replayed into another profile.
+        if (key.endsWith("/synccs_profile_uuid")) return false
         if (key in globallyShared || key in cineStreamDiscoveredKeys ||
             (cineStreamDomainKey(key) && cineStreamKeyAllowed(key))) return true
         val slash = key.indexOf('/')
@@ -373,7 +377,8 @@ internal object SyncData {
         with(DataStore) { context.setKey(backupKey, json) }
     }
 
-    fun apply(context: Context, changes: Map<String, String?>) {
+    fun apply(context: Context, changes: Map<String, String?>,
+              refreshNativeSnapshots: Boolean = true) {
         if (changes.isEmpty()) return
         val data = with(DataStore) { context.getSharedPrefs() }
         val defaults = PreferenceManager.getDefaultSharedPreferences(context)
@@ -420,11 +425,11 @@ internal object SyncData {
         check(defaultEdit.commit()) { "Default settings restore failed" }
         pluginEditors.values.forEach { check(it.commit()) { "Plugin settings restore failed" } }
         // Keep native import snapshots consistent with restored plugin settings.
-        if (changes.keys.any { it.startsWith("p/StremioC/") }) {
+        if (refreshNativeSnapshots && changes.keys.any { it.startsWith("p/StremioC/") }) {
             refreshNativeBackup(context, "StremioC", "native_backup_stremioc",
                 "stremio_c_restore_complete", "stremio_c_last_applied_backup_hash")
         }
-        if (changes.keys.any { it.startsWith("p/StreamPlay/") }) {
+        if (refreshNativeSnapshots && changes.keys.any { it.startsWith("p/StreamPlay/") }) {
             refreshNativeBackup(context, "StreamPlay", "native_backup_streamplay",
                 "streamplay_restore_complete", "streamplay_last_applied_backup_hash")
         }
@@ -483,7 +488,7 @@ internal object PluginInventory {
         return items.toString()
     }
 
-    fun uploadFiles(context: Context, backend: SyncBackend, manifest: String) {
+    fun uploadFiles(context: Context, backend: SyncStorage, manifest: String) {
         val config = SyncConfiguration(context)
         val registry = config.preferences
         val entries = PluginSync.items(manifest)
@@ -493,7 +498,7 @@ internal object PluginInventory {
             val row = entries.getJSONObject(index)
             val hash = row.optString("sha")
             if (!hash.matches(Regex("[a-f0-9]{64}")) ||
-                registry.getBoolean("file_" + hash, false)) continue
+                (backend !is GithubSyncAdapter && registry.getBoolean("file_" + hash, false))) continue
             val plugin = if (row.optString("type") == "online") {
                 val repoId = row.optString("repo")
                 online.firstOrNull {
@@ -521,7 +526,9 @@ internal object PluginInventory {
             }
             try {
                 backend.uploadFile(hash, bytes)
-                registry.edit().putBoolean("file_" + hash, true).apply()
+                if (backend !is GithubSyncAdapter) {
+                    registry.edit().putBoolean("file_" + hash, true).apply()
+                }
             } catch (error: Exception) {
                 if (row.optString("type") == "local") throw error
                 // Online extensions can also be fetched from their repository.
@@ -529,7 +536,7 @@ internal object PluginInventory {
         }
     }
 
-    suspend fun restore(context: Context, activity: Activity, backend: SyncBackend, raw: String): List<String> {
+    suspend fun restore(context: Context, activity: Activity, backend: SyncStorage, raw: String): List<String> {
         val report = mutableListOf<String>()
         val rows = PluginSync.items(raw)
         val target = PluginSync.decode(raw).items
@@ -538,50 +545,24 @@ internal object PluginInventory {
         // registry change together. The merge has already decided which entries
         // are intentional deletions; never delete SyncCS itself.
         val current = PluginSync.decode(snapshot(context)).items
-        val onlineNow = PluginManager.getPluginsOnline().toList()
-        val localNow = PluginManager.getPluginsLocal().toList()
-        for ((key, row) in current) {
-            if (key in target || row.optString("name").equals("SyncCS", true)) continue
-            val name = row.optString("name")
-            val installed = if (row.optString("type") == "online") {
-                val repoId = row.optString("repo")
-                onlineNow.firstOrNull {
-                    it.internalName == name && it.url == row.optString("url") &&
-                        (repoId.isBlank() || File(it.filePath).parentFile?.name ==
-                            PluginManager.getPluginSanitizedFileName(repoId))
-                }
-            } else {
-                localNow.firstOrNull {
-                    it.internalName == name &&
-                        File(it.filePath).name == row.optString("file")
-                }
+        // Fail closed before the first uninstall. This guarantees that
+        // every binary to be replaced is already available and SHA-verified.
+        for ((id, item) in target) {
+            val desiredHash = item.optString("sha")
+            if (current[id]?.optString("sha") == desiredHash &&
+                desiredHash.matches(Regex("[0-9a-f]{64}"))) continue
+            if (!desiredHash.matches(Regex("[0-9a-f]{64}"))) {
+                return listOf("Unverifiable plugin backup: " + item.optString("name"))
             }
-            if (installed != null) {
-                try {
-                    val path = File(installed.filePath)
-                    if (!PluginManager.deletePlugin(path)) {
-                        if (!path.exists()) {
-                            val installedOnline = PluginManager.getPluginsOnline()
-                                .filter { it.filePath != installed.filePath }
-                            val installedLocal = PluginManager.getPluginsLocal()
-                                .filter { it.filePath != installed.filePath }
-                            com.lagradost.cloudstream3.CloudStreamApp.setKey(
-                                PLUGINS_KEY, installedOnline.toTypedArray()
-                            )
-                            com.lagradost.cloudstream3.CloudStreamApp.setKey(
-                                com.lagradost.cloudstream3.plugins.PLUGINS_KEY_LOCAL,
-                                installedLocal.toTypedArray()
-                            )
-                        } else report.add("Could not delete " + name)
-                    }
-                } catch (_: Exception) {
-                    report.add("Could not delete " + name)
-                } catch (_: LinkageError) {
-                    report.add("Unsupported uninstall for " + name)
-                }
+            val bytes = try {
+                backend.downloadFile(desiredHash)
+            } catch (error: Exception) {
+                return listOf("Plugin archive is missing: " + item.optString("name"))
+            }
+            if (SyncBackend.digestBytes(bytes) != desiredHash) {
+                return listOf("Plugin archive digest mismatch: " + item.optString("name"))
             }
         }
-
         val existingLocal = PluginManager.getPluginsLocal()
         for (index in 0 until rows.length()) {
             val row = rows.getJSONObject(index)
@@ -627,6 +608,14 @@ internal object PluginInventory {
                             val temp = File(path.parentFile, path.name + ".temp")
                             val backup = File(path.parentFile, path.name + ".synccs-old")
                             temp.writeBytes(bytes)
+                            if (backup.exists() && LocalSyncJournal.pending(context)) {
+                                // A previous crash may have left this temporary
+                                // file behind. The active, verified undo journal
+                                // contains the original archive bytes.
+                                check(backup.delete()) {
+                                    "Cannot clear abandoned plugin swap backup: " + name
+                                }
+                            }
                             check(!backup.exists()) { "Unrecovered plugin backup: " + name }
                             val prior = PluginManager.getPluginsOnline()
                                 .firstOrNull { it.filePath == path.absolutePath }
@@ -716,6 +705,52 @@ internal object PluginInventory {
                 }
             }
         }
+        // Only uninstall obsolete extensions after all replacements are verified.
+        if (report.isNotEmpty()) return report
+        val onlineNow = PluginManager.getPluginsOnline().toList()
+        val localNow = PluginManager.getPluginsLocal().toList()
+        for ((key, row) in current) {
+            if (key in target || row.optString("name").equals("SyncCS", true)) continue
+            val name = row.optString("name")
+            val installed = if (row.optString("type") == "online") {
+                val repoId = row.optString("repo")
+                onlineNow.firstOrNull {
+                    it.internalName == name && it.url == row.optString("url") &&
+                        (repoId.isBlank() || File(it.filePath).parentFile?.name ==
+                            PluginManager.getPluginSanitizedFileName(repoId))
+                }
+            } else {
+                localNow.firstOrNull {
+                    it.internalName == name &&
+                        File(it.filePath).name == row.optString("file")
+                }
+            }
+            if (installed != null) {
+                try {
+                    val path = File(installed.filePath)
+                    if (!PluginManager.deletePlugin(path)) {
+                        if (!path.exists()) {
+                            val installedOnline = PluginManager.getPluginsOnline()
+                                .filter { it.filePath != installed.filePath }
+                            val installedLocal = PluginManager.getPluginsLocal()
+                                .filter { it.filePath != installed.filePath }
+                            com.lagradost.cloudstream3.CloudStreamApp.setKey(
+                                PLUGINS_KEY, installedOnline.toTypedArray()
+                            )
+                            com.lagradost.cloudstream3.CloudStreamApp.setKey(
+                                com.lagradost.cloudstream3.plugins.PLUGINS_KEY_LOCAL,
+                                installedLocal.toTypedArray()
+                            )
+                        } else report.add("Could not delete " + name)
+                    }
+                } catch (_: Exception) {
+                    report.add("Could not delete " + name)
+                } catch (_: LinkageError) {
+                    report.add("Unsupported uninstall for " + name)
+                }
+            }
+        }
+
         return report
     }
 }

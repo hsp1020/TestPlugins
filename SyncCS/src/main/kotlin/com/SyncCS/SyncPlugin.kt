@@ -82,6 +82,13 @@ class SyncPlugin : Plugin() {
                 if (name.isBlank()) "" else "p/" + name + "/"
             }
         }
+        if (type == "d/" && key == "data_store_helper/account") {
+            if (!SyncCoordinator.applying) {
+                ProfileIdentity.observe(context)
+                request(400)
+            }
+            return@OnSharedPreferenceChangeListener
+        }
         if (type == "d/" && (key == PLUGINS_KEY || key == PLUGINS_KEY_LOCAL)) {
             if (SyncCoordinator.applying) return@OnSharedPreferenceChangeListener
             SyncCoordinator.markChanged(context, "x/plugins")
@@ -98,9 +105,25 @@ class SyncPlugin : Plugin() {
         ready = true
         SyncRuntime.refreshLoadedState()
         watchPreferences()
-        request(4000)
+        val context = com.lagradost.cloudstream3.CloudStreamApp.context
+        if (context != null && LocalSyncJournal.pending(context)) {
+            scope.launch {
+                val active = currentActivity?.get()?.takeIf {
+                    !it.isFinishing && !it.isDestroyed
+                }
+                SyncCoordinator.synchronize(context, active)
+            }
+        } else request(4000)
+        Unit
     }
     private val home = { _: Boolean -> request(3000) }
+    private val accountRoster = { _: Boolean ->
+        val context = com.lagradost.cloudstream3.CloudStreamApp.context
+        if (context != null && isOwner(context) && !SyncCoordinator.applying) {
+            ProfileIdentity.observe(context)
+        }
+        request(3000)
+    }
 
     private fun config(context: Context) = SyncConfiguration(context)
     private fun isOwner(context: Context): Boolean =
@@ -152,7 +175,14 @@ class SyncPlugin : Plugin() {
             }
             override fun onActivityResumed(activity: Activity) {
                 currentActivity = WeakReference(activity)
-                if (!isOwner(context) || !ready || !config(context).active()) return
+                if (!isOwner(context) || !ready) return
+                // An interrupted original restore may have disconnected the
+                // account. Always finish its local journal before normal sync.
+                if (LocalSyncJournal.pending(context)) {
+                    scope.launch { SyncCoordinator.synchronize(context, activity) }
+                    return
+                }
+                if (!config(context).active()) return
                 scope.launch {
                     if (System.currentTimeMillis() - lastSyncAt > 120000L) {
                         val report = SyncCoordinator.synchronize(context, activity)
@@ -191,11 +221,12 @@ class SyncPlugin : Plugin() {
     }
     override fun load(context: Context) {
         config(context).preferences.edit().putString("active_instance", owner).commit()
+        ProfileIdentity.observe(context)
         MainActivity.bookmarksUpdatedEvent += bookmarks
         MainActivity.afterPluginsLoadedEvent += loaded
         MainActivity.mainPluginsLoadedEvent += loaded
         MainActivity.reloadHomeEvent += home
-        MainActivity.reloadAccountEvent += home
+        MainActivity.reloadAccountEvent += accountRoster
         watchPreferences()
         start(context)
         openSettings = { selected ->
@@ -222,7 +253,7 @@ class SyncPlugin : Plugin() {
         MainActivity.afterPluginsLoadedEvent -= loaded
         MainActivity.mainPluginsLoadedEvent -= loaded
         MainActivity.reloadHomeEvent -= home
-        MainActivity.reloadAccountEvent -= home
+        MainActivity.reloadAccountEvent -= accountRoster
     }
     fun onUnload() = unload()
 }

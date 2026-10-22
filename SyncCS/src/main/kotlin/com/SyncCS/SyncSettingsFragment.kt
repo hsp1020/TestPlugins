@@ -38,6 +38,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
 class SyncSettingsFragment : DialogFragment() {
     private var statusLabel: TextView? = null
@@ -179,7 +181,7 @@ class SyncSettingsFragment : DialogFragment() {
         body.addView(settingRow(
             context,
             "Sync account",
-            "Connect your GitHub account"
+            "Direct encrypted backup in your private GitHub repository"
         ) {
             showAccountDialog()
         })
@@ -215,6 +217,59 @@ class SyncSettingsFragment : DialogFragment() {
 
         body.addView(settingRow(
             context,
+            "Review pending deletions",
+            "Explicit approval required; automated deletions are blocked"
+        ) {
+            val request = SyncDeletionGate.pending(config)
+            if (request.isEmpty()) {
+                AlertDialog.Builder(context)
+                    .setTitle("No pending deletions")
+                    .setMessage("Automatic synchronization cannot remove stored settings, " +
+                        "profiles or extensions without an explicit approval.")
+                    .setPositiveButton("Close", null).show()
+            } else {
+                val details = request.take(25).joinToString("\n") { "• " + it }
+                AlertDialog.Builder(context)
+                    .setTitle("Confirm " + request.size + " removals?")
+                    .setMessage("These entries were reported missing on this device. " +
+                        "This may be a temporary loading error; only proceed if you " +
+                        "personally removed them.\n\n" + details)
+                    .setPositiveButton("Approve and sync") { _, _ ->
+                        try {
+                            SyncDeletionGate.authorizePending(config)
+                            val host = requireActivity()
+                            lifecycleScope.launch {
+                                val progress = showSyncProgress()
+                                try {
+                                    val result = withContext(Dispatchers.IO) {
+                                        SyncCoordinator.synchronize(host.applicationContext, host)
+                                    }
+                                    finishSyncProgress(progress, result)
+                                } finally {
+                                    if (progress.dialog.isShowing) progress.dialog.dismiss()
+                                }
+                            }
+                        } catch (error: Exception) {
+                            AlertDialog.Builder(context)
+                                .setTitle("Removal approval failed")
+                                .setMessage(error.message.orEmpty().take(220))
+                                .setPositiveButton("Close", null).show()
+                        }
+                    }
+                    .setNegativeButton("Cancel", null).show()
+            }
+        })
+
+        body.addView(settingRow(
+            context,
+            "Restore backups",
+            "Choose a GitHub revision or this device's encrypted original backup"
+        ) {
+            showBackupHistory()
+        })
+
+        body.addView(settingRow(
+            context,
             "Disconnect this device",
             "Remove this device's sync session only"
         ) {
@@ -222,8 +277,16 @@ class SyncSettingsFragment : DialogFragment() {
                 .setTitle("Disconnect SyncCS")
                 .setMessage("Disconnect this device? Cloud backups and data on other devices will be preserved.")
                 .setPositiveButton("Disconnect") { _, _ ->
-                    config.clearAccount()
-                    statusLabel?.text = statusText(config)
+                    if (LocalSyncJournal.pending(context)) {
+                        AlertDialog.Builder(context)
+                            .setTitle("Local rollback must finish")
+                            .setMessage("A previous restore did not complete. Open CloudStream " +
+                                "in the foreground and complete recovery before disconnecting.")
+                            .setPositiveButton("Close", null).show()
+                    } else {
+                        config.clearAccount()
+                        statusLabel?.text = statusText(config)
+                    }
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
@@ -245,7 +308,9 @@ class SyncSettingsFragment : DialogFragment() {
     }
 
     private fun statusText(config: SyncConfiguration): String {
-        val status = if (config.active()) SyncCoordinator.lastStatus else "Not connected"
+        val status = if (config.preferences.getBoolean("github_recovery_in_progress", false)) {
+            "Backup revision recovery in progress"
+        } else if (config.active()) SyncCoordinator.lastStatus else "Not connected"
         return "$status  ·  ${config.deviceName}"
     }
 
@@ -381,91 +446,349 @@ class SyncSettingsFragment : DialogFragment() {
         return field
     }
 
+    private fun showBackupHistory() {
+        val host = requireActivity()
+        if (LocalSyncJournal.pending(host)) {
+            AlertDialog.Builder(host).setTitle("Local rollback pending")
+                .setMessage("Finish the previous local rollback before selecting another backup.")
+                .setPositiveButton("Close", null).show()
+            return
+        }
+        val config = SyncConfiguration(host)
+        lifecycleScope.launch {
+            val progress = showSyncProgress()
+            try {
+                val local = withContext(Dispatchers.IO) { LocalOriginalBackup.list(host) }
+                var historyError: String? = null
+                val remote = if (config.active()) {
+                    try {
+                        withContext(Dispatchers.IO) {
+                            val encryptedToken = config.preferences.getString("github_token", null)
+                                ?: error("Missing GitHub token")
+                            val store = GithubBackupStore(
+                                String(LocalVault.decrypt(encryptedToken), Charsets.UTF_8),
+                                config.preferences.getString("github_login", null)
+                                    ?: error("Missing GitHub account"),
+                                deviceName = config.deviceName, deviceId = config.deviceId)
+                            val current = store.current(SyncCipher.saved(config))
+                                ?: error("No GitHub backup available.")
+                            store.history(current.branch, 30)
+                                .filter { it.id != current.revision && it.summary.startsWith("SyncCS ") }
+                        }
+                    } catch (error: Exception) {
+                        historyError = error.message ?: error.javaClass.simpleName
+                        emptyList()
+                    }
+                } else emptyList()
+
+                progress.dialog.dismiss()
+                if (local.isEmpty() && remote.isEmpty()) {
+                    AlertDialog.Builder(host).setTitle("No backup available")
+                        .setMessage(historyError?.let { "GitHub history unavailable: $it" }
+                            ?: "No local original backup or earlier GitHub revision was found.")
+                        .setPositiveButton("Close", null).show()
+                    return@launch
+                }
+                val body = column(host)
+                val picker = AlertDialog.Builder(host)
+                    .setTitle("Choose backup to restore")
+                    .setView(scroll(host, body))
+                    .setNegativeButton("Close", null).create()
+                if (local.isNotEmpty()) {
+                    body.addView(secondary(host, "DEVICE ORIGINAL BACKUPS").apply {
+                        setPadding(dp(host, 12), dp(host, 14), 0, dp(host, 4))
+                    })
+                    val formatter = java.text.SimpleDateFormat(
+                        "yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+                    local.forEach { entry ->
+                        val date = formatter.format(java.util.Date(entry.created))
+                        body.addView(settingRow(host,
+                            "Original device backup · $date",
+                            if (entry.complete) "Encrypted settings, profiles and archived .cs3 files"
+                            else "Older encrypted original · plugin binaries may be unavailable"
+                        ) {
+                            picker.dismiss()
+                            confirmOriginalRestore(entry)
+                        })
+                    }
+                }
+                if (config.active()) {
+                    body.addView(secondary(host, "GITHUB BACKUP HISTORY").apply {
+                        setPadding(dp(host, 12), dp(host, 14), 0, dp(host, 4))
+                    })
+                    remote.forEach { revision ->
+                        body.addView(settingRow(host,
+                            "GitHub revision · " + revision.timestamp,
+                            revision.summary.take(100)
+                        ) {
+                            picker.dismiss()
+                            confirmGithubRestore(revision)
+                        })
+                    }
+                    if (historyError != null) {
+                        body.addView(secondary(host,
+                            "GitHub history unavailable: " + historyError.take(160)))
+                    }
+                } else {
+                    body.addView(secondary(host,
+                        "GitHub revision history is available after signing in. " +
+                            "Local originals can be restored without a GitHub connection."))
+                }
+                picker.show()
+            } catch (error: Exception) {
+                progress.dialog.dismiss()
+                AlertDialog.Builder(host).setTitle("Backup list unavailable")
+                    .setMessage(error.message.orEmpty().take(300))
+                    .setPositiveButton("Close", null).show()
+            }
+        }
+    }
+
+    private fun confirmOriginalRestore(entry: LocalOriginalBackup.Entry) {
+        val host = requireActivity()
+        AlertDialog.Builder(host)
+            .setTitle("Restore original device backup?")
+            .setMessage("Restore this device's pre-sync profiles, watch history, preferences " +
+                "and original plugins. GitHub backups will NOT be changed. " +
+                "SyncCS will disconnect this device afterward so the restored old data " +
+                "cannot be automatically uploaded to GitHub.\n\n" +
+                if (!entry.complete) "This older backup does not contain plugin archives. " +
+                    "If required binaries are unavailable, restoration will stop without changes."
+                else "The current device state will be saved to a rollback journal first.")
+            .setPositiveButton("Restore original") { _, _ ->
+                lifecycleScope.launch {
+                    val progress = showSyncProgress()
+                    try {
+                        val result = withContext(Dispatchers.IO) {
+                            SyncCoordinator.restoreOriginal(host.applicationContext, host, entry)
+                        }
+                        progress.dialog.dismiss()
+                        statusLabel?.text = result
+                        AlertDialog.Builder(host).setTitle("Original backup restored")
+                            .setMessage(result + "\n\nRestart CloudStream to reload the restored plugins.")
+                            .setPositiveButton("Restart") { _, _ ->
+                                restartCloudStreamAfterFirstSignIn(host)
+                            }
+                            .setNegativeButton("Later", null).show()
+                    } catch (error: Exception) {
+                        progress.dialog.dismiss()
+                        AlertDialog.Builder(host).setTitle("Original restore failed")
+                            .setMessage((error.message ?: error.javaClass.simpleName).take(350) +
+                                "\nGitHub history was not changed. If local rollback failed, " +
+                                "SyncCS will block normal syncing.")
+                            .setPositiveButton("Close", null).show()
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun confirmGithubRestore(selected: GithubBackupStore.Revision) {
+        val host = requireActivity()
+        val config = SyncConfiguration(host)
+        AlertDialog.Builder(host)
+            .setTitle("Restore this GitHub revision?")
+            .setMessage("This creates a NEW Git commit preserving full history, " +
+                "increments recovery generation, and replaces synchronized settings. " +
+                "Other devices must reconnect before uploading. " +
+                "Revision: " + selected.id.take(12))
+            .setPositiveButton("Restore") { _, _ ->
+                lifecycleScope.launch {
+                    val progress = showSyncProgress()
+                    try {
+                        val result = withContext(Dispatchers.IO) {
+                            check(config.preferences.edit()
+                                .putBoolean("github_recovery_in_progress", true).commit())
+                            try {
+                                val token = config.preferences.getString("github_token", null)
+                                    ?: error("Missing GitHub access token")
+                                val store = GithubBackupStore(
+                                    String(LocalVault.decrypt(token), Charsets.UTF_8),
+                                    config.preferences.getString("github_login", null)
+                                        ?: error("Missing GitHub login"),
+                                    deviceName = config.deviceName, deviceId = config.deviceId)
+                                val cipher = SyncCipher.saved(config)
+                                val current = store.current(cipher)
+                                    ?: error("No current GitHub backup.")
+                                val newRevision = store.rollback(current, selected.id, cipher)
+                                val editor = config.preferences.edit()
+                                    .putInt("github_generation", current.generation + 1)
+                                    .putString("github_base_revision", newRevision)
+                                for (key in listOf("base", "remote_cursor", "remote_versions",
+                                    "profile_baseline", "profile_remote_snapshot",
+                                    "plugin_baseline", "plugin_remote_snapshot",
+                                    "pending_plugins", "list_baselines", "pending_conflicts"
+                                )) editor.remove(key)
+                                for (key in config.preferences.all.keys) {
+                                    if (key.startsWith("modified/")) editor.remove(key)
+                                }
+                                check(editor.commit())
+                            } finally {
+                                config.preferences.edit().remove("github_recovery_in_progress").commit()
+                            }
+                            SyncCoordinator.synchronize(host.applicationContext, host)
+                        }
+                        finishSyncProgress(progress, result)
+                    } catch (error: Exception) {
+                        progress.dialog.dismiss()
+                        AlertDialog.Builder(host).setTitle("GitHub recovery not completed")
+                            .setMessage(error.message.orEmpty().take(300))
+                            .setPositiveButton("Close", null).show()
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
     private fun showAccountDialog() {
         if (accountDialog?.isShowing == true) return
         val context = requireContext()
+        if (LocalSyncJournal.pending(context)) {
+            AlertDialog.Builder(context).setTitle("Local rollback pending")
+                .setMessage("Finish recovering the previous local restore before linking an account.")
+                .setPositiveButton("Close", null).show()
+            return
+        }
         val config = SyncConfiguration(context)
         val body = column(context)
-        body.addView(secondary(
-            context,
-            "Sign in using your GitHub account. SyncCS does not need a separate email or password."
-        ))
-        val recovery = labeledField(
-            context, body, "Recovery passphrase", "At least 12 characters",
+        body.addView(secondary(context,
+            "Direct GitHub backup · Your account owns a private repository. " +
+            "Use the Client ID of a GitHub OAuth App with Device Flow enabled. " +
+            "Authorization requests repository access; only use an app you trust."))
+        val clientId = labeledField(context, body,
+            "GitHub OAuth App Client ID", "Client ID",
+            config.preferences.getString("github_client_id", "") ?: "")
+        val recovery = labeledField(context, body,
+            "Backup recovery passphrase", "At least 12 characters",
             kind = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD,
-            revealToggle = true
-        )
-        body.addView(secondary(
-            context,
-            "This encrypts your synced data. Enter the same recovery passphrase on every device."
-        ))
-        val device = labeledField(
-            context, body, "Device name", "Device name", config.deviceName, done = true
-        )
+            revealToggle = true)
+        val device = labeledField(context, body,
+            "Device name", "Device name", config.deviceName, done = true)
         val feedback = secondary(context, "").apply {
             visibility = View.GONE
             setPadding(0, dp(context, 12), 0, 0)
         }
         body.addView(feedback)
         val dialog = AlertDialog.Builder(context)
-            .setTitle("SyncCS · GitHub")
+            .setTitle("SyncCS · GitHub direct")
             .setView(scroll(context, body))
-            .setPositiveButton("Sign in with GitHub", null)
-            .setNegativeButton("Cancel", null)
-            .create()
+            .setPositiveButton("Connect GitHub", null)
+            .setNegativeButton("Cancel", null).create()
 
         dialog.setOnShowListener {
             dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN)
-            val signInButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-            signInButton.setOnClickListener {
+            val button = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            button.setOnClickListener {
                 if (githubLoginJob?.isActive == true) return@setOnClickListener
+                val client = clientId.text.toString().trim()
                 val phrase = recovery.text.toString()
-                val name = device.text.toString().trim().ifEmpty { Build.MODEL }
-                if (phrase.length < 12) {
-                    feedback.text = "Enter a recovery passphrase with at least 12 characters."
+                val name = device.text.toString().trim().ifBlank { Build.MODEL }
+                if (!client.matches(Regex("[A-Za-z0-9_.-]{8,80}")) || phrase.length < 12) {
+                    feedback.text = "Enter your GitHub OAuth App Client ID and a recovery passphrase of 12+ characters."
                     feedback.visibility = View.VISIBLE
                     return@setOnClickListener
                 }
-                signInButton.isEnabled = false
-                feedback.text = "Preparing GitHub login..."
-                feedback.visibility = View.VISIBLE
+                button.isEnabled = false
                 val host = requireActivity()
                 val firstConnection = !config.active()
+                feedback.visibility = View.VISIBLE
                 githubLoginJob = lifecycleScope.launch {
                     try {
-                        // CloudStream's existing deep-link intent handles browser-to-app return.
-                        // No AndroidX Browser classes are required by the host at runtime.
-                        val attempt = withContext(Dispatchers.IO) {
-                            SyncBackend(config).beginGithubLogin(autoReturn = true)
+                        val challenge = withContext(Dispatchers.IO) {
+                            GithubDeviceCode.begin(client)
                         }
-                        host.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(attempt.browserUrl)))
-                        feedback.text = "Complete GitHub sign-in in your browser. CloudStream should reopen automatically; if not, return manually."
-                        val authCode: String = withTimeout(4L * 60L * 1000L) {
-                            var received: String? = null
-                            while (received == null) {
-                                delay(1600L)
-                                received = withContext(Dispatchers.IO) {
-                                    SyncBackend(config).pollGithubLogin(attempt.state)
+                        feedback.text = "Open " + challenge.verification +
+                            " and enter this code: " + challenge.userCode +
+                            "\nOn Android TV, enter the code from your phone or computer."
+                        runCatching {
+                            host.startActivity(Intent(Intent.ACTION_VIEW,
+                                Uri.parse(challenge.verification)))
+                        }
+                        var token: String? = null
+                        var interval = challenge.pollSeconds
+                        withTimeout(challenge.expiresSeconds * 1000L) {
+                            while (token == null) {
+                                delay(interval * 1000L)
+                                try {
+                                    token = withContext(Dispatchers.IO) {
+                                        GithubDeviceCode.poll(client, challenge)
+                                    }
+                                } catch (slow: java.io.IOException) {
+                                    if (slow.message?.contains("slower polling") == true) {
+                                        interval += 5
+                                    } else throw slow
                                 }
                             }
-                            received ?: throw java.io.IOException("Missing GitHub authorization code.")
+                        }
+                        val accessToken = token ?: error("GitHub authorization did not complete.")
+                        val profile = withContext(Dispatchers.IO) {
+                            GithubDeviceCode.profile(accessToken)
+                        }
+                        val previous = config.preferences.getString("github_account_id", null)
+                        check(previous == null || previous == profile.id) {
+                            "Different GitHub account: disconnect the current device first."
+                        }
+                        feedback.text = "Verifying private repository and recovery key..."
+                        // Check repository privacy and passphrase BEFORE activating any sync.
+                        val existingBackup = withContext(Dispatchers.IO) {
+                            GithubBackupStore(accessToken, profile.login).current(
+                                SyncCipher.derive(phrase, "https://api.github.com", profile.id))
+                        }
+                        val createFirst = if (existingBackup == null) {
+                            suspendCancellableCoroutine<Boolean> { continuation ->
+                                val approval = AlertDialog.Builder(host)
+                                    .setTitle("Create initial GitHub backup?")
+                                    .setMessage("No completed cloud backup exists. " +
+                                        "Only continue on the SOURCE device whose settings " +
+                                        "and watch history you want as the new master. " +
+                                        "Existing device data may contain old or corrupted settings. " +
+                                        "Do not create an initial backup from an untrusted device.")
+                                    .setPositiveButton("Use this device as source") { _, _ ->
+                                        if (continuation.isActive) continuation.resume(true)
+                                    }
+                                    .setNegativeButton("Cancel") { _, _ ->
+                                        if (continuation.isActive) continuation.resume(false)
+                                    }
+                                    .setOnCancelListener {
+                                        if (continuation.isActive) continuation.resume(false)
+                                    }.create()
+                                continuation.invokeOnCancellation { approval.dismiss() }
+                                approval.show()
+                            }
+                        } else false
+                        check(existingBackup != null || createFirst) {
+                            "Initial GitHub backup canceled; no remote data modified."
+                        }
+                        withContext(Dispatchers.IO) {
+                            SyncCipher.storeGithub(config, phrase, profile.id)
+                            val edit = config.preferences.edit()
+                                .putString("github_token", LocalVault.encrypt(
+                                    accessToken.toByteArray(Charsets.UTF_8)))
+                                .putString("github_account_id", profile.id)
+                                .putString("github_login", profile.login)
+                                .putString("github_client_id", client)
+                                .putString("sync_transport", "github")
+                                .putBoolean("github_initial_backup_confirmed", createFirst)
+                                .putString("device_name", name)
+                                .remove("account_switch_blocked")
+                            if (previous == null) {
+                                edit.remove("base").remove("remote_cursor")
+                                    .remove("remote_versions").remove("plugin_baseline")
+                                    .remove("profile_baseline").remove("profile_remote_snapshot")
+                                    .remove("plugin_remote_snapshot").remove("list_baselines")
+                                    .remove("pending_plugins").remove("pending_conflicts")
+                                for (key in config.preferences.all.keys) {
+                                    if (key.startsWith("modified/")) edit.remove(key)
+                                }
+                            }
+                            check(edit.commit()) { "Could not store GitHub session." }
                         }
                         val progress = showSyncProgress()
-                        progress.label.text = "Completing GitHub sign-in..."
                         try {
-                            withContext(Dispatchers.IO) {
-                                SyncBackend(config).completeGithubLogin(
-                                    attempt.state, authCode, phrase
-                                )
-                                config.deviceName = name
-                            }
-                            feedback.text = "GitHub sign-in complete."
-                            progress.label.text = "Synchronizing..."
                             val report = withContext(Dispatchers.IO) {
                                 SyncCoordinator.synchronize(host.applicationContext, host)
                             }
-                            if (finishSyncProgress(progress, report, restartAfter = firstConnection)) {
-                                // First login completes only after the restored state is reloaded.
+                            if (finishSyncProgress(progress, report, firstConnection)) {
                                 if (firstConnection && restartCloudStreamAfterFirstSignIn(host)) {
                                     return@launch
                                 }
@@ -473,23 +796,21 @@ class SyncSettingsFragment : DialogFragment() {
                                 if (dialog.isShowing) dialog.dismiss()
                                 if (isAdded) dismissAllowingStateLoss()
                             } else {
-                                feedback.text = "Signed in, but synchronization did not complete."
+                                feedback.text = "Connection established, but initial sync is incomplete. " +
+                                    "Do not use automatic sync until the error is resolved."
                             }
-                        } catch (error: Exception) {
-                            progress.dialog.dismiss()
-                            throw error
+                        } finally {
+                            if (progress.dialog.isShowing) progress.dialog.dismiss()
                         }
                     } catch (timeout: TimeoutCancellationException) {
-                        if (dialog.isShowing) feedback.text = "GitHub login timed out. Please try again."
+                        if (dialog.isShowing) feedback.text = "GitHub device authorization expired."
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (error: Exception) {
-                        if (dialog.isShowing) {
-                            feedback.text = "GitHub login failed: " +
-                                (error.message ?: error.javaClass.simpleName).take(160)
-                        }
+                        if (dialog.isShowing) feedback.text = "GitHub setup failed: " +
+                            (error.message ?: error.javaClass.simpleName).take(220)
                     } finally {
-                        if (dialog.isShowing) signInButton.isEnabled = true
+                        if (dialog.isShowing) button.isEnabled = true
                     }
                 }
             }

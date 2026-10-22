@@ -1,7 +1,7 @@
 version = 10
 
 cloudstream {
-    description = "Sync CloudStream library, accounts, extensions and shared preferences using Supabase"
+    description = "Encrypt and synchronize CloudStream settings and watch history through a private GitHub repository"
     authors = listOf("hsp1020")
     language = "ko"
 
@@ -15,3 +15,8 @@ android {
     namespace = "com.SyncCS"
 }
 
+dependencies {
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.15.1")
+    testImplementation("androidx.test:core:1.6.1")
+}
