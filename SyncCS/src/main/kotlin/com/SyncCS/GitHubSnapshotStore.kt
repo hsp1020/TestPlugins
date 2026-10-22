@@ -66,7 +66,8 @@ internal data class GitHubSnapshot(
     val profiles: String,
     val plugins: String,
     val settings: Map<String, String>,
-    val format: Int = 1
+    val format: Int = 1,
+    val deviceName: String = ""
 ) {
     fun json(): String {
         val entries = JSONObject()
@@ -74,6 +75,7 @@ internal data class GitHubSnapshot(
         return JSONObject().put("format", format)
             .put("generation", generation)
             .put("device", device)
+            .put("deviceName", deviceName)
             .put("profiles", profiles)
             .put("plugins", plugins)
             .put("settings", entries).toString()
@@ -93,7 +95,8 @@ internal data class GitHubSnapshot(
                 data[key] = obj.getString(key)
             }
             return GitHubSnapshot(generation, raw.getString("device"),
-                raw.getString("profiles"), raw.getString("plugins"), data)
+                raw.getString("profiles"), raw.getString("plugins"), data,
+                deviceName = raw.optString("deviceName", ""))
         }
     }
 }

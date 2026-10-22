@@ -71,7 +71,8 @@ class GitHubSyncSettingsFragment : DialogFragment() {
                 val preview = GitHubSyncEngine.inspect(requireContext())
                 if (preview == null) "No GitHub backup exists yet"
                 else "Complete backup: " + preview.count + " settings, " +
-                    preview.pluginCount + " extensions. Generation: " + preview.generation
+                    preview.pluginCount + " extensions. Last authoring device: " +
+                    preview.deviceName + ". Generation: " + preview.generation
             }
         }
         row(context, root, "Create FIRST backup (empty backup branch only)") {

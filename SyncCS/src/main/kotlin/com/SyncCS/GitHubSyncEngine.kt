@@ -28,7 +28,8 @@ internal object GitHubSyncEngine {
     @Volatile var status: String = "GitHub sync not connected"
         private set
 
-    data class Preview(val generation: String, val head: String, val count: Int, val pluginCount: Int)
+    data class Preview(val generation: String, val head: String, val count: Int,
+                       val pluginCount: Int, val deviceName: String)
     data class Plan(val merged: GitHubSnapshot, val changed: Int, val deleted: Int, val conflicts: Int)
 
     fun markChanged(context: Context, key: String) {
@@ -43,7 +44,8 @@ internal object GitHubSyncEngine {
         return GitHubSnapshot(generation,
             GitHubSyncConfig(context).deviceId,
             ProfileSync.snapshot(context),
-            PluginInventory.snapshot(context), settings)
+            PluginInventory.snapshot(context), settings,
+            deviceName = GitHubSyncConfig(context).deviceName)
     }
     private fun baselineFile(context: Context) =
         File(context.filesDir, "synccs-github-baseline-v1.enc")
@@ -87,7 +89,8 @@ internal object GitHubSyncEngine {
         val remote = GitHubSyncTransport(config).read() ?: return null
         return Preview(remote.snapshot.generation, remote.sha,
             remote.snapshot.settings.size,
-            PluginSync.decode(remote.snapshot.plugins).items.size)
+            PluginSync.decode(remote.snapshot.plugins).items.size,
+            remote.snapshot.deviceName)
     }
 
     suspend fun createFirstBackup(context: Context): String = mutex.withLock {
@@ -192,7 +195,8 @@ internal object GitHubSyncEngine {
             // Increment the generation: old device baselines cannot publish into
             // the restored account until explicitly reinitialized from this epoch.
             val target = previous.snapshot.copy(
-                generation = UUID.randomUUID().toString(), device = config.deviceId
+                generation = UUID.randomUUID().toString(), device = config.deviceId,
+                deviceName = config.deviceName
             )
             val before = local(context, head.snapshot.generation)
             recoveryCheckpoint(context, before)
