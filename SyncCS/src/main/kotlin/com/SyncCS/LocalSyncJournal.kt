@@ -182,11 +182,63 @@ internal object LocalSyncJournal {
     suspend fun recover(context: Context, activity: Activity?, storage: SyncStorage) {
         val dir = live(context)
         if (!dir.exists()) return
-        check(activity != null && !activity.isFinishing && !activity.isDestroyed) {
-            "Local rollback requires a foreground CloudStream activity. Sync is paused."
-        }
         val metadata = manifest(dir)
         check(metadata.getInt("format") == 1)
+        val created = metadata.getLong("created")
+        val savedPlugins = metadata.getString("plugins")
+        val currentPlugins = PluginInventory.snapshot(context)
+        val binariesUnchanged = PluginSync.matches(
+            PluginSync.decode(currentPlugins), PluginSync.decode(savedPlugins))
+        val marked = SyncConfiguration(context).preferences.all.filter { (key, time) ->
+            key.startsWith("modified/") &&
+                SyncRecoveryPolicy.wasChangedAfter(time, created)
+        }.keys.map { it.removePrefix("modified/") }.toSet()
+        val pluginChangedSince = "x/plugins" in marked
+        // If the user installed extensions after the failed transaction, never
+        // replace them with the older checkpoint. The surviving change marker
+        // causes the next merge to publish their current inventory.
+        val preserveCurrentPlugins = SyncRecoveryPolicy.keepNewPlugins(
+            binariesUnchanged, pluginChangedSince)
+        val needsBinaryRestore = SyncRecoveryPolicy.requiresForegroundBinaryRestore(
+            binariesUnchanged, pluginChangedSince)
+        if (needsBinaryRestore) {
+            check(activity != null && !activity.isFinishing && !activity.isDestroyed) {
+                "Plugin binaries changed during a failed transaction; foreground recovery required."
+            }
+        }
+        val currentRoster = ProfileSync.decode(ProfileSync.snapshot(context))
+        val nativeBefore = SyncData.snapshot(context)
+        val postJournalEdits = linkedMapOf<String, String?>()
+        for (remoteKey in marked) {
+            if (remoteKey == "x/plugins" || remoteKey == "x/profiles") continue
+            val native = ProfileIdentity.nativePath(remoteKey, currentRoster) ?: continue
+            if (SyncData.isTracked(native)) {
+                postJournalEdits[native] = nativeBefore[native]
+            }
+        }
+        // Preserve new plugin preferences even if their listener was registered
+        // after installation. The sync transaction did not create that plugin.
+        if (preserveCurrentPlugins) {
+            for ((key, value) in nativeBefore) {
+                if (key.startsWith("p/")) postJournalEdits[key] = value
+            }
+            for (key in metadata.getJSONObject("values").keys()) {
+                if (key.startsWith("p/") && key !in nativeBefore) {
+                    postJournalEdits[key] = null
+                }
+            }
+        }
+        val preserveNativeBackups = preserveCurrentPlugins ||
+            postJournalEdits.keys.any {
+                it.startsWith("p/StremioC/") || it.startsWith("p/StreamPlay/")
+            }
+        val recentNativeBackups = if (preserveNativeBackups) {
+            nativeBackupValues(context)
+        } else null
+        SyncTrace.info("journal-recovery-plan",
+            "created=$created pluginUnchanged=$binariesUnchanged " +
+                "preserveNewPlugins=$preserveCurrentPlugins " +
+                "newerKeys=${postJournalEdits.size} activity=${activity != null}")
         val original = metadata.getJSONObject("values")
         val backup = linkedMapOf<String, String>()
         for (key in original.keys()) backup[key] = original.getString(key)
@@ -195,46 +247,67 @@ internal object LocalSyncJournal {
         val now = SyncData.snapshot(context)
         val restore = linkedMapOf<String, String?>()
         for ((key, value) in backup) {
-            if (now[key] != value) restore[key] = value
+            if (key !in postJournalEdits && now[key] != value) restore[key] = value
         }
-        for (key in now.keys - backup.keys) restore[key] = null
+        for (key in now.keys - backup.keys) {
+            if (key !in postJournalEdits) restore[key] = null
+        }
         SyncData.apply(context, restore, refreshNativeSnapshots = false)
 
-        val originalManifest = metadata.getString("plugins")
-        val source = object : SyncStorage by storage {
-            override fun downloadFile(hash: String): ByteArray {
-                check(hash.matches(Regex("[0-9a-f]{64}")))
-                val bytes = File(dir, "$hash.cs3").readBytes()
-                check(SyncBackend.digestBytes(bytes) == hash) {
-                    "Local recovery binary was corrupted."
+        if (needsBinaryRestore) {
+            val source = object : SyncStorage by storage {
+                override fun downloadFile(hash: String): ByteArray {
+                    check(hash.matches(Regex("[0-9a-f]{64}")))
+                    val bytes = File(dir, "$hash.cs3").readBytes()
+                    check(SyncBackend.digestBytes(bytes) == hash) {
+                        "Local recovery binary was corrupted."
+                    }
+                    return bytes
                 }
-                return bytes
+            }
+            val errors = PluginInventory.restore(context, activity!!, source, savedPlugins)
+            check(errors.isEmpty()) {
+                "Plugin rollback incomplete: " + errors.joinToString(" | ")
             }
         }
-        val errors = PluginInventory.restore(context, activity, source, originalManifest)
-        check(errors.isEmpty()) { "Plugin rollback incomplete: " + errors.joinToString(" | ") }
-        // Restore the originally saved native backup AFTER extension reload,
-        // which can replay or refresh settings during plugin initialization.
-        restoreNativeBackups(context, metadata.getJSONObject("nativeAddonBackups"))
-        val extras = SyncData.snapshot(context).keys - backup.keys
+        // A plugin reload may have touched user settings. Reapply every edit
+        // made after the checkpoint, including explicit user deletions.
+        if (postJournalEdits.isNotEmpty()) {
+            SyncData.apply(context, postJournalEdits, refreshNativeSnapshots = false)
+        }
+        restoreNativeBackups(context,
+            recentNativeBackups ?: metadata.getJSONObject("nativeAddonBackups"))
+        val expected = backup.toMutableMap()
+        for ((key, value) in postJournalEdits) {
+            if (value == null) expected.remove(key) else expected[key] = value
+        }
+        val extras = SyncData.snapshot(context).keys - expected.keys
         if (extras.isNotEmpty()) {
             SyncData.apply(context, extras.associateWith { null },
                 refreshNativeSnapshots = false)
-            restoreNativeBackups(context, metadata.getJSONObject("nativeAddonBackups"))
+            restoreNativeBackups(context,
+            recentNativeBackups ?: metadata.getJSONObject("nativeAddonBackups"))
         }
         val restored = SyncData.snapshot(context)
-        check(restored.keys == backup.keys &&
-            backup.all { (key, value) -> restored[key] == value }) {
+        check(restored.keys == expected.keys &&
+            expected.all { (key, value) -> restored[key] == value }) {
             "Local settings verification failed after rollback: missing or extra keys."
         }
-        check(PluginSync.matches(PluginSync.decode(PluginInventory.snapshot(context)),
-            PluginSync.decode(originalManifest))) { "Installed plugins differ after rollback." }
+        if (!preserveCurrentPlugins) {
+            check(PluginSync.matches(PluginSync.decode(PluginInventory.snapshot(context)),
+                PluginSync.decode(savedPlugins))) {
+                "Installed plugins differ after rollback."
+            }
+        }
         check(ProfileSync.encode(ProfileSync.decode(ProfileSync.snapshot(context))) ==
             ProfileSync.encode(ProfileSync.decode(metadata.getString("profiles")))) {
             "Profile roster verification failed after rollback."
         }
         restorePrivateMetadata(context, metadata.getJSONObject("privateSyncState"))
         finish(context)
+        SyncTrace.info("journal-recovery-complete",
+            "preservedNewKeys=${postJournalEdits.size} preservedNewPlugins=$preserveCurrentPlugins " +
+                "pluginRecoveryRequired=$needsBinaryRestore")
     }
 
     fun finish(context: Context) {

@@ -40,38 +40,52 @@ internal object SyncCoordinator {
 
     suspend fun synchronize(context: Context, activity: Activity? = null): String = lock.withLock {
         val config = SyncConfiguration(context)
+        val activityReady = activity != null && !activity.isFinishing && !activity.isDestroyed
+        fun pause(reason: String, message: String): String {
+            SyncTrace.info("sync-preflight-exit",
+                "reason=$reason journalPending=${LocalSyncJournal.pending(context)} " +
+                    "activityReady=$activityReady active=${config.active()} " +
+                    "localRestorePaused=${config.preferences.getBoolean("github_local_restore_pause", false)} " +
+                    "remoteRestoreActive=${config.preferences.getBoolean("github_recovery_in_progress", false)}")
+            lastStatus = message
+            return message
+        }
+        SyncTrace.info("sync-preflight",
+            "journalPending=${LocalSyncJournal.pending(context)} activityReady=$activityReady " +
+                "active=${config.active()} markers=${config.preferences.all.keys.count {
+                    it.startsWith("modified/")
+                }}")
         if (LocalSyncJournal.pending(context)) {
-            val activityReady = activity != null && !activity.isFinishing && !activity.isDestroyed
-            if (!activityReady) {
-                lastStatus = "Sync paused: incomplete local restore requires a foreground activity."
-                return@withLock lastStatus
-            }
             applying = true
             try {
+                SyncTrace.info("journal-recovery-start",
+                    "activityReady=$activityReady")
                 LocalSyncJournal.recover(context, activity, LocalOriginalBackup.offlineRecoverySource())
             } catch (recovery: Exception) {
-                lastStatus = "Sync blocked: local rollback incomplete: " +
-                    (recovery.message ?: recovery.javaClass.simpleName).take(170)
-                return@withLock lastStatus
+                SyncTrace.info("journal-recovery-blocked",
+                    "type=${recovery.javaClass.simpleName} " +
+                        "requiresForeground=${recovery.message.orEmpty().contains("foreground", true)}")
+                return@withLock pause("journal-recovery-incomplete",
+                    "Sync blocked: local rollback incomplete: " +
+                        (recovery.message ?: recovery.javaClass.simpleName).take(170))
             } finally {
                 applying = false
             }
         }
         if (config.preferences.getBoolean("github_local_restore_pause", false)) {
-            lastStatus = "Sync paused after local original restore. Disconnect or relink explicitly."
-            return@withLock lastStatus
+            return@withLock pause("local-original-restore",
+                "Sync paused after local original restore. Disconnect or relink explicitly.")
         }
         if (!config.active()) {
-            lastStatus = "Sign in to enable sync"
-            return@withLock lastStatus
+            return@withLock pause("not-authenticated", "Sign in to enable sync")
         }
         if (config.preferences.getBoolean("github_recovery_in_progress", false)) {
-            lastStatus = "Sync paused: a GitHub backup revision is being restored."
-            return@withLock lastStatus
+            return@withLock pause("github-restore-in-progress",
+                "Sync paused: a GitHub backup revision is being restored.")
         }
         if (config.preferences.getBoolean("account_switch_blocked", false)) {
-            lastStatus = "Sync paused: account changed. Clear local CloudStream data before linking a different account."
-            return@withLock lastStatus
+            return@withLock pause("github-account-changed",
+                "Sync paused: account changed. Clear local CloudStream data before linking a different account.")
         }
         // A resume without any local changes needs only a Git HEAD check.
         // After a restart lastSuccessfulSyncAt is zero: do one complete read so
@@ -106,10 +120,14 @@ internal object SyncCoordinator {
                             "remote=${remoteRevision.take(12)} localDirty=false")
                         if (remoteRevision == known) {
                             lastSuccessfulSyncAt = System.currentTimeMillis()
-                            lastStatus = if (pendingPlugins)
+                            val status = if (pendingPlugins)
                                 "Sync incomplete: plugins waiting for foreground; other data up to date"
                             else "Synced: verified current revision; no changes"
-                            return@withLock lastStatus
+                            SyncTrace.info("sync-head-shortcut",
+                                "remote=${remoteRevision.take(12)} " +
+                                    "pendingPlugins=$pendingPlugins verified=true")
+                            lastStatus = status
+                            return@withLock status
                         }
                     }
                 }
@@ -119,6 +137,14 @@ internal object SyncCoordinator {
         for (attempt in 0 until 3) {
             val result = synchronizePass(context, activity)
             if (!result.startsWith("Sync conflict:")) {
+                SyncTrace.info("sync-pass-finished",
+                    "attempt=${attempt + 1} " +
+                        "result=${when {
+                            result.startsWith("Synced:") -> "synced"
+                            result.startsWith("Sync incomplete:") -> "partial"
+                            result.startsWith("Sync blocked:") -> "blocked"
+                            else -> "failed"
+                        }}")
                 if (result.startsWith("Synced:") ||
                     (result.startsWith("Sync incomplete:") &&
                         result.contains("plugins pending:") &&
@@ -135,6 +161,8 @@ internal object SyncCoordinator {
                 delay(backoff)
             }
         }
+        SyncTrace.info("sync-preflight-exit",
+            "reason=conflict-retries-exhausted activityReady=$activityReady")
         lastStatus = "Sync failed: repeated concurrent edits; changes retained for retry"
         lastStatus
     }
@@ -573,8 +601,11 @@ internal object SyncCoordinator {
             // A new baseline may only be recorded for installed, verified items.
             val installedPlugins = PluginInventory.snapshot(context)
             val installed = PluginSync.matches(PluginSync.decode(installedPlugins), merge.target)
-            SyncTrace.info("plugin-verification", "matched=$installed " +
-                "pending=${config.preferences.contains("pending_plugins")}")
+            SyncTrace.info("plugin-verification",
+                "originRevision=${receivedRevision.take(12)} matched=$installed " +
+                    "pending=${config.preferences.contains("pending_plugins")} " +
+                    "installed=${PluginSync.decode(installedPlugins).items.size} " +
+                    "expected=${PluginSync.decode(pluginTarget).items.size}")
             if (installed && !config.preferences.contains("pending_plugins")) {
                 check(config.preferences.edit().putString("plugin_baseline", installedPlugins).commit())
             } else if (installation.isEmpty()) {
@@ -610,6 +641,12 @@ internal object SyncCoordinator {
                     SyncData.snapshot(context))) {
                     "Local preference apply mismatch; transaction rolled back."
                 }
+                SyncTrace.info("cross-device-receipt",
+                    "phase=local-verified originRevision=${receivedRevision.take(12)} " +
+                        "keys=${nativeApply.size} remoteKeyNames=${apply.size}")
+                // The server and local UUID mapping use the same stable key hash.
+                // These entries can be paired with a remote uploader's log.
+                SyncTrace.actions("received-verified", apply)
             }
 
             // A single Git commit publishes profile, plugin inventory and
@@ -652,6 +689,12 @@ internal object SyncCoordinator {
             SyncTrace.info("receive-revision-ack",
                 "incoming=${receivedRevision.take(12)} committed=${githubRevision.take(12)} " +
                     "applied=${nativeApply.size} uploaded=${upload.size}")
+            SyncTrace.info("cross-device-receipt",
+                "phase=cloud-committed originRevision=${receivedRevision.take(12)} " +
+                    "publishedRevision=${githubRevision.take(12)} " +
+                    "downloads=${apply.size} uploads=${upload.size} " +
+                    "pluginTargetCount=${PluginSync.decode(pluginTarget).items.size}")
+            SyncTrace.actions("published-verified", upload)
             if ((backend as GithubSyncAdapter).createdFreshBackup) {
                 check(config.preferences.edit()
                     .remove("github_initial_backup_confirmed").commit())

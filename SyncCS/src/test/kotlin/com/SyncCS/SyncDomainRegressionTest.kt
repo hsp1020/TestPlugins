@@ -219,4 +219,27 @@ class SyncDomainRegressionTest {
     }
 
 
+    @Test fun failedCommitWithUnchangedPluginBinariesCanRecoverWithoutActivity() {
+        assertFalse(SyncRecoveryPolicy.requiresForegroundBinaryRestore(true, false))
+        assertFalse(SyncRecoveryPolicy.keepNewPlugins(true, false))
+    }
+
+    @Test fun pluginInstalledAfterCheckpointSurvivesRecovery() {
+        assertTrue(SyncRecoveryPolicy.wasChangedAfter(2001L, 2000L))
+        assertTrue(SyncRecoveryPolicy.keepNewPlugins(false, true))
+        assertFalse(SyncRecoveryPolicy.requiresForegroundBinaryRestore(false, true))
+    }
+
+    @Test fun syncMutatedBinariesStillRequireForegroundRollback() {
+        assertTrue(SyncRecoveryPolicy.requiresForegroundBinaryRestore(false, false))
+        assertFalse(SyncRecoveryPolicy.keepNewPlugins(false, false))
+    }
+
+    @Test fun dirtyMarkerCreatedBeforeCheckpointIsNotTreatedAsNewUserAction() {
+        assertFalse(SyncRecoveryPolicy.wasChangedAfter(1000L, 1000L))
+        assertFalse(SyncRecoveryPolicy.wasChangedAfter(999L, 1000L))
+        assertFalse(SyncRecoveryPolicy.wasChangedAfter("invalid", 1000L))
+    }
+
+
 }

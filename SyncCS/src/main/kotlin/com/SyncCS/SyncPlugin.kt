@@ -8,6 +8,7 @@ import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
 import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.MainActivity
+import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.DataStore
@@ -153,6 +154,22 @@ class SyncPlugin : Plugin() {
         observed[name] = pref
         pref.registerOnSharedPreferenceChangeListener(observedListener)
     }
+    private fun foregroundActivity(): Activity? {
+        if (!foreground) return null
+        currentActivity?.get()?.takeIf {
+            !it.isFinishing && !it.isDestroyed
+        }?.let { return it }
+        val fallback = (CommonActivity.activity as? MainActivity)?.takeIf {
+            !it.isFinishing && !it.isDestroyed
+        }
+        if (fallback != null) {
+            currentActivity = WeakReference(fallback)
+            SyncTrace.info("activity-fallback",
+                "source=CommonActivity activity=${fallback.javaClass.simpleName}")
+        }
+        return fallback
+    }
+
     private fun queueSync(reason: String) {
         val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
         if (!isOwner(context) || !config(context).active()) return
@@ -178,10 +195,7 @@ class SyncPlugin : Plugin() {
                         synchronized(workerGuard) { worker = null }
                         break
                     }
-                    val active = currentActivity?.get()?.takeIf {
-                        foreground && activityCount > 0 &&
-                            !it.isFinishing && !it.isDestroyed
-                    }
+                    val active = foregroundActivity()
                     // A repeated failed poll skips expensive work only when the
                     // remote revision is unchanged. A new commit bypasses backoff.
                     if (reason == "remote-head-poll-20s" &&
@@ -277,6 +291,12 @@ class SyncPlugin : Plugin() {
             }
         }
         app.registerActivityLifecycleCallbacks(callback!!)
+        // CloudStream plugins can load after MainActivity has already resumed.
+        // Android does not replay earlier lifecycle callbacks to new observers.
+        foregroundActivity()?.let {
+            SyncTrace.info("activity-initial-attach",
+                "source=CommonActivity activity=${it.javaClass.simpleName}")
+        }
         periodic = scope.launch {
             while (isActive) {
                 // Poll only the remote Git revision during steady state.
@@ -291,7 +311,7 @@ class SyncPlugin : Plugin() {
         }
     }
     override fun load(context: Context) {
-        SyncTrace.info("plugin-loaded", "version=P0P1-isolated-restore-acked-20261022 " +
+        SyncTrace.info("plugin-loaded", "version=P0P1-journal-recovery-resume-20261022 " +
             "classloader=${javaClass.classLoader?.javaClass?.simpleName}")
         SyncTrace.memory("plugin-load")
         config(context).preferences.edit().putString("active_instance", owner).commit()
