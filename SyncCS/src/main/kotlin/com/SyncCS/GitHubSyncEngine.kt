@@ -218,7 +218,8 @@ internal object GitHubSyncEngine {
         base: GitHubSnapshot,
         current: GitHubSnapshot,
         remote: GitHubSnapshot,
-        explicitDeletes: Set<String>
+        explicitDeletes: Set<String>,
+        observedEdits: Set<String> = emptySet()
     ): Plan {
         check(remote.generation == base.generation && current.generation == base.generation) {
             "Backup generation changed; old devices cannot upload"
@@ -232,7 +233,7 @@ internal object GitHubSyncEngine {
             val previous = base.settings[key]
             val local = current.settings[key]
             val server = remote.settings[key]
-            if (local == previous) continue
+            if (local == previous || key !in observedEdits) continue
             if (local == null && (previous == null || key !in explicitDeletes)) continue
             if (server != previous) {
                 conflicts++
@@ -270,7 +271,10 @@ internal object GitHubSyncEngine {
             // caused a mass deletion by treating an incomplete snapshot as intent.
             // A future explicit delete protocol will use durable per-item operations.
             val explicitDeletes = emptySet<String>()
-            val plan = reconcile(base, current, remote.snapshot, explicitDeletes)
+            val observed = config.preferences.all.keys.asSequence()
+                .filter { it.startsWith("modified/") }
+                .map { it.removePrefix("modified/") }.toSet()
+            val plan = reconcile(base, current, remote.snapshot, explicitDeletes, observed)
             // Never modify installed plugin binaries or profile roster automatically.
             // Their former device-local state is not authoritative.
             val updatedHead = if (plan.changed > 0) {

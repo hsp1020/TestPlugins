@@ -23,7 +23,7 @@ class GitHubReconcileTest {
     @Test fun explicitSingleDeletionIsSupportedByPlanner() {
         val key = "p/StremioC/old"
         val base = sample(settings = mapOf(key to "A"))
-        val plan = GitHubSyncEngine.reconcile(base, sample(), base, setOf(key))
+        val plan = GitHubSyncEngine.reconcile(base, sample(), base, setOf(key), setOf(key))
         assertFalse(plan.merged.settings.containsKey(key))
         assertEquals(1, plan.deleted)
     }
@@ -35,7 +35,7 @@ class GitHubReconcileTest {
         val current = sample(settings = data.filterKeys { it !in deleted })
         var blocked = false
         try {
-            GitHubSyncEngine.reconcile(base, current, base, deleted)
+            GitHubSyncEngine.reconcile(base, current, base, deleted, deleted)
         } catch (error: IllegalStateException) {
             blocked = true
         }
@@ -63,7 +63,7 @@ class GitHubReconcileTest {
         val base = sample(settings = mapOf(key to "A"))
         val current = sample(settings = mapOf(key to "B"))
         val server = sample(settings = mapOf(key to "C"))
-        val plan = GitHubSyncEngine.reconcile(base, current, server, emptySet())
+        val plan = GitHubSyncEngine.reconcile(base, current, server, emptySet(), setOf(key))
         assertEquals("C", plan.merged.settings[key])
         assertEquals(1, plan.conflicts)
         assertEquals(0, plan.changed)
@@ -73,9 +73,19 @@ class GitHubReconcileTest {
         val key = "d/0/result_resume_watching_2/1"
         val base = sample(settings = mapOf(key to "time=10"))
         val current = sample(settings = mapOf(key to "time=15"))
-        val plan = GitHubSyncEngine.reconcile(base, current, base, emptySet())
+        val plan = GitHubSyncEngine.reconcile(base, current, base, emptySet(), setOf(key))
         assertEquals("time=15", plan.merged.settings[key])
         assertEquals(1, plan.changed)
+    }
+
+    @Test fun unobservedStaleSettingsCannotContaminateRemoteBackup() {
+        val key = "p/StremioC/stremio_saved_links"
+        val baseline = sample(settings = mapOf(key to "new-A"))
+        val oldLocal = sample(settings = mapOf(key to "old-B", "p/Legacy/obsolete" to "X"))
+        val plan = GitHubSyncEngine.reconcile(baseline, oldLocal, baseline, emptySet(),
+            emptySet())
+        assertEquals(baseline.settings, plan.merged.settings)
+        assertEquals(0, plan.changed)
     }
 
     @Test fun hugeLocalInjectionIsRefused() {
@@ -83,7 +93,8 @@ class GitHubReconcileTest {
         val empty = sample()
         var blocked = false
         try {
-            GitHubSyncEngine.reconcile(empty, sample(settings = additions), empty, emptySet())
+            GitHubSyncEngine.reconcile(empty, sample(settings = additions), empty,
+                emptySet(), additions.keys)
         } catch (error: IllegalStateException) {
             blocked = true
         }
