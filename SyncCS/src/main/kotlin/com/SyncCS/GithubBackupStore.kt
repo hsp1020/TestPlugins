@@ -19,7 +19,9 @@ internal class GithubBackupStore(
     private val owner: String,
     private val repository: String = "cloudstream-synccs-backup",
     private val deviceName: String = "Unspecified device",
-    private val deviceId: String = "unknown"
+    private val deviceId: String = "unknown",
+    // Allows deterministic, offline Git object/CAS integration tests.
+    private val transport: ((String, String, JSONObject?) -> JSONObject)? = null
 ) {
     data class Snapshot(
         val revision: String, val tree: String, val branch: String,
@@ -31,6 +33,7 @@ internal class GithubBackupStore(
 
     private fun api(url: String, method: String = "GET", json: JSONObject? = null): JSONObject {
         require(url.startsWith("https://api.github.com/"))
+        transport?.let { return it(url, method, json) }
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.requestMethod = method
         conn.instanceFollowRedirects = false
