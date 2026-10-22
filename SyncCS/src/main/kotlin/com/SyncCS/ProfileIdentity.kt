@@ -29,6 +29,17 @@ internal object ProfileIdentity {
     private fun json(raw: String?): JSONObject =
         if (raw.isNullOrBlank()) JSONObject() else JSONObject(raw)
 
+    /** CloudStream marker is the durable signal: deletion clears it. */
+    fun resolveIdentity(stored: String?, marker: String?, fresh: () -> String): String {
+        if (!stored.isNullOrBlank()) check(valid(stored))
+        if (marker != null) check(valid(marker))
+        // Missing marker means native profile was removed at some point,
+        // even if deletion and re-creation happened while SyncCS was disabled.
+        val id = marker ?: fresh()
+        check(valid(id)) { "Invalid generated UUID" }
+        return id
+    }
+
     @Synchronized
     fun observe(context: Context): Map<Int, String> {
         val preferences = SyncConfiguration(context).preferences
@@ -51,19 +62,9 @@ internal object ProfileIdentity {
         for (slot in current) {
             val stored = identities.optString(slot.toString())
             val coreMarker = native.getString(marker(slot), null)
-            if (stored.isNotBlank()) check(valid(stored)) {
-                "Invalid local profile identity for slot $slot"
-            }
-            if (coreMarker != null) check(valid(coreMarker)) {
-                "Invalid CloudStream-sidecar profile marker for slot $slot"
-            }
-            // If the old numeric slot survived but its CloudStream marker was
-            // removed, CloudStream has deleted/recreated the profile. Rotate
-            // even when SyncCS missed all events and the display name is equal.
-            val identity = when {
-                coreMarker != null -> coreMarker
-                stored.isNotBlank() -> UUID.randomUUID().toString()
-                else -> UUID.randomUUID().toString()
+            // Missing marker invalidates the old UUID even when names match.
+            val identity = resolveIdentity(stored, coreMarker) {
+                UUID.randomUUID().toString()
             }
             if (stored != identity) {
                 identities.put(slot.toString(), identity)
