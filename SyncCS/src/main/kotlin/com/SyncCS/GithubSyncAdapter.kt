@@ -15,6 +15,7 @@ internal interface SyncStorage {
     fun cipher(): SyncCipher
     fun pull(previousCursor: Long?): SyncBackend.PullResult
     fun upload(changes: Map<String, String?>, cipher: SyncCipher, revisions: Map<String, Long>)
+    fun flush(cipher: SyncCipher)
     fun getEntry(key: String): RemoteEntry?
     fun uploadFile(hash: String, bytes: ByteArray)
     fun downloadFile(hash: String): ByteArray
@@ -46,6 +47,7 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         return snapshot.revision to snapshot.generation
     }
     private val archives = linkedMapOf<String, ByteArray>()
+    private val stagedChanges = linkedMapOf<String, String?>()
     private var cachedCipher: SyncCipher? = null
 
     override fun userId() = accountId
@@ -162,26 +164,34 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         return SyncBackend.PullResult(rows, null, true)
     }
 
+    // All coordinator stages are assembled before publishing ONE Git commit.
+    // A plugin/profile/settings failure must never publish a partial snapshot.
     override fun upload(
         changes: Map<String, String?>, cipher: SyncCipher, revisions: Map<String, Long>
     ) {
-        if (changes.isEmpty() && archives.isEmpty()) return
-        val current = latest ?: github.current(cipher)
-            ?: error("Cannot update a non-existent GitHub backup")
+        check(latest != null) { "Pull must complete before staging any writes." }
+        stagedChanges.putAll(changes)
+    }
+
+    override fun flush(cipher: SyncCipher) {
+        if (stagedChanges.isEmpty() && archives.isEmpty()) return
+        val current = latest ?: error("Cannot commit without a verified GitHub base.")
         checkGeneration(current)
         val target = current.values.toMutableMap()
-        for ((key, value) in changes) {
-            if (value == null) target.remove(key)
-            else target[key] = value
+        for ((key, value) in stagedChanges) {
+            if (value == null) target.remove(key) else target[key] = value
         }
-        val explicitDeletions = changes.keys.filter {
-            changes[it] == null &&
-                preferences.contains("modified/" + it)
-        }.toSet()
-        github.update(current, cipher, target, explicitDeletions, archives)
-        archives.clear()
+        val deletions = stagedChanges.filterValues { it == null }.keys
+        // No deletion may pass solely because a SharedPreferences listener fired.
+        val allowed = SyncDeletionGate.approved(config, deletions)
+        check(deletions.all { it in allowed }) {
+            "Deletion approval missing; GitHub snapshot remains unchanged."
+        }
+        github.update(current, cipher, target, allowed, archives)
         latest = github.current(cipher)
-            ?: error("Failed to verify the committed GitHub backup")
+            ?: error("Could not verify the newly committed GitHub snapshot.")
+        stagedChanges.clear()
+        archives.clear()
     }
 
     override fun getEntry(key: String): RemoteEntry? {

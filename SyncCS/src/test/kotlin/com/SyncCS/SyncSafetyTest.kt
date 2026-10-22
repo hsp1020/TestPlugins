@@ -47,8 +47,30 @@ class SyncSafetyTest {
     }
 
     @Test fun restoringHistoryBlocksOldDeviceGenerations() {
-        assertTrue(SyncSafety.acceptGeneration(0, 2))
-        assertTrue(SyncSafety.acceptGeneration(2, 2))
-        assertFalse(SyncSafety.acceptGeneration(1, 2))
+        assertTrue(SyncSafety.acceptGeneration(0, 2, false))
+        assertTrue(SyncSafety.acceptGeneration(2, 2, true))
+        assertFalse(SyncSafety.acceptGeneration(1, 2, true))
     }
+    @Test fun enrolledDeviceCannotBypassRecoveryGenerationByLosingLocalNumber() {
+        assertFalse(SyncSafety.acceptGeneration(0, 2, true))
+        assertFalse(SyncSafety.acceptGeneration(1, 2, true))
+    }
+
+    @Test fun tombstonedProfileIdCannotBeSilentlyReused() {
+        assertThrows(IllegalStateException::class.java) {
+            SyncSafety.requireProfileNotReused(2, setOf(2), emptySet())
+        }
+        assertThrows(IllegalStateException::class.java) {
+            SyncSafety.requireProfileNotReused(2, emptySet(), setOf(2))
+        }
+        SyncSafety.requireProfileNotReused(3, setOf(2), setOf(2))
+    }
+
+    @Test fun sevenDayCumulativeDeletesCannotBeSplitIntoSmallBatches() {
+        assertThrows(IllegalStateException::class.java) {
+            SyncSafety.validateDeleteBudget(1, 25)
+        }
+        SyncSafety.validateDeleteBudget(4, 20)
+    }
+
 }

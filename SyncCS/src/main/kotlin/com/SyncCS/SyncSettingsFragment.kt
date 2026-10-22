@@ -217,6 +217,51 @@ class SyncSettingsFragment : DialogFragment() {
 
         body.addView(settingRow(
             context,
+            "Review pending deletions",
+            "Explicit approval required; automated deletions are blocked"
+        ) {
+            val request = SyncDeletionGate.pending(config)
+            if (request.isEmpty()) {
+                AlertDialog.Builder(context)
+                    .setTitle("No pending deletions")
+                    .setMessage("Automatic synchronization cannot remove stored settings, " +
+                        "profiles or extensions without an explicit approval.")
+                    .setPositiveButton("Close", null).show()
+            } else {
+                val details = request.take(25).joinToString("\n") { "• " + it }
+                AlertDialog.Builder(context)
+                    .setTitle("Confirm " + request.size + " removals?")
+                    .setMessage("These entries were reported missing on this device. " +
+                        "This may be a temporary loading error; only proceed if you " +
+                        "personally removed them.\n\n" + details)
+                    .setPositiveButton("Approve and sync") { _, _ ->
+                        try {
+                            SyncDeletionGate.authorizePending(config)
+                            val host = requireActivity()
+                            lifecycleScope.launch {
+                                val progress = showSyncProgress()
+                                try {
+                                    val result = withContext(Dispatchers.IO) {
+                                        SyncCoordinator.synchronize(host.applicationContext, host)
+                                    }
+                                    finishSyncProgress(progress, result)
+                                } finally {
+                                    if (progress.dialog.isShowing) progress.dialog.dismiss()
+                                }
+                            }
+                        } catch (error: Exception) {
+                            AlertDialog.Builder(context)
+                                .setTitle("Removal approval failed")
+                                .setMessage(error.message.orEmpty().take(220))
+                                .setPositiveButton("Close", null).show()
+                        }
+                    }
+                    .setNegativeButton("Cancel", null).show()
+            }
+        })
+
+        body.addView(settingRow(
+            context,
             "Restore previous GitHub backup",
             "Browse encrypted Git revisions and restore a selected snapshot"
         ) {
@@ -451,15 +496,16 @@ class SyncSettingsFragment : DialogFragment() {
                                                 val cipher = SyncCipher.saved(config)
                                                 val current = store.current(cipher)
                                                     ?: error("No current GitHub backup.")
-                                                store.rollback(current, selected.id, cipher)
+                                                val newRevision = store.rollback(current, selected.id, cipher)
                                                 val editor = config.preferences.edit()
+                                                    .putInt("github_generation", current.generation + 1)
+                                                    .putString("github_base_revision", newRevision)
                                                 for (key in listOf(
                                                     "base", "remote_cursor", "remote_versions",
                                                     "profile_baseline", "profile_remote_snapshot",
                                                     "plugin_baseline", "plugin_remote_snapshot",
                                                     "pending_plugins", "list_baselines",
-                                                    "pending_conflicts", "github_base_revision",
-                                                    "github_generation"
+                                                    "pending_conflicts"
                                                 )) editor.remove(key)
                                                 for (key in config.preferences.all.keys) {
                                                     if (key.startsWith("modified/")) editor.remove(key)

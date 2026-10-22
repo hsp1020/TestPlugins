@@ -74,7 +74,8 @@ internal object PluginSync {
             // The host may normalize version numbers on registration. File hashes,
             // identities and actual installed binaries are the authoritative check.
             val expectedHash = right.items[key]?.optString("sha").orEmpty()
-            expectedHash.isBlank() || left.items[key]?.optString("sha") == expectedHash
+            expectedHash.matches(Regex("[0-9a-f]{64}")) &&
+                left.items[key]?.optString("sha") == expectedHash
         }
     }
 
@@ -85,7 +86,7 @@ internal object PluginSync {
      * explicitly restore a deleted entry. An uninitialized device never can.
      */
     fun merge(localRaw: String, remoteRaw: String?, baselineRaw: String?,
-              allowLocalDeletions: Boolean): Merge {
+              allowLocalDeletions: Boolean, approvedRemovals: Set<String> = emptySet()): Merge {
         val local = decode(localRaw)
         val remote = decode(remoteRaw)
         val base = decode(baselineRaw)
@@ -96,8 +97,13 @@ internal object PluginSync {
         // and never while CloudStream's plugin loading is still in progress.
         if (initialized && allowLocalDeletions) {
             for (id in base.items.keys - local.items.keys) {
-                output.items.remove(id)
-                output.deleted.add(id)
+                if (id !in remote.deleted) {
+                    check(id in approvedRemovals) {
+                        "Extension removed locally without deletion approval: $id"
+                    }
+                    output.items.remove(id)
+                    output.deleted.add(id)
+                }
             }
         }
         for ((id, item) in local.items) {

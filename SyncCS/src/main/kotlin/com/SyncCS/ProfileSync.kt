@@ -58,7 +58,8 @@ internal object ProfileSync {
             .put("deleted", deleted).toString()
     }
 
-    fun merge(localRaw: String, remoteRaw: String?, baselineRaw: String?): Merge {
+    fun merge(localRaw: String, remoteRaw: String?, baselineRaw: String?,
+              approvedRemovals: Set<Int> = emptySet()): Merge {
         val local = decode(localRaw)
         val remote = decode(remoteRaw)
         val base = decode(baselineRaw)
@@ -68,8 +69,13 @@ internal object ProfileSync {
             if (remoteRaw == null) target.items.putAll(local.items)
         } else {
             // Independent local additions, edits and removals are three-way merged.
+            // A temporarily incomplete native profile roster is never proof of
+            // intentional deletion. Keep the server roster until explicit review.
             for (id in base.items.keys - local.items.keys) {
-                if (id > 0) {
+                if (id > 0 && id !in remote.deleted) {
+                    check(id in approvedRemovals) {
+                        "Profile $id disappeared locally without deletion approval."
+                    }
                     target.items.remove(id)
                     target.deleted.add(id)
                 }
@@ -79,9 +85,7 @@ internal object ProfileSync {
                 val remoteItem = remote.items[id]
                 when {
                     previous == null && id !in remote.items -> {
-                        // A new local profile may intentionally reuse a slot
-                        // deleted in a previous synchronized generation.
-                        target.deleted.remove(id)
+                        SyncSafety.requireProfileNotReused(id, remote.deleted, base.deleted)
                         target.items[id] = item
                     }
                     previous != null && previous.toString() != item.toString() &&

@@ -103,6 +103,39 @@ internal object SyncCoordinator {
             }
             for (entry in pull.entries) versions[entry.key] = entry.version
 
+            // Gather *all* destructive changes before touching local profiles or
+            // publishing a Git commit. A preference listener only suggests a
+            // candidate; the human must approve the exact removal set.
+            val preflightBase = baseline(context)
+            val preflightLocal = SyncData.snapshot(context)
+            val preferenceRemovals = preflightBase.keys.filter { key ->
+                key !in preflightLocal &&
+                    config.preferences.contains("modified/" + key)
+            }.toSet()
+            val profileBaselineValue = config.preferences.getString("profile_baseline", null)
+            val baseProfileState = ProfileSync.decode(profileBaselineValue?.let {
+                String(LocalVault.decrypt(it), Charsets.UTF_8)
+            })
+            val localProfileState = ProfileSync.decode(ProfileSync.snapshot(context))
+            val profileRemovals = (baseProfileState.items.keys -
+                localProfileState.items.keys).filter { it > 0 }.toSet()
+            val previousInventory = PluginSync.decode(
+                config.preferences.getString("plugin_baseline", null))
+            val localInventory = PluginSync.decode(PluginInventory.snapshot(context))
+            val pluginRemovals = if (SyncRuntime.pluginsLoaded) {
+                previousInventory.items.keys - localInventory.items.keys
+            } else emptySet()
+            val destructiveProposals = preferenceRemovals +
+                profileRemovals.map { "x/profiles/$it" } +
+                pluginRemovals.map { "x/plugins/$it" }
+            SyncDeletionGate.requireApproval(config, destructiveProposals)
+            val approvedProfiles = profileRemovals.filter {
+                "x/profiles/$it" in destructiveProposals
+            }.toSet()
+            val approvedPlugins = pluginRemovals.filter {
+                "x/plugins/$it" in destructiveProposals
+            }.toSet()
+
             stage = "reconciling CloudStream profiles"
             fun protectedProfileValue(key: String): String? {
                 val stored = config.preferences.getString(key, null) ?: return null
@@ -115,7 +148,8 @@ internal object SyncCoordinator {
                 remoteValues["x/profiles"]
             } else protectedProfileValue("profile_remote_snapshot")
             val profileLocal = ProfileSync.snapshot(context)
-            val profileMerge = ProfileSync.merge(profileLocal, profileServer, previousProfiles)
+            val profileMerge = ProfileSync.merge(
+                profileLocal, profileServer, previousProfiles, approvedProfiles)
             val targetProfiles = ProfileSync.encode(profileMerge.target)
             if (profileMerge.changedRemote) {
                 verifyAccount()
@@ -256,7 +290,7 @@ internal object SyncCoordinator {
             } else config.preferences.getString("plugin_remote_snapshot", null)
             var inventoryVersion = versions["x/plugins"]
             var merge = PluginSync.merge(currentPlugins, pluginsOnServer,
-                inventoryBase, SyncRuntime.pluginsLoaded)
+                inventoryBase, SyncRuntime.pluginsLoaded, approvedPlugins)
             var pluginTarget = PluginSync.encode(merge.target)
 
             // A manual local removal is only a deletion after the actual plugin
@@ -284,7 +318,7 @@ internal object SyncCoordinator {
                     inventoryVersion = newest?.version
                     if (inventoryVersion != null) versions["x/plugins"] = inventoryVersion
                     merge = PluginSync.merge(currentPlugins, pluginsOnServer,
-                        inventoryBase, SyncRuntime.pluginsLoaded)
+                        inventoryBase, SyncRuntime.pluginsLoaded, approvedPlugins)
                     pluginTarget = PluginSync.encode(merge.target)
                 }
             }
@@ -358,6 +392,10 @@ internal object SyncCoordinator {
                 applying = false
             }
 
+            // A single Git commit publishes profile, plugin inventory and
+            // preferences together, only after local apply has succeeded.
+            stage = "publishing complete GitHub snapshot"
+            backend.flush(cipher)
             stage = "persisting verified settings baseline"
             verifyAccount()
             val baseJson = JSONObject()
@@ -388,6 +426,7 @@ internal object SyncCoordinator {
                 persisted.remove("plugin_remote_snapshot")
             }
             check(persisted.commit())
+            SyncDeletionGate.consumed(config)
             val editor = config.preferences.edit()
             for (key in apply.keys + upload.keys) editor.remove("modified/" + key)
             editor.apply()

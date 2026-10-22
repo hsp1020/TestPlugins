@@ -31,6 +31,23 @@ internal object SyncSafety {
         check(count <= 1000) { "Mass update blocked: $count" }
     }
 
-    fun acceptGeneration(local: Int, remote: Int): Boolean =
-        local == 0 || local == remote
+    fun acceptGeneration(local: Int, remote: Int, enrolled: Boolean): Boolean =
+        if (enrolled) local > 0 && local == remote
+        else local == 0 || local == remote
+
+    fun requireProfileNotReused(
+        profileId: Int, deletedOnServer: Set<Int>, deletedInBaseline: Set<Int>
+    ) {
+        check(profileId !in deletedOnServer && profileId !in deletedInBaseline) {
+            "Profile slot $profileId was previously deleted. Automatic slot reuse is blocked " +
+                "to prevent an old profile's watch history joining a new profile."
+        }
+    }
+
+    fun validateDeleteBudget(count: Int, cumulative: Int, limit: Int = 25) {
+        require(count >= 0 && cumulative >= 0)
+        check(count + cumulative <= limit) {
+            "Rolling deletion safety limit reached; manual recovery or review required."
+        }
+    }
 }

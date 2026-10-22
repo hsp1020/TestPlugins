@@ -183,6 +183,45 @@ internal class GithubBackupStore(
         } finally { conn.disconnect() }
     }
 
+
+    private fun auditBlob(existing: Map<String, String>, cipher: SyncCipher,
+                          changed: List<String>, deleted: Set<String>): ByteArray {
+        val previous = existing["synccs/audit.enc"]?.let { hash ->
+            JSONObject(cipher.decrypt("synccs/audit",
+                String(blob(hash), Charsets.UTF_8)))
+        } ?: JSONObject()
+        val now = System.currentTimeMillis()
+        val cutoff = now - 7L * 24L * 60L * 60L * 1000L
+        val oldDeletions = previous.optJSONArray("deletedLast7Days") ?: JSONArray()
+        val recentDeletions = JSONArray()
+        var alreadyDeleted = 0
+        for (i in 0 until oldDeletions.length()) {
+            val entry = oldDeletions.getJSONObject(i)
+            if (entry.optLong("time") >= cutoff) {
+                recentDeletions.put(entry)
+                alreadyDeleted += entry.optInt("count")
+            }
+        }
+        SyncSafety.validateDeleteBudget(deleted.size, alreadyDeleted)
+        if (deleted.isNotEmpty()) recentDeletions.put(JSONObject()
+            .put("time", now).put("count", deleted.size)
+            .put("deviceId", deviceId).put("deviceName", deviceName)
+            .put("keys", JSONArray(deleted.sorted())))
+        val events = previous.optJSONArray("recentEvents") ?: JSONArray()
+        val nextEvents = JSONArray()
+        for (i in maxOf(0, events.length() - 29) until events.length()) {
+            nextEvents.put(events.getJSONObject(i))
+        }
+        nextEvents.put(JSONObject().put("time", now)
+            .put("deviceId", deviceId).put("deviceName", deviceName)
+            .put("changed", changed.size).put("deleted", deleted.size)
+            .put("keysSample", JSONArray(changed.take(50))))
+        val text = JSONObject().put("format", 1)
+            .put("deletedLast7Days", recentDeletions)
+            .put("recentEvents", nextEvents).toString()
+        return cipher.encrypt("synccs/audit", text).toByteArray(Charsets.UTF_8)
+    }
+
     private fun archivePath(hash: String): String {
         require(hash.matches(Regex("[0-9a-f]{64}")))
         return "synccs/plugins/$hash.cs3"
@@ -255,6 +294,8 @@ internal class GithubBackupStore(
             changes[shard(i)] = part.toString().toByteArray(Charsets.UTF_8)
         }
         changes.putAll(archiveChanges(entries, archives))
+        changes["synccs/audit.enc"] = auditBlob(entries, cipher,
+            initial.keys.sorted(), emptySet())
         changes["synccs/manifest.json"] = JSONObject()
             .put("format", 1).put("complete", true).put("generation", 1)
             .put("verification", cipher.encrypt("synccs/check", "synccs-github-v1"))
@@ -292,6 +333,7 @@ internal class GithubBackupStore(
         }
         val (_, existing) = index(previous.revision)
         changes.putAll(archiveChanges(existing, archives))
+        changes["synccs/audit.enc"] = auditBlob(existing, cipher, changed, deleted)
         return commit(previous.revision, previous.tree, previous.branch, changes)
     }
 
