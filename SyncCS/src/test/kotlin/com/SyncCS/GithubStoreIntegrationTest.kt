@@ -109,7 +109,10 @@ class GithubStoreIntegrationTest {
 
         fun corruptOneDataBlob() {
             val currentTree = trees[commits.getValue(head).first]!!
-            val key = currentTree.entries.first { it.key.startsWith("synccs/data/") }.value
+            val key = currentTree.entries.first {
+                it.key.startsWith("synccs/data/") &&
+                    String(blobs.getValue(it.value), Charsets.UTF_8) != "{}"
+            }.value
             blobs[key] = "{}".toByteArray()
         }
     }
