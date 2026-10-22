@@ -253,6 +253,43 @@ class SyncDomainRegressionTest {
         assertFalse(SyncAuthGuard.matchesRejectedToken(old, null))
     }
 
+    @Test fun continueWatchingHeaderSelectionExcludesUnrelatedAndRetiredProfiles() {
+        val keys = listOf(
+            "0/result_resume_watching_2/42",
+            "1/result_watch_state_data/88",
+            "0/video_pos_dur/900",
+            "0/result_resume_watching_2/not-an-id",
+            "download_header_cache/999"
+        )
+        val active = keys.filter { it.substringBefore('/').toIntOrNull() in setOf(0, 1) }
+        assertEquals(setOf("42", "88"), SyncData.referencedHeaderIds(active))
+        assertTrue(SyncData.isTracked("d/download_header_cache/42"))
+        assertFalse(SyncData.isTracked("d/BACKUP_download_header_cache/42"))
+    }
+
+    @Test fun arrivingContinueWatchingRecordKeepsItsHeaderRestore() {
+        val uuid = "11111111-1111-4111-8111-111111111111"
+        val apply = mutableMapOf<String, String?>(
+            "u/$uuid/result_resume_watching_2/42" to "resume",
+            "d/download_header_cache/42" to "header"
+        )
+        SyncData.excludeUnreferencedHeaderRestores(emptyMap(), apply, emptyMap())
+        assertEquals("header", apply["d/download_header_cache/42"])
+    }
+
+    @Test fun deletedResumeDoesNotReimportOrphanedHeaderCache() {
+        val uuid = "11111111-1111-4111-8111-111111111111"
+        val resume = "u/$uuid/result_resume_watching_2/42"
+        val apply = mutableMapOf<String, String?>(
+            "d/download_header_cache/42" to "stale",
+            "d/download_header_cache/99" to "unrelated"
+        )
+        SyncData.excludeUnreferencedHeaderRestores(
+            mapOf(resume to "old"), apply, mapOf(resume to null)
+        )
+        assertTrue(apply.isEmpty())
+    }
+
     @Test fun interruptedSyncMustNotRollbackNewGithubCredentials() {
         for (key in listOf("github_token", "github_login", "github_account_id",
                 "github_client_id", "sync_transport", "secret")) {

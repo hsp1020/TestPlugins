@@ -21,7 +21,7 @@ internal object SyncData {
     private val dataPrefixes = listOf(
         "result_resume_watching_2/", "result_watch_state/",
         "result_watch_state_data/", "result_favorites_state_data/",
-        "result_subscribed_state_data/", "video_pos_dur/",
+        "result_subscribed_state_data/", "video_pos_dur/", "download_header_cache/",
         "video_watch_state/", "result_season/", "result_episode/", "result_dub/",
         "video_source_priority/", "video_quality_priority/", "video_profile_name/",
         "video_profile_types_2/", "video_profile_settings/",
@@ -200,6 +200,31 @@ internal object SyncData {
         else -> false
     }
 
+    internal fun referencedHeaderIds(keys: Collection<String>): Set<String> =
+        keys.mapNotNull { key ->
+            val marker = when {
+                "/result_resume_watching_2/" in key -> "/result_resume_watching_2/"
+                "/result_watch_state_data/" in key -> "/result_watch_state_data/"
+                else -> return@mapNotNull null
+            }
+            key.substringAfter(marker).takeIf { it.toIntOrNull() != null }
+        }.toSet()
+
+    internal fun excludeUnreferencedHeaderRestores(
+        local: Map<String, String>, apply: MutableMap<String, String?>,
+        upload: Map<String, String?>
+    ) {
+        val effective = local.keys.toMutableSet()
+        for ((key, value) in apply + upload) {
+            if (value == null) effective.remove(key) else effective.add(key)
+        }
+        val referenced = referencedHeaderIds(effective)
+        apply.keys.filter {
+            it.startsWith("d/download_header_cache/") &&
+                it.removePrefix("d/download_header_cache/") !in referenced
+        }.forEach { apply.remove(it) }
+    }
+
     private fun pluginFiles(context: Context): List<String> {
         val folder = File(context.applicationInfo.dataDir, "shared_prefs")
         return folder.listFiles()?.asSequence()?.filter { it.isFile && it.extension == "xml" }
@@ -234,7 +259,13 @@ internal object SyncData {
         refreshCineStreamKeys()
         val profileIndices = DataStoreHelper.getAccounts(context)
             .mapTo(mutableSetOf()) { it.keyIndex }
-        for ((name, value) in data.all) {
+        val stored = data.all
+        val headerIds = referencedHeaderIds(stored.keys.filter {
+            it.substringBefore('/').toIntOrNull() in profileIndices
+        })
+        for ((name, value) in stored) {
+            if (name.startsWith("download_header_cache/") &&
+                name.removePrefix("download_header_cache/") !in headerIds) continue
             if (!belongsToInstalledProfile(name, profileIndices)) continue
             if (!dataAllowed(name) || name.length > 500) continue
             valueJson(value)?.let { if (it.length <= 524288) result["d/" + name] = it }

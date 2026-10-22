@@ -486,6 +486,7 @@ internal object SyncCoordinator {
             val planned = SyncPreferencePlanner.reconcile(
                 remoteValues, local, base, profileMerge.target, activeProfiles,
                 replacedProfileUuids, marked, priorLists, firstRemoteRestore, pull.full)
+            SyncData.excludeUnreferencedHeaderRestores(local, planned.apply, planned.upload)
             SyncTrace.info("merge-duration",
                 "elapsedMs=${android.os.SystemClock.elapsedRealtime() - planStarted} " +
                     "remote=${remoteValues.size} local=${local.size} " +
