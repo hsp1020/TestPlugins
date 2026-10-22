@@ -3,6 +3,7 @@ package com.SyncCS
 import android.app.Activity
 import android.content.Context
 import com.lagradost.cloudstream3.plugins.PluginManager
+import com.lagradost.cloudstream3.utils.DataStore
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -58,6 +59,33 @@ internal object LocalSyncJournal {
             }
         }
         check(editor.commit()) { "Could not restore SyncCS sync baselines." }
+    }
+
+    private val addonBackups = listOf("native_backup_stremioc", "native_backup_streamplay")
+
+    private fun nativeBackupValues(context: Context): JSONObject {
+        val prefs = with(DataStore) { context.getSharedPrefs() }
+        val values = JSONObject()
+        for (key in addonBackups) {
+            if (prefs.contains(key)) values.put(key, prefs.getString(key, null) ?: JSONObject.NULL)
+        }
+        return values
+    }
+
+    private fun restoreNativeBackups(context: Context, old: JSONObject) {
+        val prefs = with(DataStore) { context.getSharedPrefs() }
+        val writer = prefs.edit()
+        for (key in addonBackups) {
+            if (old.has(key) && !old.isNull(key)) writer.putString(key, old.getString(key))
+            else writer.remove(key)
+        }
+        check(writer.commit()) { "Could not restore original native addon backup." }
+        for (key in addonBackups) {
+            val expected = if (old.has(key) && !old.isNull(key)) old.getString(key) else null
+            check(prefs.getString(key, null) == expected) {
+                "Native addon backup rollback verification failed: $key"
+            }
+        }
     }
 
     private fun manifest(folder: File): JSONObject {
@@ -118,6 +146,7 @@ internal object LocalSyncJournal {
                 .put("values", values)
                 .put("profiles", profiles).put("plugins", plugins)
                 .put("privateSyncState", privateMetadata(context))
+                .put("nativeAddonBackups", nativeBackupValues(context))
             File(temp, "snapshot.enc").writeText(
                 LocalVault.encrypt(meta.toString().toByteArray(Charsets.UTF_8)),
                 Charsets.UTF_8)
@@ -151,7 +180,7 @@ internal object LocalSyncJournal {
             if (now[key] != value) restore[key] = value
         }
         for (key in now.keys - backup.keys) restore[key] = null
-        SyncData.apply(context, restore)
+        SyncData.apply(context, restore, refreshNativeSnapshots = false)
 
         val originalManifest = metadata.getString("plugins")
         val source = object : SyncStorage by storage {
@@ -168,9 +197,13 @@ internal object LocalSyncJournal {
         check(errors.isEmpty()) { "Plugin rollback incomplete: " + errors.joinToString(" | ") }
         // Restore the originally saved native backup AFTER extension reload,
         // which can replay or refresh settings during plugin initialization.
-        val nativeKeys = setOf("d/native_backup_stremioc", "d/native_backup_streamplay")
-        val nativeBackup = nativeKeys.associateWith { backup[it] }
-        SyncData.apply(context, nativeBackup)
+        restoreNativeBackups(context, metadata.getJSONObject("nativeAddonBackups"))
+        val extras = SyncData.snapshot(context).keys - backup.keys
+        if (extras.isNotEmpty()) {
+            SyncData.apply(context, extras.associateWith { null },
+                refreshNativeSnapshots = false)
+            restoreNativeBackups(context, metadata.getJSONObject("nativeAddonBackups"))
+        }
         val restored = SyncData.snapshot(context)
         check(restored.keys == backup.keys &&
             backup.all { (key, value) -> restored[key] == value }) {

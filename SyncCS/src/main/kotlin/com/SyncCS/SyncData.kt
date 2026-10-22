@@ -373,7 +373,8 @@ internal object SyncData {
         with(DataStore) { context.setKey(backupKey, json) }
     }
 
-    fun apply(context: Context, changes: Map<String, String?>) {
+    fun apply(context: Context, changes: Map<String, String?>,
+              refreshNativeSnapshots: Boolean = true) {
         if (changes.isEmpty()) return
         val data = with(DataStore) { context.getSharedPrefs() }
         val defaults = PreferenceManager.getDefaultSharedPreferences(context)
@@ -420,11 +421,11 @@ internal object SyncData {
         check(defaultEdit.commit()) { "Default settings restore failed" }
         pluginEditors.values.forEach { check(it.commit()) { "Plugin settings restore failed" } }
         // Keep native import snapshots consistent with restored plugin settings.
-        if (changes.keys.any { it.startsWith("p/StremioC/") }) {
+        if (refreshNativeSnapshots && changes.keys.any { it.startsWith("p/StremioC/") }) {
             refreshNativeBackup(context, "StremioC", "native_backup_stremioc",
                 "stremio_c_restore_complete", "stremio_c_last_applied_backup_hash")
         }
-        if (changes.keys.any { it.startsWith("p/StreamPlay/") }) {
+        if (refreshNativeSnapshots && changes.keys.any { it.startsWith("p/StreamPlay/") }) {
             refreshNativeBackup(context, "StreamPlay", "native_backup_streamplay",
                 "streamplay_restore_complete", "streamplay_last_applied_backup_hash")
         }
