@@ -182,6 +182,34 @@ internal object GitHubSyncEngine {
         }
     }
 
+    suspend fun restoreHistoricalCommit(context: Context, commitSha: String): String = mutex.withLock {
+        try {
+            val config = GitHubSyncConfig(context)
+            val backend = GitHubSyncTransport(config)
+            val head = backend.read() ?: error("No existing GitHub backup")
+            val previous = backend.readAt(commitSha)
+            require(head.sha != previous.sha) { "Already on the requested checkpoint" }
+            // Increment the generation: old device baselines cannot publish into
+            // the restored account until explicitly reinitialized from this epoch.
+            val target = previous.snapshot.copy(
+                generation = UUID.randomUUID().toString(), device = config.deviceId
+            )
+            val before = local(context, head.snapshot.generation)
+            recoveryCheckpoint(context, before)
+            val newHead = backend.save(target, head.sha)
+            applyRemote(context, target, before)
+            saveBaseline(context, target)
+            check(config.preferences.edit().putString("generation", target.generation)
+                .putString("head", newHead).commit())
+            invalidateMarkers(context, before.settings.keys + target.settings.keys)
+            status = "Historical backup restored as new generation: " + target.generation
+            status
+        } catch (error: Exception) {
+            status = "Historical restore blocked: " + (error.message ?: "Unknown error")
+            status
+        }
+    }
+
     internal fun reconcile(
         base: GitHubSnapshot,
         current: GitHubSnapshot,

@@ -185,6 +185,12 @@ internal class GitHubSyncTransport(private val config: GitHubSyncConfig) {
     fun read(): Remote? {
         checkPrivateRepository()
         val sha = refSha() ?: return null
+        return readAt(sha)
+    }
+
+    fun readAt(sha: String): Remote {
+        checkPrivateRepository()
+        require(Regex("[a-fA-F0-9]{40}").matches(sha)) { "Invalid Git commit ID" }
         val tree = request(api("/git/trees/" + commitTree(sha))).getJSONArray("tree")
         var blob: String? = null
         for (i in 0 until tree.length()) {
@@ -194,7 +200,7 @@ internal class GitHubSyncTransport(private val config: GitHubSyncConfig) {
                 blob = item.getString("sha")
             }
         }
-        require(blob != null) { "Backup branch exists without completed encrypted snapshot" }
+        require(blob != null) { "Git commit has no valid SyncCS encrypted checkpoint" }
         val data = request(api("/git/blobs/" + blob))
         require(data.optString("encoding") == "base64")
         val value = String(Base64.decode(data.getString("content"), Base64.DEFAULT), Charsets.UTF_8)

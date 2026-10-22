@@ -33,3 +33,7 @@ This is a non-production safety candidate, not a fully complete migration. Do no
 ## Test gates
 
 Initial interrupted upload; initial second device with pre-existing catalogs; invalid or missing snapshot; app crash during preferences restoration; stale device writes; >1000 deletions; concurrent branch writes; profile number reuse; binary SHA mismatch; network interruption; Android 11+ local .cs3 handling. Do not merge unless confirmed.
+
+## Historical recovery
+
+Enter a verified 40-character Git commit SHA from the dedicated backup branch. The engine reads and authenticates the old encrypted snapshot, creates a new Git commit with a NEW generation, then applies it locally. Old devices cannot publish again until explicit reinitialization. This is not equivalent to restoring the contaminated Supabase database.

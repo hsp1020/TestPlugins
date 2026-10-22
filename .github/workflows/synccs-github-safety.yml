@@ -29,4 +29,4 @@ jobs:
       - name: Compile SyncCS
         run: |
           chmod +x ./gradlew
-          ./gradlew :SyncCS:make --no-daemon
+          ./gradlew :SyncCS:testDebugUnitTest :SyncCS:make --no-daemon

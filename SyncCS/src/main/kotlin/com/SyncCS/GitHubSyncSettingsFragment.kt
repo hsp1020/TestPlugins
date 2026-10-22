@@ -89,6 +89,9 @@ class GitHubSyncSettingsFragment : DialogFragment() {
                 GitHubSyncEngine.restoreExisting(requireContext())
             }
         }
+        row(context, root, "Restore an older GitHub commit (new generation)") {
+            showHistoricalRestore()
+        }
         row(context, root, "Sync changed settings now") {
             confirm("Synchronize settings?",
                 "Only run after a successful initial backup or restore. " +
@@ -202,6 +205,29 @@ class GitHubSyncSettingsFragment : DialogFragment() {
             }
         }
     }
+    private fun showHistoricalRestore() {
+        val context = requireContext()
+        val shaField = field(context, "Historical 40-character Git commit SHA")
+        AlertDialog.Builder(context).setTitle("Select historical checkpoint")
+            .setMessage("Find the desired commit in the private repository's synccs-backup branch. " +
+                "Its encrypted state will be committed again under a NEW generation. " +
+                "Previously connected devices will be blocked from uploading until reinitialized.")
+            .setView(shaField)
+            .setPositiveButton("Continue") { _, _ ->
+                val sha = shaField.text.toString().trim()
+                if (!Regex("[a-fA-F0-9]{40}").matches(sha)) {
+                    status?.text = "Invalid Git commit SHA"
+                } else {
+                    confirm("Restore old encrypted checkpoint?",
+                        "This publishes a NEW protected restore generation. Local recovery snapshots " +
+                            "are created first. There is no force-push and older commits remain accessible.") {
+                        GitHubSyncEngine.restoreHistoricalCommit(requireContext(), sha)
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
     private fun confirm(title: String, message: String, action: suspend () -> String) {
         AlertDialog.Builder(requireContext()).setTitle(title).setMessage(message)
             .setPositiveButton("Continue") { _, _ -> operate(title, action) }
