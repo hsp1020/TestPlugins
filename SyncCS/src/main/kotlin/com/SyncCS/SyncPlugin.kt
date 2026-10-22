@@ -84,22 +84,23 @@ class SyncPlugin : Plugin() {
         if (type == "d/" && key == "data_store_helper/account") {
             if (!SyncCoordinator.applying) {
                 ProfileIdentity.observe(context)
-                request(400)
+                request(400, "profile-switch")
             }
             return@OnSharedPreferenceChangeListener
         }
         if (type == "d/" && (key == PLUGINS_KEY || key == PLUGINS_KEY_LOCAL)) {
             if (SyncCoordinator.applying) return@OnSharedPreferenceChangeListener
             SyncCoordinator.markChanged(context, "x/plugins")
-            request(700)
+            request(700, "plugin-inventory")
             return@OnSharedPreferenceChangeListener
         }
         val path = type + key
         if (!SyncData.isTracked(path)) return@OnSharedPreferenceChangeListener
         SyncCoordinator.markChanged(context, path)
-        request(1800)
+        SyncTrace.keys("local-change", listOf(path))
+        request(1800, "preference-change")
     }
-    private val bookmarks = { _: Boolean -> request(2000) }
+    private val bookmarks = { _: Boolean -> request(2000, "bookmarks") }
     private val loaded = { _: Boolean ->
         ready = true
         SyncRuntime.refreshLoadedState()
@@ -112,16 +113,16 @@ class SyncPlugin : Plugin() {
                 }
                 SyncCoordinator.synchronize(context, active)
             }
-        } else request(4000)
+        } else request(4000, "plugins-loaded")
         Unit
     }
-    private val home = { _: Boolean -> request(3000) }
+    private val home = { _: Boolean -> request(3000, "home-reload") }
     private val accountRoster = { _: Boolean ->
         val context = com.lagradost.cloudstream3.CloudStreamApp.context
         if (context != null && isOwner(context) && !SyncCoordinator.applying) {
             ProfileIdentity.observe(context)
         }
-        request(3000)
+        request(3000, "account-reload")
     }
 
     private fun config(context: Context) = SyncConfiguration(context)
@@ -152,9 +153,10 @@ class SyncPlugin : Plugin() {
         observed[name] = pref
         pref.registerOnSharedPreferenceChangeListener(observedListener)
     }
-    private fun request(delayMs: Long) {
+    private fun request(delayMs: Long, reason: String) {
         val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
         if (!ready || !isOwner(context) || !config(context).active()) return
+        SyncTrace.info("trigger", "reason=$reason delayMs=$delayMs")
         trigger?.cancel()
         trigger = scope.launch {
             delay(delayMs)
@@ -175,7 +177,7 @@ class SyncPlugin : Plugin() {
                 if (!isOwner(context)) return
                 activityCount += 1
                 foreground = true
-                if (resumeSyncDue()) request(2500)
+                if (resumeSyncDue()) request(2500, "activity-started")
             }
             override fun onActivityResumed(activity: Activity) {
                 currentActivity = WeakReference(activity)
@@ -188,17 +190,17 @@ class SyncPlugin : Plugin() {
                 }
                 if (!config(context).active()) return
                 // Replace the onStarted timer rather than scheduling a second sync.
-                if (resumeSyncDue()) request(0)
+                if (resumeSyncDue()) request(0, "activity-resumed")
             }
             override fun onActivityPaused(activity: Activity) {
-                request(1500)
+                request(1500, "activity-paused")
             }
             override fun onActivityStopped(activity: Activity) {
                 if (!isOwner(context)) return
                 activityCount = maxOf(0, activityCount - 1)
                 if (activityCount == 0) {
                     foreground = false
-                    request(500)
+                    request(500, "activity-stopped")
                 }
             }
             override fun onActivitySaveInstanceState(activity: Activity, bundle: Bundle) {}
@@ -213,6 +215,7 @@ class SyncPlugin : Plugin() {
                 if (!isOwner(context)) break
                 if (foreground && ready && config(context).active()) {
                     val active = currentActivity?.get()?.takeIf { !it.isFinishing && !it.isDestroyed }
+                    SyncTrace.info("trigger", "reason=periodic-15m")
                     SyncCoordinator.synchronize(context, active)
                 }
             }

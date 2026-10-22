@@ -174,6 +174,7 @@ internal object SyncCoordinator {
     private suspend fun synchronizePass(context: Context, activity: Activity?): String {
         val config = SyncConfiguration(context)
         val backend: SyncStorage = GithubSyncAdapter(context)
+        val traceId = SyncTrace.start()
         var stage = "loading cloud state"
         var undoStarted = false
         fun ensureUndo() {
@@ -223,6 +224,7 @@ internal object SyncCoordinator {
             val previousCursor = if (config.preferences.contains("remote_cursor"))
                 config.preferences.getLong("remote_cursor", 0L) else null
             val pull = backend.pull(previousCursor)
+            SyncTrace.info("pull", "full=${pull.full} entries=${pull.entries.size}")
             stage = "decrypting remote changes"
             val remoteValues = pull.entries.associate { item ->
                 item.key to if (item.deleted) null else cipher.decrypt(
@@ -241,6 +243,9 @@ internal object SyncCoordinator {
                         it.startsWith("s/") || it.startsWith("p/")
                 }
             )
+            SyncTrace.keys("remote-state", remoteValues.keys)
+            SyncTrace.profiles("remote-profiles", remoteValues["x/profiles"])
+            SyncTrace.plugins("remote-plugins", remoteValues["x/plugins"])
             val remoteByKey = pull.entries.associateBy { it.key }
             val versions = mutableMapOf<String, Long>()
             if (!pull.full) {
@@ -275,6 +280,7 @@ internal object SyncCoordinator {
             val destructiveProposals = preferenceRemovals +
                 profileRemovals.map { "x/profiles/$it" } +
                 pluginRemovals.map { "x/plugins/$it" }
+            SyncTrace.keys("deletion-review", destructiveProposals)
             SyncDeletionGate.requireApproval(config, destructiveProposals,
                 (backend as GithubSyncAdapter).verifiedRevision().first)
             val approvedProfiles = profileRemovals.filter {
@@ -299,6 +305,8 @@ internal object SyncCoordinator {
             val profileMerge = ProfileSync.merge(
                 profileLocal, profileServer, previousProfiles, approvedProfiles)
             val targetProfiles = ProfileSync.encode(profileMerge.target)
+            SyncTrace.profiles("target-profiles", targetProfiles)
+            SyncTrace.info("profile-merge", "upload=${profileMerge.changedRemote}")
             val nativeBefore = ProfileSync.decode(profileLocal)
             val obsoleteSlots = nativeBefore.items.keys.filter { slot ->
                 val old = nativeBefore.items.getValue(slot)
@@ -358,6 +366,7 @@ internal object SyncCoordinator {
             stage = "reading local preferences"
             val local = ProfileIdentity.toRemote(SyncData.snapshot(context),
                 profileMerge.target)
+            SyncTrace.keys("local-state", local.keys)
             val currentPlugins = PluginInventory.snapshot(context)
             val base = baseline(context)
             stage = "comparing changed settings"
@@ -468,6 +477,9 @@ internal object SyncCoordinator {
                 }
             }
 
+            SyncTrace.keys("planned-upload", upload.keys)
+            SyncTrace.keys("planned-download", apply.keys)
+            SyncTrace.info("conflicts", "count=${conflicts.size}")
             if (conflicts.isNotEmpty()) {
                 val saved = config.preferences.getString("pending_conflicts", null)
                 val retained = if (saved == null) JSONObject() else JSONObject(
@@ -487,6 +499,9 @@ internal object SyncCoordinator {
             var merge = PluginSync.merge(currentPlugins, pluginsOnServer,
                 inventoryBase, SyncRuntime.pluginsLoaded, approvedPlugins)
             var pluginTarget = PluginSync.encode(merge.target)
+            SyncTrace.plugins("local-plugins", currentPlugins)
+            SyncTrace.plugins("target-plugins", pluginTarget)
+            SyncTrace.pluginDelta("plugin-install-remove-plan", currentPlugins, pluginTarget)
 
             // A manual local removal is only a deletion after the actual plugin
             // loader has completed; prevents empty snapshots during startup.
@@ -567,6 +582,8 @@ internal object SyncCoordinator {
             // A new baseline may only be recorded for installed, verified items.
             val installedPlugins = PluginInventory.snapshot(context)
             val installed = PluginSync.matches(PluginSync.decode(installedPlugins), merge.target)
+            SyncTrace.info("plugin-verification", "matched=$installed " +
+                "pending=${config.preferences.contains("pending_plugins")}")
             if (installed && !config.preferences.contains("pending_plugins")) {
                 check(config.preferences.edit().putString("plugin_baseline", installedPlugins).commit())
             } else if (installation.isEmpty()) {
@@ -590,18 +607,22 @@ internal object SyncCoordinator {
             stage = "restoring preferences"
             verifyAccount()
             if (apply.isNotEmpty()) ensureUndo()
+            val nativeApply = ProfileIdentity.toNative(apply, profileMerge.target)
             applying = true
             try {
-                SyncData.apply(context,
-                    ProfileIdentity.toNative(apply, profileMerge.target))
+                SyncData.apply(context, nativeApply)
             } finally {
                 applying = false
+            }
+            if (nativeApply.isNotEmpty()) {
+                SyncTrace.applied("local-apply-verified", nativeApply, SyncData.snapshot(context))
             }
 
             // A single Git commit publishes profile, plugin inventory and
             // preferences together, only after local apply has succeeded.
             stage = "publishing complete GitHub snapshot"
             backend.flush(cipher)
+            SyncTrace.info("publish-complete")
             stage = "persisting verified settings baseline"
             verifyAccount()
             val baseJson = JSONObject()
@@ -646,6 +667,7 @@ internal object SyncCoordinator {
             editor.apply()
             if (apply.keys.any { it.startsWith("d/") || it.startsWith("p/") }) {
                 MainActivity.bookmarksUpdatedEvent.invoke(true)
+                SyncTrace.info("ui-refresh-request", "event=bookmarksUpdated")
             }
             var result = "Synced: downloaded " + apply.size + ", uploaded " +
                 (upload.size + (if (merge.changedRemote) 1 else 0) +
@@ -655,14 +677,17 @@ internal object SyncCoordinator {
                 result = result.replaceFirst("Synced:", "Sync incomplete:")
             }
             lastStatus = result
+            SyncTrace.info("success", "downloaded=${apply.size} uploaded=${upload.size}")
             return result
         } catch (cancel: CancellationException) {
+            SyncTrace.info("cancel", "step=$stage")
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
                 undoIfNeeded()
             }
             throw cancel
         } catch (error: LinkageError) {
             val rollbackError = undoIfNeeded()
+            SyncTrace.info("failure", "step=$stage type=LinkageError rollback=${rollbackError == null}")
             val message = "Sync incompatible during " + stage + ": " +
                 error.javaClass.simpleName + (rollbackError?.let { "; " + it } ?: "")
             Log.e("SyncCS", message, error)
@@ -670,6 +695,8 @@ internal object SyncCoordinator {
             return message
         } catch (error: Exception) {
             val rollbackError = undoIfNeeded()
+            SyncTrace.info("failure", "step=$stage type=${error.javaClass.simpleName} " +
+                "rollback=${rollbackError == null}")
             val detail = (error.message ?: error.javaClass.simpleName).take(160)
             val message = if (error is IOException && isConflict(error)) {
                 "Sync conflict: " + detail
@@ -678,6 +705,8 @@ internal object SyncCoordinator {
             Log.e("SyncCS", message, error)
             lastStatus = message
             return message
+        } finally {
+            SyncTrace.finish(traceId)
         }
     }
 

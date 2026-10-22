@@ -9,6 +9,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Runs the production GithubBackupStore against an in-memory Git Data API.
@@ -25,6 +26,8 @@ class GithubStoreIntegrationTest {
         private val commits = linkedMapOf<String, Pair<String, String?>>()
         private var head: String
         var failNextPublish = false
+        val simultaneousBlobReads = AtomicInteger()
+        val peakBlobReads = AtomicInteger()
 
         init {
             val tree = sha()
@@ -62,9 +65,16 @@ class GithubStoreIntegrationTest {
                 }
                 method == "GET" && p.startsWith("/git/blobs/") -> {
                     val id = p.substringAfterLast("/")
-                    val bytes = blobs[id] ?: error("Blob not found $id")
-                    return JSONObject().put("encoding", "base64")
-                        .put("content", Base64.encodeToString(bytes, Base64.NO_WRAP))
+                    val running = simultaneousBlobReads.incrementAndGet()
+                    peakBlobReads.updateAndGet { maxOf(it, running) }
+                    try {
+                        Thread.sleep(15)
+                        val bytes = blobs[id] ?: error("Blob not found $id")
+                        return JSONObject().put("encoding", "base64")
+                            .put("content", Base64.encodeToString(bytes, Base64.NO_WRAP))
+                    } finally {
+                        simultaneousBlobReads.decrementAndGet()
+                    }
                 }
                 method == "POST" && p == "/git/blobs" -> {
                     val bytes = Base64.decode(body!!.getString("content"), Base64.DEFAULT)
@@ -141,6 +151,16 @@ class GithubStoreIntegrationTest {
         assertEquals(commit, b.current(key)!!.revision)
         assertEquals(original, b.current(key)!!.values)
         assertEquals(1, b.current(key)!!.generation)
+    }
+
+    @Test fun allShardsAreVerifiedWithConcurrentReads() {
+        val api = FakeGit()
+        val a = store(api, "A")
+        val c = cipher()
+        val expected = (0 until 48).associate { "d/0/video_pos_dur/$it" to "position-$it" }
+        a.initialize(c, expected)
+        assertEquals(expected, a.current(c)!!.values)
+        assertTrue("GitHub shard reads should overlap", api.peakBlobReads.get() > 1)
     }
 
     @Test fun failedPublicationNeverExposesPartialBackup() {

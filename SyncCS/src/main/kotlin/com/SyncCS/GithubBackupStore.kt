@@ -8,6 +8,9 @@ import java.net.HttpURLConnection
 import java.net.URLEncoder
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
 
 /**
  * Standalone GitHub storage engine. It cannot touch the Supabase account.
@@ -155,23 +158,53 @@ internal class GithubBackupStore(
         val canonical = (0 until 16).map { expectedHashes.getString(it) }
         check(cipher.decrypt("synccs/data-root", manifest.getString("rootSeal"))
             == canonical.joinToString("|")) { "Backup root authentication failed." }
+        // Keep the complete authenticated snapshot; only parallelize independent
+        // shard reads. Nothing becomes visible until ALL 16 shards are verified.
+        val began = System.nanoTime()
+        val workers = Executors.newFixedThreadPool(4) { task ->
+            Thread(task, "SyncCS-GitHub-shard").apply { isDaemon = true }
+        }
+        SyncTrace.info("shards-start", "count=16 workers=4 revision=${rev.take(12)}")
+        val jobs = (0 until 16).map { i ->
+            workers.submit(Callable {
+                val bytes = blob(entries[shard(i)]
+                    ?: throw IOException("Corrupted backup: missing shard " + shard(i)))
+                check(SyncBackend.digestBytes(bytes) == canonical[i]) {
+                    "Backup shard $i does not match its authenticated manifest."
+                }
+                val part = JSONObject(String(bytes, Charsets.UTF_8))
+                val sealed = linkedMapOf<String, String>()
+                val plain = linkedMapOf<String, String>()
+                for (key in part.keys()) {
+                    check(bucket(key) == i) { "Invalid backup shard." }
+                    val ciphertext = part.getString(key)
+                    sealed[key] = ciphertext
+                    plain[key] = cipher.decrypt(key, ciphertext)
+                }
+                sealed to plain
+            })
+        }
         val encrypted = linkedMapOf<String, String>()
         val values = linkedMapOf<String, String>()
-        for (i in 0 until 16) {
-            val hash = entries[shard(i)]
-                ?: throw IOException("Corrupted backup: missing shard " + shard(i))
-            val bytes = blob(hash)
-            check(SyncBackend.digestBytes(bytes) == canonical[i]) {
-                "Backup shard $i does not match its authenticated manifest."
+        try {
+            for (job in jobs) {
+                val part = try {
+                    job.get()
+                } catch (error: ExecutionException) {
+                    throw (error.cause ?: error)
+                }
+                for ((key, value) in part.first) {
+                    check(!encrypted.containsKey(key)) { "Duplicate backup key." }
+                    encrypted[key] = value
+                }
+                values.putAll(part.second)
             }
-            val part = JSONObject(String(bytes, Charsets.UTF_8))
-            for (key in part.keys()) {
-                check(bucket(key) == i && !values.containsKey(key)) { "Invalid backup shard." }
-                val ciphertext = part.getString(key)
-                encrypted[key] = ciphertext
-                values[key] = cipher.decrypt(key, ciphertext)
-            }
+        } finally {
+            jobs.forEach { if (!it.isDone) it.cancel(true) }
+            workers.shutdownNow()
         }
+        SyncTrace.info("shards-verified",
+            "count=16 keys=${values.size} elapsedMs=${(System.nanoTime() - began) / 1000000}")
         return Snapshot(rev, tree, branch, manifest.getInt("generation"), values,
             encrypted, canonical)
     }

@@ -138,6 +138,9 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
             preserveUnlinkedDeviceState()
         }
         latest = snapshot
+        SyncTrace.info("github-pull", "revision=${snapshot.revision.take(12)} " +
+            "records=${snapshot.values.size} newBackup=$createdFreshBackup")
+        SyncTrace.keys("github-pull-keys", snapshot.values.keys)
         // Verify that any desired plugin missing locally can be fetched BEFORE
         // ProfileSync applies profile changes or installation removes binaries.
         val localPluginIds = PluginSync.decode(PluginInventory.snapshot(context)).items
@@ -166,6 +169,7 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
     ) {
         check(latest != null) { "Pull must complete before staging any writes." }
         stagedChanges.putAll(changes)
+        SyncTrace.keys("github-staged", changes.keys)
     }
 
     override fun flush(cipher: SyncCipher) {
@@ -182,9 +186,12 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         check(deletions.all { it in allowed }) {
             "Deletion approval missing; GitHub snapshot remains unchanged."
         }
+        SyncTrace.info("github-publish", "base=${current.revision.take(12)} " +
+            "writes=${stagedChanges.size} deletions=${deletions.size} archives=${archives.size}")
         github.update(current, cipher, target, allowed, archives)
         latest = github.current(cipher)
             ?: error("Could not verify the newly committed GitHub snapshot.")
+        SyncTrace.info("github-publish-verified", "revision=${latest!!.revision.take(12)}")
         stagedChanges.clear()
         archives.clear()
     }
