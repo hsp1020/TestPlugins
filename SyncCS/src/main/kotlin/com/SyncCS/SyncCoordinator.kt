@@ -39,6 +39,23 @@ internal object SyncCoordinator {
             lastStatus = "Sign in to enable sync"
             return@withLock lastStatus
         }
+        if (LocalSyncJournal.pending(context)) {
+            val activityReady = activity != null && !activity.isFinishing && !activity.isDestroyed
+            if (!activityReady) {
+                lastStatus = "Sync paused: incomplete local restore requires a foreground activity."
+                return@withLock lastStatus
+            }
+            applying = true
+            try {
+                LocalSyncJournal.recover(context, activity, GithubSyncAdapter(context))
+            } catch (recovery: Exception) {
+                lastStatus = "Sync blocked: local rollback incomplete: " +
+                    (recovery.message ?: recovery.javaClass.simpleName).take(170)
+                return@withLock lastStatus
+            } finally {
+                applying = false
+            }
+        }
         if (config.preferences.getBoolean("github_recovery_in_progress", false)) {
             lastStatus = "Sync paused: a GitHub backup revision is being restored."
             return@withLock lastStatus
@@ -62,6 +79,26 @@ internal object SyncCoordinator {
         val config = SyncConfiguration(context)
         val backend: SyncStorage = GithubSyncAdapter(context)
         var stage = "loading cloud state"
+        var undoStarted = false
+        fun ensureUndo() {
+            if (!undoStarted) {
+                LocalSyncJournal.capture(context)
+                undoStarted = true
+            }
+        }
+        suspend fun undoIfNeeded(): String? {
+            if (!undoStarted) return null
+            applying = true
+            return try {
+                LocalSyncJournal.recover(context, activity, backend)
+                null
+            } catch (failure: Exception) {
+                "Local rollback incomplete; sync blocked until recovery: " +
+                    (failure.message ?: failure.javaClass.simpleName).take(170)
+            } finally {
+                applying = false
+            }
+        }
         try {
             val startedUser = backend.userId()
             fun verifyAccount() {
@@ -157,6 +194,9 @@ internal object SyncCoordinator {
                 versions["x/profiles"] = (versions["x/profiles"] ?: 0L) + 1L
             }
             verifyAccount()
+            if (ProfileSync.encode(ProfileSync.decode(profileLocal)) != targetProfiles) {
+                ensureUndo()
+            }
             applying = true
             try {
                 ProfileSync.apply(context, profileMerge.target)
@@ -332,6 +372,7 @@ internal object SyncCoordinator {
             val repositories = apply.remove("d/REPOSITORIES_KEY")
             if (repositories != null && activity != null) {
                 verifyAccount()
+                ensureUndo()
                 applying = true
                 try {
                     SyncData.apply(context, mapOf("d/REPOSITORIES_KEY" to repositories))
@@ -345,6 +386,10 @@ internal object SyncCoordinator {
             stage = "restoring plugin binaries and removals"
             var installation = ""
             if (!PluginSync.matches(PluginSync.decode(currentPlugins), merge.target)) {
+                check(activity != null && SyncRuntime.pluginsLoaded) {
+                    "Plugin restore must complete in the foreground before settings are applied."
+                }
+                ensureUndo()
                 check(config.preferences.edit()
                     .putString("pending_plugins", pluginTarget).commit())
             } else if (config.preferences.contains("pending_plugins")) {
@@ -355,7 +400,11 @@ internal object SyncCoordinator {
                 verifyAccount()
                 applying = true
                 try {
+                    ensureUndo()
                     installation = installPending(context, activity, backend)
+                    check(!installation.contains("plugins pending:")) {
+                        "Plugin restore was incomplete."
+                    }
                 } finally {
                     applying = false
                 }
@@ -385,6 +434,7 @@ internal object SyncCoordinator {
 
             stage = "restoring preferences"
             verifyAccount()
+            if (apply.isNotEmpty()) ensureUndo()
             applying = true
             try {
                 SyncData.apply(context, apply)
@@ -427,6 +477,10 @@ internal object SyncCoordinator {
             }
             check(persisted.commit())
             SyncDeletionGate.consumed(config)
+            if (undoStarted) {
+                LocalSyncJournal.finish(context)
+                undoStarted = false
+            }
             val editor = config.preferences.edit()
             for (key in apply.keys + upload.keys) editor.remove("modified/" + key)
             editor.apply()
@@ -443,17 +497,24 @@ internal object SyncCoordinator {
             lastStatus = result
             return result
         } catch (cancel: CancellationException) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                undoIfNeeded()
+            }
             throw cancel
         } catch (error: LinkageError) {
-            val message = "Sync incompatible during " + stage + ": " + error.javaClass.simpleName
+            val rollbackError = undoIfNeeded()
+            val message = "Sync incompatible during " + stage + ": " +
+                error.javaClass.simpleName + (rollbackError?.let { "; " + it } ?: "")
             Log.e("SyncCS", message, error)
             lastStatus = message
             return message
         } catch (error: Exception) {
+            val rollbackError = undoIfNeeded()
             val detail = (error.message ?: error.javaClass.simpleName).take(160)
             val message = if (error is IOException && isConflict(error)) {
                 "Sync conflict: " + detail
-            } else "Sync failed during " + stage + ": " + detail
+            } else "Sync failed during " + stage + ": " + detail +
+                (rollbackError?.let { "; " + it } ?: "")
             Log.e("SyncCS", message, error)
             lastStatus = message
             return message
