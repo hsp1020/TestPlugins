@@ -28,6 +28,8 @@ internal enum class ElevateFeature(
         "Repair stale Home cards when switching providers."),
     EPISODE_PROGRESS("Home & Library", "Episode Progress Indicators",
         "Show watched progress on large episode thumbnails."),
+    EMBEDDED_SUBTITLES("Playback & Subtitles", "Embedded Subtitle Management",
+        "Prefer matching embedded subtitles and discard stale tracks when videos change."),
     AUDIO_TRACKS("Playback & Subtitles", "Automatic Audio Language",
         "Select app-language audio, then Japanese for anime or English for other titles."),
     PIP_BUTTON("Playback & Subtitles", "Picture-in-Picture Button",

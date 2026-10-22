@@ -1,0 +1,357 @@
+package com.hsp1020.elevate
+
+import android.app.Activity
+import android.app.Application
+import android.app.Dialog
+import android.content.Context
+import android.content.SharedPreferences
+import android.os.Bundle
+import android.view.View
+import android.view.ViewTreeObserver
+import androidx.annotation.OptIn
+import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentActivity
+import androidx.fragment.app.FragmentManager
+import androidx.lifecycle.Observer
+import androidx.lifecycle.ViewModelProvider
+import androidx.media3.common.C
+import androidx.media3.common.Player as Media3Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
+import androidx.media3.common.util.UnstableApi
+import com.lagradost.cloudstream3.CommonActivity
+import com.lagradost.cloudstream3.MainActivity
+import com.lagradost.cloudstream3.ui.player.CS3IPlayer
+import com.lagradost.cloudstream3.ui.player.FullScreenPlayer
+import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
+import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
+import com.lagradost.cloudstream3.ui.player.PlayerSubtitleHelper
+import com.lagradost.cloudstream3.ui.player.SubtitleData
+import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
+import com.lagradost.cloudstream3.ui.player.VideoLive
+import com.lagradost.cloudstream3.ui.subtitles.SUBTITLE_AUTO_SELECT_KEY
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.PREFERENCES_NAME
+
+@OptIn(UnstableApi::class)
+internal class EmbeddedSubtitleController(private val application: Application) :
+    Application.ActivityLifecycleCallbacks {
+    private var host: FragmentActivity? = null
+    private var fragment: GeneratorPlayer? = null
+    private var model: PlayerGeneratorViewModel? = null
+    private var viewTree: ViewTreeObserver? = null
+    private var removeObserver: (() -> Unit)? = null
+    private var player: Media3Player? = null
+    private var instance: Int? = null
+    private var linkUrl: String? = null
+    private var previousEmbedded = emptySet<SubtitleData>()
+    private var embeddedApplied = false
+    private var manualOverride = false
+    private var selectionDialog: Dialog? = null
+    private var selectionBeforeDialog: SubtitleData? = null
+    private var settings: SharedPreferences? = null
+    private var preferredLanguage = "en"
+    private val trackIdPrefix = Regex("^\\d+:")
+
+    private val dialogField = runCatching {
+        FullScreenPlayer::class.java.getDeclaredField("selectSourceDialog")
+            .apply { isAccessible = true }
+    }.getOrNull()
+    private val selectedField = runCatching {
+        GeneratorPlayer::class.java.getDeclaredField("currentSelectedSubtitles")
+            .apply { isAccessible = true }
+    }.getOrNull()
+    private val helperField = runCatching {
+        CS3IPlayer::class.java.getDeclaredField("subtitleHelper")
+            .apply { isAccessible = true }
+    }.getOrNull()
+    private val activeField = runCatching {
+        PlayerSubtitleHelper::class.java.getDeclaredField("activeSubtitles")
+            .apply { isAccessible = true }
+    }.getOrNull()
+    private val linkField = runCatching {
+        CS3IPlayer::class.java.getDeclaredField("currentLink")
+            .apply { isAccessible = true }
+    }.getOrNull()
+
+    private val listener = java.lang.reflect.Proxy.newProxyInstance(
+        Media3Player.Listener::class.java.classLoader,
+        arrayOf(Media3Player.Listener::class.java)
+    ) { proxy, method, args ->
+        when (method.name) {
+            "onTracksChanged" -> {
+                synchronizeSource()
+                (args?.getOrNull(0) as? Tracks)?.let(::selectEmbedded)
+                null
+            }
+            "equals" -> proxy === args?.getOrNull(0)
+            "hashCode" -> System.identityHashCode(proxy)
+            "toString" -> "ElevateEmbeddedSubtitleListener"
+            else -> null
+        }
+    } as Media3Player.Listener
+
+    private val settingsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == SUBTITLE_AUTO_SELECT_KEY) {
+            preferredLanguage = readPreferredLanguage()
+            manualOverride = true
+        }
+    }
+
+    private fun readPreferredLanguage(): String =
+        runCatching { settings?.getString(SUBTITLE_AUTO_SELECT_KEY, null) }
+            .getOrNull()?.trim()?.removeSurrounding("\"")
+            ?.takeIf { it.matches(Regex("[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*")) }
+            ?: "en"
+
+    private fun currentLinkUrl(f: GeneratorPlayer): String? =
+        runCatching { (linkField?.get(f.player) as? ExtractorLink)?.url }.getOrNull()
+
+    private fun selectedByHost(f: GeneratorPlayer): SubtitleData? =
+        runCatching { selectedField?.get(f) as? SubtitleData }.getOrNull()
+
+    private fun trackDialog(f: GeneratorPlayer) {
+        val shown = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
+            ?.takeIf { it.isShowing }
+        if (shown != null) {
+            if (shown !== selectionDialog) {
+                selectionDialog = shown
+                selectionBeforeDialog = selectedByHost(f)
+            } else if (selectedByHost(f) != selectionBeforeDialog) {
+                manualOverride = true
+            }
+        } else if (selectionDialog != null) {
+            if (selectedByHost(f) != selectionBeforeDialog) manualOverride = true
+            selectionDialog = null
+            selectionBeforeDialog = null
+        }
+    }
+
+    private fun discardPreviousEmbedded() {
+        val stale = previousEmbedded
+        previousEmbedded = emptySet()
+        if (stale.isEmpty()) return
+        model?.let { vm ->
+            if (vm.state.subtitles.any { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it in stale }) {
+                vm.modifyState {
+                    set(subtitles.filterNot {
+                        it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it in stale
+                    })
+                }
+            }
+        }
+        runCatching {
+            val helper = helperField?.get(fragment?.player) as? PlayerSubtitleHelper
+                ?: return@runCatching
+            @Suppress("UNCHECKED_CAST")
+            val active = activeField?.get(helper) as? Set<SubtitleData>
+                ?: return@runCatching
+            if (active.any { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it in stale }) {
+                helper.setActiveSubtitles(active.filterNot {
+                    it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it in stale
+                }.toSet())
+            }
+        }
+    }
+
+    private fun synchronizeSource() {
+        val f = fragment ?: return
+        val nextInstance = model?.state?.instance ?: return
+        val current = f.playerView?.player
+        val nextUrl = currentLinkUrl(f)
+        val changedInstance = instance != null && instance != nextInstance
+        val changedUrl = linkUrl != null && nextUrl != null && linkUrl != nextUrl
+        val changedPlayer = current != null && current !== player
+        val changedUnknownSource = changedPlayer && player != null &&
+            (nextUrl == null || linkUrl == null)
+        val changedSource = changedInstance || changedUrl || changedUnknownSource
+
+        instance = nextInstance
+        if (nextUrl != null) linkUrl = nextUrl
+        if (changedSource) {
+            embeddedApplied = false
+            manualOverride = false
+            selectionDialog = null
+            selectionBeforeDialog = null
+            discardPreviousEmbedded()
+        }
+        if (changedPlayer) {
+            player?.removeListener(listener)
+            player = current
+            embeddedApplied = false
+            current?.addListener(listener)
+        }
+        if ((changedSource || changedPlayer) && current != null) selectEmbedded(current.currentTracks)
+    }
+
+    private val onDraw = ViewTreeObserver.OnPreDrawListener {
+        synchronizeSource()
+        fragment?.let(::trackDialog)
+        true
+    }
+
+    private fun markActive(f: GeneratorPlayer, embedded: SubtitleData): Boolean =
+        runCatching {
+            val helper = helperField?.get(f.player) as? PlayerSubtitleHelper
+                ?: return@runCatching false
+            @Suppress("UNCHECKED_CAST")
+            val existing = activeField?.get(helper) as? Set<SubtitleData>
+                ?: return@runCatching false
+            if (embedded !in existing) helper.setActiveSubtitles(existing + embedded)
+            true
+        }.getOrDefault(false)
+
+    private fun selectEmbedded(tracks: Tracks) {
+        val f = fragment ?: return
+        val current = player ?: return
+        if (current !== f.playerView?.player || instance != model?.state?.instance) return
+        val subtitles = model?.state?.subtitles ?: return
+        val groups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+
+        for (subtitle in subtitles) {
+            if (subtitle.origin != SubtitleOrigin.EMBEDDED_IN_VIDEO) continue
+            if (groups.any { group ->
+                (0 until group.length).any { i ->
+                    group.getTrackFormat(i).id?.replace(trackIdPrefix, "") == subtitle.url
+                }
+            }) markActive(f, subtitle)
+        }
+
+        trackDialog(f)
+        if (manualOverride || embeddedApplied || selectionDialog?.isShowing == true) return
+        val target = subtitles.firstOrNull {
+            it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO &&
+                it.matchesLanguageCode(preferredLanguage)
+        } ?: return
+        val match = groups.firstNotNullOfOrNull { group ->
+            (0 until group.length).firstOrNull { i ->
+                group.isTrackSupported(i) &&
+                    group.getTrackFormat(i).id?.replace(trackIdPrefix, "") == target.url
+            }?.let { i -> group to i }
+        } ?: return
+        if (!markActive(f, target)) return
+        val (group, index) = match
+        if (group.isTrackSelected(index)) {
+            embeddedApplied = true
+            return
+        }
+        runCatching {
+            embeddedApplied = true
+            current.trackSelectionParameters = current.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, index))
+                .build()
+        }.onFailure { embeddedApplied = false }
+    }
+
+    private val callbacks = object : FragmentManager.FragmentLifecycleCallbacks() {
+        override fun onFragmentViewCreated(
+            fm: FragmentManager, f: Fragment, v: View, saved: Bundle?
+        ) = watch(f)
+        override fun onFragmentResumed(fm: FragmentManager, f: Fragment) = watch(f)
+        override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) = detach(f)
+    }
+
+    fun start() {
+        application.registerActivityLifecycleCallbacks(this)
+        (CommonActivity.activity as? MainActivity)?.let(::use)
+    }
+
+    fun stop() {
+        application.unregisterActivityLifecycleCallbacks(this)
+        host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(callbacks)
+        detach()
+        host = null
+    }
+
+    private fun use(activity: FragmentActivity) {
+        if (host === activity) return
+        host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(callbacks)
+        detach()
+        host = activity
+        activity.supportFragmentManager.registerFragmentLifecycleCallbacks(callbacks, true)
+        fun scan(fm: FragmentManager) {
+            fm.fragments.forEach { f ->
+                if (f.view != null) watch(f)
+                if (f.isAdded) scan(f.childFragmentManager)
+            }
+        }
+        scan(activity.supportFragmentManager)
+    }
+
+    private fun watch(candidate: Fragment) {
+        if (candidate !is GeneratorPlayer || !candidate.isAdded || candidate.view == null ||
+            candidate === fragment) return
+        detach()
+        fragment = candidate
+        model = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
+        val subtitleObserver = Observer<VideoLive<Set<SubtitleData>>> { event ->
+            if (event != null && event.instance == model?.state?.instance) {
+                synchronizeSource()
+                previousEmbedded = model?.state?.subtitles
+                    ?.filterTo(mutableSetOf()) { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
+                    ?: emptySet()
+                player?.currentTracks?.let(::selectEmbedded)
+            }
+        }
+        settings = candidate.context?.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+        preferredLanguage = readPreferredLanguage()
+        settings?.registerOnSharedPreferenceChangeListener(settingsListener)
+        model?.currentSubtitles?.observe(candidate.viewLifecycleOwner, subtitleObserver)
+        val linksObserver = Observer<VideoLive<Set<com.lagradost.cloudstream3.ui.player.VideoLink>>> {
+            synchronizeSource()
+        }
+        model?.currentLinks?.observe(candidate.viewLifecycleOwner, linksObserver)
+        val loadingObserver = Observer<VideoLive<com.lagradost.cloudstream3.mvvm.Resource<Unit>>> {
+            synchronizeSource()
+        }
+        model?.loadingLinks?.observe(candidate.viewLifecycleOwner, loadingObserver)
+        removeObserver = {
+            model?.currentSubtitles?.removeObserver(subtitleObserver)
+            model?.currentLinks?.removeObserver(linksObserver)
+            model?.loadingLinks?.removeObserver(loadingObserver)
+        }
+        candidate.view?.viewTreeObserver?.takeIf { it.isAlive }?.let {
+            it.addOnPreDrawListener(onDraw)
+            viewTree = it
+        }
+        synchronizeSource()
+    }
+
+    private fun detach(candidate: Fragment? = null) {
+        if (candidate != null && candidate !== fragment) return
+        viewTree?.let { if (it.isAlive) it.removeOnPreDrawListener(onDraw) }
+        viewTree = null
+        player?.removeListener(listener)
+        player = null
+        settings?.unregisterOnSharedPreferenceChangeListener(settingsListener)
+        settings = null
+        removeObserver?.invoke()
+        removeObserver = null
+        fragment = null
+        model = null
+        instance = null
+        linkUrl = null
+        previousEmbedded = emptySet()
+        embeddedApplied = false
+        manualOverride = false
+        selectionDialog = null
+        selectionBeforeDialog = null
+    }
+
+    override fun onActivityResumed(activity: Activity) {
+        if (activity is MainActivity) use(activity)
+    }
+    override fun onActivityDestroyed(activity: Activity) {
+        if (host === activity) {
+            host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(callbacks)
+            detach()
+            host = null
+        }
+    }
+    override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+    override fun onActivityStarted(activity: Activity) = Unit
+    override fun onActivityPaused(activity: Activity) = Unit
+    override fun onActivityStopped(activity: Activity) = Unit
+    override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+}

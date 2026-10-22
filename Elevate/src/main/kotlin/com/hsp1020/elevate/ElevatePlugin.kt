@@ -39,6 +39,7 @@ class ElevatePlugin : Plugin() {
     private var homeRecyclerGuard: HomeRecyclerCacheGuard? = null
     private var searchProviderOrder: SearchProviderOrderHook? = null
     private var audioSelector: ElevateAudioTrackSelector? = null
+    private var embeddedSubtitles: EmbeddedSubtitleController? = null
     private var homeHero: HomeHeroToggle? = null
     private var featurePrefs: SharedPreferences? = null
     private var featureListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
@@ -144,6 +145,14 @@ class ElevatePlugin : Plugin() {
             audioSelector?.stop()
             audioSelector = null
         }
+        if (enabled(ElevateFeature.EMBEDDED_SUBTITLES)) {
+            if (embeddedSubtitles == null) {
+                embeddedSubtitles = EmbeddedSubtitleController(application).also { it.start() }
+            }
+        } else {
+            embeddedSubtitles?.stop()
+            embeddedSubtitles = null
+        }
         if (enabled(ElevateFeature.PIP_BUTTON) || enabled(ElevateFeature.PIP_SUBTITLES)) {
             if (pipSubtitles == null) {
                 pipSubtitles = PipSubtitleLifecycle(
@@ -184,6 +193,8 @@ class ElevatePlugin : Plugin() {
         searchProviderOrder = null
         audioSelector?.stop()
         audioSelector = null
+        embeddedSubtitles?.stop()
+        embeddedSubtitles = null
         homeHero?.stop()
         homeHero = null
         app = null
