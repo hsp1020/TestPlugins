@@ -114,6 +114,7 @@ class SyncPlugin : Plugin() {
                 SyncCoordinator.synchronize(context, active)
             }
         } else request(4000)
+        Unit
     }
     private val home = { _: Boolean -> request(3000) }
     private val accountRoster = { _: Boolean ->
