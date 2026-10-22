@@ -203,4 +203,44 @@ class GithubStoreIntegrationTest {
         api.corruptOneDataBlob()
         assertThrows(IllegalStateException::class.java) { a.current(c) }
     }
+    @Test fun reusedProfileSlotKeepsOldUuidArchiveButNeverAttachesItToNewProfile() {
+        val api = FakeGit()
+        val a = store(api, "A")
+        val b = store(api, "B")
+        val c = cipher()
+        val uuidOld = "11111111-1111-4111-8111-111111111111"
+        val uuidNew = "22222222-2222-4222-8222-222222222222"
+        val uuidDefault = "33333333-3333-4333-8333-333333333333"
+        fun profiles(uuid: String): String {
+            val zero = JSONObject().put("keyIndex", 0).put("uuid", uuidDefault)
+                .put("name", "Main")
+            val one = JSONObject().put("keyIndex", 1).put("uuid", uuid)
+                .put("name", "Same")
+            return ProfileSync.encode(ProfileSync.State(
+                linkedMapOf(0 to zero, 1 to one)))
+        }
+        val initial = mapOf("x/profiles" to profiles(uuidOld),
+            "u/$uuidOld/video_pos_dur/example" to "old progress")
+        a.initialize(c, initial)
+        val bObservedBefore = b.current(c)!!
+        val currentA = a.current(c)!!
+        a.update(currentA, c, currentA.values + mapOf(
+            "x/profiles" to profiles(uuidNew),
+            "u/$uuidNew/video_pos_dur/example" to "new progress"
+        ), emptySet())
+        val remote = b.current(c)!!
+        val merged = ProfileSync.merge(
+            bObservedBefore.values.getValue("x/profiles"),
+            remote.values.getValue("x/profiles"),
+            bObservedBefore.values.getValue("x/profiles"))
+        assertEquals(uuidNew, merged.target.items.getValue(1).getString("uuid"))
+        assertEquals(setOf(uuidNew), ProfileIdentity.replacedByServer(
+            ProfileSync.decode(bObservedBefore.values.getValue("x/profiles")), merged.target))
+        assertNull(ProfileIdentity.nativePath("u/$uuidOld/video_pos_dur/example", merged.target))
+        assertEquals("d/1/video_pos_dur/example",
+            ProfileIdentity.nativePath("u/$uuidNew/video_pos_dur/example", merged.target))
+        assertEquals("old progress", remote.values["u/$uuidOld/video_pos_dur/example"])
+        assertEquals("new progress", remote.values["u/$uuidNew/video_pos_dur/example"])
+    }
+
 }
