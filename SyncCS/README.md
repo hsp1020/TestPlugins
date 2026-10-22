@@ -21,10 +21,10 @@ The repository is **always private**. SyncCS refuses to use a public repository.
 - New GitHub backups are published as a **single Git commit** after all 16 encrypted data shards and plugin binary archives have been uploaded as Git objects. Crashes prior to the ref update do not publish an incomplete backup.
 - Writes are guarded by the last observed Git commit and use **non-forced fast-forward ref updates**. Conflicting writes are rejected for retry; no force push.
 - Scalar settings retain server-authoritative conflict behavior. Only keys with a local change listener event may be sent as deletions; unexpected local snapshot omissions are repaired from the server.
-- Automatic deletion is rejected when it would remove more than 25 keys or 1% of the snapshot. More than 1,000 value changes in one write are also rejected.
+- Automatic deletion is blocked. Even approved deletion batches may not exceed 25 keys or 1% of the snapshot; a rolling seven-day 25-item budget includes deletions **inside** plugin and profile manifests. More than 1,000 value changes in one commit are also rejected.
 - Plugin archives are SHA-256 verified before replacement. An absent archive stops restore instead of silently discarding an installed plugin.
 - Every successful Git commit remains a versioned rollback point. **Restore previous GitHub backup** creates a new commit, preserving the earlier history and increasing recovery generation. Devices with an old generation cannot upload until re-linked.
-- GitHub is not a real-time transactional database. CloudStream's native profiles, app preferences, and plugin binaries cannot be changed atomically across the Android filesystem. Restoration failures may still leave partial local changes, even when a pre-link encrypted copy exists. Test with a disposable account before production use.
+- A **durable encrypted local undo journal** captures tracked preferences, profile state, SyncCS metadata and installed plugin binaries before local mutation. On restore failure or process death, normal sync is paused until foreground recovery verifies local settings, plugin digests and profiles. Recovery can still fail (e.g. disk corruption, missing CloudStream API compatibility); it then **keeps the journal and blocks sync**, rather than claiming success. The Android host does not offer a true filesystem-wide atomic transaction.
 - Each device must finish initialization before synchronizing normally; the first backup requires user confirmation.
 - The encrypted local pre-link snapshot is stored in the app's private files and is **not** a substitute for a portable export or an off-device backup. Clearing app data destroys its Keystore key.
 - GitHub commit history preserves earlier snapshots even when current data is deleted; plan long-term retention and sensitive-data erasure accordingly.
@@ -41,3 +41,9 @@ Before release, validate with two disposable devices and a test GitHub account:
 - OAuth errors and expiry / Android TV device code entry
 
 No Supabase data is automatically migrated or restored. Removing the previous Supabase project is a separate administrative action and does not happen during GitHub sign-in.
+
+## Known limitations (do not describe as fully verified)
+
+- The current profile roster has only native numeric key indexes; SyncCS rejects reuse of tombstoned indexes, but a remove-and-recreate cycle which is never observed while SyncCS runs cannot be distinguished from ordinary profile editing. True epoch-specific keys require either a native stable profile UUID or an always-present lifecycle observation point.
+- GitHub OAuth and two real Android clients have not been exercised against a disposable GitHub OAuth App. Offline JVM safety tests and extension compilation are **not** substitutes for this end-to-end verification.
+- The GitHub OAuth App `repo` permission covers more than the dedicated backup repository. Use a dedicated GitHub account if least privilege is mandatory.

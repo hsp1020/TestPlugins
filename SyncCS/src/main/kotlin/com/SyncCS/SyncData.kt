@@ -558,50 +558,6 @@ internal object PluginInventory {
                 return listOf("Plugin archive digest mismatch: " + item.optString("name"))
             }
         }
-        val onlineNow = PluginManager.getPluginsOnline().toList()
-        val localNow = PluginManager.getPluginsLocal().toList()
-        for ((key, row) in current) {
-            if (key in target || row.optString("name").equals("SyncCS", true)) continue
-            val name = row.optString("name")
-            val installed = if (row.optString("type") == "online") {
-                val repoId = row.optString("repo")
-                onlineNow.firstOrNull {
-                    it.internalName == name && it.url == row.optString("url") &&
-                        (repoId.isBlank() || File(it.filePath).parentFile?.name ==
-                            PluginManager.getPluginSanitizedFileName(repoId))
-                }
-            } else {
-                localNow.firstOrNull {
-                    it.internalName == name &&
-                        File(it.filePath).name == row.optString("file")
-                }
-            }
-            if (installed != null) {
-                try {
-                    val path = File(installed.filePath)
-                    if (!PluginManager.deletePlugin(path)) {
-                        if (!path.exists()) {
-                            val installedOnline = PluginManager.getPluginsOnline()
-                                .filter { it.filePath != installed.filePath }
-                            val installedLocal = PluginManager.getPluginsLocal()
-                                .filter { it.filePath != installed.filePath }
-                            com.lagradost.cloudstream3.CloudStreamApp.setKey(
-                                PLUGINS_KEY, installedOnline.toTypedArray()
-                            )
-                            com.lagradost.cloudstream3.CloudStreamApp.setKey(
-                                com.lagradost.cloudstream3.plugins.PLUGINS_KEY_LOCAL,
-                                installedLocal.toTypedArray()
-                            )
-                        } else report.add("Could not delete " + name)
-                    }
-                } catch (_: Exception) {
-                    report.add("Could not delete " + name)
-                } catch (_: LinkageError) {
-                    report.add("Unsupported uninstall for " + name)
-                }
-            }
-        }
-
         val existingLocal = PluginManager.getPluginsLocal()
         for (index in 0 until rows.length()) {
             val row = rows.getJSONObject(index)
@@ -647,6 +603,14 @@ internal object PluginInventory {
                             val temp = File(path.parentFile, path.name + ".temp")
                             val backup = File(path.parentFile, path.name + ".synccs-old")
                             temp.writeBytes(bytes)
+                            if (backup.exists() && LocalSyncJournal.pending(context)) {
+                                // A previous crash may have left this temporary
+                                // file behind. The active, verified undo journal
+                                // contains the original archive bytes.
+                                check(backup.delete()) {
+                                    "Cannot clear abandoned plugin swap backup: " + name
+                                }
+                            }
                             check(!backup.exists()) { "Unrecovered plugin backup: " + name }
                             val prior = PluginManager.getPluginsOnline()
                                 .firstOrNull { it.filePath == path.absolutePath }
@@ -736,6 +700,52 @@ internal object PluginInventory {
                 }
             }
         }
+        // Only uninstall obsolete extensions after all replacements are verified.
+        if (report.isNotEmpty()) return report
+        val onlineNow = PluginManager.getPluginsOnline().toList()
+        val localNow = PluginManager.getPluginsLocal().toList()
+        for ((key, row) in current) {
+            if (key in target || row.optString("name").equals("SyncCS", true)) continue
+            val name = row.optString("name")
+            val installed = if (row.optString("type") == "online") {
+                val repoId = row.optString("repo")
+                onlineNow.firstOrNull {
+                    it.internalName == name && it.url == row.optString("url") &&
+                        (repoId.isBlank() || File(it.filePath).parentFile?.name ==
+                            PluginManager.getPluginSanitizedFileName(repoId))
+                }
+            } else {
+                localNow.firstOrNull {
+                    it.internalName == name &&
+                        File(it.filePath).name == row.optString("file")
+                }
+            }
+            if (installed != null) {
+                try {
+                    val path = File(installed.filePath)
+                    if (!PluginManager.deletePlugin(path)) {
+                        if (!path.exists()) {
+                            val installedOnline = PluginManager.getPluginsOnline()
+                                .filter { it.filePath != installed.filePath }
+                            val installedLocal = PluginManager.getPluginsLocal()
+                                .filter { it.filePath != installed.filePath }
+                            com.lagradost.cloudstream3.CloudStreamApp.setKey(
+                                PLUGINS_KEY, installedOnline.toTypedArray()
+                            )
+                            com.lagradost.cloudstream3.CloudStreamApp.setKey(
+                                com.lagradost.cloudstream3.plugins.PLUGINS_KEY_LOCAL,
+                                installedLocal.toTypedArray()
+                            )
+                        } else report.add("Could not delete " + name)
+                    }
+                } catch (_: Exception) {
+                    report.add("Could not delete " + name)
+                } catch (_: LinkageError) {
+                    report.add("Unsupported uninstall for " + name)
+                }
+            }
+        }
+
         return report
     }
 }
