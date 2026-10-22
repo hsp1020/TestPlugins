@@ -262,8 +262,8 @@ class SyncSettingsFragment : DialogFragment() {
 
         body.addView(settingRow(
             context,
-            "Restore previous GitHub backup",
-            "Browse encrypted Git revisions and restore a selected snapshot"
+            "Restore backups",
+            "Choose a GitHub revision or this device's encrypted original backup"
         ) {
             showBackupHistory()
         })
@@ -450,107 +450,194 @@ class SyncSettingsFragment : DialogFragment() {
         val host = requireActivity()
         if (LocalSyncJournal.pending(host)) {
             AlertDialog.Builder(host).setTitle("Local rollback pending")
-                .setMessage("Complete the interrupted local recovery before changing Git history.")
+                .setMessage("Finish the previous local rollback before selecting another backup.")
                 .setPositiveButton("Close", null).show()
             return
         }
         val config = SyncConfiguration(host)
-        if (!config.active()) {
-            AlertDialog.Builder(host).setTitle("Sign in required")
-                .setMessage("Connect your GitHub account first.")
-                .setPositiveButton("Close", null).show()
-            return
-        }
         lifecycleScope.launch {
             val progress = showSyncProgress()
             try {
-                val previews = withContext(Dispatchers.IO) {
-                    val token = config.preferences.getString("github_token", null)
-                        ?: error("Missing GitHub access token")
-                    val secret = String(LocalVault.decrypt(token), Charsets.UTF_8)
-                    val store = GithubBackupStore(secret,
-                        config.preferences.getString("github_login", null) ?: error("Missing GitHub login"),
-                        deviceName = config.deviceName, deviceId = config.deviceId)
-                    val now = store.current(SyncCipher.saved(config))
-                        ?: error("No complete GitHub backup exists.")
-                    store.history(now.branch, 30)
-                        .filter { it.id != now.revision && it.summary.startsWith("SyncCS ") }
-                }
+                val local = withContext(Dispatchers.IO) { LocalOriginalBackup.list(host) }
+                var historyError: String? = null
+                val remote = if (config.active()) {
+                    try {
+                        withContext(Dispatchers.IO) {
+                            val encryptedToken = config.preferences.getString("github_token", null)
+                                ?: error("Missing GitHub token")
+                            val store = GithubBackupStore(
+                                String(LocalVault.decrypt(encryptedToken), Charsets.UTF_8),
+                                config.preferences.getString("github_login", null)
+                                    ?: error("Missing GitHub account"),
+                                deviceName = config.deviceName, deviceId = config.deviceId)
+                            val current = store.current(SyncCipher.saved(config))
+                                ?: error("No GitHub backup available.")
+                            store.history(current.branch, 30)
+                                .filter { it.id != current.revision && it.summary.startsWith("SyncCS ") }
+                        }
+                    } catch (error: Exception) {
+                        historyError = error.message ?: error.javaClass.simpleName
+                        emptyList()
+                    }
+                } else emptyList()
+
                 progress.dialog.dismiss()
-                if (previews.isEmpty()) {
-                    AlertDialog.Builder(host).setMessage("No older SyncCS backup revisions found.")
+                if (local.isEmpty() && remote.isEmpty()) {
+                    AlertDialog.Builder(host).setTitle("No backup available")
+                        .setMessage(historyError?.let { "GitHub history unavailable: $it" }
+                            ?: "No local original backup or earlier GitHub revision was found.")
                         .setPositiveButton("Close", null).show()
                     return@launch
                 }
-                val labels = previews.map { it.timestamp + " · " + it.summary.take(70) }
-                AlertDialog.Builder(host)
-                    .setTitle("Choose backup revision")
-                    .setItems(labels.toTypedArray()) { _, index ->
-                        val selected = previews[index]
-                        AlertDialog.Builder(host)
-                            .setTitle("Restore this older snapshot?")
-                            .setMessage("This creates a NEW Git commit preserving full history, " +
-                                "increments recovery generation, and replaces synced local settings " +
-                                "with the selected snapshot. Other devices must reconnect before uploading. " +
-                                "Revision: " + selected.id.take(12))
-                            .setPositiveButton("Restore") { _, _ ->
-                                lifecycleScope.launch {
-                                    val restoring = showSyncProgress()
-                                    try {
-                                        val restored = withContext(Dispatchers.IO) {
-                                            check(config.preferences.edit()
-                                                .putBoolean("github_recovery_in_progress", true)
-                                                .commit())
-                                            try {
-                                                val token = config.preferences.getString("github_token", null)
-                                                    ?: error("Missing GitHub access token")
-                                                val store = GithubBackupStore(
-                                                    String(LocalVault.decrypt(token), Charsets.UTF_8),
-                                                    config.preferences.getString("github_login", null)
-                                                        ?: error("Missing GitHub login"),
-                                                    deviceName = config.deviceName, deviceId = config.deviceId)
-                                                val cipher = SyncCipher.saved(config)
-                                                val current = store.current(cipher)
-                                                    ?: error("No current GitHub backup.")
-                                                val newRevision = store.rollback(current, selected.id, cipher)
-                                                val editor = config.preferences.edit()
-                                                    .putInt("github_generation", current.generation + 1)
-                                                    .putString("github_base_revision", newRevision)
-                                                for (key in listOf(
-                                                    "base", "remote_cursor", "remote_versions",
-                                                    "profile_baseline", "profile_remote_snapshot",
-                                                    "plugin_baseline", "plugin_remote_snapshot",
-                                                    "pending_plugins", "list_baselines",
-                                                    "pending_conflicts"
-                                                )) editor.remove(key)
-                                                for (key in config.preferences.all.keys) {
-                                                    if (key.startsWith("modified/")) editor.remove(key)
-                                                }
-                                                check(editor.commit())
-                                            } finally {
-                                                config.preferences.edit()
-                                                    .remove("github_recovery_in_progress").commit()
-                                            }
-                                            SyncCoordinator.synchronize(host.applicationContext, host)
-                                        }
-                                        finishSyncProgress(restoring, restored)
-                                    } catch (error: Exception) {
-                                        restoring.dialog.dismiss()
-                                        AlertDialog.Builder(host)
-                                            .setTitle("Backup recovery not completed")
-                                            .setMessage(error.message.orEmpty().take(300))
-                                            .setPositiveButton("Close", null).show()
-                                    }
-                                }
-                            }.setNegativeButton("Cancel", null).show()
-                    }.setNegativeButton("Close", null).show()
+                val body = column(host)
+                val picker = AlertDialog.Builder(host)
+                    .setTitle("Choose backup to restore")
+                    .setView(scroll(host, body))
+                    .setNegativeButton("Close", null).create()
+                if (local.isNotEmpty()) {
+                    body.addView(secondary(host, "DEVICE ORIGINAL BACKUPS").apply {
+                        setPadding(dp(host, 12), dp(host, 14), 0, dp(host, 4))
+                    })
+                    val formatter = java.text.SimpleDateFormat(
+                        "yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+                    local.forEach { entry ->
+                        val date = formatter.format(java.util.Date(entry.created))
+                        body.addView(settingRow(host,
+                            "Original device backup · $date",
+                            if (entry.complete) "Encrypted settings, profiles and archived .cs3 files"
+                            else "Older encrypted original · plugin binaries may be unavailable"
+                        ) {
+                            picker.dismiss()
+                            confirmOriginalRestore(entry)
+                        })
+                    }
+                }
+                if (config.active()) {
+                    body.addView(secondary(host, "GITHUB BACKUP HISTORY").apply {
+                        setPadding(dp(host, 12), dp(host, 14), 0, dp(host, 4))
+                    })
+                    remote.forEach { revision ->
+                        body.addView(settingRow(host,
+                            "GitHub revision · " + revision.timestamp,
+                            revision.summary.take(100)
+                        ) {
+                            picker.dismiss()
+                            confirmGithubRestore(revision)
+                        })
+                    }
+                    if (historyError != null) {
+                        body.addView(secondary(host,
+                            "GitHub history unavailable: " + historyError.take(160)))
+                    }
+                } else {
+                    body.addView(secondary(host,
+                        "GitHub revision history is available after signing in. " +
+                            "Local originals can be restored without a GitHub connection."))
+                }
+                picker.show()
             } catch (error: Exception) {
                 progress.dialog.dismiss()
-                AlertDialog.Builder(host).setTitle("Backup history unavailable")
+                AlertDialog.Builder(host).setTitle("Backup list unavailable")
                     .setMessage(error.message.orEmpty().take(300))
                     .setPositiveButton("Close", null).show()
             }
         }
+    }
+
+    private fun confirmOriginalRestore(entry: LocalOriginalBackup.Entry) {
+        val host = requireActivity()
+        AlertDialog.Builder(host)
+            .setTitle("Restore original device backup?")
+            .setMessage("Restore this device's pre-sync profiles, watch history, preferences " +
+                "and original plugins. GitHub backups will NOT be changed. " +
+                "SyncCS will disconnect this device afterward so the restored old data " +
+                "cannot be automatically uploaded to GitHub.\n\n" +
+                if (!entry.complete) "This older backup does not contain plugin archives. " +
+                    "If required binaries are unavailable, restoration will stop without changes."
+                else "The current device state will be saved to a rollback journal first.")
+            .setPositiveButton("Restore original") { _, _ ->
+                lifecycleScope.launch {
+                    val progress = showSyncProgress()
+                    try {
+                        val result = withContext(Dispatchers.IO) {
+                            SyncCoordinator.restoreOriginal(host.applicationContext, host, entry)
+                        }
+                        progress.dialog.dismiss()
+                        statusLabel?.text = result
+                        AlertDialog.Builder(host).setTitle("Original backup restored")
+                            .setMessage(result + "\n\nRestart CloudStream to reload the restored plugins.")
+                            .setPositiveButton("Restart") { _, _ ->
+                                restartCloudStreamAfterFirstSignIn(host)
+                            }
+                            .setNegativeButton("Later", null).show()
+                    } catch (error: Exception) {
+                        progress.dialog.dismiss()
+                        AlertDialog.Builder(host).setTitle("Original restore failed")
+                            .setMessage((error.message ?: error.javaClass.simpleName).take(350) +
+                                "\nGitHub history was not changed. If local rollback failed, " +
+                                "SyncCS will block normal syncing.")
+                            .setPositiveButton("Close", null).show()
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun confirmGithubRestore(selected: GithubBackupStore.Revision) {
+        val host = requireActivity()
+        val config = SyncConfiguration(host)
+        AlertDialog.Builder(host)
+            .setTitle("Restore this GitHub revision?")
+            .setMessage("This creates a NEW Git commit preserving full history, " +
+                "increments recovery generation, and replaces synchronized settings. " +
+                "Other devices must reconnect before uploading. " +
+                "Revision: " + selected.id.take(12))
+            .setPositiveButton("Restore") { _, _ ->
+                lifecycleScope.launch {
+                    val progress = showSyncProgress()
+                    try {
+                        val result = withContext(Dispatchers.IO) {
+                            check(config.preferences.edit()
+                                .putBoolean("github_recovery_in_progress", true).commit())
+                            try {
+                                val token = config.preferences.getString("github_token", null)
+                                    ?: error("Missing GitHub access token")
+                                val store = GithubBackupStore(
+                                    String(LocalVault.decrypt(token), Charsets.UTF_8),
+                                    config.preferences.getString("github_login", null)
+                                        ?: error("Missing GitHub login"),
+                                    deviceName = config.deviceName, deviceId = config.deviceId)
+                                val cipher = SyncCipher.saved(config)
+                                val current = store.current(cipher)
+                                    ?: error("No current GitHub backup.")
+                                val newRevision = store.rollback(current, selected.id, cipher)
+                                val editor = config.preferences.edit()
+                                    .putInt("github_generation", current.generation + 1)
+                                    .putString("github_base_revision", newRevision)
+                                for (key in listOf("base", "remote_cursor", "remote_versions",
+                                    "profile_baseline", "profile_remote_snapshot",
+                                    "plugin_baseline", "plugin_remote_snapshot",
+                                    "pending_plugins", "list_baselines", "pending_conflicts"
+                                )) editor.remove(key)
+                                for (key in config.preferences.all.keys) {
+                                    if (key.startsWith("modified/")) editor.remove(key)
+                                }
+                                check(editor.commit())
+                            } finally {
+                                config.preferences.edit().remove("github_recovery_in_progress").commit()
+                            }
+                            SyncCoordinator.synchronize(host.applicationContext, host)
+                        }
+                        finishSyncProgress(progress, result)
+                    } catch (error: Exception) {
+                        progress.dialog.dismiss()
+                        AlertDialog.Builder(host).setTitle("GitHub recovery not completed")
+                            .setMessage(error.message.orEmpty().take(300))
+                            .setPositiveButton("Close", null).show()
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null).show()
     }
 
     private fun showAccountDialog() {

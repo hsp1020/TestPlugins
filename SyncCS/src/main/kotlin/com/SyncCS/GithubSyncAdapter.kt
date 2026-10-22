@@ -98,29 +98,7 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
     }
 
     private fun preserveUnlinkedDeviceState() {
-        if (preferences.getString("github_base_revision", null) != null) return
-        if (preferences.getBoolean("github_local_recovery_saved", false)) return
-        // Preserve ORIGINAL native keys and the slot->UUID mapping on B. Do
-        // not serialize them through the cloud-UUID projection intended for A.
-        val json = JSONObject().put("format", 2)
-            .put("deviceId", config.deviceId)
-            .put("nativeValues", JSONObject(SyncData.snapshot(context)))
-            .put("nativeProfiles", ProfileSync.snapshot(context))
-            .put("pluginManifest", PluginInventory.snapshot(context))
-            .toString()
-        val protected = LocalVault.encrypt(json.toByteArray(Charsets.UTF_8))
-        val folder = File(context.filesDir, "synccs-recovery")
-        check(folder.exists() || folder.mkdirs())
-        val name = "pre-github-link-" + config.deviceId.take(8) +
-            "-" + System.currentTimeMillis() + ".enc"
-        val destination = File(folder, name)
-        check(!destination.exists()) {
-            "A previous device recovery snapshot already exists; refusing overwrite."
-        }
-        val temporary = File(folder, "$name.tmp")
-        temporary.writeText(protected, Charsets.UTF_8)
-        check(temporary.renameTo(destination)) { "Could not persist local recovery snapshot." }
-        check(preferences.edit().putBoolean("github_local_recovery_saved", true).commit())
+        LocalOriginalBackup.capture(context, config)
     }
 
     private fun checkGeneration(snapshot: GithubBackupStore.Snapshot) {

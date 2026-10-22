@@ -38,10 +38,6 @@ internal object SyncCoordinator {
 
     suspend fun synchronize(context: Context, activity: Activity? = null): String = lock.withLock {
         val config = SyncConfiguration(context)
-        if (!config.active()) {
-            lastStatus = "Sign in to enable sync"
-            return@withLock lastStatus
-        }
         if (LocalSyncJournal.pending(context)) {
             val activityReady = activity != null && !activity.isFinishing && !activity.isDestroyed
             if (!activityReady) {
@@ -50,7 +46,7 @@ internal object SyncCoordinator {
             }
             applying = true
             try {
-                LocalSyncJournal.recover(context, activity, GithubSyncAdapter(context))
+                LocalSyncJournal.recover(context, activity, LocalOriginalBackup.offlineRecoverySource())
             } catch (recovery: Exception) {
                 lastStatus = "Sync blocked: local rollback incomplete: " +
                     (recovery.message ?: recovery.javaClass.simpleName).take(170)
@@ -58,6 +54,14 @@ internal object SyncCoordinator {
             } finally {
                 applying = false
             }
+        }
+        if (config.preferences.getBoolean("github_local_restore_pause", false)) {
+            lastStatus = "Sync paused after local original restore. Disconnect or relink explicitly."
+            return@withLock lastStatus
+        }
+        if (!config.active()) {
+            lastStatus = "Sign in to enable sync"
+            return@withLock lastStatus
         }
         if (config.preferences.getBoolean("github_recovery_in_progress", false)) {
             lastStatus = "Sync paused: a GitHub backup revision is being restored."
@@ -76,6 +80,86 @@ internal object SyncCoordinator {
         }
         lastStatus = "Sync failed: repeated concurrent edits; changes retained for retry"
         lastStatus
+    }
+
+    suspend fun restoreOriginal(context: Context, activity: Activity,
+                                entry: LocalOriginalBackup.Entry): String = lock.withLock {
+        check(!activity.isFinishing && !activity.isDestroyed) {
+            "Original backup restore requires a foreground CloudStream activity."
+        }
+        check(!LocalSyncJournal.pending(context)) {
+            "Finish the previous local rollback before restoring an original backup."
+        }
+        check(SyncRuntime.pluginsLoaded) {
+            "Wait until CloudStream has loaded installed plugins before restoring."
+        }
+        val saved = LocalOriginalBackup.read(context, entry)
+        LocalOriginalBackup.preflight(context, saved)
+        val roster = ProfileSync.decode(saved.profiles)
+        val source = LocalOriginalBackup.storage(saved)
+        val rollbackSource = LocalOriginalBackup.offlineRecoverySource()
+        // A crash or failed installation must not erase the previous local state.
+        LocalSyncJournal.capture(context)
+        applying = true
+        try {
+            ProfileSync.apply(context, roster)
+            fun restoreSettings() {
+                val existing = SyncData.snapshot(context)
+                val changes = linkedMapOf<String, String?>()
+                for ((key, value) in saved.values) {
+                    if (existing[key] != value) changes[key] = value
+                }
+                for (key in existing.keys - saved.values.keys) changes[key] = null
+                SyncData.apply(context, changes, refreshNativeSnapshots = false)
+            }
+            restoreSettings()
+            val installErrors = PluginInventory.restore(context, activity, source, saved.plugins)
+            check(installErrors.isEmpty()) {
+                "Original plugin restore failed: " + installErrors.joinToString("; ").take(220)
+            }
+            // Plugin activation may replay its own settings; restore their exact
+            // pre-link values a second time and verify the final state.
+            restoreSettings()
+            LocalOriginalBackup.restoreNativeAddons(context, saved.nativeAddons)
+            val observed = SyncData.snapshot(context)
+            check(observed.keys == saved.values.keys &&
+                saved.values.all { (key, value) -> observed[key] == value }) {
+                "Original preferences were not fully restored; local rollback required."
+            }
+            check(ProfileSync.encode(ProfileSync.decode(ProfileSync.snapshot(context))) ==
+                ProfileSync.encode(roster)) {
+                "Restored profile identities do not match the original backup."
+            }
+            check(PluginSync.matches(PluginSync.decode(PluginInventory.snapshot(context)),
+                PluginSync.decode(saved.plugins))) {
+                "Restored plugin binaries do not match the original backup."
+            }
+            val config = SyncConfiguration(context)
+            // Even if the app dies after the journal is retired but before
+            // disconnect, this durable flag blocks every automatic upload.
+            check(config.preferences.edit()
+                .putBoolean("github_local_restore_pause", true).commit())
+            LocalSyncJournal.finish(context)
+            config.clearAccount()
+            lastStatus = "Original device backup restored locally. GitHub backup unchanged; sync disconnected."
+            lastStatus
+        } catch (error: Throwable) {
+            val recoveryError = try {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    LocalSyncJournal.recover(context, activity, rollbackSource)
+                }
+                null
+            } catch (rollback: Exception) {
+                rollback.message ?: rollback.javaClass.simpleName
+            }
+            if (recoveryError != null) {
+                throw IOException("Local original restore failed; rollback incomplete: " +
+                    recoveryError, error)
+            }
+            throw error
+        } finally {
+            applying = false
+        }
     }
 
     private suspend fun synchronizePass(context: Context, activity: Activity?): String {

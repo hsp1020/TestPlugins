@@ -26,6 +26,7 @@ internal object LocalSyncJournal {
         "plugin_baseline", "plugin_remote_snapshot", "pending_plugins",
         "remote_cursor", "remote_versions", "list_baselines",
         "github_base_revision", "github_generation", "pending_conflicts",
+        "github_local_restore_pause",
         "profile_slot_identities_v2", "profile_last_seen_slots_v2",
         "profile_retired_slots_v2"
     )

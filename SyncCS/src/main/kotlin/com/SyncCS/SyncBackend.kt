@@ -52,7 +52,7 @@ internal class SyncConfiguration(context: Context) {
             "list_baselines", "github_token", "github_login",
             "github_account_id", "github_base_revision", "github_generation",
             "sync_transport", "account_switch_blocked",
-            "github_local_recovery_saved", "github_client_id",
+            "github_local_recovery_saved", "github_local_restore_pause", "github_client_id",
             "github_initial_backup_confirmed", "github_recovery_in_progress",
             "session", "oauth_pending", "configured", "email"
         )) editor.remove(key)
