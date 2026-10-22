@@ -274,18 +274,11 @@ internal class GithubBackupStore(
             "Sync conflict: remote revision changed."
         }
         val deleted = previous.values.keys - target.keys
-        check(deleted.all { it in explicitDeletes }) {
-            "Incomplete local snapshot: implicit deletion blocked."
-        }
-        check(deleted.size <= 25 && deleted.size <= maxOf(2, previous.values.size / 100)) {
-            "Mass deletion blocked: " + deleted.size
-        }
+        SyncSafety.validateDeletes(deleted, explicitDeletes, previous.values.size)
         val changed = (previous.values.keys + target.keys)
             .filter { previous.values[it] != target[it] }
         if (changed.isEmpty() && archives.isEmpty()) return previous.revision
-        check(changed.size <= 1000) {
-            "Mass update blocked: " + changed.size
-        }
+        SyncSafety.validateChanges(changed.size)
         val changes = linkedMapOf<String, ByteArray>()
         for (i in changed.map(::bucket).distinct()) {
             val part = JSONObject()

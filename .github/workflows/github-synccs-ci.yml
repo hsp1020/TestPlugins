@@ -20,7 +20,7 @@ jobs:
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
       - uses: android-actions/setup-android@v4
-      - name: Compile SyncCS without publishing artifacts
+      - name: Run SyncCS sync-safety regression tests and compile without publishing
         run: |
           chmod +x gradlew
-          ./gradlew :SyncCS:make --no-daemon --stacktrace
+          ./gradlew :SyncCS:testDebugUnitTest :SyncCS:make --no-daemon --stacktrace

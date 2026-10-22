@@ -86,12 +86,15 @@ internal object SyncCoordinator {
             }
             // On first link, an existing cloud account takes precedence over
             // unrelated settings and watch history already stored on this device.
-            val firstRemoteRestore = !config.preferences.contains("base") &&
-                !(backend as GithubSyncAdapter).createdFreshBackup &&
+            val firstRemoteRestore = SyncSafety.firstRemoteRestore(
+                config.preferences.contains("base"),
+                (backend as GithubSyncAdapter).createdFreshBackup,
+                config.preferences.getBoolean("github_initial_backup_confirmed", false),
                 remoteValues.keys.any {
                     it == "x/profiles" || it == "x/plugins" ||
                         it.startsWith("d/") || it.startsWith("s/") || it.startsWith("p/")
                 }
+            )
             val remoteByKey = pull.entries.associateBy { it.key }
             val versions = mutableMapOf<String, Long>()
             if (!pull.full) {
@@ -196,8 +199,9 @@ internal object SyncCoordinator {
                     next[key] = remoteHash
                     continue
                 }
-                val changedLocal = currentHash != old &&
-                    (current != null || explicitlyChanged)
+                val changedLocal = SyncSafety.localHasRealChange(
+                    old, currentHash, current != null, explicitlyChanged
+                )
                 val changedRemote = if (pull.full) remoteHash != old
                     else remotePresent && remoteHash != old
                 when {
