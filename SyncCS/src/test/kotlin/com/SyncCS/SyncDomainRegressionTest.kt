@@ -75,18 +75,18 @@ class SyncDomainRegressionTest {
         config.preferences.edit().clear().commit()
         val requested = setOf("p/StremioC/stremio_saved_links")
         assertThrows(IllegalStateException::class.java) {
-            SyncDeletionGate.requireApproval(config, requested, $revision)
+            SyncDeletionGate.requireApproval(config, requested, "a".repeat(40))
         }
         assertEquals(requested, SyncDeletionGate.pending(config).toSet())
         SyncDeletionGate.authorizePending(config)
-        SyncDeletionGate.requireApproval(config, requested, $revision)
-        assertTrue(SyncDeletionGate.approved(config, requested, $revision).containsAll(requested))
-        assertTrue(SyncDeletionGate.approved(config, setOf("p/Other/unknown"), $revision).isEmpty())
-        assertTrue(SyncDeletionGate.approved(config, requested, $other).isEmpty())
+        SyncDeletionGate.requireApproval(config, requested, "a".repeat(40))
+        assertTrue(SyncDeletionGate.approved(config, requested, "a".repeat(40)).containsAll(requested))
+        assertTrue(SyncDeletionGate.approved(config, setOf("p/Other/unknown"), "a".repeat(40)).isEmpty())
+        assertTrue(SyncDeletionGate.approved(config, requested, "b".repeat(40)).isEmpty())
         assertTrue(SyncDeletionGate.approved(config,
-            requested + "p/StremioC/other", $revision).isEmpty())
+            requested + "p/StremioC/other", "a".repeat(40)).isEmpty())
         SyncDeletionGate.consumed(config)
-        assertTrue(SyncDeletionGate.approved(config, requested, $revision).isEmpty())
+        assertTrue(SyncDeletionGate.approved(config, requested, "a".repeat(40)).isEmpty())
     }
     @Test fun authenticatedManifestRootRejectsUntrustedShardList() {
         val cipher = SyncCipher.derive("an-example-passphrase-123",
