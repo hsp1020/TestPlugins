@@ -19,8 +19,10 @@ internal object ProfileSync {
 
     fun snapshot(context: Context): String {
         val state = State()
+        val identities = ProfileIdentity.observe(context)
         DataStoreHelper.getAccounts(context).forEach { account ->
             state.items[account.keyIndex] = JSONObject()
+                .put("uuid", identities.getValue(account.keyIndex))
                 .put("keyIndex", account.keyIndex)
                 .put("name", account.name)
                 .put("customImage", account.customImage ?: JSONObject.NULL)
@@ -38,7 +40,10 @@ internal object ProfileSync {
         for (index in 0 until items.length()) {
             val item = items.getJSONObject(index)
             val id = item.getInt("keyIndex")
-            if (id >= 0) state.items[id] = item
+            if (id >= 0) {
+                ProfileIdentity.uuid(item)
+                state.items[id] = item
+            }
         }
         val removed = root.optJSONArray("deleted") ?: JSONArray()
         for (index in 0 until removed.length()) {
@@ -54,7 +59,7 @@ internal object ProfileSync {
         state.items.toSortedMap().values.forEach { items.put(it) }
         val deleted = JSONArray()
         state.deleted.sorted().forEach { deleted.put(it) }
-        return JSONObject().put("format", 1).put("items", items)
+        return JSONObject().put("format", 2).put("items", items)
             .put("deleted", deleted).toString()
     }
 
@@ -84,12 +89,26 @@ internal object ProfileSync {
                 val previous = base.items[id]
                 val remoteItem = remote.items[id]
                 when {
-                    previous == null && id !in remote.items -> {
-                        SyncSafety.requireProfileNotReused(id, remote.deleted, base.deleted)
+                    previous == null && remoteItem == null -> {
+                        // Fresh UUID is allowed to occupy a retired numeric slot.
+                        // The prior UUID's watch data stays archived separately.
+                        target.deleted.remove(id)
                         target.items[id] = item
                     }
-                    previous != null && previous.toString() != item.toString() &&
-                        remoteItem?.toString() == previous.toString() -> {
+                    previous != null &&
+                        ProfileIdentity.uuid(previous) != ProfileIdentity.uuid(item) &&
+                        (remoteItem == null ||
+                            ProfileIdentity.uuid(remoteItem) == ProfileIdentity.uuid(previous)) -> {
+                        // Deleted and recreated between sync passes, possibly
+                        // with the SAME numeric slot and the SAME display name.
+                        target.deleted.remove(id)
+                        target.items[id] = item
+                    }
+                    previous != null &&
+                        ProfileIdentity.uuid(previous) == ProfileIdentity.uuid(item) &&
+                        id !in remote.deleted &&
+                        remoteItem?.toString() == previous.toString() &&
+                        previous.toString() != item.toString() -> {
                         target.items[id] = item
                     }
                 }
@@ -107,6 +126,7 @@ internal object ProfileSync {
     fun apply(context: Context, state: State) {
         val current = decode(snapshot(context))
         if (encode(current) == encode(state)) return
+        val remoteIdentities = state.items.mapValues { (_, row) -> ProfileIdentity.uuid(row) }
         val accounts = state.items.toSortedMap().values.map { item ->
             DataStoreHelper.Account(
                 keyIndex = item.getInt("keyIndex"),
@@ -122,6 +142,9 @@ internal object ProfileSync {
         }
         require(accounts.any { it.keyIndex == 0 }) { "Missing default CloudStream profile" }
         DataStoreHelper.accounts = accounts.toTypedArray()
+        // CloudStream only knows numeric slots. Adopt the server UUID sidecar
+        // before subsequent watch-state reconciliation.
+        ProfileIdentity.adopt(context, remoteIdentities)
         val valid = accounts.mapTo(mutableSetOf()) { it.keyIndex }
         if (DataStoreHelper.selectedKeyIndex !in valid) {
             DataStoreHelper.setAccount(accounts.first { it.keyIndex == 0 }, showToast = false)

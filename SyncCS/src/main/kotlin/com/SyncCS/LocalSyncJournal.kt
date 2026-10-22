@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import com.lagradost.cloudstream3.plugins.PluginManager
 import com.lagradost.cloudstream3.utils.DataStore
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -24,7 +25,9 @@ internal object LocalSyncJournal {
         "base", "profile_baseline", "profile_remote_snapshot",
         "plugin_baseline", "plugin_remote_snapshot", "pending_plugins",
         "remote_cursor", "remote_versions", "list_baselines",
-        "github_base_revision", "github_generation", "pending_conflicts"
+        "github_base_revision", "github_generation", "pending_conflicts",
+        "profile_slot_identities_v2", "profile_last_seen_slots_v2",
+        "profile_retired_slots_v2"
     )
 
     private fun privateMetadata(context: Context): JSONObject {
@@ -38,6 +41,11 @@ internal object LocalSyncJournal {
                 is Int -> output.put(key, JSONObject().put("type", "int").put("value", value))
                 is Long -> output.put(key, JSONObject().put("type", "long").put("value", value))
                 is Boolean -> output.put(key, JSONObject().put("type", "bool").put("value", value))
+                is Set<*> -> {
+                    check(value.all { it is String }) { "Invalid saved profile UUID set" }
+                    output.put(key, JSONObject().put("type", "set")
+                        .put("value", JSONArray(value.sortedBy { it.toString() })))
+                }
                 else -> error("Unsupported SyncCS transaction setting: $key")
             }
         }
@@ -55,6 +63,12 @@ internal object LocalSyncJournal {
                 "int" -> editor.putInt(key, item.getInt("value"))
                 "long" -> editor.putLong(key, item.getLong("value"))
                 "bool" -> editor.putBoolean(key, item.getBoolean("value"))
+                "set" -> {
+                    val saved = item.getJSONArray("value")
+                    editor.putStringSet(key, (0 until saved.length()).map {
+                        saved.getString(it)
+                    }.toSet())
+                }
                 else -> error("Invalid saved SyncCS metadata.")
             }
         }

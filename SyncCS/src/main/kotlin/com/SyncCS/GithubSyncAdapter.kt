@@ -55,9 +55,14 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         cachedCipher = it
     }
 
-    private fun localState(): MutableMap<String, String> = SyncData.snapshot(context).apply {
-        this["x/profiles"] = ProfileSync.snapshot(context)
-        this["x/plugins"] = PluginSync.encode(PluginSync.decode(PluginInventory.snapshot(context)))
+    private fun localState(): MutableMap<String, String> {
+        val profiles = ProfileSync.snapshot(context)
+        val keyed = ProfileIdentity.toRemote(SyncData.snapshot(context),
+            ProfileSync.decode(profiles))
+        keyed["x/profiles"] = profiles
+        keyed["x/plugins"] = PluginSync.encode(
+            PluginSync.decode(PluginInventory.snapshot(context)))
+        return keyed
     }
 
     private fun uploadAvailableArchives(manifest: String) {
@@ -95,8 +100,14 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
     private fun preserveUnlinkedDeviceState() {
         if (preferences.getString("github_base_revision", null) != null) return
         if (preferences.getBoolean("github_local_recovery_saved", false)) return
-        val snapshot = localState()
-        val json = JSONObject(snapshot).toString()
+        // Preserve ORIGINAL native keys and the slot->UUID mapping on B. Do
+        // not serialize them through the cloud-UUID projection intended for A.
+        val json = JSONObject().put("format", 2)
+            .put("deviceId", config.deviceId)
+            .put("nativeValues", JSONObject(SyncData.snapshot(context)))
+            .put("nativeProfiles", ProfileSync.snapshot(context))
+            .put("pluginManifest", PluginInventory.snapshot(context))
+            .toString()
         val protected = LocalVault.encrypt(json.toByteArray(Charsets.UTF_8))
         val folder = File(context.filesDir, "synccs-recovery")
         check(folder.exists() || folder.mkdirs())

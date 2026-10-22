@@ -149,6 +149,10 @@ internal object SyncData {
         "crashlytics", "androidx", "gms", "advertis", "encrypted"
     )
     private fun dataAllowed(key: String): Boolean {
+        // UUID marker belongs to SyncCS local identity state. It must be
+        // deleted with CloudStream's profile slot but never uploaded as a
+        // normal setting or replayed into another profile.
+        if (key.endsWith("/synccs_profile_uuid")) return false
         if (key in globallyShared || key in cineStreamDiscoveredKeys ||
             (cineStreamDomainKey(key) && cineStreamKeyAllowed(key))) return true
         val slash = key.indexOf('/')

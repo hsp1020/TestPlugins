@@ -23,8 +23,10 @@ class SyncDomainRegressionTest {
         JSONObject().put("format", 2).put("items", JSONArray(items.toList()))
             .put("deleted", JSONArray()).toString()
 
-    private fun profile(id: Int, name: String): JSONObject =
+    private fun profile(id: Int, name: String, uuid: String = java.util.UUID.nameUUIDFromBytes(
+        "$id/$name".toByteArray()).toString()): JSONObject =
         JSONObject().put("keyIndex", id).put("name", name)
+            .put("uuid", uuid)
             .put("customImage", JSONObject.NULL).put("defaultImageIndex", 0)
             .put("lockPin", JSONObject.NULL)
 
@@ -61,11 +63,94 @@ class SyncDomainRegressionTest {
         assertEquals(setOf(1), allowed.target.deleted)
     }
 
-    @Test fun reusingTombstonedProfileNumberIsBlocked() {
+    @Test fun deletedProfileNumberCanBeReusedWithNewUuid() {
         val original = roster(profile(0, "Main"), deleted = listOf(1))
         val newProfile = roster(profile(0, "Main"), profile(1, "Unrelated"))
-        assertThrows(IllegalStateException::class.java) {
-            ProfileSync.merge(newProfile, original, original)
+        val merged = ProfileSync.merge(newProfile, original, original)
+        assertTrue(merged.target.items.containsKey(1))
+        assertTrue(1 !in merged.target.deleted)
+        assertEquals(profile(1, "Unrelated").getString("uuid"),
+            merged.target.items.getValue(1).getString("uuid"))
+    }
+
+    @Test fun deleteAndRecreateBetweenSyncsRotatesIdentity() {
+        val before = roster(profile(0, "Main"), profile(1, "Same name", "11111111-1111-4111-8111-111111111111"))
+        val after = roster(profile(0, "Main"), profile(1, "Same name", "22222222-2222-4222-8222-222222222222"))
+        val merged = ProfileSync.merge(after, before, before)
+        assertEquals("22222222-2222-4222-8222-222222222222",
+            merged.target.items.getValue(1).getString("uuid"))
+        val staleB = ProfileSync.merge(before, after, before)
+        assertEquals("22222222-2222-4222-8222-222222222222",
+            staleB.target.items.getValue(1).getString("uuid"))
+    }
+
+    @Test fun separateUuidNamespacesPreventOldWatchHistoryAttachingToNewProfile() {
+        val old = ProfileSync.decode(roster(profile(0, "Main"),
+            profile(1, "Same", "11111111-1111-4111-8111-111111111111")))
+        val next = ProfileSync.decode(roster(profile(0, "Main"),
+            profile(1, "Same", "22222222-2222-4222-8222-222222222222")))
+        val oldPath = ProfileIdentity.remotePath("d/1/video_pos_dur/123", old)
+        val newPath = ProfileIdentity.remotePath("d/1/video_pos_dur/123", next)
+        assertNotEquals(oldPath, newPath)
+        assertNull(ProfileIdentity.nativePath(oldPath, next))
+        assertEquals("d/1/video_pos_dur/123", ProfileIdentity.nativePath(newPath, next))
+    }
+
+    @Test fun oldBProfileUuidIsNeverConsideredTheNewAProfile() {
+        val before = ProfileSync.decode(roster(profile(0, "Main"),
+            profile(1, "Same", "11111111-1111-4111-8111-111111111111")))
+        val after = ProfileSync.decode(roster(profile(0, "Main"),
+            profile(1, "Same", "22222222-2222-4222-8222-222222222222")))
+        val merged = ProfileSync.merge(ProfileSync.encode(before),
+            ProfileSync.encode(after), ProfileSync.encode(before))
+        val replaced = ProfileIdentity.replacedByServer(before, merged.target)
+        assertEquals(setOf("22222222-2222-4222-8222-222222222222"), replaced)
+        val localB = ProfileIdentity.toRemote(mapOf(
+            "d/1/video_pos_dur/episode" to "old B playback"), merged.target)
+        val serverA = mapOf(
+            "u/22222222-2222-4222-8222-222222222222/video_pos_dur/episode" to "new A playback")
+        assertEquals(serverA.keys, localB.keys)
+        // The coordinator overwrites B in every replaced namespace even if the
+        // local entry was edited more recently.
+        assertTrue(localB.keys.all { it.substringAfter("u/").substringBefore('/') in replaced })
+        assertEquals("new A playback", serverA[localB.keys.single()])
+    }
+
+    @Test fun profileIdentityPersistsAcrossNativeRosterDeletionAndRecreation() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val prefs = SyncConfiguration(context).preferences
+        prefs.edit().remove("profile_slot_identities_v2")
+            .remove("profile_last_seen_slots_v2")
+            .remove("profile_retired_slots_v2").commit()
+        val account = com.lagradost.cloudstream3.utils.DataStoreHelper.Account(
+            keyIndex = 1, name = "Same", defaultImageIndex = 0)
+        try {
+            com.lagradost.cloudstream3.utils.DataStoreHelper.accounts = arrayOf(account)
+            val first = ProfileIdentity.observe(context).getValue(1)
+            ProfileIdentity.observe(context)
+            assertEquals(first, ProfileIdentity.observe(context).getValue(1))
+            com.lagradost.cloudstream3.utils.DataStoreHelper.accounts = emptyArray()
+            ProfileIdentity.observe(context)
+            com.lagradost.cloudstream3.utils.DataStoreHelper.accounts = arrayOf(account)
+            val second = ProfileIdentity.observe(context).getValue(1)
+            assertNotEquals(first, second)
+            // Even if a profile is renamed, the core sidecar marker survives.
+            com.lagradost.cloudstream3.utils.DataStoreHelper.accounts =
+                arrayOf(account.copy(name = "Renamed"))
+            assertEquals(second, ProfileIdentity.observe(context).getValue(1))
+            // Simulate deletion/recreation while SyncCS plugin was disabled:
+            // CloudStream removesKeys("1"), including the UUID marker.
+            with(com.lagradost.cloudstream3.utils.DataStore) {
+                context.getSharedPrefs().edit().remove("1/synccs_profile_uuid").commit()
+            }
+            com.lagradost.cloudstream3.utils.DataStoreHelper.accounts = arrayOf(account)
+            val third = ProfileIdentity.observe(context).getValue(1)
+            assertNotEquals(second, third)
+        } finally {
+            com.lagradost.cloudstream3.utils.DataStoreHelper.accounts = emptyArray()
+            prefs.edit().remove("profile_slot_identities_v2")
+                .remove("profile_last_seen_slots_v2")
+                .remove("profile_retired_slots_v2").commit()
         }
     }
 

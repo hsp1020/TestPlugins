@@ -29,7 +29,10 @@ internal object SyncCoordinator {
     fun markChanged(context: Context, path: String) {
         if (applying) return
         val config = SyncConfiguration(context)
-        val key = "modified/" + path
+        val remotePath = if (path.startsWith("d/")) {
+            ProfileIdentity.remotePath(path, ProfileSync.decode(ProfileSync.snapshot(context)))
+        } else path
+        val key = "modified/" + remotePath
         config.preferences.edit().putLong(key, System.currentTimeMillis()).apply()
     }
 
@@ -129,7 +132,8 @@ internal object SyncCoordinator {
                 config.preferences.getBoolean("github_initial_backup_confirmed", false),
                 remoteValues.keys.any {
                     it == "x/profiles" || it == "x/plugins" ||
-                        it.startsWith("d/") || it.startsWith("s/") || it.startsWith("p/")
+                        it.startsWith("d/") || it.startsWith("u/") ||
+                        it.startsWith("s/") || it.startsWith("p/")
                 }
             )
             val remoteByKey = pull.entries.associateBy { it.key }
@@ -144,7 +148,8 @@ internal object SyncCoordinator {
             // publishing a Git commit. A preference listener only suggests a
             // candidate; the human must approve the exact removal set.
             val preflightBase = baseline(context)
-            val preflightLocal = SyncData.snapshot(context)
+            val preflightLocal = ProfileIdentity.toRemote(SyncData.snapshot(context),
+                ProfileSync.decode(ProfileSync.snapshot(context)))
             val preferenceRemovals = preflightBase.keys.filter { key ->
                 key !in preflightLocal &&
                     config.preferences.contains("modified/" + key)
@@ -189,6 +194,38 @@ internal object SyncCoordinator {
             val profileMerge = ProfileSync.merge(
                 profileLocal, profileServer, previousProfiles, approvedProfiles)
             val targetProfiles = ProfileSync.encode(profileMerge.target)
+            val nativeBefore = ProfileSync.decode(profileLocal)
+            val obsoleteSlots = nativeBefore.items.keys.filter { slot ->
+                val old = nativeBefore.items.getValue(slot)
+                val adopted = profileMerge.target.items[slot]
+                adopted == null || ProfileIdentity.uuid(old) != ProfileIdentity.uuid(adopted)
+            }.toSet()
+            if (obsoleteSlots.isNotEmpty()) {
+                // An old B profile can leave numeric-slot watch keys behind even
+                // after the roster is replaced. Remove tracked native data
+                // BEFORE adopting the server's UUID, under the undo journal.
+                val obsolete = SyncData.snapshot(context).keys.filter { path ->
+                    val slot = if (path.startsWith("d/")) {
+                        path.removePrefix("d/").substringBefore('/').toIntOrNull()
+                    } else null
+                    slot in obsoleteSlots
+                }
+                if (obsolete.isNotEmpty()) {
+                    ensureUndo()
+                    applying = true
+                    try {
+                        SyncData.apply(context, obsolete.associateWith { null },
+                            refreshNativeSnapshots = false)
+                    } finally {
+                        applying = false
+                    }
+                }
+            }
+            // If another device replaced profile #1 (same number, new UUID),
+            // all records on this stale device's old #1 are untrusted.
+            // They must be restored from the new server UUID, never uploaded.
+            val replacedProfileUuids = ProfileIdentity.replacedByServer(
+                ProfileSync.decode(profileLocal), profileMerge.target)
             if (profileMerge.changedRemote) {
                 verifyAccount()
                 backend.upload(mapOf("x/profiles" to targetProfiles), cipher, versions)
@@ -214,7 +251,8 @@ internal object SyncCoordinator {
             val activeProfiles = profileMerge.target.items.keys
 
             stage = "reading local preferences"
-            val local = SyncData.snapshot(context)
+            val local = ProfileIdentity.toRemote(SyncData.snapshot(context),
+                profileMerge.target)
             val currentPlugins = PluginInventory.snapshot(context)
             val base = baseline(context)
             stage = "comparing changed settings"
@@ -245,7 +283,18 @@ internal object SyncCoordinator {
                 val profileId = if (key.startsWith("d/")) {
                     key.removePrefix("d/").substringBefore('/').toIntOrNull()
                 } else null
-                if (profileId != null && profileId !in activeProfiles) {
+                if (profileId != null && profileId !in activeProfiles) continue
+                // Never attach archived UUID watch state to a new profile that
+                // happens to reuse the same CloudStream numeric keyIndex.
+                if (key.startsWith("u/") &&
+                    ProfileIdentity.nativePath(key, profileMerge.target) == null) {
+                    continue
+                }
+                val namespace = key.removePrefix("u/").substringBefore('/')
+                if (key.startsWith("u/") && namespace in replacedProfileUuids) {
+                    if (remote != current) apply[key] = remote
+                    if (remotePresent) next[key] = remoteHash
+                    else next.remove(key)
                     continue
                 }
 
@@ -438,7 +487,8 @@ internal object SyncCoordinator {
             if (apply.isNotEmpty()) ensureUndo()
             applying = true
             try {
-                SyncData.apply(context, apply)
+                SyncData.apply(context,
+                    ProfileIdentity.toNative(apply, profileMerge.target))
             } finally {
                 applying = false
             }
