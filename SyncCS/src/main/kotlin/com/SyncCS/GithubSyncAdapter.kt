@@ -189,7 +189,7 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         }
         val deletions = stagedChanges.filterValues { it == null }.keys
         // No deletion may pass solely because a SharedPreferences listener fired.
-        val allowed = SyncDeletionGate.approved(config, deletions)
+        val allowed = SyncDeletionGate.approved(config, deletions, current.revision)
         check(deletions.all { it in allowed }) {
             "Deletion approval missing; GitHub snapshot remains unchanged."
         }

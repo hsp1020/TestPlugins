@@ -23,7 +23,8 @@ internal class GithubBackupStore(
 ) {
     data class Snapshot(
         val revision: String, val tree: String, val branch: String,
-        val generation: Int, val values: Map<String, String>, val encrypted: Map<String, String>
+        val generation: Int, val values: Map<String, String>, val encrypted: Map<String, String>,
+        val shardHashes: List<String>
     )
     private val apiRoot = "https://api.github.com/repos/$owner/$repository"
     internal class ApiException(val code: Int, text: String) : IOException(text)
@@ -118,6 +119,20 @@ internal class GithubBackupStore(
             .toInt() and 255) ushr 4
     private fun shard(index: Int): String = "synccs/data/" + index.toString(16) + ".json"
 
+    private fun sealedManifest(cipher: SyncCipher, generation: Int,
+                               shardHashes: List<String>): ByteArray {
+        check(shardHashes.size == 16 && shardHashes.all {
+            it.matches(Regex("[0-9a-f]{64}"))
+        })
+        val canonical = shardHashes.joinToString("|")
+        return JSONObject().put("format", 2).put("complete", true)
+            .put("generation", generation)
+            .put("verification", cipher.encrypt("synccs/check", "synccs-github-v1"))
+            .put("shards", JSONArray(shardHashes))
+            .put("rootSeal", cipher.encrypt("synccs/data-root", canonical))
+            .toString().toByteArray(Charsets.UTF_8)
+    }
+
     private fun readAt(rev: String, branch: String, cipher: SyncCipher): Snapshot? {
         val (tree, entries) = index(rev)
         val manifestSha = entries["synccs/manifest.json"] ?: run {
@@ -127,15 +142,26 @@ internal class GithubBackupStore(
             return null
         }
         val manifest = JSONObject(String(blob(manifestSha), Charsets.UTF_8))
-        check(manifest.getInt("format") == 1 && manifest.getBoolean("complete"))
+        check(manifest.getInt("format") == 2 && manifest.getBoolean("complete")) {
+            "Unsupported or incomplete backup manifest; refusing unsafe sync."
+        }
         check(cipher.decrypt("synccs/check", manifest.getString("verification"))
             == "synccs-github-v1") { "Invalid recovery passphrase." }
+        val expectedHashes = manifest.getJSONArray("shards")
+        check(expectedHashes.length() == 16) { "Incomplete authenticated backup root." }
+        val canonical = (0 until 16).map { expectedHashes.getString(it) }
+        check(cipher.decrypt("synccs/data-root", manifest.getString("rootSeal"))
+            == canonical.joinToString("|")) { "Backup root authentication failed." }
         val encrypted = linkedMapOf<String, String>()
         val values = linkedMapOf<String, String>()
         for (i in 0 until 16) {
             val hash = entries[shard(i)]
                 ?: throw IOException("Corrupted backup: missing shard " + shard(i))
-            val part = JSONObject(String(blob(hash), Charsets.UTF_8))
+            val bytes = blob(hash)
+            check(SyncBackend.digestBytes(bytes) == canonical[i]) {
+                "Backup shard $i does not match its authenticated manifest."
+            }
+            val part = JSONObject(String(bytes, Charsets.UTF_8))
             for (key in part.keys()) {
                 check(bucket(key) == i && !values.containsKey(key)) { "Invalid backup shard." }
                 val ciphertext = part.getString(key)
@@ -143,7 +169,8 @@ internal class GithubBackupStore(
                 values[key] = cipher.decrypt(key, ciphertext)
             }
         }
-        return Snapshot(rev, tree, branch, manifest.getInt("generation"), values, encrypted)
+        return Snapshot(rev, tree, branch, manifest.getInt("generation"), values,
+            encrypted, canonical)
     }
 
     fun current(cipher: SyncCipher): Snapshot? {
@@ -302,20 +329,20 @@ internal class GithubBackupStore(
             "A GitHub backup already exists; never silently overwrite it."
         }
         val changes = linkedMapOf<String, ByteArray>()
+        val hashes = mutableListOf<String>()
         for (i in 0 until 16) {
             val part = JSONObject()
             for ((key, value) in initial) {
                 if (bucket(key) == i) part.put(key, cipher.encrypt(key, value))
             }
-            changes[shard(i)] = part.toString().toByteArray(Charsets.UTF_8)
+            val bytes = part.toString().toByteArray(Charsets.UTF_8)
+            changes[shard(i)] = bytes
+            hashes.add(SyncBackend.digestBytes(bytes))
         }
         changes.putAll(archiveChanges(entries, archives))
         changes["synccs/audit.enc"] = auditBlob(entries, cipher,
             initial.keys.sorted(), emptySet())
-        changes["synccs/manifest.json"] = JSONObject()
-            .put("format", 1).put("complete", true).put("generation", 1)
-            .put("verification", cipher.encrypt("synccs/check", "synccs-github-v1"))
-            .toString().toByteArray(Charsets.UTF_8)
+        changes["synccs/manifest.json"] = sealedManifest(cipher, 1, hashes)
         return commit(old, tree, branch, changes)
     }
 
@@ -338,6 +365,7 @@ internal class GithubBackupStore(
         if (changed.isEmpty() && archives.isEmpty()) return previous.revision
         SyncSafety.validateChanges(changed.size)
         val changes = linkedMapOf<String, ByteArray>()
+        val hashes = previous.shardHashes.toMutableList()
         for (i in changed.map(::bucket).distinct()) {
             val part = JSONObject()
             for ((key, value) in target) {
@@ -346,8 +374,12 @@ internal class GithubBackupStore(
                 part.put(key, if (existing != null && previous.values[key] == value)
                     existing else cipher.encrypt(key, value))
             }
-            changes[shard(i)] = part.toString().toByteArray(Charsets.UTF_8)
+            val bytes = part.toString().toByteArray(Charsets.UTF_8)
+            changes[shard(i)] = bytes
+            hashes[i] = SyncBackend.digestBytes(bytes)
         }
+        changes["synccs/manifest.json"] =
+            sealedManifest(cipher, previous.generation, hashes)
         val (_, existing) = index(previous.revision)
         changes.putAll(archiveChanges(existing, archives))
         changes["synccs/audit.enc"] = auditBlob(existing, cipher, changed, logicalDeletions)
@@ -369,13 +401,10 @@ internal class GithubBackupStore(
                     .put("type", "blob").put("sha", hash))
             }
         }
-        val manifest = JSONObject().put("format", 1).put("complete", true)
-            .put("generation", current.generation + 1)
-            .put("verification", cipher.encrypt("synccs/check", "synccs-github-v1"))
-            .put("recovered_from", old.revision)
+        val manifest = sealedManifest(cipher, current.generation + 1, old.shardHashes)
         paths.put(JSONObject().put("path", "synccs/manifest.json")
             .put("mode", "100644").put("type", "blob")
-            .put("sha", createBlob(manifest.toString().toByteArray(Charsets.UTF_8))))
+            .put("sha", createBlob(manifest)))
         val newTree = write("/git/trees", "POST", JSONObject()
             .put("base_tree", current.tree).put("tree", paths)).getString("sha")
         val next = write("/git/commits", "POST", JSONObject()

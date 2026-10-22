@@ -165,7 +165,8 @@ internal object SyncCoordinator {
             val destructiveProposals = preferenceRemovals +
                 profileRemovals.map { "x/profiles/$it" } +
                 pluginRemovals.map { "x/plugins/$it" }
-            SyncDeletionGate.requireApproval(config, destructiveProposals)
+            SyncDeletionGate.requireApproval(config, destructiveProposals,
+                (backend as GithubSyncAdapter).verifiedRevision().first)
             val approvedProfiles = profileRemovals.filter {
                 "x/profiles/$it" in destructiveProposals
             }.toSet()

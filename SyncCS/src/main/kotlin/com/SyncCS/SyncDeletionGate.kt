@@ -25,32 +25,44 @@ internal object SyncDeletionGate {
         return (0 until items.length()).map { items.getString(it) }.toSet()
     }
 
-    private fun parse(raw: String?): Pair<Set<String>, Long> {
-        if (raw.isNullOrBlank()) return emptySet<String>() to 0L
+    private data class Review(val keys: Set<String>, val expires: Long, val revision: String)
+
+    private fun parse(raw: String?): Review {
+        if (raw.isNullOrBlank()) return Review(emptySet(), 0L, "")
         val data = JSONObject(raw)
-        return keys(data.optString("keys")) to data.optLong("expires", 0L)
+        return Review(keys(data.optString("keys")), data.optLong("expires", 0L),
+            data.optString("revision"))
     }
 
-    private fun record(paths: Set<String>, now: Long): String = JSONObject()
+    private fun record(paths: Set<String>, now: Long, revision: String): String = JSONObject()
         .put("keys", encode(paths))
-        .put("expires", now + LIFETIME_MS).toString()
+        .put("expires", now + LIFETIME_MS)
+        .put("revision", revision).toString()
 
-    fun approved(config: SyncConfiguration, candidates: Set<String>): Set<String> {
-        if (candidates.isEmpty()) return emptySet()
-        val (saved, expires) = parse(config.preferences.getString(APPROVAL, null))
-        return if (System.currentTimeMillis() <= expires && candidates.all { it in saved }) {
-            saved
+    fun approved(config: SyncConfiguration, candidates: Set<String>,
+                 remoteRevision: String): Set<String> {
+        if (candidates.isEmpty() || remoteRevision.isBlank()) return emptySet()
+        val saved = parse(config.preferences.getString(APPROVAL, null))
+        // Approvals are bound to the exact reviewed keys AND the exact Git HEAD.
+        // A different proposal or concurrent edit can never reuse a prior approval.
+        return if (System.currentTimeMillis() <= saved.expires &&
+            candidates == saved.keys && remoteRevision == saved.revision) {
+            saved.keys
         } else emptySet()
     }
 
-    fun requireApproval(config: SyncConfiguration, candidates: Set<String>) {
+    fun requireApproval(config: SyncConfiguration, candidates: Set<String>,
+                        remoteRevision: String) {
         if (candidates.isEmpty()) return
+        check(remoteRevision.matches(Regex("[0-9a-f]{40}"))) {
+            "Cannot review a deletion without a verified GitHub revision."
+        }
         check(candidates.size <= 25) {
             "Unsafe deletion request blocked: " + candidates.size + " changes."
         }
-        if (approved(config, candidates).containsAll(candidates)) return
+        if (approved(config, candidates, remoteRevision) == candidates) return
         check(config.preferences.edit().putString(PROPOSAL,
-            record(candidates, System.currentTimeMillis())).commit()) {
+            record(candidates, System.currentTimeMillis(), remoteRevision)).commit()) {
             "Could not store deletion review request."
         }
         error("Deletion confirmation required for " + candidates.size +
@@ -58,15 +70,20 @@ internal object SyncDeletionGate {
     }
 
     fun pending(config: SyncConfiguration): List<String> {
-        val (paths, expires) = parse(config.preferences.getString(PROPOSAL, null))
-        return if (System.currentTimeMillis() <= expires) paths.sorted() else emptyList()
+        val proposal = parse(config.preferences.getString(PROPOSAL, null))
+        return if (System.currentTimeMillis() <= proposal.expires &&
+            proposal.revision.matches(Regex("[0-9a-f]{40}")))
+            proposal.keys.sorted() else emptyList()
     }
 
     fun authorizePending(config: SyncConfiguration): Int {
+        val request = parse(config.preferences.getString(PROPOSAL, null))
         val paths = pending(config).toSet()
-        require(paths.isNotEmpty() && paths.size <= 25) { "No valid deletion request." }
+        require(paths.isNotEmpty() && paths.size <= 25 && paths == request.keys) {
+            "No valid deletion request."
+        }
         check(config.preferences.edit()
-            .putString(APPROVAL, record(paths, System.currentTimeMillis()))
+            .putString(APPROVAL, record(paths, System.currentTimeMillis(), request.revision))
             .remove(PROPOSAL).commit())
         return paths.size
     }

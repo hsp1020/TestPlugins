@@ -172,8 +172,9 @@ internal object LocalSyncJournal {
         val nativeBackup = nativeKeys.associateWith { backup[it] }
         SyncData.apply(context, nativeBackup)
         val restored = SyncData.snapshot(context)
-        check(backup.all { (key, value) -> restored[key] == value }) {
-            "Local settings verification failed after rollback."
+        check(restored.keys == backup.keys &&
+            backup.all { (key, value) -> restored[key] == value }) {
+            "Local settings verification failed after rollback: missing or extra keys."
         }
         check(PluginSync.matches(PluginSync.decode(PluginInventory.snapshot(context)),
             PluginSync.decode(originalManifest))) { "Installed plugins differ after rollback." }
@@ -182,13 +183,20 @@ internal object LocalSyncJournal {
             "Profile roster verification failed after rollback."
         }
         restorePrivateMetadata(context, metadata.getJSONObject("privateSyncState"))
-        check(dir.deleteRecursively()) { "Recovered, but could not retire local undo journal." }
+        finish(context)
     }
 
     fun finish(context: Context) {
         val dir = live(context)
-        if (dir.exists()) check(dir.deleteRecursively()) {
-            "Sync succeeded but local undo journal could not be retired."
+        if (!dir.exists()) return
+        val complete = File(directory(context), "completed")
+        if (complete.exists()) check(complete.deleteRecursively()) {
+            "Could not remove retired recovery journal."
         }
+        // Rename is atomic within the same directory: a crash while deleting
+        // retired files can never leave a partially deleted ACTIVE journal.
+        check(dir.renameTo(complete)) { "Could not retire active recovery journal." }
+        // Residual completed files are safe to remove on the next transaction.
+        complete.deleteRecursively()
     }
 }

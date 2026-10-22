@@ -75,14 +75,48 @@ class SyncDomainRegressionTest {
         config.preferences.edit().clear().commit()
         val requested = setOf("p/StremioC/stremio_saved_links")
         assertThrows(IllegalStateException::class.java) {
-            SyncDeletionGate.requireApproval(config, requested)
+            SyncDeletionGate.requireApproval(config, requested, $revision)
         }
         assertEquals(requested, SyncDeletionGate.pending(config).toSet())
         SyncDeletionGate.authorizePending(config)
-        SyncDeletionGate.requireApproval(config, requested)
-        assertTrue(SyncDeletionGate.approved(config, requested).containsAll(requested))
-        assertTrue(SyncDeletionGate.approved(config, setOf("p/Other/unknown")).isEmpty())
+        SyncDeletionGate.requireApproval(config, requested, $revision)
+        assertTrue(SyncDeletionGate.approved(config, requested, $revision).containsAll(requested))
+        assertTrue(SyncDeletionGate.approved(config, setOf("p/Other/unknown"), $revision).isEmpty())
+        assertTrue(SyncDeletionGate.approved(config, requested, $other).isEmpty())
+        assertTrue(SyncDeletionGate.approved(config,
+            requested + "p/StremioC/other", $revision).isEmpty())
         SyncDeletionGate.consumed(config)
-        assertTrue(SyncDeletionGate.approved(config, requested).isEmpty())
+        assertTrue(SyncDeletionGate.approved(config, requested, $revision).isEmpty())
     }
+    @Test fun authenticatedManifestRootRejectsUntrustedShardList() {
+        val cipher = SyncCipher.derive("an-example-passphrase-123",
+            "https://api.github.com", "device-1")
+        val original = (0 until 16).map { "a".repeat(64) }.joinToString("|")
+        val seal = cipher.encrypt("synccs/data-root", original)
+        assertEquals(original, cipher.decrypt("synccs/data-root", seal))
+        val tampered = original.replaceFirst("a", "b")
+        assertNotEquals(tampered, cipher.decrypt("synccs/data-root", seal))
+        assertThrows(Exception::class.java) {
+            cipher.decrypt("synccs/another-purpose", seal)
+        }
+    }
+
+    @Test fun onlyReviewedDeletionSetAndRevisionAreAccepted() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val config = SyncConfiguration(context)
+        config.preferences.edit().clear().commit()
+        val reviewed = setOf("d/0/search_history/one")
+        val revA = "a".repeat(40)
+        val revB = "b".repeat(40)
+        assertThrows(IllegalStateException::class.java) {
+            SyncDeletionGate.requireApproval(config, reviewed, revA)
+        }
+        SyncDeletionGate.authorizePending(config)
+        assertEquals(reviewed, SyncDeletionGate.approved(config, reviewed, revA))
+        assertTrue(SyncDeletionGate.approved(config, reviewed, revB).isEmpty())
+        assertTrue(SyncDeletionGate.approved(config,
+            reviewed + "d/0/search_history/two", revA).isEmpty())
+        SyncDeletionGate.consumed(config)
+    }
+
 }
