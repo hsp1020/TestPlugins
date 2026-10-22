@@ -82,6 +82,13 @@ internal object SyncCoordinator {
                     item.key, item.cipher ?: error("Missing encrypted value for " + item.key)
                 )
             }
+            // On first link, an existing cloud account takes precedence over
+            // unrelated settings and watch history already stored on this device.
+            val firstRemoteRestore = !config.preferences.contains("base") &&
+                remoteValues.keys.any {
+                    it == "x/profiles" || it == "x/plugins" ||
+                        it.startsWith("d/") || it.startsWith("s/") || it.startsWith("p/")
+                }
             val remoteByKey = pull.entries.associateBy { it.key }
             val versions = mutableMapOf<String, Long>()
             if (!pull.full) {
@@ -166,8 +173,12 @@ internal object SyncCoordinator {
                         if (remote != current) apply[key] = remote
                         next[key] = remoteHash
                     } else if (current != null) {
-                        upload[key] = current
-                        next[key] = currentHash
+                        if (firstRemoteRestore) {
+                            apply[key] = null
+                        } else {
+                            upload[key] = current
+                            next[key] = currentHash
+                        }
                     }
                     continue
                 }

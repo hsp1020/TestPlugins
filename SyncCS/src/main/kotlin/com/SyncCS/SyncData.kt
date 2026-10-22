@@ -355,6 +355,24 @@ internal object SyncData {
         }
     }
 
+    private fun refreshNativeBackup(
+        context: Context, file: String, backupKey: String, completeKey: String, hashKey: String
+    ) {
+        val prefs = context.getSharedPreferences(file, Context.MODE_PRIVATE)
+        val payload = JSONObject()
+        for ((key, value) in prefs.all) {
+            if (value is Set<*>) {
+                payload.put(key, JSONArray(value.toList()))
+            } else if (value != null) {
+                payload.put(key, value)
+            }
+        }
+        val json = payload.toString()
+        check(prefs.edit().putBoolean(completeKey, true)
+            .putString(hashKey, json.hashCode().toString()).commit())
+        with(DataStore) { context.setKey(backupKey, json) }
+    }
+
     fun apply(context: Context, changes: Map<String, String?>) {
         if (changes.isEmpty()) return
         val data = with(DataStore) { context.getSharedPrefs() }
@@ -401,6 +419,15 @@ internal object SyncData {
         check(dataEdit.commit()) { "CloudStream settings restore failed" }
         check(defaultEdit.commit()) { "Default settings restore failed" }
         pluginEditors.values.forEach { check(it.commit()) { "Plugin settings restore failed" } }
+        // Keep native import snapshots consistent with restored plugin settings.
+        if (changes.keys.any { it.startsWith("p/StremioC/") }) {
+            refreshNativeBackup(context, "StremioC", "native_backup_stremioc",
+                "stremio_c_restore_complete", "stremio_c_last_applied_backup_hash")
+        }
+        if (changes.keys.any { it.startsWith("p/StreamPlay/") }) {
+            refreshNativeBackup(context, "StreamPlay", "native_backup_streamplay",
+                "streamplay_restore_complete", "streamplay_last_applied_backup_hash")
+        }
         if (priorityChanged && !invalidatePriorityCaches()) {
             android.util.Log.w("SyncCS", "Priority cache APIs unavailable; restart CloudStream to reload priorities.")
         }

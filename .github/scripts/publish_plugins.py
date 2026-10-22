@@ -49,6 +49,9 @@ def publish(src: Path, builds: Path) -> None:
     names = {p["internalName"] for p in index}
     if names != set(artifacts):
         raise ValueError(f"Metadata/artifact mismatch: missing={sorted(names - set(artifacts))}, extra={sorted(set(artifacts) - names)}")
+    if not index:
+        raise ValueError("Refusing to publish an empty plugin index")
+    published_files = set()
     for plugin in index:
         name = plugin["internalName"]
         gradle = src / name / "build.gradle.kts"
@@ -64,10 +67,14 @@ def publish(src: Path, builds: Path) -> None:
                 raise ValueError(f"Refusing to overwrite different bytes: {target}")
         else:
             shutil.copyfile(original, target)
+        published_files.add(file_name)
         plugin["url"] = f"https://raw.githubusercontent.com/{REPOSITORY}/builds/{quote(file_name)}"
         plugin["fileSize"] = target.stat().st_size
         plugin["fileHash"] = f"sha256-{digest}"
         print(f"Publish {name} v{expected_version}: {file_name} ({plugin['fileSize']} bytes)")
+    for old in builds.glob("*.cs3"):
+        if old.name not in published_files:
+            old.unlink()
     (builds / "plugins.json").write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
