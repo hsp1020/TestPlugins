@@ -62,7 +62,7 @@ internal object GitHubSyncEngine {
             val matching = installed.asSequence().filter { it.internalName == name }
                 .map { File(it.filePath) }.firstOrNull {
                     it.isFile && it.length() in 1L..(20L * 1024 * 1024) &&
-                        SyncBackend.digestBytes(it.readBytes()) == required
+                        GitHubDigest.sha256(it.readBytes()) == required
                 } ?: error("Cannot archive missing plugin " + name)
             result[required] = matching.readBytes()
         }

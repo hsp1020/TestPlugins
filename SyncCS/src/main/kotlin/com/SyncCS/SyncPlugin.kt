@@ -1,28 +1,13 @@
 package com.SyncCS
 
-import android.app.Activity
-import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
-import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
 import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.DataStore
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import java.util.UUID
-import java.lang.ref.WeakReference
-import com.lagradost.cloudstream3.plugins.PLUGINS_KEY
-import com.lagradost.cloudstream3.plugins.PLUGINS_KEY_LOCAL
 
 internal object SyncRuntime {
     @Volatile var pluginsLoaded = false

@@ -234,7 +234,7 @@ internal class GitHubSyncTransport(private val config: GitHubSyncConfig) {
             val encrypted = JSONObject(encodedJson).getString("encrypted")
             val clear = encryptor.decrypt("github-sync-binary-" + hash, encrypted)
             val bytes = Base64.decode(clear, Base64.DEFAULT)
-            check(SyncBackend.digestBytes(bytes) == hash) {
+            check(GitHubDigest.sha256(bytes) == hash) {
                 "Plugin archive integrity verification failed for " + hash
             }
         }
@@ -266,7 +266,7 @@ internal class GitHubSyncTransport(private val config: GitHubSyncConfig) {
             if (path in existing) continue
             val binary = binaryFiles[hash] ?: error("Plugin archive missing for SHA " + hash)
             check(binary.size in 1..(20 * 1024 * 1024))
-            check(SyncBackend.digestBytes(binary) == hash)
+            check(GitHubDigest.sha256(binary) == hash)
             val encrypted = binaryCipher!!.encrypt("github-sync-binary-" + hash,
                 Base64.encodeToString(binary, Base64.NO_WRAP))
             val binaryJson = JSONObject().put("format", 1).put("encrypted", encrypted).toString()
