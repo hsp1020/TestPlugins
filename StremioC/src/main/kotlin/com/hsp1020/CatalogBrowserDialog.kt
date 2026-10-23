@@ -1230,7 +1230,7 @@ internal class CatalogBrowserDialog(
                     contentDescription = activity.getString(R.string.go_back)
                     isFocusable = true
                     isClickable = true
-                    setPadding(dp(10), dp(10), dp(10), dp(10))
+                    setPadding(dp(3), dp(3), dp(3), dp(3))
                     val ripple = TypedValue()
                     if (activity.theme.resolveAttribute(
                             android.R.attr.selectableItemBackgroundBorderless, ripple, true
@@ -1262,7 +1262,10 @@ internal class CatalogBrowserDialog(
                     }
                 }
                 backButton = back
-                addView(back, LinearLayout.LayoutParams(dp(44), dp(44)))
+                addView(back, LinearLayout.LayoutParams(dp(30), dp(30)).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    marginStart = dp(7)
+                })
                 val searchField = FrameLayout(activity).apply {
                     setBackgroundResource(R.drawable.search_background)
                     val input = SearchView(activity).apply {
@@ -1313,7 +1316,7 @@ internal class CatalogBrowserDialog(
                     }
                 }
                 addView(searchField, LinearLayout.LayoutParams(0, dp(44), 1f).apply {
-                    marginStart = dp(38)
+                    marginStart = dp(45)
                 })
             }
             addView(navigationRow, LinearLayout.LayoutParams(-1, dp(44)))
