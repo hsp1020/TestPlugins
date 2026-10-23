@@ -1264,9 +1264,7 @@ internal class CatalogBrowserDialog(
                 addView(back, LinearLayout.LayoutParams(dp(25), dp(44)))
                 val searchField = FrameLayout(activity).apply {
                     setBackgroundResource(R.drawable.search_background)
-                    if (android.os.Build.VERSION.SDK_INT >= 23) foreground = nativeCatalogRipple(activity)
                     val input = SearchView(activity).apply {
-                        if (android.os.Build.VERSION.SDK_INT >= 23) foreground = nativeCatalogRipple(activity)
                         queryHint = activity.getString(R.string.search_hint)
                         setIconifiedByDefault(false)
                         isIconified = false
