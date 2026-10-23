@@ -1230,6 +1230,7 @@ internal class CatalogBrowserDialog(
                     contentDescription = activity.getString(R.string.go_back)
                     isFocusable = true
                     isClickable = true
+                    setPadding(dp(10), dp(10), dp(10), dp(10))
                     val ripple = TypedValue()
                     if (activity.theme.resolveAttribute(
                             android.R.attr.selectableItemBackgroundBorderless, ripple, true
