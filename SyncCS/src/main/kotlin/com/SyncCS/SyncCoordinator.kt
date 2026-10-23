@@ -23,6 +23,14 @@ internal object SyncCoordinator {
     private fun fingerprint(raw: String?): String =
         if (raw == null) "<deleted>" else SyncBackend.digest(raw)
 
+    private fun isLocalLibraryKey(key: String): Boolean =
+        key.startsWith("d/") && (
+            "/result_watch_state/" in key ||
+            "/result_watch_state_data/" in key ||
+            "/result_favorites_state_data/" in key ||
+            "/result_subscribed_state_data/" in key
+        )
+
     private fun baseline(context: Context): MutableMap<String, String> {
         val json = JSONObject(SyncConfiguration(context).preferences.getString("base", "{}") ?: "{}")
         return json.keys().asSequence().associateWith { json.getString(it) }.toMutableMap()
@@ -408,6 +416,7 @@ internal object SyncCoordinator {
             SyncTrace.profiles("target-profiles", targetProfiles)
             SyncTrace.info("profile-merge", "upload=${profileMerge.changedRemote}")
             val nativeBefore = ProfileSync.decode(profileLocal)
+            var retiredLibraryData = false
             val obsoleteSlots = nativeBefore.items.keys.filter { slot ->
                 val old = nativeBefore.items.getValue(slot)
                 val adopted = profileMerge.target.items[slot]
@@ -424,6 +433,7 @@ internal object SyncCoordinator {
                     slot in obsoleteSlots
                 }
                 if (obsolete.isNotEmpty()) {
+                    retiredLibraryData = obsolete.any(::isLocalLibraryKey)
                     ensureUndo()
                     applying = true
                     try {
@@ -730,7 +740,8 @@ internal object SyncCoordinator {
                     "removed=${cleanStats.removed} pending=${cleanStats.pending}")
             }
             var uiRefreshFailed = false
-            if (nativeApply.keys.any { it.startsWith("d/") || it.startsWith("p/") }) {
+            val libraryChanged = retiredLibraryData || nativeApply.keys.any(::isLocalLibraryKey)
+            if (retiredLibraryData || nativeApply.keys.any { it.startsWith("d/") || it.startsWith("p/") }) {
                 SyncTrace.info("ui-refresh-request",
                     "event=bookmarksUpdated incoming=${receivedRevision.take(12)} " +
                         "changed=${nativeApply.size} " +
@@ -750,6 +761,20 @@ internal object SyncCoordinator {
             } else {
                 SyncTrace.info("ui-refresh-not-needed",
                     "incoming=${receivedRevision.take(12)} nativeChanges=0")
+            }
+            if (libraryChanged) {
+                try {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        MainActivity.reloadLibraryEvent.invoke(true)
+                    }
+                    SyncTrace.info("ui-refresh-dispatched",
+                        "event=reloadLibrary incoming=${receivedRevision.take(12)}")
+                } catch (error: Exception) {
+                    uiRefreshFailed = true
+                    SyncTrace.info("ui-refresh-failed",
+                        "event=reloadLibrary type=${error.javaClass.simpleName} " +
+                            "incoming=${receivedRevision.take(12)}")
+                }
             }
             var result = "Synced: downloaded " + apply.size + ", uploaded " +
                 (upload.size + (if (merge.changedRemote) 1 else 0) +
