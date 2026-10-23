@@ -563,14 +563,23 @@
                             android:layout_height="35dp"
                             android:layout_gravity="center_vertical"
                             android:hint="Enter MdbList API Key"
-                            android:inputType="text"
+                            android:inputType="textPassword"
                             android:singleLine="true"
                             android:textSize="14sp"
                             android:fontFamily="sans-serif"
                             android:paddingStart="12dp"
-                            android:paddingEnd="12dp"
+                            android:paddingEnd="60dp"
                             android:paddingTop="0dp"
                             android:paddingBottom="0dp"
+                            android:background="@android:color/transparent" />
+                        <ImageButton
+                            android:id="@+id/btnRevealMdbListApiKey"
+                            android:layout_width="48dp"
+                            android:layout_height="48dp"
+                            android:layout_gravity="end|center_vertical"
+                            android:scaleType="center"
+                            android:focusable="true"
+                            android:contentDescription="Show MDBList API key"
                             android:background="@android:color/transparent" />
                     </FrameLayout>
                     

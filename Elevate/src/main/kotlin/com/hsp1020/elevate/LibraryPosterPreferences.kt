@@ -2,6 +2,17 @@ package com.hsp1020.elevate
 
 import android.content.Context
 import android.net.Uri
+import android.graphics.Canvas
+import android.graphics.ColorFilter
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PixelFormat
+import android.graphics.drawable.Drawable
+import android.text.method.PasswordTransformationMethod
+import android.view.Gravity
+import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.ImageView
 import android.text.InputType
 import android.util.TypedValue
 import android.view.View
@@ -13,6 +24,51 @@ import android.widget.LinearLayout
 import android.widget.Spinner
 import android.widget.TextView
 import androidx.core.widget.doAfterTextChanged
+
+private class ApiKeyEyeIcon(private val iconColor: Int, private val visible: Boolean, private val iconSize: Int) : Drawable() {
+        private val pen = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 1.8f
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+            color = iconColor
+        }
+
+        override fun draw(canvas: Canvas) {
+            if (bounds.isEmpty) return
+            val scale = minOf(bounds.width(), bounds.height()) / 24f
+            val saved = canvas.save()
+            canvas.translate(bounds.exactCenterX() - 12f * scale, bounds.exactCenterY() - 12f * scale)
+            canvas.scale(scale, scale)
+            val outline = Path().apply {
+                moveTo(2f, 12f)
+                cubicTo(5f, 8f, 8f, 6f, 12f, 6f)
+                cubicTo(16f, 6f, 19f, 8f, 22f, 12f)
+                cubicTo(19f, 16f, 16f, 18f, 12f, 18f)
+                cubicTo(8f, 18f, 5f, 16f, 2f, 12f)
+                close()
+            }
+            canvas.drawPath(outline, pen)
+            canvas.drawCircle(12f, 12f, 3f, pen)
+            if (!visible) canvas.drawLine(3f, 21f, 21f, 3f, pen)
+            canvas.restoreToCount(saved)
+        }
+
+        override fun setAlpha(alpha: Int) {
+            pen.alpha = alpha
+            invalidateSelf()
+        }
+
+        override fun setColorFilter(colorFilter: ColorFilter?) {
+            pen.colorFilter = colorFilter
+            invalidateSelf()
+        }
+
+        @Suppress("DEPRECATION")
+        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+        override fun getIntrinsicWidth(): Int = iconSize
+        override fun getIntrinsicHeight(): Int = iconSize
+    }
 
 internal enum class PosterService(val title: String, val host: String) {
     RPDB("RPDB", "api.ratingposterdb.com"),
@@ -122,8 +178,47 @@ internal object LibraryPosterPrefs {
                 else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
                 setText(value)
             }
-        fun addField(parent: LinearLayout, field: EditText) {
-            parent.addView(field, LinearLayout.LayoutParams(
+        fun addField(parent: LinearLayout, field: EditText, secret: Boolean = false) {
+            if (!secret) {
+                parent.addView(field, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                return
+            }
+            val row = FrameLayout(context)
+            row.addView(field, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            field.setPadding(field.paddingLeft, field.paddingTop,
+                field.paddingRight + dp(48), field.paddingBottom)
+            var revealed = false
+            val toggle = ImageButton(context).apply {
+                val ripple = TypedValue()
+                if (context.theme.resolveAttribute(
+                        android.R.attr.selectableItemBackgroundBorderless, ripple, true
+                    ) && ripple.resourceId != 0) {
+                    setBackgroundResource(ripple.resourceId)
+                } else {
+                    background = null
+                }
+                scaleType = ImageView.ScaleType.CENTER
+                isFocusable = true
+                isFocusableInTouchMode = false
+                contentDescription = "Show API key"
+                setImageDrawable(ApiKeyEyeIcon(field.currentTextColor, false, dp(24)))
+                setOnClickListener {
+                    val start = field.selectionStart.coerceAtLeast(0)
+                    val end = field.selectionEnd.coerceAtLeast(0)
+                    revealed = !revealed
+                    field.transformationMethod =
+                        if (revealed) null else PasswordTransformationMethod.getInstance()
+                    val length = field.text?.length ?: 0
+                    field.setSelection(start.coerceAtMost(length), end.coerceAtMost(length))
+                    setImageDrawable(ApiKeyEyeIcon(field.currentTextColor, revealed, dp(24)))
+                    contentDescription = if (revealed) "Hide API key" else "Show API key"
+                }
+            }
+            row.addView(toggle, FrameLayout.LayoutParams(dp(48), dp(48),
+                Gravity.END or Gravity.CENTER_VERTICAL))
+            parent.addView(row, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
 
@@ -138,7 +233,7 @@ internal object LibraryPosterPrefs {
         val keyGroup = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         title(keyGroup, "Service API Key / Token")
         val key = field(saved.key, "API Key", secret = true)
-        addField(keyGroup, key)
+        addField(keyGroup, key, secret = true)
         content.addView(keyGroup)
 
         val xrdbGroup = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
@@ -153,7 +248,7 @@ internal object LibraryPosterPrefs {
         val privateKeyGroup = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         title(privateKeyGroup, "Instance API Key (only for protected self-hosted XRDB)")
         val renderKey = field(saved.xrdbRenderKey, "XRDB_API_KEY", secret = true)
-        addField(privateKeyGroup, renderKey)
+        addField(privateKeyGroup, renderKey, secret = true)
         xrdbGroup.addView(privateKeyGroup)
         content.addView(xrdbGroup)
 

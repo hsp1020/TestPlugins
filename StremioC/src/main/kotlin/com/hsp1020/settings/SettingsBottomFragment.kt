@@ -8,6 +8,11 @@ import android.animation.ValueAnimator
 import android.app.Activity
 import android.app.Dialog
 import android.content.ActivityNotFoundException
+import android.graphics.Canvas
+import android.graphics.ColorFilter
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.RippleDrawable
 import android.net.Uri
@@ -43,6 +48,7 @@ import android.view.animation.AnimationUtils
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.text.InputType
+import android.text.method.PasswordTransformationMethod
 import android.widget.CompoundButton
 import android.widget.EditText
 import android.widget.ImageButton
@@ -80,6 +86,51 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.withContext
 import java.util.Collections
+
+private class ApiKeyEyeIcon(private val iconColor: Int, private val visible: Boolean, private val iconSize: Int) : Drawable() {
+        private val pen = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 1.8f
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+            color = iconColor
+        }
+
+        override fun draw(canvas: Canvas) {
+            if (bounds.isEmpty) return
+            val scale = minOf(bounds.width(), bounds.height()) / 24f
+            val saved = canvas.save()
+            canvas.translate(bounds.exactCenterX() - 12f * scale, bounds.exactCenterY() - 12f * scale)
+            canvas.scale(scale, scale)
+            val outline = Path().apply {
+                moveTo(2f, 12f)
+                cubicTo(5f, 8f, 8f, 6f, 12f, 6f)
+                cubicTo(16f, 6f, 19f, 8f, 22f, 12f)
+                cubicTo(19f, 16f, 16f, 18f, 12f, 18f)
+                cubicTo(8f, 18f, 5f, 16f, 2f, 12f)
+                close()
+            }
+            canvas.drawPath(outline, pen)
+            canvas.drawCircle(12f, 12f, 3f, pen)
+            if (!visible) canvas.drawLine(3f, 21f, 21f, 3f, pen)
+            canvas.restoreToCount(saved)
+        }
+
+        override fun setAlpha(alpha: Int) {
+            pen.alpha = alpha
+            invalidateSelf()
+        }
+
+        override fun setColorFilter(colorFilter: ColorFilter?) {
+            pen.colorFilter = colorFilter
+            invalidateSelf()
+        }
+
+        @Suppress("DEPRECATION")
+        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+        override fun getIntrinsicWidth(): Int = iconSize
+        override fun getIntrinsicHeight(): Int = iconSize
+    }
 
 data class LinkItem(
     val id: Long = System.currentTimeMillis(),
@@ -1187,7 +1238,7 @@ class SettingsBottomFragment(
                 "btnAddStreamSubtitleUrl"),
             ImageView::class.java to listOf("saveIcon", "addlinks", "showlinks",
                 "btnSelectLanguage", "toggleStreamSubtitleUrls"),
-            ImageButton::class.java to listOf("btnConfigureHistoryAddon", "btnDeleteHistoryAddon"),
+            ImageButton::class.java to listOf("btnConfigureHistoryAddon", "btnDeleteHistoryAddon", "btnRevealMdbListApiKey"),
             EditText::class.java to listOf("etTmdbApiKey", "etMdbListApiKey", "etHistorySyncUrl"),
             Switch::class.java to listOf("switchMdbList", "switchCineStream", "switchStreamPlay", "switchVixSrc")
         ))) {
@@ -1584,6 +1635,36 @@ class SettingsBottomFragment(
         val switchMdbList: Switch = try { view.findView("switchMdbList") } catch (e: Throwable) { throw Exception("switchMdbList Switch not found", e) }
         val layoutMdbList: View = try { view.findView("layoutMdbList") } catch (e: Throwable) { throw Exception("layoutMdbList View not found", e) }
         val etMdbListApiKey: EditText = try { view.findView("etMdbListApiKey") } catch (e: Throwable) { throw Exception("etMdbListApiKey EditText not found", e) }
+
+        val revealMdbListApiKey = view.findView<ImageButton>("btnRevealMdbListApiKey")
+        var mdbListKeyRevealed = false
+        revealMdbListApiKey.apply {
+            val ripple = android.util.TypedValue()
+            if (ctx.theme.resolveAttribute(
+                    android.R.attr.selectableItemBackgroundBorderless, ripple, true
+                ) && ripple.resourceId != 0) {
+                setBackgroundResource(ripple.resourceId)
+            } else {
+                background = null
+            }
+            scaleType = ImageView.ScaleType.CENTER
+            isFocusableInTouchMode = false
+            contentDescription = "Show MDBList API key"
+            setImageDrawable(ApiKeyEyeIcon(etMdbListApiKey.currentTextColor, false, dp(24)))
+            makeTvCompatible()
+            setOnClickListener {
+                val start = etMdbListApiKey.selectionStart.coerceAtLeast(0)
+                val end = etMdbListApiKey.selectionEnd.coerceAtLeast(0)
+                mdbListKeyRevealed = !mdbListKeyRevealed
+                etMdbListApiKey.transformationMethod =
+                    if (mdbListKeyRevealed) null else PasswordTransformationMethod.getInstance()
+                val length = etMdbListApiKey.text?.length ?: 0
+                etMdbListApiKey.setSelection(start.coerceAtMost(length), end.coerceAtMost(length))
+                setImageDrawable(ApiKeyEyeIcon(etMdbListApiKey.currentTextColor, mdbListKeyRevealed, dp(24)))
+                contentDescription =
+                    if (mdbListKeyRevealed) "Hide MDBList API key" else "Show MDBList API key"
+            }
+        }
 
         etTmdbApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_API_KEY, ""))
 
