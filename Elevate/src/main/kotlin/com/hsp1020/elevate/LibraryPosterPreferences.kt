@@ -12,6 +12,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.Spinner
 import android.widget.TextView
+import androidx.core.widget.doAfterTextChanged
 
 internal enum class PosterService(val title: String, val host: String) {
     RPDB("RPDB", "api.ratingposterdb.com"),
@@ -27,28 +28,32 @@ internal data class PosterIds(val imdb: String? = null, val tmdb: String? = null
 }
 
 internal data class PosterConfig(
-    val service: PosterService, val key: String, val template: String
+    val service: PosterService,
+    val key: String,
+    val xrdbProfile: String,
+    val xrdbBase: String,
+    val xrdbRenderKey: String
 ) {
-    val ready get() = if (service == PosterService.XRDB) template.isNotBlank() else key.isNotBlank()
+    val ready get() = if (service == PosterService.XRDB) xrdbBase.isNotBlank() else key.isNotBlank()
 
     fun image(ids: PosterIds, isMovie: Boolean): String? {
         if (!ready || !ids.available) return null
         val kind = if (isMovie) "movie" else "series"
+        if (service == PosterService.XRDB) {
+            val base = Uri.parse(xrdbBase.trim().trimEnd('/'))
+            if (base.scheme != "https" || base.host.isNullOrBlank() ||
+                !base.userInfo.isNullOrBlank() || !base.query.isNullOrBlank() ||
+                !base.fragment.isNullOrBlank()) return null
+            val artworkId = ids.imdb ?: "tmdb:${kind}:${ids.tmdb ?: return null}"
+            return base.buildUpon().appendPath("poster").appendPath(artworkId)
+                .apply {
+                    if (xrdbProfile.isNotBlank()) appendQueryParameter("config", xrdbProfile)
+                    if (xrdbRenderKey.isNotBlank()) appendQueryParameter("key", xrdbRenderKey)
+                }.build().toString()
+        }
         val type = if (ids.imdb != null) "imdb" else "tmdb"
         val id = ids.imdb ?: "${kind}-${ids.tmdb ?: return null}"
-        val url = if (service == PosterService.XRDB) {
-            val params = mapOf(
-                "{key}" to Uri.encode(key), "{id}" to id, "{imdb}" to ids.imdb.orEmpty(),
-                "{tmdb}" to ids.tmdb.orEmpty(), "{type}" to kind,
-                "{id_type}" to type, "{tmdb_type}" to "${kind}-${ids.tmdb.orEmpty()}"
-            )
-            var result = template
-            for ((name, value) in params) result = result.replace(name, value)
-            if (result.contains('{') || result.contains('}') ||
-                (ids.imdb == null && template.contains("{imdb}")) ||
-                (ids.tmdb == null && (template.contains("{tmdb}") || template.contains("{tmdb_type}")))) return null
-            result
-        } else when (service) {
+        val url = when (service) {
             PosterService.RPDB, PosterService.OPDB, PosterService.AIORATINGS ->
                 "https://${service.host}/${Uri.encode(key)}/${type}/poster-default/${id}.jpg"
             PosterService.TOP_POSTERS ->
@@ -66,25 +71,47 @@ internal data class PosterConfig(
 
 internal object LibraryPosterPrefs {
     const val FILE = "ElevateLibraryPosters"
+    private const val DEFAULT_XRDB_BASE = "https://xrdb.elfhosted.com"
+
     fun get(context: Context): PosterConfig {
         val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+        val legacyUrl = prefs.getString("template", "").orEmpty().trim()
+        val legacy = runCatching { Uri.parse(legacyUrl).takeIf { it.scheme == "https" } }.getOrNull()
+        val legacyBase = legacy?.host?.takeIf { it.isNotBlank() }?.let {
+            "https://${it}${legacy.encodedPath?.substringBefore("/poster/").orEmpty()}"
+        }
         return PosterConfig(
             PosterService.entries.firstOrNull { it.name == prefs.getString("service", null) }
                 ?: PosterService.RPDB,
             prefs.getString("key", "").orEmpty().trim(),
-            prefs.getString("template", "").orEmpty().trim()
+            prefs.getString("xrdb_profile", null) ?: legacy?.getQueryParameter("config").orEmpty(),
+            prefs.getString("xrdb_base", null) ?: legacyBase ?: DEFAULT_XRDB_BASE,
+            prefs.getString("xrdb_render_key", null) ?: legacy?.getQueryParameter("key").orEmpty()
         )
     }
 
     fun controls(context: Context, content: LinearLayout, dp: (Int) -> Int): () -> Unit {
         val saved = get(context)
-        fun title(parent: LinearLayout, text: String, smaller: Boolean = false) {
+        fun title(parent: LinearLayout, label: String, smaller: Boolean = false) {
             parent.addView(TextView(context).apply {
-                this.text = text
+                text = label
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, if (smaller) 12f else 15f)
                 if (smaller) alpha = 0.75f
                 setPadding(0, dp(8), 0, dp(4))
             })
+        }
+        fun field(value: String, hintText: String, secret: Boolean = false) =
+            EditText(context).apply {
+                setSingleLine(true)
+                hint = hintText
+                inputType = if (secret) InputType.TYPE_CLASS_TEXT or
+                    InputType.TYPE_TEXT_VARIATION_PASSWORD
+                else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                setText(value)
+            }
+        fun addField(parent: LinearLayout, field: EditText) {
+            parent.addView(field, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
 
         title(content, "Library Poster Service")
@@ -95,55 +122,59 @@ internal object LibraryPosterPrefs {
         }
         content.addView(service)
 
-        val keyGroup = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-        }
+        val keyGroup = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
         title(keyGroup, "Service API Key / Token")
-        val key = EditText(context).apply {
-            hint = "API Key"
-            setSingleLine(true)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setText(saved.key)
-        }
-        keyGroup.addView(key, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT))
+        val key = field(saved.key, "API Key", secret = true)
+        addField(keyGroup, key)
         content.addView(keyGroup)
 
-        val xrdbGroup = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        title(xrdbGroup, "XRDB Poster URL Template")
-        val template = EditText(context).apply {
-            hint = "https://.../poster/tmdb:{type}:{tmdb}"
-            maxLines = 3
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-            setText(saved.template)
-        }
-        xrdbGroup.addView(template, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT))
-        title(xrdbGroup, "Paste the XRDB profile poster URL. Replace the title ID with " +
-            "{id}, {imdb}, {tmdb}, or tmdb:{type}:{tmdb}. " +
-            "Other tokens: {id_type}, {tmdb_type}. No separate API key is required.", true)
+        val xrdbGroup = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        title(xrdbGroup, "XRDB Profile UUID / Alias")
+        val profile = field(saved.xrdbProfile, "Saved profile UUID or alias")
+        addField(xrdbGroup, profile)
+        title(xrdbGroup, "XRDB Server URL")
+        val base = field(saved.xrdbBase, DEFAULT_XRDB_BASE)
+        addField(xrdbGroup, base)
+        title(xrdbGroup, "Profile is optional for the server's default appearance. " +
+            "The public XRDB instance does not need an API key.", true)
+        val privateKeyGroup = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        title(privateKeyGroup, "Instance API Key (only for protected self-hosted XRDB)")
+        val renderKey = field(saved.xrdbRenderKey, "XRDB_API_KEY", secret = true)
+        addField(privateKeyGroup, renderKey)
+        xrdbGroup.addView(privateKeyGroup)
         content.addView(xrdbGroup)
 
-        fun updateServiceFields() {
+        fun updateFields() {
             val xrdb = PosterService.entries[service.selectedItemPosition] == PosterService.XRDB
             keyGroup.visibility = if (xrdb) View.GONE else View.VISIBLE
             xrdbGroup.visibility = if (xrdb) View.VISIBLE else View.GONE
+            val host = runCatching { Uri.parse(base.text.toString().trim()).host?.lowercase() }.getOrNull()
+            privateKeyGroup.visibility = if (xrdb && host != null &&
+                host !in setOf("xrdb.elfhosted.com", "extendedratings.com", "www.extendedratings.com")
+            ) View.VISIBLE else View.GONE
         }
         service.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: AdapterView<*>?, view: View?, position: Int, id: Long
-            ) = updateServiceFields()
+            ) = updateFields()
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
         }
-        updateServiceFields()
+        base.doAfterTextChanged { updateFields() }
+        updateFields()
 
         return {
+            val isPublic = runCatching {
+                Uri.parse(base.text.toString().trim()).host?.lowercase() in
+                    setOf("xrdb.elfhosted.com", "extendedratings.com", "www.extendedratings.com")
+            }.getOrDefault(false)
             context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
                 .putString("service", PosterService.entries[service.selectedItemPosition].name)
                 .putString("key", key.text.toString().trim())
-                .putString("template", template.text.toString().trim()).apply()
+                .putString("xrdb_profile", profile.text.toString().trim())
+                .putString("xrdb_base", base.text.toString().trim())
+                .putString("xrdb_render_key", if (isPublic) "" else renderKey.text.toString().trim())
+                .remove("template")
+                .apply()
         }
     }
 }
