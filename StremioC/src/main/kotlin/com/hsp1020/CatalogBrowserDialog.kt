@@ -1261,7 +1261,7 @@ internal class CatalogBrowserDialog(
                     }
                 }
                 backButton = back
-                addView(back, LinearLayout.LayoutParams(dp(25), dp(44)))
+                addView(back, LinearLayout.LayoutParams(dp(44), dp(44)))
                 val searchField = FrameLayout(activity).apply {
                     setBackgroundResource(R.drawable.search_background)
                     val input = SearchView(activity).apply {
@@ -1296,11 +1296,9 @@ internal class CatalogBrowserDialog(
                         isClickable = false
                         isFocusable = false
                     }, FrameLayout.LayoutParams(dp(24), dp(24),
-                        Gravity.START or Gravity.CENTER_VERTICAL).apply {
-                        marginStart = dp(47)
-                    })
+                        Gravity.START or Gravity.CENTER_VERTICAL))
                     addView(input, FrameLayout.LayoutParams(-1, -1).apply {
-                        marginStart = dp(60)
+                        marginStart = dp(13)
                     })
                     setOnClickListener {
                         input.requestFocus()
@@ -1314,7 +1312,7 @@ internal class CatalogBrowserDialog(
                     }
                 }
                 addView(searchField, LinearLayout.LayoutParams(0, dp(44), 1f).apply {
-                    marginStart = dp(10)
+                    marginStart = dp(38)
                 })
             }
             addView(navigationRow, LinearLayout.LayoutParams(-1, dp(44)))
