@@ -112,6 +112,14 @@ class TvchakProvider : MainAPI() {
             
             var solved = false
             val handler = android.os.Handler(android.os.Looper.getMainLooper())
+            var destroyed = false
+            fun cleanup() {
+                if (destroyed) return
+                destroyed = true
+                solved = true
+                handler.removeCallbacksAndMessages(null)
+                webView.destroy()
+            }
             
             val checkRunnable = object : Runnable {
                 override fun run() {
@@ -120,7 +128,7 @@ class TvchakProvider : MainAPI() {
                     if (cookies.contains("aws-waf-token") || cookies.contains("cf_clearance")) {
                         solved = true
                         continuation.resume(Pair(cookies, userAgent))
-                        webView.destroy()
+                        cleanup()
                     } else {
                         handler.postDelayed(this, 1000)
                     }
@@ -139,15 +147,13 @@ class TvchakProvider : MainAPI() {
             val timeoutRunnable = Runnable {
                 if (!solved && continuation.isActive) {
                     continuation.resume(null)
-                    webView.destroy()
+                    cleanup()
                 }
             }
             handler.postDelayed(timeoutRunnable, 10000)
 
             continuation.invokeOnCancellation {
-                solved = true
-                handler.removeCallbacksAndMessages(null)
-                webView.destroy()
+                handler.post { cleanup() }
             }
         }
     }
