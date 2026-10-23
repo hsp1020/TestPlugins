@@ -7,12 +7,43 @@ import com.lagradost.cloudstream3.MainActivity
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
+import java.io.Closeable
+import java.io.File
 import java.io.IOException
+import java.io.RandomAccessFile
+import java.nio.channels.OverlappingFileLockException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 
 internal object SyncCoordinator {
     private val lock = Mutex()
+
+    // A coroutine Mutex is not shared by separately loaded SyncCS classloaders.
+    // Guard both the undo journal and plugin files across all instances in this process.
+    private fun transactionLease(context: Context): Closeable? {
+        val handle = RandomAccessFile(File(context.filesDir, "synccs-transaction.lock"), "rw")
+        try {
+            val exclusive = try {
+                handle.channel.tryLock()
+            } catch (_: OverlappingFileLockException) {
+                null
+            }
+            if (exclusive == null) {
+                handle.close()
+                return null
+            }
+            return Closeable {
+                try {
+                    exclusive.release()
+                } finally {
+                    handle.close()
+                }
+            }
+        } catch (error: Exception) {
+            handle.close()
+            throw error
+        }
+    }
     @Volatile var applying = false
         private set
     @Volatile var lastStatus: String = "Not connected"
@@ -47,6 +78,11 @@ internal object SyncCoordinator {
     }
 
     suspend fun synchronize(context: Context, activity: Activity? = null): String = lock.withLock {
+        val lease = transactionLease(context) ?: run {
+            SyncTrace.info("transaction-busy", "operation=synchronize; no changes applied")
+            return@withLock "Sync deferred: another SyncCS instance is updating local data."
+        }
+        try {
         val config = SyncConfiguration(context)
         val activityReady = activity != null && !activity.isFinishing && !activity.isDestroyed
         fun pause(reason: String, message: String): String {
@@ -185,10 +221,16 @@ internal object SyncCoordinator {
             "reason=conflict-retries-exhausted activityReady=$activityReady")
         lastStatus = "Sync failed: repeated concurrent edits; changes retained for retry"
         lastStatus
+        } finally {
+            lease.close()
+        }
     }
 
     suspend fun restoreOriginal(context: Context, activity: Activity,
                                 entry: LocalOriginalBackup.Entry): String = lock.withLock {
+        val lease = transactionLease(context)
+            ?: error("Another SyncCS instance is using the recovery journal. Restore not started.")
+        try {
         check(!activity.isFinishing && !activity.isDestroyed) {
             "Original backup restore requires a foreground CloudStream activity."
         }
@@ -266,6 +308,9 @@ internal object SyncCoordinator {
             throw error
         } finally {
             applying = false
+        }
+        } finally {
+            lease.close()
         }
     }
 
