@@ -1761,7 +1761,7 @@ class YoutubeProvider(
                     watchUrl,
                     TvType.Movie
                 ) {
-                    this.posterUrl = if (isSearch) YoutubeUtils.getProxiedPoster(poster) else poster
+                    this.posterUrl = poster
                 }
             }
             return null
@@ -1973,7 +1973,7 @@ class YoutubeProvider(
                         "$mainUrl/watch?v=$videoId",
                         TvType.Movie
                     ) {
-                        this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
+                        this.posterUrl = poster
                     }
                 }
             }
