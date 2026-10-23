@@ -52,14 +52,13 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private var instance: Int? = null
     private var linkUrl: String? = null
     private var previousEmbedded = emptySet<SubtitleData>()
-    private var embeddedApplied = false
     private var manualOverride = false
     private var selectionDialog: Dialog? = null
     private var selectionBeforeDialog: SubtitleData? = null
     private var labeledDialog: Dialog? = null
     private var pendingDialog: Dialog? = null
     private var settings: SharedPreferences? = null
-    private var preferredLanguage = "en"
+    private var preferredLanguage: String? = null
     private val trackIdPrefix = Regex("^\\d+:")
 
     private val dialogField = runCatching {
@@ -103,15 +102,20 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private val settingsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == SUBTITLE_AUTO_SELECT_KEY) {
             preferredLanguage = readPreferredLanguage()
-            manualOverride = true
+            val dialog = runCatching { dialogField?.get(fragment) as? Dialog }.getOrNull()
+            if (dialog?.isShowing == true) {
+                manualOverride = true
+            } else {
+                manualOverride = false
+                player?.currentTracks?.let(::selectEmbedded)
+            }
         }
     }
 
-    private fun readPreferredLanguage(): String =
+    private fun readPreferredLanguage(): String? =
         runCatching { settings?.getString(SUBTITLE_AUTO_SELECT_KEY, null) }
             .getOrNull()?.trim()?.removeSurrounding("\"")
-            ?.takeIf { it.matches(Regex("[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*")) }
-            ?: "en"
+            ?.takeIf { it.isEmpty() || it.matches(Regex("[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*")) }
 
     private fun currentLinkUrl(f: GeneratorPlayer): String? =
         runCatching { (linkField?.get(f.player) as? ExtractorLink)?.url }.getOrNull()
@@ -179,7 +183,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         if (nextUrl != null) linkUrl = nextUrl
         if (changedSource) {
             labeledDialog = null
-            embeddedApplied = false
             manualOverride = false
             selectionDialog = null
             selectionBeforeDialog = null
@@ -188,7 +191,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         if (changedPlayer) {
             player?.removeListener(listener)
             player = current
-            embeddedApplied = false
             current?.addListener(listener)
         }
         if ((changedSource || changedPlayer) && current != null) selectEmbedded(current.currentTracks)
@@ -224,7 +226,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     }
 
     private val onDraw = ViewTreeObserver.OnPreDrawListener {
-        synchronizeSource()
+        if (fragment?.playerView?.player?.let { it !== player } == true) synchronizeSource()
         fragment?.let { f ->
             trackDialog(f)
             val popup = selectionDialog
@@ -241,14 +243,15 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         true
     }
 
-    private fun markActive(f: GeneratorPlayer, embedded: SubtitleData): Boolean =
+    private fun markActive(f: GeneratorPlayer, embedded: Set<SubtitleData>): Boolean =
         runCatching {
             val helper = helperField?.get(f.player) as? PlayerSubtitleHelper
                 ?: return@runCatching false
             @Suppress("UNCHECKED_CAST")
             val existing = activeField?.get(helper) as? Set<SubtitleData>
                 ?: return@runCatching false
-            if (embedded !in existing) helper.setActiveSubtitles(existing + embedded)
+            val missing = embedded.filterNot { it in existing }
+            if (missing.isNotEmpty()) helper.setActiveSubtitles(existing + missing)
             true
         }.getOrDefault(false)
 
@@ -257,42 +260,37 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         val current = player ?: return
         if (current !== f.playerView?.player || instance != model?.state?.instance) return
         val subtitles = model?.state?.subtitles ?: return
-        val groups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
 
-        for (subtitle in subtitles) {
-            if (subtitle.origin != SubtitleOrigin.EMBEDDED_IN_VIDEO) continue
-            if (groups.any { group ->
-                (0 until group.length).any { i ->
-                    group.getTrackFormat(i).id?.replace(trackIdPrefix, "") == subtitle.url
-                }
-            }) markActive(f, subtitle)
+        val available = LinkedHashMap<String, Pair<Tracks.Group, Int>>()
+        for (group in tracks.groups) {
+            if (group.type != C.TRACK_TYPE_TEXT) continue
+            for (i in 0 until group.length) {
+                val id = group.getTrackFormat(i).id?.replace(trackIdPrefix, "") ?: continue
+                available.putIfAbsent(id, group to i)
+            }
         }
+        if (available.isEmpty()) return
+        val embedded = subtitles.filterTo(mutableSetOf()) {
+            it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it.url in available
+        }
+        if (embedded.isEmpty()) return
 
         trackDialog(f)
-        if (manualOverride || embeddedApplied || selectionDialog?.isShowing == true) return
-        val target = subtitles.firstOrNull {
-            it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO &&
-                it.matchesLanguageCode(preferredLanguage)
+        if (!markActive(f, embedded)) return
+        if (manualOverride || selectionDialog?.isShowing == true) return
+        val language = preferredLanguage?.takeIf { it.isNotEmpty() } ?: return
+        val match = embedded.firstNotNullOfOrNull { subtitle ->
+            if (!subtitle.matchesLanguageCode(language)) return@firstNotNullOfOrNull null
+            available[subtitle.url]?.takeIf { (group, index) -> group.isTrackSupported(index) }
         } ?: return
-        val match = groups.firstNotNullOfOrNull { group ->
-            (0 until group.length).firstOrNull { i ->
-                group.isTrackSupported(i) &&
-                    group.getTrackFormat(i).id?.replace(trackIdPrefix, "") == target.url
-            }?.let { i -> group to i }
-        } ?: return
-        if (!markActive(f, target)) return
         val (group, index) = match
-        if (group.isTrackSelected(index)) {
-            embeddedApplied = true
-            return
-        }
+        if (group.isTrackSelected(index)) return
         runCatching {
-            embeddedApplied = true
             current.trackSelectionParameters = current.trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                 .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, index))
                 .build()
-        }.onFailure { embeddedApplied = false }
+        }
     }
 
     private val callbacks = object : FragmentManager.FragmentLifecycleCallbacks() {
@@ -385,7 +383,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         instance = null
         linkUrl = null
         previousEmbedded = emptySet()
-        embeddedApplied = false
         manualOverride = false
         selectionDialog = null
         selectionBeforeDialog = null
