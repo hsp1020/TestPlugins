@@ -41,6 +41,7 @@ class ElevatePlugin : Plugin() {
     private var audioSelector: ElevateAudioTrackSelector? = null
     private var embeddedSubtitles: EmbeddedSubtitleController? = null
     private var homeHero: HomeHeroToggle? = null
+    private var libraryPosters: LibraryPosterHook? = null
     private var featurePrefs: SharedPreferences? = null
     private var featureListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
     private var app: Application? = null
@@ -134,6 +135,12 @@ class ElevatePlugin : Plugin() {
             homeRecyclerGuard?.stop()
             homeRecyclerGuard = null
         }
+        if (enabled(ElevateFeature.LIBRARY_POSTERS)) {
+            if (libraryPosters == null) libraryPosters = LibraryPosterHook(application).also { it.start() }
+        } else {
+            libraryPosters?.stop()
+            libraryPosters = null
+        }
         if (enabled(ElevateFeature.EPISODE_PROGRESS)) {
             if (episodeProgress == null) {
                 episodeProgress = EpisodeProgressHook(application).also { it.start() }
@@ -202,6 +209,8 @@ class ElevatePlugin : Plugin() {
         embeddedSubtitles = null
         homeHero?.stop()
         homeHero = null
+        libraryPosters?.stop()
+        libraryPosters = null
         app = null
     }
 

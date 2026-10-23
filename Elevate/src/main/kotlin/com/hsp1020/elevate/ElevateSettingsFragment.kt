@@ -26,6 +26,8 @@ internal enum class ElevateFeature(
         "Hide the featured Home banner while keeping search and profile controls available."),
     HOME_REPAIR("Home & Library", "Home Poster Refresh",
         "Repair stale Home cards when switching providers."),
+    LIBRARY_POSTERS("Home & Library", "Custom Library Posters",
+        "Replace library covers via RPDB, XRDB, OPDB, AIORatings, TOP Posters or EasyRatingsDB."),
     EPISODE_PROGRESS("Home & Library", "Episode Progress Indicators",
         "Show watched progress on large episode thumbnails."),
     EMBEDDED_SUBTITLES("Playback & Subtitles", "Embedded Subtitle Management",
@@ -42,7 +44,8 @@ internal enum class ElevateFeature(
 
 internal object ElevateFeaturePrefs {
     const val FILE = "ElevateFeatures"
-    fun defaultEnabled(feature: ElevateFeature): Boolean = feature != ElevateFeature.HERO_CAROUSEL
+    fun defaultEnabled(feature: ElevateFeature): Boolean =
+        feature != ElevateFeature.HERO_CAROUSEL && feature != ElevateFeature.LIBRARY_POSTERS
     fun enabled(context: Context, feature: ElevateFeature): Boolean =
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
             .getBoolean(feature.name, defaultEnabled(feature))
@@ -100,10 +103,11 @@ class ElevateSettingsFragment : DialogFragment() {
                 content.addView(row)
             }
         }
+        val savePosterSettings = LibraryPosterPrefs.controls(ctx, content, ::dp)
         return AlertDialog.Builder(ctx)
             .setTitle("Elevate Settings")
             .setView(scroll)
-            .setPositiveButton("Close", null)
+            .setPositiveButton("Save & Close") { _, _ -> savePosterSettings() }
             .create()
     }
 }
