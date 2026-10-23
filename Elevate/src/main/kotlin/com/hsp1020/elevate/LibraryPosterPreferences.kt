@@ -23,8 +23,15 @@ internal enum class PosterService(val title: String, val host: String) {
     EASY_RATINGS("EasyRatingsDB", "easyratingsdb.com")
 }
 
-internal data class PosterIds(val imdb: String? = null, val tmdb: String? = null) {
-    val available get() = imdb != null || tmdb != null
+internal data class PosterIds(
+    val imdb: String? = null,
+    val tmdb: String? = null,
+    val mal: String? = null,
+    val anilist: String? = null,
+    val kitsu: String? = null
+) {
+    val available get() = imdb != null || tmdb != null ||
+        mal != null || anilist != null || kitsu != null
 }
 
 internal data class PosterConfig(
@@ -44,13 +51,19 @@ internal data class PosterConfig(
             if (base.scheme != "https" || base.host.isNullOrBlank() ||
                 !base.userInfo.isNullOrBlank() || !base.query.isNullOrBlank() ||
                 !base.fragment.isNullOrBlank()) return null
-            val artworkId = ids.imdb ?: "tmdb:${kind}:${ids.tmdb ?: return null}"
+            val artworkId = ids.imdb
+                ?: ids.tmdb?.let { "tmdb:${kind}:${it}" }
+                ?: ids.mal?.let { "mal:${it}" }
+                ?: ids.anilist?.let { "anilist:${it}" }
+                ?: ids.kitsu?.let { "kitsu:${it}" }
+                ?: return null
             return base.buildUpon().appendPath("poster").appendPath(artworkId)
                 .apply {
                     if (xrdbProfile.isNotBlank()) appendQueryParameter("config", xrdbProfile)
                     if (xrdbRenderKey.isNotBlank()) appendQueryParameter("key", xrdbRenderKey)
                 }.build().toString()
         }
+        if (ids.imdb == null && ids.tmdb == null) return null
         val type = if (ids.imdb != null) "imdb" else "tmdb"
         val id = ids.imdb ?: "${kind}-${ids.tmdb ?: return null}"
         val url = when (service) {

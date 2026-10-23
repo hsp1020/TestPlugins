@@ -297,7 +297,9 @@ internal class LibraryPosterHook(private val appContext: Application) :
         val version = xrdbVersion
         pending[image] = scope.launch {
             try {
-                val ids = withContext(Dispatchers.IO) { resolve(item) } ?: return@launch
+                val ids = withContext(Dispatchers.IO) {
+                    resolve(item, setting.service == PosterService.XRDB)
+                } ?: return@launch
                 val originalPoster = setting.image(ids, item.type == TvType.Movie) ?: return@launch
                 val poster = if (setting.service == PosterService.XRDB && version != null) {
                     Uri.parse(originalPoster).buildUpon().appendQueryParameter("v", version)
@@ -402,17 +404,33 @@ internal class LibraryPosterHook(private val appContext: Application) :
         }
     }
 
-    private suspend fun resolve(item: SyncAPI.LibraryItem): PosterIds? {
-        val local = DataStoreHelper.getBookmarkedData(item.id)?.takeIf { it.url == item.url }?.syncData
-        fun ids(imdb: String?, tmdb: String?): PosterIds? {
-            return PosterIds(
-                imdb?.takeIf { IMDB.matches(it) },
-                tmdb?.takeIf { it.toLongOrNull()?.let { n -> n > 0 } == true }
-            ).takeIf { it.available }
-        }
-        ids(local?.get("imdb"), local?.get("tmdb"))?.let { return it }
+    private suspend fun resolve(item: SyncAPI.LibraryItem, forXrdb: Boolean): PosterIds? {
+        fun positive(value: String?): String? = value?.trim()
+            ?.takeIf { it.toLongOrNull()?.let { n -> n > 0 } == true }
+        fun ids(
+            imdb: String?, tmdb: String?, mal: String? = null,
+            anilist: String? = null, kitsu: String? = null
+        ): PosterIds? = PosterIds(
+            imdb?.trim()?.takeIf { IMDB.matches(it) },
+            positive(tmdb), positive(mal), positive(anilist), positive(kitsu)
+        ).takeIf { it.available }
+        fun canonical(value: PosterIds?): Boolean =
+            value?.imdb != null || value?.tmdb != null
+        fun usable(value: PosterIds?): Boolean =
+            value != null && (forXrdb || canonical(value))
+
+        val syncData = DataStoreHelper.getBookmarkedData(item.id)
+            ?.takeIf { it.url == item.url }?.syncData
+        val saved = ids(
+            syncData?.get("imdb"), syncData?.get("tmdb"),
+            syncData?.get("mal"), syncData?.get("anilist"), syncData?.get("kitsu")
+        )
+        if (usable(saved)) return saved
+
         val source = "${item.url} ${item.syncId}"
-        ids(IMDB.find(source)?.value, TMDB.find(source)?.groupValues?.get(1))?.let { return it }
+        ids(IMDB.find(source)?.value, TMDB.find(source)?.groupValues?.get(1))
+            ?.let { return it }
+
         val host = runCatching { URI(item.url).host?.lowercase()?.removePrefix("www.") }.getOrNull()
         val provider = when (host) {
             "simkl.com" -> "simkl"
@@ -421,44 +439,69 @@ internal class LibraryPosterHook(private val appContext: Application) :
             "kitsu.app" -> "kitsu"
             else -> return null
         }
-        val numeric = item.syncId.toLongOrNull()?.takeIf { it > 0 }?.toString() ?: return null
-        val cached = runCatching {
-            val account = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
-            val userId = account?.authData()?.user?.id?.toString()
-            val library = userId?.let {
-                getKey<com.fasterxml.jackson.databind.JsonNode>(SimklApi.SIMKL_CACHED_LIST, it)
-            }
-            var matched: PosterIds? = null
-            for (section in listOf("movies", "shows", "anime")) {
-                val items = library?.get(section) ?: continue
-                for (entry in items) {
-                    val external = entry.get(if (section == "movies") "movie" else "show")
-                        ?.get("ids") ?: continue
-                    val matches = when (provider) {
-                        "simkl" -> external.get("simkl")?.asText() == numeric
-                        "mal" -> external.get("mal")?.asText() == numeric
-                        "anilist" -> external.get("anilist")?.asText() == numeric
-                        else -> false
-                    }
-                    if (!matches) continue
-                    matched = ids(external.get("imdb")?.asText(), external.get("tmdb")?.asText())
-                    if (matched != null) break
-                }
-                if (matched != null) break
-            }
-            matched
-        }.getOrNull()
-        if (cached != null) return cached
-        if (provider == "simkl") return null
+        // CloudStream's Simkl anime cards store the Simkl ID in syncId
+        // (and may use a /tv/ URL even for anime). It is never an IMDb/TMDB ID.
+        val numeric = positive(item.syncId) ?: return null
 
-        val kind = when (provider) {
-            "mal" -> "malId"; "anilist" -> "anilistId"; else -> "kitsuId"
+        var alternate = saved
+        if (provider == "simkl") {
+            val cached = runCatching {
+                val account = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
+                val userId = account?.authData()?.user?.id?.toString()
+                val list = userId?.let {
+                    getKey<com.fasterxml.jackson.databind.JsonNode>(SimklApi.SIMKL_CACHED_LIST, it)
+                }
+                var entryIds: PosterIds? = null
+                for (section in listOf("movies", "shows", "anime")) {
+                    val entries = list?.get(section) ?: continue
+                    for (entry in entries) {
+                        val itemIds = entry.get(if (section == "movies") "movie" else "show")
+                            ?.get("ids") ?: continue
+                        if (itemIds.get("simkl")?.asText() != numeric) continue
+                        entryIds = ids(
+                            itemIds.get("imdb")?.asText(),
+                            itemIds.get("tmdb")?.asText(),
+                            if (section == "anime") itemIds.get("mal")?.asText() else null,
+                            if (section == "anime") itemIds.get("anilist")?.asText() else null
+                        )
+                        break
+                    }
+                    if (entryIds != null) break
+                }
+                entryIds
+            }.getOrNull()
+            if (usable(cached)) return cached
+            if (cached != null) alternate = cached
+        } else {
+            val direct = when (provider) {
+                "mal" -> ids(null, null, mal = numeric)
+                "anilist" -> ids(null, null, anilist = numeric)
+                else -> ids(null, null, kitsu = numeric)
+            }
+            if (usable(direct)) return direct
+            alternate = direct
         }
-        val query = "idType=${kind}&idValue=${numeric}"
-        val now = System.currentTimeMillis()
+
+        // Only unresolved anime IDs enter AIOStreams. Never query its anime
+        // endpoint with a raw Simkl ID, as that lookup type is unsupported.
+        val candidates = listOfNotNull(
+            alternate?.mal?.let { "malId" to it },
+            alternate?.anilist?.let { "anilistId" to it },
+            alternate?.kitsu?.let { "kitsuId" to it }
+        )
+        for ((kind, id) in candidates) {
+            val mapping = fetchAnimeIds(kind, id)
+            if (canonical(mapping)) return mapping
+        }
+        return null
+    }
+
+    private suspend fun fetchAnimeIds(kind: String, id: String): PosterIds? {
+        val query = "idType=${kind}&idValue=${id}"
         fun fresh(entry: CacheEntry): Boolean {
+            val age = System.currentTimeMillis() - entry.time
             val ttl = if (entry.value == null) 900_000L else 86_400_000L
-            return now - entry.time in 0 until ttl
+            return age >= 0 && age < ttl
         }
         mapCache[query]?.takeIf(::fresh)?.let { return it.value }
         return semaphore.withPermit {
@@ -469,14 +512,20 @@ internal class LibraryPosterHook(private val appContext: Application) :
                         app.get("https://${server}/api/v1/anime?${query}", timeout = 4L).text
                     } catch (cancelled: CancellationException) {
                         throw cancelled
-                    } catch (_: Exception) { continue }
+                    } catch (_: Exception) {
+                        continue
+                    }
                     val root = runCatching { JSONObject(json) }.getOrNull() ?: continue
                     if (!root.optBoolean("success")) continue
                     if (root.isNull("data")) break
                     val mapped = root.optJSONObject("data")?.optJSONObject("mappings") ?: continue
-                    if (mapped.optString(kind) != numeric) continue
-                    ids(mapped.optString("imdbId"), mapped.optString("themoviedbId"))?.let {
-                        return@withTimeoutOrNull it
+                    // Do not apply a mapping for a different season / anime title.
+                    if (mapped.optString(kind) != id) continue
+                    val imdb = mapped.optString("imdbId").takeIf { IMDB.matches(it) }
+                    val tmdb = mapped.optString("themoviedbId")
+                        .takeIf { it.toLongOrNull()?.let { n -> n > 0 } == true }
+                    if (imdb != null || tmdb != null) {
+                        return@withTimeoutOrNull PosterIds(imdb, tmdb)
                     }
                 }
                 null
