@@ -4,7 +4,9 @@ import android.content.Context
 import android.net.Uri
 import android.text.InputType
 import android.util.TypedValue
+import android.view.View
 import android.view.ViewGroup
+import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -27,14 +29,14 @@ internal data class PosterIds(val imdb: String? = null, val tmdb: String? = null
 internal data class PosterConfig(
     val service: PosterService, val key: String, val template: String
 ) {
-    val ready get() = key.isNotBlank() && (service != PosterService.XRDB || template.isNotBlank())
+    val ready get() = if (service == PosterService.XRDB) template.isNotBlank() else key.isNotBlank()
 
     fun image(ids: PosterIds, isMovie: Boolean): String? {
         if (!ready || !ids.available) return null
         val kind = if (isMovie) "movie" else "series"
         val type = if (ids.imdb != null) "imdb" else "tmdb"
         val id = ids.imdb ?: "${kind}-${ids.tmdb ?: return null}"
-        val url = if (template.isNotBlank()) {
+        val url = if (service == PosterService.XRDB) {
             val params = mapOf(
                 "{key}" to Uri.encode(key), "{id}" to id, "{imdb}" to ids.imdb.orEmpty(),
                 "{tmdb}" to ids.tmdb.orEmpty(), "{type}" to kind,
@@ -76,42 +78,67 @@ internal object LibraryPosterPrefs {
 
     fun controls(context: Context, content: LinearLayout, dp: (Int) -> Int): () -> Unit {
         val saved = get(context)
-        fun title(text: String, smaller: Boolean = false) {
-            content.addView(TextView(context).apply {
+        fun title(parent: LinearLayout, text: String, smaller: Boolean = false) {
+            parent.addView(TextView(context).apply {
                 this.text = text
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, if (smaller) 12f else 15f)
                 if (smaller) alpha = 0.75f
                 setPadding(0, dp(8), 0, dp(4))
             })
         }
-        title("Library Poster Service")
+
+        title(content, "Library Poster Service")
         val service = Spinner(context).apply {
             adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item,
                 PosterService.entries.map { it.title })
             setSelection(saved.service.ordinal)
         }
         content.addView(service)
-        title("Service API Key / Token")
+
+        val keyGroup = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        title(keyGroup, "Service API Key / Token")
         val key = EditText(context).apply {
             hint = "API Key"
             setSingleLine(true)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             setText(saved.key)
         }
-        content.addView(key, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+        keyGroup.addView(key, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT))
-        title("Poster URL Template (optional; required for XRDB)")
+        content.addView(keyGroup)
+
+        val xrdbGroup = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        title(xrdbGroup, "XRDB Poster URL Template")
         val template = EditText(context).apply {
-            hint = "https://.../{key}/.../{id}.jpg"
+            hint = "https://.../poster/tmdb:{type}:{tmdb}"
             maxLines = 3
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             setText(saved.template)
         }
-        content.addView(template, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+        xrdbGroup.addView(template, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT))
-        title("Tokens: {key}, {id}, {imdb}, {tmdb}, {type}, {id_type}, {tmdb_type}. " +
-            "For XRDB, paste your saved profile poster URL and replace its title ID with a token. " +
-            "Leave blank for the other services' standard poster URL.", true)
+        title(xrdbGroup, "Paste the XRDB profile poster URL. Replace the title ID with " +
+            "{id}, {imdb}, {tmdb}, or tmdb:{type}:{tmdb}. " +
+            "Other tokens: {id_type}, {tmdb_type}. No separate API key is required.", true)
+        content.addView(xrdbGroup)
+
+        fun updateServiceFields() {
+            val xrdb = PosterService.entries[service.selectedItemPosition] == PosterService.XRDB
+            keyGroup.visibility = if (xrdb) View.GONE else View.VISIBLE
+            xrdbGroup.visibility = if (xrdb) View.VISIBLE else View.GONE
+        }
+        service.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: AdapterView<*>?, view: View?, position: Int, id: Long
+            ) = updateServiceFields()
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+        updateServiceFields()
+
         return {
             context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
                 .putString("service", PosterService.entries[service.selectedItemPosition].name)

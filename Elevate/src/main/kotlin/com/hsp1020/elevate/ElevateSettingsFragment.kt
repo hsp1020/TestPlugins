@@ -65,6 +65,7 @@ class ElevateSettingsFragment : DialogFragment() {
         }
         scroll.addView(content)
         val preferences = ctx.applicationContext.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
+        var savePosterSettings: (() -> Unit)? = null
         ElevateFeature.entries.groupBy { it.section }.forEach { (section, features) ->
             content.addView(TextView(ctx).apply {
                 text = section
@@ -92,22 +93,34 @@ class ElevateSettingsFragment : DialogFragment() {
                     setPadding(0, dp(3), 0, 0)
                 })
                 row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                val posterControls = if (feature == ElevateFeature.LIBRARY_POSTERS) {
+                    LinearLayout(ctx).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(dp(8), 0, 0, dp(12))
+                    }
+                } else null
                 row.addView(SwitchCompat(ctx).apply {
                     isChecked = preferences.getBoolean(feature.name, ElevateFeaturePrefs.defaultEnabled(feature))
                     contentDescription = feature.label
+                    posterControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     setOnCheckedChangeListener { _, checked ->
                         preferences.edit().putBoolean(feature.name, checked).apply()
+                        posterControls?.visibility =
+                            if (checked) android.view.View.VISIBLE else android.view.View.GONE
                     }
                 }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
                 content.addView(row)
+                posterControls?.let { container ->
+                    savePosterSettings = LibraryPosterPrefs.controls(ctx, container, ::dp)
+                    content.addView(container)
+                }
             }
         }
-        val savePosterSettings = LibraryPosterPrefs.controls(ctx, content, ::dp)
         return AlertDialog.Builder(ctx)
             .setTitle("Elevate Settings")
             .setView(scroll)
-            .setPositiveButton("Save & Close") { _, _ -> savePosterSettings() }
+            .setPositiveButton("Save & Close") { _, _ -> savePosterSettings?.invoke() }
             .create()
     }
 }
