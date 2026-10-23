@@ -540,7 +540,7 @@ internal fun catalogStyledSelector(activity: FragmentActivity): AppCompatSpinner
         }
     }.apply {
         id = View.generateViewId()
-        minimumHeight = dp(36)
+        minimumHeight = dp(44)
         isFocusable = true
         setPopupBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryGrayBackground)))
         val cardBg = androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, R.drawable.bg_color_both)?.mutate()
@@ -1174,11 +1174,11 @@ internal class CatalogBrowserDialog(
                 gravity = Gravity.CENTER_VERTICAL
                 setTextColor(activity.colorFromAttribute(R.attr.textColor))
                 setSingleLine(true)
-            }, LinearLayout.LayoutParams(dp(82), dp(36)))
+            }, LinearLayout.LayoutParams(dp(82), dp(44)))
             addView(FrameLayout(activity).apply {
                 addView(spinner, FrameLayout.LayoutParams(-1, -1))
                 addView(arrow, FrameLayout.LayoutParams(dp(40), -1, Gravity.END))
-            }, LinearLayout.LayoutParams(0, dp(36), 1f))
+            }, LinearLayout.LayoutParams(0, dp(44), 1f))
         }
 
     private fun AppCompatSpinner.choices(title: String, labels: List<String>, selected: Int, choose: (Int) -> Unit) {
@@ -1254,7 +1254,7 @@ internal class CatalogBrowserDialog(
                     }
                 }
                 backButton = back
-                addView(back, LinearLayout.LayoutParams(dp(25), dp(36)))
+                addView(back, LinearLayout.LayoutParams(dp(25), dp(44)))
                 val searchField = FrameLayout(activity).apply {
                     setBackgroundResource(R.drawable.search_background)
                     val input = SearchView(activity).apply {
@@ -1306,18 +1306,18 @@ internal class CatalogBrowserDialog(
                         }
                     }
                 }
-                addView(searchField, LinearLayout.LayoutParams(0, dp(36), 1f).apply {
+                addView(searchField, LinearLayout.LayoutParams(0, dp(44), 1f).apply {
                     marginStart = dp(10)
                 })
             }
-            addView(navigationRow, LinearLayout.LayoutParams(-1, dp(36)))
+            addView(navigationRow, LinearLayout.LayoutParams(-1, dp(44)))
             inlineSelectors = listOf(
                 selectorRow("Type", typeSelector, typeArrow),
                 selectorRow("Catalog", catalogSelector, catalogArrow),
                 selectorRow("Genre", genreSelector, genreArrow)
             )
             inlineSelectors.forEach { selector ->
-                addView(selector, LinearLayout.LayoutParams(-1, dp(36)).apply {
+                addView(selector, LinearLayout.LayoutParams(-1, dp(44)).apply {
                     marginStart = dp(10)
                     marginEnd = dp(12)
                 })
