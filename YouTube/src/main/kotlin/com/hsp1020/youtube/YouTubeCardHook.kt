@@ -175,6 +175,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 override fun onChildViewAttachedToWindow(view: View) {
                     syncAdapter()
                     apply(view)
+                    if (!isParent) view.post {
+                        if (view.parent === list && watchers[list] === this@Watcher) apply(view)
+                    }
                 }
 
                 override fun onChildViewDetachedFromWindow(view: View) {
@@ -249,7 +252,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 val image = view.findViewById<ImageView>(R.id.imageView) ?: return
                 val state = modified[view] ?: CardState(title, card, image).also { modified[view] = it }
                 val expanded = !card.contains(title)
-                val lines = if (expanded) 4 else 2
+                val lines = 4
                 if (Build.VERSION.SDK_INT >= 29 && title.isSingleLine) title.setSingleLine(false)
                 if (title.maxLines != lines) title.maxLines = lines
                 if (title.minLines != 1) title.minLines = 1
@@ -279,6 +282,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                         if (shorts) wide else (wide * 9f / 16f).roundToInt()
                     )
                 }
+                if (expanded && role != Role.DIALOG_GRID) {
+                    val titleWidth = card.layoutParams.width.takeIf { it > 0 }
+                        ?: card.width.takeIf { it > 0 }
+                    if (titleWidth != null) state.setTitleWidth(titleWidth)
+                }
             }
 
             private fun restore(view: View) {
@@ -297,9 +305,20 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         private val cardWidth = card.layoutParams.width
         private val cardHeight = card.layoutParams.height
         private val imageHeight = image.layoutParams.height
+        private val titleWidth = title.layoutParams.width
+        private var changedTitleWidth = false
         private val horizontal = Build.VERSION.SDK_INT >= 29 && title.isSingleLine
         private var changedCard = false
         private var changedImage = false
+
+        fun setTitleWidth(width: Int) {
+            val params = title.layoutParams
+            if (params.width != width) {
+                params.width = width
+                title.layoutParams = params
+            }
+            changedTitleWidth = true
+        }
 
         fun setCardSize(width: Int, height: Int) {
             val params = card.layoutParams
@@ -330,6 +349,14 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
 
         fun restoreSize() {
+            if (changedTitleWidth) {
+                val params = title.layoutParams
+                if (params.width != titleWidth) {
+                    params.width = titleWidth
+                    title.layoutParams = params
+                }
+                changedTitleWidth = false
+            }
             if (changedCard) {
                 val params = card.layoutParams
                 if (params.width != cardWidth || params.height != cardHeight) {
