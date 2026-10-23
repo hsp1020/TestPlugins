@@ -1219,7 +1219,7 @@ internal class CatalogBrowserDialog(
         val headerColor = activity.colorFromAttribute(R.attr.primaryBlackBackground)
         val controls = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(10), 0, 0)
+            setPadding(0, 0, 0, 0)
             setBackgroundColor(headerColor)
             val navigationRow = LinearLayout(activity).apply {
                 gravity = Gravity.CENTER_VERTICAL
@@ -1372,8 +1372,17 @@ internal class CatalogBrowserDialog(
             val statusTop = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
             val position = IntArray(2)
             view.getLocationOnScreen(position)
-            val safeTop = dp(8) + (statusTop - position[1]).coerceAtLeast(0)
-            if (view.paddingTop != safeTop) view.setPadding(0, safeTop, 0, 0)
+            val safeTop = (statusTop - position[1]).coerceAtLeast(0)
+            val homeToolbar = activity.findViewById<View>(R.id.home_padding)
+            val homeTop = homeToolbar?.takeIf {
+                it.isAttachedToWindow && it.height > 0 && it.getGlobalVisibleRect(Rect())
+            }?.let { toolbar ->
+                val at = IntArray(2)
+                toolbar.getLocationOnScreen(at)
+                at[1] - position[1]
+            }
+            val alignedTop = homeTop?.coerceAtLeast(safeTop) ?: safeTop
+            if (view.paddingTop != alignedTop) view.setPadding(0, alignedTop, 0, 0)
             insets
         }
         grid.spanCount = activity.getSpanCount(false)
@@ -1460,6 +1469,7 @@ internal class CatalogBrowserDialog(
         ViewCompat.requestApplyInsets(root)
         dialog.window?.setBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryBlackBackground)))
         fitWindowToNavigation()
+        root.post { if (!closed && dialog.isShowing) ViewCompat.requestApplyInsets(root) }
         dialog.window?.setWindowAnimations(0)
         dialog.window?.setSoftInputMode(
             WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
