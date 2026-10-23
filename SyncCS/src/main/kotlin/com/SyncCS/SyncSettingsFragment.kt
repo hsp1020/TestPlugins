@@ -587,11 +587,11 @@ class SyncSettingsFragment : DialogFragment() {
                     else -> manual.forEach { revision ->
                         body.addView(settingRow(host,
                             "User backup · " + revision.timestamp,
-                            "Restore point · " + revision.id.take(12))
+                            "Restore point · " + revision.id.take(12)
                         ) {
                             picker.dismiss()
                             confirmGithubRestore(revision)
-                        }
+                        })
                     }
                 }
                 heading("GITHUB BACKUP HISTORY")
@@ -609,7 +609,7 @@ class SyncSettingsFragment : DialogFragment() {
                         ) {
                             picker.dismiss()
                             confirmGithubRestore(revision)
-                        }
+                        })
                     }
                 }
                 picker.show()
