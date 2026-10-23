@@ -329,6 +329,25 @@ class SyncDomainRegressionTest {
         assertEquals(1, attempts)
     }
 
+    @Test fun manualBackupReferencesAreSeparateAndSorted() {
+        val a = "1".repeat(40)
+        val b = "2".repeat(40)
+        val records = JSONArray()
+            .put(JSONObject().put("ref", "refs/tags/synccs/manual/20261023T120100Z-abcdef123456")
+                .put("object", JSONObject().put("type", "commit").put("sha", a)))
+            .put(JSONObject().put("ref", "refs/tags/synccs/manual/20261023T121100Z-abcdef123457")
+                .put("object", JSONObject().put("type", "commit").put("sha", b)))
+            .put(JSONObject().put("ref", "refs/tags/other-branch")
+                .put("object", JSONObject().put("type", "commit").put("sha", a)))
+            .put(JSONObject().put("ref", "refs/tags/synccs/manual/20261023T121200Z-abcdef123458")
+                .put("object", JSONObject().put("type", "tag").put("sha", a)))
+        val parsed = GithubBackupStore("unused", "unused").parseManualBackups(records)
+        assertEquals(2, parsed.size)
+        assertEquals(b, parsed[0].id)
+        assertEquals(a, parsed[1].id)
+        assertTrue(parsed.all { it.summary == "SyncCS user backup" })
+    }
+
     @Test fun interruptedSyncMustNotRollbackNewGithubCredentials() {
         for (key in listOf("github_token", "github_login", "github_account_id",
                 "github_client_id", "sync_transport", "secret")) {

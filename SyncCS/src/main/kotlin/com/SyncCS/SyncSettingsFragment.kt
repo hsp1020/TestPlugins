@@ -239,8 +239,16 @@ class SyncSettingsFragment : DialogFragment() {
 
         body.addView(settingRow(
             context,
+            "Create GitHub user backup",
+            "Save a dated restore point after verified synchronization"
+        ) {
+            confirmManualBackup()
+        })
+
+        body.addView(settingRow(
+            context,
             "Restore backups",
-            "Choose a GitHub revision or this device's encrypted original backup"
+            "Device originals, GitHub user backups and automatic history"
         ) {
             showBackupHistory()
         })
@@ -425,6 +433,73 @@ class SyncSettingsFragment : DialogFragment() {
         return field
     }
 
+    private fun confirmManualBackup() {
+        val host = requireActivity()
+        val config = SyncConfiguration(host)
+        if (!config.active() || SyncAuthGuard.needsReauthentication(config) ||
+            LocalSyncJournal.pending(host) ||
+            config.preferences.getBoolean("github_recovery_in_progress", false)) {
+            AlertDialog.Builder(host).setTitle("GitHub account not ready")
+                .setMessage("Connect GitHub and complete any pending recovery before creating a user backup.")
+                .setPositiveButton("Close", null).show()
+            return
+        }
+        AlertDialog.Builder(host).setTitle("Create GitHub user backup?")
+            .setMessage("First synchronize and verify all changes, then save a permanent " +
+                "restore point in your private GitHub repository. This does not create " +
+                "a second copy of the data or replace existing backups.")
+            .setPositiveButton("Back up now") { _, _ ->
+                lifecycleScope.launch {
+                    val progress = showSyncProgress()
+                    try {
+                        val checkpoint = withContext(Dispatchers.IO) {
+                            val result = SyncCoordinator.synchronize(host.applicationContext, host)
+                            check(result.startsWith("Synced:")) {
+                                "Cannot create user backup: $result"
+                            }
+                            check(!SyncAuthGuard.needsReauthentication(config) &&
+                                !config.preferences.getBoolean("github_recovery_in_progress", false)) {
+                                "GitHub authorization or recovery is incomplete."
+                            }
+                            val encryptedToken = config.preferences.getString("github_token", null)
+                                ?: error("Missing GitHub token")
+                            val store = GithubBackupStore(
+                                String(LocalVault.decrypt(encryptedToken), Charsets.UTF_8),
+                                config.preferences.getString("github_login", null)
+                                    ?: error("Missing GitHub account"),
+                                deviceName = config.deviceName, deviceId = config.deviceId)
+                            val snapshot = store.current(SyncCipher.saved(config))
+                                ?: error("No verified GitHub backup is available.")
+                            check(config.preferences.getString("github_base_revision", null)
+                                == snapshot.revision) {
+                                "GitHub changed during user backup. Sync again before retrying."
+                            }
+                            store.createManualBackup(snapshot)
+                        }
+                        progress.dialog.dismiss()
+                        AlertDialog.Builder(host).setTitle("GitHub user backup saved")
+                            .setMessage("Restore point: " + checkpoint.timestamp +
+                                "\nRevision: " + checkpoint.id.take(12) +
+                                "\nNo existing backup was replaced.")
+                            .setPositiveButton("View backups") { _, _ -> showBackupHistory() }
+                            .setNegativeButton("Close", null).show()
+                    } catch (cancelled: CancellationException) {
+                        progress.dialog.dismiss()
+                        throw cancelled
+                    } catch (error: Exception) {
+                        progress.dialog.dismiss()
+                        SyncTrace.info("github-user-backup",
+                            "event=failed type=${error.javaClass.simpleName}")
+                        AlertDialog.Builder(host).setTitle("GitHub user backup failed")
+                            .setMessage((error.message ?: error.javaClass.simpleName).take(300) +
+                                "\nNo user backup marker was created.")
+                            .setPositiveButton("Close", null).show()
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
     private fun showBackupHistory() {
         val host = requireActivity()
         if (LocalSyncJournal.pending(host)) {
@@ -439,9 +514,12 @@ class SyncSettingsFragment : DialogFragment() {
             try {
                 val local = withContext(Dispatchers.IO) { LocalOriginalBackup.list(host) }
                 var historyError: String? = null
-                val remote = if (config.active()) {
-                    try {
-                        withContext(Dispatchers.IO) {
+                var userBackupError: String? = null
+                var remote = emptyList<GithubBackupStore.Revision>()
+                var manual = emptyList<GithubBackupStore.Revision>()
+                if (config.active()) {
+                    withContext(Dispatchers.IO) {
+                        try {
                             val encryptedToken = config.preferences.getString("github_token", null)
                                 ?: error("Missing GitHub token")
                             val store = GithubBackupStore(
@@ -451,32 +529,39 @@ class SyncSettingsFragment : DialogFragment() {
                                 deviceName = config.deviceName, deviceId = config.deviceId)
                             val current = store.current(SyncCipher.saved(config))
                                 ?: error("No GitHub backup available.")
-                            store.history(current.branch, 30)
-                                .filter { it.id != current.revision && it.summary.startsWith("SyncCS ") }
+                            try {
+                                remote = store.history(current.branch, 30)
+                                    .filter { it.id != current.revision &&
+                                        it.summary.startsWith("SyncCS ") }
+                            } catch (error: Exception) {
+                                historyError = error.message ?: error.javaClass.simpleName
+                            }
+                            try {
+                                manual = store.manualBackups()
+                            } catch (error: Exception) {
+                                userBackupError = error.message ?: error.javaClass.simpleName
+                            }
+                        } catch (error: Exception) {
+                            historyError = error.message ?: error.javaClass.simpleName
+                            userBackupError = historyError
                         }
-                    } catch (error: Exception) {
-                        historyError = error.message ?: error.javaClass.simpleName
-                        emptyList()
                     }
-                } else emptyList()
-
-                progress.dialog.dismiss()
-                if (local.isEmpty() && remote.isEmpty()) {
-                    AlertDialog.Builder(host).setTitle("No backup available")
-                        .setMessage(historyError?.let { "GitHub history unavailable: $it" }
-                            ?: "No local original backup or earlier GitHub revision was found.")
-                        .setPositiveButton("Close", null).show()
-                    return@launch
                 }
+                progress.dialog.dismiss()
                 val body = column(host)
                 val picker = AlertDialog.Builder(host)
                     .setTitle("Choose backup to restore")
                     .setView(scroll(host, body))
                     .setNegativeButton("Close", null).create()
-                if (local.isNotEmpty()) {
-                    body.addView(secondary(host, "DEVICE ORIGINAL BACKUPS").apply {
+                fun heading(title: String) {
+                    body.addView(secondary(host, title).apply {
                         setPadding(dp(host, 12), dp(host, 14), 0, dp(host, 4))
                     })
+                }
+                heading("DEVICE ORIGINAL BACKUPS")
+                if (local.isEmpty()) {
+                    body.addView(secondary(host, "No original backup on this device."))
+                } else {
                     val formatter = java.text.SimpleDateFormat(
                         "yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
                     local.forEach { entry ->
@@ -491,29 +576,46 @@ class SyncSettingsFragment : DialogFragment() {
                         })
                     }
                 }
-                if (config.active()) {
-                    body.addView(secondary(host, "GITHUB BACKUP HISTORY").apply {
-                        setPadding(dp(host, 12), dp(host, 14), 0, dp(host, 4))
-                    })
-                    remote.forEach { revision ->
+                heading("GITHUB USER BACKUPS")
+                when {
+                    !config.active() -> body.addView(secondary(host,
+                        "Connect GitHub to view saved user backups."))
+                    userBackupError != null -> body.addView(secondary(host,
+                        "GitHub user backups unavailable: " + userBackupError.take(160)))
+                    manual.isEmpty() -> body.addView(secondary(host,
+                        "No user backups saved yet. Use Create GitHub user backup."))
+                    else -> manual.forEach { revision ->
+                        body.addView(settingRow(host,
+                            "User backup · " + revision.timestamp,
+                            "Restore point · " + revision.id.take(12))
+                        ) {
+                            picker.dismiss()
+                            confirmGithubRestore(revision)
+                        }
+                    }
+                }
+                heading("GITHUB BACKUP HISTORY")
+                when {
+                    !config.active() -> body.addView(secondary(host,
+                        "Connect GitHub to browse recent automatic revisions."))
+                    historyError != null -> body.addView(secondary(host,
+                        "GitHub history unavailable: " + historyError.take(160)))
+                    remote.isEmpty() -> body.addView(secondary(host,
+                        "No earlier SyncCS revisions in the latest 30 commits."))
+                    else -> remote.forEach { revision ->
                         body.addView(settingRow(host,
                             "GitHub revision · " + revision.timestamp,
                             revision.summary.take(100)
                         ) {
                             picker.dismiss()
                             confirmGithubRestore(revision)
-                        })
+                        }
                     }
-                    if (historyError != null) {
-                        body.addView(secondary(host,
-                            "GitHub history unavailable: " + historyError.take(160)))
-                    }
-                } else {
-                    body.addView(secondary(host,
-                        "GitHub revision history is available after signing in. " +
-                            "Local originals can be restored without a GitHub connection."))
                 }
                 picker.show()
+            } catch (cancelled: CancellationException) {
+                progress.dialog.dismiss()
+                throw cancelled
             } catch (error: Exception) {
                 progress.dialog.dismiss()
                 AlertDialog.Builder(host).setTitle("Backup list unavailable")

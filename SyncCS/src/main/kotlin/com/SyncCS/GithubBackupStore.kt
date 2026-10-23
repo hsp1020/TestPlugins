@@ -224,6 +224,71 @@ internal class GithubBackupStore(
         readAt(revision, branch, cipher)
 
     data class Revision(val id: String, val summary: String, val timestamp: String)
+    private val manualRefPrefix = "refs/tags/synccs/manual/"
+    private val manualName = Regex("""\d{8}T\d{6}Z-[0-9a-f]{12}""")
+
+    internal fun parseManualBackups(rows: JSONArray): List<Revision> {
+        val formatter = java.text.SimpleDateFormat("yyyyMMdd'T'HHmmss'Z'", java.util.Locale.US)
+            .apply {
+                timeZone = java.util.TimeZone.getTimeZone("UTC")
+                isLenient = false
+            }
+        val display = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss 'UTC'", java.util.Locale.US)
+            .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+        return (0 until rows.length()).mapNotNull { index ->
+            val row = rows.getJSONObject(index)
+            val ref = row.optString("ref")
+            if (!ref.startsWith(manualRefPrefix)) return@mapNotNull null
+            val name = ref.removePrefix(manualRefPrefix)
+            if (!manualName.matches(name)) return@mapNotNull null
+            val objectInfo = row.optJSONObject("object") ?: return@mapNotNull null
+            if (objectInfo.optString("type") != "commit") return@mapNotNull null
+            val id = objectInfo.optString("sha")
+            if (!id.matches(Regex("[0-9a-f]{40}"))) return@mapNotNull null
+            val timestamp = runCatching { formatter.parse(name.substringBefore('-')) }.getOrNull()
+                ?: return@mapNotNull null
+            Revision(id, "SyncCS user backup", display.format(timestamp))
+        }.sortedByDescending { it.timestamp }
+    }
+
+    fun manualBackups(): List<Revision> {
+        val url = apiRoot + "/git/matching-refs/tags/synccs/manual/"
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.connectTimeout = 12000
+        conn.readTimeout = 25000
+        conn.setRequestProperty("Authorization", "Bearer $token")
+        conn.setRequestProperty("Accept", "application/vnd.github+json")
+        conn.setRequestProperty("User-Agent", "SyncCS-Backup")
+        try {
+            val status = conn.responseCode
+            if (status == 404) return emptyList()
+            if (status != 200) throw ApiException(status,
+                "Cannot load GitHub user backups (HTTP $status).")
+            return parseManualBackups(JSONArray(String(conn.inputStream.use {
+                it.readBytes()
+            }, Charsets.UTF_8)))
+        } finally { conn.disconnect() }
+    }
+
+    fun createManualBackup(snapshot: Snapshot): Revision {
+        require(snapshot.revision.matches(Regex("[0-9a-f]{40}")))
+        check(revision(snapshot.branch) == snapshot.revision) {
+            "GitHub backup changed after syncing. Sync again before creating a user backup."
+        }
+        val date = java.text.SimpleDateFormat("yyyyMMdd'T'HHmmss'Z'", java.util.Locale.US)
+            .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+            .format(java.util.Date())
+        val suffix = java.util.UUID.randomUUID().toString().replace("-", "").take(12)
+        val ref = manualRefPrefix + date + "-" + suffix
+        write("/git/refs", "POST", JSONObject()
+            .put("ref", ref).put("sha", snapshot.revision))
+        SyncTrace.info("github-user-backup",
+            "event=created revision=${snapshot.revision.take(12)}")
+        return Revision(snapshot.revision, "SyncCS user backup",
+            date.substring(0, 4) + "-" + date.substring(4, 6) + "-" + date.substring(6, 8) +
+                " " + date.substring(9, 11) + ":" + date.substring(11, 13) +
+                ":" + date.substring(13, 15) + " UTC")
+    }
 
     /** Read-only history for explicit user-directed rollback. */
     fun history(branch: String, limit: Int = 20): List<Revision> {
