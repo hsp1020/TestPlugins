@@ -341,19 +341,27 @@ internal class LibraryPosterHook(private val appContext: Application) :
             val account = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
             val userId = account?.authData()?.user?.id?.toString()
             val library = userId?.let {
-                getKey<SimklApi.AllItemsResponse>(SimklApi.SIMKL_CACHED_LIST, it)
+                getKey<com.fasterxml.jackson.databind.JsonNode>(SimklApi.SIMKL_CACHED_LIST, it)
             }
-            val all = library?.movies.orEmpty().map { it.movie.ids } +
-                library?.shows.orEmpty().map { it.show.ids } +
-                library?.anime.orEmpty().map { it.show.ids }
-            all.firstOrNull {
-                when (provider) {
-                    "simkl" -> it.simkl.toString() == numeric
-                    "mal" -> it.mal == numeric
-                    "anilist" -> it.anilist == numeric
-                    else -> false
+            var matched: PosterIds? = null
+            for (section in listOf("movies", "shows", "anime")) {
+                val items = library?.get(section) ?: continue
+                for (entry in items) {
+                    val external = entry.get(if (section == "movies") "movie" else "show")
+                        ?.get("ids") ?: continue
+                    val matches = when (provider) {
+                        "simkl" -> external.get("simkl")?.asText() == numeric
+                        "mal" -> external.get("mal")?.asText() == numeric
+                        "anilist" -> external.get("anilist")?.asText() == numeric
+                        else -> false
+                    }
+                    if (!matches) continue
+                    matched = ids(external.get("imdb")?.asText(), external.get("tmdb")?.asText())
+                    if (matched != null) break
                 }
-            }?.let { ids(it.imdb, it.tmdb) }
+                if (matched != null) break
+            }
+            matched
         }.getOrNull()
         if (cached != null) return cached
         if (provider == "simkl") return null
