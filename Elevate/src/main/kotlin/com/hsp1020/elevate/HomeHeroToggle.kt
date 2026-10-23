@@ -161,7 +161,7 @@ internal class HomeHeroToggle(private val app: Application) :
         private fun enforceHidden() {
             if (mobileHolder != null) {
                 val density = root.resources.displayMetrics.density
-                val gap = (12 * density + 0.5f).toInt()
+                val gap = (4 * density + 0.5f).toInt()
                 val controls = toolbar
                 val margins = controls?.layoutParams as? ViewGroup.MarginLayoutParams
                 val controlHeight = controls?.height?.takeIf { it > 0 }
