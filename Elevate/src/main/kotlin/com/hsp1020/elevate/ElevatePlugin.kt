@@ -89,7 +89,6 @@ class ElevatePlugin : Plugin() {
                         }
                     }
                 }.also(preferences::registerOnSharedPreferenceChangeListener)
-                homeHero = HomeHeroToggle(application).also { it.start() }
                 syncFeatures()
             } catch (failure: Exception) {
                 stopAll()
@@ -120,7 +119,13 @@ class ElevatePlugin : Plugin() {
             searchProviderOrder?.stop()
             searchProviderOrder = null
         }
-        homeHero?.setHidden(enabled(ElevateFeature.HERO_CAROUSEL))
+        if (enabled(ElevateFeature.HERO_CAROUSEL)) {
+            if (homeHero == null) homeHero = HomeHeroToggle(application).also { it.start() }
+            homeHero?.setHidden(true)
+        } else {
+            homeHero?.stop()
+            homeHero = null
+        }
         if (enabled(ElevateFeature.HOME_REPAIR)) {
             if (homeRecyclerGuard == null) {
                 homeRecyclerGuard = HomeRecyclerCacheGuard(application).also { it.start() }

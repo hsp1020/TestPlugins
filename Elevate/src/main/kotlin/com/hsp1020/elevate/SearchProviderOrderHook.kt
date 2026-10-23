@@ -356,12 +356,14 @@ internal class SearchProviderOrderHook(private val app: Application) :
             }
             val context = fragment.context ?: return@Observer
             val adapter = recycler?.adapter as? ParentItemAdapter ?: return@Observer
+            val ranks = stableEntries.associate { (name, _) -> name to rank(name) }
+            val providerIndices = mutableMapOf<String, Int>()
+            APIHolder.allProviders.forEachIndexed { index, provider ->
+                providerIndices.putIfAbsent(provider.name, index)
+            }
             val rows = stableEntries.sortedWith(
-                compareBy<Pair<String, ExpandableSearchList>> { rank(it.first) }
-                    .thenBy { entry ->
-                        APIHolder.allProviders.indexOfFirst { it.name == entry.first }
-                            .takeIf { it >= 0 } ?: Int.MAX_VALUE
-                    }
+                compareBy<Pair<String, ExpandableSearchList>> { ranks[it.first] ?: Int.MAX_VALUE }
+                    .thenBy { providerIndices[it.first] ?: Int.MAX_VALUE }
                     .thenBy { it.first.lowercase() }
             ).map { (name, value) ->
                 HomeViewModel.ExpandableHomepageList(
@@ -583,8 +585,10 @@ internal class SearchProviderOrderHook(private val app: Application) :
                         Row(name, index)
                     }
                     val specials = next.take(2)
+                    val ranks = next.drop(2).associate { it.name to rank(it.name) }
                     val ordered = next.drop(2).sortedWith(
-                        compareBy<Row> { rank(it.name) }.thenBy { it.name.lowercase() }
+                        compareBy<Row> { ranks[it.name] ?: Int.MAX_VALUE }
+                            .thenBy { it.name.lowercase() }
                     )
                     entries.clear()
                     entries.addAll(specials + ordered)

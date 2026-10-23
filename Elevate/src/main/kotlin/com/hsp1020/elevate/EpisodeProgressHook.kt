@@ -86,6 +86,7 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
         private val tree = root.viewTreeObserver
         private var list: RecyclerView? = null
         private var adapter: RecyclerView.Adapter<*>? = null
+        private var refreshScheduled = false
         private val rows = mutableMapOf<View, RowProgress>()
         private val dataObserver = object : RecyclerView.AdapterDataObserver() {
             override fun onChanged() = scheduleRefresh()
@@ -120,19 +121,22 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
         private fun syncList() {
             if (!fragment.isAdded || fragment.view !== root) return
             val target = root.findViewById<RecyclerView>(R.id.result_episodes)
+            var changed = false
             if (target !== list) {
                 releaseList()
                 list = target
                 target?.addOnChildAttachStateChangeListener(children)
                 target?.addOnLayoutChangeListener(listLayout)
+                changed = true
             }
             val nextAdapter = target?.adapter
             if (adapter !== nextAdapter) {
                 adapter?.unregisterAdapterDataObserver(dataObserver)
                 adapter = nextAdapter
                 nextAdapter?.registerAdapterDataObserver(dataObserver)
+                changed = true
             }
-            refreshRows()
+            if (changed) refreshRows()
         }
 
         private fun releaseList() {
@@ -146,8 +150,11 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
         }
 
         private fun scheduleRefresh() {
+            if (refreshScheduled) return
             val recycler = list ?: return
+            refreshScheduled = true
             recycler.postOnAnimation {
+                refreshScheduled = false
                 if (list === recycler && fragment.view === root) refreshRows()
             }
         }
