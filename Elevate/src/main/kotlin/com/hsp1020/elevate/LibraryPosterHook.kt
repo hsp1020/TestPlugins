@@ -7,6 +7,8 @@ import android.content.SharedPreferences
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.net.Uri
 import android.view.View
 import android.widget.ImageView
 import android.widget.TextView
@@ -59,6 +61,9 @@ internal class LibraryPosterHook(private val appContext: Application) :
     private var pagerAdapter: RecyclerView.Adapter<*>? = null
     private var revision = 0
     private var config = LibraryPosterPrefs.get(appContext)
+    private var xrdbVersion: String? = null
+    private var xrdbCheckAt = 0L
+    private var xrdbCheck: Job? = null
 
     private data class CacheEntry(val value: PosterIds?, val time: Long)
     private data class Binding(
@@ -72,11 +77,16 @@ internal class LibraryPosterHook(private val appContext: Application) :
             val changed = LibraryPosterPrefs.get(appContext)
             if (config != changed) {
                 config = changed
+                xrdbCheck?.cancel()
+                xrdbCheck = null
+                xrdbVersion = null
+                xrdbCheckAt = 0L
                 revision++
                 cancelPending()
                 restoreAll()
                 unavailable.clear()
                 rescan()
+                if (library?.isResumed == true) checkXrdbVersion()
             }
         }
     }
@@ -86,6 +96,9 @@ internal class LibraryPosterHook(private val appContext: Application) :
         }
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
             if (library === f) unbind()
+        }
+        override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
+            if (f === library) checkXrdbVersion()
         }
     }
     private val parentListener = object : RecyclerView.OnChildAttachStateChangeListener {
@@ -146,9 +159,12 @@ internal class LibraryPosterHook(private val appContext: Application) :
         pagerRecycler?.addOnChildAttachStateChangeListener(parentListener)
         observePager()
         queueRescan()
+        if (next.isResumed) checkXrdbVersion()
     }
 
     private fun unbind() {
+        xrdbCheck?.cancel()
+        xrdbCheck = null
         revision++
         cancelPending()
         restoreAll()
@@ -278,10 +294,15 @@ internal class LibraryPosterHook(private val appContext: Application) :
         image.setTag(R.id.imageView, id)
         val token = revision
         val setting = config
+        val version = xrdbVersion
         pending[image] = scope.launch {
             try {
                 val ids = withContext(Dispatchers.IO) { resolve(item) } ?: return@launch
-                val poster = setting.image(ids, item.type == TvType.Movie) ?: return@launch
+                val originalPoster = setting.image(ids, item.type == TvType.Movie) ?: return@launch
+                val poster = if (setting.service == PosterService.XRDB && version != null) {
+                    Uri.parse(originalPoster).buildUpon().appendQueryParameter("v", version)
+                        .build().toString()
+                } else originalPoster
                 if (revision != token || image.getTag(R.id.imageView) != id ||
                     !image.isAttachedToWindow || poster in unavailable) return@launch
                 val entry = Binding(id, poster, item.posterUrl, item.posterHeaders)
@@ -315,6 +336,70 @@ internal class LibraryPosterHook(private val appContext: Application) :
     private fun cancelPending() {
         pending.values.toList().forEach { it.cancel() }
         pending.clear()
+    }
+
+    private fun checkXrdbVersion() {
+        val snapshot = config
+        if (snapshot.service != PosterService.XRDB || snapshot.xrdbProfile.isBlank() ||
+            library?.view == null) return
+        if (xrdbCheck?.isActive == true) return
+        val now = SystemClock.elapsedRealtime()
+        if (xrdbCheckAt != 0L && now - xrdbCheckAt in 0 until 5_000L) return
+        xrdbCheckAt = now
+        xrdbCheck = scope.launch {
+            val token = withContext(Dispatchers.IO) { fetchXrdbVersion(snapshot) }
+            if (config != snapshot || library?.view == null ||
+                token == null || token == xrdbVersion) return@launch
+            xrdbVersion = token
+            revision++
+            cancelPending()
+            restoreAll()
+            unavailable.clear()
+            rescan()
+        }
+    }
+
+    private suspend fun fetchXrdbVersion(snapshot: PosterConfig): String? {
+        val base = Uri.parse(snapshot.xrdbBase.trim().trimEnd('/'))
+        if (base.scheme != "https" || base.host.isNullOrBlank() ||
+            !base.userInfo.isNullOrEmpty() || !base.query.isNullOrEmpty() ||
+            !base.fragment.isNullOrEmpty()) return null
+
+        fun valid(value: String?): String? =
+            value?.takeIf { XRDB_VERSION.matches(it) }
+
+        val headers = if (snapshot.xrdbRenderKey.isBlank()) emptyMap() else
+            mapOf("Authorization" to "Bearer ${snapshot.xrdbRenderKey}")
+        val profileUrl = base.buildUpon().appendPath("profile")
+            .appendPath(snapshot.xrdbProfile).build().toString()
+        try {
+            val body = app.get(profileUrl, headers = headers, timeout = 6L).text
+            valid(JSONObject(body).optString("versionToken"))?.let { return it }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Password-protected profiles cannot expose the profile API without a password.
+        }
+
+        // The public XRDB Stremio metadata endpoint embeds the current version
+        // in meta.poster, including for password-protected profiles.
+        val fallback = base.buildUpon().appendPath("stremio")
+            .appendPath("c").appendPath(snapshot.xrdbProfile)
+            .appendPath("meta").appendPath("movie").appendPath("tt0111161.json")
+            .apply {
+                if (snapshot.xrdbRenderKey.isNotBlank()) {
+                    appendQueryParameter("key", snapshot.xrdbRenderKey)
+                }
+            }.build().toString()
+        return try {
+            val body = app.get(fallback, headers = headers, timeout = 8L).text
+            val poster = JSONObject(body).optJSONObject("meta")?.optString("poster")
+            valid(poster?.let { Uri.parse(it).getQueryParameter("v") })
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private suspend fun resolve(item: SyncAPI.LibraryItem): PosterIds? {
@@ -403,7 +488,10 @@ internal class LibraryPosterHook(private val appContext: Application) :
     }
 
     override fun onActivityResumed(activity: Activity) {
-        if (activity is MainActivity) use(activity)
+        if (activity is MainActivity) {
+            use(activity)
+            if (library?.isResumed == true) checkXrdbVersion()
+        }
     }
     override fun onActivityDestroyed(activity: Activity) {
         if (host === activity) detachActivity()
@@ -416,6 +504,7 @@ internal class LibraryPosterHook(private val appContext: Application) :
 
     private companion object {
         const val LIBRARY_CLASS = "com.lagradost.cloudstream3.ui.library.LibraryFragment"
+        val XRDB_VERSION = Regex("[a-fA-F0-9]{8}")
         val IMDB = Regex("tt[0-9]{5,10}")
         val TMDB = Regex("tmdb:(?:(?:movie|series|tv):)?([0-9]+)")
         val ANIME_HOSTS = listOf("aiostreams.elfhosted.com",
