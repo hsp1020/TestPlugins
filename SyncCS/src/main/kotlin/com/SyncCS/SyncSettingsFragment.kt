@@ -695,55 +695,94 @@ class SyncSettingsFragment : DialogFragment() {
                 val firstConnection = !config.active()
                 feedback.visibility = View.VISIBLE
                 githubLoginJob = lifecycleScope.launch {
+                    var authStep = "pending-token"
                     try {
-                        val challenge = withContext(Dispatchers.IO) {
-                            GithubDeviceCode.begin(client)
+                        val savedToken = withContext(Dispatchers.IO) {
+                            GithubAuthFlow.pending(config, client)
                         }
-                        deviceCode.text = challenge.userCode
-                        deviceCode.visibility = View.VISIBLE
-                        feedback.text = "Enter this code at " + challenge.verification +
-                            ". Tap the red code to copy it. " +
-                            "On Android TV, use a phone or computer."
-                        accountScroll.post { accountScroll.fullScroll(View.FOCUS_DOWN) }
-                        try {
-                            host.startActivity(Intent(Intent.ACTION_VIEW,
-                                Uri.parse(challenge.verification)))
-                        } catch (_: Exception) {
-                            feedback.text = "Open " + challenge.verification +
-                                " on a browser and enter the red code above."
-                        }
-                        var token: String? = null
-                        var interval = challenge.pollSeconds
-                        withTimeout(challenge.expiresSeconds * 1000L) {
-                            while (token == null) {
-                                delay(interval * 1000L)
-                                try {
-                                    token = withContext(Dispatchers.IO) {
-                                        GithubDeviceCode.poll(client, challenge)
-                                    }
-                                } catch (slow: java.io.IOException) {
-                                    if (slow.message?.contains("slower polling") == true) {
-                                        interval += 5
-                                    } else throw slow
+                        val accessToken = if (savedToken != null) {
+                            SyncTrace.info("github-auth-step", "step=pending-token event=reused")
+                            feedback.text = "Resuming GitHub setup with saved authorization..."
+                            savedToken
+                        } else {
+                            authStep = "device-code"
+                            SyncTrace.info("github-auth-step", "step=device-code event=start")
+                            val challenge = withContext(Dispatchers.IO) {
+                                GithubAuthFlow.retry("device-code") {
+                                    GithubDeviceCode.begin(client)
                                 }
                             }
+                            SyncTrace.info("github-auth-step", "step=device-code event=success")
+                            deviceCode.text = challenge.userCode
+                            deviceCode.visibility = View.VISIBLE
+                            feedback.text = "Enter this code at " + challenge.verification +
+                                ". Tap the red code to copy it. " +
+                                "On Android TV, use a phone or computer."
+                            accountScroll.post { accountScroll.fullScroll(View.FOCUS_DOWN) }
+                            try {
+                                host.startActivity(Intent(Intent.ACTION_VIEW,
+                                    Uri.parse(challenge.verification)))
+                            } catch (_: Exception) {
+                                feedback.text = "Open " + challenge.verification +
+                                    " on a browser and enter the red code above."
+                            }
+                            authStep = "access-token"
+                            SyncTrace.info("github-auth-step", "step=access-token event=start")
+                            var token: String? = null
+                            var interval = challenge.pollSeconds
+                            withTimeout(challenge.expiresSeconds * 1000L) {
+                                while (token == null) {
+                                    delay(interval * 1000L)
+                                    try {
+                                        token = withContext(Dispatchers.IO) {
+                                            GithubAuthFlow.retry("access-token") {
+                                                GithubDeviceCode.poll(client, challenge)
+                                            }.also { issued ->
+                                                // Persist on the IO thread before resuming the UI
+                                                // coroutine, even if the Activity is then closed.
+                                                if (issued != null) {
+                                                    GithubAuthFlow.save(config, client, issued)
+                                                }
+                                            }
+                                        }
+                                    } catch (slow: java.io.IOException) {
+                                        if (slow.message?.contains("slower polling") == true) {
+                                            interval += 5
+                                        } else throw slow
+                                    }
+                                }
+                            }
+                            SyncTrace.info("github-auth-step", "step=access-token event=success")
+                            token ?: error("GitHub authorization did not complete.")
                         }
-                        val accessToken = token ?: error("GitHub authorization did not complete.")
                         feedback.text = "GitHub authorized. Returning to CloudStream..."
                         returnToCloudStreamAfterAuthorization(host)
+                        authStep = "account-profile"
+                        SyncTrace.info("github-auth-step", "step=account-profile event=start")
                         val profile = withContext(Dispatchers.IO) {
-                            GithubDeviceCode.profile(accessToken)
+                            GithubAuthFlow.retry("account-profile") {
+                                GithubDeviceCode.profile(accessToken)
+                            }
                         }
+                        SyncTrace.info("github-auth-step", "step=account-profile event=success")
                         val previous = config.preferences.getString("github_account_id", null)
-                        check(previous == null || previous == profile.id) {
-                            "Different GitHub account: disconnect the current device first."
+                        if (previous != null && previous != profile.id) {
+                            withContext(Dispatchers.IO) { GithubAuthFlow.clear(config) }
+                            error("Different GitHub account: disconnect the current device first.")
                         }
                         feedback.text = "Verifying private repository and recovery key..."
-                        // Check repository privacy and passphrase BEFORE activating any sync.
-                        val existingBackup = withContext(Dispatchers.IO) {
-                            GithubBackupStore(accessToken, profile.login).current(
-                                SyncCipher.derive(phrase, "https://api.github.com", profile.id))
+                        // No active token, sync secret or upload before backup verification.
+                        authStep = "backup-verification"
+                        SyncTrace.info("github-auth-step", "step=backup-verification event=start")
+                        val verifiedCipher = withContext(Dispatchers.IO) {
+                            SyncCipher.derive(phrase, "https://api.github.com", profile.id)
                         }
+                        val existingBackup = withContext(Dispatchers.IO) {
+                            GithubAuthFlow.retry("backup-verification") {
+                                GithubBackupStore(accessToken, profile.login).current(verifiedCipher)
+                            }
+                        }
+                        SyncTrace.info("github-auth-step", "step=backup-verification event=success")
                         val createFirst = if (existingBackup == null) {
                             suspendCancellableCoroutine<Boolean> { continuation ->
                                 val approval = AlertDialog.Builder(host)
@@ -769,9 +808,10 @@ class SyncSettingsFragment : DialogFragment() {
                         check(existingBackup != null || createFirst) {
                             "Initial GitHub backup canceled; no remote data modified."
                         }
+                        authStep = "session-commit"
                         withContext(Dispatchers.IO) {
-                            SyncCipher.storeGithub(config, phrase, profile.id)
                             val edit = config.preferences.edit()
+                                .putString("secret", verifiedCipher.encryptForLocalStorage())
                                 .putString("github_token", LocalVault.encrypt(
                                     accessToken.toByteArray(Charsets.UTF_8)))
                                 .putString("github_account_id", profile.id)
@@ -781,6 +821,7 @@ class SyncSettingsFragment : DialogFragment() {
                                 .putBoolean("github_initial_backup_confirmed", createFirst)
                                 .putString("device_name", name)
                                 .remove("account_switch_blocked")
+                                .remove("github_pending_token").remove("github_pending_client")
                             if (previous == null) {
                                 edit.remove("base").remove("remote_cursor")
                                     .remove("remote_versions").remove("plugin_baseline")
@@ -794,6 +835,8 @@ class SyncSettingsFragment : DialogFragment() {
                             check(edit.commit()) { "Could not store GitHub session." }
                             SyncAuthGuard.clearAfterLogin(config)
                         }
+                        SyncTrace.info("github-auth-step", "step=session-commit event=success")
+                        authStep = "first-sync"
                         val progress = showSyncProgress()
                         try {
                             val report = withContext(Dispatchers.IO) {
@@ -814,10 +857,20 @@ class SyncSettingsFragment : DialogFragment() {
                             if (progress.dialog.isShowing) progress.dialog.dismiss()
                         }
                     } catch (timeout: TimeoutCancellationException) {
+                        SyncTrace.info("github-auth-failed",
+                            "step=$authStep type=TimeoutCancellationException http=0")
                         if (dialog.isShowing) feedback.text = "GitHub device authorization expired."
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (error: Exception) {
+                        val code = GithubAuthFlow.httpCode(error)
+                        SyncTrace.info("github-auth-failed",
+                            "step=$authStep type=${error.javaClass.simpleName} http=$code")
+                        if (code == 401 &&
+                            authStep in setOf("account-profile", "backup-verification")) {
+                            withContext(Dispatchers.IO) { GithubAuthFlow.clear(config) }
+                            SyncTrace.info("github-auth-pending", "event=discarded http=401")
+                        }
                         if (dialog.isShowing) feedback.text = "GitHub setup failed: " +
                             (error.message ?: error.javaClass.simpleName).take(220)
                     } finally {

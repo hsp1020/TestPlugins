@@ -482,7 +482,9 @@ internal object GithubDeviceCode {
         connection.setRequestProperty("Accept", "application/vnd.github+json")
         connection.setRequestProperty("User-Agent", "SyncCS-Backup")
         try {
-            check(connection.responseCode == 200) { "Cannot verify GitHub account." }
+            val status = connection.responseCode
+            if (status != 200) throw GithubBackupStore.ApiException(
+                status, "Cannot verify GitHub account (HTTP $status).")
             val response = JSONObject(String(connection.inputStream.use {
                 it.readBytes()
             }, Charsets.UTF_8))
@@ -514,7 +516,8 @@ internal object GithubDeviceCode {
             val status = connection.responseCode
             val response = (if (status in 200..299) connection.inputStream else connection.errorStream)
                 ?.use { it.readBytes() } ?: ByteArray(0)
-            if (status !in 200..299) throw IOException("GitHub OAuth HTTP $status")
+            if (status !in 200..299) throw GithubBackupStore.ApiException(
+                status, "GitHub OAuth HTTP $status")
             return JSONObject(String(response, Charsets.UTF_8))
         } finally {
             connection.disconnect()

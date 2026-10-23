@@ -290,6 +290,45 @@ class SyncDomainRegressionTest {
         assertTrue(apply.isEmpty())
     }
 
+    @Test fun pendingGithubOAuthCannotEnableUnverifiedSync() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val config = SyncConfiguration(context)
+        config.preferences.edit().clear()
+            .putString("github_pending_token", "encrypted-but-not-active")
+            .putString("github_pending_client", "test-client")
+            .commit()
+        assertFalse(config.active())
+        assertNull(GithubAuthFlow.pending(config, "other-client"))
+        assertFalse(config.active())
+        config.clearAccount()
+        assertFalse(config.preferences.contains("github_pending_token"))
+        assertFalse(config.preferences.contains("github_pending_client"))
+    }
+
+    @Test fun oauthNetworkRetryOnlyAcceptsTemporaryFailures() {
+        assertTrue(GithubAuthFlow.isTransient(java.net.UnknownHostException("offline")))
+        assertTrue(GithubAuthFlow.isTransient(java.net.SocketTimeoutException("timeout")))
+        assertTrue(GithubAuthFlow.isTransient(GithubBackupStore.ApiException(503, "temporary")))
+        assertFalse(GithubAuthFlow.isTransient(GithubBackupStore.ApiException(401, "revoked")))
+        assertFalse(GithubAuthFlow.isTransient(GithubBackupStore.ApiException(403, "forbidden")))
+        assertFalse(GithubAuthFlow.isTransient(GithubBackupStore.ApiException(404, "missing")))
+        assertFalse(GithubAuthFlow.isTransient(java.io.IOException("invalid passphrase")))
+    }
+
+    @Test fun oauthRetryNeverRepeatsUnauthorizedRequest() {
+        var attempts = 0
+        try {
+            GithubAuthFlow.retry("test-profile") {
+                attempts++
+                throw GithubBackupStore.ApiException(401, "rejected")
+            }
+            fail("401 must fail without retry")
+        } catch (error: GithubBackupStore.ApiException) {
+            assertEquals(401, error.code)
+        }
+        assertEquals(1, attempts)
+    }
+
     @Test fun interruptedSyncMustNotRollbackNewGithubCredentials() {
         for (key in listOf("github_token", "github_login", "github_account_id",
                 "github_client_id", "sync_transport", "secret")) {

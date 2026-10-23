@@ -54,7 +54,8 @@ internal class SyncConfiguration(context: Context) {
             "sync_transport", "account_switch_blocked",
             "github_local_recovery_saved", "github_local_restore_pause", "github_client_id",
             "github_initial_backup_confirmed", "github_recovery_in_progress",
-            "session", "oauth_pending", "configured", "email"
+            "session", "oauth_pending", "configured", "email",
+            "github_pending_token", "github_pending_client"
         )) editor.remove(key)
         check(editor.commit())
     }
@@ -110,6 +111,7 @@ internal class SyncCipher(private val key: ByteArray) {
         cipher.updateAAD(itemKey.toByteArray(Charsets.UTF_8))
         return String(cipher.doFinal(bytes.copyOfRange(12, bytes.size)), Charsets.UTF_8)
     }
+    fun encryptForLocalStorage(): String = LocalVault.encrypt(key)
     companion object {
         fun derive(password: String, url: String, userId: String): SyncCipher {
             require(password.length >= 12) { "Recovery passphrase must have at least 12 characters." }
@@ -120,12 +122,6 @@ internal class SyncCipher(private val key: ByteArray) {
             finally { spec.clearPassword() }
             return SyncCipher(derived)
         }
-        fun storeGithub(config: SyncConfiguration, password: String, userId: String) {
-            val cipher = derive(password, "https://api.github.com", userId)
-            check(config.preferences.edit().putString("secret",
-                LocalVault.encrypt(cipher.key)).commit())
-        }
-
         fun saved(config: SyncConfiguration): SyncCipher {
             val value = config.preferences.getString("secret", null) ?: error("Missing recovery key")
             return SyncCipher(LocalVault.decrypt(value))
@@ -147,5 +143,72 @@ internal class SyncBackend private constructor() {
         fun digestBytes(bytes: ByteArray): String =
             MessageDigest.getInstance("SHA-256").digest(bytes)
                 .joinToString("") { "%02x".format(it) }
+    }
+}
+
+// OAuth authorization is stored separately from an activated sync session.
+internal object GithubAuthFlow {
+    private const val PENDING_TOKEN = "github_pending_token"
+    private const val PENDING_CLIENT = "github_pending_client"
+
+    fun pending(config: SyncConfiguration, clientId: String): String? {
+        if (config.preferences.getString(PENDING_CLIENT, null) != clientId) return null
+        val encrypted = config.preferences.getString(PENDING_TOKEN, null) ?: return null
+        return try {
+            String(LocalVault.decrypt(encrypted), Charsets.UTF_8)
+        } catch (error: Exception) {
+            clear(config)
+            SyncTrace.info("github-auth-pending",
+                "event=invalid type=${error.javaClass.simpleName}")
+            null
+        }
+    }
+
+    fun save(config: SyncConfiguration, clientId: String, token: String) {
+        check(token.isNotBlank()) { "Empty GitHub authorization" }
+        val encrypted = LocalVault.encrypt(token.toByteArray(Charsets.UTF_8))
+        check(config.preferences.edit()
+            .putString(PENDING_CLIENT, clientId)
+            .putString(PENDING_TOKEN, encrypted)
+            .commit()) { "Could not preserve pending GitHub authorization" }
+        SyncTrace.info("github-auth-pending", "event=saved syncActiveUnchanged=true")
+    }
+
+    fun clear(config: SyncConfiguration) {
+        check(config.preferences.edit()
+            .remove(PENDING_TOKEN).remove(PENDING_CLIENT).commit()) {
+            "Could not clear pending GitHub authorization"
+        }
+    }
+
+    fun isTransient(error: java.io.IOException): Boolean =
+        when (error) {
+            is GithubBackupStore.ApiException -> error.code in setOf(500, 502, 503, 504)
+            is java.net.UnknownHostException, is java.net.SocketTimeoutException,
+            is java.net.ConnectException, is java.net.SocketException -> true
+            else -> false
+        }
+
+    fun httpCode(error: Exception): Int =
+        (error as? GithubBackupStore.ApiException)?.code ?: 0
+
+    fun <T> retry(step: String, action: () -> T): T {
+        repeat(3) { attempt ->
+            try {
+                return action()
+            } catch (error: java.io.IOException) {
+                if (!isTransient(error) || attempt == 2) throw error
+                SyncTrace.info("github-auth-retry",
+                    "step=$step attempt=${attempt + 1} " +
+                        "type=${error.javaClass.simpleName} http=${httpCode(error)}")
+                try {
+                    Thread.sleep(350L * (attempt + 1))
+                } catch (interrupted: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw java.io.InterruptedIOException("GitHub authorization retry interrupted")
+                }
+            }
+        }
+        error("Unreachable GitHub authorization retry state")
     }
 }
