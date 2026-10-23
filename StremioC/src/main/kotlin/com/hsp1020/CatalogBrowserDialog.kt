@@ -946,6 +946,8 @@ internal class CatalogBrowserDialog(
 
     private var touchStartY = 0f
     private var closed = false
+    private var pendingBackPress: Runnable? = null
+    private var backButton: ImageView? = null
     private val navigation by lazy {
         (activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)?.navController
     }
@@ -981,6 +983,7 @@ internal class CatalogBrowserDialog(
             cancelDestinationCheck()
             if (dialog.window?.decorView?.visibility == View.VISIBLE) {
                 suspendedForNavigation = true
+                cancelPendingBackPress()
                 dialog.hide()
                 releaseNavigation()
             }
@@ -1028,6 +1031,12 @@ internal class CatalogBrowserDialog(
     }
 
     private fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
+
+    private fun cancelPendingBackPress() {
+        pendingBackPress?.let { pending -> backButton?.removeCallbacks(pending) }
+        pendingBackPress = null
+        backButton?.isPressed = false
+    }
 
     private fun preserveNavigation() {
         releaseNavigation()
@@ -1092,6 +1101,7 @@ internal class CatalogBrowserDialog(
                     fitWindowToNavigation(force = true)
                 } else {
                     suspendedForNavigation = true
+                    cancelPendingBackPress()
                     dialog.hide()
                     releaseNavigation()
                 }
@@ -1218,8 +1228,32 @@ internal class CatalogBrowserDialog(
                             android.R.attr.selectableItemBackgroundBorderless, ripple, true
                         ) && ripple.resourceId != 0) setBackgroundResource(ripple.resourceId)
                     scaleType = ImageView.ScaleType.FIT_CENTER
-                    setOnClickListener { dialog.onBackPressedDispatcher.onBackPressed() }
+                    setOnClickListener {
+                        if (pendingBackPress != null || closed || !dialog.isShowing || !isShown ||
+                            detailHandoff.isActive || suspendedForNavigation) return@setOnClickListener
+                        val finish = Runnable {
+                            pendingBackPress = null
+                            isPressed = false
+                            if (!closed && dialog.isShowing && isShown &&
+                                !detailHandoff.isActive && !suspendedForNavigation &&
+                                !activity.isFinishing && !activity.isDestroyed)
+                                dialog.onBackPressedDispatcher.onBackPressed()
+                        }
+                        pendingBackPress = finish
+                        postOnAnimation {
+                            if (pendingBackPress !== finish) return@postOnAnimation
+                            if (closed || !dialog.isShowing || !isShown ||
+                                detailHandoff.isActive || suspendedForNavigation ||
+                                activity.isFinishing || activity.isDestroyed) {
+                                pendingBackPress = null
+                                return@postOnAnimation
+                            }
+                            isPressed = true
+                            postDelayed(finish, 120L)
+                        }
+                    }
                 }
+                backButton = back
                 addView(back, LinearLayout.LayoutParams(dp(25), dp(36)))
                 val searchField = FrameLayout(activity).apply {
                     setBackgroundResource(R.drawable.search_background)
@@ -1375,6 +1409,8 @@ internal class CatalogBrowserDialog(
         inlineModel.currentSearch.observe(activity, inlineListObserver)
         inlineModel.searchResponse.observe(activity, inlineStatusObserver)
         dialog.setOnDismissListener {
+            cancelPendingBackPress()
+            backButton = null
             initialProgress(false)
             pageProgress(false)
             closed = true
@@ -1436,6 +1472,7 @@ internal class CatalogBrowserDialog(
     fun dismiss() {
         if (closed) return
         closed = true
+        cancelPendingBackPress()
         detailHandoff.close()
         generation++
         scope.cancel()
