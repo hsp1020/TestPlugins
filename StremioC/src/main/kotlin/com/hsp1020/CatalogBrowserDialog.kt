@@ -492,6 +492,14 @@ internal class StremioDetailHandoff(
     }
 }
 
+private fun nativeCatalogRipple(context: Context, borderless: Boolean = false): android.graphics.drawable.Drawable? {
+    val value = TypedValue()
+    val attribute = if (borderless) android.R.attr.selectableItemBackgroundBorderless
+        else android.R.attr.selectableItemBackground
+    if (!context.theme.resolveAttribute(attribute, value, true) || value.resourceId == 0) return null
+    return androidx.appcompat.content.res.AppCompatResources.getDrawable(context, value.resourceId)?.mutate()
+}
+
 internal fun catalogStyledSelector(activity: FragmentActivity): AppCompatSpinner {
     fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
     return object : AppCompatSpinner(
@@ -544,16 +552,15 @@ internal fun catalogStyledSelector(activity: FragmentActivity): AppCompatSpinner
         isFocusable = true
         setPopupBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryGrayBackground)))
         val cardBg = androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, R.drawable.bg_color_both)?.mutate()
-        val ripple = TypedValue()
-        val overlay = if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) &&
-            ripple.resourceId != 0) {
-            androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, ripple.resourceId)
-        } else null
-        val selectorBackground = if (cardBg != null && overlay != null)
-            android.graphics.drawable.LayerDrawable(arrayOf(cardBg, overlay))
-        else cardBg ?: overlay
-        background = selectorBackground?.let {
+        val ripple = nativeCatalogRipple(activity)
+        val backgroundDrawable = if (android.os.Build.VERSION.SDK_INT < 23 && cardBg != null && ripple != null)
+            android.graphics.drawable.LayerDrawable(arrayOf(cardBg, ripple))
+        else cardBg ?: ripple
+        background = backgroundDrawable?.let {
             android.graphics.drawable.InsetDrawable(it, 0, dp(4), 0, dp(4))
+        }
+        if (android.os.Build.VERSION.SDK_INT >= 23) {
+            foreground = ripple?.let { android.graphics.drawable.InsetDrawable(it, 0, dp(4), 0, dp(4)) }
         }
     }
 }
@@ -596,12 +603,12 @@ internal fun catalogStyledAdapter(
                     gravity = Gravity.CENTER_VERTICAL
                     val rowColor = activity.colorFromAttribute(R.attr.primaryGrayBackground)
                     setBackgroundColor(rowColor)
-                    val ripple = TypedValue()
-                    if (activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) &&
-                        ripple.resourceId != 0) {
-                        androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, ripple.resourceId)?.let { overlay ->
-                            background = android.graphics.drawable.LayerDrawable(arrayOf(ColorDrawable(rowColor), overlay))
-                        }
+                    val ripple = nativeCatalogRipple(activity)
+                    if (android.os.Build.VERSION.SDK_INT >= 23) {
+                        foreground = ripple
+                    } else if (ripple != null) {
+                        background = android.graphics.drawable.LayerDrawable(
+                            arrayOf(ColorDrawable(rowColor), ripple))
                     }
                     minimumHeight = dp(48)
                     setPadding(dp(16), 0, dp(12), 0)
@@ -1257,7 +1264,9 @@ internal class CatalogBrowserDialog(
                 addView(back, LinearLayout.LayoutParams(dp(25), dp(44)))
                 val searchField = FrameLayout(activity).apply {
                     setBackgroundResource(R.drawable.search_background)
+                    if (android.os.Build.VERSION.SDK_INT >= 23) foreground = nativeCatalogRipple(activity)
                     val input = SearchView(activity).apply {
+                        if (android.os.Build.VERSION.SDK_INT >= 23) foreground = nativeCatalogRipple(activity)
                         queryHint = activity.getString(R.string.search_hint)
                         setIconifiedByDefault(false)
                         isIconified = false

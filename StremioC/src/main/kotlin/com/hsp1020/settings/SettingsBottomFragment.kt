@@ -1160,6 +1160,9 @@ class SettingsBottomFragment(
         isFocusable = true
         isClickable = true
         layoutParams = params
+        val ripple = android.util.TypedValue()
+        if (ctx.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) &&
+            ripple.resourceId != 0) setBackgroundResource(ripple.resourceId)
         makeTvCompatible()
     }
 
@@ -2190,6 +2193,13 @@ private fun showLanguageSelectDialog() {
                 rowLayout.background = android.graphics.drawable.StateListDrawable().apply {
                     addState(intArrayOf(android.R.attr.state_selected), getCardBg())
                     addState(intArrayOf(), ColorDrawable(Color.TRANSPARENT))
+                }
+                if (android.os.Build.VERSION.SDK_INT >= 23) {
+                    val ripple = android.util.TypedValue()
+                    if (context.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) &&
+                        ripple.resourceId != 0)
+                        rowLayout.foreground = androidx.appcompat.content.res.AppCompatResources
+                            .getDrawable(context, ripple.resourceId)
                 }
                 rowLayout.makeTvCompatible()
                 normalizeTypeface(rowLayout)

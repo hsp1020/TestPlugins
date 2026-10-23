@@ -57,7 +57,7 @@
                     android:paddingBottom="8dp"
                     android:focusable="true"
                     android:clickable="true"
-                    android:background="@android:color/transparent">
+                    android:background="?android:attr/selectableItemBackground">
                     <LinearLayout
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
@@ -114,7 +114,7 @@
                     android:paddingBottom="8dp"
                     android:focusable="true"
                     android:clickable="true"
-                    android:background="@android:color/transparent">
+                    android:background="?android:attr/selectableItemBackground">
                     <LinearLayout
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
@@ -159,7 +159,7 @@
                     android:paddingBottom="8dp"
                     android:focusable="true"
                     android:clickable="true"
-                    android:background="@android:color/transparent">
+                    android:background="?android:attr/selectableItemBackground">
                     <LinearLayout
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
@@ -204,7 +204,7 @@
                     android:paddingBottom="8dp"
                     android:focusable="true"
                     android:clickable="true"
-                    android:background="@android:color/transparent">
+                    android:background="?android:attr/selectableItemBackground">
                     <LinearLayout
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
@@ -255,7 +255,7 @@
                     android:paddingBottom="8dp"
                     android:focusable="true"
                     android:clickable="true"
-                    android:background="@android:color/transparent">
+                    android:background="?android:attr/selectableItemBackground">
                     <LinearLayout
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
@@ -417,7 +417,7 @@
                     android:paddingBottom="4dp"
                     android:focusable="true"
                     android:clickable="true"
-                    android:background="@android:color/transparent">
+                    android:background="?android:attr/selectableItemBackground">
                     <LinearLayout
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
@@ -499,7 +499,7 @@
                             android:scaleType="centerInside"
                             android:contentDescription="Addon settings for Meta / History"
                             android:focusable="true"
-                            android:background="@android:color/transparent" />
+                            android:background="?android:attr/selectableItemBackgroundBorderless" />
                         <ImageButton
                             android:id="@+id/btnDeleteHistoryAddon"
                             android:layout_width="48dp"
@@ -510,7 +510,7 @@
                             android:visibility="gone"
                             android:focusable="false"
                             android:importantForAccessibility="no"
-                            android:background="@android:color/transparent" />
+                            android:background="?android:attr/selectableItemBackgroundBorderless" />
                     </LinearLayout>
                     <TextView
                         android:layout_width="match_parent"
@@ -580,7 +580,7 @@
                             android:scaleType="center"
                             android:focusable="true"
                             android:contentDescription="Show MDBList API key"
-                            android:background="@android:color/transparent" />
+                            android:background="?android:attr/selectableItemBackgroundBorderless" />
                     </FrameLayout>
                     
                 </LinearLayout>
@@ -606,7 +606,7 @@
                     android:textStyle="bold"
                     android:focusable="true"
                     android:clickable="true"
-                    android:background="@android:color/transparent" />
+                    android:background="?android:attr/selectableItemBackground" />
                 <TextView
                     android:id="@+id/tvImport"
                     android:layout_width="match_parent"
@@ -622,7 +622,7 @@
                     android:textStyle="bold"
                     android:focusable="true"
                     android:clickable="true"
-                    android:background="@android:color/transparent" />
+                    android:background="?android:attr/selectableItemBackground" />
             </LinearLayout>
         </LinearLayout>
     </androidx.core.widget.NestedScrollView>
@@ -644,7 +644,7 @@
             android:textStyle="bold"
             android:focusable="true"
             android:clickable="true"
-            android:background="@android:color/transparent" />
+            android:background="?android:attr/selectableItemBackground" />
         <LinearLayout
             android:id="@+id/saveAction"
             android:layout_width="0dp"
@@ -657,7 +657,7 @@
             android:focusable="true"
             android:clickable="true"
             android:contentDescription="Save"
-            android:background="@android:color/transparent">
+            android:background="?android:attr/selectableItemBackground">
             <ImageView
                 android:id="@+id/saveIcon"
                 android:layout_width="0dp"

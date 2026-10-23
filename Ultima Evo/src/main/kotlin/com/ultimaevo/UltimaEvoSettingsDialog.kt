@@ -15,6 +15,7 @@ import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
 import android.util.Base64
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
@@ -59,6 +60,23 @@ class UltimaEvoSettingsDialog : DialogFragment() {
     private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
     private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f }
 
+    private fun applyNativeRipple(view: View) {
+        if (android.os.Build.VERSION.SDK_INT < 23) return
+        val ripple = TypedValue()
+        if (view.context.theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true) &&
+            ripple.resourceId != 0) {
+            view.foreground = androidx.appcompat.content.res.AppCompatResources
+                .getDrawable(view.context, ripple.resourceId)
+            view.clipToOutline = true
+        }
+    }
+
+    private fun applyButtonRipples(root: View) {
+        if (root is Button) applyNativeRipple(root)
+        if (root is ViewGroup) for (i in 0 until root.childCount)
+            applyButtonRipples(root.getChildAt(i))
+    }
+
     private fun prefsToJson(prefs: SharedPreferences): JSONObject {
         val json = JSONObject()
         prefs.all.forEach { (key, value) ->
@@ -98,6 +116,7 @@ class UltimaEvoSettingsDialog : DialogFragment() {
     }
 
     private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {
+        applyButtonRipples(contentView)
         activeAlertDialog = dialog
         dialog.setCanceledOnTouchOutside(false)
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
@@ -590,7 +609,8 @@ class UltimaEvoSettingsDialog : DialogFragment() {
                 val configBtn = Button(ctx).apply { text = "Configure Providers"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg(); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0,0,15,0) } }
                 val delBtn = Button(ctx).apply { text = "Delete"; setTextColor(Color.parseColor("#FF5555")); isAllCaps = false; background = getButtonBg(); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15,0,0,0) } }
                 actionRow.addView(configBtn); actionRow.addView(delBtn); card.addView(actionRow)
-
+                applyNativeRipple(configBtn)
+                applyNativeRipple(delBtn)
                 return VH(card, nameInput, visSwitch, searchSwitch, configBtn, delBtn)
             }
 
@@ -767,6 +787,7 @@ class UltimaEvoSettingsDialog : DialogFragment() {
         mainLayout.addView(saveBtn)
 
         scrollView.addView(mainLayout)
+        applyButtonRipples(mainLayout)
         return scrollView
     }
 
@@ -1123,6 +1144,7 @@ class UltimaEvoSettingsDialog : DialogFragment() {
             if (rvProviders.visibility == View.VISIBLE) { rvProviders.visibility = View.GONE; toggleArrow.text = "▼" } 
             else { rvProviders.visibility = View.VISIBLE; toggleArrow.text = "▲" }
         }
+        applyNativeRipple(headerRow)
         mainContainer.addView(providerSettingsCard)
 
         val touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
