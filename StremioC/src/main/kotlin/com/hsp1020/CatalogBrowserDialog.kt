@@ -1315,11 +1315,11 @@ internal class CatalogBrowserDialog(
                         }
                     }
                 }
-                addView(searchField, LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+                addView(searchField, LinearLayout.LayoutParams(0, dp(50), 1f).apply {
                     marginStart = dp(45)
                 })
             }
-            addView(navigationRow, LinearLayout.LayoutParams(-1, dp(44)))
+            addView(navigationRow, LinearLayout.LayoutParams(-1, dp(50)))
             inlineSelectors = listOf(
                 selectorRow("Type", typeSelector, typeArrow),
                 selectorRow("Catalog", catalogSelector, catalogArrow),
