@@ -1,9 +1,6 @@
 package com.hsp1020
 
 import android.content.res.ColorStateList
-import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.graphics.Color
 import android.graphics.Typeface
 import android.util.TypedValue
@@ -21,9 +18,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.cardview.widget.CardView
 import androidx.core.content.res.ResourcesCompat
-import androidx.core.view.doOnPreDraw
 import androidx.fragment.app.Fragment
-import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.navigation.fragment.findNavController
@@ -107,7 +102,6 @@ internal class TrailerChooser(
     private var opening = false
     private var extractionJob: kotlinx.coroutines.Job? = null
     private var extractionProgress: android.widget.ProgressBar? = null
-    private var finishPlayerHandoff: (() -> Unit)? = null
     private var reopenAfterPlayback = false
     private var reopenScrollY = 0
     private var reopenFocusedRow = -1
@@ -378,7 +372,6 @@ internal class TrailerChooser(
             setContentView(list)
             setOnDismissListener {
                 if (dialog === this) {
-                    finishPlayerHandoff?.invoke()
                     extractionJob?.cancel()
                     extractionJob = null
                     extractionProgress = null
@@ -400,166 +393,6 @@ internal class TrailerChooser(
             }
         }
         return true
-    }
-
-    private fun dismissPickerOnPlayerFrame(
-        picker: BottomSheetDialog, controller: androidx.navigation.NavController
-    ) {
-        finishPlayerHandoff?.invoke()
-        val manager = fragment.parentFragmentManager
-        val owner = fragment.activity
-        val handler = Handler(Looper.getMainLooper())
-        var active = true
-        var rollingBack = false
-        var homeRecovery = false
-        var recoveryAttempts = 0
-        var recoveryStarted = 0L
-        var visitedPlayer = false
-        var watchedView: View? = null
-        var releaseWatcher: (() -> Unit)? = null
-        lateinit var callback: FragmentManager.FragmentLifecycleCallbacks
-        lateinit var destinationListener: androidx.navigation.NavController.OnDestinationChangedListener
-        lateinit var timeout: Runnable
-        lateinit var returnTimeout: Runnable
-        lateinit var release: () -> Unit
-        lateinit var dismiss: () -> Unit
-
-        fun currentView(): View? = owner?.let { stremioCurrentDestinationView(it, controller) }
-        fun safeToReveal(view: View): Boolean = owner != null &&
-            currentView() === view && stremioDestinationReady(owner, view) &&
-            (if (rollingBack) controller.currentDestination?.id != R.id.navigation_player
-             else controller.currentDestination?.id == R.id.navigation_player)
-
-        val ownerObserver = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_DESTROY) dismiss()
-        }
-        release = {
-            if (active) {
-                active = false
-                releaseWatcher?.invoke()
-                releaseWatcher = null
-                manager.unregisterFragmentLifecycleCallbacks(callback)
-                controller.removeOnDestinationChangedListener(destinationListener)
-                handler.removeCallbacks(timeout)
-                handler.removeCallbacks(returnTimeout)
-                owner?.lifecycle?.removeObserver(ownerObserver)
-                if (finishPlayerHandoff === release) finishPlayerHandoff = null
-            }
-        }
-        dismiss = {
-            release()
-            if (picker.isShowing) picker.dismiss()
-        }
-
-        fun watch(view: View) {
-            if (!active || !view.isAttachedToWindow || watchedView === view) return
-            releaseWatcher?.invoke()
-            val observer = view.viewTreeObserver
-            if (!observer.isAlive) return
-            watchedView = view
-            var stable = 0
-            lateinit var listener: ViewTreeObserver.OnPreDrawListener
-            lateinit var unwatch: () -> Unit
-            unwatch = {
-                if (observer.isAlive) observer.removeOnPreDrawListener(listener)
-                if (releaseWatcher === unwatch) releaseWatcher = null
-                if (watchedView === view) watchedView = null
-            }
-            listener = ViewTreeObserver.OnPreDrawListener {
-                if (!active || currentView() !== view) {
-                    unwatch()
-                } else {
-                    stable = if (safeToReveal(view)) stable + 1 else 0
-                    if (stable >= 2) {
-                        unwatch()
-                        view.postOnAnimation {
-                            if (active && safeToReveal(view)) dismiss()
-                        }
-                    } else view.postInvalidateOnAnimation()
-                }
-                true
-            }
-            releaseWatcher = unwatch
-            observer.addOnPreDrawListener(listener)
-            view.postInvalidateOnAnimation()
-        }
-
-        fun recoverHome(): Boolean {
-            if (homeRecovery || owner?.isFinishing == true || owner?.isDestroyed == true ||
-                owner?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) != true)
-                return false
-            homeRecovery = true
-            val moved = runCatching {
-                controller.navigate(R.id.global_to_navigation_home)
-                controller.currentDestination?.id == R.id.navigation_home
-            }.getOrDefault(false)
-            if (!moved) homeRecovery = false
-            return moved
-        }
-
-        fun attemptReturn() {
-            if (!active || owner?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) != true)
-                return
-            if (controller.currentDestination?.id == R.id.navigation_player) {
-                val popped = runCatching { controller.popBackStack() }.getOrDefault(false)
-                if (!popped || controller.currentDestination?.id == R.id.navigation_player)
-                    recoveryAttempts++
-
-                if (recoveryAttempts >= 2) recoverHome()
-            }
-            currentView()?.let(::watch)
-        }
-
-        callback = object : FragmentManager.FragmentLifecycleCallbacks() {
-            override fun onFragmentViewCreated(
-                fm: FragmentManager, f: Fragment, view: View, savedInstanceState: Bundle?
-            ) {
-                view.doOnPreDraw {
-                    if (active && currentView() === view) watch(view)
-                }
-            }
-        }
-        returnTimeout = object : Runnable {
-            override fun run() {
-                if (!active) return
-                val current = currentView()
-                if (current != null) watch(current)
-                if (rollingBack) {
-                    if (controller.currentDestination?.id == R.id.navigation_player) attemptReturn()
-                    else if (!homeRecovery &&
-                        android.os.SystemClock.uptimeMillis() - recoveryStarted >= 6000L) recoverHome()
-                }
-
-                handler.postDelayed(this, 1000L)
-            }
-        }
-        timeout = Runnable {
-            if (active) {
-                rollingBack = true
-                recoveryStarted = android.os.SystemClock.uptimeMillis()
-                attemptReturn()
-                handler.postDelayed(returnTimeout, 1000L)
-            }
-        }
-        destinationListener = androidx.navigation.NavController.OnDestinationChangedListener { _, destination, _ ->
-            if (active) {
-                if (destination.id == R.id.navigation_player) {
-                    visitedPlayer = true
-                } else if (visitedPlayer && !rollingBack) {
-
-                    rollingBack = true
-                    recoveryStarted = android.os.SystemClock.uptimeMillis()
-                    handler.removeCallbacks(timeout)
-                    currentView()?.let(::watch)
-                    handler.postDelayed(returnTimeout, 1000L)
-                }
-            }
-        }
-        finishPlayerHandoff = release
-        manager.registerFragmentLifecycleCallbacks(callback, false)
-        controller.addOnDestinationChangedListener(destinationListener)
-        owner?.lifecycle?.addObserver(ownerObserver)
-        handler.postDelayed(timeout, 6000L)
     }
 
     private fun play(entry: TrailerChoice, scrollY: Int, focusedRow: Int) {
@@ -596,15 +429,14 @@ internal class TrailerChooser(
                 saved.set(returnScrollKey, scrollY)
                 saved.set(returnFocusKey, focusedRow)
                 try {
-                    dismissPickerOnPlayerFrame(picker, controller)
                     controller.navigate(R.id.global_to_navigation_player, playerArgs)
                 } catch (error: Exception) {
-                    finishPlayerHandoff?.invoke()
                     saved.remove<String>(returnKey)
                     saved.remove<Int>(returnScrollKey)
                     saved.remove<Int>(returnFocusKey)
-                    throw error 
+                    throw error
                 }
+                picker.dismiss()
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
@@ -630,7 +462,7 @@ internal class TrailerChooser(
 
         extractionJob?.cancel()
         extractionJob = null
-        if (finishPlayerHandoff == null) dialog?.dismiss()
+        dialog?.dismiss()
         dialog = null
         (button?.parent as? ViewGroup)?.removeView(button)
         button = null
