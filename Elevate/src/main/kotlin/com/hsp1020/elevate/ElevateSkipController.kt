@@ -423,7 +423,9 @@ internal class ElevateSkipController(private val application: Application) :
     private fun suppressNativeSkipButton(stamp: VideoSkipStamp?): Boolean {
         val player = mediaPlayer
         if (player == null || player.playbackState != Media3Player.STATE_READY) return true
-        return stamp != null && settings.getBoolean(autoPreference(stamp), false)
+        return stamp != null && settings.getBoolean(autoPreference(stamp), false) &&
+            stampKey(stamp) !in manualSeekProtected &&
+            stampKey(stamp) !in autoSkipped
     }
 
     private fun autoEnabled(): Boolean = ElevateSkipPreferences.autoTypes.any { name ->
@@ -465,11 +467,20 @@ internal class ElevateSkipController(private val application: Application) :
         if (target > current && target > 0L) {
             ownSeek = target to android.os.SystemClock.uptimeMillis()
             player.seekTo(target)
-            // uiText is generated from CloudStream's own localized skip_type_format
-            // and skip-type resources, using the user's selected app locale.
+            // CloudStream's skip_type_format and SkipType resources are already
+            // localized for its selected app language. Do not hardcode ko/en.
             fragment?.context?.let { ctx ->
-                android.widget.Toast.makeText(ctx, active.uiText,
-                    android.widget.Toast.LENGTH_SHORT).show()
+                val totalSeconds = target / 1000L
+                val clock = if (totalSeconds >= 3600L) {
+                    java.lang.String.format(java.util.Locale.ROOT, "%d:%02d:%02d",
+                        totalSeconds / 3600L, (totalSeconds / 60L) % 60L, totalSeconds % 60L)
+                } else {
+                    java.lang.String.format(java.util.Locale.ROOT, "%02d:%02d",
+                        totalSeconds / 60L, totalSeconds % 60L)
+                }
+                android.widget.Toast.makeText(
+                    ctx, active.uiText + " → " + clock, android.widget.Toast.LENGTH_SHORT
+                ).show()
             }
         }
     }
