@@ -222,6 +222,10 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
                     created++
                 }
             }
+            // Keep the latest horizontal thumbnail progress design.
+            // Without update() the newly created SlimProgressView remains GONE
+            // and CloudStream's original circular overlay stays visible.
+            state.update()
             val elapsedUs = (SystemClock.elapsedRealtimeNanos() - beginNs) / 1000L
             refreshCount++
             totalRefreshUs += elapsedUs
