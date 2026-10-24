@@ -122,13 +122,12 @@ class SyncPlugin : Plugin() {
         if (SyncPlaybackThrottle.isProgressPath(path)) {
             requestProgress()
         } else {
-            SyncTrace.keys("local-change", listOf(path))
+
             request(1800, "preference-change")
         }
     }
     private val bookmarks = { _: Boolean ->
-        SyncTrace.info("ui-bookmarks-event-observed",
-            "thread=${Thread.currentThread().name}")
+
         request(2000, "bookmarks")
     }
     private val loaded = { _: Boolean ->
@@ -139,7 +138,7 @@ class SyncPlugin : Plugin() {
         if (context != null && LocalSyncJournal.pending(context)) {
             queueSync("unfinished-local-journal")
         } else request(4000, "plugins-loaded")
-        Unit
+
     }
     // Navigation is not a data change; foreground checks and tracked edits remain active.
     private val home = { _: Boolean -> Unit }
@@ -190,8 +189,7 @@ class SyncPlugin : Plugin() {
         }
         if (fallback != null) {
             currentActivity = WeakReference(fallback)
-            SyncTrace.info("activity-fallback",
-                "source=CommonActivity activity=${fallback.javaClass.simpleName}")
+
         }
         return fallback
     }
@@ -203,8 +201,7 @@ class SyncPlugin : Plugin() {
             !SyncAuthGuard.mayRecover(config(context))) {
             if (!authPausedLogged) {
                 authPausedLogged = true
-                SyncTrace.info("auth-queue-suppressed",
-                    "reason=github-401 action=reauthorize; pending changes retained")
+
             }
             return
         }
@@ -213,12 +210,12 @@ class SyncPlugin : Plugin() {
             if (worker?.isActive == true &&
                 reason in setOf("remote-head-poll-20s", "home-reload",
                     "activity-resumed", "activity-paused", "activity-stopped")) {
-                SyncTrace.info("coalesce", "reason=$reason active-worker-no-rerun")
+
                 return
             }
             rerunRequested = true
             if (worker?.isActive == true) {
-                SyncTrace.info("coalesce", "reason=$reason pending=1")
+
                 return
             }
             worker = scope.launch {
@@ -247,22 +244,18 @@ class SyncPlugin : Plugin() {
                         val current = config(context).preferences.getString("github_base_revision", null)
                         val head = runCatching { GithubSyncAdapter(context).remoteHead() }.getOrNull()
                         if (current != null && head == current) {
-                            SyncTrace.info("failure-backoff",
-                                "reason=$reason head=${head.take(12)} unchanged=true")
+
                             continue
                         }
                     }
-                    SyncTrace.info("worker-dispatch",
-                        "reason=$reason activityPresent=${active != null} " +
-                            "foreground=$foreground startedActivities=$activityCount")
-                    SyncTrace.memory("scheduled-sync")
+
+
                     val result = SyncCoordinator.synchronize(context, active)
                     if (result.startsWith("Sync failed:") ||
                         result.startsWith("Sync failed during") ||
                         result.startsWith("Sync conflict:")) {
                         lastAutomaticFailureAt = android.os.SystemClock.elapsedRealtime()
-                        SyncTrace.info("worker-failed", "reason=$reason " +
-                            "statusHash=${java.lang.Integer.toHexString(result.hashCode())}")
+
                     } else {
                         lastAutomaticFailureAt = 0L
                     }
@@ -279,8 +272,7 @@ class SyncPlugin : Plugin() {
             if (progressTimer?.isActive == true) return
             val now = android.os.SystemClock.elapsedRealtime()
             val wait = SyncPlaybackThrottle.delayMs(now, nextProgressAllowedAt)
-            SyncTrace.info("progress-throttle", "event=scheduled delayMs=$wait " +
-                "nextAllowedAtMs=$nextProgressAllowedAt")
+
             progressTimer = scope.launch {
                 delay(wait)
                 if (!isOwner(context) || !config(context).active()) return@launch
@@ -288,7 +280,7 @@ class SyncPlugin : Plugin() {
                 // sync coalesces one later pass; no update is discarded.
                 nextProgressAllowedAt = android.os.SystemClock.elapsedRealtime() +
                     SyncPlaybackThrottle.COALESCE_MS
-                SyncTrace.info("progress-throttle", "event=dispatch")
+
                 queueSync("playback-progress")
             }
         }
@@ -301,12 +293,11 @@ class SyncPlugin : Plugin() {
             !SyncAuthGuard.mayRecover(config(context))) {
             if (!authPausedLogged) {
                 authPausedLogged = true
-                SyncTrace.info("auth-trigger-suppressed",
-                    "reason=github-401 action=reauthorize; pending changes retained")
+
             }
             return
         }
-        SyncTrace.info("trigger", "reason=$reason delayMs=$delayMs")
+
         trigger?.cancel()
         trigger = scope.launch {
             delay(delayMs)
@@ -328,15 +319,13 @@ class SyncPlugin : Plugin() {
                 currentActivity = WeakReference(activity)
                 activityCount += 1
                 foreground = true
-                SyncTrace.info("activity-started", "started=$activityCount " +
-                    "activity=${activity.javaClass.simpleName}")
+
             }
             override fun onActivityResumed(activity: Activity) {
                 currentActivity = WeakReference(activity)
                 foreground = true
                 if (activityCount == 0) activityCount = 1
-                SyncTrace.info("activity-resumed", "activity=${activity.javaClass.simpleName} " +
-                    "started=$activityCount")
+
                 if (!isOwner(context) || !ready) return
                 // An interrupted original restore may have disconnected the
                 // account. Always finish its local journal before normal sync.
@@ -370,8 +359,7 @@ class SyncPlugin : Plugin() {
         // CloudStream plugins can load after MainActivity has already resumed.
         // Android does not replay earlier lifecycle callbacks to new observers.
         foregroundActivity()?.let {
-            SyncTrace.info("activity-initial-attach",
-                "source=CommonActivity activity=${it.javaClass.simpleName}")
+
         }
         periodic = scope.launch {
             while (isActive) {
@@ -382,26 +370,18 @@ class SyncPlugin : Plugin() {
                 if (foreground && ready && config(context).active() &&
                     (!SyncAuthGuard.needsReauthentication(config(context)) ||
                         SyncAuthGuard.mayRecover(config(context)))) {
-                    SyncTrace.info("trigger", "reason=remote-head-poll-20s")
+
                     queueSync("remote-head-poll-20s")
                 }
             }
         }
     }
     override fun load(context: Context) {
-        SyncTrace.info("plugin-loaded", "version=P0P1-incremental-local-audit-20261024 " +
-            "classloader=${javaClass.classLoader?.javaClass?.simpleName}")
-        SyncTrace.memory("plugin-load")
+
+
         config(context).preferences.edit().putString("active_instance", owner).commit()
         val session = config(context)
-        SyncTrace.info("github-credential-state",
-            "present=${session.preferences.contains("github_token")} " +
-                "tokenId=${SyncAuthGuard.tokenHash(session.preferences.getString("github_token", null))?.take(12) ?: "missing"} " +
-                "rejected=${SyncAuthGuard.needsReauthentication(session)} " +
-                "issuedAtMs=${session.preferences.getLong("github_token_issued_at", 0L)} " +
-                "expiresAtMs=${session.preferences.getLong("github_token_expires_at", 0L)} " +
-                "refreshPresent=${session.preferences.contains("github_refresh_token")} " +
-                "recoveryEligible=${SyncAuthGuard.mayRecover(session)}")
+
         GithubAuthDiagnostics.snapshot(session, "plugin-loaded")
         ready = SyncRuntime.refreshLoadedState()
         ProfileIdentity.observe(context)
@@ -415,7 +395,7 @@ class SyncPlugin : Plugin() {
         openSettings = { selected ->
             (selected as? AppCompatActivity)?.let { activity ->
                 currentActivity = WeakReference(activity)
-                SyncTrace.info("activity-from-settings", "activity=${activity.javaClass.simpleName}")
+
                 SyncSettingsFragment().show(activity.supportFragmentManager, "SyncCS")
             }
         }
