@@ -476,7 +476,15 @@ internal class GithubBackupStore(
         }
         SyncSafety.validateDeletes(deletes, approvedDeletes, 0)
         val newArchives = archiveChanges(existing, archives)
-        if (patches.isEmpty() && newArchives.isEmpty()) return expectedRevision
+        SyncTrace.info("github-publish-effective",
+            "requested=${requested.size} changed=${changed.size} " +
+                "skippedIdentical=${requested.size - changed.size} " +
+                "shards=${patches.size} archiveRequested=${archives.size} " +
+                "archiveNew=${newArchives.size} deletions=${deletes.size}")
+        if (patches.isEmpty() && newArchives.isEmpty()) {
+            SyncTrace.info("github-publish-noop", "revision=${expectedRevision.take(12)}")
+            return expectedRevision
+        }
         patches.putAll(newArchives)
         val delta = if (changed.size <= 1000) changeJournal(cipher, changed) else null
         if (delta != null) patches["synccs/delta.enc"] = delta

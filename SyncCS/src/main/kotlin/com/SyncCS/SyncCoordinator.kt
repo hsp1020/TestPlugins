@@ -611,6 +611,18 @@ internal object SyncCoordinator {
             SyncTrace.plugins("local-plugins", currentPlugins)
             SyncTrace.plugins("target-plugins", pluginTarget)
             SyncTrace.pluginDelta("plugin-install-remove-plan", currentPlugins, pluginTarget)
+            if (merge.changedRemote) {
+                SyncTrace.pluginDelta("plugin-server-manifest-change",
+                    pluginsOnServer, pluginTarget)
+                SyncTrace.pluginDelta("plugin-baseline-to-local",
+                    inventoryBase, currentPlugins)
+                SyncTrace.info("plugin-manifest-difference",
+                    "localMatchesRemote=${PluginSync.matches(
+                        PluginSync.decode(currentPlugins),
+                        PluginSync.decode(pluginsOnServer))} " +
+                        "serverTombstones=${PluginSync.decode(pluginsOnServer).deleted.size} " +
+                        "targetTombstones=${merge.target.deleted.size}")
+            }
 
             // A manual local removal is only a deletion after the actual plugin
             // loader has completed; prevents empty snapshots during startup.

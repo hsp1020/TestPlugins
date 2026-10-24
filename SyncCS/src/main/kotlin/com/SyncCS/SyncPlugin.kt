@@ -58,11 +58,27 @@ internal object SyncRuntime {
 }
 
 
+
+/** Progress values are noisy while a player is running; all other keys remain immediate. */
+internal object SyncPlaybackThrottle {
+    const val COALESCE_MS = 30_000L
+    fun isProgressPath(path: String): Boolean =
+        path.startsWith("d/") && (
+            "/video_pos_dur/" in path || "/result_resume_watching_2/" in path ||
+            path.startsWith("d/video_pos_dur/") ||
+            path.startsWith("d/result_resume_watching_2/")
+        )
+    fun delayMs(now: Long, nextAllowedAt: Long): Long =
+        if (nextAllowedAt <= 0L) 5_000L else (nextAllowedAt - now).coerceAtLeast(0L)
+}
+
 @CloudstreamPlugin
 class SyncPlugin : Plugin() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val owner = UUID.randomUUID().toString()
     private var trigger: Job? = null
+    private var progressTimer: Job? = null
+    @Volatile private var nextProgressAllowedAt = 0L
     private val workerGuard = Any()
     private var worker: Job? = null
     private var rerunRequested = false
@@ -103,8 +119,12 @@ class SyncPlugin : Plugin() {
         val path = type + key
         if (!SyncData.isTracked(path)) return@OnSharedPreferenceChangeListener
         SyncCoordinator.markChanged(context, path)
-        SyncTrace.keys("local-change", listOf(path))
-        request(1800, "preference-change")
+        if (SyncPlaybackThrottle.isProgressPath(path)) {
+            requestProgress()
+        } else {
+            SyncTrace.keys("local-change", listOf(path))
+            request(1800, "preference-change")
+        }
     }
     private val bookmarks = { _: Boolean ->
         SyncTrace.info("ui-bookmarks-event-observed",
@@ -251,6 +271,29 @@ class SyncPlugin : Plugin() {
         }
     }
 
+    /** Bound the publish rate without losing the latest persisted progress value. */
+    private fun requestProgress() {
+        val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
+        if (!ready || !isOwner(context) || !config(context).active()) return
+        synchronized(workerGuard) {
+            if (progressTimer?.isActive == true) return
+            val now = android.os.SystemClock.elapsedRealtime()
+            val wait = SyncPlaybackThrottle.delayMs(now, nextProgressAllowedAt)
+            SyncTrace.info("progress-throttle", "event=scheduled delayMs=$wait " +
+                "nextAllowedAtMs=$nextProgressAllowedAt")
+            progressTimer = scope.launch {
+                delay(wait)
+                if (!isOwner(context) || !config(context).active()) return@launch
+                // Progress is backed by durable modified/ markers. An in-flight
+                // sync coalesces one later pass; no update is discarded.
+                nextProgressAllowedAt = android.os.SystemClock.elapsedRealtime() +
+                    SyncPlaybackThrottle.COALESCE_MS
+                SyncTrace.info("progress-throttle", "event=dispatch")
+                queueSync("playback-progress")
+            }
+        }
+    }
+
     private fun request(delayMs: Long, reason: String) {
         val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
         if (!ready || !isOwner(context) || !config(context).active()) return
@@ -313,6 +356,8 @@ class SyncPlugin : Plugin() {
                 if (activityCount == 0) {
                     foreground = false
                     if (currentActivity?.get() === activity) currentActivity = null
+                    // Always flush final progress promptly on app background.
+                    synchronized(workerGuard) { progressTimer?.cancel(); progressTimer = null }
                     request(500, "activity-stopped")
                 }
             }
@@ -344,7 +389,7 @@ class SyncPlugin : Plugin() {
         }
     }
     override fun load(context: Context) {
-        SyncTrace.info("plugin-loaded", "version=P0P1-journal-recovery-resume-20261022 " +
+        SyncTrace.info("plugin-loaded", "version=P0P1-incremental-local-audit-20261024 " +
             "classloader=${javaClass.classLoader?.javaClass?.simpleName}")
         SyncTrace.memory("plugin-load")
         config(context).preferences.edit().putString("active_instance", owner).commit()
@@ -379,6 +424,7 @@ class SyncPlugin : Plugin() {
         currentActivity = null
         scope.cancel()
         trigger?.cancel()
+        progressTimer?.cancel()
         periodic?.cancel()
         val context = com.lagradost.cloudstream3.CloudStreamApp.context
         if (context != null) {

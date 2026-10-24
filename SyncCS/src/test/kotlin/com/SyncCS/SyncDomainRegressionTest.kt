@@ -34,6 +34,34 @@ class SyncDomainRegressionTest {
         JSONObject().put("format", 1).put("items", JSONArray(profiles.toList()))
             .put("deleted", JSONArray(deleted)).toString()
 
+
+    @Test fun progressThrottleIsBoundedAndDoesNotDelayOtherPreferences() {
+        assertTrue(SyncPlaybackThrottle.isProgressPath("d/0/video_pos_dur/123"))
+        assertTrue(SyncPlaybackThrottle.isProgressPath("d/0/result_resume_watching_2/123"))
+        assertTrue(SyncPlaybackThrottle.isProgressPath("d/result_resume_watching_2/123"))
+        assertFalse(SyncPlaybackThrottle.isProgressPath("d/0/result_watch_state_data/123"))
+        assertFalse(SyncPlaybackThrottle.isProgressPath("p/StremioC/catalog"))
+        assertFalse(SyncPlaybackThrottle.isProgressPath("s/user_settings"))
+        assertEquals(5_000L, SyncPlaybackThrottle.delayMs(500L, 0L))
+        assertEquals(19_000L, SyncPlaybackThrottle.delayMs(11_000L, 30_000L))
+        assertEquals(0L, SyncPlaybackThrottle.delayMs(31_000L, 30_000L))
+    }
+
+    @Test fun remoteTombstoneInPartialSnapshotIsPreserved() {
+        val profiles = ProfileSync.decode(roster(profile(0, "Main")))
+        val key = "d/0/video_pos_dur/example"
+        val before = "{\"type\":\"string\",\"value\":\"position\"}"
+        val baseline = mutableMapOf(key to SyncBackend.digest(before))
+        val p = SyncPreferencePlanner.reconcile(
+            mapOf(key to null), emptyMap(), baseline, profiles,
+            setOf(0), emptySet(), emptySet(), JSONObject(), false,
+            false, false)
+        assertTrue(p.apply.containsKey(key))
+        assertNull(p.apply[key])
+        assertEquals("<deleted>", p.next[key])
+        assertTrue(p.upload.isEmpty())
+    }
+
     @Test fun firstLinkOfBDoesNotPublishItsHigherVersionLegacyPlugin() {
         val server = inventory(plugin("StreamPlay", 4, "https://server/4.cs3"))
         val staleB = inventory(plugin("StreamPlay", 99, "https://legacy/99.cs3"))

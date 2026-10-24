@@ -29,6 +29,7 @@ internal object SyncDirtyMarkerCleaner {
         val editor = prefs.edit()
         var removed = 0
         var newer = 0
+        var differing = 0
         for ((tag, timestamp) in markers) {
             val key = tag.removePrefix("modified/")
             if ((timestamp as? Number)?.toLong()?.let { it > startedAt } != false) {
@@ -53,12 +54,19 @@ internal object SyncDirtyMarkerCleaner {
             if (settled) {
                 editor.remove(tag)
                 removed++
+            } else {
+                differing++
+                if (differing <= 8) SyncTrace.info("dirty-marker-held",
+                    "keyHash=${SyncBackend.digest(key).take(12)} " +
+                    "reason=differs-from-verified-baseline " +
+                    "baselinePresent=${baseline.containsKey(key)} " +
+                    "nativeMapped=${ProfileIdentity.nativePath(key, profiles) != null}")
             }
         }
         if (removed != 0) check(editor.commit()) { "Could not prune settled dirty markers" }
         val duration = SystemClock.elapsedRealtime() - begin
         SyncTrace.info("dirty-marker-cleanup", "before=${markers.size} removed=$removed " +
-            "remaining=${markers.size - removed} newer=$newer " +
+            "remaining=${markers.size - removed} newer=$newer unsettled=$differing " +
                 "pluginsPending=$pluginsPending elapsedMs=$duration")
         return Stats(removed, markers.size - removed, newer, duration)
     }

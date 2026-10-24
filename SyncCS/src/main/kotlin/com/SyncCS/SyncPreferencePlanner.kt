@@ -103,11 +103,9 @@ internal object SyncPreferencePlanner {
                 // A missing key is NOT evidence of user deletion. Plugin startup,
                 // a failed preferences enumeration, or a filtered snapshot can omit it.
                 val explicitlyChanged = modifiedKeys.contains(key)
-                if (current == null && !explicitlyChanged && !completeLocalSnapshot) {
-                    // Selected snapshots cannot prove a key was deleted.
-                    // Never treat absence from a partial read as a deletion.
-                    continue
-                }
+                // Remote tombstones must be processed even when the selected
+                // local key is absent. Missing LOCAL keys without an explicit
+                // marker must never create a new upload tombstone.
                 if (current == null && !explicitlyChanged &&
                     remotePresent && remote != null) {
                     // A temporarily missing local preference must be repaired
