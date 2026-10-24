@@ -12,36 +12,6 @@ import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 
-/** Safe diagnostics: log GitHub's error class and request ID, never OAuth secrets. */
-internal object GithubHttpDiagnostics {
-    fun report(stage: String, status: Int, conn: HttpURLConnection, response: ByteArray? = null) {
-        val message = runCatching {
-            JSONObject(String(response ?: ByteArray(0), Charsets.UTF_8)).optString("message")
-        }.getOrDefault("")
-        val kind = when {
-            message.equals("Bad credentials", true) -> "bad-credentials"
-            message.contains("Requires authentication", true) -> "authentication-required"
-            message.contains("Resource not accessible", true) -> "access-denied"
-            message.contains("rate limit", true) -> "rate-limit"
-            message.equals("Not Found", true) -> "not-found"
-            message.isBlank() -> "no-error-message"
-            else -> "other"
-        }
-        val auth = conn.getHeaderField("WWW-Authenticate") ?: ""
-        val authError = Regex("""error="?([a-z_]+)""").find(auth)?.groupValues?.get(1)
-            ?: "unspecified"
-        val request = conn.getHeaderField("X-GitHub-Request-Id")
-            ?.takeIf { it.matches(Regex("[A-Za-z0-9:-]{1,100}")) } ?: "missing"
-        val scopes = conn.getHeaderField("X-OAuth-Scopes")
-            ?.replace(Regex("[^a-zA-Z0-9_, -]"), "")?.take(100) ?: "unknown"
-        val accepted = conn.getHeaderField("X-Accepted-OAuth-Scopes")
-            ?.replace(Regex("[^a-zA-Z0-9_, -]"), "")?.take(100) ?: "unknown"
-        val limit = conn.getHeaderField("X-RateLimit-Remaining")
-            ?.takeIf { it.matches(Regex("[0-9]{1,12}")) } ?: "unknown"
-
-    }
-}
-
 /** A rejected request is replayed at most once with a renewed credential. */
 internal object GithubAuthRetry {
     fun <T> once(
@@ -60,10 +30,6 @@ internal object GithubAuthRetry {
             return try {
                 request(replacement)
             } catch (second: GithubBackupStore.ApiException) {
-                if (second.code == 401) {
-
-
-                }
                 throw second
             }
         }
@@ -136,7 +102,6 @@ internal class GithubBackupStore(
                     url.contains("/git/refs") -> "ref-write"
                     else -> "backup-api"
                 }
-                GithubHttpDiagnostics.report(stage, status, conn, response)
                 throw ApiException(status, "GitHub API HTTP $status (stage=$stage)")
             }
             if (response.isEmpty()) JSONObject()
