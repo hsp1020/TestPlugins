@@ -840,7 +840,8 @@ open class StremioC(
             headers: Map<String, String>, clientId: String, key: String
         ): List<SimklSuggestion> = simklSuggestionSemaphore.withPermit {
             val disk = MetadataDiskCache.read("simkl_recs", key)
-            if (disk != null) {
+            if (disk != null && System.currentTimeMillis() >= disk.second &&
+                System.currentTimeMillis() - disk.second < SIMKL_RECOMMENDATION_TTL_MS) {
                 val cached = runCatching { simklSuggestionsFromDetail(disk.first) }.getOrNull()
                 if (!cached.isNullOrEmpty()) return@withPermit cached
             }
