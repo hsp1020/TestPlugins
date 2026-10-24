@@ -10,6 +10,9 @@ import android.os.Looper
 import android.view.View
 import androidx.constraintlayout.widget.ConstraintLayout
 import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.ui.settings.Globals.TV
+import com.lagradost.cloudstream3.ui.settings.Globals.EMULATOR
+import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
@@ -74,6 +77,9 @@ internal class ElevateSkipController(private val application: Application) :
     private var savedButtonPosition: SkipButtonPosition? = null
 
     private fun placeNativeSkipButton() {
+        // Match GeneratorPlayer.pickLayout(): TV/emulator already uses the native
+        // bottom-right layout. Never touch its margins or layout constraints.
+        if (isLayout(TV or EMULATOR)) return
         val host = fragment?.playerView ?: return
         val button = host.findViewById<View>(R.id.skip_chapter_button) ?: return
         val bottomBar = host.findViewById<View>(R.id.bottom_player_bar) ?: return
