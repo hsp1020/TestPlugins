@@ -596,6 +596,7 @@ internal class ElevateSkipButtonTimer(
     private var autoHidden = false
     private var hiddenByTimer = false
     private var lastRestoreAtMs = 0L
+    private var lastNativeHideAtMs = 0L
     private var tickQueued = false
 
     private fun queueTick(delayMs: Long = 0L) {
@@ -633,7 +634,10 @@ internal class ElevateSkipButtonTimer(
     private fun showNative(stamp: com.lagradost.cloudstream3.utils.videoskip.VideoSkipStamp,
                            now: Long) {
         val b = button ?: return
-        if (now - lastRestoreAtMs < NATIVE_ANIMATION_MS + 100L) return
+        // The native hide animator's onEnd sets GONE even when cancelled.
+        // Never reopen during that animation; wait for its callback to finish.
+        if (now - lastNativeHideAtMs < NATIVE_ANIMATION_MS + 100L ||
+            now - lastRestoreAtMs < NATIVE_ANIMATION_MS + 100L) return
         lastRestoreAtMs = now
         // CloudStream's timestampShowState can remain true even after a stale
         // hide-animation onEnd makes the view GONE. Normalize that state first.
@@ -673,10 +677,16 @@ internal class ElevateSkipButtonTimer(
                 lastRestoreAtMs = 0L
                 lastTickMs = now
                 fill?.scaleX = 0f
-                // If the core has already displayed the button, invalidate
-                // its pending 6-second hide immediately.
+                // Invalidate any native six-second runnable already posted.
                 fragment.skipIndex++
             }
+
+            // GeneratorPlayer.onTimestamp() posts a six-second runnable which
+            // captures skipIndex. Core can post another runnable at ANY point
+            // while the chapter is active. Keep its snapshot stale before it
+            // executes, instead of trying to restore the button afterwards.
+            // This mutates only an Int: no layout, player or coroutine work.
+            fragment.skipIndex++
 
             val controlsVisible = fragment.isUIShowing()
             if (!controlsVisible && !autoHidden) {
@@ -702,8 +712,11 @@ internal class ElevateSkipButtonTimer(
                     (elapsedMs / HIDE_TIMEOUT_MS.toFloat()).coerceIn(0f, 1f)
             } else {
                 indicator?.visibility = View.GONE
-                if (!hiddenByTimer) {
+                if (!hiddenByTimer ||
+                    (b.visibility == View.VISIBLE && b.width > dp(25f) &&
+                        now - lastNativeHideAtMs >= NATIVE_ANIMATION_MS + 100L)) {
                     hiddenByTimer = true
+                    lastNativeHideAtMs = now
                     fragment.onTimestamp(null)
                 }
             }
@@ -775,6 +788,7 @@ internal class ElevateSkipButtonTimer(
         elapsedMs = 0L
         lastTickMs = 0L
         lastRestoreAtMs = 0L
+        lastNativeHideAtMs = 0L
         intervalKey = null
         indicator?.visibility = View.GONE
     }
