@@ -114,9 +114,12 @@ internal object ElevateSkipRepository {
                 }
                 if (!matches) continue
             }
-            val fromEpisode = data.node("imdb")?.positive("fromEpisode")
-                ?: data.node("tvdb")?.positive("fromEpisode")
-                ?: data.node("tmdb")?.positive("fromEpisode")
+            val episodeMap = listOf("imdb", "tvdb", "trakt", "tmdb")
+                .mapNotNull { data.node(it) }
+                .firstOrNull { candidate ->
+                    i.season == null || candidate.positive("seasonNumber") == i.season
+                }
+            val fromEpisode = episodeMap?.positive("fromEpisode")
             val local = if (kind == "imdbId" && fromEpisode != null) {
                 (i.episode - fromEpisode + 1).takeIf { it > 0 }
             } else i.episode
@@ -153,7 +156,10 @@ internal object ElevateSkipRepository {
 
     private fun stamps(source: String, intervals: List<SkipStamp>, i: Identity): List<VideoSkipStamp> =
         intervals.filter { valid(it, i.duration) }.map { stamp ->
-            VideoSkipStamp(stamp, !i.movie && i.duration - stamp.endMs < 20_000L,
+            // A substantial tail after an ending may contain a post-credit scene.
+            // Do not allow the native next-episode action to skip that tail.
+            val trailing = i.duration - stamp.endMs
+            VideoSkipStamp(stamp, !i.movie && trailing in 0L..5_000L,
                 "Elevate/" + source)
         }
 
