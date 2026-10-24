@@ -7,6 +7,9 @@ import android.content.SharedPreferences
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.View
+import androidx.constraintlayout.widget.ConstraintLayout
+import com.lagradost.cloudstream3.R
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
@@ -55,6 +58,58 @@ internal class ElevateSkipController(private val application: Application) :
     private var lastPosition: Long? = null
     private var suppressedUntilOutside = false
     private var polling = false
+    // Keep the native MaterialButton and its click/focus/animation handlers intact.
+    // Only swap phone/tablet constraint anchors; TV is already above the bottom bar.
+    private data class SkipButtonPosition(
+        val button: View,
+        val topToTop: Int,
+        val topToBottom: Int,
+        val bottomToTop: Int,
+        val bottomToBottom: Int,
+        val topMargin: Int,
+        val bottomMargin: Int,
+        val marginEnd: Int
+    )
+    private var savedButtonPosition: SkipButtonPosition? = null
+
+    private fun placeNativeSkipButton() {
+        val host = fragment?.playerView ?: return
+        val button = host.findViewById<View>(R.id.skip_chapter_button) ?: return
+        val bottomBar = host.findViewById<View>(R.id.bottom_player_bar) ?: return
+        val params = button.layoutParams as? ConstraintLayout.LayoutParams ?: return
+        if (button.parent !== bottomBar.parent) return
+        if (savedButtonPosition?.button === button) return
+        restoreNativeSkipButton()
+        // Native TV is already constrained to the bottom bar: leave it untouched.
+        if (params.bottomToTop == bottomBar.id) return
+        savedButtonPosition = SkipButtonPosition(
+            button, params.topToTop, params.topToBottom, params.bottomToTop,
+            params.bottomToBottom, params.topMargin, params.bottomMargin, params.marginEnd
+        )
+        params.topToTop = ConstraintLayout.LayoutParams.UNSET
+        params.topToBottom = ConstraintLayout.LayoutParams.UNSET
+        params.bottomToBottom = ConstraintLayout.LayoutParams.UNSET
+        params.bottomToTop = bottomBar.id
+        params.topMargin = 0
+        params.bottomMargin = (16 * button.resources.displayMetrics.density + 0.5f).toInt()
+        params.marginEnd = (24 * button.resources.displayMetrics.density + 0.5f).toInt()
+        button.layoutParams = params
+    }
+
+    private fun restoreNativeSkipButton() {
+        val prior = savedButtonPosition ?: return
+        savedButtonPosition = null
+        val params = prior.button.layoutParams as? ConstraintLayout.LayoutParams ?: return
+        params.topToTop = prior.topToTop
+        params.topToBottom = prior.topToBottom
+        params.bottomToTop = prior.bottomToTop
+        params.bottomToBottom = prior.bottomToBottom
+        params.topMargin = prior.topMargin
+        params.bottomMargin = prior.bottomMargin
+        params.marginEnd = prior.marginEnd
+        prior.button.layoutParams = params
+    }
+
     private var attachAttempts = 0
     private val attachRetry = object : Runnable {
         override fun run() {
@@ -145,6 +200,7 @@ internal class ElevateSkipController(private val application: Application) :
         }
         detach()
         fragment = candidate
+        placeNativeSkipButton()
         val vm = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
         model = vm
         val stampsObserver = Observer<VideoLive<List<VideoSkipStamp>>> { event ->
@@ -184,6 +240,7 @@ internal class ElevateSkipController(private val application: Application) :
         main.removeCallbacks(autoTick)
         main.removeCallbacks(attachRetry)
         attachAttempts = 0
+        restoreNativeSkipButton()
         restoreNative()
         model = null
         fragment = null
@@ -214,6 +271,7 @@ internal class ElevateSkipController(private val application: Application) :
     private fun refresh() {
         val vm = model ?: return
         val f = fragment ?: return
+        placeNativeSkipButton()
         val nextPlayer = f.playerView?.player
         if (nextPlayer !== mediaPlayer) {
             mediaPlayer?.removeListener(playerListener)
