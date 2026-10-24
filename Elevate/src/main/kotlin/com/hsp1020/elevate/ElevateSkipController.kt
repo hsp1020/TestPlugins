@@ -75,17 +75,29 @@ internal class ElevateSkipController(private val application: Application) :
     private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key?.startsWith("AUTO_SKIP_") == true) main.post { scheduleAutoSkip() }
     }
-    private val playerListener = object : Media3Player.Listener {
-        override fun onPlaybackStateChanged(playbackState: Int) {
-            if (playbackState == Media3Player.STATE_READY) refresh()
+    // CloudStream may bundle a newer Media3 Player.Listener than our compileOnly API.
+    // Implementing the interface directly can trigger AbstractMethodError when ExoPlayer
+    // invokes a method that does not exist in the compile-time interface version.
+    // A proxy handles every runtime callback safely without invoking interface defaults.
+    private val playerListener = java.lang.reflect.Proxy.newProxyInstance(
+        Media3Player.Listener::class.java.classLoader,
+        arrayOf(Media3Player.Listener::class.java)
+    ) { proxy, method, args ->
+        when (method.name) {
+            "onPlaybackStateChanged" -> {
+                if (args?.getOrNull(0) == Media3Player.STATE_READY) refresh()
+                null
+            }
+            "onMediaItemTransition", "onTimelineChanged" -> {
+                refresh()
+                null
+            }
+            "equals" -> proxy === args?.getOrNull(0)
+            "hashCode" -> System.identityHashCode(proxy)
+            "toString" -> "ElevateSkipPlayerListener"
+            else -> null
         }
-        override fun onMediaItemTransition(
-            mediaItem: androidx.media3.common.MediaItem?, reason: Int
-        ) = refresh()
-        override fun onTimelineChanged(
-            timeline: androidx.media3.common.Timeline, reason: Int
-        ) = refresh()
-    }
+    } as Media3Player.Listener
     private val fragmentCallbacks = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, v: android.view.View,
                                            state: Bundle?) = watch(f)
