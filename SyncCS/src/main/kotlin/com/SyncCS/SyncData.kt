@@ -316,6 +316,20 @@ internal object SyncData {
         return try { prefs.getStringSet(key, null) } catch (_: ClassCastException) { null }
     }
 
+    /**
+     * The native profile references are indexed by <slot>/<kind>/<item ID>.
+     * For selected download-header entries, look up those two exact references
+     * instead of enumerating every key stored in CloudStream.
+     */
+    internal fun selectedReferencedHeaders(
+        prefs: SharedPreferences, installedSlots: Set<Int>, ids: Set<String>
+    ): Set<String> = ids.filterTo(mutableSetOf()) { id ->
+        id.toIntOrNull() != null && installedSlots.any { slot ->
+            prefs.contains("$slot/result_resume_watching_2/$id") ||
+                prefs.contains("$slot/result_watch_state_data/$id")
+        }
+    }
+
     fun snapshotSelected(context: Context, nativePaths: Collection<String>): MutableMap<String, String> {
         val result = linkedMapOf<String, String>()
         if (nativePaths.isEmpty()) return result
@@ -328,13 +342,13 @@ internal object SyncData {
             val indices = DataStoreHelper.getAccounts(context)
                 .mapTo(mutableSetOf()) { it.keyIndex }
             val prefs = with(DataStore) { context.getSharedPrefs() }
-            // Only generated download headers need a full key enumeration to
-            // validate whether CloudStream still references them.
-            val referencedHeaders = if (dataPaths.any {
-                it.startsWith("d/download_header_cache/")
-            }) referencedHeaderIds(prefs.all.keys.filter {
-                it.substringBefore('/').toIntOrNull() in indices
-            }) else emptySet()
+            // Reference lookup is constant-time per selected header. Never
+            // clone the complete 25k-entry map for an orphaned header marker.
+            val headers = dataPaths.asSequence()
+                .filter { it.startsWith("d/download_header_cache/") }
+                .map { it.removePrefix("d/download_header_cache/") }
+                .toSet()
+            val referencedHeaders = selectedReferencedHeaders(prefs, indices, headers)
             for (path in dataPaths) {
                 val key = path.removePrefix("d/")
                 if (!belongsToInstalledProfile(key, indices) || key.length > 500 ||
@@ -368,9 +382,10 @@ internal object SyncData {
         SyncTrace.info("selected-local-read",
             "requested=${nativePaths.size} data=${dataPaths.size} " +
                 "defaults=${defaultPaths.size} pluginPrefs=${pluginPaths.size} " +
-                "found=${result.size} headerLookupAll=${dataPaths.any {
+                "found=${result.size} headerCandidates=${dataPaths.count {
                     it.startsWith("d/download_header_cache/")
-                }} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
+                }} " +
+                "headerLookupAll=false elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
         return result
     }
 

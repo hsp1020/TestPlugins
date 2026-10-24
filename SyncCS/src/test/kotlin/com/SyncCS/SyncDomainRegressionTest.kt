@@ -111,6 +111,21 @@ class SyncDomainRegressionTest {
         assertNull(SyncData.selectedValue(prefs, "absent"))
     }
 
+    @Test fun selectedHeadersCheckOnlyNativeReferencesWithoutEnumeratingAllPrefs() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val prefs = context.getSharedPreferences("synccs-header-probe", Context.MODE_PRIVATE)
+        prefs.edit().clear()
+            .putString("0/result_resume_watching_2/42", "resume")
+            .putString("1/result_watch_state_data/88", "watched")
+            .putString("2/result_resume_watching_2/999", "inactive")
+            .commit()
+        val references = SyncData.selectedReferencedHeaders(
+            prefs, setOf(0, 1), setOf("42", "88", "999", "55"))
+        assertEquals(setOf("42", "88"), references)
+        assertFalse(SyncData.includeHeaderCache("download_header_cache/55", references))
+        assertTrue(SyncData.includeHeaderCache("download_header_cache/42", references))
+    }
+
     @Test fun selectedAndFullSnapshotShareOrphanHeaderExclusion() {
         val referenced = setOf("42", "88")
         assertTrue(SyncData.includeHeaderCache("download_header_cache/42", referenced))
