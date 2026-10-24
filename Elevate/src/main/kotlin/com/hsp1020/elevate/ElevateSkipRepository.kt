@@ -128,6 +128,7 @@ internal object ElevateSkipRepository {
                 ids.positive("anilistId")?.toString(), local)
             if (result.mal != null || result.anilist != null) break
         }
+        if (mappingCache.size >= 600) mappingCache.clear()
         mappingCache[query] = Timed(result, now + if (result == null) MISS else DAY)
         return result
     }
@@ -313,6 +314,7 @@ internal object ElevateSkipRepository {
                 choose(intro.await(), anime.await(), ani.await(), theIntro.await())
             }
         } ?: emptyList()
+        if (resultCache.size >= 400) resultCache.clear()
         resultCache[i.key] = Timed(result, now + if (result.isEmpty()) MISS else DAY)
         result
     }
