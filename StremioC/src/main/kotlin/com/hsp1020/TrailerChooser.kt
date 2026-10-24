@@ -331,7 +331,7 @@ internal class TrailerChooser(
                 // Match the inner CardView in result_episode_large.xml:
                 // default CardView radius/elevation, with native focus outline.
                 isDuplicateParentStateEnabled = true
-                foreground = androidx.core.content.ContextCompat.getDrawable(
+                this.foreground = androidx.core.content.ContextCompat.getDrawable(
                     activity, R.drawable.outline_drawable
                 )
                 addView(ImageView(activity).apply {
@@ -342,7 +342,7 @@ internal class TrailerChooser(
                             android.R.attr.selectableItemBackgroundBorderless, ripple, true
                         ) && ripple.resourceId != 0
                     ) {
-                        foreground = androidx.core.content.ContextCompat.getDrawable(
+                        this.foreground = androidx.core.content.ContextCompat.getDrawable(
                             activity, ripple.resourceId
                         )
                     }
