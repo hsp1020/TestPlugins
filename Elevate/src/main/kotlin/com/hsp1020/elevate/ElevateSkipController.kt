@@ -594,124 +594,120 @@ internal class ElevateSkipButtonTimer(
     private var lastTickMs = 0L
     private var intervalKey: String? = null
     private var autoHidden = false
-    private var revealedWhileControls = false
-    // Core uses a 500ms width animation. Reopening while its hide animator is
-    // cancelling can cause the old onEnd callback to hide the new button.
-    private var nativeHiddenAtMs = 0L
-    private var nativeShownAtMs = 0L
+    private var hiddenByTimer = false
+    private var lastRestoreAtMs = 0L
+    private var tickQueued = false
+
+    private fun queueTick(delayMs: Long = 0L) {
+        if (tickQueued || button == null) return
+        tickQueued = true
+        main.postDelayed(tick, delayMs)
+    }
 
     private fun dp(value: Float): Int =
         (value * (button?.resources?.displayMetrics?.density ?: 1f) + 0.5f).toInt()
 
-    private val buttonLayout = View.OnLayoutChangeListener {
-            view, left, _, right, _, oldLeft, _, oldRight, _ ->
-        val width = right - left
-        val oldWidth = oldRight - oldLeft
-        if (view.visibility != View.VISIBLE) {
-            if (active && !autoHidden) reset()
-            return@OnLayoutChangeListener
-        }
-        // A shrinking width is not sufficient evidence of manual dismissal:
-        // native animators can resize during controller transitions. The tick
-        // handles completed hides and changes in the actual skip interval.
-        refreshVisibility()
-        if (!active && width > oldWidth + dp(1f) && !isSuppressed()) begin()
-    }
-
     private fun isSuppressed(): Boolean = shouldHide(currentInterval())
 
-    /** Triggered by runtime player-state and explicit seek events, not a frame observer. */
+    /** Suppression affects interaction, not the native six-second display timer. */
     fun refreshVisibility() {
         val b = button ?: return
         val suppressed = isSuppressed()
-        val desiredAlpha = if (suppressed) 0f else originalAlpha
-        if (b.alpha != desiredAlpha) b.alpha = desiredAlpha
-        val desiredEnabled = if (suppressed) false else originalEnabled
-        if (b.isEnabled != desiredEnabled) b.isEnabled = desiredEnabled
-        val desiredFocusable = if (suppressed) false else originalFocusable
-        if (b.isFocusable != desiredFocusable) b.isFocusable = desiredFocusable
+        val alpha = if (suppressed) 0f else originalAlpha
+        if (b.alpha != alpha) b.alpha = alpha
+        val enabled = !suppressed && originalEnabled
+        if (b.isEnabled != enabled) b.isEnabled = enabled
+        val focusable = !suppressed && originalFocusable
+        if (b.isFocusable != focusable) b.isFocusable = focusable
         val accessibility = if (suppressed) {
             View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
         } else originalAccessibility
-        if (b.importantForAccessibility != accessibility)
-            b.importantForAccessibility = accessibility
-        if (suppressed) {
-            if (b.hasFocus()) b.clearFocus()
-            indicator?.alpha = 0f
-            if (active) reset()
-        } else {
-            if (!active && b.visibility == View.VISIBLE && b.width > dp(25f)) begin()
-            indicator?.alpha = if (fragment.isUIShowing()) 0f else 1f
-        }
+        if (b.importantForAccessibility != accessibility) b.importantForAccessibility = accessibility
+        if (suppressed && b.hasFocus()) b.clearFocus()
+        if (suppressed) indicator?.visibility = View.GONE
+        // Do not restart or cancel the countdown on the native button's layout
+        // transitions: CloudStream animates its width for 500ms.
+        queueTick()
+    }
+
+    private fun showNative(stamp: com.lagradost.cloudstream3.utils.videoskip.VideoSkipStamp,
+                           now: Long) {
+        val b = button ?: return
+        if (now - lastRestoreAtMs < NATIVE_ANIMATION_MS + 100L) return
+        lastRestoreAtMs = now
+        // CloudStream's timestampShowState can remain true even after a stale
+        // hide-animation onEnd makes the view GONE. Normalize that state first.
+        fragment.onTimestamp(null)
+        fragment.onTimestamp(stamp)
+        // Cancel the core's independent 6-second delayed hide; Elevate's
+        // countdown is authoritative for this active interval.
+        fragment.skipIndex++
+        if (b.alpha != originalAlpha) b.alpha = originalAlpha
     }
 
     private val tick = object : Runnable {
         override fun run() {
-            if (!active) return
-            val view = button
-            if (view == null || fragment.view == null) {
-                reset()
-                return
-            }
+            tickQueued = false
+            val b = button ?: return
+            if (fragment.view == null) return
             val now = SystemClock.uptimeMillis()
-            if (isSuppressed()) {
-                refreshVisibility()
-                return
-            }
-            val controlsVisible = fragment.isUIShowing()
-            val currentStamp = currentInterval()
-            val current = currentStamp?.let {
-                val stamp = it.timestamp
-                "${stamp.type}:${stamp.startMs}:${stamp.endMs}"
-            }
-            if (current != null && intervalKey != current) {
-                intervalKey = current
-                elapsedMs = 0L
-                autoHidden = false
-                revealedWhileControls = false
-                fill?.scaleX = 0f
-                fragment.skipIndex++
-            } else if (current == null && intervalKey != null) {
-                reset()
-                fragment.onTimestamp(null)
-                return
-            }
-            if (autoHidden) {
-                indicator?.visibility = View.GONE
-                if (controlsVisible && !revealedWhileControls && currentStamp != null &&
-                    now - nativeHiddenAtMs >= NATIVE_ANIMATION_MS) {
-                    revealedWhileControls = true
-                    nativeShownAtMs = now
-                    // Show only while controls are open; preserve the completed
-                    // countdown and cancel the core's independent six-second hide.
-                    fragment.onTimestamp(currentStamp)
-                    fragment.skipIndex++
-                } else if (!controlsVisible && revealedWhileControls &&
-                    now - nativeShownAtMs >= NATIVE_ANIMATION_MS) {
-                    revealedWhileControls = false
-                    nativeHiddenAtMs = now
+            val stamp = currentInterval()
+            if (stamp == null || isSuppressed()) {
+                if (active) {
+                    reset()
+                    // Only clear when this interval was actually ours.
                     fragment.onTimestamp(null)
                 }
-                lastTickMs = now
-                main.postDelayed(this, 250L)
+                queueTick(IDLE_UPDATE_MS)
                 return
             }
-            if (view.visibility != View.VISIBLE) {
-                reset()
-                return
-            }
-            if (!controlsVisible) elapsedMs += (now - lastTickMs).coerceAtLeast(0L)
-            lastTickMs = now
-            indicator?.alpha = if (controlsVisible) 0f else 1f
-            fill?.scaleX = (elapsedMs / HIDE_TIMEOUT_MS.toFloat()).coerceIn(0f, 1f)
 
-            if (elapsedMs >= HIDE_TIMEOUT_MS && !controlsVisible) {
-                autoHidden = true
-                indicator?.visibility = View.GONE
-                nativeHiddenAtMs = now
-                fragment.onTimestamp(null)
+            val data = stamp.timestamp
+            val key = "${data.type}:${data.startMs}:${data.endMs}"
+            if (!active || intervalKey != key) {
+                active = true
+                intervalKey = key
+                elapsedMs = 0L
+                autoHidden = false
+                hiddenByTimer = false
+                lastRestoreAtMs = 0L
+                lastTickMs = now
+                fill?.scaleX = 0f
+                // If the core has already displayed the button, invalidate
+                // its pending 6-second hide immediately.
+                fragment.skipIndex++
             }
-            main.postDelayed(this, UPDATE_MS)
+
+            val controlsVisible = fragment.isUIShowing()
+            if (!controlsVisible && !autoHidden) {
+                elapsedMs += (now - lastTickMs).coerceAtLeast(0L)
+                if (elapsedMs >= HIDE_TIMEOUT_MS) autoHidden = true
+            }
+            lastTickMs = now
+            val shouldShow = !autoHidden || controlsVisible
+            if (shouldShow) {
+                // This also restores the button when controls open after the
+                // 10-second timeout, matching Nuvio's (!autoHidden || controls).
+                val wasHiddenByUs = hiddenByTimer
+                hiddenByTimer = false
+                if (wasHiddenByUs || b.visibility != View.VISIBLE ||
+                    b.width <= dp(25f)) {
+                    showNative(stamp, now)
+                }
+                if (b.alpha != originalAlpha) b.alpha = originalAlpha
+                indicator?.visibility =
+                    if (controlsVisible || autoHidden) View.GONE else View.VISIBLE
+                indicator?.alpha = if (controlsVisible) 0f else 1f
+                fill?.scaleX =
+                    (elapsedMs / HIDE_TIMEOUT_MS.toFloat()).coerceIn(0f, 1f)
+            } else {
+                indicator?.visibility = View.GONE
+                if (!hiddenByTimer) {
+                    hiddenByTimer = true
+                    fragment.onTimestamp(null)
+                }
+            }
+            queueTick(UPDATE_MS)
         }
     }
 
@@ -722,10 +718,6 @@ internal class ElevateSkipButtonTimer(
             val stamp = it.timestamp
             position >= stamp.startMs && position < stamp.endMs
         }
-    }
-
-    private fun currentIntervalKey(): String? = currentInterval()?.let {
-        "${it.timestamp.type}:${it.timestamp.startMs}:${it.timestamp.endMs}"
     }
 
     fun attach() {
@@ -773,45 +765,25 @@ internal class ElevateSkipButtonTimer(
         parent.addView(strip, params)
         indicator = strip
         fill = progress
-        next.addOnLayoutChangeListener(buttonLayout)
         refreshVisibility()
-    }
-
-    private fun begin() {
-        if (active || button?.visibility != View.VISIBLE || isSuppressed()) return
-        active = true
-        autoHidden = false
-        revealedWhileControls = false
-        nativeHiddenAtMs = 0L
-        nativeShownAtMs = 0L
-        elapsedMs = 0L
-        intervalKey = currentIntervalKey()
-        lastTickMs = SystemClock.uptimeMillis()
-        indicator?.visibility = View.VISIBLE
-        fill?.scaleX = 0f
-        // The core's six-second runnable compares this with its captured index.
-        // It must not preempt Nuvio's ten-second progress indicator.
-        fragment.skipIndex++
-        main.removeCallbacks(tick)
-        main.post(tick)
     }
 
     private fun reset() {
         active = false
         autoHidden = false
-        revealedWhileControls = false
-        nativeHiddenAtMs = 0L
-        nativeShownAtMs = 0L
-        main.removeCallbacks(tick)
-        indicator?.visibility = View.GONE
+        hiddenByTimer = false
         elapsedMs = 0L
+        lastTickMs = 0L
+        lastRestoreAtMs = 0L
         intervalKey = null
+        indicator?.visibility = View.GONE
     }
 
     fun dispose() {
         reset()
         val previous = button
-        previous?.removeOnLayoutChangeListener(buttonLayout)
+        main.removeCallbacks(tick)
+        tickQueued = false
         previous?.alpha = originalAlpha
         previous?.isEnabled = originalEnabled
         previous?.isFocusable = originalFocusable
@@ -825,6 +797,7 @@ internal class ElevateSkipButtonTimer(
     companion object {
         private const val HIDE_TIMEOUT_MS = 10_000L
         private const val UPDATE_MS = 125L
+        private const val IDLE_UPDATE_MS = 300L
         private const val NATIVE_ANIMATION_MS = 550L
     }
 }
