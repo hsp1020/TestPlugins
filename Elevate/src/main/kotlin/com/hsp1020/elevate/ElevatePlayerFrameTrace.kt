@@ -12,6 +12,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
+import androidx.media3.common.Player as Media3Player
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.mvvm.Resource
@@ -19,6 +20,8 @@ import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.player.VideoLink
 import com.lagradost.cloudstream3.ui.player.VideoLive
+import com.lagradost.cloudstream3.ui.result.ResultEpisode
+import java.security.MessageDigest
 
 /** Passive diagnostic: observes the core player but never reloads or relayouts it. */
 internal class ElevatePlayerFrameTrace(private val app: Application) :
@@ -28,17 +31,29 @@ internal class ElevatePlayerFrameTrace(private val app: Application) :
     private var model: PlayerGeneratorViewModel? = null
     private var tree: ViewTreeObserver? = null
     private var onDraw: ViewTreeObserver.OnPreDrawListener? = null
+    private var onGlobalLayout: ViewTreeObserver.OnGlobalLayoutListener? = null
     private var unsubscribe: (() -> Unit)? = null
     private val layoutListeners = mutableMapOf<View, View.OnLayoutChangeListener>()
     private var session = 0
     private var event = 0
     private var lastPlayer: Any? = null
+    private var listeningPlayer: Media3Player? = null
+    private var loadSequence = 0
+    private var loadingPhase = "unknown"
+    private var lastMediaKey: String? = null
+    private var lastMediaPlayerId = 0
+    private var lastMediaInstance: Int? = null
+    private var lastMediaEpisode: Int? = null
+    private var lastMediaTime = 0L
     private var observed = false
     private var lastInstance: Int? = null
     private var lastState: Int? = null
     private var lastDraw = 0L
     private var layoutWindow = 0L
     private var layouts = 0
+    private var layoutPasses = 0
+    private var unchangedLayouts = 0
+    private var lastSlowGapLog = 0L
 
     private fun log(stage: String, detail: String = "") {
         Log.i("Elevate-PlayerTrace", "session=" + session + " event=" + (++event) +
@@ -48,8 +63,64 @@ internal class ElevatePlayerFrameTrace(private val app: Application) :
     private fun source(): String {
         val state = model?.state ?: return "model=none"
         return "instance=" + state.instance +
+            " episode=" + (state.generatorState?.meta as? ResultEpisode)?.id +
+            " observedLoadSeq=" + loadSequence + " loading=" + loadingPhase +
             " provider=" + (state.generatorState?.response?.apiName ?: "none")
     }
+
+    // Only calculate on link/media changes; never print URLs or tokens.
+    private fun fingerprint(value: String): String =
+        MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+            .take(8).joinToString("") { "%02x".format(it) }
+
+    private fun recordMedia(trigger: String, player: Media3Player) {
+        val uri = runCatching {
+            player.currentMediaItem?.localConfiguration?.uri?.toString()
+        }.getOrNull() ?: return
+        val key = fingerprint(uri)
+        val playerId = System.identityHashCode(player)
+        val instance = model?.state?.instance
+        val episode = (model?.state?.generatorState?.meta as? ResultEpisode)?.id
+        if (key == lastMediaKey && playerId == lastMediaPlayerId &&
+            instance == lastMediaInstance && episode == lastMediaEpisode) return
+        val now = SystemClock.elapsedRealtime()
+        val sameMedia = key == lastMediaKey && instance == lastMediaInstance &&
+            episode == lastMediaEpisode && lastMediaPlayerId != 0 &&
+            lastMediaPlayerId != playerId
+        log("media-observed", "playerId=" + playerId + " mediaKey=" + key +
+            " trigger=" + trigger + " sameMediaNewPlayer=" + sameMedia +
+            " sincePreviousMs=" + (if (sameMedia) now - lastMediaTime else -1) +
+            " " + source())
+        lastMediaKey = key
+        lastMediaPlayerId = playerId
+        lastMediaInstance = instance
+        lastMediaEpisode = episode
+        lastMediaTime = now
+    }
+
+    // Observer callbacks do not expose the direct caller of core load/release methods.
+    // Proxy avoids host/app Media3 listener ABI mismatch.
+    private val playerListener = java.lang.reflect.Proxy.newProxyInstance(
+        Media3Player.Listener::class.java.classLoader,
+        arrayOf(Media3Player.Listener::class.java)
+    ) { proxy, method, args ->
+        when (method.name) {
+            "onMediaItemTransition" -> {
+                listeningPlayer?.let { recordMedia("media-transition", it) }
+                log("media-transition", "reason=" + args?.getOrNull(1) + " " + source())
+                null
+            }
+            "onPlayerError" -> {
+                val error = args?.getOrNull(0) as? androidx.media3.common.PlaybackException
+                log("player-error", "errorCode=" + error?.errorCode + " " + source())
+                null
+            }
+            "equals" -> proxy === args?.getOrNull(0)
+            "hashCode" -> System.identityHashCode(proxy)
+            "toString" -> "ElevatePlayerTraceListener"
+            else -> null
+        }
+    } as Media3Player.Listener
 
     private val lifecycle = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, v: View, saved: Bundle?) {
@@ -100,12 +171,30 @@ internal class ElevatePlayerFrameTrace(private val app: Application) :
         event = 0
         log("fragment-attach", source())
         val vm = model ?: return
-        val links = Observer<VideoLive<Set<VideoLink>>> {
-            log("links-event", source())
+        val links = Observer<VideoLive<Set<VideoLink>>> { update ->
+            if (update != null) {
+                val urls = update.value.mapNotNull { it.first?.url }.sorted()
+                val key = if (urls.isEmpty()) "none" else fingerprint(urls.joinToString("\n"))
+                log("links-event", "eventInstance=" + update.instance +
+                    " count=" + update.value.size + " linksKey=" + key + " " + source())
+            }
             sample("links")
         }
-        val loading = Observer<VideoLive<Resource<Unit>>> {
-            log("loading-event", source())
+        val loading = Observer<VideoLive<Resource<Unit>>> { update ->
+            if (update != null) {
+                val phase = when (update.value) {
+                    is Resource.Loading -> "Loading"
+                    is Resource.Success -> "Success"
+                    is Resource.Failure -> "Failure"
+                    else -> "Other"
+                }
+                if (update.instance == vm.state.instance) {
+                    if (phase == "Loading" && loadingPhase != "Loading") loadSequence++
+                    loadingPhase = phase
+                }
+                log("loading-event", "eventInstance=" + update.instance +
+                    " phase=" + phase + " " + source())
+            }
             sample("loading")
         }
         vm.currentLinks.observe(f.viewLifecycleOwner, links)
@@ -117,8 +206,19 @@ internal class ElevatePlayerFrameTrace(private val app: Application) :
         val listener = ViewTreeObserver.OnPreDrawListener {
             sample("draw")
             val now = SystemClock.elapsedRealtime()
-            if (lastDraw != 0L && now - lastDraw >= 80L) {
+            if (lastDraw != 0L && now - lastDraw >= 80L && now - lastSlowGapLog >= 500L) {
                 log("slow-frame-gap", "milliseconds=" + (now - lastDraw) + " " + source())
+                lastSlowGapLog = now
+            }
+            if (layoutWindow != 0L && now - layoutWindow >= 1000L) {
+                if (layouts > 0 || layoutPasses > 1) {
+                    log("layout-summary", "passes=" + layoutPasses + " callbacks=" + layouts +
+                        " sameBounds=" + unchangedLayouts + " " + source())
+                }
+                layouts = 0
+                layoutPasses = 0
+                unchangedLayouts = 0
+                layoutWindow = now
             }
             lastDraw = now
             true
@@ -126,7 +226,10 @@ internal class ElevatePlayerFrameTrace(private val app: Application) :
         f.view?.viewTreeObserver?.takeIf { it.isAlive }?.let {
             tree = it
             onDraw = listener
+            onGlobalLayout = ViewTreeObserver.OnGlobalLayoutListener { layoutPasses++ }
             it.addOnPreDrawListener(listener)
+            it.addOnGlobalLayoutListener(onGlobalLayout!!)
+            layoutWindow = SystemClock.elapsedRealtime()
         }
         for (name in listOf("exo_content_frame", "extra_brightness_overlay",
             "start_panel", "end_panel")) {
@@ -135,13 +238,8 @@ internal class ElevatePlayerFrameTrace(private val app: Application) :
             val view = if (id > 0) root.findViewById<View>(id) else null
             if (view == null) continue
             val onChange = View.OnLayoutChangeListener { v, l, t, r, b, ol, ot, oright, ob ->
-                val now = SystemClock.elapsedRealtime()
-                if (now - layoutWindow >= 1000L) {
-                    if (layouts > 0) log("layout-window", "count=" + layouts)
-                    layouts = 0
-                    layoutWindow = now
-                }
                 layouts++
+                if (l == ol && t == ot && r == oright && b == ob) unchangedLayouts++
                 if (layouts <= 5) {
                     log("layout", "view=" + name + " sameBounds=" +
                         (l == ol && t == ot && r == oright && b == ob) +
@@ -164,27 +262,41 @@ internal class ElevatePlayerFrameTrace(private val app: Application) :
             lastInstance = instance
         }
         if (!observed || lastPlayer !== player) {
-            log("player-attachment", "oldId=" + (lastPlayer?.let(System::identityHashCode) ?: 0) +
-                " newId=" + (player?.let(System::identityHashCode) ?: 0) +
+            val oldId = lastPlayer?.let(System::identityHashCode) ?: 0
+            val newId = player?.let(System::identityHashCode) ?: 0
+            listeningPlayer?.let { runCatching { it.removeListener(playerListener) } }
+            listeningPlayer = player
+            player?.let { runCatching { it.addListener(playerListener) } }
+            log("player-attachment", "oldId=" + oldId + " newId=" + newId +
                 " trigger=" + trigger + " " + source())
             lastPlayer = player
             lastState = null
             observed = true
+            if (player != null) recordMedia("attachment", player)
         }
         if (player != null) {
             val state = runCatching { player.playbackState }.getOrNull()
             if (state != lastState) {
                 log("playback-state", "playerId=" + System.identityHashCode(player) +
-                    " old=" + lastState + " new=" + state + " trigger=" + trigger)
+                    " old=" + lastState + " new=" + state + " trigger=" + trigger +
+                    " " + source())
                 lastState = state
             }
         }
     }
     private fun detach() {
         if (fragment != null) log("fragment-detach", source())
-        tree?.let { tr -> onDraw?.let { if (tr.isAlive) tr.removeOnPreDrawListener(it) } }
+        tree?.let { tr ->
+            if (tr.isAlive) {
+                onDraw?.let { tr.removeOnPreDrawListener(it) }
+                onGlobalLayout?.let { tr.removeOnGlobalLayoutListener(it) }
+            }
+        }
         tree = null
         onDraw = null
+        onGlobalLayout = null
+        listeningPlayer?.let { runCatching { it.removeListener(playerListener) } }
+        listeningPlayer = null
         layoutListeners.forEach { (v, listener) -> v.removeOnLayoutChangeListener(listener) }
         layoutListeners.clear()
         unsubscribe?.invoke()
@@ -197,6 +309,17 @@ internal class ElevatePlayerFrameTrace(private val app: Application) :
         lastInstance = null
         lastDraw = 0L
         layouts = 0
+        layoutPasses = 0
+        unchangedLayouts = 0
+        layoutWindow = 0L
+        lastSlowGapLog = 0L
+        loadSequence = 0
+        loadingPhase = "unknown"
+        lastMediaKey = null
+        lastMediaPlayerId = 0
+        lastMediaInstance = null
+        lastMediaEpisode = null
+        lastMediaTime = 0L
     }
     override fun onActivityCreated(a: Activity, state: Bundle?) {}
     override fun onActivityStarted(a: Activity) {}
