@@ -1,6 +1,8 @@
 package com.hsp1020
 
 import android.content.Context
+import android.os.SystemClock
+import android.util.Log
 import android.content.SharedPreferences
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonAlias
@@ -1214,6 +1216,53 @@ open class StremioC(
         }
 
         val networkSemaphore = Semaphore(35)
+
+        // Bound only the expensive extractor callback / integrated provider
+        // invocations. Metadata and link discovery remain concurrent so the
+        // first playable result is not delayed by unrelated network lookups.
+        private val streamCallbackLimiter = Semaphore(8)
+        private val integratedSourceLimiter = Semaphore(4)
+        private val activeStreamCallbacks = java.util.concurrent.atomic.AtomicInteger()
+        private val activeSourceIntegrations = java.util.concurrent.atomic.AtomicInteger()
+
+        private suspend fun <T> withStreamCallback(
+            category: String, work: suspend () -> T
+        ): T {
+            val queuedAt = SystemClock.elapsedRealtime()
+            return streamCallbackLimiter.withPermit {
+                val waited = SystemClock.elapsedRealtime() - queuedAt
+                val running = activeStreamCallbacks.incrementAndGet()
+                val start = SystemClock.elapsedRealtime()
+                try { work() } finally {
+                    val duration = SystemClock.elapsedRealtime() - start
+                    activeStreamCallbacks.decrementAndGet()
+                    if (duration >= 5000L || waited >= 1500L)
+                        Log.i("StremioC-Perf", "stage=stream-callback category=" +
+                            category + " waitMs=" + waited +
+                            " durationMs=" + duration + " simultaneous=" + running)
+                }
+            }
+        }
+
+        private suspend fun <T> withIntegratedSource(
+            label: String, work: suspend () -> T
+        ): T {
+            val queuedAt = SystemClock.elapsedRealtime()
+            return integratedSourceLimiter.withPermit {
+                val waited = SystemClock.elapsedRealtime() - queuedAt
+                val running = activeSourceIntegrations.incrementAndGet()
+                val start = SystemClock.elapsedRealtime()
+                try { work() } finally {
+                    val duration = SystemClock.elapsedRealtime() - start
+                    activeSourceIntegrations.decrementAndGet()
+                    if (waited >= 1000L || duration >= 10000L)
+                        Log.i("StremioC-Perf", "stage=integrated-extraction source=" +
+                            label + " waitMs=" + waited +
+                            " durationMs=" + duration + " simultaneous=" + running)
+                }
+            }
+        }
+
 
         const val HOME_FOREGROUND_CONCURRENCY = 10
         const val HOME_FOREGROUND_PER_HOST_CONCURRENCY = 10
@@ -3277,8 +3326,8 @@ open class StremioC(
                             streams.map { stream -> async(Dispatchers.IO) {
                                 val named = if (stream.name == null && stream.title == null && stream.description == null)
                                     stream.copy(title = loadData.embeddedStreamTitle) else stream
-                                named.runCallback(this@StremioC, name,
-                                    stremioSubtitleFrom(currentMainUrl), extractorSubtitleFrom(currentMainUrl), wrappedCallback)
+                                withStreamCallback("embedded") { named.runCallback(this@StremioC, name,
+                                    stremioSubtitleFrom(currentMainUrl), extractorSubtitleFrom(currentMainUrl), wrappedCallback) }
                             } }.awaitAll()
                         }
                     }
@@ -3296,7 +3345,7 @@ open class StremioC(
                             val emitted = java.util.concurrent.atomic.AtomicInteger(0)
                             coroutineScope {
                                 res?.streams?.map { stream -> async(Dispatchers.IO) {
-                                    stream.runCallback(
+                                    withStreamCallback("main") { stream.runCallback(
                                         this@StremioC,
                                         name,
                                         stremioSubtitleFrom(currentMainUrl),
@@ -3305,7 +3354,7 @@ open class StremioC(
                                             emitted.incrementAndGet()
                                             wrappedCallback(link)
                                         }
-                                    )
+                                    ) }
                                 } }?.awaitAll()
                             }
                             emitted.get()
@@ -3374,9 +3423,9 @@ open class StremioC(
                                             val streams = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
                                             coroutineScope {
                                                 streams?.streams?.map { stream -> async(Dispatchers.IO) {
-                                                    stream.runCallback(this@StremioC, source,
+                                                    withStreamCallback("extra") { stream.runCallback(this@StremioC, source,
                                                         stremioSubtitleFrom(addonUrl), extractorSubtitleFrom(addonUrl), wrappedCallback,
-                                                        preferredName = addon.name)
+                                                        preferredName = addon.name) }
                                                 } }?.awaitAll()
                                             }
                                         }
@@ -3980,11 +4029,11 @@ open class StremioC(
                 standardImdbRoute: Boolean = false
             ) {
                 try {
-                    cineStreamProvider.loadLinks(
+                    withIntegratedSource("cine") { cineStreamProvider.loadLinks(
                         cinePayload(loadData, targetType, media, animeRoute,
                             japaneseTitle, standardImdbRoute).toJson(),
                         isCasting, subtitleCallback, trackedCallback
-                    )
+                    ) }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -4054,10 +4103,10 @@ open class StremioC(
             if (!media.isAnime) {
                 if (streamPlayProvider != null) {
                     withTimeoutOrNull(55000L) {
-                        streamPlayProvider.loadLinks(
+                        withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(
                             streamPlayPayload(loadData, targetType, media).toJson(),
                             isCasting, subtitleCallback, callback
-                        )
+                        ) }
                     }
                 }
                 return
@@ -4092,9 +4141,9 @@ open class StremioC(
                                 "isCartoon" to loadData.isCartoon
                             )
                             withTimeoutOrNull(35000L) {
-                                animeProvider.loadLinks(
+                                withIntegratedSource("anime") { animeProvider.loadLinks(
                                     animePayload.toJson(), isCasting, subtitleCallback, callback
-                                )
+                                ) }
                             }
                         } catch (e: CancellationException) {
                             throw e
@@ -4106,10 +4155,10 @@ open class StremioC(
                     val anime = async(Dispatchers.IO) {
                         try {
                             if (media.hasSeasonMapping || (loadData.originalAnimeId == null && (media.season ?: 1) <= 1)) withTimeoutOrNull(35000L) {
-                                streamPlayProvider.loadLinks(
+                                withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(
                                     streamPlayPayload(loadData, targetType, media).toJson(),
                                     isCasting, subtitleCallback, callback
-                                )
+                                ) }
                             }
                         } catch (e: CancellationException) {
                             throw e
@@ -4122,12 +4171,12 @@ open class StremioC(
                         async(Dispatchers.IO) {
                             try {
                                 withTimeoutOrNull(35000L) {
-                                    streamPlayProvider.loadLinks(
+                                    withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(
                                         streamPlayPayload(
                                             loadData, targetType, media, generalAnimeRoute = true
                                         ).toJson(),
                                         isCasting, subtitleCallback, callback
-                                    )
+                                    ) }
                                 }
                             } catch (e: CancellationException) {
                                 throw e
@@ -4141,11 +4190,11 @@ open class StremioC(
                         async(Dispatchers.IO) {
                             runSuspendCatching {
                                 withTimeoutOrNull(35000L) {
-                                    streamPlayProvider.loadLinks(
+                                    withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(
                                         streamPlayPayload(loadData, targetType, media,
                                             generalAnimeRoute = true, imdbOnlyRoute = true).toJson(),
                                         isCasting, subtitleCallback, callback
-                                    )
+                                    ) }
                                 }
                             }
                         }
