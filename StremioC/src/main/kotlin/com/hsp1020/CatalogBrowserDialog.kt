@@ -13,9 +13,6 @@ import android.content.res.Resources
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.Rect
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.drawable.BitmapDrawable
 import android.graphics.Typeface
 import android.text.TextUtils
 import android.view.View
@@ -678,7 +675,6 @@ internal class CatalogBrowserDialog(
             SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
             SEARCH_ACTION_LOAD -> {
                 val covered = detailHandoff.begin()
-                if (covered) preserveNavigation()
                 SearchHelper.handleSearchClickCallback(click)
                 if (!covered) dismiss()
             }
@@ -703,7 +699,6 @@ internal class CatalogBrowserDialog(
                 SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
                 SEARCH_ACTION_LOAD -> {
                     val covered = detailHandoff.begin()
-                    if (covered) preserveNavigation()
                     SearchHelper.handleSearchClickCallback(click)
                     if (!covered) dismiss()
                 }
@@ -966,9 +961,7 @@ internal class CatalogBrowserDialog(
                     if (!dialog.isShowing) dialog.show()
                 }
             },
-            onReady = ::releaseNavigation,
             onReturnStart = {
-                releaseNavigation()
                 if (!closed) {
                     fitWindowToNavigation(force = true)
                     dialog.show()
@@ -976,7 +969,6 @@ internal class CatalogBrowserDialog(
             },
             preserveNestedNavigation = true)
     }
-    private var navigationSnapshot: BitmapDrawable? = null
     private var pendingDestinationCheck: Runnable? = null
     private var suspendedForNavigation = false
     private var originEntryId: String? = null
@@ -992,7 +984,6 @@ internal class CatalogBrowserDialog(
                 suspendedForNavigation = true
                 cancelPendingBackPress()
                 dialog.hide()
-                releaseNavigation()
             }
             return@OnDestinationChangedListener
         }
@@ -1045,35 +1036,6 @@ internal class CatalogBrowserDialog(
         backButton?.isPressed = false
     }
 
-    private fun preserveNavigation() {
-        releaseNavigation()
-        val decor = activity.window.decorView
-        val browser = dialog.window?.decorView ?: return
-        if (decor.width <= 0 || decor.height <= 0 || browser.width <= 0) return
-        val origin = IntArray(2).also { decor.getLocationOnScreen(it) }
-        val at = IntArray(2).also { browser.getLocationOnScreen(it) }
-        // Keep the complete browser frame over the host while its navigation rail resizes.
-        val snapshot = runCatching {
-            Bitmap.createBitmap(decor.width, decor.height, Bitmap.Config.ARGB_8888).also {
-                val canvas = Canvas(it)
-                decor.draw(canvas)
-                canvas.save()
-                canvas.translate((at[0] - origin[0]).toFloat(), (at[1] - origin[1]).toFloat())
-                browser.draw(canvas)
-                canvas.restore()
-            }
-        }.getOrNull() ?: return
-        navigationSnapshot = BitmapDrawable(activity.resources, snapshot).apply {
-            setBounds(0, 0, decor.width, decor.height)
-            decor.overlay.add(this)
-        }
-    }
-
-    private fun releaseNavigation() {
-        navigationSnapshot?.let { activity.window.decorView.overlay.remove(it) }
-        navigationSnapshot = null
-    }
-
     private fun cancelDestinationCheck() {
         pendingDestinationCheck?.let { activity.window.decorView.removeCallbacks(it) }
         pendingDestinationCheck = null
@@ -1111,7 +1073,6 @@ internal class CatalogBrowserDialog(
                     suspendedForNavigation = true
                     cancelPendingBackPress()
                     dialog.hide()
-                    releaseNavigation()
                 }
             } else decor.postOnAnimation(check)
         }
@@ -1475,7 +1436,6 @@ internal class CatalogBrowserDialog(
             inlineSheet = null
             inlineInput?.setOnQueryTextListener(null)
             inlineResults.adapter = null
-            releaseNavigation()
             navigation?.removeOnDestinationChangedListener(destinationListener)
             activity.window.decorView.removeOnLayoutChangeListener(windowBoundsListener)
             activity.findViewById<View>(R.id.nav_rail_view)
