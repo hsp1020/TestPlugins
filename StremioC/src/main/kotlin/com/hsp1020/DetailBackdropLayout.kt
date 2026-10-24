@@ -70,10 +70,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private var previousHolderBackground: Drawable? = null
     private var appliedHolderBackground: Drawable? = null
     private var lastPaletteKey: List<Int>? = null
-    private var backgroundApplyCount = 0
-    private var backgroundSkipCount = 0
-    private var backgroundTotalUs = 0L
-    private var backgroundMaxUs = 0L
     private var fadeColor = Color.BLACK
     private data class ArtworkColors(val left: Int, val center: Int, val right: Int)
     private var trackedArtwork: Drawable? = null
@@ -179,16 +175,9 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         if (container.background === background) return
         if (appliedHolderBackground == null) previousHolderBackground = container.background
         else if (container.background !== appliedHolderBackground) return
-        val startedNs = SystemClock.elapsedRealtimeNanos()
         appliedHolderBackground = background
         container.background = background
         edge?.invalidate()
-        val us = (SystemClock.elapsedRealtimeNanos() - startedNs) / 1000L
-        backgroundApplyCount++
-        backgroundTotalUs += us
-        backgroundMaxUs = max(backgroundMaxUs, us)
-        if (us >= 8000L) Log.w("StremioC-Perf",
-            "stage=backdrop-background-slow durationUs=$us count=$backgroundApplyCount")
     }
     private fun useThemeBackground(enabled: Boolean) {
         val container = holder ?: return
@@ -213,7 +202,6 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
             listOf(1, fadeColor, colors.left, colors.center, colors.right)
         if (lastPaletteKey == key && appliedHolderBackground != null &&
             holder?.background === appliedHolderBackground) {
-            backgroundSkipCount++
             return
         }
         if (colors == null) {
@@ -922,11 +910,7 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         reservedLateLogoSlot = false
         reservedLateBackgroundFrame = false
         useThemeBackground(false)
-        if (backgroundApplyCount != 0 || backgroundSkipCount != 0) {
-            Log.i("StremioC-Perf", "stage=backdrop-background-summary applied=" +
-                backgroundApplyCount + " skippedSamePalette=" + backgroundSkipCount +
-                " totalUs=" + backgroundTotalUs + " maxUs=" + backgroundMaxUs)
-        }
+
         lastPaletteKey = null
         if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(preDraw)
         if (forcedPortraitTitle && logo?.visibility == View.VISIBLE)

@@ -90,30 +90,9 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
         private var adapter: RecyclerView.Adapter<*>? = null
         private var refreshScheduled = false
         private val rows = mutableMapOf<View, RowProgress>()
-        private var created = 0
-        private var refreshCount = 0
-        private var totalRefreshUs = 0L
-        private var slowestRefreshUs = 0L
-        private var lastReport = SystemClock.elapsedRealtime()
         private val primaryColor by lazy { root.context.colorFromAttribute(R.attr.colorPrimary) }
         private val rowHeight by lazy {
             (3f * root.resources.displayMetrics.density + 0.5f).toInt().coerceAtLeast(1)
-        }
-        private fun reportPerformance(force: Boolean = false) {
-            val now = SystemClock.elapsedRealtime()
-            if (!force && now - lastReport < 2000L) return
-            if (created != 0 || refreshCount != 0)
-                Log.i("Elevate-EpisodePerf",
-                    "stage=episode-row-window created=" + created +
-                    " updated=" + refreshCount +
-                    " totalUs=" + totalRefreshUs + " maxUs=" + slowestRefreshUs +
-                    " attached=" + rows.size +
-                    " elapsedMs=" + (now - lastReport))
-            created = 0
-            refreshCount = 0
-            totalRefreshUs = 0
-            slowestRefreshUs = 0
-            lastReport = now
         }
         private val dataObserver = object : RecyclerView.AdapterDataObserver() {
             override fun onChanged() = scheduleRefresh()
@@ -144,7 +123,6 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
 
         fun stop() {
             if (tree.isAlive) tree.removeOnGlobalLayoutListener(globalLayout)
-            reportPerformance(force = true)
             releaseList()
         }
 
@@ -193,11 +171,9 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
             val recycler = list ?: return
             // Coalesced once per frame, after any RecyclerView layout pass.
             for (i in 0 until recycler.childCount) refreshRow(recycler.getChildAt(i))
-            reportPerformance()
         }
 
         private fun refreshRow(row: View) {
-            val beginNs = SystemClock.elapsedRealtimeNanos()
             val nativeProgress = row.findViewById<ProgressBar>(R.id.episode_progress)
             val poster = row.findViewById<ImageView>(R.id.episode_poster)
             val originalOverlay = row.findViewById<View>(R.id.watch_progress_container)
@@ -219,20 +195,13 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
                     }).also {
                     frame.addView(it.horizontal)
                     rows[row] = it
-                    created++
                 }
             }
             // Keep the latest horizontal thumbnail progress design.
             // Without update() the newly created SlimProgressView remains GONE
             // and CloudStream's original circular overlay stays visible.
             state.update()
-            val elapsedUs = (SystemClock.elapsedRealtimeNanos() - beginNs) / 1000L
-            refreshCount++
-            totalRefreshUs += elapsedUs
-            if (elapsedUs > slowestRefreshUs) slowestRefreshUs = elapsedUs
-            if (elapsedUs >= 8000L)
-                Log.w("Elevate-EpisodePerf", "stage=episode-row-slow durationUs=" +
-                    elapsedUs + " created=" + created + " attached=" + rows.size)
+
         }
     }
 

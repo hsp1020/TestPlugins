@@ -237,7 +237,6 @@ private object MetadataDiskCache {
         readWithTtl(kind, key)?.let { it.json to it.timestamp }
 
     suspend fun readWithTtl(kind: String, key: String): Entry? = withContext(Dispatchers.IO) {
-        val begin = android.os.SystemClock.elapsedRealtime()
         // Writers publish complete files using atomic rename. Reading a completed
         // file does not need the writer's global eviction/quota monitor.
         val file = directory()?.let { target(it, kind, key) } ?: return@withContext null
@@ -272,10 +271,7 @@ private object MetadataDiskCache {
         } catch (_: Exception) {
             // An eviction racing this read is a cache miss, never a playback error.
             null
-        } finally {
-            val duration = android.os.SystemClock.elapsedRealtime() - begin
-            if (duration >= 120L) android.util.Log.i(
-                "StremioC-Cache", "slow-read kind=$kind elapsedMs=$duration")
+
         }
     }
 
@@ -308,7 +304,6 @@ private object MetadataDiskCache {
                 if (temp.length() > MAX_ENTRY_BYTES) {
                     return@withContext
                 }
-                val begin = android.os.SystemClock.elapsedRealtime()
                 synchronized(lock) {
                     val acquired = android.os.SystemClock.elapsedRealtime()
                     if (!cleanedOldTemps) {
@@ -324,7 +319,6 @@ private object MetadataDiskCache {
                             writesSinceQuotaCheck >= QUOTA_CHECK_WRITES ||
                             acquired - lastQuotaCheckAtMs >= QUOTA_CHECK_MS
                         if (due) {
-                            val scanStart = android.os.SystemClock.elapsedRealtime()
                             val files = dir.listFiles()?.filter {
                                 it.isFile && it.name.endsWith(".gz")
                             }.orEmpty()
@@ -336,17 +330,10 @@ private object MetadataDiskCache {
                             quotaChecked = true
                             writesSinceQuotaCheck = 0
                             lastQuotaCheckAtMs = android.os.SystemClock.elapsedRealtime()
-                            val scanMs = lastQuotaCheckAtMs - scanStart
-                            if (scanMs >= 100L || trimNeeded) android.util.Log.i(
-                                "StremioC-Cache", "quota kind=$kind files=${files.size} " +
-                                    "bytes=$totalBytes trimmed=$trimNeeded elapsedMs=$scanMs")
+
                         }
                     }
-                    val lockMs = android.os.SystemClock.elapsedRealtime() - acquired
-                    val waitMs = acquired - begin
-                    if (waitMs >= 100L || lockMs >= 100L) android.util.Log.i(
-                        "StremioC-Cache", "write-lock kind=$kind waitMs=$waitMs " +
-                            "heldMs=$lockMs quotaChecked=$quotaChecked")
+
                 }
             } catch (error: Exception) {
             } finally {
@@ -1222,47 +1209,16 @@ open class StremioC(
         // first playable result is not delayed by unrelated network lookups.
         private val streamCallbackLimiter = Semaphore(8)
         private val integratedSourceLimiter = Semaphore(4)
-        private val activeStreamCallbacks = java.util.concurrent.atomic.AtomicInteger()
-        private val activeSourceIntegrations = java.util.concurrent.atomic.AtomicInteger()
 
         private suspend fun <T> withStreamCallback(
-            category: String, work: suspend () -> T
-        ): T {
-            val queuedAt = SystemClock.elapsedRealtime()
-            return streamCallbackLimiter.withPermit {
-                val waited = SystemClock.elapsedRealtime() - queuedAt
-                val running = activeStreamCallbacks.incrementAndGet()
-                val start = SystemClock.elapsedRealtime()
-                try { work() } finally {
-                    val duration = SystemClock.elapsedRealtime() - start
-                    activeStreamCallbacks.decrementAndGet()
-                    if (duration >= 5000L || waited >= 1500L)
-                        Log.i("StremioC-Perf", "stage=stream-callback category=" +
-                            category + " waitMs=" + waited +
-                            " durationMs=" + duration + " simultaneous=" + running)
-                }
-            }
-        }
+            @Suppress("UNUSED_PARAMETER") category: String,
+            work: suspend () -> T
+        ): T = streamCallbackLimiter.withPermit { work() }
 
         private suspend fun <T> withIntegratedSource(
-            label: String, work: suspend () -> T
-        ): T {
-            val queuedAt = SystemClock.elapsedRealtime()
-            return integratedSourceLimiter.withPermit {
-                val waited = SystemClock.elapsedRealtime() - queuedAt
-                val running = activeSourceIntegrations.incrementAndGet()
-                val start = SystemClock.elapsedRealtime()
-                try { work() } finally {
-                    val duration = SystemClock.elapsedRealtime() - start
-                    activeSourceIntegrations.decrementAndGet()
-                    if (waited >= 1000L || duration >= 10000L)
-                        Log.i("StremioC-Perf", "stage=integrated-extraction source=" +
-                            label + " waitMs=" + waited +
-                            " durationMs=" + duration + " simultaneous=" + running)
-                }
-            }
-        }
-
+            @Suppress("UNUSED_PARAMETER") label: String,
+            work: suspend () -> T
+        ): T = integratedSourceLimiter.withPermit { work() }
 
         const val HOME_FOREGROUND_CONCURRENCY = 10
         const val HOME_FOREGROUND_PER_HOST_CONCURRENCY = 10

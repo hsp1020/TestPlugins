@@ -40,29 +40,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private val watched = mutableMapOf<RecyclerView, RowWatch>()
     private val repaired = mutableSetOf<String>()
     private var scanScheduled = false
-    private var scanRequests = 0
-    private var scansPerformed = 0
-    private var repairsPerformed = 0
-    private var maxScanUs = 0L
-    private var lastReportAt = SystemClock.elapsedRealtime()
-
-    private fun recordWindow(force: Boolean = false) {
-        val now = SystemClock.elapsedRealtime()
-        if (!force && now - lastReportAt < 4000L) return
-        if (scanRequests != 0 || repairsPerformed != 0)
-            Log.i("Elevate-HomePerf", "stage=home-cache-guard requests=" +
-                scanRequests + " scans=" + scansPerformed +
-                " repaired=" + repairsPerformed + " maxScanUs=" +
-                maxScanUs + " watchedRows=" + watched.size)
-        scanRequests = 0
-        scansPerformed = 0
-        repairsPerformed = 0
-        maxScanUs = 0L
-        lastReportAt = now
-    }
-
     private fun queueScan() {
-        scanRequests++
         if (scanScheduled) return
         val rv = root ?: return
         val seq = generation
@@ -179,7 +157,6 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private fun unbindActivity() {
         generation++
         scanScheduled = false
-        recordWindow(force = true)
         model?.apiName?.removeObserver(apiObserver)
         model?.page?.removeObserver(pageObserver)
         activity?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
@@ -227,16 +204,8 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
             queueScan()
             return
         }
-        val begin = SystemClock.elapsedRealtimeNanos()
         observeParent()
         for (i in 0 until rv.childCount) watchRow(rv.getChildAt(i))
-        scansPerformed++
-        val us = (SystemClock.elapsedRealtimeNanos() - begin) / 1000L
-        if (us > maxScanUs) maxScanUs = us
-        if (us >= 8_000L)
-            Log.w("Elevate-HomePerf", "stage=home-scan-slow durationUs=" + us +
-                " rows=" + rv.childCount)
-        recordWindow()
     }
     private fun watchRow(view: View) {
         if (expected == null) return
@@ -320,7 +289,6 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                     child.findViewHolderForAdapterPosition(pos)?.itemView === bound.itemView &&
                     repaired.add(key)
                 ) {
-                    repairsPerformed++
                     adapter.notifyItemChanged(pos)
                 }
             }
