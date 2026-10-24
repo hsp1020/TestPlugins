@@ -23,10 +23,12 @@ import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
  */
 internal class ElevateSkipButtonTimer(
     private val fragment: GeneratorPlayer,
-    private val model: PlayerGeneratorViewModel
+    private val model: PlayerGeneratorViewModel,
+    private val shouldHide: (com.lagradost.cloudstream3.utils.videoskip.VideoSkipStamp?) -> Boolean
 ) {
     private val main = Handler(Looper.getMainLooper())
     private var button: View? = null
+    private var originalAlpha = 1f
     private var indicator: FrameLayout? = null
     private var fill: View? = null
     private var active = false
@@ -54,7 +56,24 @@ internal class ElevateSkipButtonTimer(
         // A shrinking width is not sufficient evidence of manual dismissal:
         // native animators can resize during controller transitions. The tick
         // handles completed hides and changes in the actual skip interval.
-        if (!active && width > oldWidth + dp(1f)) begin()
+        refreshVisibility()
+        if (!active && width > oldWidth + dp(1f) && !isSuppressed()) begin()
+    }
+
+    private fun isSuppressed(): Boolean = shouldHide(currentInterval())
+
+    /** Triggered by runtime player-state and explicit seek events, not a frame observer. */
+    fun refreshVisibility() {
+        val b = button ?: return
+        val suppressed = isSuppressed()
+        b.alpha = if (suppressed) 0f else originalAlpha
+        if (suppressed) {
+            indicator?.alpha = 0f
+            if (active) reset()
+        } else {
+            if (!active && b.visibility == View.VISIBLE && b.width > dp(25f)) begin()
+            indicator?.alpha = if (fragment.isUIShowing()) 0f else 1f
+        }
     }
 
     private val tick = object : Runnable {
@@ -66,6 +85,10 @@ internal class ElevateSkipButtonTimer(
                 return
             }
             val now = SystemClock.uptimeMillis()
+            if (isSuppressed()) {
+                refreshVisibility()
+                return
+            }
             val controlsVisible = fragment.isUIShowing()
             val currentStamp = currentInterval()
             val current = currentStamp?.let {
@@ -143,6 +166,7 @@ internal class ElevateSkipButtonTimer(
         dispose()
         val parent = next.parent as? ConstraintLayout ?: return
         button = next
+        originalAlpha = next.alpha
 
         val strip = FrameLayout(next.context).apply {
             id = View.generateViewId()
@@ -178,10 +202,11 @@ internal class ElevateSkipButtonTimer(
         indicator = strip
         fill = progress
         next.addOnLayoutChangeListener(buttonLayout)
+        refreshVisibility()
     }
 
     private fun begin() {
-        if (active || button?.visibility != View.VISIBLE) return
+        if (active || button?.visibility != View.VISIBLE || isSuppressed()) return
         active = true
         autoHidden = false
         revealedWhileControls = false
@@ -215,6 +240,7 @@ internal class ElevateSkipButtonTimer(
         reset()
         val previous = button
         previous?.removeOnLayoutChangeListener(buttonLayout)
+        previous?.alpha = originalAlpha
         (indicator?.parent as? ViewGroup)?.removeView(indicator)
         button = null
         indicator = null
