@@ -301,9 +301,25 @@ internal object SyncData {
      * The core SharedPreferences map is acquired once, never JSON-encoded in
      * its entirety. Missing values remain missing (not implicit deletions).
      */
+    /**
+     * SharedPreferences.all clones the entire preference map, even for one key.
+     * Probe supported Android preference types directly. Wrong-type reads
+     * throw ClassCastException; only selected keys pay this small cost.
+     */
+    internal fun selectedValue(prefs: SharedPreferences, key: String): Any? {
+        if (!prefs.contains(key)) return null
+        try { return prefs.getString(key, null) } catch (_: ClassCastException) {}
+        try { return prefs.getLong(key, 0L) } catch (_: ClassCastException) {}
+        try { return prefs.getInt(key, 0) } catch (_: ClassCastException) {}
+        try { return prefs.getBoolean(key, false) } catch (_: ClassCastException) {}
+        try { return prefs.getFloat(key, 0f) } catch (_: ClassCastException) {}
+        return try { prefs.getStringSet(key, null) } catch (_: ClassCastException) { null }
+    }
+
     fun snapshotSelected(context: Context, nativePaths: Collection<String>): MutableMap<String, String> {
         val result = linkedMapOf<String, String>()
         if (nativePaths.isEmpty()) return result
+        val started = android.os.SystemClock.elapsedRealtime()
         refreshCineStreamKeys()
         val dataPaths = nativePaths.filter { it.startsWith("d/") && isTracked(it) }
         val defaultPaths = nativePaths.filter { it.startsWith("s/") && isTracked(it) }
@@ -311,24 +327,26 @@ internal object SyncData {
         if (dataPaths.isNotEmpty()) {
             val indices = DataStoreHelper.getAccounts(context)
                 .mapTo(mutableSetOf()) { it.keyIndex }
-            val stored = with(DataStore) { context.getSharedPrefs() }.all
+            val prefs = with(DataStore) { context.getSharedPrefs() }
+            // Only generated download headers need a full key enumeration to
+            // validate whether CloudStream still references them.
             val referencedHeaders = if (dataPaths.any {
                 it.startsWith("d/download_header_cache/")
-            }) referencedHeaderIds(stored.keys.filter {
+            }) referencedHeaderIds(prefs.all.keys.filter {
                 it.substringBefore('/').toIntOrNull() in indices
             }) else emptySet()
             for (path in dataPaths) {
                 val key = path.removePrefix("d/")
                 if (!belongsToInstalledProfile(key, indices) || key.length > 500 ||
                     !includeHeaderCache(key, referencedHeaders)) continue
-                val raw = stored[key] ?: continue
+                val raw = selectedValue(prefs, key) ?: continue
                 valueJson(raw)?.takeIf { it.length <= 524288 }?.let { result[path] = it }
             }
         }
         if (defaultPaths.isNotEmpty()) {
-            val stored = PreferenceManager.getDefaultSharedPreferences(context).all
+            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
             for (path in defaultPaths) {
-                val raw = stored[path.removePrefix("s/")] ?: continue
+                val raw = selectedValue(prefs, path.removePrefix("s/")) ?: continue
                 valueJson(raw)?.let { result[path] = it }
             }
         }
@@ -339,14 +357,20 @@ internal object SyncData {
             }
             for ((name, paths) in grouped) {
                 if (name !in validFiles) continue
-                val stored = context.getSharedPreferences(name, Context.MODE_PRIVATE).all
+                val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
                 for (path in paths) {
                     val key = path.removePrefix("p/$name/")
-                    val raw = stored[key] ?: continue
+                    val raw = selectedValue(prefs, key) ?: continue
                     valueJson(raw)?.takeIf { it.length <= 524288 }?.let { result[path] = it }
                 }
             }
         }
+        SyncTrace.info("selected-local-read",
+            "requested=${nativePaths.size} data=${dataPaths.size} " +
+                "defaults=${defaultPaths.size} pluginPrefs=${pluginPaths.size} " +
+                "found=${result.size} headerLookupAll=${dataPaths.any {
+                    it.startsWith("d/download_header_cache/")
+                }} elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
         return result
     }
 

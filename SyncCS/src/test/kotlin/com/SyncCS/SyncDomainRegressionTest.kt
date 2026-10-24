@@ -91,6 +91,26 @@ class SyncDomainRegressionTest {
         assertFalse(merged.changedRemote)
     }
 
+    @Test fun selectedReadSupportsAllNativePreferenceTypesWithoutCloning() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val prefs = context.getSharedPreferences("synccs-selected-test", Context.MODE_PRIVATE)
+        prefs.edit().clear()
+            .putString("string", "movie")
+            .putLong("long", 100L)
+            .putInt("int", 12)
+            .putBoolean("bool", false)
+            .putFloat("float", 1.25f)
+            .putStringSet("set", setOf("ko", "en"))
+            .commit()
+        assertEquals("movie", SyncData.selectedValue(prefs, "string"))
+        assertEquals(100L, SyncData.selectedValue(prefs, "long"))
+        assertEquals(12, SyncData.selectedValue(prefs, "int"))
+        assertEquals(false, SyncData.selectedValue(prefs, "bool"))
+        assertEquals(1.25f, SyncData.selectedValue(prefs, "float"))
+        assertEquals(setOf("ko", "en"), SyncData.selectedValue(prefs, "set"))
+        assertNull(SyncData.selectedValue(prefs, "absent"))
+    }
+
     @Test fun selectedAndFullSnapshotShareOrphanHeaderExclusion() {
         val referenced = setOf("42", "88")
         assertTrue(SyncData.includeHeaderCache("download_header_cache/42", referenced))
