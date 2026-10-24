@@ -64,6 +64,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import coil3.request.crossfade
 import coil3.request.placeholder
+import coil3.dispose
 import org.json.JSONObject
 
 internal class LibraryPosterHook(private val appContext: Application) :
@@ -90,7 +91,7 @@ internal class LibraryPosterHook(private val appContext: Application) :
     private data class CacheEntry(val value: PosterIds?, val time: Long)
     private data class Binding(
         val identity: String, val url: String, val original: String?,
-        val headers: Map<String, String>?
+        val headers: Map<String, String>?, val generation: Int
     )
 
     private val settings = appContext.getSharedPreferences(LibraryPosterPrefs.FILE, Context.MODE_PRIVATE)
@@ -106,8 +107,11 @@ internal class LibraryPosterHook(private val appContext: Application) :
                 xrdbCheckAt = 0L
                 revision++
                 cancelPending()
-                restoreAll()
-                watches.values.toList().forEach { it.hideAll() }
+                if (config.ready) {
+                    // Changing between configured services must not reload native covers.
+                    bound.clear()
+                    watches.values.toList().forEach { it.hideAll() }
+                } else restoreAll()
                 unavailable.clear()
                 rescan()
                 if (library?.isResumed == true) checkXrdbVersion()
@@ -237,12 +241,16 @@ internal class LibraryPosterHook(private val appContext: Application) :
         private val attachListener = object : RecyclerView.OnChildAttachStateChangeListener {
             override fun onChildViewAttachedToWindow(view: View) {
                 hide(view)
+                if (view.isAttachedToWindow) {
+                    (recycler.adapter as? PageAdapter)?.let { scanChild(view, it) }
+                }
                 queue()
             }
             override fun onChildViewDetachedFromWindow(view: View) {
                 view.findViewById<ImageView>(R.id.imageView)?.let { image ->
                     pending.remove(image)?.cancel()
                     bound.remove(image)
+                    image.setTag(R.id.imageView, null)
                     image.alpha = 1f
                 }
             }
@@ -264,14 +272,15 @@ internal class LibraryPosterHook(private val appContext: Application) :
         private val changes = object : RecyclerView.AdapterDataObserver() {
             override fun onChanged() = queue(true)
             override fun onItemRangeChanged(p: Int, n: Int) = queue(true)
-            override fun onItemRangeInserted(p: Int, n: Int) = queue(true)
-            override fun onItemRangeRemoved(p: Int, n: Int) = queue(true)
-            override fun onItemRangeMoved(from: Int, to: Int, n: Int) = queue(true)
+            override fun onItemRangeInserted(p: Int, n: Int) = queue()
+            override fun onItemRangeRemoved(p: Int, n: Int) = queue()
+            override fun onItemRangeMoved(from: Int, to: Int, n: Int) = queue()
         }
 
         fun start() {
             recycler.addOnChildAttachStateChangeListener(attachListener)
             hideAll()
+            if (recycler.isAttachedToWindow) scan()
             queue()
         }
 
@@ -307,19 +316,20 @@ internal class LibraryPosterHook(private val appContext: Application) :
             }
         }
 
+        private fun scanChild(view: View, native: PageAdapter) {
+            if (!config.ready || library?.view == null) return
+            val position = recycler.getChildViewHolder(view).bindingAdapterPosition
+            if (position == RecyclerView.NO_POSITION) return
+            val card = native.getItemOrNull(position) ?: return
+            if (view.findViewById<TextView>(R.id.imageText)?.text?.toString() != card.name) return
+            val image = view.findViewById<ImageView>(R.id.imageView) ?: return
+            update(image, card)
+        }
+
         fun scan() {
             sync()
-            if (!config.ready || library?.view == null) return
             val native = recycler.adapter as? PageAdapter ?: return
-            for (i in 0 until recycler.childCount) {
-                val view = recycler.getChildAt(i)
-                val position = recycler.getChildViewHolder(view).bindingAdapterPosition
-                if (position == RecyclerView.NO_POSITION) continue
-                val card = native.getItemOrNull(position) ?: continue
-                if (view.findViewById<TextView>(R.id.imageText)?.text?.toString() != card.name) continue
-                val image = view.findViewById<ImageView>(R.id.imageView) ?: continue
-                update(image, card)
-            }
+            for (i in 0 until recycler.childCount) scanChild(recycler.getChildAt(i), native)
         }
 
         fun stop() {
@@ -343,16 +353,23 @@ internal class LibraryPosterHook(private val appContext: Application) :
 
     private fun update(image: ImageView, item: SyncAPI.LibraryItem) {
         val id = "${item.apiName}:${item.syncId}:${item.url}:${item.name}"
-        if (bound[image]?.identity == id || pending[image]?.isActive == true &&
-            image.getTag(R.id.imageView) == id) return
+        val token = revision
+        if (bound[image]?.let { it.identity == id && it.generation == token } == true ||
+            pending[image]?.isActive == true && image.getTag(R.id.imageView) == id) return
+
         val sameItem = image.getTag(R.id.imageView) == id
         pending.remove(image)?.cancel()
         bound.remove(image)
         image.setTag(R.id.imageView, id)
-        val token = revision
         val setting = config
-        // Avoid showing an unversioned XRDB cover and immediately replacing it
-        // with the versioned cover on the very first library load.
+        val marker = Binding(id, "", item.posterUrl, item.posterHeaders, token)
+        bound[image] = marker
+
+        // PageAdapter has already bound this card's original image. Cancel only on
+        // a newly bound identity; on the same card the request could be ours.
+        if (!sameItem && !item.posterUrl.isNullOrBlank()) image.dispose()
+
+        // Do not start an unversioned XRDB image before the initial profile lookup.
         if (setting.service == PosterService.XRDB && setting.xrdbProfile.isNotBlank() &&
             !xrdbVersionChecked) return
         val version = xrdbVersion
@@ -361,28 +378,23 @@ internal class LibraryPosterHook(private val appContext: Application) :
                 val ids = withContext(Dispatchers.IO) {
                     resolve(item, setting.service == PosterService.XRDB)
                 }
-                if (ids == null) {
-                    showNative(image, id)
-                    return@launch
-                }
-                val originalPoster = setting.image(ids, item.type == TvType.Movie)
+                if (revision != token || bound[image] !== marker ||
+                    !image.isAttachedToWindow) return@launch
+                val originalPoster = ids?.let { setting.image(it, item.type == TvType.Movie) }
                 if (originalPoster == null) {
-                    showNative(image, id)
+                    restore(image, marker)
                     return@launch
                 }
                 val poster = if (setting.service == PosterService.XRDB && version != null) {
                     Uri.parse(originalPoster).buildUpon().appendQueryParameter("v", version)
                         .build().toString()
                 } else originalPoster
-                if (revision != token || image.getTag(R.id.imageView) != id ||
-                    !image.isAttachedToWindow) return@launch
                 if (poster in unavailable) {
-                    showNative(image, id)
+                    restore(image, marker)
                     return@launch
                 }
-                val entry = Binding(id, poster, item.posterUrl, item.posterHeaders)
-                // Coil disposes the current request on replacement; preserve a cover for
-                // the same title until its updated artwork is actually ready.
+                val entry = marker.copy(url = poster)
+                // Preserve an already visible custom poster during a version refresh.
                 val retained = image.drawable.takeIf { sameItem && image.alpha > 0f }
                 bound[image] = entry
                 image.loadImage(poster) {
@@ -393,10 +405,15 @@ internal class LibraryPosterHook(private val appContext: Application) :
                     }, onError = { _, _ ->
                         if (bound[image] === entry && image.isAttachedToWindow) {
                             unavailable.add(poster)
-                            bound.remove(image)
                             restore(image, entry)
                         }
                     })
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (revision == token && bound[image]?.identity == id) {
+                    bound[image]?.let { restore(image, it) }
                 }
             } finally {
                 if (image.getTag(R.id.imageView) == id) pending.remove(image)
@@ -444,7 +461,12 @@ internal class LibraryPosterHook(private val appContext: Application) :
             val initial = !xrdbVersionChecked
             xrdbVersionChecked = true
             if (token == null || token == xrdbVersion) {
-                if (initial) rescan()
+                if (initial) {
+                    // Retry pending cards even when the server has no version token.
+                    revision++
+                    bound.clear()
+                    rescan()
+                }
                 return@launch
             }
             xrdbVersion = token
