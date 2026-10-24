@@ -93,6 +93,8 @@ internal class ElevatePerformanceTrace(private val application: Application) :
     private var lastStallAt = 0L
     private var lastHotSampleAt = 0L
     private var lastHeapAt = 0L
+    private var lastAllocatedBytes = -1L
+    private var lastGcCount = -1L
     private var lastWebSignature = ""
     private var lastPreviewSignature = ""
     @Volatile private var lastDetachAtMs = 0L
@@ -334,10 +336,25 @@ internal class ElevatePerformanceTrace(private val application: Application) :
     }
 
     private val lifecycle = object : FragmentManager.FragmentLifecycleCallbacks() {
-        override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, v: View, state: Bundle?) =
+        private fun relevant(f: Fragment): Boolean {
+            val name = f.javaClass.name
+            return f is GeneratorPlayer ||
+                name.contains(".ui.result.") || name.contains(".ui.search.")
+        }
+        override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, v: View, state: Bundle?) {
+            if (relevant(f)) log("fragment-view-created",
+                "fragment=" + f.javaClass.simpleName +
+                " viewId=" + System.identityHashCode(v))
             attach(f)
-        override fun onFragmentResumed(fm: FragmentManager, f: Fragment) = attach(f)
+        }
+        override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
+            if (relevant(f)) log("fragment-resumed",
+                "fragment=" + f.javaClass.simpleName)
+            attach(f)
+        }
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
+            if (relevant(f)) log("fragment-view-destroyed",
+                "fragment=" + f.javaClass.simpleName)
             if (f === fragment) detach()
         }
     }
@@ -434,14 +451,28 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                     lastHeapAt = now
                     val memory = Runtime.getRuntime()
                     val used = memory.totalMemory() - memory.freeMemory()
-                    val gcCount = runCatching { Debug.getRuntimeStat("art.gc.gc-count") }
-                        .getOrNull() ?: "unknown"
+                    val gcCount = Debug.getRuntimeStat("art.gc.gc-count")
+                        ?.toLongOrNull() ?: -1L
+                    val allocated = Debug.getRuntimeStat("art.gc.bytes-allocated")
+                        ?.toLongOrNull() ?: -1L
+                    val allocDeltaMb = if (lastAllocatedBytes >= 0L &&
+                        allocated >= lastAllocatedBytes)
+                        (allocated - lastAllocatedBytes) / 1048576L else -1L
+                    val gcDelta = if (lastGcCount >= 0L &&
+                        gcCount >= lastGcCount) gcCount - lastGcCount else -1L
+                    lastAllocatedBytes = allocated
+                    lastGcCount = gcCount
+                    val blockingGc = Debug.getRuntimeStat("art.gc.blocking-gc-count")
+                        ?: "unknown"
                     sampleHttp(now)
                     log("heap", "javaUsedMB=" + used / 1048576L +
                         " javaCommittedMB=" + memory.totalMemory() / 1048576L +
                         " javaMaxMB=" + memory.maxMemory() / 1048576L +
                         " nativeMB=" + Debug.getNativeHeapAllocatedSize() / 1048576L +
                         " gcCount=" + gcCount +
+                        " gcDelta=" + gcDelta +
+                        " allocDeltaMB=" + allocDeltaMb +
+                        " blockingGcCount=" + blockingGc +
                         " threadCount=" + Thread.activeCount())
                 }
             } catch (_: InterruptedException) {
