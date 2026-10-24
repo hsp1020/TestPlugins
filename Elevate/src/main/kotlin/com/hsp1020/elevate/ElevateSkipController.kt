@@ -59,8 +59,11 @@ internal class ElevateSkipController(private val application: Application) :
     private var custom = emptyList<VideoSkipStamp>()
     private var published = emptyList<VideoSkipStamp>()
     private val autoSkipped = hashSetOf<String>()
-    private var lastPosition: Long? = null
-    private var suppressedUntilOutside = false
+    // Preserve explicit Media3 seek origins/destinations, as Nuvio Mobile does.
+    // No sampled position-difference heuristic, including for small seeks.
+    private var lastManualSeek: Pair<Long, Long>? = null
+    private val manualSeekProtected = hashSetOf<String>()
+    private var ownSeek: Pair<Long, Long>? = null
     private var polling = false
     // Keep the native MaterialButton and its click/focus/animation handlers intact.
     // Move the touch-layout skip button only; leave the native TV constraints untouched.
@@ -142,7 +145,10 @@ internal class ElevateSkipController(private val application: Application) :
     }
 
     private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key?.startsWith("AUTO_SKIP_") == true) main.post { scheduleAutoSkip() }
+        if (key?.startsWith("AUTO_SKIP_") == true) main.post {
+            scheduleAutoSkip()
+            skipButtonTimer?.refreshVisibility()
+        }
     }
     // CloudStream may bundle a newer Media3 Player.Listener than our compileOnly API.
     // Implementing the interface directly can trigger AbstractMethodError when ExoPlayer
@@ -153,12 +159,23 @@ internal class ElevateSkipController(private val application: Application) :
         arrayOf(Media3Player.Listener::class.java)
     ) { proxy, method, args ->
         when (method.name) {
-            "onPlaybackStateChanged" -> {
-                if (args?.getOrNull(0) == Media3Player.STATE_READY) refresh()
+            "onPlaybackStateChanged", "onIsPlayingChanged" -> {
+                refresh()
+                skipButtonTimer?.refreshVisibility()
+                null
+            }
+            "onPositionDiscontinuity" -> {
+                if (args?.size == 3 &&
+                    args[2] == Media3Player.DISCONTINUITY_REASON_SEEK) {
+                    val from = (args[0] as? Media3Player.PositionInfo)?.positionMs
+                    val to = (args[1] as? Media3Player.PositionInfo)?.positionMs
+                    if (from != null && to != null) recordSeek(from, to)
+                }
                 null
             }
             "onMediaItemTransition", "onTimelineChanged" -> {
                 refresh()
+                skipButtonTimer?.refreshVisibility()
                 null
             }
             "equals" -> proxy === args?.getOrNull(0)
@@ -217,7 +234,9 @@ internal class ElevateSkipController(private val application: Application) :
         placeNativeSkipButton()
         val vm = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
         model = vm
-        skipButtonTimer = ElevateSkipButtonTimer(candidate, vm).also { it.attach() }
+        skipButtonTimer = ElevateSkipButtonTimer(candidate, vm) { stamp ->
+            suppressNativeSkipButton(stamp)
+        }.also { it.attach() }
         val stampsObserver = Observer<VideoLive<List<VideoSkipStamp>>> { event ->
             if (event != null && event.instance == vm.state.instance) {
                 val incoming = event.value
@@ -268,8 +287,9 @@ internal class ElevateSkipController(private val application: Application) :
         custom = emptyList()
         published = emptyList()
         autoSkipped.clear()
-        lastPosition = null
-        suppressedUntilOutside = false
+        manualSeekProtected.clear()
+        lastManualSeek = null
+        ownSeek = null
     }
 
     private fun restoreNative() {
@@ -306,6 +326,7 @@ internal class ElevateSkipController(private val application: Application) :
         val key = state.instance.toString() + ":" + episode.id + ":" + identity.key
         if (activeKey == key) {
             scheduleAutoSkip()
+            skipButtonTimer?.refreshVisibility()
             return
         }
         generation++
@@ -351,6 +372,58 @@ internal class ElevateSkipController(private val application: Application) :
             }
         }
         published = combined
+        lastManualSeek?.let { protectManualSeek(it.first, it.second) }
+        skipButtonTimer?.refreshVisibility()
+        if (autoEnabled()) tryAutoSkip()
+    }
+
+    private fun stampKey(stamp: VideoSkipStamp): String =
+        "${stamp.source}:${stamp.timestamp.type}:${stamp.timestamp.startMs}:${stamp.timestamp.endMs}"
+
+    private fun protectManualSeek(from: Long, to: Long) {
+        for (stamp in published) {
+            val data = stamp.timestamp
+            if (from in data.startMs until data.endMs ||
+                to in data.startMs until data.endMs) {
+                manualSeekProtected.add(stampKey(stamp))
+            }
+        }
+    }
+
+    private fun recordSeek(from: Long, to: Long) {
+        val internal = ownSeek?.let { (target, time) ->
+            android.os.SystemClock.uptimeMillis() - time < 1500L &&
+                kotlin.math.abs(to - target) <= 1200L
+        } == true
+        ownSeek = null
+        if (internal) return
+        lastManualSeek = from to to
+        protectManualSeek(from, to)
+        skipButtonTimer?.refreshVisibility()
+    }
+
+    private fun autoPreference(stamp: VideoSkipStamp): String =
+        when (stamp.timestamp.type) {
+            com.lagradost.cloudstream3.utils.videoskip.SkipType.Opening,
+            com.lagradost.cloudstream3.utils.videoskip.SkipType.Intro,
+            com.lagradost.cloudstream3.utils.videoskip.SkipType.MixedOpening -> "AUTO_SKIP_OPENING"
+            com.lagradost.cloudstream3.utils.videoskip.SkipType.Recap -> "AUTO_SKIP_RECAP"
+            com.lagradost.cloudstream3.utils.videoskip.SkipType.Credits ->
+                if (model?.state?.generatorState?.response?.type in setOf(
+                        com.lagradost.cloudstream3.TvType.Movie,
+                        com.lagradost.cloudstream3.TvType.AnimeMovie)) {
+                    "AUTO_SKIP_MOVIE_CREDITS"
+                } else "AUTO_SKIP_ENDING"
+            com.lagradost.cloudstream3.utils.videoskip.SkipType.Preview -> ""
+            else -> "AUTO_SKIP_ENDING"
+        }
+
+    // Called from native skip button's layout event, before its first visible frame.
+    // Buffering suppression is independent of auto-skip settings.
+    private fun suppressNativeSkipButton(stamp: VideoSkipStamp?): Boolean {
+        val player = mediaPlayer
+        if (player == null || player.playbackState != Media3Player.STATE_READY) return true
+        return stamp != null && settings.getBoolean(autoPreference(stamp), false)
     }
 
     private fun autoEnabled(): Boolean = ElevateSkipPreferences.autoTypes.any { name ->
@@ -362,7 +435,7 @@ internal class ElevateSkipController(private val application: Application) :
         if (polling == next) return
         main.removeCallbacks(autoTick)
         polling = next
-        if (polling) main.postDelayed(autoTick, 600L)
+        if (polling) main.post(autoTick)
     }
 
     private val autoTick = object : Runnable {
@@ -380,48 +453,22 @@ internal class ElevateSkipController(private val application: Application) :
             vm.state.instance != activeInstance ||
             (vm.state.generatorState?.meta as? ResultEpisode)?.id != activeEpisode) return
         val current = player.currentPosition
-        val previous = lastPosition
-        lastPosition = current
-        // Protect a real resume position without suppressing intro auto-skip merely because
-        // network metadata arrived a few seconds after playback started.
-        val resume = (vm.state.generatorState?.meta as? ResultEpisode)?.position ?: 0L
-        val manualSeek = if (previous == null) {
-            resume > 5_000L && kotlin.math.abs(resume - current) < 20_000L
-        } else current < previous - 1000L || current > previous + 3500L
         val active = published.firstOrNull {
             current >= it.timestamp.startMs && current < it.timestamp.endMs
-        }
-        if (manualSeek) suppressedUntilOutside = true
-        if (active == null) {
-            suppressedUntilOutside = false
-            return
-        }
-        if (suppressedUntilOutside) return
-        val type = when (active.timestamp.type) {
-            com.lagradost.cloudstream3.utils.videoskip.SkipType.Opening,
-            com.lagradost.cloudstream3.utils.videoskip.SkipType.Intro,
-            com.lagradost.cloudstream3.utils.videoskip.SkipType.MixedOpening -> "AUTO_SKIP_OPENING"
-            com.lagradost.cloudstream3.utils.videoskip.SkipType.Recap -> "AUTO_SKIP_RECAP"
-            com.lagradost.cloudstream3.utils.videoskip.SkipType.Credits ->
-                if (vm.state.generatorState?.response?.type in setOf(
-                        com.lagradost.cloudstream3.TvType.Movie,
-                        com.lagradost.cloudstream3.TvType.AnimeMovie)) {
-                    "AUTO_SKIP_MOVIE_CREDITS"
-                } else "AUTO_SKIP_ENDING"
-            else -> "AUTO_SKIP_ENDING"
-        }
-        if (!settings.getBoolean(type, false)) return
+        } ?: return
+        if (!settings.getBoolean(autoPreference(active), false)) return
+        val key = stampKey(active)
+        if (key in manualSeekProtected || key in autoSkipped) return
         val stamp = active.timestamp
-        val key = active.source + ":" + stamp.type + ":" + stamp.startMs + ":" + stamp.endMs
         if (!autoSkipped.add(key)) return
         val target = stamp.endMs.coerceAtMost(player.duration - 1L)
         if (target > current && target > 0L) {
+            ownSeek = target to android.os.SystemClock.uptimeMillis()
             player.seekTo(target)
+            // uiText is generated from CloudStream's own localized skip_type_format
+            // and skip-type resources, using the user's selected app locale.
             fragment?.context?.let { ctx ->
-                val korean = androidx.core.os.ConfigurationCompat
-                    .getLocales(ctx.resources.configuration).get(0)?.language == "ko"
-                val prefix = if (korean) "자동 건너뛰기: " else "Auto-skipped: "
-                android.widget.Toast.makeText(ctx, prefix + ctx.getString(stamp.type.res),
+                android.widget.Toast.makeText(ctx, active.uiText,
                     android.widget.Toast.LENGTH_SHORT).show()
             }
         }
