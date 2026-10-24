@@ -333,7 +333,6 @@ internal object SyncData {
     fun snapshotSelected(context: Context, nativePaths: Collection<String>): MutableMap<String, String> {
         val result = linkedMapOf<String, String>()
         if (nativePaths.isEmpty()) return result
-        val started = android.os.SystemClock.elapsedRealtime()
         refreshCineStreamKeys()
         val dataPaths = nativePaths.filter { it.startsWith("d/") && isTracked(it) }
         val defaultPaths = nativePaths.filter { it.startsWith("s/") && isTracked(it) }

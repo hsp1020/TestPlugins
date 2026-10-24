@@ -29,7 +29,6 @@ internal object SyncDirtyMarkerCleaner {
         val editor = prefs.edit()
         var removed = 0
         var newer = 0
-        var differing = 0
         for ((tag, timestamp) in markers) {
             val key = tag.removePrefix("modified/")
             if ((timestamp as? Number)?.toLong()?.let { it > startedAt } != false) {
@@ -54,8 +53,6 @@ internal object SyncDirtyMarkerCleaner {
             if (settled) {
                 editor.remove(tag)
                 removed++
-            } else {
-                differing++
             }
         }
         if (removed != 0) check(editor.commit()) { "Could not prune settled dirty markers" }

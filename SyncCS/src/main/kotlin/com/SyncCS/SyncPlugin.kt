@@ -83,7 +83,6 @@ class SyncPlugin : Plugin() {
     private var worker: Job? = null
     private var rerunRequested = false
     @Volatile private var lastAutomaticFailureAt = 0L
-    @Volatile private var authPausedLogged = false
     private var periodic: Job? = null
     private var callback: Application.ActivityLifecycleCallbacks? = null
     @Volatile private var activityCount = 0
@@ -140,8 +139,6 @@ class SyncPlugin : Plugin() {
         } else request(4000, "plugins-loaded")
 
     }
-    // Navigation is not a data change; foreground checks and tracked edits remain active.
-    private val home = { _: Boolean -> Unit }
     private val accountRoster = { _: Boolean ->
         val context = com.lagradost.cloudstream3.CloudStreamApp.context
         if (context != null && isOwner(context) && !SyncCoordinator.applying) {
@@ -199,13 +196,8 @@ class SyncPlugin : Plugin() {
         if (!isOwner(context) || !config(context).active()) return
         if (SyncAuthGuard.needsReauthentication(config(context)) &&
             !SyncAuthGuard.mayRecover(config(context))) {
-            if (!authPausedLogged) {
-                authPausedLogged = true
-
-            }
             return
         }
-        authPausedLogged = false
         synchronized(workerGuard) {
             if (worker?.isActive == true &&
                 reason in setOf("remote-head-poll-20s", "home-reload",
@@ -291,10 +283,6 @@ class SyncPlugin : Plugin() {
         if (!ready || !isOwner(context) || !config(context).active()) return
         if (SyncAuthGuard.needsReauthentication(config(context)) &&
             !SyncAuthGuard.mayRecover(config(context))) {
-            if (!authPausedLogged) {
-                authPausedLogged = true
-
-            }
             return
         }
 
@@ -387,7 +375,6 @@ class SyncPlugin : Plugin() {
         MainActivity.bookmarksUpdatedEvent += bookmarks
         MainActivity.afterPluginsLoadedEvent += loaded
         MainActivity.mainPluginsLoadedEvent += loaded
-        MainActivity.reloadHomeEvent += home
         MainActivity.reloadAccountEvent += accountRoster
         watchPreferences()
         start(context)
@@ -417,7 +404,6 @@ class SyncPlugin : Plugin() {
         MainActivity.bookmarksUpdatedEvent -= bookmarks
         MainActivity.afterPluginsLoadedEvent -= loaded
         MainActivity.mainPluginsLoadedEvent -= loaded
-        MainActivity.reloadHomeEvent -= home
         MainActivity.reloadAccountEvent -= accountRoster
     }
     fun onUnload() = unload()

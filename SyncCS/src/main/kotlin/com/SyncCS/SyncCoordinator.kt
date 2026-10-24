@@ -396,7 +396,6 @@ internal object SyncCoordinator {
     private suspend fun synchronizePass(context: Context, activity: Activity?): String {
         val config = SyncConfiguration(context)
         val backend: SyncStorage = GithubSyncAdapter(context)
-        val elapsedStart = android.os.SystemClock.elapsedRealtime()
         val dirtyBarrier = System.currentTimeMillis()
 
         var stage = "loading cloud state"
@@ -449,7 +448,6 @@ internal object SyncCoordinator {
             val previousCursor = if (config.preferences.contains("remote_cursor"))
                 config.preferences.getLong("remote_cursor", 0L) else null
             val pull = backend.pull(previousCursor)
-            val receivedRevision = (backend as GithubSyncAdapter).verifiedRevision().first
 
 
             stage = "decrypting remote changes"
@@ -566,7 +564,6 @@ internal object SyncCoordinator {
 
             stage = "reading local preferences"
 
-            val snapshotStarted = android.os.SystemClock.elapsedRealtime()
             val marked = config.preferences.all.keys.asSequence()
                 .filter { it.startsWith("modified/") }
                 .map { it.removePrefix("modified/") }.toSet()
@@ -577,9 +574,6 @@ internal object SyncCoordinator {
             // Received generated headers need the full reference graph for safe
             // restore. Dirty local headers alone do not require repeating an audit.
             val incomingHeaders = remoteValues.keys.any {
-                it.startsWith("d/download_header_cache/")
-            }
-            val localHeaderMarkers = marked.count {
                 it.startsWith("d/download_header_cache/")
             }
             val periodicAuditDue = needsLocalAudit()
@@ -601,7 +595,6 @@ internal object SyncCoordinator {
             val priorLists = if (savedLists == null) JSONObject() else JSONObject(
                 String(LocalVault.decrypt(savedLists), Charsets.UTF_8)
             )
-            val planStarted = android.os.SystemClock.elapsedRealtime()
             val planned = SyncPreferencePlanner.reconcile(
                 remoteValues, local, base, profileMerge.target, activeProfiles,
                 replacedProfileUuids, marked, priorLists, firstRemoteRestore,
