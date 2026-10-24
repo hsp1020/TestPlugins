@@ -336,50 +336,61 @@ internal class ElevatePerformanceTrace(private val application: Application) :
         } == true
     }
 
-    // Eagerly release the socket for tiny, fully sized provider error
-    // messages, while retaining *identical* bytes for the caller's .text /
-    // .document / .parsedSafe. Unknown-length or large responses stay untouched
-    // because probing them would introduce blocking I/O and allocation.
-    private fun bufferSmallProviderError(
+    // Generic, lossless response buffering for small StreamPlay 3xx and 4xx/5xx
+    // responses. No extractor name, URL, or host-specific branching.
+    // The entire body must fit; otherwise all probed bytes remain buffered in
+    // the original BufferedSource for the normal NiceHTTP consumer.
+    private fun bufferSmallProviderResponse(
         request: Request, response: okhttp3.Response, origin: CallOrigin?
     ): okhttp3.Response? {
         if (request.header("Range") != null ||
-            response.code !in 400..599 ||
             origin?.provider?.startsWith("StreamPlay") != true) return null
-        val actor = origin.entryPoint
-        val targeted = listOf(
-            "invokeVidy", "invokeMapple", "miruroPipeRequestForDomain",
-            "resolveTryEmbed", "getMovieBoxToken", "invokeAtlantic",
-            "invokeZshow", "safeGet"
-        ).any { actor.contains(it, ignoreCase = true) }
-        if (!targeted) return null
+        val isRedirect = response.code in 300..399 &&
+            !response.header("Location").isNullOrBlank()
+        val isError = response.code in 400..599
+        if (!isRedirect && !isError) return null
         val originalBody = response.body ?: return null
         val length = originalBody.contentLength()
-        val mediaType = originalBody.contentType()?.toString().orEmpty()
-        if (mediaType.startsWith("video/") || mediaType.contains("mpegurl", true))
+        val mediaType = originalBody.contentType()
+        val typeName = mediaType?.toString().orEmpty()
+        if (typeName.startsWith("video/", ignoreCase = true) ||
+            typeName.contains("mpegurl", ignoreCase = true) ||
+            typeName.startsWith("application/octet-stream", ignoreCase = true))
             return null
-        if (length < 0 || length > 16_384L) {
-            guardLog("streamplay-error-unbuffered", request, 0,
+
+        val limit = if (isRedirect) 4_096L else 16_384L
+        val kind = if (isRedirect) "redirect" else "error"
+        if (length > limit) {
+            guardLog("streamplay-" + kind + "-unbuffered", request, 0,
                 "code=" + response.code + " length=" + length +
-                    " caller=" + actor +
-                    " reason=" + (if (length < 0) "unknown-length" else "large-body"))
+                    " reason=large-body")
             return null
         }
         return try {
-            val bytes = originalBody.bytes() // consumes and closes the socket
+            // For chunked/gzipped responses length is often -1. Requesting
+            // limit+1 bytes tells us whether EOF occurs within the cap.
+            // This does NOT consume buffered bytes from the caller's source
+            // when the limit is exceeded. No extra network call is created.
+            if (length < 0 && originalBody.source().request(limit + 1L)) {
+                guardLog("streamplay-" + kind + "-unbuffered", request, 0,
+                    "code=" + response.code + " length=-1 reason=limit-exceeded")
+                return null
+            }
+            val bytes = originalBody.bytes()
             originalBody.close()
-            guardLog("streamplay-error-buffered", request, 0,
-                "code=" + response.code + " length=" + bytes.size +
-                    " caller=" + actor)
-            response.newBuilder().body(bytes.toResponseBody(originalBody.contentType())).build()
+            guardLog("streamplay-" + kind + "-buffered", request, 0,
+                "code=" + response.code + " bytes=" + bytes.size +
+                    " length=" + length)
+            response.newBuilder().body(bytes.toResponseBody(mediaType)).build()
         } catch (failure: Exception) {
-            // The upstream body may be partly consumed. Propagate the same read
-            // failure rather than silently returning an invalid response.
-            runCatching { originalBody.close() }
-            guardLog("streamplay-error-buffer-failed", request, 0,
-                "code=" + response.code + " caller=" + actor +
+            // An optional optimization must not make a header-only redirect
+            // fail solely because its response body could not be read.
+            // BufferedSource.request() keeps prefetched bytes available to
+            // the original caller even after a failed/partial probe.
+            guardLog("streamplay-" + kind + "-buffer-skipped", request, 0,
+                "code=" + response.code +
                     " reason=" + failure.javaClass.simpleName)
-            throw failure
+            null
         }
     }
 
@@ -446,7 +457,7 @@ internal class ElevatePerformanceTrace(private val application: Application) :
         } else if (body == null) {
             response
         } else {
-            val buffered = bufferSmallProviderError(request, response, origin)
+            val buffered = bufferSmallProviderResponse(request, response, origin)
             if (buffered != null) {
                 buffered
             } else {
