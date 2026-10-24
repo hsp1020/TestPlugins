@@ -525,8 +525,6 @@ internal class GithubBackupStore(
             val status = conn.responseCode
             if (status == 404) return@authorized emptyList()
             if (status != 200) {
-                GithubHttpDiagnostics.report("manual-backup-list", status, conn,
-                    conn.errorStream?.use { it.readBytes() })
                 throw ApiException(status, "Cannot load GitHub user backups (HTTP $status).")
             }
             parseManualBackups(JSONArray(String(conn.inputStream.use {
@@ -572,8 +570,6 @@ internal class GithubBackupStore(
         try {
             val status = conn.responseCode
             if (status != 200) {
-                GithubHttpDiagnostics.report("backup-history", status, conn,
-                    conn.errorStream?.use { it.readBytes() })
                 throw ApiException(status, "Cannot load GitHub backup revisions (HTTP $status).")
             }
             val rows = JSONArray(String(conn.inputStream.use { it.readBytes() }, Charsets.UTF_8))
@@ -856,8 +852,6 @@ internal object GithubDeviceCode {
         try {
             val status = connection.responseCode
             if (status != 200) {
-                GithubHttpDiagnostics.report("account-profile", status, connection,
-                    connection.errorStream?.use { it.readBytes() })
                 throw GithubBackupStore.ApiException(
                     status, "Cannot verify GitHub account (HTTP $status).")
             }
@@ -893,7 +887,6 @@ internal object GithubDeviceCode {
             val response = (if (status in 200..299) connection.inputStream else connection.errorStream)
                 ?.use { it.readBytes() } ?: ByteArray(0)
             if (status !in 200..299) {
-                GithubHttpDiagnostics.report("oauth-$endpoint", status, connection, response)
                 throw GithubBackupStore.ApiException(status, "GitHub OAuth HTTP $status")
             }
             return JSONObject(String(response, Charsets.UTF_8))
