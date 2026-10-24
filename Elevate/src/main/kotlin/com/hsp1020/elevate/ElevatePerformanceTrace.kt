@@ -97,6 +97,7 @@ internal class ElevatePerformanceTrace(private val application: Application) :
     private val httpOpenCount = AtomicInteger()
     private val httpCloseCount = AtomicInteger()
     private val httpLeaks = AtomicInteger()
+    private val sampledLeakHosts = HashSet<String>()
     private var lastHttpEnsureAt = 0L
     private val httpQueue = ReferenceQueue<ResponseBody>()
     private val httpPending = ConcurrentHashMap<PhantomReference<ResponseBody>, HttpRecord>()
@@ -117,7 +118,7 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                 sourceThread = Thread.currentThread().name,
                 // Interceptor entry gives the actual HTTP execution stack. Async
                 // OkHttp dispatch can obscure which plugin initiated the request.
-                executionStack = Thread.currentThread().stackTrace.drop(2).take(40)
+                executionStack = Thread.currentThread().stackTrace.drop(2).take(24)
             )
             lateinit var reference: PhantomReference<ResponseBody>
             val tracked = TracedResponseBody(body) {
@@ -194,6 +195,8 @@ internal class ElevatePerformanceTrace(private val application: Application) :
     private fun sampleHttp(now: Long) {
         var scanned = 0
         var warned = 0
+        val leakedByHost = linkedMapOf<String, Int>()
+        val firstLeakSamples = ArrayList<HttpRecord>()
         while (true) {
             @Suppress("UNCHECKED_CAST")
             val ref = httpQueue.poll() as? PhantomReference<ResponseBody> ?: break
@@ -201,7 +204,17 @@ internal class ElevatePerformanceTrace(private val application: Application) :
             ref.clear()
             if (record != null) {
                 httpLeaks.incrementAndGet()
-                log("http-body-gc-unclosed",
+                leakedByHost[record.host] = (leakedByHost[record.host] ?: 0) + 1
+                if (sampledLeakHosts.add(record.host) && firstLeakSamples.size < 8)
+                    firstLeakSamples.add(record)
+            }
+        }
+        if (leakedByHost.isNotEmpty()) {
+            log("http-gc-leaks-by-host",
+                leakedByHost.entries.sortedByDescending { it.value }
+                    .take(15).joinToString(",") { it.key + ":" + it.value })
+            for (record in firstLeakSamples) {
+                log("http-body-gc-first-sample",
                     "requestId=" + record.id + " host=" + record.host +
                     " httpCode=" + record.code + " type=" + record.contentType +
                     " ageMs=" + age(now, record.started) +
@@ -346,7 +359,7 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                         " lastPlayerMs=" + age(now, lastPlayerAt))
                     stack("main-stall-stack", mainThread, mainThread.stackTrace)
                 }
-                if (fragment != null && now - lastHotSampleAt >= 750L) {
+                if (fragment != null && now - lastHotSampleAt >= 1250L) {
                     lastHotSampleAt = now
                     inspectHotThreads()
                 }
