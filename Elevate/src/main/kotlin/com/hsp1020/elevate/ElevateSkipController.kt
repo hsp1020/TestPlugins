@@ -7,6 +7,7 @@ import android.content.SharedPreferences
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.View
 import androidx.constraintlayout.widget.ConstraintLayout
 import com.lagradost.cloudstream3.R
@@ -63,6 +64,7 @@ internal class ElevateSkipController(private val application: Application) :
     private var custom = emptyList<VideoSkipStamp>()
     private var published = emptyList<VideoSkipStamp>()
     private val autoSkipped = hashSetOf<String>()
+    private var lastAutoDecision: String? = null
     // Preserve explicit Media3 seek origins/destinations, as Nuvio Mobile does.
     // No sampled position-difference heuristic, including for small seeks.
     private var lastManualSeek: Pair<Long, Long>? = null
@@ -297,13 +299,14 @@ internal class ElevateSkipController(private val application: Application) :
         manualSeekProtected.clear()
         lastManualSeek = null
         ownSeek = null
+        lastAutoDecision = null
     }
 
     private fun restoreNative() {
         val vm = model ?: return
         val instance = activeInstance
         val episode = activeEpisode
-        if (instance < 0 || episode < 0) return
+        if (instance < 0 || activeKey == null) return
         vm.modifyState {
             if (this.instance != instance ||
                 (generatorState?.meta as? ResultEpisode)?.id != episode ||
@@ -335,8 +338,14 @@ internal class ElevateSkipController(private val application: Application) :
         val gen = state.generatorState ?: return
         val episode = gen.meta as? ResultEpisode ?: return
         val response = gen.response ?: return
-        val duration = nextPlayer?.duration?.takeIf { it > 0L }
-            ?: episode.duration.takeIf { it > 0L } ?: return
+        // Some HLS streams expose a temporary 30-second duration before their
+        // real timeline becomes available. Prefer a known full episode duration.
+        val playerDuration = nextPlayer?.duration?.takeIf { it > 0L }
+        val episodeDuration = episode.duration.takeIf { it > 0L }
+        val duration = if (playerDuration != null && episodeDuration != null &&
+            playerDuration < 60_000L && episodeDuration > playerDuration) {
+            episodeDuration
+        } else playerDuration ?: episodeDuration ?: return
         val identity = ElevateSkipRepository.identity(response, episode, duration)
         val key = state.instance.toString() + ":" + episode.id + ":" + identity.key
         if (activeKey == key) {
@@ -355,6 +364,14 @@ internal class ElevateSkipController(private val application: Application) :
         activeInstance = state.instance
         activeEpisode = episode.id
         activeKey = key
+        Log.i("Elevate-Skip", "identity instance=" + activeInstance +
+            " episode=" + activeEpisode + " season=" + identity.season +
+            " number=" + identity.episode + " durationMs=" + duration +
+            " playerDurationMs=" + playerDuration +
+            " imdb=" + (identity.imdb != null) + " tmdb=" + (identity.tmdb != null) +
+            " mal=" + (identity.mal != null) + " anilist=" + (identity.anilist != null) +
+            " kitsu=" + (identity.kitsu != null) + " anime=" + identity.anime)
+        lastAutoDecision = null
         custom = emptyList()
         published = emptyList()
         autoSkipped.clear()
@@ -375,7 +392,7 @@ internal class ElevateSkipController(private val application: Application) :
         val combined = ElevateSkipRepository.merge(custom, native)
         val instance = activeInstance
         val episode = activeEpisode
-        if (instance < 0 || episode < 0) return
+        if (instance < 0 || activeKey == null) return
         if (combined == vm.state.stamps) {
             published = combined
             return
@@ -388,6 +405,11 @@ internal class ElevateSkipController(private val application: Application) :
             }
         }
         published = combined
+        Log.i("Elevate-Skip", "publish instance=" + instance + " episode=" + episode +
+            " native=" + native.size + " custom=" + custom.size +
+            " merged=" + combined.size + " intervals=" +
+            combined.joinToString(";") { it.source.substringAfter('/') + ":" +
+                it.timestamp.type + ":" + it.timestamp.startMs + "-" + it.timestamp.endMs })
         lastManualSeek?.let { protectManualSeek(it.first, it.second) }
         skipButtonTimer?.refreshVisibility()
         if (autoEnabled()) tryAutoSkip()
@@ -412,9 +434,16 @@ internal class ElevateSkipController(private val application: Application) :
                 kotlin.math.abs(to - target) <= 1200L
         } == true
         ownSeek = null
-        if (internal) return
+        if (internal) {
+            Log.i("Elevate-Skip", "auto-seek-confirmed episode=" + activeEpisode +
+                " fromMs=" + from + " toMs=" + to)
+            return
+        }
         lastManualSeek = from to to
         protectManualSeek(from, to)
+        Log.i("Elevate-Skip", "manual-seek episode=" + activeEpisode +
+            " fromMs=" + from + " toMs=" + to +
+            " protected=" + manualSeekProtected.size)
         skipButtonTimer?.refreshVisibility()
     }
 
@@ -434,14 +463,11 @@ internal class ElevateSkipController(private val application: Application) :
             else -> "AUTO_SKIP_ENDING"
         }
 
-    // Called from native skip button's layout event, before its first visible frame.
-    // After initial loading, rebuffering does not suppress the manual button.
-    private fun suppressNativeSkipButton(stamp: VideoSkipStamp?): Boolean {
-        val player = mediaPlayer
-        if (player == null || !initialLoadCompleted) return true
-        return stamp != null && settings.getBoolean(autoPreference(stamp), false) &&
-            stampKey(stamp) !in manualSeekProtected
-    }
+    // Preserve the native manual button even with auto-skip enabled: auto-skip can
+    // be ineligible (not playing, unknown duration, late timestamps or failed seek).
+    // Hide only before the first READY, never for ordinary rebuffering.
+    private fun suppressNativeSkipButton(@Suppress("UNUSED_PARAMETER") stamp: VideoSkipStamp?): Boolean =
+        mediaPlayer == null || !initialLoadCompleted
 
     private fun autoEnabled(): Boolean = ElevateSkipPreferences.autoTypes.any { name ->
         settings.getBoolean(name, false)
@@ -455,6 +481,19 @@ internal class ElevateSkipController(private val application: Application) :
         if (polling) main.post(autoTick)
     }
 
+    private fun autoDecision(reason: String) {
+        if (lastAutoDecision == reason) return
+        lastAutoDecision = reason
+        val p = mediaPlayer
+        Log.i("Elevate-Skip", "auto-decision=" + reason +
+            " instance=" + activeInstance + " episode=" + activeEpisode +
+            " playerId=" + (p?.let { System.identityHashCode(it) } ?: 0) +
+            " positionMs=" + (p?.currentPosition ?: -1L) +
+            " durationMs=" + (p?.duration ?: -1L) +
+            " isPlaying=" + (p?.isPlaying ?: false) +
+            " stamps=" + published.size)
+    }
+
     private val autoTick = object : Runnable {
         override fun run() {
             if (!polling) return
@@ -464,22 +503,41 @@ internal class ElevateSkipController(private val application: Application) :
     }
 
     private fun tryAutoSkip() {
-        val player = mediaPlayer ?: return
-        val vm = model ?: return
-        if (!player.isPlaying || player.duration <= 0L ||
-            vm.state.instance != activeInstance ||
-            (vm.state.generatorState?.meta as? ResultEpisode)?.id != activeEpisode) return
+        val player = mediaPlayer ?: run { autoDecision("no-player"); return }
+        val vm = model ?: run { autoDecision("no-model"); return }
+        if (vm.state.instance != activeInstance ||
+            (vm.state.generatorState?.meta as? ResultEpisode)?.id != activeEpisode) {
+            autoDecision("stale-episode")
+            return
+        }
+        if (published.isEmpty()) { autoDecision("no-stamps"); return }
+        if (player.duration <= 0L) { autoDecision("unknown-duration"); return }
         val current = player.currentPosition
         val active = published.firstOrNull {
             current >= it.timestamp.startMs && current < it.timestamp.endMs
-        } ?: return
-        if (!settings.getBoolean(autoPreference(active), false)) return
+        } ?: run { autoDecision("outside-interval"); return }
+        if (!settings.getBoolean(autoPreference(active), false)) {
+            autoDecision("type-disabled")
+            return
+        }
         val key = stampKey(active)
-        if (key in manualSeekProtected || key in autoSkipped) return
+        if (key in manualSeekProtected) { autoDecision("manual-seek-protected"); return }
+        if (key in autoSkipped) { autoDecision("already-skipped"); return }
+        if (!player.isPlaying) { autoDecision("not-playing"); return }
         val stamp = active.timestamp
-        if (!autoSkipped.add(key)) return
+        // A provisional HLS timeline (often 30s) must not turn an intro skip
+        // into a seek to the wrong point. Keep the manual fallback available.
+        if (player.duration <= stamp.endMs) {
+            autoDecision("duration-shorter-than-interval")
+            return
+        }
         val target = stamp.endMs.coerceAtMost(player.duration - 1L)
-        if (target > current && target > 0L) {
+        if (target > current && target > 0L && autoSkipped.add(key)) {
+            autoDecision("seeking")
+            Log.i("Elevate-Skip", "auto-seek-request episode=" + activeEpisode +
+                " source=" + active.source + " type=" + stamp.type +
+                " fromMs=" + current + " toMs=" + target)
+
             ownSeek = target to android.os.SystemClock.uptimeMillis()
             player.seekTo(target)
             // Use the native skip button's UiText for localized or custom labels.

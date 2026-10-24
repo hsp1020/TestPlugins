@@ -54,6 +54,10 @@ internal class ElevatePlayerFrameTrace(private val app: Application) :
     private var layoutPasses = 0
     private var unchangedLayouts = 0
     private var lastSlowGapLog = 0L
+    private var lastLinksLoggedCount = -1
+    private var lastLinksAt = 0L
+    private var lastLoadingAt = 0L
+    private var lastPlayerChangedAt = 0L
 
     private fun log(stage: String, detail: String = "") {
         Log.i("Elevate-PlayerTrace", "session=" + session + " event=" + (++event) +
@@ -173,10 +177,20 @@ internal class ElevatePlayerFrameTrace(private val app: Application) :
         val vm = model ?: return
         val links = Observer<VideoLive<Set<VideoLink>>> { update ->
             if (update != null) {
-                val urls = update.value.mapNotNull { it.first?.url }.sorted()
-                val key = if (urls.isEmpty()) "none" else fingerprint(urls.joinToString("\n"))
-                log("links-event", "eventInstance=" + update.instance +
-                    " count=" + update.value.size + " linksKey=" + key + " " + source())
+                lastLinksAt = SystemClock.elapsedRealtime()
+                val count = update.value.size
+                // Large search results can deliver hundreds of updates. Hash only
+                // first/zero and sparse milestones instead of every item arrival.
+                val milestone = count <= 2 || count == 4 || count == 8 ||
+                    count == 16 || count == 32 || count == 64 ||
+                    count == 128 || count == 256 || count < lastLinksLoggedCount
+                if (milestone && count != lastLinksLoggedCount) {
+                    val urls = update.value.mapNotNull { it.first?.url }.sorted()
+                    val key = if (urls.isEmpty()) "none" else fingerprint(urls.joinToString("\n"))
+                    log("links-event", "eventInstance=" + update.instance +
+                        " count=" + count + " linksKey=" + key + " " + source())
+                    lastLinksLoggedCount = count
+                }
             }
             sample("links")
         }
@@ -189,6 +203,7 @@ internal class ElevatePlayerFrameTrace(private val app: Application) :
                     else -> "Other"
                 }
                 if (update.instance == vm.state.instance) {
+                    lastLoadingAt = SystemClock.elapsedRealtime()
                     if (phase == "Loading" && loadingPhase != "Loading") loadSequence++
                     loadingPhase = phase
                 }
@@ -213,7 +228,11 @@ internal class ElevatePlayerFrameTrace(private val app: Application) :
             if (layoutWindow != 0L && now - layoutWindow >= 1000L) {
                 if (layouts > 0 || layoutPasses > 1) {
                     log("layout-summary", "passes=" + layoutPasses + " callbacks=" + layouts +
-                        " sameBounds=" + unchangedLayouts + " " + source())
+                        " sameBounds=" + unchangedLayouts +
+                        " sinceLinksMs=" + (if (lastLinksAt > 0) now - lastLinksAt else -1) +
+                        " sinceLoadingMs=" + (if (lastLoadingAt > 0) now - lastLoadingAt else -1) +
+                        " sincePlayerMs=" + (if (lastPlayerChangedAt > 0) now - lastPlayerChangedAt else -1) +
+                        " " + source())
                 }
                 layouts = 0
                 layoutPasses = 0
@@ -267,8 +286,13 @@ internal class ElevatePlayerFrameTrace(private val app: Application) :
             listeningPlayer?.let { runCatching { it.removeListener(playerListener) } }
             listeningPlayer = player
             player?.let { runCatching { it.addListener(playerListener) } }
+            val now = SystemClock.elapsedRealtime()
             log("player-attachment", "oldId=" + oldId + " newId=" + newId +
-                " trigger=" + trigger + " " + source())
+                " trigger=" + trigger + " sinceLinksMs=" +
+                (if (lastLinksAt > 0) now - lastLinksAt else -1) +
+                " sinceLoadingMs=" + (if (lastLoadingAt > 0) now - lastLoadingAt else -1) +
+                " " + source())
+            lastPlayerChangedAt = now
             lastPlayer = player
             lastState = null
             observed = true
@@ -313,6 +337,10 @@ internal class ElevatePlayerFrameTrace(private val app: Application) :
         unchangedLayouts = 0
         layoutWindow = 0L
         lastSlowGapLog = 0L
+        lastLinksLoggedCount = -1
+        lastLinksAt = 0L
+        lastLoadingAt = 0L
+        lastPlayerChangedAt = 0L
         loadSequence = 0
         loadingPhase = "unknown"
         lastMediaKey = null

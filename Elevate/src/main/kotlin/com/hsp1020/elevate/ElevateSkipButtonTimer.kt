@@ -69,12 +69,17 @@ internal class ElevateSkipButtonTimer(
     fun refreshVisibility() {
         val b = button ?: return
         val suppressed = isSuppressed()
-        b.alpha = if (suppressed) 0f else originalAlpha
-        b.isEnabled = if (suppressed) false else originalEnabled
-        b.isFocusable = if (suppressed) false else originalFocusable
-        b.importantForAccessibility = if (suppressed) {
+        val desiredAlpha = if (suppressed) 0f else originalAlpha
+        if (b.alpha != desiredAlpha) b.alpha = desiredAlpha
+        val desiredEnabled = if (suppressed) false else originalEnabled
+        if (b.isEnabled != desiredEnabled) b.isEnabled = desiredEnabled
+        val desiredFocusable = if (suppressed) false else originalFocusable
+        if (b.isFocusable != desiredFocusable) b.isFocusable = desiredFocusable
+        val accessibility = if (suppressed) {
             View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
         } else originalAccessibility
+        if (b.importantForAccessibility != accessibility)
+            b.importantForAccessibility = accessibility
         if (suppressed) {
             if (b.hasFocus()) b.clearFocus()
             indicator?.alpha = 0f

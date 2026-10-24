@@ -1,5 +1,6 @@
 package com.hsp1020.elevate
 
+import android.util.Log
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
 import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
@@ -27,6 +28,7 @@ import java.util.concurrent.ConcurrentHashMap
 internal object ElevateSkipRepository {
     private const val DAY = 86_400_000L
     private const val MISS = 900_000L
+    private const val TAG = "Elevate-SkipData"
     private val imdbPattern = Regex("^tt[0-9]+$")
     private val hosts = listOf(
         "aiostreams.elfhosted.com", "aiostreams.fortheweak.cloud",
@@ -200,14 +202,26 @@ internal object ElevateSkipRepository {
             "&episode=" + i.episode
         val root = request("https://api.theintrodb.org/v4/media?" + idParam + suffix)
             ?: return emptyList()
+        // A successful v4 media response has type=tv/movie. Error payloads may
+        // be JSON objects without type; never treat them as timestamp arrays.
+        val mediaType = root.optString("type")
+        if (mediaType != "tv" && mediaType != "movie") {
+            Log.i(TAG, "theintrodb-invalid-response type=" + mediaType.take(16) +
+                " hasError=" + (root.has("error") || root.has("message")) +
+                " hasCode=" + root.has("code"))
+            return emptyList()
+        }
         val intervals = ArrayList<SkipStamp>()
         for ((key, type) in listOf("intro" to SkipType.Intro, "recap" to SkipType.Recap,
             "credits" to SkipType.Credits, "preview" to SkipType.Preview)) {
             val items = root.optJSONArray(key) ?: continue
             for (n in 0 until items.length()) {
                 val stamp = items.optJSONObject(n) ?: continue
-                intervals.add(SkipStamp(type, stamp.optLong("start_ms"),
-                    if (stamp.isNull("end_ms")) i.duration else stamp.optLong("end_ms", i.duration)))
+                // v4: null start means start of media; null end means end of media.
+                val start = if (stamp.isNull("start_ms")) 0L else stamp.optLong("start_ms", -1L)
+                val end = if (stamp.isNull("end_ms")) i.duration
+                    else stamp.optLong("end_ms", -1L)
+                if (start >= 0L && end > start) intervals.add(SkipStamp(type, start, end))
             }
         }
         return stamps("TheIntroDB", intervals, i)
@@ -300,30 +314,51 @@ internal object ElevateSkipRepository {
         return emptyList()
     }
 
+    private suspend fun provider(name: String, block: suspend () -> List<VideoSkipStamp>): List<VideoSkipStamp> =
+        try { withTimeoutOrNull(8_000L) { block() }.orEmpty() }
+        catch (ex: CancellationException) { throw ex }
+        catch (ex: Exception) {
+            Log.w(TAG, "provider-failure name=" + name + " cause=" + ex.javaClass.simpleName)
+            emptyList()
+        }
+
     suspend fun fetch(i: Identity): List<VideoSkipStamp> = withContext(Dispatchers.IO) {
-        if (i.duration <= 0L || i.duration > 24L * 60L * 60L * 1000L) return@withContext emptyList()
+        if (i.duration <= 0L || i.duration > 24L * 60L * 60L * 1000L) {
+            Log.i(TAG, "skip-invalid-duration durationMs=" + i.duration)
+            return@withContext emptyList()
+        }
         val now = System.currentTimeMillis()
-        resultCache[i.key]?.takeIf { it.until > now }?.let { return@withContext it.data }
+        resultCache[i.key]?.takeIf { it.until > now }?.let {
+            Log.i(TAG, "skip-cache-hit count=" + it.data.size + " durationMs=" + i.duration)
+            return@withContext it.data
+        }
         val result = withTimeoutOrNull(19_000L) {
             coroutineScope {
-                val mapping = async { withTimeoutOrNull(8_000L) { mapped(i) } }
-                val intro = async {
-                    withTimeoutOrNull(8_000L) { introDb(i) }.orEmpty()
+                val mapping = async {
+                    try { withTimeoutOrNull(8_000L) { mapped(i) } }
+                    catch (ex: CancellationException) { throw ex }
+                    catch (ex: Exception) {
+                        Log.w(TAG, "mapping-failure cause=" + ex.javaClass.simpleName)
+                        null
+                    }
                 }
-                val theIntro = async {
-                    withTimeoutOrNull(8_000L) { theIntroDB(i) }.orEmpty()
-                }
-                val ani = async {
-                    val ids = mapping.await()
-                    withTimeoutOrNull(8_000L) { aniSkip(i, ids) }.orEmpty()
-                }
-                val anime = async {
-                    val ids = mapping.await()
-                    withTimeoutOrNull(8_000L) { animeSkip(i, ids) }.orEmpty()
-                }
-                choose(intro.await(), anime.await(), ani.await(), theIntro.await())
+                val intro = async { provider("introdb") { introDb(i) } }
+                val theIntro = async { provider("theintrodb") { theIntroDB(i) } }
+                val ani = async { provider("aniskip") { aniSkip(i, mapping.await()) } }
+                val anime = async { provider("animeskip") { animeSkip(i, mapping.await()) } }
+                val groups = listOf(intro.await(), anime.await(), ani.await(), theIntro.await())
+                Log.i(TAG, "skip-fetched imdb=" + (i.imdb != null) +
+                    " tmdb=" + (i.tmdb != null) + " mal=" + (i.mal != null) +
+                    " anilist=" + (i.anilist != null) + " kitsu=" + (i.kitsu != null) +
+                    " season=" + i.season + " episode=" + i.episode +
+                    " durationMs=" + i.duration + " introdb=" + groups[0].size +
+                    " animeskip=" + groups[1].size + " aniskip=" + groups[2].size +
+                    " theintrodb=" + groups[3].size)
+                choose(*groups.toTypedArray())
             }
-        } ?: emptyList()
+        } ?: emptyList<VideoSkipStamp>().also {
+            Log.i(TAG, "skip-fetch-timeout durationMs=" + i.duration)
+        }
         if (resultCache.size >= 400) resultCache.clear()
         resultCache[i.key] = Timed(result, now + if (result.isEmpty()) MISS else DAY)
         result
