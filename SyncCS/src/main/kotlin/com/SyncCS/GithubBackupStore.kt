@@ -218,17 +218,21 @@ internal class GithubBackupStore(
     private fun shard(index: Int): String = "synccs/data/" + index.toString(16) + ".json"
 
     private fun sealedManifest(cipher: SyncCipher, generation: Int,
-                               shardHashes: List<String>): ByteArray {
+                               shardHashes: List<String>, deltaHash: String? = null): ByteArray {
         check(shardHashes.size == 16 && shardHashes.all {
             it.matches(Regex("[0-9a-f]{64}"))
         })
         val canonical = shardHashes.joinToString("|")
-        return JSONObject().put("format", 2).put("complete", true)
+        val manifest = JSONObject().put("format", 2).put("complete", true)
             .put("generation", generation)
             .put("verification", cipher.encrypt("synccs/check", "synccs-github-v1"))
             .put("shards", JSONArray(shardHashes))
             .put("rootSeal", cipher.encrypt("synccs/data-root", canonical))
-            .toString().toByteArray(Charsets.UTF_8)
+        if (deltaHash != null) {
+            manifest.put("deltaHash", deltaHash)
+                .put("deltaSeal", cipher.encrypt("synccs/delta-root-v1", deltaHash))
+        }
+        return manifest.toString().toByteArray(Charsets.UTF_8)
     }
 
     private fun readAt(rev: String, branch: String, cipher: SyncCipher): Snapshot? {
@@ -299,6 +303,168 @@ internal class GithubBackupStore(
             "count=16 keys=${values.size} elapsedMs=${(System.nanoTime() - began) / 1000000}")
         return Snapshot(rev, tree, branch, manifest.getInt("generation"), values,
             encrypted, canonical)
+    }
+
+
+    /** Encrypted per-commit changes; old GitHub revisions remain full-snapshot compatible. */
+    data class Incremental(
+        val revision: String, val generation: Int, val encryptedChanges: Map<String, String?>
+    )
+
+    private fun changeJournal(cipher: SyncCipher, entries: Map<String, String?>): ByteArray {
+        val rows = JSONObject()
+        for ((key, value) in entries) {
+            rows.put(key, if (value == null) JSONObject.NULL else cipher.encrypt(key, value))
+        }
+        return cipher.encrypt("synccs/delta-journal-v1",
+            JSONObject().put("format", 1).put("entries", rows).toString())
+            .toByteArray(Charsets.UTF_8)
+    }
+
+    private fun readJournal(rev: String, cipher: SyncCipher): Pair<Int, Map<String, String?>>? {
+        val (_, files) = index(rev)
+        val manifestId = files["synccs/manifest.json"] ?: return null
+        val manifest = JSONObject(String(blob(manifestId), Charsets.UTF_8))
+        if (!manifest.has("deltaHash")) return null
+        check(manifest.getInt("format") == 2 && manifest.getBoolean("complete"))
+        check(cipher.decrypt("synccs/check", manifest.getString("verification")) ==
+            "synccs-github-v1") { "Untrusted incremental manifest" }
+        val shards = manifest.getJSONArray("shards")
+        check(shards.length() == 16)
+        val hashes = (0 until 16).map { shards.getString(it) }
+        check(cipher.decrypt("synccs/data-root", manifest.getString("rootSeal")) ==
+            hashes.joinToString("|")) { "Incremental root verification failed" }
+        val expected = manifest.getString("deltaHash")
+        check(expected.matches(Regex("[0-9a-f]{64}")) &&
+            cipher.decrypt("synccs/delta-root-v1", manifest.getString("deltaSeal")) == expected) {
+            "Untrusted incremental journal"
+        }
+        val journalId = files["synccs/delta.enc"] ?: error("Missing sealed change journal")
+        val bytes = blob(journalId)
+        check(SyncBackend.digestBytes(bytes) == expected) { "Incremental journal hash mismatch" }
+        val payload = JSONObject(cipher.decrypt("synccs/delta-journal-v1",
+            String(bytes, Charsets.UTF_8)))
+        check(payload.getInt("format") == 1)
+        val rows = payload.getJSONObject("entries")
+        check(rows.length() <= 1000) { "Incremental journal exceeds safe size" }
+        val changes = linkedMapOf<String, String?>()
+        for (key in rows.keys()) {
+            check(key.isNotBlank() && key.length <= 512)
+            changes[key] = if (rows.isNull(key)) null else rows.getString(key)
+        }
+        return manifest.getInt("generation") to changes
+    }
+
+    /** Follow a short contiguous first-parent chain, or use full recovery. */
+    fun incrementalSince(base: String, cipher: SyncCipher, generation: Int): Incremental? {
+        if (!base.matches(Regex("[0-9a-f]{40}")) || generation <= 0) return null
+        val branch = ensurePrivateRepository()
+        val head = revision(branch)
+        if (head == base) return Incremental(head, generation, emptyMap())
+        val compare = get("/compare/$base...$head?per_page=12")
+        if (compare.optString("status") != "ahead") return null
+        val list = compare.getJSONArray("commits")
+        val total = compare.getInt("total_commits")
+        if (total !in 1..8 || list.length() != total) return null
+        var parent = base
+        val latest = linkedMapOf<String, String?>()
+        for (i in 0 until total) {
+            val item = list.getJSONObject(i)
+            val parents = item.getJSONArray("parents")
+            val rev = item.getString("sha")
+            if (parents.length() != 1 ||
+                parents.getJSONObject(0).getString("sha") != parent) return null
+            val delta = readJournal(rev, cipher) ?: return null
+            if (delta.first != generation) return null
+            latest.putAll(delta.second)
+            parent = rev
+        }
+        if (parent != head) return null
+        SyncTrace.info("github-delta-verified",
+            "commits=$total changed=${latest.size} revision=${head.take(12)}")
+        return Incremental(head, generation, latest)
+    }
+
+    /**
+     * Update only changed verified shards, preserving the rest verbatim.
+     * CAS and the sealed complete snapshot remain authoritative.
+     */
+    fun publishPartial(
+        expectedRevision: String, expectedGeneration: Int, cipher: SyncCipher,
+        requested: Map<String, String?>, approvedDeletes: Set<String>,
+        archives: Map<String, ByteArray> = emptyMap()
+    ): String {
+        val branch = ensurePrivateRepository()
+        if (revision(branch) != expectedRevision)
+            throw IOException("Sync conflict: remote revision changed.")
+        val (tree, existing) = index(expectedRevision)
+        val manifest = JSONObject(String(blob(existing["synccs/manifest.json"]
+            ?: error("Missing verified GitHub manifest")), Charsets.UTF_8))
+        check(manifest.getInt("format") == 2 && manifest.getBoolean("complete"))
+        val generation = manifest.getInt("generation")
+        check(SyncSafety.acceptGeneration(expectedGeneration, generation, true)) {
+            "Backup recovery generation changed; re-link this device before uploading."
+        }
+        check(cipher.decrypt("synccs/check", manifest.getString("verification")) ==
+            "synccs-github-v1")
+        val list = manifest.getJSONArray("shards")
+        check(list.length() == 16)
+        val hashes = (0 until 16).map { list.getString(it) }.toMutableList()
+        check(cipher.decrypt("synccs/data-root", manifest.getString("rootSeal")) ==
+            hashes.joinToString("|")) { "Backup root authentication failed." }
+        SyncSafety.validateChanges(requested.size)
+        val patches = linkedMapOf<String, ByteArray>()
+        val changed = linkedMapOf<String, String?>()
+        val nestedDeletes = linkedSetOf<String>()
+        for (bucket in requested.keys.map(::bucket).distinct()) {
+            val path = shard(bucket)
+            val bytes = blob(existing[path] ?: error("Missing GitHub shard $bucket"))
+            check(SyncBackend.digestBytes(bytes) == hashes[bucket]) {
+                "Backup shard $bucket failed verification"
+            }
+            val rows = JSONObject(String(bytes, Charsets.UTF_8))
+            var altered = false
+            for ((key, value) in requested) {
+                if (bucket(key) != bucket) continue
+                val previous = if (rows.has(key)) cipher.decrypt(key, rows.getString(key)) else null
+                if (previous == value) continue
+                if (key == "x/plugins") {
+                    val old = PluginSync.decode(previous)
+                    val next = PluginSync.decode(value)
+                    nestedDeletes.addAll((old.items.keys - next.items.keys)
+                        .map { "x/plugins/$it" })
+                } else if (key == "x/profiles") {
+                    val old = ProfileSync.decode(previous)
+                    val next = ProfileSync.decode(value)
+                    nestedDeletes.addAll((old.items.keys - next.items.keys)
+                        .map { "x/profiles/$it" })
+                }
+                if (value == null) {
+                    if (previous != null) rows.remove(key)
+                } else rows.put(key, cipher.encrypt(key, value))
+                changed[key] = value
+                altered = true
+            }
+            if (altered) {
+                val data = rows.toString().toByteArray(Charsets.UTF_8)
+                patches[path] = data
+                hashes[bucket] = SyncBackend.digestBytes(data)
+            }
+        }
+        val deletes = changed.filterValues { it == null }.keys + nestedDeletes
+        check(deletes.all { it in approvedDeletes }) {
+            "Unverified deletion detected; refusing to publish."
+        }
+        SyncSafety.validateDeletes(deletes, approvedDeletes, 0)
+        val newArchives = archiveChanges(existing, archives)
+        if (patches.isEmpty() && newArchives.isEmpty()) return expectedRevision
+        patches.putAll(newArchives)
+        val delta = if (changed.size <= 1000) changeJournal(cipher, changed) else null
+        if (delta != null) patches["synccs/delta.enc"] = delta
+        patches["synccs/manifest.json"] = sealedManifest(cipher, generation, hashes,
+            delta?.let(SyncBackend::digestBytes))
+        patches["synccs/audit.enc"] = auditBlob(existing, cipher, changed.keys.toList(), deletes)
+        return commit(expectedRevision, tree, branch, patches)
     }
 
     /** Cheap Git HEAD check, without fetching or decrypting any backup shard. */
@@ -572,7 +738,8 @@ internal class GithubBackupStore(
         val logicalDeletions = deleted + nestedDeletions(previous.values, target)
         val changed = (previous.values.keys + target.keys)
             .filter { previous.values[it] != target[it] }
-        if (changed.isEmpty() && archives.isEmpty()) return previous.revision
+        val newArchives = archiveChanges(index(previous.revision).second, archives)
+        if (changed.isEmpty() && newArchives.isEmpty()) return previous.revision
         SyncSafety.validateChanges(changed.size)
         val changes = linkedMapOf<String, ByteArray>()
         val hashes = previous.shardHashes.toMutableList()
@@ -588,10 +755,13 @@ internal class GithubBackupStore(
             changes[shard(i)] = bytes
             hashes[i] = SyncBackend.digestBytes(bytes)
         }
-        changes["synccs/manifest.json"] =
-            sealedManifest(cipher, previous.generation, hashes)
+        val delta = if (changed.size <= 1000) changeJournal(cipher,
+            changed.associateWith { target[it] }) else null
+        if (delta != null) changes["synccs/delta.enc"] = delta
+        changes["synccs/manifest.json"] = sealedManifest(cipher,
+            previous.generation, hashes, delta?.let(SyncBackend::digestBytes))
         val (_, existing) = index(previous.revision)
-        changes.putAll(archiveChanges(existing, archives))
+        changes.putAll(newArchives)
         changes["synccs/audit.enc"] = auditBlob(existing, cipher, changed, logicalDeletions)
         return commit(previous.revision, previous.tree, previous.branch, changes)
     }

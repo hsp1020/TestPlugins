@@ -121,7 +121,8 @@ class SyncPlugin : Plugin() {
         } else request(4000, "plugins-loaded")
         Unit
     }
-    private val home = { _: Boolean -> request(3000, "home-reload") }
+    // Navigation is not a data change; foreground checks and tracked edits remain active.
+    private val home = { _: Boolean -> Unit }
     private val accountRoster = { _: Boolean ->
         val context = com.lagradost.cloudstream3.CloudStreamApp.context
         if (context != null && isOwner(context) && !SyncCoordinator.applying) {
@@ -189,6 +190,12 @@ class SyncPlugin : Plugin() {
         }
         authPausedLogged = false
         synchronized(workerGuard) {
+            if (worker?.isActive == true &&
+                reason in setOf("remote-head-poll-20s", "home-reload",
+                    "activity-resumed", "activity-paused", "activity-stopped")) {
+                SyncTrace.info("coalesce", "reason=$reason active-worker-no-rerun")
+                return
+            }
             rerunRequested = true
             if (worker?.isActive == true) {
                 SyncTrace.info("coalesce", "reason=$reason pending=1")

@@ -299,8 +299,20 @@ class SyncSettingsFragment : DialogFragment() {
             else "GitHub authorization rejected (HTTP 401); open Sync account to reauthorize."
         } else if (config.preferences.getBoolean("github_recovery_in_progress", false)) {
             "Backup revision recovery in progress"
-        } else if (config.active()) SyncCoordinator.lastStatus else "Not connected"
+        } else if (config.active()) {
+            val runtime = SyncCoordinator.lastStatus
+            if (runtime == "Not connected") {
+                if (config.preferences.contains("github_base_revision"))
+                    "Connected · GitHub backup linked"
+                else "Connected · Initial synchronization pending"
+            } else runtime
+        } else "Not connected"
         return "$status  ·  ${config.deviceName}"
+    }
+
+    override fun onResume() {
+        super.onResume()
+        statusLabel?.text = statusText(SyncConfiguration(requireContext()))
     }
 
     private class EyeIcon(private val iconColor: Int, private val visible: Boolean, private val iconSize: Int) : Drawable() {

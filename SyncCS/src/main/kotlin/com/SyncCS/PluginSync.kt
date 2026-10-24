@@ -85,6 +85,16 @@ internal object PluginSync {
      * in its baseline. A *new* installation after an established baseline can
      * explicitly restore a deleted entry. An uninitialized device never can.
      */
+    private fun sameItem(a: JSONObject, b: JSONObject): Boolean {
+        val keys = a.keys().asSequence().toSet()
+        return keys == b.keys().asSequence().toSet() && keys.all { key ->
+            a.opt(key).toString() == b.opt(key).toString()
+        }
+    }
+    private fun sameState(a: State, b: State): Boolean =
+        a.deleted == b.deleted && a.items.keys == b.items.keys &&
+            a.items.keys.all { sameItem(a.items.getValue(it), b.items.getValue(it)) }
+
     fun merge(localRaw: String, remoteRaw: String?, baselineRaw: String?,
               allowLocalDeletions: Boolean): Merge {
         val local = decode(localRaw)
@@ -124,9 +134,9 @@ internal object PluginSync {
                     output.items.putIfAbsent(id, item)
                 }
                 id in remote.deleted -> Unit // Old device must not resurrect a delete
-                previous != null && previous.toString() != item.toString() -> {
+                previous != null && !sameItem(previous, item) -> {
                     val remoteItem = remote.items[id]
-                    if (remoteItem == null || remoteItem.toString() == previous.toString()) {
+                    if (remoteItem == null || sameItem(remoteItem, previous)) {
                         output.items[id] = item
                     }
                     // Concurrent edits of the same entry: confirmed remote wins.
@@ -135,6 +145,6 @@ internal object PluginSync {
         }
         output.deleted.forEach { output.items.remove(it) }
         val target = encode(output)
-        return Merge(output, remoteRaw == null || encode(remote) != target)
+        return Merge(output, remoteRaw == null || !sameState(remote, output))
     }
 }

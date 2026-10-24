@@ -50,6 +50,28 @@ class GithubStoreIntegrationTest {
                     .put("default_branch", "main")
                 method == "GET" && p == "/git/ref/heads/main" ->
                     return JSONObject().put("object", responseId(head))
+                method == "GET" && p.startsWith("/compare/") -> {
+                    val specs = p.substringAfter("/compare/").substringBefore("?").split("...")
+                    val base = specs[0]
+                    val target = specs[1]
+                    val chain = mutableListOf<String>()
+                    var cursor: String? = target
+                    while (cursor != null && cursor != base && chain.size <= 100) {
+                        chain.add(cursor)
+                        cursor = commits[cursor]?.second
+                    }
+                    if (cursor != base) return JSONObject().put("status", "diverged")
+                        .put("total_commits", 0).put("commits", JSONArray())
+                    chain.reverse()
+                    val entries = JSONArray()
+                    for (revision in chain) {
+                        entries.put(JSONObject().put("sha", revision)
+                            .put("parents", JSONArray().put(JSONObject()
+                                .put("sha", commits.getValue(revision).second))))
+                    }
+                    return JSONObject().put("status", if (chain.isEmpty()) "identical" else "ahead")
+                        .put("total_commits", chain.size).put("commits", entries)
+                }
                 method == "GET" && p.startsWith("/git/commits/") -> {
                     val key = p.substringAfterLast("/")
                     val tree = commits[key]?.first ?: error("Commit not found $key")
@@ -135,6 +157,65 @@ class GithubStoreIntegrationTest {
     private fun cipher() = SyncCipher.derive(
         "strong-github-backup-passphrase", "https://api.github.com", "test-owner-id"
     )
+
+    @Test fun incrementalThreeKeysAfterInitialSnapshotAndNoChange() {
+        val api = FakeGit()
+        val a = store(api, "A")
+        val b = store(api, "B")
+        val c = cipher()
+        val initial = (0 until 256).associate { "d/0/video_pos_dur/$it" to "start-$it" }
+        a.initialize(c, initial)
+        val before = b.current(c)!!
+        val modifications = mapOf(
+            "d/0/video_pos_dur/1" to "new-1",
+            "d/0/video_pos_dur/2" to "new-2",
+            "d/0/video_pos_dur/3" to "new-3"
+        )
+        val published = a.publishPartial(before.revision, before.generation, c,
+            modifications, emptySet())
+        val delta = b.incrementalSince(before.revision, c, before.generation)!!
+        assertEquals(published, delta.revision)
+        assertEquals(modifications.keys, delta.encryptedChanges.keys)
+        modifications.forEach { (key, expected) ->
+            assertEquals(expected, c.decrypt(key, delta.encryptedChanges.getValue(key)!!))
+        }
+        assertTrue(b.incrementalSince(published, c, before.generation)!!
+            .encryptedChanges.isEmpty())
+        assertEquals(initial + modifications, b.current(c)!!.values)
+    }
+
+    @Test fun incrementalDeletionsAndMultiCommitCatchup() {
+        val api = FakeGit()
+        val a = store(api, "A")
+        val b = store(api, "B")
+        val c = cipher()
+        a.initialize(c, mapOf("d/0/video_pos_dur/1" to "one"))
+        val first = b.current(c)!!
+        val second = a.publishPartial(first.revision, first.generation, c,
+            mapOf("d/0/video_pos_dur/1" to null), setOf("d/0/video_pos_dur/1"))
+        a.publishPartial(second, first.generation, c,
+            mapOf("d/0/video_pos_dur/2" to "two"), emptySet())
+        val changes = b.incrementalSince(first.revision, c, first.generation)!!
+        assertTrue(changes.encryptedChanges.containsKey("d/0/video_pos_dur/1"))
+        assertNull(changes.encryptedChanges["d/0/video_pos_dur/1"])
+        assertEquals("two", c.decrypt("d/0/video_pos_dur/2",
+            changes.encryptedChanges.getValue("d/0/video_pos_dur/2")!!))
+        assertFalse(b.current(c)!!.values.containsKey("d/0/video_pos_dur/1"))
+    }
+
+    @Test fun restoredGenerationFallsBackToFullSnapshot() {
+        val api = FakeGit()
+        val a = store(api, "A")
+        val c = cipher()
+        val first = a.initialize(c, mapOf("d/0/video_pos_dur/1" to "one"))
+        val before = a.current(c)!!
+        a.publishPartial(before.revision, before.generation, c,
+            mapOf("d/0/video_pos_dur/1" to "two"), emptySet())
+        val newer = a.current(c)!!
+        a.rollback(newer, first, c)
+        assertNull(a.incrementalSince(newer.revision, c, newer.generation))
+        assertEquals("one", a.current(c)!!.values["d/0/video_pos_dur/1"])
+    }
 
     @Test fun sourceBackupAndUnlinkedBRestoreSameValues() {
         val api = FakeGit()

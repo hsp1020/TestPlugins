@@ -42,15 +42,15 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
             })
     }
     private var latest: GithubBackupStore.Snapshot? = null
+    private var verifiedState: Pair<String, Int>? = null
     var createdFreshBackup: Boolean = false
         private set
 
     fun remoteHead(): String = github.remoteHead()
 
-    fun verifiedRevision(): Pair<String, Int> {
-        val snapshot = latest ?: error("GitHub backup not loaded")
-        return snapshot.revision to snapshot.generation
-    }
+    fun verifiedRevision(): Pair<String, Int> =
+        verifiedState ?: latest?.let { it.revision to it.generation }
+            ?: error("GitHub backup not loaded")
     private val archives = linkedMapOf<String, ByteArray>()
     private val stagedChanges = linkedMapOf<String, String?>()
     private val verifiedDeletionPaths = linkedSetOf<String>()
@@ -122,6 +122,21 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
 
     override fun pull(previousCursor: Long?): SyncBackend.PullResult {
         val cipher = cipher()
+        val baseRevision = preferences.getString("github_base_revision", null)
+        val generation = preferences.getInt("github_generation", 0)
+        if (baseRevision != null && preferences.contains("base") && generation > 0) {
+            val delta = github.incrementalSince(baseRevision, cipher, generation)
+            if (delta != null) {
+                verifiedState = delta.revision to delta.generation
+                latest = null
+                val rows = delta.encryptedChanges.map { (key, sealed) ->
+                    RemoteEntry(key, sealed, sealed == null, "", "github", 1L)
+                }
+                SyncTrace.info("github-pull-delta", "entries=${rows.size}")
+                return SyncBackend.PullResult(rows, null, false)
+            }
+            SyncTrace.info("github-pull-fallback", "reason=history-gap-or-legacy")
+        }
         var snapshot = github.current(cipher)
         if (snapshot == null) {
             val alreadyEnrolled = preferences.contains("github_base_revision") ||
@@ -147,6 +162,7 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
             preserveUnlinkedDeviceState()
         }
         latest = snapshot
+        verifiedState = snapshot.revision to snapshot.generation
         SyncTrace.info("github-pull", "revision=${snapshot.revision.take(12)} " +
             "records=${snapshot.values.size} newBackup=$createdFreshBackup")
         SyncTrace.keys("github-pull-keys", snapshot.values.keys)
@@ -191,14 +207,30 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
     override fun upload(
         changes: Map<String, String?>, cipher: SyncCipher, revisions: Map<String, Long>
     ) {
-        check(latest != null) { "Pull must complete before staging any writes." }
+        check(verifiedState != null) { "Pull must complete before staging any writes." }
         stagedChanges.putAll(changes)
         SyncTrace.keys("github-staged", changes.keys)
     }
 
     override fun flush(cipher: SyncCipher) {
         if (stagedChanges.isEmpty() && archives.isEmpty()) return
-        val current = latest ?: error("Cannot commit without a verified GitHub base.")
+        val current = latest
+        if (current == null) {
+            val (known, generation) = verifiedRevision()
+            val published = github.publishPartial(known, generation, cipher,
+                stagedChanges, verifiedDeletionPaths, archives)
+            check(github.remoteHead() == published) {
+                "Published GitHub revision was not verified"
+            }
+            verifiedState = published to generation
+            SyncTrace.info("github-publish-partial",
+                "base=${known.take(12)} writes=${stagedChanges.size} " +
+                    "revision=${published.take(12)}")
+            stagedChanges.clear()
+            archives.clear()
+            verifiedDeletionPaths.clear()
+            return
+        }
         checkGeneration(current)
         val target = current.values.toMutableMap()
         for ((key, value) in stagedChanges) {
@@ -226,6 +258,7 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         github.update(current, cipher, target, allowed, archives)
         latest = github.current(cipher)
             ?: error("Could not verify the newly committed GitHub snapshot.")
+        verifiedState = latest!!.revision to latest!!.generation
         SyncTrace.info("github-publish-verified", "revision=${latest!!.revision.take(12)}")
         stagedChanges.clear()
         archives.clear()
@@ -235,6 +268,7 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
     override fun getEntry(key: String): RemoteEntry? {
         val snapshot = github.current(cipher()) ?: return null
         latest = snapshot
+        verifiedState = snapshot.revision to snapshot.generation
         return snapshot.values[key]?.let {
             RemoteEntry(key, snapshot.encrypted[key], false, "", "github", 1L)
         }

@@ -11,7 +11,7 @@ internal object SyncDirtyMarkerCleaner {
     data class Stats(val removed: Int, val pending: Int, val newer: Int, val elapsedMs: Long)
 
     fun matchesVerifiedBaseline(actual: String?, expectedHash: String?): Boolean =
-        if (expectedHash == null) actual == null
+        if (expectedHash == null || expectedHash == "<deleted>") actual == null
         else actual != null && SyncBackend.digest(actual) == expectedHash
 
     fun prune(

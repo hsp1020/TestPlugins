@@ -36,8 +36,14 @@ internal object SyncPreferencePlanner {
         next.remove("x/plugins")
         next.remove("x/profiles")
         val conflicts = mutableMapOf<String, String>()
-        val all = (remoteValues.keys + local.keys + base.keys)
-            .filter { it != "x/plugins" && it != "x/profiles" }.toSortedSet()
+        val candidates = if (fullSnapshot || firstRemoteRestore || base.isEmpty()) {
+            remoteValues.keys + local.keys + base.keys
+        } else {
+            remoteValues.keys + modifiedKeys + local.keys.filterNot(base::containsKey)
+        }
+        val all = candidates.filter {
+            it != "x/plugins" && it != "x/profiles"
+        }.toSortedSet()
 
             for (key in all) {
                 val nativeKey = ProfileIdentity.nativePath(key, profiles) ?: continue

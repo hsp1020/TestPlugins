@@ -314,10 +314,12 @@ internal object GithubOAuthSession {
                 ?: error("GitHub authorization disappeared during refresh")
             return String(LocalVault.decrypt(current), Charsets.UTF_8)
         }
+        val newRefresh = renewed.refresh?.takeIf { it.isNotBlank() }
+            ?: throw java.io.IOException("GitHub did not return a rotating refresh credential.")
         check(prefs.edit()
             .putString("github_token", LocalVault.encrypt(renewed.access.toByteArray(Charsets.UTF_8)))
             .putString("github_refresh_token", LocalVault.encrypt(
-                renewed.refresh!!.toByteArray(Charsets.UTF_8)))
+                newRefresh.toByteArray(Charsets.UTF_8)))
             .putLong("github_token_expires_at", renewed.expiresAt)
             .putLong("github_token_issued_at", renewed.issuedAt)
             .putLong("github_refresh_expires_at", renewed.refreshExpiresAt)

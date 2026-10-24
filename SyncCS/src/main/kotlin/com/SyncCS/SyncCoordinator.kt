@@ -139,12 +139,11 @@ internal object SyncCoordinator {
             return@withLock pause("github-account-changed",
                 "Sync paused: account changed. Clear local CloudStream data before linking a different account.")
         }
-        // A resume without any local changes needs only a Git HEAD check.
-        // After a restart lastSuccessfulSyncAt is zero: do one complete read so
-        // changes missed while the plugin was unloaded cannot be skipped.
+        // A committed baseline/revision persists across restarts; pending local
+        // journals were handled above, so clean restarts need only a HEAD check.
         val pendingPlugins = config.preferences.contains("pending_plugins")
         val restoreActivity = activity?.takeIf { !it.isFinishing && !it.isDestroyed }
-        if (lastSuccessfulSyncAt > 0L &&
+        if (config.preferences.contains("base") &&
             (!pendingPlugins || restoreActivity == null) &&
             config.preferences.all.keys.none { it.startsWith("modified/") }) {
             val known = config.preferences.getString("github_base_revision", null)
@@ -372,8 +371,8 @@ internal object SyncCoordinator {
             }
             stage = "loading cloud state"
             SyncTrace.memory("before-github-pull")
-            // A full snapshot is required only for the first run, or when the
-            // server has not yet installed the v340 change journal migration.
+            // Older commits without a sealed change journal fall back to full
+            // authenticated recovery; Git revision is the durable delta cursor.
             val previousCursor = if (config.preferences.contains("remote_cursor"))
                 config.preferences.getLong("remote_cursor", 0L) else null
             val pull = backend.pull(previousCursor)
@@ -735,12 +734,15 @@ internal object SyncCoordinator {
             for ((key, hash) in next) baseJson.put(key, hash)
             val revisionJson = JSONObject()
             versions.forEach { (key, version) -> revisionJson.put(key, version) }
-            val listBaselineJson = JSONObject()
-            for (key in local.keys + apply.keys) {
+            val listBaselineJson = if (pull.full) JSONObject()
+                else JSONObject(priorLists.toString())
+            val keysToRecord = if (pull.full) local.keys + apply.keys
+                else (marked + remoteValues.keys + apply.keys + upload.keys)
+            for (key in keysToRecord) {
                 val raw = if (apply.containsKey(key)) apply[key] else local[key]
                 if (raw != null && SharedListSync.isCollection(key, raw)) {
                     listBaselineJson.put(key, raw)
-                }
+                } else listBaselineJson.remove(key)
             }
             val persisted = config.preferences.edit()
                 .putString("base", baseJson.toString())
