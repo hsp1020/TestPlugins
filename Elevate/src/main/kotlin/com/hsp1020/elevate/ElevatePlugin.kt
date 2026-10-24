@@ -39,6 +39,7 @@ class ElevatePlugin : Plugin() {
     private var homeRecyclerGuard: HomeRecyclerCacheGuard? = null
     private var searchProviderOrder: SearchProviderOrderHook? = null
     private var audioSelector: ElevateAudioTrackSelector? = null
+    private var skipController: ElevateSkipController? = null
     private var embeddedSubtitles: EmbeddedSubtitleController? = null
     private var homeHero: HomeHeroToggle? = null
     private var libraryPosters: LibraryPosterHook? = null
@@ -157,6 +158,14 @@ class ElevatePlugin : Plugin() {
             audioSelector?.stop()
             audioSelector = null
         }
+        if (enabled(ElevateFeature.SKIP)) {
+            if (skipController == null) {
+                skipController = ElevateSkipController(application).also { it.start() }
+            }
+        } else {
+            skipController?.stop()
+            skipController = null
+        }
         if (enabled(ElevateFeature.EMBEDDED_SUBTITLES)) {
             if (embeddedSubtitles == null) {
                 embeddedSubtitles = EmbeddedSubtitleController(application).also { it.start() }
@@ -205,6 +214,8 @@ class ElevatePlugin : Plugin() {
         searchProviderOrder = null
         audioSelector?.stop()
         audioSelector = null
+        skipController?.stop()
+        skipController = null
         embeddedSubtitles?.stop()
         embeddedSubtitles = null
         homeHero?.stop()
