@@ -1210,7 +1210,9 @@ internal class CatalogBrowserDialog(
             setBackgroundColor(headerColor)
             val navigationRow = LinearLayout(activity).apply {
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, 0, dp(10), 0)
+                // Home SearchView's 48dp search button centers its icon 24dp
+                // from the content start; center this 24dp back view at the same X.
+                setPadding(dp(12), 0, dp(10), 0)
                 val back = ImageView(activity).apply {
                     setImageResource(R.drawable.ic_baseline_arrow_back_24)
                     imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.white))
@@ -1302,7 +1304,8 @@ internal class CatalogBrowserDialog(
                     }
                 }
                 addView(searchField, LinearLayout.LayoutParams(0, dp(44), 1f).apply {
-                    marginStart = dp(45)
+                    // Type spinner starts at 10dp (row) + 82dp (label) = 92dp.
+                    marginStart = dp(56)
                 })
             }
             addView(navigationRow, LinearLayout.LayoutParams(-1, dp(44)))
@@ -1356,50 +1359,14 @@ internal class CatalogBrowserDialog(
         })
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val statusTop = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
-            val position = IntArray(2)
-            view.getLocationOnScreen(position)
-            val safeTop = (statusTop - position[1]).coerceAtLeast(0)
-            val homeSearch = activity.findViewById<SearchView>(R.id.home_search)
-            val homeIcon = listOfNotNull(
-                homeSearch?.findViewById<ImageView>(androidx.appcompat.R.id.search_button),
-                homeSearch?.findViewById<ImageView>(androidx.appcompat.R.id.search_mag_icon),
-                activity.findViewById<ImageView>(R.id.home_preview_search_button)
-            ).firstOrNull { icon ->
-                icon.isAttachedToWindow && icon.isShown &&
-                    icon.width > 0 && icon.height > 0 && icon.getGlobalVisibleRect(Rect())
-            }
-            val iconCenter = homeIcon?.let { icon ->
-                val location = IntArray(2).also { icon.getLocationOnScreen(it) }
-                (location[0] + icon.width / 2) to (location[1] + icon.height / 2)
-            }
-            // Align the back arrow with the visible home search icon, not home_padding.
-            val alignedTop = iconCenter?.let { (_, y) ->
-                (y - position[1] - dp(22)).coerceAtLeast(safeTop)
-            } ?: safeTop
+            val location = IntArray(2)
+            view.getLocationOnScreen(location)
+            // Home search row is 50dp high, browser navigation row is 44dp.
+            // Align their centers once per window inset/layout update, even if
+            // Home's scrolling search icon is currently off-screen.
+            val alignedTop = (statusTop - location[1]).coerceAtLeast(0) + dp(3)
             if (view.paddingTop != alignedTop) view.setPadding(0, alignedTop, 0, 0)
-            val backLeft = iconCenter?.let { (x, _) ->
-                (x - position[0] - dp(12)).coerceAtLeast(0)
-            } ?: 0
-            val navigationRow = controls.getChildAt(0) as LinearLayout
-            if (navigationRow.paddingLeft != backLeft) {
-                navigationRow.setPadding(backLeft, 0, dp(10), 0)
-            }
-            // Align the browser search icon's left edge with the Type spinner.
-            val spinnerLeft = if (typeSelector.isAttachedToWindow && typeSelector.width > 0) {
-                val location = IntArray(2).also { typeSelector.getLocationOnScreen(it) }
-                location[0] - position[0]
-            } else dp(10) + dp(82)
-            val searchField = navigationRow.getChildAt(1)
-            val searchParams = searchField.layoutParams as LinearLayout.LayoutParams
-            val searchMargin = (spinnerLeft - backLeft - dp(24)).coerceAtLeast(0)
-            if (searchParams.marginStart != searchMargin) {
-                searchParams.marginStart = searchMargin
-                searchField.layoutParams = searchParams
-            }
             insets
-        }
-        controls.doOnPreDraw {
-            if (!closed && dialog.isShowing) ViewCompat.requestApplyInsets(root)
         }
         grid.spanCount = activity.getSpanCount(false)
         root.addView(content, CoordinatorLayout.LayoutParams(-1, -1).apply {
