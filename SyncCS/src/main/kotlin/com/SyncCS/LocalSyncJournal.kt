@@ -91,9 +91,7 @@ internal object LocalSyncJournal {
             }
         }
         check(editor.commit()) { "Could not restore SyncCS sync baselines." }
-        SyncTrace.info("journal-auth-preserved",
-            "sessionPresent=${SyncConfiguration(context).active()} " +
-                "credentialsNotRestored=true")
+
     }
 
     private val addonBackups = listOf("native_backup_stremioc", "native_backup_streamplay")
@@ -252,10 +250,7 @@ internal object LocalSyncJournal {
         val recentNativeBackups = if (preserveNativeBackups) {
             nativeBackupValues(context)
         } else null
-        SyncTrace.info("journal-recovery-plan",
-            "created=$created pluginUnchanged=$binariesUnchanged " +
-                "preserveNewPlugins=$preserveCurrentPlugins " +
-                "newerKeys=${postJournalEdits.size} activity=${activity != null}")
+
         val original = metadata.getJSONObject("values")
         val backup = linkedMapOf<String, String>()
         for (key in original.keys()) backup[key] = original.getString(key)
@@ -322,9 +317,7 @@ internal object LocalSyncJournal {
         }
         restorePrivateMetadata(context, metadata.getJSONObject("privateSyncState"))
         finish(context)
-        SyncTrace.info("journal-recovery-complete",
-            "preservedNewKeys=${postJournalEdits.size} preservedNewPlugins=$preserveCurrentPlugins " +
-                "pluginRecoveryRequired=$needsBinaryRestore")
+
     }
 
     fun finish(context: Context) {

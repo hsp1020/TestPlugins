@@ -379,13 +379,7 @@ internal object SyncData {
                 }
             }
         }
-        SyncTrace.info("selected-local-read",
-            "requested=${nativePaths.size} data=${dataPaths.size} " +
-                "defaults=${defaultPaths.size} pluginPrefs=${pluginPaths.size} " +
-                "found=${result.size} headerCandidates=${dataPaths.count {
-                    it.startsWith("d/download_header_cache/")
-                }} " +
-                "headerLookupAll=false elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}")
+
         return result
     }
 
@@ -639,7 +633,7 @@ internal object PluginInventory {
                 .put("file", file.name).put("sha", sha256(file)))
         }
         val duration = android.os.SystemClock.elapsedRealtime() - scanStart
-        SyncTrace.info("plugin-inventory-scan", "count=${items.length()} elapsedMs=$duration")
+
         return items.toString()
     }
 

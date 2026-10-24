@@ -132,10 +132,10 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
                 val rows = delta.encryptedChanges.map { (key, sealed) ->
                     RemoteEntry(key, sealed, sealed == null, "", "github", 1L)
                 }
-                SyncTrace.info("github-pull-delta", "entries=${rows.size}")
+
                 return SyncBackend.PullResult(rows, null, false)
             }
-            SyncTrace.info("github-pull-fallback", "reason=history-gap-or-legacy")
+
         }
         var snapshot = github.current(cipher)
         if (snapshot == null) {
@@ -163,9 +163,8 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         }
         latest = snapshot
         verifiedState = snapshot.revision to snapshot.generation
-        SyncTrace.info("github-pull", "revision=${snapshot.revision.take(12)} " +
-            "records=${snapshot.values.size} newBackup=$createdFreshBackup")
-        SyncTrace.keys("github-pull-keys", snapshot.values.keys)
+
+
         // First enrollment requires a complete verified restore, including
         // all missing plugin archives. Already linked devices may synchronize
         // independent preferences while binary installation is deferred.
@@ -191,9 +190,7 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
             }
             github.readArchive(snapshot, sha)
         }
-        SyncTrace.info("plugin-archive-preflight",
-            "firstEnrollment=$firstEnrollment deferred=$deferredArchives " +
-                "remotePlugins=${remotePluginIds.size}")
+
         val rows = snapshot.values.keys.map { key ->
             RemoteEntry(key, snapshot.encrypted[key], false, "",
                 "github", 1L)
@@ -209,7 +206,7 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
     ) {
         check(verifiedState != null) { "Pull must complete before staging any writes." }
         stagedChanges.putAll(changes)
-        SyncTrace.keys("github-staged", changes.keys)
+
     }
 
     override fun flush(cipher: SyncCipher) {
@@ -223,9 +220,7 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
                 "Published GitHub revision was not verified"
             }
             verifiedState = published to generation
-            SyncTrace.info("github-publish-partial",
-                "base=${known.take(12)} writes=${stagedChanges.size} " +
-                    "revision=${published.take(12)}")
+
             stagedChanges.clear()
             archives.clear()
             verifiedDeletionPaths.clear()
@@ -252,14 +247,13 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
             "Unrecognized deletion outside an established local baseline."
         }
         val allowed = deletions + nested
-        SyncTrace.keys("github-delete-authorized", allowed)
-        SyncTrace.info("github-publish", "base=${current.revision.take(12)} " +
-            "writes=${stagedChanges.size} deletions=${deletions.size} archives=${archives.size}")
+
+
         github.update(current, cipher, target, allowed, archives)
         latest = github.current(cipher)
             ?: error("Could not verify the newly committed GitHub snapshot.")
         verifiedState = latest!!.revision to latest!!.generation
-        SyncTrace.info("github-publish-verified", "revision=${latest!!.revision.take(12)}")
+
         stagedChanges.clear()
         archives.clear()
         verifiedDeletionPaths.clear()

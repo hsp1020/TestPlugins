@@ -52,8 +52,7 @@ internal object SyncPreferencePlanner {
                 // Old backups may contain now-excluded generated import bookkeeping.
                 // Do not keep replaying those two-way-changing keys.
                 if (!SyncData.isTracked(nativeKey)) {
-                    SyncTrace.info("skip-obsolete-setting",
-                        "keyHash=${SyncBackend.digest(key).take(12)}")
+
                     continue
                 }
                 val current = local[key]

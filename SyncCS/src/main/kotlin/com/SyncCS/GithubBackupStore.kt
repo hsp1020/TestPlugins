@@ -38,10 +38,7 @@ internal object GithubHttpDiagnostics {
             ?.replace(Regex("[^a-zA-Z0-9_, -]"), "")?.take(100) ?: "unknown"
         val limit = conn.getHeaderField("X-RateLimit-Remaining")
             ?.takeIf { it.matches(Regex("[0-9]{1,12}")) } ?: "unknown"
-        SyncTrace.info("github-http-failure",
-            "phase=$stage http=$status message=$kind authError=$authError " +
-            "requestId=$request scopes=$scopes acceptedScopes=$accepted rateRemaining=$limit " +
-                "serverDate=${conn.getHeaderField("Date")?.take(60) ?: "unknown"}")
+
     }
 }
 
@@ -54,24 +51,20 @@ internal object GithubAuthRetry {
             return request(token)
         } catch (failure: GithubBackupStore.ApiException) {
             if (failure.code == 401)
-                SyncTrace.info("github-api-token-rejected",
-                    "submittedId=${GithubAuthDiagnostics.fingerprint(token)} " +
-                        "recoveryConfigured=${recover != null}")
+
             if (failure.code != 401 || recover == null) throw failure
             val replacement = recover(token)
             if (replacement.isNullOrBlank() || replacement == token) {
-                SyncTrace.info("github-401-recovery", "event=unavailable action=pause")
+
                 throw failure
             }
-            SyncTrace.info("github-401-recovery", "event=retry action=repeat-once")
+
             return try {
                 request(replacement)
             } catch (second: GithubBackupStore.ApiException) {
                 if (second.code == 401) {
-                    SyncTrace.info("github-api-token-rejected",
-                        "submittedId=${GithubAuthDiagnostics.fingerprint(replacement)} " +
-                            "phase=one-time-retry")
-                    SyncTrace.info("github-401-recovery", "event=retry-rejected action=pause")
+
+
                 }
                 throw second
             }
@@ -260,7 +253,7 @@ internal class GithubBackupStore(
         val workers = Executors.newFixedThreadPool(4) { task ->
             Thread(task, "SyncCS-GitHub-shard").apply { isDaemon = true }
         }
-        SyncTrace.info("shards-start", "count=16 workers=4 revision=${rev.take(12)}")
+
         val jobs = (0 until 16).map { i ->
             workers.submit(Callable {
                 val bytes = blob(entries[shard(i)]
@@ -299,8 +292,7 @@ internal class GithubBackupStore(
             jobs.forEach { if (!it.isDone) it.cancel(true) }
             workers.shutdownNow()
         }
-        SyncTrace.info("shards-verified",
-            "count=16 keys=${values.size} elapsedMs=${(System.nanoTime() - began) / 1000000}")
+
         return Snapshot(rev, tree, branch, manifest.getInt("generation"), values,
             encrypted, canonical)
     }
@@ -426,9 +418,7 @@ internal class GithubBackupStore(
             }
         }
         SyncSafety.validateChanges(result.size)
-        SyncTrace.info("github-delta-shard-diff",
-            "changedShards=$alteredShards changedKeys=${result.size} " +
-                "old=${base.take(12)} current=${head.take(12)}")
+
         return Incremental(head, generation, result)
     }
 
@@ -504,13 +494,9 @@ internal class GithubBackupStore(
         }
         SyncSafety.validateDeletes(deletes, approvedDeletes, 0)
         val newArchives = archiveChanges(existing, archives)
-        SyncTrace.info("github-publish-effective",
-            "requested=${requested.size} changed=${changed.size} " +
-                "skippedIdentical=${requested.size - changed.size} " +
-                "shards=${patches.size} archiveRequested=${archives.size} " +
-                "archiveNew=${newArchives.size} deletions=${deletes.size}")
+
         if (patches.isEmpty() && newArchives.isEmpty()) {
-            SyncTrace.info("github-publish-noop", "revision=${expectedRevision.take(12)}")
+
             return expectedRevision
         }
         patches.putAll(newArchives)
@@ -598,8 +584,7 @@ internal class GithubBackupStore(
         val ref = manualRefPrefix + date + "-" + suffix
         write("/git/refs", "POST", JSONObject()
             .put("ref", ref).put("sha", snapshot.revision))
-        SyncTrace.info("github-user-backup",
-            "event=created revision=${snapshot.revision.take(12)}")
+
         return Revision(snapshot.revision, "SyncCS user backup",
             date.substring(0, 4) + "-" + date.substring(4, 6) + "-" + date.substring(6, 8) +
                 " " + date.substring(9, 11) + ":" + date.substring(11, 13) +
@@ -741,8 +726,7 @@ internal class GithubBackupStore(
                 JSONObject().put("sha", next).put("force", false))
         } catch (e: ApiException) {
             if (e.code == 409 || e.code == 422) {
-                SyncTrace.info("github-cas-rejected",
-                    "status=${e.code} parent=${parent.take(12)}")
+
                 throw IOException("Sync conflict: GitHub backup advanced.", e)
             }
             throw e
@@ -968,21 +952,13 @@ internal object GithubDeviceCode {
             "grant_type" to "urn:ietf:params:oauth:grant-type:device_code"))
         return when (r.optString("error")) {
             "" -> Credential.issued(r).also {
-                SyncTrace.info("github-oauth-issued",
-                    "fingerprint=${SyncBackend.digest(it.access).take(12)} " +
-                    "type=${if (it.expiresAt > 0L) "expiring" else "non-expiring"} " +
-                    "issuedAtMs=${it.issuedAt} expiresAtMs=${it.expiresAt} " +
-                    "refreshPresent=${it.refresh != null} " +
-                    "refreshExpiresAtMs=${it.refreshExpiresAt}")
+
             }
             "authorization_pending" -> null
             "slow_down" -> throw IOException("GitHub OAuth requested slower polling.")
             else -> {
                 val code = r.optString("error")
-                SyncTrace.info("github-oauth-response",
-                    "phase=device-poll error=${code.takeIf {
-                        it.matches(Regex("[a-z_]{1,64}"))
-                    } ?: "unknown"}")
+
                 throw IOException("GitHub OAuth refused: " +
                     r.optString("error_description", code).take(150))
             }
@@ -994,10 +970,7 @@ internal object GithubDeviceCode {
             "grant_type" to "refresh_token", "refresh_token" to refreshToken))
         if (r.has("error")) {
             val code = r.optString("error")
-            SyncTrace.info("github-oauth-response",
-                "phase=refresh error=${code.takeIf {
-                    it.matches(Regex("[a-z_]{1,64}"))
-                } ?: "unknown"}")
+
             throw GithubBackupStore.ApiException(401,
                 "GitHub refresh authorization rejected: " +
                     (code.takeIf { it.matches(Regex("[a-z_]{1,64}")) } ?: "unknown"))

@@ -35,9 +35,7 @@ internal object SyncAuthGuard {
             .commit()) { "Cannot record rejected GitHub credential" }
         GithubAuthDiagnostics.record(config, "api-401-rejected")
         GithubAuthDiagnostics.snapshot(config, "auth-guard-rejected")
-        SyncTrace.info("github-auth-rejected",
-            "http=401 credentialId=${token.take(12)} " +
-                "action=reauthorize noLocalDataDeleted=true")
+
     }
 
     /** Only a saved, still-usable refresh credential can unblock a rejected access token. */
@@ -67,8 +65,7 @@ internal object SyncAuthGuard {
         GithubAuthDiagnostics.record(config,
             if (permanent) "refresh-permanently-rejected" else "refresh-retry-deferred",
             detail = "retryAfterMs=${prefs.getLong(REFRESH_RETRY_AFTER, 0L)}")
-        SyncTrace.info("github-auth-recovery-limited",
-            "permanent=$permanent retryAfterMs=${prefs.getLong(REFRESH_RETRY_AFTER, 0L)}")
+
     }
 
     fun clearAfterLogin(config: SyncConfiguration) {
@@ -78,8 +75,7 @@ internal object SyncAuthGuard {
             "Could not reset GitHub authorization failure state"
         }
         GithubAuthDiagnostics.record(config, "authorization-restored")
-        SyncTrace.info("github-auth-restored",
-            "savedCredential=true action=resume-sync")
+
     }
 
     const val MESSAGE =
@@ -108,8 +104,7 @@ internal object GithubAuthDiagnostics {
         val stamp = System.currentTimeMillis()
         val marker = fingerprint(access)
         val safeDetail = detail.take(160)
-        SyncTrace.info("github-auth-event",
-            "atMs=$stamp event=$event accessId=$marker detail=$safeDetail")
+
         runCatching {
             val prefs = config.preferences
             val old = org.json.JSONArray(prefs.getString(HISTORY_KEY, "[]"))
@@ -121,8 +116,7 @@ internal object GithubAuthDiagnostics {
                 .put("accessId", marker).put("detail", safeDetail))
             check(prefs.edit().putString(HISTORY_KEY, updated.toString()).commit())
         }.onFailure {
-            SyncTrace.info("github-auth-audit-unavailable",
-                "event=$event type=${it.javaClass.simpleName}")
+
         }
     }
 
@@ -147,17 +141,7 @@ internal object GithubAuthDiagnostics {
             expires <= now -> "locally-expired"
             else -> "not-locally-expired"
         }
-        SyncTrace.info("github-auth-snapshot",
-            "phase=$phase nowMs=$now submittedId=${fingerprint(submitted)} " +
-            "storedId=${fingerprint(stored)} submittedMatchesStored=${submitted != null && submitted == stored} " +
-            "storedPresent=${prefs.contains("github_token")} " +
-            "issuedAtMs=$issued expiresAtMs=$expires " +
-            "remainingSec=${if (expires > 0L) (expires - now) / 1000L else "unknown"} " +
-            "expiryClass=$expiryClass refreshPresent=${refresh != null} " +
-            "refreshId=${fingerprint(refresh)} refreshExpiresAtMs=$refreshExpires " +
-            "clientPresent=${prefs.contains("github_client_id")} " +
-            "rejected=${SyncAuthGuard.needsReauthentication(config)} " +
-            "recoveryEligible=${SyncAuthGuard.mayRecover(config)}")
+
         runCatching {
             val history = org.json.JSONArray(prefs.getString(HISTORY_KEY, "[]"))
             val recent = (maxOf(0, history.length() - MAX_EVENTS) until history.length())
@@ -166,11 +150,9 @@ internal object GithubAuthDiagnostics {
                     "${e.optLong("at")}:${e.optString("event")}:" +
                         "${e.optString("accessId")}:${e.optString("detail")}"
                 }
-            SyncTrace.info("github-auth-timeline",
-                "phase=$phase count=${history.length()} events=$recent")
+
         }.onFailure {
-            SyncTrace.info("github-auth-timeline",
-                "phase=$phase unavailable=${it.javaClass.simpleName}")
+
         }
     }
 }

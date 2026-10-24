@@ -148,9 +148,7 @@ internal object ProfileIdentity {
         if (markerId != null && valid(markerId)) {
             return "u/$markerId/" + raw.substringAfter('/')
         }
-        SyncTrace.info("profile-mark-fallback",
-            "reason=${if (markerId == null) "missing-marker" else "invalid-marker"} " +
-                "slot=$slot")
+
         return remotePath(nativePath, ProfileSync.decode(ProfileSync.snapshot(context)))
     }
 
