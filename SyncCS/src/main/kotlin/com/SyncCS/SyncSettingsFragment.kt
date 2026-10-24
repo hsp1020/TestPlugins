@@ -958,11 +958,7 @@ class SyncSettingsFragment : DialogFragment() {
                                 }
                             }
                             check(edit.commit()) { "Could not store GitHub session." }
-                            GithubAuthDiagnostics.record(config, "session-committed",
-                                credential.access,
-                                "expiresAtMs=${credential.expiresAt} " +
-                                    "refreshPresent=${credential.refresh != null} " +
-                                    "refreshExpiresAtMs=${credential.refreshExpiresAt}")
+
                             SyncAuthGuard.clearAfterLogin(config)
                         }
 

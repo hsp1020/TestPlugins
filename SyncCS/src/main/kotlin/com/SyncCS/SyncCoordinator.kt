@@ -128,7 +128,6 @@ internal object SyncCoordinator {
             return@withLock pause("not-authenticated", "Sign in to enable sync")
         }
         if (SyncAuthGuard.needsReauthentication(config)) {
-            GithubAuthDiagnostics.snapshot(config, "sync-preflight-rejected")
 
             if (!GithubOAuthSession.resumeRejected(config))
                 return@withLock pause("github-credential-rejected", SyncAuthGuard.MESSAGE)
