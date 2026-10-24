@@ -35,7 +35,10 @@ internal class ElevateSkipButtonTimer(
     private var intervalKey: String? = null
     private var autoHidden = false
     private var revealedWhileControls = false
-    private var revealHideInvalidated = false
+    // Core uses a 500ms width animation. Reopening while its hide animator is
+    // cancelling can cause the old onEnd callback to hide the new button.
+    private var nativeHiddenAtMs = 0L
+    private var nativeShownAtMs = 0L
 
     private fun dp(value: Float): Int =
         (value * (button?.resources?.displayMetrics?.density ?: 1f) + 0.5f).toInt()
@@ -48,16 +51,10 @@ internal class ElevateSkipButtonTimer(
             if (active && !autoHidden) reset()
             return@OnLayoutChangeListener
         }
-        if (active && width + dp(2f) < oldWidth && !autoHidden) {
-            // The user skipped or the native timestamp became invalid.
-            reset()
-        } else if (autoHidden && revealedWhileControls &&
-            width > oldWidth + dp(1f) && !revealHideInvalidated) {
-            fragment.skipIndex++
-            revealHideInvalidated = true
-        } else if (!active && width > oldWidth + dp(1f)) {
-            begin()
-        }
+        // A shrinking width is not sufficient evidence of manual dismissal:
+        // native animators can resize during controller transitions. The tick
+        // handles completed hides and changes in the actual skip interval.
+        if (!active && width > oldWidth + dp(1f)) begin()
     }
 
     private val tick = object : Runnable {
@@ -89,13 +86,18 @@ internal class ElevateSkipButtonTimer(
             }
             if (autoHidden) {
                 indicator?.visibility = View.GONE
-                if (controlsVisible && !revealedWhileControls && currentStamp != null) {
+                if (controlsVisible && !revealedWhileControls && currentStamp != null &&
+                    now - nativeHiddenAtMs >= NATIVE_ANIMATION_MS) {
                     revealedWhileControls = true
-                    revealHideInvalidated = false
-                    // Nuvio allows the button to reappear with the controls open.
+                    nativeShownAtMs = now
+                    // Show only while controls are open; preserve the completed
+                    // countdown and cancel the core's independent six-second hide.
                     fragment.onTimestamp(currentStamp)
-                } else if (!controlsVisible && revealedWhileControls) {
+                    fragment.skipIndex++
+                } else if (!controlsVisible && revealedWhileControls &&
+                    now - nativeShownAtMs >= NATIVE_ANIMATION_MS) {
                     revealedWhileControls = false
+                    nativeHiddenAtMs = now
                     fragment.onTimestamp(null)
                 }
                 lastTickMs = now
@@ -114,6 +116,7 @@ internal class ElevateSkipButtonTimer(
             if (elapsedMs >= HIDE_TIMEOUT_MS && !controlsVisible) {
                 autoHidden = true
                 indicator?.visibility = View.GONE
+                nativeHiddenAtMs = now
                 fragment.onTimestamp(null)
             }
             main.postDelayed(this, UPDATE_MS)
@@ -182,7 +185,8 @@ internal class ElevateSkipButtonTimer(
         active = true
         autoHidden = false
         revealedWhileControls = false
-        revealHideInvalidated = false
+        nativeHiddenAtMs = 0L
+        nativeShownAtMs = 0L
         elapsedMs = 0L
         intervalKey = currentIntervalKey()
         lastTickMs = SystemClock.uptimeMillis()
@@ -199,7 +203,8 @@ internal class ElevateSkipButtonTimer(
         active = false
         autoHidden = false
         revealedWhileControls = false
-        revealHideInvalidated = false
+        nativeHiddenAtMs = 0L
+        nativeShownAtMs = 0L
         main.removeCallbacks(tick)
         indicator?.visibility = View.GONE
         elapsedMs = 0L
@@ -219,5 +224,6 @@ internal class ElevateSkipButtonTimer(
     companion object {
         private const val HIDE_TIMEOUT_MS = 10_000L
         private const val UPDATE_MS = 125L
+        private const val NATIVE_ANIMATION_MS = 550L
     }
 }
