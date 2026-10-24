@@ -304,13 +304,23 @@ internal object ElevateSkipRepository {
         if (i.duration <= 0L || i.duration > 24L * 60L * 60L * 1000L) return@withContext emptyList()
         val now = System.currentTimeMillis()
         resultCache[i.key]?.takeIf { it.until > now }?.let { return@withContext it.data }
-        val result = withTimeoutOrNull(17_000L) {
+        val result = withTimeoutOrNull(19_000L) {
             coroutineScope {
-                val mapped = async { mapped(i) }
-                val intro = async { introDb(i) }
-                val theIntro = async { theIntroDB(i) }
-                val ani = async { aniSkip(i, mapped.await()) }
-                val anime = async { animeSkip(i, mapped.await()) }
+                val mapping = async { withTimeoutOrNull(8_000L) { mapped(i) } }
+                val intro = async {
+                    withTimeoutOrNull(8_000L) { introDb(i) }.orEmpty()
+                }
+                val theIntro = async {
+                    withTimeoutOrNull(8_000L) { theIntroDB(i) }.orEmpty()
+                }
+                val ani = async {
+                    val ids = mapping.await()
+                    withTimeoutOrNull(8_000L) { aniSkip(i, ids) }.orEmpty()
+                }
+                val anime = async {
+                    val ids = mapping.await()
+                    withTimeoutOrNull(8_000L) { animeSkip(i, ids) }.orEmpty()
+                }
                 choose(intro.await(), anime.await(), ani.await(), theIntro.await())
             }
         } ?: emptyList()
