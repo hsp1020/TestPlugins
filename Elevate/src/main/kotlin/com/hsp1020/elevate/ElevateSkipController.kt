@@ -605,6 +605,7 @@ internal class ElevateSkipButtonTimer(
     private var tickQueued = false
     private var completedManualKey: String? = null
     private var manualPendingKey: String? = null
+    private var manualPendingAtMs = 0L
 
     private fun stampKey(stamp: VideoSkipStamp): String =
         "${stamp.source}:${stamp.timestamp.type}:${stamp.timestamp.startMs}:${stamp.timestamp.endMs}"
@@ -616,14 +617,10 @@ internal class ElevateSkipButtonTimer(
         if (shouldHide(stamp)) return
         completedManualKey = stampKey(stamp)
         manualPendingKey = completedManualKey
-        indicator?.visibility = View.GONE
+        manualPendingAtMs = SystemClock.uptimeMillis()
+        // Do NOT disable the view or start a close animation inside ACTION_UP.
+        // CloudStream's native performClick must still execute SkipCurrentChapter.
         fragment.skipIndex++
-        if (!hiddenByTimer) {
-            hiddenByTimer = true
-            lastNativeHideAtMs = SystemClock.uptimeMillis()
-            fragment.onTimestamp(null)
-        }
-        refreshVisibility()
     }
 
     fun onPlaybackSeek(from: Long, to: Long) {
@@ -633,6 +630,7 @@ internal class ElevateSkipButtonTimer(
         if (to < from && returned != null) {
             completedManualKey = null
             manualPendingKey = null
+            manualPendingAtMs = 0L
             active = false
             intervalKey = null
         } else if (manualPendingKey != null) {
@@ -641,6 +639,7 @@ internal class ElevateSkipButtonTimer(
                 completedManualKey = null
             }
             manualPendingKey = null
+            manualPendingAtMs = 0L
         }
         refreshVisibility()
     }
@@ -701,6 +700,12 @@ internal class ElevateSkipButtonTimer(
             val b = button ?: return
             if (fragment.view == null) return
             val now = SystemClock.uptimeMillis()
+            if (manualPendingKey != null &&
+                now - manualPendingAtMs >= 1500L) {
+                manualPendingKey = null
+                completedManualKey = null
+                manualPendingAtMs = 0L
+            }
             val stamp = currentInterval()
             if (stamp == null || isSuppressed() || stampKey(stamp) == completedManualKey) {
                 if (active) {
@@ -855,6 +860,7 @@ internal class ElevateSkipButtonTimer(
         main.removeCallbacks(tick)
         completedManualKey = null
         manualPendingKey = null
+        manualPendingAtMs = 0L
         tickQueued = false
         previous?.setOnTouchListener(null)
         previous?.setOnKeyListener(null)
