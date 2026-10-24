@@ -1,6 +1,7 @@
 package com.hsp1020
 
 import android.content.Context
+import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
@@ -8,6 +9,7 @@ import android.graphics.drawable.GradientDrawable
 import android.text.Layout
 import android.text.StaticLayout
 import android.os.Bundle
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.ViewTreeObserver
 import android.view.View
@@ -392,27 +394,37 @@ internal object ActorInformation {
                 }
             )
             detailHandoff = handoff
+            val originalBack = fragment.view?.findViewById<View>(R.id.result_back)
+                ?.takeIf { it.isAttachedToWindow && it.width > 0 && it.height > 0 }
+            val backScreen = originalBack?.let { original ->
+                IntArray(2).also { original.getLocationOnScreen(it) }
+            }
             val root = column().apply {
                 setBackgroundColor(activity.colorFromAttribute(R.attr.primaryBlackBackground))
-                setPadding(dp(10), dp(8), dp(10), dp(20))
+                setPadding(0, 0, 0, dp(20))
             }
-            val heading = LinearLayout(activity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-            }
-            val close = label("✕", 23f, true).apply {
+            val heading = FrameLayout(activity)
+            val back = ImageView(activity).apply {
+                setImageResource(R.drawable.ic_baseline_arrow_back_24)
+                imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.white))
+                contentDescription = activity.getString(R.string.go_back)
                 isFocusable = true
                 isClickable = true
+                val ripple = TypedValue()
+                if (activity.theme.resolveAttribute(
+                        android.R.attr.selectableItemBackgroundBorderless, ripple, true
+                    ) && ripple.resourceId != 0) setBackgroundResource(ripple.resourceId)
                 setOnClickListener { windowDialog.dismiss() }
             }
             val loadingName = label(actor.name, 20f, true)
-            heading.addView(loadingName, LinearLayout.LayoutParams(0, -2, 1f))
-            heading.addView(close)
-            close.foreground = themedPressedForeground(close)
-            root.addView(heading)
+            heading.addView(back, FrameLayout.LayoutParams(dp(30), dp(30), Gravity.TOP or Gravity.START))
+            heading.addView(loadingName,
+                FrameLayout.LayoutParams(-1, -2, Gravity.CENTER_VERTICAL))
+            root.addView(heading, LinearLayout.LayoutParams(-1, dp(50)))
 
             val scroller = ScrollView(activity).apply {
                 isFillViewport = true
+                setPadding(dp(10), 0, dp(10), 0)
             }
             scroll = scroller
             val wide = fragment.resources.configuration.screenWidthDp >= 900
@@ -536,6 +548,26 @@ internal object ActorInformation {
             val filmArea = column()
             body.addView(filmArea, if (wide) LinearLayout.LayoutParams(0, -2, 3f)
                 else LinearLayout.LayoutParams(-1, -2))
+            root.doOnPreDraw {
+                if (dialog !== windowDialog) return@doOnPreDraw
+                val rootScreen = IntArray(2).also { root.getLocationOnScreen(it) }
+                val left = backScreen?.get(0)?.minus(rootScreen[0])?.coerceAtLeast(0) ?: dp(15)
+                val top = backScreen?.get(1)?.minus(rootScreen[1])?.coerceAtLeast(0) ?: dp(8)
+                (back.layoutParams as FrameLayout.LayoutParams).apply {
+                    leftMargin = left
+                    topMargin = top
+                    back.layoutParams = this
+                }
+                (loadingName.layoutParams as FrameLayout.LayoutParams).apply {
+                    leftMargin = left + dp(46)
+                    rightMargin = dp(10)
+                    loadingName.layoutParams = this
+                }
+                (heading.layoutParams as LinearLayout.LayoutParams).apply {
+                    height = (top + dp(42)).coerceAtLeast(dp(50))
+                    heading.layoutParams = this
+                }
+            }
             windowDialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
             windowDialog.setContentView(root)
             windowDialog.window?.setLayout(-1, -1)

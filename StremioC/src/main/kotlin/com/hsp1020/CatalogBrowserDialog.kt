@@ -1223,14 +1223,14 @@ internal class CatalogBrowserDialog(
             setBackgroundColor(headerColor)
             val navigationRow = LinearLayout(activity).apply {
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(10), 0, dp(10), 0)
+                setPadding(0, 0, dp(10), 0)
                 val back = ImageView(activity).apply {
                     setImageResource(R.drawable.ic_baseline_arrow_back_24)
                     imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.white))
                     contentDescription = activity.getString(R.string.go_back)
                     isFocusable = true
                     isClickable = true
-                    setPadding(dp(3), dp(3), dp(3), dp(3))
+                    setPadding(0, 0, 0, 0)
                     val ripple = TypedValue()
                     if (activity.theme.resolveAttribute(
                             android.R.attr.selectableItemBackgroundBorderless, ripple, true
@@ -1262,9 +1262,8 @@ internal class CatalogBrowserDialog(
                     }
                 }
                 backButton = back
-                addView(back, LinearLayout.LayoutParams(dp(30), dp(30)).apply {
+                addView(back, LinearLayout.LayoutParams(dp(24), dp(24)).apply {
                     gravity = Gravity.CENTER_VERTICAL
-                    marginStart = dp(7)
                 })
                 val searchField = FrameLayout(activity).apply {
                     setBackgroundResource(R.drawable.search_background)
@@ -1374,15 +1373,18 @@ internal class CatalogBrowserDialog(
             view.getLocationOnScreen(position)
             val safeTop = (statusTop - position[1]).coerceAtLeast(0)
             val homeToolbar = activity.findViewById<View>(R.id.home_padding)
-            val homeTop = homeToolbar?.takeIf {
-                it.isAttachedToWindow && it.height > 0 && it.getGlobalVisibleRect(Rect())
-            }?.let { toolbar ->
-                val at = IntArray(2)
-                toolbar.getLocationOnScreen(at)
-                at[1] - position[1]
+                ?.takeIf { it.isAttachedToWindow && it.height > 0 && it.getGlobalVisibleRect(Rect()) }
+            val homePosition = homeToolbar?.let { toolbar ->
+                IntArray(2).also { toolbar.getLocationOnScreen(it) }
             }
-            val alignedTop = homeTop?.coerceAtLeast(safeTop) ?: safeTop
+            val alignedTop = homePosition?.get(1)?.minus(position[1])
+                ?.coerceAtLeast(safeTop) ?: safeTop
             if (view.paddingTop != alignedTop) view.setPadding(0, alignedTop, 0, 0)
+            val left = homePosition?.get(0)?.minus(position[0])?.coerceAtLeast(0) ?: 0
+            val navigationRow = controls.getChildAt(0) as LinearLayout
+            if (navigationRow.paddingLeft != left) {
+                navigationRow.setPadding(left, 0, dp(10), 0)
+            }
             insets
         }
         grid.spanCount = activity.getSpanCount(false)
