@@ -305,13 +305,8 @@ internal class ElevateSkipController(private val application: Application) :
         if (target > current && target > 0L) {
             player.seekTo(target)
             fragment?.context?.let { ctx ->
-                val language = if (android.os.Build.VERSION.SDK_INT >= 24) {
-                    ctx.resources.configuration.locales.get(0)?.language
-                } else {
-                    @Suppress("DEPRECATION")
-                    ctx.resources.configuration.locale.language
-                }
-                val korean = language == "ko"
+                val korean = androidx.core.os.ConfigurationCompat
+                    .getLocales(ctx.resources.configuration).get(0)?.language == "ko"
                 val prefix = if (korean) "자동 건너뛰기: " else "Auto-skipped: "
                 android.widget.Toast.makeText(ctx, prefix + ctx.getString(stamp.type.res),
                     android.widget.Toast.LENGTH_SHORT).show()
