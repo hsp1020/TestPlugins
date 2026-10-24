@@ -1047,23 +1047,24 @@ internal class CatalogBrowserDialog(
 
     private fun preserveNavigation() {
         releaseNavigation()
-        val source = listOf(R.id.nav_rail_view, R.id.nav_view)
-            .mapNotNull { activity.findViewById<View>(it) }
-            .firstOrNull { it.isShown && it.width > 0 && it.height > 0 } ?: return
         val decor = activity.window.decorView
-        val origin = IntArray(2)
-        val location = IntArray(2)
-        decor.getLocationOnScreen(origin)
-        source.getLocationOnScreen(location)
+        val browser = dialog.window?.decorView ?: return
+        if (decor.width <= 0 || decor.height <= 0 || browser.width <= 0) return
+        val origin = IntArray(2).also { decor.getLocationOnScreen(it) }
+        val at = IntArray(2).also { browser.getLocationOnScreen(it) }
+        // Keep the complete browser frame over the host while its navigation rail resizes.
         val snapshot = runCatching {
-            Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888).also {
-                source.draw(Canvas(it))
+            Bitmap.createBitmap(decor.width, decor.height, Bitmap.Config.ARGB_8888).also {
+                val canvas = Canvas(it)
+                decor.draw(canvas)
+                canvas.save()
+                canvas.translate((at[0] - origin[0]).toFloat(), (at[1] - origin[1]).toFloat())
+                browser.draw(canvas)
+                canvas.restore()
             }
         }.getOrNull() ?: return
         navigationSnapshot = BitmapDrawable(activity.resources, snapshot).apply {
-            setBounds(location[0] - origin[0], location[1] - origin[1],
-                location[0] - origin[0] + source.width,
-                location[1] - origin[1] + source.height)
+            setBounds(0, 0, decor.width, decor.height)
             decor.overlay.add(this)
         }
     }

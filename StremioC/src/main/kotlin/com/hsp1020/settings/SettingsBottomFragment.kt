@@ -2491,7 +2491,8 @@ private fun showLanguageSelectDialog() {
             }
 
             inner class VH(val view: LinearLayout, val checkbox: CheckBox, val etOrder: EditText,
-                val dragHandle: ImageView, val homeIcon: ImageView) : RecyclerView.ViewHolder(view) {
+                val dragHandle: ImageView, val homeIcon: ImageView, val catalogName: TextView
+            ) : RecyclerView.ViewHolder(view) {
                 var displayedOrder = 0
             }
 
@@ -2499,7 +2500,7 @@ private fun showLanguageSelectDialog() {
                 val layout = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(dp(4), dp(4), dp(4), dp(4))
+                    setPadding(dp(6), dp(4), dp(6), dp(4))
                     background = getCardBg()
                     layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                         setMargins(0, dp(4), 0, dp(4))
@@ -2510,7 +2511,9 @@ private fun showLanguageSelectDialog() {
                     contentDescription = "Drag to reorder catalog"
                     isClickable = true
                     isFocusable = false
-                    layoutParams = LinearLayout.LayoutParams(dp(20), dp(24))
+                    layoutParams = LinearLayout.LayoutParams(dp(24), dp(24)).apply {
+                        marginEnd = dp(6)
+                    }
                     makeTvCompatible()
                 }
 
@@ -2519,7 +2522,8 @@ private fun showLanguageSelectDialog() {
                     imeOptions = EditorInfo.IME_ACTION_DONE
                     setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                     textSize = 14f
-                    setPadding(dp(4), 0, dp(4), 0)
+                    setPadding(dp(2), 0, dp(2), 0)
+                    minimumWidth = 0
                     background = getCardBg()
                     gravity = android.view.Gravity.CENTER
                     isSingleLine = true
@@ -2532,34 +2536,52 @@ private fun showLanguageSelectDialog() {
                 }
 
                 val checkbox = CheckBox(context).apply {
-                    textSize = 14f
-                    setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    text = ""
+                    minimumWidth = 0
+                    minWidth = 0
+                    setPadding(0, 0, 0, 0)
+                    background = null
+                    gravity = Gravity.CENTER
+                    layoutParams = LinearLayout.LayoutParams(dp(30), dp(48)).apply {
+                        marginEnd = dp(4)
+                    }
                 }
                 val homeIcon = ImageView(context).apply {
                     setImageResource(HostR.drawable.home_icon_filled_24)
                     scaleType = ImageView.ScaleType.FIT_CENTER
                     isClickable = true
                     isFocusable = true
-                    layoutParams = LinearLayout.LayoutParams(dp(28), dp(28)).apply {
-                        marginStart = dp(4)
+                    layoutParams = LinearLayout.LayoutParams(dp(30), dp(30)).apply {
+                        marginEnd = dp(6)
                     }
+                    setPadding(dp(3), dp(3), dp(3), dp(3))
                     val ripple = android.util.TypedValue()
                     if (context.theme.resolveAttribute(
                             android.R.attr.selectableItemBackgroundBorderless, ripple, true
                         ) && ripple.resourceId != 0) setBackgroundResource(ripple.resourceId)
                 }
+                val catalogName = TextView(context).apply {
+                    textSize = 14f
+                    setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
+                    maxLines = 2
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    gravity = Gravity.CENTER_VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                    setOnClickListener { checkbox.performClick() }
+                }
                 layout.addView(dragHandle)
                 layout.addView(inputSlot(etOrder).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(44), dp(48)).apply { marginEnd = dp(4) }
+                    layoutParams = LinearLayout.LayoutParams(dp(30), dp(48)).apply {
+                        marginEnd = dp(4)
+                    }
                 })
                 layout.addView(checkbox)
                 layout.addView(homeIcon)
-                checkbox.maxLines = 2
+                layout.addView(catalogName)
                 normalizeTypeface(layout)
                 prepareControls(layout)
                 horizontalFocus(etOrder, checkbox, homeIcon)
-                return VH(layout, checkbox, etOrder, dragHandle, homeIcon).also { holder ->
+                return VH(layout, checkbox, etOrder, dragHandle, homeIcon, catalogName).also { holder ->
                     holder.dragHandle.setOnTouchListener { _, event ->
                         if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN &&
                             holder.adapterPosition != RecyclerView.NO_POSITION)
@@ -2585,7 +2607,8 @@ private fun showLanguageSelectDialog() {
                 }
                 holder.checkbox.setOnCheckedChangeListener(null)
                 holder.checkbox.isChecked = tab.isChecked
-                holder.checkbox.text = tab.displayName
+                holder.checkbox.contentDescription = tab.displayName
+                holder.catalogName.text = tab.displayName
                 val itemColor = hostContext.colorFromAttribute(if (tab.isChecked) HostR.attr.colorPrimary else HostR.attr.textColor)
                 holder.checkbox.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                 holder.etOrder.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))

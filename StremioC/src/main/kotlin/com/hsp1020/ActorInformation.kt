@@ -416,10 +416,7 @@ internal object ActorInformation {
                     ) && ripple.resourceId != 0) setBackgroundResource(ripple.resourceId)
                 setOnClickListener { windowDialog.dismiss() }
             }
-            val loadingName = label(actor.name, 20f, true)
             heading.addView(back, FrameLayout.LayoutParams(dp(30), dp(30), Gravity.TOP or Gravity.START))
-            heading.addView(loadingName,
-                FrameLayout.LayoutParams(-1, -2, Gravity.CENTER_VERTICAL))
             root.addView(heading, LinearLayout.LayoutParams(-1, dp(50)))
 
             val scroller = ScrollView(activity).apply {
@@ -443,7 +440,6 @@ internal object ActorInformation {
                 body.doOnPreDraw {
                     if (dialog === windowDialog) {
                         body.visibility = View.VISIBLE
-                        loadingName.visibility = View.GONE
                         skeleton.loading(false)
                     }
                 }
@@ -558,11 +554,6 @@ internal object ActorInformation {
                     topMargin = top
                     back.layoutParams = this
                 }
-                (loadingName.layoutParams as FrameLayout.LayoutParams).apply {
-                    leftMargin = left + dp(46)
-                    rightMargin = dp(10)
-                    loadingName.layoutParams = this
-                }
                 (heading.layoutParams as LinearLayout.LayoutParams).apply {
                     height = (top + dp(42)).coerceAtLeast(dp(50))
                     heading.layoutParams = this
@@ -626,7 +617,6 @@ internal object ActorInformation {
                 profileLoaded = false
                 skeleton.loading(true)
                 body.visibility = View.INVISIBLE
-                loadingName.visibility = View.VISIBLE
                 details.removeViews(1, details.childCount - 1)
                 biographyReady = false
                 biography.text = "Loading biography…"
