@@ -174,6 +174,7 @@ private class PipControlButton {
     private var originalLeftNext = View.NO_ID
     private var originalRightPrevious = View.NO_ID
     private var preferences: SharedPreferences? = null
+    private var appliedHideName: Boolean? = null
 
     private val settingListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         val context = root?.context
@@ -290,11 +291,14 @@ private class PipControlButton {
             control.nextFocusLeftId = sample.id
             control.nextFocusRightId = following?.id ?: originalLeftNext
             button = control
+            appliedHideName = null
         }
 
         val hideName = preferences?.getBoolean(
             view.context.getString(R.string.hide_player_control_names_key), false
         ) == true
+        if (appliedHideName == hideName) return
+        appliedHideName = hideName
         button?.apply {
             if (hideName) {
                 setTextSize(TypedValue.COMPLEX_UNIT_PX, 0f)
@@ -318,6 +322,7 @@ private class PipControlButton {
         (control.parent as? LinearLayout)?.removeView(control)
         control.setOnClickListener(null)
         button = null
+        appliedHideName = null
         left = null
         right = null
     }

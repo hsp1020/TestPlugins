@@ -238,6 +238,8 @@ internal class LibraryPosterHook(private val appContext: Application) :
         private var adapter: RecyclerView.Adapter<*>? = null
         private var queued = false
         private var rebinding = false
+        private var rebindAll = false
+        private val rebindRanges = ArrayList<IntRange>()
         private val attachListener = object : RecyclerView.OnChildAttachStateChangeListener {
             override fun onChildViewAttachedToWindow(view: View) {
                 hide(view)
@@ -271,7 +273,9 @@ internal class LibraryPosterHook(private val appContext: Application) :
         }
         private val changes = object : RecyclerView.AdapterDataObserver() {
             override fun onChanged() = queue(true)
-            override fun onItemRangeChanged(p: Int, n: Int) = queue(true)
+            override fun onItemRangeChanged(p: Int, n: Int) {
+                if (n > 0) queue(rebind = true, range = p until (p + n))
+            }
             override fun onItemRangeInserted(p: Int, n: Int) = queue()
             override fun onItemRangeRemoved(p: Int, n: Int) = queue()
             override fun onItemRangeMoved(from: Int, to: Int, n: Int) = queue()
@@ -292,11 +296,22 @@ internal class LibraryPosterHook(private val appContext: Application) :
             next?.registerAdapterDataObserver(changes)
         }
 
-        private fun queue(rebind: Boolean = false) {
+        private fun queue(rebind: Boolean = false, range: IntRange? = null) {
             if (rebind) {
                 rebinding = true
-                // The native adapter is about to bind its original covers again.
-                hideAll()
+                if (range == null) {
+                    rebindAll = true
+                    rebindRanges.clear()
+                    hideAll()
+                } else if (!rebindAll) {
+                    rebindRanges.add(range)
+                    // Only images actually rebound by the native adapter are hidden.
+                    for (i in 0 until recycler.childCount) {
+                        val view = recycler.getChildAt(i)
+                        val position = recycler.getChildViewHolder(view).bindingAdapterPosition
+                        if (position in range) hide(view)
+                    }
+                }
             }
             if (queued) return
             queued = true
@@ -304,11 +319,47 @@ internal class LibraryPosterHook(private val appContext: Application) :
                 queued = false
                 if (watches[recycler] !== this || library?.view == null) return@postOnAnimation
                 if (rebinding) {
+                    val resetEvery = rebindAll
+                    val ranges = rebindRanges.toList()
                     rebinding = false
+                    rebindAll = false
+                    rebindRanges.clear()
                     for (i in 0 until recycler.childCount) {
-                        recycler.getChildAt(i).findViewById<ImageView>(R.id.imageView)?.let {
-                            pending.remove(it)?.cancel()
-                            bound.remove(it)
+                        val view = recycler.getChildAt(i)
+                        val position = recycler.getChildViewHolder(view).bindingAdapterPosition
+                        if (!resetEvery && ranges.none { position in it }) continue
+                        view.findViewById<ImageView>(R.id.imageView)?.let { image ->
+                            val prior = bound[image]
+                            val card = (recycler.adapter as? PageAdapter)
+                                ?.getItemOrNull(position)
+                            val identity = card?.let {
+                                it.apiName + ":" + it.syncId + ":" + it.url + ":" + it.name
+                            }
+                            if (prior != null && prior.identity == identity &&
+                                prior.generation == revision) {
+                                // Reuse resolved custom URL instead of repeating ID mapping.
+                                // In-flight mapping is deliberately never cancelled here.
+                                if (prior.url.isBlank() && pending[image]?.isActive != true) {
+                                    // A completed unresolved mapping must be reconsidered
+                                    // after a native rebind rather than leaving the cover hidden.
+                                    bound.remove(image)
+                                } else if (prior.url.isNotBlank() && pending[image]?.isActive != true) {
+                                    val current = prior
+                                    image.loadImage(prior.url) {
+                                        crossfade(false)
+                                        listener(onSuccess = { _, _ ->
+                                            if (bound[image] === current && image.isAttachedToWindow)
+                                                showNative(image, current.identity)
+                                        }, onError = { _, _ ->
+                                            if (bound[image] === current)
+                                                restore(image, current)
+                                        })
+                                    }
+                                }
+                            } else {
+                                pending.remove(image)?.cancel()
+                                bound.remove(image)
+                            }
                         }
                     }
                 }

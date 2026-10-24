@@ -89,6 +89,8 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
         private var list: RecyclerView? = null
         private var adapter: RecyclerView.Adapter<*>? = null
         private var refreshScheduled = false
+        private var fullRefreshPending = false
+        private val dirtyRows = LinkedHashSet<View>()
         private val rows = mutableMapOf<View, RowProgress>()
         private val primaryColor by lazy { root.context.colorFromAttribute(R.attr.colorPrimary) }
         private val rowHeight by lazy {
@@ -96,8 +98,10 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
         }
         private val dataObserver = object : RecyclerView.AdapterDataObserver() {
             override fun onChanged() = scheduleRefresh()
-            override fun onItemRangeChanged(positionStart: Int, itemCount: Int) = scheduleRefresh()
-            override fun onItemRangeChanged(positionStart: Int, itemCount: Int, payload: Any?) = scheduleRefresh()
+            override fun onItemRangeChanged(positionStart: Int, itemCount: Int) =
+                scheduleRange(positionStart, itemCount)
+            override fun onItemRangeChanged(positionStart: Int, itemCount: Int, payload: Any?) =
+                scheduleRange(positionStart, itemCount)
             override fun onItemRangeInserted(positionStart: Int, itemCount: Int) = scheduleRefresh()
             override fun onItemRangeRemoved(positionStart: Int, itemCount: Int) = scheduleRefresh()
             override fun onItemRangeMoved(fromPosition: Int, toPosition: Int, itemCount: Int) = scheduleRefresh()
@@ -107,13 +111,18 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
             override fun onChildViewAttachedToWindow(view: View) {
                 // Adapter inserts/layout are already on the main thread.
                 // Never allocate overlays from RecyclerView's layout traversal.
-                scheduleRefresh()
+                scheduleRow(view)
             }
             override fun onChildViewDetachedFromWindow(view: View) {
+                dirtyRows.remove(view)
                 rows.remove(view)?.restore()
             }
         }
-        private val listLayout = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> scheduleRefresh() }
+        private val listLayout = View.OnLayoutChangeListener { _, left, top, right, bottom,
+                                                               oldLeft, oldTop, oldRight, oldBottom ->
+            if (left != oldLeft || top != oldTop || right != oldRight || bottom != oldBottom)
+                scheduleRefresh()
+        }
         private val globalLayout = ViewTreeObserver.OnGlobalLayoutListener { syncList() }
 
         fun start() {
@@ -154,23 +163,57 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
             list?.removeOnLayoutChangeListener(listLayout)
             rows.values.toList().forEach(RowProgress::restore)
             rows.clear()
+            dirtyRows.clear()
+            fullRefreshPending = false
             list = null
         }
 
+        private fun scheduleRange(start: Int, count: Int) {
+            if (count <= 0 || fullRefreshPending) return
+            val recycler = list ?: return
+            val end = start.toLong() + count
+            for (i in 0 until recycler.childCount) {
+                val child = recycler.getChildAt(i)
+                val position = recycler.getChildViewHolder(child).bindingAdapterPosition
+                if (position >= start && position.toLong() < end) dirtyRows.add(child)
+            }
+            if (dirtyRows.isNotEmpty()) postRefresh()
+        }
+
+        private fun scheduleRow(row: View) {
+            if (!fullRefreshPending) dirtyRows.add(row)
+            postRefresh()
+        }
+
         private fun scheduleRefresh() {
+            fullRefreshPending = true
+            dirtyRows.clear()
+            postRefresh()
+        }
+
+        private fun postRefresh() {
             if (refreshScheduled) return
             val recycler = list ?: return
             refreshScheduled = true
             recycler.postOnAnimation {
                 refreshScheduled = false
-                if (list === recycler && fragment.view === root) refreshRows()
+                if (list !== recycler || fragment.view !== root) {
+                    dirtyRows.clear()
+                    fullRefreshPending = false
+                    return@postOnAnimation
+                }
+                if (fullRefreshPending) {
+                    fullRefreshPending = false
+                    dirtyRows.clear()
+                    for (i in 0 until recycler.childCount) refreshRow(recycler.getChildAt(i))
+                } else {
+                    val changed = dirtyRows.toList()
+                    dirtyRows.clear()
+                    changed.forEach { row ->
+                        if (row.parent === recycler) refreshRow(row)
+                    }
+                }
             }
-        }
-
-        private fun refreshRows() {
-            val recycler = list ?: return
-            // Coalesced once per frame, after any RecyclerView layout pass.
-            for (i in 0 until recycler.childCount) refreshRow(recycler.getChildAt(i))
         }
 
         private fun refreshRow(row: View) {

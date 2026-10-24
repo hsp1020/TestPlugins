@@ -202,11 +202,12 @@ internal class ElevateSkipController(private val application: Application) :
                     if (from != null && to != null) {
                         skipButtonTimer?.onPlaybackSeek(from, to)
                         recordSeek(from, to)
+                        scheduleAutoSkip()
                     }
                 }
                 null
             }
-            "onMediaItemTransition", "onTimelineChanged" -> {
+            "onMediaItemTransition", "onTimelineChanged", "onPlaybackParametersChanged" -> {
                 refresh()
                 skipButtonTimer?.refreshVisibility()
                 null
@@ -425,7 +426,10 @@ internal class ElevateSkipController(private val application: Application) :
         published = combined
         lastManualSeek?.let { protectManualSeek(it.first, it.second) }
         skipButtonTimer?.refreshVisibility()
-        if (autoEnabled()) tryAutoSkip()
+        if (autoEnabled()) {
+            tryAutoSkip()
+            scheduleAutoSkip()
+        }
     }
 
     private fun stampKey(stamp: VideoSkipStamp): String =
@@ -483,17 +487,37 @@ internal class ElevateSkipController(private val application: Application) :
 
     private fun scheduleAutoSkip() {
         val next = autoEnabled() && fragment?.view != null
-        if (polling == next) return
-        main.removeCallbacks(autoTick)
         polling = next
-        if (polling) main.post(autoTick)
+        main.removeCallbacks(autoTick)
+        if (!next) return
+        // Only schedule at an actionable timestamp. Playback state/seek,
+        // speed, timeline and new stamp callbacks reschedule the deadline.
+        nextAutoDelay()?.let { main.postDelayed(autoTick, it) }
+    }
+
+    private fun nextAutoDelay(): Long? {
+        val player = mediaPlayer ?: return null
+        if (!player.isPlaying || published.isEmpty()) return null
+        val now = player.currentPosition
+        val upcoming = published.asSequence()
+            .filter { settings.getBoolean(autoPreference(it), false) }
+            .filter { stampKey(it) !in autoSkipped && stampKey(it) !in manualSeekProtected }
+            .filter { it.timestamp.endMs > now }
+            .map { it.timestamp.startMs }
+            .minOrNull() ?: return null
+        if (upcoming <= now) return 650L // Active stamp; wait for a valid timeline if necessary.
+        val speed = player.playbackParameters.speed.coerceAtLeast(0.1f)
+        val delta = ((upcoming - now) / speed).toLong()
+        // An early wake avoids skipping the first frames of a chapter.
+        return (delta - 100L).coerceIn(150L, 60_000L)
     }
 
     private val autoTick = object : Runnable {
         override fun run() {
             if (!polling) return
             tryAutoSkip()
-            if (polling) main.postDelayed(this, 650L)
+            main.removeCallbacks(this)
+            if (polling) nextAutoDelay()?.let { main.postDelayed(this, it) }
         }
     }
 

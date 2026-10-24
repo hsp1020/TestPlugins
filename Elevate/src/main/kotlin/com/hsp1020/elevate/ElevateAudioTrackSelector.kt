@@ -3,8 +3,9 @@ package com.hsp1020.elevate
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.View
-import android.view.ViewTreeObserver
 import androidx.annotation.OptIn
 import androidx.core.os.ConfigurationCompat
 import androidx.fragment.app.Fragment
@@ -38,7 +39,29 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
     private var model: PlayerGeneratorViewModel? = null
     private var removeObserver: (() -> Unit)? = null
     private var player: Media3Player? = null
-    private var waitingOn: ViewTreeObserver? = null
+    private val main = Handler(Looper.getMainLooper())
+    private var attachAttempts = 0
+    // Native player can attach after network callbacks; a real layout event is
+    // a cheap fallback after the finite initial attach window.
+    private var observedRoot: View? = null
+    private val rootLayout = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+        refreshPlayer()
+    }
+    private val attachRetry = object : Runnable {
+        override fun run() {
+            if (fragment == null || player != null || attachAttempts >= 16) return
+            attachAttempts++
+            refreshPlayer()
+            if (player == null && fragment != null)
+                main.postDelayed(this, 125L)
+        }
+    }
+    private fun requestAttach() {
+        main.removeCallbacks(attachRetry)
+        if (player != null || fragment == null) return
+        attachAttempts = 0
+        main.post(attachRetry)
+    }
     private var lastInstance: Int? = null
     private var lastProvider: String? = null
     private var isAnime = false
@@ -62,17 +85,11 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         }
     } as Media3Player.Listener
 
-    // Keep monitoring the view: ExoPlayer can be attached after link loading or replaced
-    // when the user changes stream mirrors without replacing the GeneratorPlayer fragment.
-    private val onDraw = ViewTreeObserver.OnPreDrawListener {
-        refreshPlayer()
-        true
-    }
-
     private fun refreshPlayer() {
         val active = fragment?.takeIf { it.isAdded && it.view != null }
         val next = active?.playerView?.player
         if (next === player) return
+        if (next != null) main.removeCallbacks(attachRetry)
         val old = player
         if (old != null) {
             old.removeListener(audioListener)
@@ -140,16 +157,26 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
 
     private fun watch(candidate: Fragment) {
         if (candidate !is GeneratorPlayer) return
-        if (!candidate.isAdded || candidate.view == null || fragment === candidate) return
+        if (!candidate.isAdded || candidate.view == null) return
+        if (fragment === candidate) {
+            refreshPlayer()
+            if (player == null) requestAttach()
+            return
+        }
         detach()
         fragment = candidate
+        observedRoot = candidate.view?.also { it.addOnLayoutChangeListener(rootLayout) }
         val vm = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
         model = vm
         val loadingObserver = Observer<VideoLive<Resource<Unit>>> {
             checkSource()
+            refreshPlayer()
+            if (player == null) requestAttach()
         }
         val linksObserver = Observer<VideoLive<Set<VideoLink>>> {
             checkSource()
+            refreshPlayer()
+            if (player == null) requestAttach()
         }
         vm.loadingLinks.observe(candidate.viewLifecycleOwner, loadingObserver)
         vm.currentLinks.observe(candidate.viewLifecycleOwner, linksObserver)
@@ -157,14 +184,11 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             vm.loadingLinks.removeObserver(loadingObserver)
             vm.currentLinks.removeObserver(linksObserver)
         }
-        val observer = candidate.view?.viewTreeObserver?.takeIf { it.isAlive }
-        if (observer != null) {
-            observer.addOnPreDrawListener(onDraw)
-            waitingOn = observer
-        }
         checkSource()
-        // Catch a player already connected before the observer was registered.
+        // No frame observer: Media3 track changes are delivered by audioListener.
+        // Mirror changes are signalled by the ViewModel's link/loading events.
         refreshPlayer()
+        if (player == null) requestAttach()
     }
 
     private fun checkSource() {
@@ -222,14 +246,12 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, index)).build()
     }
 
-    private fun stopWaiting() {
-        waitingOn?.let { if (it.isAlive) it.removeOnPreDrawListener(onDraw) }
-        waitingOn = null
-    }
-
     private fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
-        stopWaiting()
+        main.removeCallbacks(attachRetry)
+        attachAttempts = 0
+        observedRoot?.removeOnLayoutChangeListener(rootLayout)
+        observedRoot = null
         removeObserver?.invoke()
         removeObserver = null
         player?.removeListener(audioListener)
