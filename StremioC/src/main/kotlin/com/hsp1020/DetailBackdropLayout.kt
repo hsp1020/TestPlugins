@@ -24,6 +24,7 @@ import android.text.TextPaint
 import android.text.Editable
 import android.text.TextWatcher
 import android.util.TypedValue
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -68,6 +69,11 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
     private val shadow = holder?.getChildAt(1) 
     private var previousHolderBackground: Drawable? = null
     private var appliedHolderBackground: Drawable? = null
+    private var lastPaletteKey: List<Int>? = null
+    private var backgroundApplyCount = 0
+    private var backgroundSkipCount = 0
+    private var backgroundTotalUs = 0L
+    private var backgroundMaxUs = 0L
     private var fadeColor = Color.BLACK
     private data class ArtworkColors(val left: Int, val center: Int, val right: Int)
     private var trackedArtwork: Drawable? = null
@@ -170,24 +176,46 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
 
     private fun replaceBackground(background: Drawable) {
         val container = holder ?: return
+        if (container.background === background) return
         if (appliedHolderBackground == null) previousHolderBackground = container.background
         else if (container.background !== appliedHolderBackground) return
+        val startedNs = SystemClock.elapsedRealtimeNanos()
         appliedHolderBackground = background
         container.background = background
         edge?.invalidate()
+        val us = (SystemClock.elapsedRealtimeNanos() - startedNs) / 1000L
+        backgroundApplyCount++
+        backgroundTotalUs += us
+        backgroundMaxUs = max(backgroundMaxUs, us)
+        if (us >= 8000L) Log.w("StremioC-Perf",
+            "stage=backdrop-background-slow durationUs=$us count=$backgroundApplyCount")
     }
     private fun useThemeBackground(enabled: Boolean) {
         val container = holder ?: return
         if (enabled) {
-            if (appliedHolderBackground == null) replaceBackground(ColorDrawable(fadeColor))
+            if (appliedHolderBackground == null) {
+                replaceBackground(ColorDrawable(fadeColor))
+                lastPaletteKey = listOf(0, fadeColor)
+            }
         } else {
             val ours = appliedHolderBackground ?: return
             if (container.background === ours) container.background = previousHolderBackground
             appliedHolderBackground = null
             previousHolderBackground = null
+            lastPaletteKey = null
         }
     }
     private fun showArtworkPalette(colors: ArtworkColors?) {
+        // This callback can be reached on several pre-draw/layout passes for
+        // the same artwork. Do not allocate GradientDrawable/LayerDrawable or
+        // invalidate the full detail container if the effective palette matches.
+        val key = if (colors == null) listOf(0, fadeColor) else
+            listOf(1, fadeColor, colors.left, colors.center, colors.right)
+        if (lastPaletteKey == key && appliedHolderBackground != null &&
+            holder?.background === appliedHolderBackground) {
+            backgroundSkipCount++
+            return
+        }
         if (colors == null) {
             replaceBackground(ColorDrawable(fadeColor))
         } else {
@@ -207,6 +235,8 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
                 })
             }
         }
+        if (holder?.background === appliedHolderBackground &&
+            appliedHolderBackground != null) lastPaletteKey = key
     }
     private fun paletteBitmap(drawable: Drawable?): Bitmap? {
         if (drawable is BitmapDrawable) return drawable.bitmap
@@ -892,6 +922,12 @@ internal class DetailBackdropLayout(private val root: View, private val detailUr
         reservedLateLogoSlot = false
         reservedLateBackgroundFrame = false
         useThemeBackground(false)
+        if (backgroundApplyCount != 0 || backgroundSkipCount != 0) {
+            Log.i("StremioC-Perf", "stage=backdrop-background-summary applied=" +
+                backgroundApplyCount + " skippedSamePalette=" + backgroundSkipCount +
+                " totalUs=" + backgroundTotalUs + " maxUs=" + backgroundMaxUs)
+        }
+        lastPaletteKey = null
         if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(preDraw)
         if (forcedPortraitTitle && logo?.visibility == View.VISIBLE)
             title?.visibility = View.GONE
