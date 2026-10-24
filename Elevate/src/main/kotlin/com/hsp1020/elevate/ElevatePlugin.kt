@@ -43,6 +43,7 @@ class ElevatePlugin : Plugin() {
     private var embeddedSubtitles: EmbeddedSubtitleController? = null
     private var homeHero: HomeHeroToggle? = null
     private var libraryPosters: LibraryPosterHook? = null
+    private var playerTrace: ElevatePlayerFrameTrace? = null
     private var featurePrefs: SharedPreferences? = null
     private var featureListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
     private var app: Application? = null
@@ -63,6 +64,7 @@ class ElevatePlugin : Plugin() {
             if (generation.get() != token) return@post
             stopAll()
             app = application
+            playerTrace = ElevatePlayerFrameTrace(application).also { it.start() }
             try {
                 val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
                 // Preserve the user's previous visible/hidden choice when changing to "ON = hide".
@@ -222,6 +224,8 @@ class ElevatePlugin : Plugin() {
         homeHero = null
         libraryPosters?.stop()
         libraryPosters = null
+        playerTrace?.stop()
+        playerTrace = null
         app = null
     }
 
