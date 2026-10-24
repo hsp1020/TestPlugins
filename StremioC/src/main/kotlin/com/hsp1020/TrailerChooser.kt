@@ -298,13 +298,23 @@ internal class TrailerChooser(
             setTextColor(foreground)
             setPadding(dp(4), dp(8), 0, dp(4))
         })
-        val scroll = ScrollView(activity)
+        // Let rows grow for multiline titles. Limit only the total scroll viewport,
+        // rather than assuming each row is 88dp and clipping taller rows.
+        val maxListHeight = (activity.resources.displayMetrics.heightPixels * 0.6f).toInt()
+        val scroll = object : ScrollView(activity) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                super.onMeasure(
+                    widthMeasureSpec,
+                    View.MeasureSpec.makeMeasureSpec(maxListHeight, View.MeasureSpec.AT_MOST)
+                )
+            }
+        }
         val rows = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         items.forEachIndexed { index, entry ->
             val row = LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                minimumHeight = dp(88)
+                minimumHeight = dp(92)
                 setPadding(dp(4), dp(10), dp(4), dp(10))
                 isClickable = true
                 isFocusable = true
@@ -318,10 +328,24 @@ internal class TrailerChooser(
                 }
             }
             val thumbnail = CardView(activity).apply {
-                cardElevation = 0f
-                radius = activity.resources.getDimension(R.dimen.rounded_image_radius)
+                // Match the inner CardView in result_episode_large.xml:
+                // default CardView radius/elevation, with native focus outline.
+                isDuplicateParentStateEnabled = true
+                foreground = androidx.core.content.ContextCompat.getDrawable(
+                    activity, R.drawable.outline_drawable
+                )
                 addView(ImageView(activity).apply {
                     scaleType = ImageView.ScaleType.CENTER_CROP
+                    isDuplicateParentStateEnabled = true
+                    val ripple = TypedValue()
+                    if (activity.theme.resolveAttribute(
+                            android.R.attr.selectableItemBackgroundBorderless, ripple, true
+                        ) && ripple.resourceId != 0
+                    ) {
+                        foreground = androidx.core.content.ContextCompat.getDrawable(
+                            activity, ripple.resourceId
+                        )
+                    }
                     loadImage("https://i.ytimg.com/vi/" + entry.youtubeId + "/hqdefault.jpg")
                 }, FrameLayout.LayoutParams(dp(126), dp(72)))
             }
@@ -333,22 +357,24 @@ internal class TrailerChooser(
             labels.addView(TextView(activity).apply {
                 text = "${index + 1}. ${entry.title}"
                 setTypeface(typeface, Typeface.BOLD)
-                maxLines = 2
-                ellipsize = android.text.TextUtils.TruncateAt.END
+                // Native episode_text has no maxLines/ellipsize restriction.
                 setTextColor(foreground)
-            })
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
             labels.addView(TextView(activity).apply {
                 text = (if (entry.type.equals("Trailer", true)) activity.getString(R.string.trailer) else entry.type) +
                     (localizedLanguage(entry.language)?.let { " · " + it } ?: "")
                 setTextColor(themeColor("grayTextColor", foreground))
-            })
+            }, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
             row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             rows.addView(row)
         }
         scroll.addView(rows)
         list.addView(scroll, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            minOf(dp(88) * items.size + dp(1), (activity.resources.displayMetrics.heightPixels * 0.6f).toInt())
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ))
         val progress = android.widget.ProgressBar(activity).apply {
             isIndeterminate = true
