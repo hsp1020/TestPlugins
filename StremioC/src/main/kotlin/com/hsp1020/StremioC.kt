@@ -231,14 +231,12 @@ private object MetadataDiskCache {
         readWithTtl(kind, key)?.let { it.json to it.timestamp }
 
     suspend fun readWithTtl(kind: String, key: String): Entry? = withContext(Dispatchers.IO) {
+        // A cache miss must not wait behind another writer's global quota scan.
+        // Existing files are still read under the lock to preserve eviction safety.
+        val file = directory()?.let { target(it, kind, key) } ?: return@withContext null
+        if (!file.isFile) return@withContext null
         synchronized(lock) {
-            val file = directory()?.let { target(it, kind, key) }
-            if (file == null) {
-                return@synchronized null
-            }
-            if (!file.isFile) {
-                return@synchronized null
-            }
+            if (!file.isFile) return@synchronized null
             try {
                 val body = GZIPInputStream(file.inputStream()).bufferedReader(Charsets.UTF_8).use { it.readText() }
                 val stamp = body.substringBefore('\n').toLongOrNull()
@@ -786,6 +784,12 @@ open class StremioC(
         private const val SIMKL_RECOMMENDATION_TTL_MS = 24L * 60 * 60 * 1000
         private const val SIMKL_RECOMMENDATION_EMPTY_TTL_MS = 15L * 60 * 1000
         private val recommendationTraceSequence = java.util.concurrent.atomic.AtomicLong()
+        private const val SIMKL_TITLE_INDEX_TTL_MS = 2L * 60 * 1000
+        private data class SimklTitleIndex(
+            val userId: String, val at: Long, val byExternalId: Map<String, Pair<String, String>>
+        )
+        @Volatile private var simklTitleIndex: SimklTitleIndex? = null
+        private val simklTitleIndexLock = Any()
 
         private fun recommendationLog(trace: Long, stage: String, message: String) {
             android.util.Log.i("StremioC-Recs", "trace=$trace stage=$stage $message")
@@ -821,30 +825,73 @@ open class StremioC(
         }
 
         private fun cachedSimklTitle(
-            userId: String, type: String, tmdbId: String, imdbId: String?, malId: Int?
+            userId: String, type: String, tmdbId: String, imdbId: String?, malId: Int?, trace: Long
         ): Pair<String, String>? {
-            val list = getKey<JsonNode>(SimklApi.SIMKL_CACHED_LIST, userId) ?: return null
-            for ((section, segment) in listOf("anime" to "anime", "shows" to "tv", "movies" to "movies")) {
-                val rows = list.get(section)?.takeIf { it.isArray } ?: continue
-                for (record in rows) {
-                    val objectNode = record.get(if (section == "movies") "movie" else "show") ?: record
-                    val ids = objectNode.get("ids") ?: continue
-                    val found = (malId != null && section == "anime" && ids.get("mal")?.asInt(0) == malId) ||
-                        (imdbId != null && ids.get("imdb")?.asText() == imdbId) ||
-                        (ids.get("tmdb")?.asText() == tmdbId &&
-                            (if (section == "movies") "movie" else "series") == type)
-                    val simklId = ids.get("simkl")?.asText()?.takeIf { it.all(Char::isDigit) && it != "0" }
-                    if (found && simklId != null) return segment to simklId
+            val startedAt = android.os.SystemClock.elapsedRealtime()
+            val now = System.currentTimeMillis()
+            var index = simklTitleIndex?.takeIf {
+                it.userId == userId && now >= it.at && now - it.at < SIMKL_TITLE_INDEX_TTL_MS
+            }
+            val reusedIndex = index != null
+            if (index == null) {
+                index = synchronized(simklTitleIndexLock) {
+                    val recent = simklTitleIndex?.takeIf {
+                        it.userId == userId && now >= it.at && now - it.at < SIMKL_TITLE_INDEX_TTL_MS
+                    }
+                    recent ?: run {
+                        val list = getKey<JsonNode>(SimklApi.SIMKL_CACHED_LIST, userId)
+                        val ids = HashMap<String, Pair<String, String>>()
+                        for ((section, segment) in listOf("anime" to "anime", "shows" to "tv", "movies" to "movies")) {
+                            val rows = list?.get(section)?.takeIf { it.isArray } ?: continue
+                            for (record in rows) {
+                                val item = record.get(if (section == "movies") "movie" else "show") ?: record
+                                val itemIds = item.get("ids") ?: continue
+                                val simklId = itemIds.get("simkl")?.asText()
+                                    ?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true } ?: continue
+                                val target = segment to simklId
+                                itemIds.get("imdb")?.asText()?.takeIf { IMDB_ID_REGEX.matches(it) }
+                                    ?.let { ids.putIfAbsent("imdb:$it", target) }
+                                itemIds.get("tmdb")?.asText()?.toIntOrNull()?.takeIf { it > 0 }
+                                    ?.let {
+                                        val media = if (section == "movies") "movie" else "series"
+                                        ids.putIfAbsent("tmdb:$media:$it", target)
+                                    }
+                                if (section == "anime") {
+                                    itemIds.get("mal")?.asInt(0)?.takeIf { it > 0 }
+                                        ?.let { ids.putIfAbsent("mal:$it", target) }
+                                }
+                            }
+                        }
+                        SimklTitleIndex(userId, System.currentTimeMillis(), ids).also {
+                            simklTitleIndex = it
+                        }
+                    }
                 }
             }
-            return null
+            val entries = index!!.byExternalId
+            val hit = malId?.let { entries["mal:$it"] }
+                ?: imdbId?.let { entries["imdb:$it"] }
+                ?: entries["tmdb:$type:$tmdbId"]
+            recommendationLog(trace, "timing",
+                "step=sync-id-index elapsedMs=${android.os.SystemClock.elapsedRealtime() - startedAt}" +
+                    " index=${if (reusedIndex) "reuse" else "build_or_wait"} entries=${entries.size}" +
+                    " found=${hit != null}")
+            return hit
         }
 
         private suspend fun loadSimklSuggestions(
             userId: String, type: String, tmdbId: String, imdbId: String?, malId: Int?,
             headers: Map<String, String>, clientId: String, key: String, trace: Long
-        ): List<SimklSuggestion> = simklSuggestionSemaphore.withPermit {
+        ): List<SimklSuggestion> {
+            val queuedAt = android.os.SystemClock.elapsedRealtime()
+            return simklSuggestionSemaphore.withPermit {
+            recommendationLog(trace, "timing",
+                "step=semaphore-wait elapsedMs=${android.os.SystemClock.elapsedRealtime() - queuedAt}")
+            val diskAt = android.os.SystemClock.elapsedRealtime()
             val disk = MetadataDiskCache.read("simkl_recs", key)
+            recommendationLog(trace, "timing",
+                "step=disk-read elapsedMs=${android.os.SystemClock.elapsedRealtime() - diskAt}" +
+                    " hit=${disk != null}")
             if (disk != null && System.currentTimeMillis() >= disk.second &&
                 System.currentTimeMillis() - disk.second < SIMKL_RECOMMENDATION_TTL_MS) {
                 val cached = runCatching { simklSuggestionsFromDetail(disk.first) }.getOrNull()
@@ -854,7 +901,7 @@ open class StremioC(
                 }
             }
             if (disk != null) recommendationLog(trace, "cache", "source=disk result=expired_or_empty")
-            val found = cachedSimklTitle(userId, type, tmdbId, imdbId, malId)
+            val found = cachedSimklTitle(userId, type, tmdbId, imdbId, malId, trace)
             if (found != null) recommendationLog(
                 trace, "id", "source=sync-cache segment=${found.first} simklId=${found.second}"
             )
@@ -904,6 +951,7 @@ open class StremioC(
                         if (response.code in listOf(401, 403, 412, 429)) break
                         continue
                     }
+                    val idParseAt = android.os.SystemClock.elapsedRealtime()
                     val parsed = try {
                         parseJson<JsonNode>(response.text)
                     } catch (e: Exception) {
@@ -912,6 +960,8 @@ open class StremioC(
                                 " resultCount=0 validSimklIdCount=0 selectedType=none")
                         continue
                     }
+                    recommendationLog(trace, "timing",
+                        "step=id-json-parse lookup=$lookupKey elapsedMs=${android.os.SystemClock.elapsedRealtime() - idParseAt}")
                     if (!parsed.isArray) {
                         recommendationLog(trace, "id",
                             "source=search-id lookup=$lookupKey result=unexpected-shape" +
@@ -969,6 +1019,8 @@ open class StremioC(
                             " selectedType=${selected?.sourceType ?: "none"}" +
                             " selectedSegment=${selected?.segment ?: "none"}" +
                             " selectedSimklId=${selected?.simklId ?: "none"}")
+                    recommendationLog(trace, "timing",
+                        "step=id-candidates lookup=$lookupKey elapsedMs=${android.os.SystemClock.elapsedRealtime() - idParseAt}")
                     if (selected != null) {
                         resolved = selected.segment to selected.simklId
                         break
@@ -1006,10 +1058,32 @@ open class StremioC(
                 recommendationLog(trace, "result", "source=simkl count=0 reason=http_or_empty")
                 return@withPermit emptyList()
             }
+            val parseAt = android.os.SystemClock.elapsedRealtime()
             val result = simklSuggestionsFromDetail(response.text)
+            recommendationLog(trace, "timing",
+                "step=detail-parse elapsedMs=${android.os.SystemClock.elapsedRealtime() - parseAt}")
             recommendationLog(trace, "result", "source=simkl count=${result.size}")
-            if (result.isNotEmpty()) MetadataDiskCache.write("simkl_recs", key, response.text)
+            // Persistence must never delay the recommendation returned to the detail page.
+            // The same supervisor keeps this write alive beyond the 1-second UI wait.
+            if (result.isNotEmpty()) {
+                val persistBody = response.text
+                simklSuggestionScope.launch {
+                    val persistAt = android.os.SystemClock.elapsedRealtime()
+                    try {
+                        MetadataDiskCache.write("simkl_recs", key, persistBody)
+                        recommendationLog(trace, "timing",
+                            "step=disk-write-async status=complete elapsedMs=${android.os.SystemClock.elapsedRealtime() - persistAt}")
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        recommendationLog(trace, "timing",
+                            "step=disk-write-async status=error error=${e.javaClass.simpleName}" +
+                                " elapsedMs=${android.os.SystemClock.elapsedRealtime() - persistAt}")
+                    }
+                }
+            }
             result
+            }
         }
 
         private fun requestSimklSuggestions(
