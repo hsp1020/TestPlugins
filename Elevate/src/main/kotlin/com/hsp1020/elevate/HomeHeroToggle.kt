@@ -124,11 +124,20 @@ internal class HomeHeroToggle(private val app: Application) :
         private var hidden = false
         private var lastPagerVisibility = View.VISIBLE
         private var lastButtonsVisibility = View.VISIBLE
-        // UI visibility/layout is changed on layout events, not every frame.
-        // Coalesce callbacks outside the ongoing layout pass to avoid nested
-        // requestLayout() caused by adjusting the hero height.
+        // An occasional native visibility overwrite must be corrected BEFORE
+        // draw to prevent a one-frame hero flash. The hot-path guard checks
+        // only properties; actual height recomputation runs on layout changes.
         private var enforceScheduled = false
-        private val guard = ViewTreeObserver.OnGlobalLayoutListener {
+        private val beforeDraw = ViewTreeObserver.OnPreDrawListener {
+            if (hidden && (
+                (mobileHolder != null &&
+                    (pager?.visibility != View.GONE || buttons?.visibility != View.GONE)) ||
+                (tvFrame != null &&
+                    (tvFrame.visibility != View.GONE || tvFrame.hasFocus()))
+            )) enforceHidden()
+            true
+        }
+        private val onLayout = ViewTreeObserver.OnGlobalLayoutListener {
             if (!hidden || enforceScheduled) return@OnGlobalLayoutListener
             enforceScheduled = true
             root.post {
@@ -138,7 +147,10 @@ internal class HomeHeroToggle(private val app: Application) :
         }
 
         init {
-            if (tree.isAlive) tree.addOnGlobalLayoutListener(guard)
+            if (tree.isAlive) {
+                tree.addOnPreDrawListener(beforeDraw)
+                tree.addOnGlobalLayoutListener(onLayout)
+            }
         }
 
         fun apply(visible: Boolean) {
@@ -193,7 +205,10 @@ internal class HomeHeroToggle(private val app: Application) :
         }
 
         fun release() {
-            if (tree.isAlive) tree.removeOnGlobalLayoutListener(guard)
+            if (tree.isAlive) {
+                tree.removeOnPreDrawListener(beforeDraw)
+                tree.removeOnGlobalLayoutListener(onLayout)
+            }
             apply(true)
         }
     }
