@@ -18,6 +18,7 @@ import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import com.lagradost.cloudstream3.CommonActivity
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
@@ -26,7 +27,17 @@ import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.player.VideoLink
 import com.lagradost.cloudstream3.ui.player.VideoLive
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
+import java.lang.ref.PhantomReference
+import java.lang.ref.ReferenceQueue
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import okhttp3.Interceptor
+import okhttp3.MediaType
+import okhttp3.ResponseBody
+import okio.BufferedSource
+import okio.ForwardingSource
+import okio.buffer
 
 /**
  * Temporary P0/P1 diagnostics, restricted to:
@@ -37,8 +48,9 @@ import java.util.concurrent.atomic.AtomicInteger
  *  - M3U8 preview extraction stack samples and heap/GC pressure
  *
  * Does not call requestLayout(), trigger media loading, or replace a WebViewClient.
- * Without a core hook, observers cannot return the *initiating* call stack of
- * requestLayout()/ResponseBody.close()/setActiveSubtitles(). Mark these as correlations.
+ * OkHttp response bodies passing through app.baseClient are instrumented directly
+ * at their source().close() boundary. View.requestLayout and the final core player
+ * implementation remain observer-based; do not attribute sampled stacks to callers.
  */
 internal class ElevatePerformanceTrace(private val app: Application) :
     Application.ActivityLifecycleCallbacks {
@@ -76,6 +88,147 @@ internal class ElevatePerformanceTrace(private val app: Application) :
     private var lastPreviewSignature = ""
     private var priorVmPolicy: StrictMode.VmPolicy? = null
     private var installedVmPolicy: StrictMode.VmPolicy? = null
+    private val httpSequence = AtomicLong()
+    private val httpOpenCount = AtomicInteger()
+    private val httpCloseCount = AtomicInteger()
+    private val httpLeaks = AtomicInteger()
+    private var lastHttpEnsureAt = 0L
+    private val httpQueue = ReferenceQueue<ResponseBody>()
+    private val httpPending = ConcurrentHashMap<PhantomReference<ResponseBody>, HttpRecord>()
+    private val httpInterceptor = Interceptor { chain ->
+        val request = chain.request()
+        val response = chain.proceed(request)
+        val body = response.body
+        if (!monitoring || body == null || response.code == 101) {
+            response
+        } else {
+            val record = HttpRecord(
+                id = httpSequence.incrementAndGet(),
+                started = SystemClock.elapsedRealtime(),
+                host = request.url.host,
+                route = "",
+                code = response.code,
+                contentType = body.contentType()?.toString().orEmpty().take(48),
+                sourceThread = Thread.currentThread().name,
+                // Interceptor entry gives the actual HTTP execution stack. Async
+                // OkHttp dispatch can obscure which plugin initiated the request.
+                executionStack = Thread.currentThread().stackTrace.drop(2).take(40)
+            )
+            lateinit var reference: PhantomReference<ResponseBody>
+            val tracked = TracedResponseBody(body) {
+                onHttpClosed(record, reference)
+            }
+            reference = PhantomReference(tracked as ResponseBody, httpQueue)
+            httpPending[reference] = record
+            httpOpenCount.incrementAndGet()
+            response.newBuilder().body(tracked).build()
+        }
+    }
+
+    private data class HttpRecord(
+        val id: Long,
+        val started: Long,
+        val host: String,
+        val route: String,
+        val code: Int,
+        val contentType: String,
+        val sourceThread: String,
+        val executionStack: List<StackTraceElement>,
+        @Volatile var warned: Boolean = false
+    )
+
+    private class TracedResponseBody(
+        private val delegate: ResponseBody,
+        private val onClose: () -> Unit
+    ) : ResponseBody() {
+        private val closed = java.util.concurrent.atomic.AtomicBoolean()
+        private val trackedSource: BufferedSource by lazy {
+            object : ForwardingSource(delegate.source()) {
+                override fun close() {
+                    try {
+                        super.close()
+                    } finally {
+                        if (closed.compareAndSet(false, true)) onClose()
+                    }
+                }
+            }.buffer()
+        }
+        override fun contentType(): MediaType? = delegate.contentType()
+        override fun contentLength(): Long = delegate.contentLength()
+        override fun source(): BufferedSource = trackedSource
+    }
+
+    private fun onHttpClosed(record: HttpRecord, ref: PhantomReference<ResponseBody>) {
+        httpPending.remove(ref)
+        ref.clear()
+        httpCloseCount.incrementAndGet()
+        if (record.warned && monitoring) {
+            log("http-close-after-warning",
+                "requestId=" + record.id + " host=" + record.host +
+                " elapsedMs=" + (SystemClock.elapsedRealtime() - record.started))
+            stack("http-close-stack requestId=" + record.id,
+                Thread.currentThread(), Thread.currentThread().stackTrace)
+        }
+    }
+
+    private fun ensureHttpInterceptor() {
+        if (!monitoring) return
+        // Other Elevate features rebuild app.baseClient on preference changes.
+        // Install on the current client only, preserving existing interceptors.
+        runCatching {
+            val client = app.baseClient
+            if (client.interceptors.none { it === httpInterceptor }) {
+                app.baseClient = client.newBuilder().addInterceptor(httpInterceptor).build()
+                log("http-interceptor-installed", "clientId=" +
+                    System.identityHashCode(app.baseClient))
+            }
+        }.onFailure { Log.w(tag, "http-interceptor-install-failed " +
+            it.javaClass.simpleName) }
+    }
+
+    private fun sampleHttp(now: Long) {
+        var scanned = 0
+        var warned = 0
+        while (true) {
+            @Suppress("UNCHECKED_CAST")
+            val ref = httpQueue.poll() as? PhantomReference<ResponseBody> ?: break
+            val record = httpPending.remove(ref)
+            ref.clear()
+            if (record != null) {
+                httpLeaks.incrementAndGet()
+                log("http-body-gc-unclosed",
+                    "requestId=" + record.id + " host=" + record.host +
+                    " httpCode=" + record.code + " type=" + record.contentType +
+                    " ageMs=" + age(now, record.started) +
+                    " executedOn=" + record.sourceThread)
+                stack("http-unclosed-acquisition requestId=" + record.id,
+                    Thread.currentThread(), record.executionStack.toTypedArray())
+            }
+        }
+        // An unclosed live response is suspicious, not automatically a leak.
+        // Print the execution stack once; confirmed leaks are separately marked.
+        for ((ref, record) in httpPending) {
+            if (++scanned > 2500) break
+            if (!record.warned && now - record.started > 30_000L) {
+                record.warned = true
+                warned++
+                log("http-body-open-30s",
+                    "requestId=" + record.id + " host=" + record.host +
+                    " httpCode=" + record.code + " type=" + record.contentType +
+                    " executedOn=" + record.sourceThread)
+                stack("http-body-acquisition requestId=" + record.id,
+                    Thread.currentThread(), record.executionStack.toTypedArray())
+            }
+        }
+        val opened = httpOpenCount.getAndSet(0)
+        val closed = httpCloseCount.getAndSet(0)
+        val leaked = httpLeaks.getAndSet(0)
+        if (opened != 0 || closed != 0 || leaked != 0 || warned != 0) {
+            log("http-summary", "opened=" + opened + " closed=" + closed +
+                " gcUnclosed=" + leaked + " pending=" + httpPending.size +
+                " warned=" + warned)
+        }
+    }
 
     private fun source(): String {
         val state = model?.state
@@ -123,6 +276,7 @@ internal class ElevatePerformanceTrace(private val app: Application) :
             Log.w(tag, "strictmode-install-failed " + it.javaClass.simpleName)
         }
         monitoring = true
+        ensureHttpInterceptor()
         worker = Thread(::watch, "Elevate-P0-P1-Watch").apply {
             isDaemon = true
             start()
@@ -139,6 +293,15 @@ internal class ElevatePerformanceTrace(private val app: Application) :
         detach()
         host = null
         monitoring = false
+        runCatching {
+            val client = app.baseClient
+            if (client.interceptors.any { it === httpInterceptor }) {
+                app.baseClient = client.newBuilder().apply {
+                    interceptors().removeAll { it === httpInterceptor }
+                }.build()
+            }
+        }
+        httpPending.clear()
         worker?.interrupt()
         worker = null
         main.removeCallbacks(heartbeat)
@@ -152,7 +315,12 @@ internal class ElevatePerformanceTrace(private val app: Application) :
     private val heartbeat = object : Runnable {
         override fun run() {
             if (!monitoring) return
-            lastHeartbeatAt = SystemClock.elapsedRealtime()
+            val now = SystemClock.elapsedRealtime()
+            lastHeartbeatAt = now
+            if (now - lastHttpEnsureAt > 5_000L) {
+                lastHttpEnsureAt = now
+                ensureHttpInterceptor()
+            }
             main.postDelayed(this, 40L)
         }
     }
@@ -183,6 +351,7 @@ internal class ElevatePerformanceTrace(private val app: Application) :
                     val used = memory.totalMemory() - memory.freeMemory()
                     val gcCount = runCatching { Debug.getRuntimeStat("art.gc.gc-count") }
                         .getOrNull() ?: "unknown"
+                    sampleHttp(now)
                     log("heap", "javaUsedMB=" + used / 1048576L +
                         " javaCommittedMB=" + memory.totalMemory() / 1048576L +
                         " javaMaxMB=" + memory.maxMemory() / 1048576L +
