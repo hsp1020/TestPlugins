@@ -768,6 +768,162 @@ open class StremioC(
         private const val tmdbAPI = "https://api.themoviedb.org/3"
         private const val TRANSPARENT_PIXEL = "https://upload.wikimedia.org/wikipedia/commons/c/ca/1x1.png"
 
+
+        // Recommendations do not depend on the user's watchlist, but reuse the logged-in
+        // Simkl identity and CloudStream's own Simkl client credentials.
+        private data class SimklSuggestion(
+            val type: String, val id: String, val tmdbId: Int?, val name: String,
+            val poster: String?, val rank: Int
+        )
+        private data class SimklSuggestionCache(val entries: List<SimklSuggestion>, val at: Long)
+        private val simklSuggestionCache = lruCacheMap<String, SimklSuggestionCache>(160)
+        private val simklSuggestionFlights = mutableMapOf<String, Deferred<List<SimklSuggestion>>>()
+        private val simklSuggestionLock = Any()
+        // A separate supervisor prevents the parent detail load from joining background requests.
+        private val simklSuggestionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val simklSuggestionSemaphore = Semaphore(3)
+        private const val SIMKL_RECOMMENDATION_WAIT_MS = 700L
+        private const val SIMKL_RECOMMENDATION_TTL_MS = 24L * 60 * 60 * 1000
+        private const val SIMKL_RECOMMENDATION_EMPTY_TTL_MS = 15L * 60 * 1000
+
+        private fun simklSuggestionsFromDetail(text: String): List<SimklSuggestion> {
+            val detail = parseJson<JsonNode>(text)
+            val userSuggestions = detail.get("users_recommendations")
+            val rows = if (userSuggestions != null && userSuggestions.isArray && userSuggestions.size() > 0)
+                userSuggestions else detail.get("similar")
+            if (rows == null || !rows.isArray) return emptyList()
+            return rows.take(30).mapIndexedNotNull { index, row ->
+                val ids = row.get("ids") ?: return@mapIndexedNotNull null
+                val tmdb = ids.get("tmdb")?.asInt(0)?.takeIf { it > 0 }
+                val mal = ids.get("mal")?.asInt(0)?.takeIf { it > 0 }
+                val imdb = ids.get("imdb")?.asText()?.takeIf { IMDB_ID_REGEX.matches(it) }
+                val originalType = row.get("type")?.asText()?.lowercase()
+                val isAnime = originalType == "anime"
+                val movie = originalType == "movie" || originalType == "movies" ||
+                    (isAnime && row.get("anime_type")?.asText()?.equals("movie", true) == true)
+                val type = if (movie) "movie" else "series"
+                val id = if (isAnime && mal != null) "mal:$mal"
+                    else tmdb?.let { "tmdb:$it" }
+                        ?: imdb ?: mal?.let { "mal:$it" } ?: return@mapIndexedNotNull null
+                val title = listOf("en_title", "title", "name")
+                    .firstNotNullOfOrNull { row.get(it)?.asText()?.trim()?.takeIf(String::isNotBlank) }
+                    ?: return@mapIndexedNotNull null
+                val art = row.get("poster")?.asText()?.trim()
+                    ?.takeIf { it.matches(Regex("[A-Za-z0-9_/-]{1,160}")) }
+                    ?.let { "https://wsrv.nl/?url=https://simkl.in/posters/" + it + "_m.webp" }
+                SimklSuggestion(type, id, tmdb, title, art, index)
+            }.distinctBy { it.type to (it.tmdbId?.let { id -> "tmdb:$id" } ?: it.id) }
+        }
+
+        private fun cachedSimklTitle(
+            userId: String, type: String, tmdbId: String, imdbId: String?, malId: Int?
+        ): Pair<String, String>? {
+            val list = getKey<JsonNode>(SimklApi.SIMKL_CACHED_LIST, userId) ?: return null
+            for ((section, segment) in listOf("anime" to "anime", "shows" to "tv", "movies" to "movies")) {
+                val rows = list.get(section)?.takeIf { it.isArray } ?: continue
+                for (record in rows) {
+                    val objectNode = record.get(if (section == "movies") "movie" else "show") ?: record
+                    val ids = objectNode.get("ids") ?: continue
+                    val found = (malId != null && section == "anime" && ids.get("mal")?.asInt(0) == malId) ||
+                        (imdbId != null && ids.get("imdb")?.asText() == imdbId) ||
+                        (ids.get("tmdb")?.asText() == tmdbId &&
+                            (if (section == "movies") "movie" else "series") == type)
+                    val simklId = ids.get("simkl")?.asText()?.takeIf { it.all(Char::isDigit) && it != "0" }
+                    if (found && simklId != null) return segment to simklId
+                }
+            }
+            return null
+        }
+
+        private suspend fun loadSimklSuggestions(
+            userId: String, type: String, tmdbId: String, imdbId: String?, malId: Int?,
+            headers: Map<String, String>, clientId: String, key: String
+        ): List<SimklSuggestion> = simklSuggestionSemaphore.withPermit {
+            val disk = MetadataDiskCache.read("simkl_recs", key)
+            if (disk != null) {
+                val cached = runCatching { simklSuggestionsFromDetail(disk.first) }.getOrNull()
+                if (!cached.isNullOrEmpty()) return@withPermit cached
+            }
+            val found = cachedSimklTitle(userId, type, tmdbId, imdbId, malId)
+            val target = found ?: run {
+                val lookup = when {
+                    malId != null -> "mal" to malId.toString()
+                    !imdbId.isNullOrBlank() -> "imdb" to imdbId
+                    else -> "tmdb" to tmdbId
+                }
+                val response = customSession.get(
+                    "https://api.simkl.com/search/id",
+                    params = mapOf("client_id" to clientId, lookup.first to lookup.second),
+                    headers = headers, timeout = 4L
+                )
+                if (response.code !in 200..299) return@withPermit emptyList()
+                val array = parseJson<JsonNode>(response.text)
+                val item = array.takeIf { it.isArray }?.firstOrNull { row ->
+                    val ids = row.get("ids")
+                    ids?.get(lookup.first)?.asText() == lookup.second
+                } ?: return@withPermit emptyList()
+                val id = item.get("ids")?.get("simkl")?.asText()
+                    ?.takeIf { it.all(Char::isDigit) && it != "0" }
+                    ?: return@withPermit emptyList()
+                val segment = when (item.get("type")?.asText()?.lowercase()) {
+                    "movie", "movies" -> "movies"
+                    "anime" -> "anime"
+                    "tv", "shows", "show" -> "tv"
+                    else -> if (type == "movie") "movies" else "tv"
+                }
+                segment to id
+            }
+            val response = customSession.get(
+                "https://api.simkl.com/" + target.first + "/" + target.second,
+                params = mapOf("client_id" to clientId, "extended" to "full"),
+                headers = headers, timeout = 5L
+            )
+            if (response.code !in 200..299 || response.text.isBlank()) return@withPermit emptyList()
+            val result = simklSuggestionsFromDetail(response.text)
+            if (result.isNotEmpty()) MetadataDiskCache.write("simkl_recs", key, response.text)
+            result
+        }
+
+        private fun requestSimklSuggestions(
+            type: String, tmdbId: String, imdbId: String?, malId: Int?
+        ): Deferred<List<SimklSuggestion>>? {
+            if (tmdbId.toIntOrNull()?.let { it > 0 } != true) return null
+            val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
+                ?.authData() ?: return null
+            val headers = SimklApi.getHeaders(auth.token)
+            val clientId = headers["simkl-api-key"]?.takeIf(String::isNotBlank) ?: return null
+            val key = listOf(type, tmdbId, imdbId.orEmpty(), malId?.toString().orEmpty()).joinToString("|")
+            val cached = simklSuggestionCache[key]
+            val now = System.currentTimeMillis()
+            if (cached != null && now >= cached.at &&
+                now - cached.at < if (cached.entries.isEmpty()) SIMKL_RECOMMENDATION_EMPTY_TTL_MS else SIMKL_RECOMMENDATION_TTL_MS) {
+                return CompletableDeferred(cached.entries)
+            }
+            val userId = auth.user.id.toString()
+            val task = synchronized(simklSuggestionLock) {
+                simklSuggestionFlights[key] ?: simklSuggestionScope.async(start = CoroutineStart.LAZY) {
+                    val rows = try {
+                        withTimeout(6500L) {
+                            loadSimklSuggestions(userId, type, tmdbId, imdbId, malId, headers, clientId, key)
+                        }
+                    } catch (e: CancellationException) {
+                        if (!currentCoroutineContext().isActive) emptyList() else throw e
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
+                    simklSuggestionCache[key] = SimklSuggestionCache(rows, System.currentTimeMillis())
+                    rows
+                }.also { simklSuggestionFlights[key] = it }
+            }
+            task.invokeOnCompletion {
+                synchronized(simklSuggestionLock) {
+                    if (simklSuggestionFlights[key] === task) simklSuggestionFlights.remove(key)
+                }
+            }
+            task.start()
+            return task
+        }
+
         private val IMDB_ID_REGEX = "tt[0-9]+".toRegex()
         private val JSON_ID_EXTRACT_REGEX = "\"id\":\"([^\"]+)\"".toRegex()
 
@@ -4078,7 +4234,8 @@ open class StremioC(
             provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
             stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null,
             preFetchedCollection: Deferred<List<TmdbMedia>>? = null,
-            recommendationPoster: String? = null
+            recommendationPoster: String? = null,
+            recommendationMalId: Int? = null
         ): FetchedTmdbData {
             var fetchedRecommendations: List<SearchResponse>? = null
 
@@ -4115,6 +4272,13 @@ open class StremioC(
             if (detailRes == null) {
                 return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null, null)
             }
+
+            val simklJob = StremioC.requestSimklSuggestions(
+                tmdbMediaType, tmdbIdStr,
+                finalImdbId?.takeIf { StremioC.IMDB_ID_REGEX.matches(it) }
+                    ?: detailRes.external_ids?.imdb_id,
+                recommendationMalId
+            )
 
             val episodeTmdbMeta = ConcurrentHashMap<String, TmdbEpisode>()
 
@@ -4193,28 +4357,81 @@ open class StremioC(
 
                 val collectionParts = run { collectionDeferred.await() }
                 run { episodeDeferred?.awaitAll() }
-                val tmdbRecs: List<TmdbMedia> = detailRes.recommendations?.results ?: emptyList()
-                val finalCombinedMedia = (collectionParts + tmdbRecs)
-                    .distinctBy { it.id }
-                    .filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
 
-                fetchedRecommendations = run { finalCombinedMedia.take(50).map { rec ->
-                    val recTitle = rec.title ?: rec.name ?: ""
-                    val isRecMovie = rec.mediaType == "movie" || rec.title != null
-                    val recTypeStr = if (isRecMovie) "movie" else "series"
-                    val recType = if (isRecMovie) TvType.Movie else TvType.TvSeries
-
-                    val tmdbPoster = if (!rec.poster_path.isNullOrBlank())
-                        "https://image.tmdb.org/t/p/w500${rec.poster_path}" else TRANSPARENT_PIXEL
-                    val recPoster = rec.id?.let {
-                        StremioC.recommendationPosterUrl(recommendationPoster, it, isRecMovie,
-                            tmdbPoster, metadataHost)
-                    } ?: tmdbPoster
-                    val thinData = LoadData(id = "tmdb:${rec.id}", type = recTypeStr, addonUrl = provider.mainUrl)
-                    provider.newMovieSearchResponse(recTitle, thinData.toJson(), recType) {
-                        this.posterUrl = recPoster
+                // No per-recommendation Simkl or TMDB detail calls: use lightweight rows
+                // from the two existing responses and keep collection ordering native.
+                data class SuggestedCard(
+                    val type: String, val id: String, val tmdbId: Int?, var name: String,
+                    var poster: String?, var fallbackPoster: String? = null,
+                    var collectionDate: String? = null, var collectionIndex: Int? = null,
+                    var tmdbRank: Int? = null, var simklRank: Int? = null,
+                    var sameOrigin: Boolean = false
+                )
+                val candidates = linkedMapOf<String, SuggestedCard>()
+                fun addTmdb(media: TmdbMedia, collectionIndex: Int?, rank: Int?) {
+                    val id = media.id?.takeIf { it > 0 && it.toString() != tmdbIdStr } ?: return
+                    val movie = media.mediaType == "movie" ||
+                        (media.mediaType != "tv" && (media.title != null || tmdbMediaType == "movie"))
+                    val type = if (movie) "movie" else "series"
+                    val key = "$type:tmdb:$id"
+                    val title = media.title ?: media.name ?: media.originalTitle ?: return
+                    val poster = media.poster_path?.takeIf(String::isNotBlank)
+                        ?.let { "https://image.tmdb.org/t/p/w500$it" }
+                    val card = candidates.getOrPut(key) {
+                        SuggestedCard(type, "tmdb:$id", id, title, poster)
                     }
-                } }
+                    if (card.poster == null) card.poster = poster
+                    if (collectionIndex != null) {
+                        card.collectionIndex = collectionIndex
+                        card.collectionDate = media.releaseDate ?: media.firstAirDate ?: "9999-12-31"
+                    }
+                    if (rank != null) card.tmdbRank = rank
+                    if (media.original_language == detailRes.original_language ||
+                        (media.origin_country.orEmpty().any { it in detailRes.origin_country.orEmpty() }))
+                        card.sameOrigin = true
+                }
+                collectionParts.forEachIndexed { idx, media -> addTmdb(media, idx, null) }
+                detailRes.recommendations?.results.orEmpty().forEachIndexed { idx, media ->
+                    addTmdb(media, null, idx)
+                }
+                val simklRows = withTimeoutOrNull(StremioC.SIMKL_RECOMMENDATION_WAIT_MS) {
+                    simklJob?.await() ?: emptyList()
+                }.orEmpty()
+                simklRows.forEach { rec ->
+                    if (rec.tmdbId?.toString() == tmdbIdStr) return@forEach
+                    val key = rec.type + ":" + (rec.tmdbId?.let { "tmdb:$it" } ?: rec.id)
+                    val card = candidates.getOrPut(key) {
+                        SuggestedCard(rec.type, rec.id, rec.tmdbId, rec.name, rec.poster)
+                    }
+                    card.simklRank = rec.rank
+                    card.fallbackPoster = rec.poster
+                }
+                val ordered = candidates.values.sortedWith(
+                    compareByDescending<SuggestedCard> { it.collectionIndex != null }
+                        .thenBy { it.collectionDate ?: "" }
+                        .thenByDescending {
+                            (if (it.simklRank != null) 2.0 else 0.0) +
+                            (if (it.tmdbRank != null) 1.7 else 0.0) +
+                            (if (it.sameOrigin) 0.5 else 0.0) +
+                            (it.simklRank?.let { n -> (30 - n.coerceAtMost(30)) / 300.0 } ?: 0.0) +
+                            (it.tmdbRank?.let { n -> (30 - n.coerceAtMost(30)) / 300.0 } ?: 0.0)
+                        }
+                        .thenBy { it.collectionIndex ?: Int.MAX_VALUE }
+                        .thenBy { it.tmdbRank ?: it.simklRank ?: Int.MAX_VALUE }
+                ).take(50)
+                fetchedRecommendations = ordered.map { rec ->
+                    val fallback = rec.poster ?: rec.fallbackPoster ?: TRANSPARENT_PIXEL
+                    val poster = rec.tmdbId?.let {
+                        StremioC.recommendationPosterUrl(
+                            recommendationPoster, it, rec.type == "movie", fallback, metadataHost
+                        )
+                    } ?: fallback
+                    val thinData = LoadData(id = rec.id, type = rec.type, addonUrl = provider.mainUrl)
+                    provider.newMovieSearchResponse(
+                        rec.name, thinData.toJson(),
+                        if (rec.type == "movie") TvType.Movie else TvType.TvSeries
+                    ) { this.posterUrl = poster }
+                }
             }
 
             val countryCode = langCode.substringAfter("-", "KR").uppercase()
@@ -4528,7 +4745,9 @@ open class StremioC(
                         fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!,
                             refinedMediaType == "movie", finalImdbId, finalType, finalVideos,
                             safePrefetchedDetail, if (safePrefetchedDetail != null) preFetchedCollection else null,
-                            recommendationPoster)
+                            recommendationPoster,
+                            fetchedMalId ?: originalAnimeId?.takeIf { it.startsWith("mal:") }
+                                ?.substringAfter(':')?.toIntOrNull())
                     }
                 } catch (e: Exception) {
                 }
