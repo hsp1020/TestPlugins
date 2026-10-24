@@ -425,8 +425,7 @@ internal class ElevateSkipController(private val application: Application) :
         val player = mediaPlayer
         if (player == null || player.playbackState != Media3Player.STATE_READY) return true
         return stamp != null && settings.getBoolean(autoPreference(stamp), false) &&
-            stampKey(stamp) !in manualSeekProtected &&
-            stampKey(stamp) !in autoSkipped
+            stampKey(stamp) !in manualSeekProtected
     }
 
     private fun autoEnabled(): Boolean = ElevateSkipPreferences.autoTypes.any { name ->
