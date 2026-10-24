@@ -32,7 +32,7 @@ internal object SyncDirtyMarkerCleaner {
         var removed = 0
         var newer = 0
         var differing = 0
-        var orphanHeaders = 0
+        var removedHeaderMarkers = 0
         var withoutBaseline = 0
         for ((tag, timestamp) in markers) {
             val key = tag.removePrefix("modified/")
@@ -58,8 +58,8 @@ internal object SyncDirtyMarkerCleaner {
             if (settled) {
                 editor.remove(tag)
                 removed++
-                synchronized(diagnosed) { diagnosed.removeIf { it.startsWith("$key:") } }
-                if (key.startsWith("d/download_header_cache/")) orphanHeaders++
+                synchronized(diagnosed) { diagnosed.removeAll { it.startsWith("$key:") } }
+                if (key.startsWith("d/download_header_cache/")) removedHeaderMarkers++
             } else {
                 differing++
                 if (!baseline.containsKey(key)) withoutBaseline++
@@ -87,7 +87,7 @@ internal object SyncDirtyMarkerCleaner {
         SyncTrace.info("dirty-marker-cleanup", "before=${markers.size} removed=$removed " +
             "remaining=${markers.size - removed} newer=$newer " +
                 "unsettled=$differing baselineMissing=$withoutBaseline " +
-                "orphanHeaderRemoved=$orphanHeaders " +
+                "headerMarkersRemoved=$removedHeaderMarkers " +
                 "pluginsPending=$pluginsPending elapsedMs=$duration")
         return Stats(removed, markers.size - removed, newer, duration)
     }
