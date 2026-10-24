@@ -818,6 +818,7 @@ internal class RatingPlotImageHook(
                 val response = app.post("https://api.simkl.com/sync/watched?extended=episodes",
                     headers=headers, requestBody=payload.toString().toRequestBody())
                 if (response.code !in 200..299) {
+                    response.okhttpResponse.close()
                     return null
                 }
                 val records = JSONArray(response.text)
@@ -877,7 +878,7 @@ internal class RatingPlotImageHook(
                     headers=headers,cacheTime=0)
             } catch(e: CancellationException) { throw e }
               catch(e: Exception) { return null }
-            if(response.code !in 200..299)return null
+            if(response.code !in 200..299) { response.okhttpResponse.close(); return null }
             val body=response.text.trim()
             return if(body=="null") JSONObject()
                 else runCatching { JSONObject(body) }.getOrNull()
@@ -940,7 +941,7 @@ internal class RatingPlotImageHook(
                     requestBody=JSONObject().put("shows",items).toString().toRequestBody())
             }catch(e:CancellationException){throw e}
              catch(e:Exception){return false}
-            if(response.code !in 200..299)return false
+            if(response.code !in 200..299) { response.okhttpResponse.close(); return false }
             val ack=runCatching { JSONObject(response.text) }.getOrNull() ?: return false
             val saved=ack.optJSONObject(if(value>0)"added" else "deleted")
                 ?.optInt("shows",-1) ?: -1
@@ -1112,7 +1113,7 @@ internal class RatingPlotImageHook(
                 } catch (e: CancellationException) { throw e }
                   catch (e: Exception) {
                   return false }
-                if (response.code !in 200..299) return false
+                if (response.code !in 200..299) { response.okhttpResponse.close(); return false }
                 val result = runCatching { JSONObject(response.text) }.getOrNull()
                     ?: return false
                 if ((result.optJSONObject("not_found")?.optJSONArray("shows")?.length() ?: 0) > 0)
@@ -1203,7 +1204,7 @@ internal class RatingPlotImageHook(
             }catch(e: CancellationException){throw e}
              catch(e: Exception){
                   return null}
-            if(response.code !in 200..299)return null
+            if(response.code !in 200..299) { response.okhttpResponse.close(); return null }
             val rows=runCatching { JSONArray(response.text) }.getOrNull() ?: return null
             if(rows.length()!=ids.size)return null
             val watched=linkedSetOf<String>()
@@ -1255,7 +1256,7 @@ internal class RatingPlotImageHook(
             }catch(e: CancellationException){throw e}
              catch(e: Exception){
                   return null}
-            if(response.code !in 200..299)return null
+            if(response.code !in 200..299) { response.okhttpResponse.close(); return null }
             val result=runCatching { JSONObject(response.text) }.getOrNull() ?: return null
             val notFound=result.optJSONObject("not_found")
             if((notFound?.optJSONArray("anime")?.length() ?: 0)>0 ||
@@ -1324,7 +1325,7 @@ internal class RatingPlotImageHook(
              catch(e:Exception) {
                 return false
              }
-            if(response.code !in 200..299)return false
+            if(response.code !in 200..299) { response.okhttpResponse.close(); return false }
             val ack=runCatching { JSONObject(response.text) }.getOrNull() ?: return false
 
             val deleted=ack.optJSONObject("deleted")?.optInt("shows",-1) ?: -1
@@ -1349,7 +1350,8 @@ internal class RatingPlotImageHook(
                     val resp=app.get("https://api.simkl.com/search/id",
                         params=mapOf(field to value.toString()),headers=headers,cacheTime=0)
                     val array=if (resp.code in 200..299)
-                        runCatching { JSONArray(resp.text) }.getOrNull() else null
+                        runCatching { JSONArray(resp.text) }.getOrNull()
+                        else { resp.okhttpResponse.close(); null }
                     val found=mutableListOf<Int>()
                     for(i in 0 until (array?.length() ?: 0)){
                         val item=array?.optJSONObject(i)
@@ -1380,6 +1382,7 @@ internal class RatingPlotImageHook(
                     val detail=app.get("https://api.simkl.com/anime/$id",
                         headers=headers,cacheTime=600)
                     if(detail.code !in 200..299){
+                        detail.okhttpResponse.close()
                         continue
                     }
                     val info=runCatching { JSONObject(detail.text) }.getOrNull()
@@ -1400,7 +1403,10 @@ internal class RatingPlotImageHook(
                     val row=animeEpisodeCache[id] ?: run {
                         val list=app.get("https://api.simkl.com/anime/episodes/$id",
                             headers=headers,cacheTime=600)
-                        if(list.code !in 200..299)throw IllegalStateException("episodes-http-${list.code}")
+                        if(list.code !in 200..299) {
+                            list.okhttpResponse.close()
+                            throw IllegalStateException("episodes-http-${list.code}")
+                        }
                         val array=JSONArray(list.text)
                         val found=(0 until array.length()).mapNotNull { i ->
                             val ep=array.optJSONObject(i)
@@ -2111,7 +2117,7 @@ internal class RatingPlotImageHook(
              catch(e:Exception){
                 return false
              }
-            if(response.code !in 200..299)return false
+            if(response.code !in 200..299) { response.okhttpResponse.close(); return false }
             val body=runCatching { JSONObject(response.text) }.getOrNull()
             val actual=body?.optJSONObject("my_list_status") ?: return false
             val wantedStatus=when(expected.status){
@@ -2346,7 +2352,9 @@ internal class RatingPlotImageHook(
             }catch(e: CancellationException){throw e}
              catch(e: Exception){
                   return false}
-            if(deleted.code !in 200..299 && deleted.code!=404)return false
+            val deleteStatus = deleted.code
+            deleted.okhttpResponse.close()
+            if(deleteStatus !in 200..299 && deleteStatus != 404)return false
             repeat(3){ attempt ->
                 if(attempt>0)kotlinx.coroutines.delay(if(attempt==1)350L else 900L)
                 val response=try {
@@ -2360,7 +2368,7 @@ internal class RatingPlotImageHook(
                     val data=runCatching { JSONObject(response.text) }.getOrNull()
                     if(data!=null && (data.isNull("my_list_status") ||
                         !data.has("my_list_status")))return true
-                }
+                } else response.okhttpResponse.close()
             }
             return false
         }
@@ -2391,7 +2399,10 @@ internal class RatingPlotImageHook(
                     val entry = if (find.code in 200..299)
                         JSONObject(find.text).optJSONArray("data")?.optJSONObject(0)
                             ?.optString("id")?.takeIf { it.isNotBlank() } else null
-                    if (find.code !in 200..299) continue
+                    if (find.code !in 200..299) {
+                        find.okhttpResponse.close()
+                        continue
+                    }
                     val data = JSONObject().put("type","libraryEntries").put("attributes",payload)
                     if (entry != null) data.put("id",entry)
                     else data.put("relationships", JSONObject()
@@ -2404,7 +2415,9 @@ internal class RatingPlotImageHook(
                         app.post("$host/library-entries", headers=headers, requestBody=body)
                     else app.patch("$host/library-entries/$entry", headers=headers, requestBody=body)
 
-                    if (response.code in 200..299) return true
+                    val writeStatus = response.code
+                    response.okhttpResponse.close()
+                    if (writeStatus in 200..299) return true
                 } catch(e: CancellationException) { throw e }
                 catch(e: Exception) {
                 }
