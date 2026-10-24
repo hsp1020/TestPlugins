@@ -178,7 +178,8 @@ class SyncPlugin : Plugin() {
     private fun queueSync(reason: String) {
         val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
         if (!isOwner(context) || !config(context).active()) return
-        if (SyncAuthGuard.needsReauthentication(config(context))) {
+        if (SyncAuthGuard.needsReauthentication(config(context)) &&
+            !SyncAuthGuard.mayRecover(config(context))) {
             if (!authPausedLogged) {
                 authPausedLogged = true
                 SyncTrace.info("auth-queue-suppressed",
@@ -246,7 +247,8 @@ class SyncPlugin : Plugin() {
     private fun request(delayMs: Long, reason: String) {
         val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
         if (!ready || !isOwner(context) || !config(context).active()) return
-        if (SyncAuthGuard.needsReauthentication(config(context))) {
+        if (SyncAuthGuard.needsReauthentication(config(context)) &&
+            !SyncAuthGuard.mayRecover(config(context))) {
             if (!authPausedLogged) {
                 authPausedLogged = true
                 SyncTrace.info("auth-trigger-suppressed",
@@ -326,7 +328,8 @@ class SyncPlugin : Plugin() {
                 delay(20 * 1000L)
                 if (!isOwner(context)) break
                 if (foreground && ready && config(context).active() &&
-                    !SyncAuthGuard.needsReauthentication(config(context))) {
+                    (!SyncAuthGuard.needsReauthentication(config(context)) ||
+                        SyncAuthGuard.mayRecover(config(context)))) {
                     SyncTrace.info("trigger", "reason=remote-head-poll-20s")
                     queueSync("remote-head-poll-20s")
                 }
@@ -345,7 +348,8 @@ class SyncPlugin : Plugin() {
                 "rejected=${SyncAuthGuard.needsReauthentication(session)} " +
                 "issuedAtMs=${session.preferences.getLong("github_token_issued_at", 0L)} " +
                 "expiresAtMs=${session.preferences.getLong("github_token_expires_at", 0L)} " +
-                "refreshPresent=${session.preferences.contains("github_refresh_token")}")
+                "refreshPresent=${session.preferences.contains("github_refresh_token")} " +
+                "recoveryEligible=${SyncAuthGuard.mayRecover(session)}")
         ready = SyncRuntime.refreshLoadedState()
         ProfileIdentity.observe(context)
         MainActivity.bookmarksUpdatedEvent += bookmarks

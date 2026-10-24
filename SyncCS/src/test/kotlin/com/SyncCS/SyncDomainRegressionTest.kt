@@ -429,6 +429,26 @@ class SyncDomainRegressionTest {
         assertEquals(0, renewals)
     }
 
+    @Test fun newDeviceAuthorizationRequestsRotatingTokens() {
+        assertEquals("repo offline_access", GithubDeviceCode.DEVICE_SCOPE)
+    }
+
+    @Test fun rejectedAuthorizationIsRecoverableOnlyWithUnusedRefreshCredential() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val config = SyncConfiguration(context)
+        config.preferences.edit().clear()
+            .putString("github_token", "sample-encrypted-access")
+            .putString("github_client_id", "test-client")
+            .putString("github_refresh_token", "sample-encrypted-refresh")
+            .commit()
+        SyncAuthGuard.reject(config, 401)
+        assertTrue(SyncAuthGuard.mayRecover(config))
+        SyncAuthGuard.recordRefreshFailure(config, permanent = true)
+        assertFalse(SyncAuthGuard.mayRecover(config))
+        SyncAuthGuard.clearAfterLogin(config)
+        assertFalse(SyncAuthGuard.needsReauthentication(config))
+    }
+
     @Test fun oauthLegacyCredentialWithoutExpirationStaysCompatible() {
         val legacy = GithubDeviceCode.Credential.decode("old-token")
         assertEquals("old-token", legacy.access)

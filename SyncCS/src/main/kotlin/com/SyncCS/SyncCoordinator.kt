@@ -124,7 +124,11 @@ internal object SyncCoordinator {
             return@withLock pause("not-authenticated", "Sign in to enable sync")
         }
         if (SyncAuthGuard.needsReauthentication(config)) {
-            return@withLock pause("github-credential-rejected", SyncAuthGuard.MESSAGE)
+            SyncTrace.info("github-401-preflight",
+                "refreshAvailable=${config.preferences.contains("github_refresh_token")} " +
+                    "recoveryEligible=${SyncAuthGuard.mayRecover(config)}")
+            if (!GithubOAuthSession.resumeRejected(config))
+                return@withLock pause("github-credential-rejected", SyncAuthGuard.MESSAGE)
         }
         if (config.preferences.getBoolean("github_recovery_in_progress", false)) {
             return@withLock pause("github-restore-in-progress",

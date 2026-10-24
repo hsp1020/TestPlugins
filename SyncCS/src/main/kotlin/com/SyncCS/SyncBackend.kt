@@ -57,7 +57,9 @@ internal class SyncConfiguration(context: Context) {
             "session", "oauth_pending", "configured", "email",
             "github_pending_token", "github_pending_client",
             "github_refresh_token", "github_token_expires_at",
-            "github_token_issued_at", "github_refresh_expires_at"
+            "github_token_issued_at", "github_refresh_expires_at",
+            "github_rejected_token_hash", "github_rejected_token_reason",
+            "github_rejected_refresh_hash", "github_refresh_retry_after"
         )) editor.remove(key)
         check(editor.commit())
     }
@@ -180,7 +182,18 @@ internal object GithubOAuthSession {
                 "event=unavailable reason=${if (encryptedRefresh == null) "missing-refresh" else "missing-client"}")
             return token
         }
-        return rotate(prefs, clientId, encryptedRefresh, "pre-expiry")
+        return try {
+            rotate(prefs, clientId, encryptedRefresh, "pre-expiry")
+        } catch (failure: GithubBackupStore.ApiException) {
+            if (failure.code != 401) throw failure
+            // OAuth refresh rejection differs from an API request's 401, but
+            // without a working refresh token the session cannot continue safely.
+            SyncAuthGuard.reject(config, 401)
+            SyncAuthGuard.recordRefreshFailure(config, permanent = true)
+            SyncTrace.info("github-auth-refresh",
+                "event=rejected reason=pre-expiry action=reauthorize")
+            throw java.io.IOException("GitHub refresh authorization was rejected.", failure)
+        }
     }
 
     /**
@@ -199,17 +212,57 @@ internal object GithubOAuthSession {
         val encryptedRefresh = prefs.getString("github_refresh_token", null)
         val clientId = prefs.getString("github_client_id", null)
         if (encryptedRefresh == null || clientId == null) {
+            SyncAuthGuard.reject(config, 401)
             SyncTrace.info("github-401-recovery",
-                "event=no-refresh-token legacyCredential=true action=pause")
+                "event=no-refresh-token legacyCredential=true action=reauthorize")
             return null
         }
         return try {
             rotate(prefs, clientId, encryptedRefresh, "http-401")
-        } catch (error: GithubBackupStore.ApiException) {
-            if (error.code != 401) throw error
+        } catch (error: java.io.IOException) {
+            // GitHub may have rotated this pair in another loaded plugin instance.
+            if (prefs.getString("github_refresh_token", null) != encryptedRefresh) {
+                val current = prefs.getString("github_token", null) ?: return null
+                return String(LocalVault.decrypt(current), Charsets.UTF_8)
+            }
+            SyncAuthGuard.reject(config, 401)
+            SyncAuthGuard.recordRefreshFailure(config, permanent =
+                error is GithubBackupStore.ApiException && error.code == 401)
             SyncTrace.info("github-401-recovery",
-                "event=refresh-rejected http=401 action=pause")
+                "event=refresh-failed type=${error.javaClass.simpleName} " +
+                    "http=${GithubAuthFlow.httpCode(error)} action=pause")
             null
+        }
+    }
+
+    /**
+     * A previous API 401 must not permanently mask a valid refresh token.
+     * Retry only if a usable refresh credential exists; permanently rejected
+     * refresh tokens are not submitted again.
+     */
+    @Synchronized
+    fun resumeRejected(config: SyncConfiguration): Boolean {
+        if (!SyncAuthGuard.needsReauthentication(config)) return true
+        if (!SyncAuthGuard.mayRecover(config)) return false
+        val encrypted = config.preferences.getString("github_token", null) ?: return false
+        val rejected = String(LocalVault.decrypt(encrypted), Charsets.UTF_8)
+        SyncTrace.info("github-401-recovery", "event=resume-attempt")
+        return try {
+            val renewed = recoverAfter401(config, rejected)
+            if (!renewed.isNullOrBlank() && renewed != rejected) {
+                SyncAuthGuard.clearAfterLogin(config)
+                SyncTrace.info("github-401-recovery", "event=resume-success action=sync")
+                true
+            } else {
+                // The failed refresh has already been classified and rate-limited.
+                false
+            }
+        } catch (failure: java.io.IOException) {
+            SyncAuthGuard.recordRefreshFailure(config, permanent = false)
+            SyncTrace.info("github-401-recovery",
+                "event=resume-deferred type=${failure.javaClass.simpleName} " +
+                "http=${GithubAuthFlow.httpCode(failure)}")
+            false
         }
     }
 
@@ -218,9 +271,35 @@ internal object GithubOAuthSession {
         encryptedRefresh: String, reason: String
     ): String {
         SyncTrace.info("github-auth-refresh", "event=start reason=$reason")
-        val renewed = GithubAuthFlow.retry("refresh-token") {
-            GithubDeviceCode.refresh(clientId,
-                String(LocalVault.decrypt(encryptedRefresh), Charsets.UTF_8))
+        // Another loaded SyncCS instance may already have rotated this pair.
+        if (prefs.getString("github_refresh_token", null) != encryptedRefresh) {
+            SyncTrace.info("github-auth-refresh", "event=already-rotated reason=$reason")
+            val current = prefs.getString("github_token", null)
+                ?: error("GitHub authorization disappeared during refresh")
+            return String(LocalVault.decrypt(current), Charsets.UTF_8)
+        }
+        val renewed = try {
+            GithubAuthFlow.retry("refresh-token") {
+                GithubDeviceCode.refresh(clientId,
+                    String(LocalVault.decrypt(encryptedRefresh), Charsets.UTF_8))
+            }
+        } catch (failure: java.io.IOException) {
+            // A losing concurrent refresh must not treat a new token pair as revoked.
+            if (prefs.getString("github_refresh_token", null) != encryptedRefresh) {
+                val current = prefs.getString("github_token", null)
+                    ?: error("GitHub authorization disappeared during refresh")
+                SyncTrace.info("github-auth-refresh",
+                    "event=already-rotated-after-failure reason=$reason")
+                return String(LocalVault.decrypt(current), Charsets.UTF_8)
+            }
+            throw failure
+        }
+        // Do not overwrite a newer token pair committed by another instance.
+        if (prefs.getString("github_refresh_token", null) != encryptedRefresh) {
+            SyncTrace.info("github-auth-refresh", "event=already-rotated-after-request reason=$reason")
+            val current = prefs.getString("github_token", null)
+                ?: error("GitHub authorization disappeared during refresh")
+            return String(LocalVault.decrypt(current), Charsets.UTF_8)
         }
         check(prefs.edit()
             .putString("github_token", LocalVault.encrypt(renewed.access.toByteArray(Charsets.UTF_8)))

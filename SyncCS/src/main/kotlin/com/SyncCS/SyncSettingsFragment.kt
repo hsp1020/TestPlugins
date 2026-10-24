@@ -294,7 +294,9 @@ class SyncSettingsFragment : DialogFragment() {
 
     private fun statusText(config: SyncConfiguration): String {
         val status = if (SyncAuthGuard.needsReauthentication(config)) {
-            "GitHub authorization expired or revoked (HTTP 401). Open Sync account to reauthorize."
+            if (SyncAuthGuard.mayRecover(config))
+                "GitHub authorization rejected (HTTP 401); automatic recovery pending."
+            else "GitHub authorization rejected (HTTP 401); open Sync account to reauthorize."
         } else if (config.preferences.getBoolean("github_recovery_in_progress", false)) {
             "Backup revision recovery in progress"
         } else if (config.active()) SyncCoordinator.lastStatus else "Not connected"

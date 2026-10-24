@@ -627,6 +627,8 @@ internal class GithubBackupStore(
 }
 
 internal object GithubDeviceCode {
+    // Explicitly opt into rotating access/refresh tokens for OAuth Device Flow.
+    internal const val DEVICE_SCOPE = "repo offline_access"
     data class Profile(val login: String, val id: String)
     data class Credential(
         val access: String, val refresh: String? = null,
@@ -721,7 +723,7 @@ internal object GithubDeviceCode {
     }
     fun begin(clientId: String): Challenge {
         require(clientId.matches(Regex("[A-Za-z0-9_.-]{8,80}")))
-        val r = post("device/code", mapOf("client_id" to clientId, "scope" to "repo"))
+        val r = post("device/code", mapOf("client_id" to clientId, "scope" to DEVICE_SCOPE))
         check(!r.has("error")) { r.optString("error_description") }
         return Challenge(r.getString("device_code"), r.getString("user_code"),
             r.getString("verification_uri"), r.optLong("interval", 5).coerceAtLeast(5),
