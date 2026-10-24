@@ -33,23 +33,28 @@ internal class ElevateSkipButtonTimer(
     private var elapsedMs = 0L
     private var lastTickMs = 0L
     private var intervalKey: String? = null
-    private var restoring = false
+    private var autoHidden = false
+    private var revealedWhileControls = false
+    private var revealHideInvalidated = false
 
     private fun dp(value: Float): Int =
         (value * (button?.resources?.displayMetrics?.density ?: 1f) + 0.5f).toInt()
 
     private val buttonLayout = View.OnLayoutChangeListener {
             view, left, _, right, _, oldLeft, _, oldRight, _ ->
-        if (restoring) return@OnLayoutChangeListener
         val width = right - left
         val oldWidth = oldRight - oldLeft
         if (view.visibility != View.VISIBLE) {
-            if (active) reset()
+            if (active && !autoHidden) reset()
             return@OnLayoutChangeListener
         }
-        if (active && width + dp(2f) < oldWidth) {
-            // Core genuinely hid the button (manual skip, end of interval, etc).
+        if (active && width + dp(2f) < oldWidth && !autoHidden) {
+            // The user skipped or the native timestamp became invalid.
             reset()
+        } else if (autoHidden && revealedWhileControls &&
+            width > oldWidth + dp(1f) && !revealHideInvalidated) {
+            fragment.skipIndex++
+            revealHideInvalidated = true
         } else if (!active && width > oldWidth + dp(1f)) {
             begin()
         }
@@ -59,52 +64,73 @@ internal class ElevateSkipButtonTimer(
         override fun run() {
             if (!active) return
             val view = button
-            if (view == null || view.visibility != View.VISIBLE || fragment.view == null) {
+            if (view == null || fragment.view == null) {
                 reset()
                 return
             }
             val now = SystemClock.uptimeMillis()
             val controlsVisible = fragment.isUIShowing()
-            if (!controlsVisible) elapsedMs += (now - lastTickMs).coerceAtLeast(0L)
-            lastTickMs = now
-            val fraction = (elapsedMs / HIDE_TIMEOUT_MS.toFloat()).coerceIn(0f, 1f)
-            indicator?.alpha = if (controlsVisible) 0f else 1f
-            fill?.scaleX = fraction
-
-            val current = currentIntervalKey()
+            val currentStamp = currentInterval()
+            val current = currentStamp?.let {
+                val stamp = it.timestamp
+                "${stamp.type}:${stamp.startMs}:${stamp.endMs}"
+            }
             if (current != null && intervalKey != current) {
                 intervalKey = current
                 elapsedMs = 0L
+                autoHidden = false
+                revealedWhileControls = false
                 fill?.scaleX = 0f
-                // Every new skip region gets a fresh ten-second window.
                 fragment.skipIndex++
             } else if (current == null && intervalKey != null) {
-                // Native timestamp is no longer applicable.
                 reset()
                 fragment.onTimestamp(null)
                 return
             }
+            if (autoHidden) {
+                indicator?.visibility = View.GONE
+                if (controlsVisible && !revealedWhileControls && currentStamp != null) {
+                    revealedWhileControls = true
+                    revealHideInvalidated = false
+                    // Nuvio allows the button to reappear with the controls open.
+                    fragment.onTimestamp(currentStamp)
+                } else if (!controlsVisible && revealedWhileControls) {
+                    revealedWhileControls = false
+                    fragment.onTimestamp(null)
+                }
+                lastTickMs = now
+                main.postDelayed(this, 250L)
+                return
+            }
+            if (view.visibility != View.VISIBLE) {
+                reset()
+                return
+            }
+            if (!controlsVisible) elapsedMs += (now - lastTickMs).coerceAtLeast(0L)
+            lastTickMs = now
+            indicator?.alpha = if (controlsVisible) 0f else 1f
+            fill?.scaleX = (elapsedMs / HIDE_TIMEOUT_MS.toFloat()).coerceIn(0f, 1f)
 
             if (elapsedMs >= HIDE_TIMEOUT_MS && !controlsVisible) {
-                reset()
-                // Use CloudStream's own hide path; it also restores skip focus/state.
+                autoHidden = true
+                indicator?.visibility = View.GONE
                 fragment.onTimestamp(null)
-                return
             }
             main.postDelayed(this, UPDATE_MS)
         }
     }
 
-    private fun currentIntervalKey(): String? {
+    private fun currentInterval(): com.lagradost.cloudstream3.utils.videoskip.VideoSkipStamp? {
         val position = fragment.playerView?.player?.currentPosition ?: return null
         if (position < 0L) return null
         return model.state.stamps.firstOrNull {
             val stamp = it.timestamp
             position >= stamp.startMs && position < stamp.endMs
-        }?.let {
-            val stamp = it.timestamp
-            "${stamp.type}:${stamp.startMs}:${stamp.endMs}"
         }
+    }
+
+    private fun currentIntervalKey(): String? = currentInterval()?.let {
+        "${it.timestamp.type}:${it.timestamp.startMs}:${it.timestamp.endMs}"
     }
 
     fun attach() {
@@ -154,6 +180,9 @@ internal class ElevateSkipButtonTimer(
     private fun begin() {
         if (active || button?.visibility != View.VISIBLE) return
         active = true
+        autoHidden = false
+        revealedWhileControls = false
+        revealHideInvalidated = false
         elapsedMs = 0L
         intervalKey = currentIntervalKey()
         lastTickMs = SystemClock.uptimeMillis()
@@ -168,6 +197,9 @@ internal class ElevateSkipButtonTimer(
 
     private fun reset() {
         active = false
+        autoHidden = false
+        revealedWhileControls = false
+        revealHideInvalidated = false
         main.removeCallbacks(tick)
         indicator?.visibility = View.GONE
         elapsedMs = 0L
