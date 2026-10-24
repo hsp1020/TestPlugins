@@ -29,6 +29,9 @@ internal class ElevateSkipButtonTimer(
     private val main = Handler(Looper.getMainLooper())
     private var button: View? = null
     private var originalAlpha = 1f
+    private var originalEnabled = true
+    private var originalFocusable = true
+    private var originalAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
     private var indicator: FrameLayout? = null
     private var fill: View? = null
     private var active = false
@@ -67,7 +70,13 @@ internal class ElevateSkipButtonTimer(
         val b = button ?: return
         val suppressed = isSuppressed()
         b.alpha = if (suppressed) 0f else originalAlpha
+        b.isEnabled = if (suppressed) false else originalEnabled
+        b.isFocusable = if (suppressed) false else originalFocusable
+        b.importantForAccessibility = if (suppressed) {
+            View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        } else originalAccessibility
         if (suppressed) {
+            if (b.hasFocus()) b.clearFocus()
             indicator?.alpha = 0f
             if (active) reset()
         } else {
@@ -167,6 +176,9 @@ internal class ElevateSkipButtonTimer(
         val parent = next.parent as? ConstraintLayout ?: return
         button = next
         originalAlpha = next.alpha
+        originalEnabled = next.isEnabled
+        originalFocusable = next.isFocusable
+        originalAccessibility = next.importantForAccessibility
 
         val strip = FrameLayout(next.context).apply {
             id = View.generateViewId()
@@ -241,6 +253,9 @@ internal class ElevateSkipButtonTimer(
         val previous = button
         previous?.removeOnLayoutChangeListener(buttonLayout)
         previous?.alpha = originalAlpha
+        previous?.isEnabled = originalEnabled
+        previous?.isFocusable = originalFocusable
+        previous?.importantForAccessibility = originalAccessibility
         (indicator?.parent as? ViewGroup)?.removeView(indicator)
         button = null
         indicator = null
