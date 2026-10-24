@@ -105,6 +105,13 @@ class ElevateSettingsFragment : DialogFragment() {
                     LinearLayout(ctx).apply {
                         orientation = LinearLayout.VERTICAL
                         setPadding(dp(14), 0, 0, dp(8))
+                        // Automatic skipping only controls seeking; manual native buttons stay enabled.
+                        addView(TextView(ctx).apply {
+                            text = "Automatic Skipping"
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                            setTypeface(typeface, android.graphics.Typeface.BOLD)
+                            setPadding(0, dp(10), 0, dp(5))
+                        })
                         // Keep existing preference keys, only match Nuvio's labels and descriptions.
                         val skipItems = listOf(
                             Triple(
