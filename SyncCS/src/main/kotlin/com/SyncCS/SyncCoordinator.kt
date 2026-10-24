@@ -124,6 +124,7 @@ internal object SyncCoordinator {
             return@withLock pause("not-authenticated", "Sign in to enable sync")
         }
         if (SyncAuthGuard.needsReauthentication(config)) {
+            GithubAuthDiagnostics.snapshot(config, "sync-preflight-rejected")
             SyncTrace.info("github-401-preflight",
                 "refreshAvailable=${config.preferences.contains("github_refresh_token")} " +
                     "recoveryEligible=${SyncAuthGuard.mayRecover(config)}")

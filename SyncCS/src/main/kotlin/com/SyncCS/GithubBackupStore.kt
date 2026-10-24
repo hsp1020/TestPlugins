@@ -40,7 +40,8 @@ internal object GithubHttpDiagnostics {
             ?.takeIf { it.matches(Regex("[0-9]{1,12}")) } ?: "unknown"
         SyncTrace.info("github-http-failure",
             "phase=$stage http=$status message=$kind authError=$authError " +
-            "requestId=$request scopes=$scopes acceptedScopes=$accepted rateRemaining=$limit")
+            "requestId=$request scopes=$scopes acceptedScopes=$accepted rateRemaining=$limit " +
+                "serverDate=${conn.getHeaderField("Date")?.take(60) ?: "unknown"}")
     }
 }
 
@@ -52,6 +53,10 @@ internal object GithubAuthRetry {
         try {
             return request(token)
         } catch (failure: GithubBackupStore.ApiException) {
+            if (failure.code == 401)
+                SyncTrace.info("github-api-token-rejected",
+                    "submittedId=${GithubAuthDiagnostics.fingerprint(token)} " +
+                        "recoveryConfigured=${recover != null}")
             if (failure.code != 401 || recover == null) throw failure
             val replacement = recover(token)
             if (replacement.isNullOrBlank() || replacement == token) {
@@ -63,6 +68,9 @@ internal object GithubAuthRetry {
                 request(replacement)
             } catch (second: GithubBackupStore.ApiException) {
                 if (second.code == 401) {
+                    SyncTrace.info("github-api-token-rejected",
+                        "submittedId=${GithubAuthDiagnostics.fingerprint(replacement)} " +
+                            "phase=one-time-retry")
                     SyncTrace.info("github-401-recovery", "event=retry-rejected action=pause")
                 }
                 throw second
@@ -766,7 +774,8 @@ internal object GithubDeviceCode {
                     it.matches(Regex("[a-z_]{1,64}"))
                 } ?: "unknown"}")
             throw GithubBackupStore.ApiException(401,
-                "GitHub refresh authorization was rejected; sign in again.")
+                "GitHub refresh authorization rejected: " +
+                    (code.takeIf { it.matches(Regex("[a-z_]{1,64}")) } ?: "unknown"))
         }
         return Credential.issued(r).also {
             check(!it.refresh.isNullOrBlank() && it.expiresAt > 0L) {

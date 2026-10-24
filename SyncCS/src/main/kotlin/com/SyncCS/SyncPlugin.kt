@@ -350,6 +350,7 @@ class SyncPlugin : Plugin() {
                 "expiresAtMs=${session.preferences.getLong("github_token_expires_at", 0L)} " +
                 "refreshPresent=${session.preferences.contains("github_refresh_token")} " +
                 "recoveryEligible=${SyncAuthGuard.mayRecover(session)}")
+        GithubAuthDiagnostics.snapshot(session, "plugin-loaded")
         ready = SyncRuntime.refreshLoadedState()
         ProfileIdentity.observe(context)
         MainActivity.bookmarksUpdatedEvent += bookmarks

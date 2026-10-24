@@ -449,6 +449,23 @@ class SyncDomainRegressionTest {
         assertFalse(SyncAuthGuard.needsReauthentication(config))
     }
 
+    @Test fun oauthDiagnosticsRetainOnlyBoundedSafeTokenIdentifiers() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val config = SyncConfiguration(context)
+        config.preferences.edit().clear().commit()
+        for (index in 0 until 20) {
+            GithubAuthDiagnostics.record(config, "test-issued", "test-secret-$index",
+                "expiresAtMs=1 refreshPresent=true")
+        }
+        val stored = config.preferences.getString(GithubAuthDiagnostics.HISTORY_KEY, null)!!
+        val events = JSONArray(stored)
+        assertEquals(12, events.length())
+        assertFalse(stored.contains("test-secret-"))
+        assertEquals(GithubAuthDiagnostics.fingerprint("test-secret-19"),
+            events.getJSONObject(11).getString("accessId"))
+        assertEquals("test-issued", events.getJSONObject(0).getString("event"))
+    }
+
     @Test fun oauthLegacyCredentialWithoutExpirationStaysCompatible() {
         val legacy = GithubDeviceCode.Credential.decode("old-token")
         assertEquals("old-token", legacy.access)
