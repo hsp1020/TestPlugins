@@ -56,15 +56,23 @@ class GithubStoreIntegrationTest {
                     val target = specs[1]
                     val chain = mutableListOf<String>()
                     var cursor: String? = target
-                    while (cursor != null && cursor != base && chain.size <= 100) {
+                    while (cursor != null && cursor != base && chain.size <= commits.size) {
                         chain.add(cursor)
                         cursor = commits[cursor]?.second
                     }
                     if (cursor != base) return JSONObject().put("status", "diverged")
                         .put("total_commits", 0).put("commits", JSONArray())
                     chain.reverse()
+                    val query = p.substringAfter("?", "")
+                    val params = query.split("&").mapNotNull { entry ->
+                        val fields = entry.split("=", limit = 2)
+                        if (fields.size == 2) fields[0] to fields[1] else null
+                    }.toMap()
+                    val perPage = params["per_page"]?.toInt() ?: 30
+                    val page = params["page"]?.toInt() ?: 1
+                    check(perPage in 1..100 && page > 0)
                     val entries = JSONArray()
-                    for (revision in chain) {
+                    for (revision in chain.drop((page - 1) * perPage).take(perPage)) {
                         entries.put(JSONObject().put("sha", revision)
                             .put("parents", JSONArray().put(JSONObject()
                                 .put("sha", commits.getValue(revision).second))))
@@ -157,6 +165,45 @@ class GithubStoreIntegrationTest {
     private fun cipher() = SyncCipher.derive(
         "strong-github-backup-passphrase", "https://api.github.com", "test-owner-id"
     )
+
+    @Test fun moreThanEightCommitsRemainsIncremental() {
+        val api = FakeGit()
+        val writer = store(api, "A")
+        val reader = store(api, "B")
+        val key = cipher()
+        writer.initialize(key, mapOf("d/0/video_pos_dur/seed" to "before"))
+        val baseline = reader.current(key)!!
+        var revision = baseline.revision
+        for (i in 1..12) {
+            revision = writer.publishPartial(revision, baseline.generation, key,
+                mapOf("d/0/video_pos_dur/seed" to "update-$i"), emptySet())
+        }
+        val delta = reader.incrementalSince(baseline.revision, key, baseline.generation)!!
+        assertEquals(revision, delta.revision)
+        assertEquals(setOf("d/0/video_pos_dur/seed"), delta.encryptedChanges.keys)
+        assertEquals("update-12", key.decrypt("d/0/video_pos_dur/seed",
+            delta.encryptedChanges.getValue("d/0/video_pos_dur/seed")!!))
+    }
+
+    @Test fun multiPageHistoryOverOneHundredCommitsRemainsIncremental() {
+        val api = FakeGit()
+        val writer = store(api, "A")
+        val reader = store(api, "B")
+        val key = cipher()
+        val initial = mapOf("d/0/video_pos_dur/movie" to "0")
+        writer.initialize(key, initial)
+        val baseline = reader.current(key)!!
+        var revision = baseline.revision
+        for (i in 1..105) {
+            revision = writer.publishPartial(revision, baseline.generation, key,
+                mapOf("d/0/video_pos_dur/movie" to i.toString()), emptySet())
+        }
+        val delta = reader.incrementalSince(baseline.revision, key, baseline.generation)!!
+        assertEquals(revision, delta.revision)
+        assertEquals(1, delta.encryptedChanges.size)
+        assertEquals("105", key.decrypt("d/0/video_pos_dur/movie",
+            delta.encryptedChanges.getValue("d/0/video_pos_dur/movie")!!))
+    }
 
     @Test fun incrementalThreeKeysAfterInitialSnapshotAndNoChange() {
         val api = FakeGit()

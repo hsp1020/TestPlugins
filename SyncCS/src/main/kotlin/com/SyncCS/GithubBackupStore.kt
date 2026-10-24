@@ -355,33 +355,52 @@ internal class GithubBackupStore(
         return manifest.getInt("generation") to changes
     }
 
-    /** Follow a short contiguous first-parent chain, or use full recovery. */
+    /**
+     * GitHub comparison is chronological and paginated. Never fall back to a
+     * 25k-key snapshot just because more than a handful of commits accumulated.
+     * A missing journal, broken ancestry or recovery-generation change still
+     * requires the complete authenticated snapshot.
+     */
     fun incrementalSince(base: String, cipher: SyncCipher, generation: Int): Incremental? {
         if (!base.matches(Regex("[0-9a-f]{40}")) || generation <= 0) return null
         val branch = ensurePrivateRepository()
         val head = revision(branch)
         if (head == base) return Incremental(head, generation, emptyMap())
-        val compare = get("/compare/$base...$head?per_page=12")
-        if (compare.optString("status") != "ahead") return null
-        val list = compare.getJSONArray("commits")
-        val total = compare.getInt("total_commits")
-        if (total !in 1..8 || list.length() != total) return null
+
+        val pageSize = 100 // GitHub's maximum per_page; not a sync history limit.
+        var page = 1
+        var total = -1
+        var processed = 0
         var parent = base
         val latest = linkedMapOf<String, String?>()
-        for (i in 0 until total) {
-            val item = list.getJSONObject(i)
-            val parents = item.getJSONArray("parents")
-            val rev = item.getString("sha")
-            if (parents.length() != 1 ||
-                parents.getJSONObject(0).getString("sha") != parent) return null
-            val delta = readJournal(rev, cipher) ?: return null
-            if (delta.first != generation) return null
-            latest.putAll(delta.second)
-            parent = rev
+
+        while (total < 0 || processed < total) {
+            val compare = get("/compare/$base...$head?per_page=$pageSize&page=$page")
+            if (compare.optString("status") != "ahead") return null
+            val count = compare.optInt("total_commits", -1)
+            if (count < 1 || (total >= 0 && total != count)) return null
+            if (total < 0) total = count
+            val list = compare.getJSONArray("commits")
+            val expected = minOf(pageSize, total - processed)
+            if (list.length() != expected) return null
+
+            for (i in 0 until list.length()) {
+                val item = list.getJSONObject(i)
+                val parents = item.getJSONArray("parents")
+                val rev = item.getString("sha")
+                if (parents.length() != 1 ||
+                    parents.getJSONObject(0).getString("sha") != parent) return null
+                val delta = readJournal(rev, cipher) ?: return null
+                if (delta.first != generation) return null
+                latest.putAll(delta.second)
+                parent = rev
+            }
+            processed += list.length()
+            page++
         }
-        if (parent != head) return null
+        if (processed != total || parent != head) return null
         SyncTrace.info("github-delta-verified",
-            "commits=$total changed=${latest.size} revision=${head.take(12)}")
+            "commits=$total pages=${page - 1} changed=${latest.size} revision=${head.take(12)}")
         return Incremental(head, generation, latest)
     }
 
