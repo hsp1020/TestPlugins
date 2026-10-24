@@ -322,6 +322,92 @@ internal object SyncCoordinator {
         }
     }
 
+    /**
+     * Explicit deletion evidence only. No missing key in a partial local
+     * snapshot can be interpreted as a request to delete remote data.
+     */
+    private fun verifiedDeletionPaths(context: Context, config: SyncConfiguration): Set<String> {
+    val preflightBase = baseline(context)
+    val preflightMarked = config.preferences.all.keys.asSequence()
+        .filter { it.startsWith("modified/") }
+        .map { it.removePrefix("modified/") }.toSet()
+    val preflightProfiles = ProfileSync.decode(ProfileSync.snapshot(context))
+    val preflightNative = preflightMarked.mapNotNull {
+        ProfileIdentity.nativePath(it, preflightProfiles)
+    }
+    val preflightLocal = ProfileIdentity.toRemote(
+        SyncData.snapshotSelected(context, preflightNative), preflightProfiles)
+    val preferenceRemovals = preflightBase.keys.filter { key ->
+        key in preflightMarked && key !in preflightLocal
+    }.toSet()
+    SyncTrace.info("deletion-preflight-scan",
+        "marked=${preflightMarked.size} selected=${preflightLocal.size} " +
+            "baseline=${preflightBase.size}")
+    val profileBaselineValue = config.preferences.getString("profile_baseline", null)
+    val baseProfileState = ProfileSync.decode(profileBaselineValue?.let {
+        String(LocalVault.decrypt(it), Charsets.UTF_8)
+    })
+    val localProfileState = ProfileSync.decode(ProfileSync.snapshot(context))
+    val profileRemovals = (baseProfileState.items.keys -
+        localProfileState.items.keys).filter { it > 0 }.toSet()
+    val previousInventory = PluginSync.decode(
+        config.preferences.getString("plugin_baseline", null))
+    val localInventory = PluginSync.decode(PluginInventory.snapshot(context))
+    val pluginRemovals = if (SyncRuntime.pluginsLoaded) {
+        previousInventory.items.keys - localInventory.items.keys
+    } else emptySet()
+    val verifiedRemovals = preferenceRemovals +
+        profileRemovals.map { "x/profiles/$it" } +
+        pluginRemovals.map { "x/plugins/$it" }
+    SyncTrace.keys("deletion-verified", verifiedRemovals)
+    SyncTrace.info("deletion-proof",
+        "preferences=${preferenceRemovals.size} profiles=${profileRemovals.size} " +
+            "plugins=${pluginRemovals.size} baseline=${config.preferences.contains("base")}")
+        return verifiedRemovals
+    }
+
+    /** All baseline and remote revision fields commit together after CAS publication. */
+    private fun persistCommittedBaseline(
+        config: SyncConfiguration,
+        next: Map<String, String>, versions: Map<String, Long>,
+        priorLists: JSONObject, completeLocal: Boolean,
+        local: Map<String, String>, apply: Map<String, String?>,
+        marked: Set<String>, remoteKeys: Set<String>,
+        upload: Map<String, String?>, remoteCursor: Long?,
+        githubRevision: String, githubGeneration: Int, serverPluginManifest: String?
+    ) {
+    val baseJson = JSONObject()
+    for ((key, hash) in next) baseJson.put(key, hash)
+    val revisionJson = JSONObject()
+    versions.forEach { (key, version) -> revisionJson.put(key, version) }
+    val listBaselineJson = if (completeLocal) JSONObject()
+        else JSONObject(priorLists.toString())
+    val keysToRecord = if (completeLocal) local.keys + apply.keys
+        else (marked + remoteKeys + apply.keys + upload.keys)
+    for (key in keysToRecord) {
+        val raw = if (apply.containsKey(key)) apply[key] else local[key]
+        if (raw != null && SharedListSync.isCollection(key, raw)) {
+            listBaselineJson.put(key, raw)
+        } else listBaselineJson.remove(key)
+    }
+    val persisted = config.preferences.edit()
+        .putString("base", baseJson.toString())
+        .putString("remote_versions", revisionJson.toString())
+        .putString("list_baselines", LocalVault.encrypt(
+            listBaselineJson.toString().toByteArray(Charsets.UTF_8)))
+    if (remoteCursor != null) persisted.putLong("remote_cursor", remoteCursor)
+    else persisted.remove("remote_cursor")
+
+    persisted.putString("github_base_revision", githubRevision)
+        .putInt("github_generation", githubGeneration)
+    if (serverPluginManifest != null) {
+        persisted.putString("plugin_remote_snapshot", serverPluginManifest)
+    } else {
+        persisted.remove("plugin_remote_snapshot")
+    }
+    check(persisted.commit())
+    }
+
     private suspend fun synchronizePass(context: Context, activity: Activity?): String {
         val config = SyncConfiguration(context)
         val backend: SyncStorage = GithubSyncAdapter(context)
@@ -421,42 +507,7 @@ internal object SyncCoordinator {
 
             // A synced device may propagate actual deletions automatically.
             // An unlinked device has no baseline and never emits deletions.
-            val preflightBase = baseline(context)
-            val preflightMarked = config.preferences.all.keys.asSequence()
-                .filter { it.startsWith("modified/") }
-                .map { it.removePrefix("modified/") }.toSet()
-            val preflightProfiles = ProfileSync.decode(ProfileSync.snapshot(context))
-            val preflightNative = preflightMarked.mapNotNull {
-                ProfileIdentity.nativePath(it, preflightProfiles)
-            }
-            val preflightLocal = ProfileIdentity.toRemote(
-                SyncData.snapshotSelected(context, preflightNative), preflightProfiles)
-            val preferenceRemovals = preflightBase.keys.filter { key ->
-                key in preflightMarked && key !in preflightLocal
-            }.toSet()
-            SyncTrace.info("deletion-preflight-scan",
-                "marked=${preflightMarked.size} selected=${preflightLocal.size} " +
-                    "baseline=${preflightBase.size}")
-            val profileBaselineValue = config.preferences.getString("profile_baseline", null)
-            val baseProfileState = ProfileSync.decode(profileBaselineValue?.let {
-                String(LocalVault.decrypt(it), Charsets.UTF_8)
-            })
-            val localProfileState = ProfileSync.decode(ProfileSync.snapshot(context))
-            val profileRemovals = (baseProfileState.items.keys -
-                localProfileState.items.keys).filter { it > 0 }.toSet()
-            val previousInventory = PluginSync.decode(
-                config.preferences.getString("plugin_baseline", null))
-            val localInventory = PluginSync.decode(PluginInventory.snapshot(context))
-            val pluginRemovals = if (SyncRuntime.pluginsLoaded) {
-                previousInventory.items.keys - localInventory.items.keys
-            } else emptySet()
-            val verifiedRemovals = preferenceRemovals +
-                profileRemovals.map { "x/profiles/$it" } +
-                pluginRemovals.map { "x/plugins/$it" }
-            SyncTrace.keys("deletion-verified", verifiedRemovals)
-            SyncTrace.info("deletion-proof",
-                "preferences=${preferenceRemovals.size} profiles=${profileRemovals.size} " +
-                    "plugins=${pluginRemovals.size} baseline=${config.preferences.contains("base")}")
+            val verifiedRemovals = verifiedDeletionPaths(context, config)
             // The final Git commit checks membership against this verified set.
             (backend as GithubSyncAdapter).allowVerifiedDeletions(verifiedRemovals)
 
@@ -771,37 +822,11 @@ internal object SyncCoordinator {
             SyncTrace.memory("after-github-commit")
             stage = "persisting verified settings baseline"
             verifyAccount()
-            val baseJson = JSONObject()
-            for ((key, hash) in next) baseJson.put(key, hash)
-            val revisionJson = JSONObject()
-            versions.forEach { (key, version) -> revisionJson.put(key, version) }
-            val listBaselineJson = if (completeLocal) JSONObject()
-                else JSONObject(priorLists.toString())
-            val keysToRecord = if (completeLocal) local.keys + apply.keys
-                else (marked + remoteValues.keys + apply.keys + upload.keys)
-            for (key in keysToRecord) {
-                val raw = if (apply.containsKey(key)) apply[key] else local[key]
-                if (raw != null && SharedListSync.isCollection(key, raw)) {
-                    listBaselineJson.put(key, raw)
-                } else listBaselineJson.remove(key)
-            }
-            val persisted = config.preferences.edit()
-                .putString("base", baseJson.toString())
-                .putString("remote_versions", revisionJson.toString())
-                .putString("list_baselines", LocalVault.encrypt(
-                    listBaselineJson.toString().toByteArray(Charsets.UTF_8)))
-            if (pull.cursor != null) persisted.putLong("remote_cursor", pull.cursor)
-            else persisted.remove("remote_cursor")
             val (githubRevision, githubGeneration) =
                 (backend as GithubSyncAdapter).verifiedRevision()
-            persisted.putString("github_base_revision", githubRevision)
-                .putInt("github_generation", githubGeneration)
-            if (serverPluginManifest != null) {
-                persisted.putString("plugin_remote_snapshot", serverPluginManifest)
-            } else {
-                persisted.remove("plugin_remote_snapshot")
-            }
-            check(persisted.commit())
+            persistCommittedBaseline(config, next, versions, priorLists,
+                completeLocal, local, apply, marked, remoteValues.keys,
+                upload, pull.cursor, githubRevision, githubGeneration, serverPluginManifest)
             SyncTrace.info("receive-revision-ack",
                 "incoming=${receivedRevision.take(12)} committed=${githubRevision.take(12)} " +
                     "applied=${nativeApply.size} uploaded=${upload.size}")
