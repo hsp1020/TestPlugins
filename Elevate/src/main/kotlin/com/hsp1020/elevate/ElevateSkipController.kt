@@ -479,8 +479,12 @@ internal class ElevateSkipController(private val application: Application) :
                     java.lang.String.format(java.util.Locale.ROOT, "%02d:%02d",
                         totalSeconds / 60L, totalSeconds % 60L)
                 }
+                val localizedLabel: String = ctx.getString(
+                    R.string.skip_type_format, ctx.getString(stamp.type.res)
+                )
+                val toastMessage: String = "$localizedLabel → $clock"
                 android.widget.Toast.makeText(
-                    ctx, active.uiText + " → " + clock, android.widget.Toast.LENGTH_SHORT
+                    ctx, toastMessage, android.widget.Toast.LENGTH_SHORT
                 ).show()
             }
         }
