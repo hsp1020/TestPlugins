@@ -52,7 +52,7 @@ import okio.buffer
  * at their source().close() boundary. View.requestLayout and the final core player
  * implementation remain observer-based; do not attribute sampled stacks to callers.
  */
-internal class ElevatePerformanceTrace(private val app: Application) :
+internal class ElevatePerformanceTrace(private val application: Application) :
     Application.ActivityLifecycleCallbacks {
     private val tag = "Elevate-Perf"
     private val main = Handler(Looper.getMainLooper())
@@ -282,13 +282,13 @@ internal class ElevatePerformanceTrace(private val app: Application) :
             start()
         }
         main.post(heartbeat)
-        app.registerActivityLifecycleCallbacks(this)
+        application.registerActivityLifecycleCallbacks(this)
         (CommonActivity.activity as? MainActivity)?.let(::bindHost)
         log("diagnostic-start", "closeguard=" + (installedVmPolicy != null))
     }
 
     fun stop() {
-        app.unregisterActivityLifecycleCallbacks(this)
+        application.unregisterActivityLifecycleCallbacks(this)
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(lifecycle)
         detach()
         host = null
