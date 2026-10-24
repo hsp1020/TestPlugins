@@ -272,7 +272,9 @@ internal class ElevateSkipController(private val application: Application) :
         val current = player.currentPosition
         val previous = lastPosition
         lastPosition = current
-        val manualSeek = previous != null && (current < previous - 1000L || current > previous + 3500L)
+        // A resume/initial seek is user intent, not permission to skip the containing interval.
+        val manualSeek = if (previous == null) current > 2_500L
+            else current < previous - 1000L || current > previous + 3500L
         val active = published.firstOrNull {
             current >= it.timestamp.startMs && current < it.timestamp.endMs
         }
@@ -300,7 +302,15 @@ internal class ElevateSkipController(private val application: Application) :
         val key = active.source + ":" + stamp.type + ":" + stamp.startMs + ":" + stamp.endMs
         if (!autoSkipped.add(key)) return
         val target = stamp.endMs.coerceAtMost(player.duration - 1L)
-        if (target > current && target > 0L) player.seekTo(target)
+        if (target > current && target > 0L) {
+            player.seekTo(target)
+            fragment?.context?.let { ctx ->
+                val korean = ctx.resources.configuration.locales.get(0)?.language == "ko"
+                val prefix = if (korean) "자동 건너뛰기: " else "Auto-skipped: "
+                android.widget.Toast.makeText(ctx, prefix + ctx.getString(stamp.type.res),
+                    android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     override fun onActivityResumed(activity: Activity) {
