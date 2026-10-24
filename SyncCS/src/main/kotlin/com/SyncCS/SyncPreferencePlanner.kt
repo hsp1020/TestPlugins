@@ -28,7 +28,8 @@ internal object SyncPreferencePlanner {
         modifiedKeys: Set<String>,
         priorLists: JSONObject,
         firstRemoteRestore: Boolean,
-        fullSnapshot: Boolean
+        fullSnapshot: Boolean,
+        completeLocalSnapshot: Boolean = true
     ): Plan {
         val apply = mutableMapOf<String, String?>()
         val upload = mutableMapOf<String, String?>()
@@ -36,7 +37,8 @@ internal object SyncPreferencePlanner {
         next.remove("x/plugins")
         next.remove("x/profiles")
         val conflicts = mutableMapOf<String, String>()
-        val candidates = if (fullSnapshot || firstRemoteRestore || base.isEmpty()) {
+        val candidates = if (fullSnapshot || firstRemoteRestore ||
+            completeLocalSnapshot || base.isEmpty()) {
             remoteValues.keys + local.keys + base.keys
         } else {
             remoteValues.keys + modifiedKeys + local.keys.filterNot(base::containsKey)
@@ -101,6 +103,11 @@ internal object SyncPreferencePlanner {
                 // A missing key is NOT evidence of user deletion. Plugin startup,
                 // a failed preferences enumeration, or a filtered snapshot can omit it.
                 val explicitlyChanged = modifiedKeys.contains(key)
+                if (current == null && !explicitlyChanged && !completeLocalSnapshot) {
+                    // Selected snapshots cannot prove a key was deleted.
+                    // Never treat absence from a partial read as a deletion.
+                    continue
+                }
                 if (current == null && !explicitlyChanged &&
                     remotePresent && remote != null) {
                     // A temporarily missing local preference must be repaired

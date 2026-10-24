@@ -50,6 +50,10 @@ internal object SyncCoordinator {
         private set
     @Volatile var lastSuccessfulSyncAt: Long = 0L
         private set
+    @Volatile private var lastCompleteLocalAuditAt = 0L
+    private const val LOCAL_AUDIT_INTERVAL_MS = 60L * 60L * 1000L
+    private fun needsLocalAudit(): Boolean = lastCompleteLocalAuditAt == 0L ||
+        android.os.SystemClock.elapsedRealtime() - lastCompleteLocalAuditAt >= LOCAL_AUDIT_INTERVAL_MS
 
     private fun fingerprint(raw: String?): String =
         if (raw == null) "<deleted>" else SyncBackend.digest(raw)
@@ -143,7 +147,7 @@ internal object SyncCoordinator {
         // journals were handled above, so clean restarts need only a HEAD check.
         val pendingPlugins = config.preferences.contains("pending_plugins")
         val restoreActivity = activity?.takeIf { !it.isFinishing && !it.isDestroyed }
-        if (config.preferences.contains("base") &&
+        if (!needsLocalAudit() && config.preferences.contains("base") &&
             (!pendingPlugins || restoreActivity == null) &&
             config.preferences.all.keys.none { it.startsWith("modified/") }) {
             val known = config.preferences.getString("github_base_revision", null)
@@ -418,12 +422,21 @@ internal object SyncCoordinator {
             // A synced device may propagate actual deletions automatically.
             // An unlinked device has no baseline and never emits deletions.
             val preflightBase = baseline(context)
-            val preflightLocal = ProfileIdentity.toRemote(SyncData.snapshot(context),
-                ProfileSync.decode(ProfileSync.snapshot(context)))
+            val preflightMarked = config.preferences.all.keys.asSequence()
+                .filter { it.startsWith("modified/") }
+                .map { it.removePrefix("modified/") }.toSet()
+            val preflightProfiles = ProfileSync.decode(ProfileSync.snapshot(context))
+            val preflightNative = preflightMarked.mapNotNull {
+                ProfileIdentity.nativePath(it, preflightProfiles)
+            }
+            val preflightLocal = ProfileIdentity.toRemote(
+                SyncData.snapshotSelected(context, preflightNative), preflightProfiles)
             val preferenceRemovals = preflightBase.keys.filter { key ->
-                key !in preflightLocal &&
-                    config.preferences.contains("modified/" + key)
+                key in preflightMarked && key !in preflightLocal
             }.toSet()
+            SyncTrace.info("deletion-preflight-scan",
+                "marked=${preflightMarked.size} selected=${preflightLocal.size} " +
+                    "baseline=${preflightBase.size}")
             val profileBaselineValue = config.preferences.getString("profile_baseline", null)
             val baseProfileState = ProfileSync.decode(profileBaselineValue?.let {
                 String(LocalVault.decrypt(it), Charsets.UTF_8)
@@ -525,12 +538,30 @@ internal object SyncCoordinator {
             stage = "reading local preferences"
             SyncTrace.memory("before-local-snapshot")
             val snapshotStarted = android.os.SystemClock.elapsedRealtime()
-            val local = ProfileIdentity.toRemote(SyncData.snapshot(context),
-                profileMerge.target)
+            val marked = config.preferences.all.keys.asSequence()
+                .filter { it.startsWith("modified/") }
+                .map { it.removePrefix("modified/") }.toSet()
+            val profileRosterChanged = ProfileSync.encode(ProfileSync.decode(profileLocal)) !=
+                targetProfiles
+            val headerNeedsAudit = (remoteValues.keys + marked).any {
+                it.startsWith("d/download_header_cache/")
+            }
+            val completeLocal = pull.full || firstRemoteRestore ||
+                profileRosterChanged || headerNeedsAudit || needsLocalAudit()
+            val local = if (completeLocal) {
+                ProfileIdentity.toRemote(SyncData.snapshot(context), profileMerge.target)
+            } else {
+                val selectedRemote = (remoteValues.keys + marked)
+                    .mapNotNull { ProfileIdentity.nativePath(it, profileMerge.target) }
+                ProfileIdentity.toRemote(
+                    SyncData.snapshotSelected(context, selectedRemote), profileMerge.target)
+            }
             SyncTrace.info("local-snapshot-time",
-                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - snapshotStarted} " +
-                    "keys=${local.size}")
-            SyncTrace.keys("local-state", local.keys)
+                "mode=${if (completeLocal) "audit" else "changed-only"} " +
+                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - snapshotStarted} " +
+                    "keys=${local.size} remoteKeys=${remoteValues.size} dirty=${marked.size}")
+            if (completeLocal) SyncTrace.keys("local-audit", local.keys)
+            else SyncTrace.keys("local-changed", local.keys)
             val currentPlugins = PluginInventory.snapshot(context)
             val base = baseline(context)
             stage = "comparing changed settings"
@@ -538,13 +569,11 @@ internal object SyncCoordinator {
             val priorLists = if (savedLists == null) JSONObject() else JSONObject(
                 String(LocalVault.decrypt(savedLists), Charsets.UTF_8)
             )
-            val marked = config.preferences.all.keys.asSequence()
-                .filter { it.startsWith("modified/") }
-                .map { it.removePrefix("modified/") }.toSet()
             val planStarted = android.os.SystemClock.elapsedRealtime()
             val planned = SyncPreferencePlanner.reconcile(
                 remoteValues, local, base, profileMerge.target, activeProfiles,
-                replacedProfileUuids, marked, priorLists, firstRemoteRestore, pull.full)
+                replacedProfileUuids, marked, priorLists, firstRemoteRestore,
+                pull.full, completeLocal)
             SyncData.excludeUnreferencedHeaderRestores(local, planned.apply, planned.upload)
             SyncTrace.info("merge-duration",
                 "elapsedMs=${android.os.SystemClock.elapsedRealtime() - planStarted} " +
@@ -710,7 +739,7 @@ internal object SyncCoordinator {
             }
             if (nativeApply.isNotEmpty()) {
                 check(SyncTrace.applied("local-apply-verified", nativeApply,
-                    SyncData.snapshot(context))) {
+                    SyncData.snapshotSelected(context, nativeApply.keys))) {
                     "Local preference apply mismatch; transaction rolled back."
                 }
                 SyncTrace.info("cross-device-receipt",
@@ -734,9 +763,9 @@ internal object SyncCoordinator {
             for ((key, hash) in next) baseJson.put(key, hash)
             val revisionJson = JSONObject()
             versions.forEach { (key, version) -> revisionJson.put(key, version) }
-            val listBaselineJson = if (pull.full) JSONObject()
+            val listBaselineJson = if (completeLocal) JSONObject()
                 else JSONObject(priorLists.toString())
-            val keysToRecord = if (pull.full) local.keys + apply.keys
+            val keysToRecord = if (completeLocal) local.keys + apply.keys
                 else (marked + remoteValues.keys + apply.keys + upload.keys)
             for (key in keysToRecord) {
                 val raw = if (apply.containsKey(key)) apply[key] else local[key]
@@ -778,6 +807,11 @@ internal object SyncCoordinator {
             if (undoStarted) {
                 LocalSyncJournal.finish(context)
                 undoStarted = false
+            }
+            if (completeLocal) {
+                lastCompleteLocalAuditAt = android.os.SystemClock.elapsedRealtime()
+                SyncTrace.info("local-audit-verified",
+                    "keys=${local.size} nextDueMs=$LOCAL_AUDIT_INTERVAL_MS")
             }
             val cleanStats = runCatching {
                 SyncDirtyMarkerCleaner.prune(

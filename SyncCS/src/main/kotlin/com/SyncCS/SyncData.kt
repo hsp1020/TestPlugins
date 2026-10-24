@@ -288,6 +288,58 @@ internal object SyncData {
         return result
     }
 
+
+    /**
+     * Read only explicit tracked keys during incremental reconciliation.
+     * Unknown writes cannot bypass validation: a complete audit runs at app
+     * startup, on first restore, on roster changes and periodically.
+     *
+     * The core SharedPreferences map is acquired once, never JSON-encoded in
+     * its entirety. Missing values remain missing (not implicit deletions).
+     */
+    fun snapshotSelected(context: Context, nativePaths: Collection<String>): MutableMap<String, String> {
+        val result = linkedMapOf<String, String>()
+        if (nativePaths.isEmpty()) return result
+        refreshCineStreamKeys()
+        val dataPaths = nativePaths.filter { it.startsWith("d/") && isTracked(it) }
+        val defaultPaths = nativePaths.filter { it.startsWith("s/") && isTracked(it) }
+        val pluginPaths = nativePaths.filter { it.startsWith("p/") && isTracked(it) }
+        if (dataPaths.isNotEmpty()) {
+            val indices = DataStoreHelper.getAccounts(context)
+                .mapTo(mutableSetOf()) { it.keyIndex }
+            val stored = with(DataStore) { context.getSharedPrefs() }.all
+            for (path in dataPaths) {
+                val key = path.removePrefix("d/")
+                if (!belongsToInstalledProfile(key, indices) || key.length > 500) continue
+                val raw = stored[key] ?: continue
+                valueJson(raw)?.takeIf { it.length <= 524288 }?.let { result[path] = it }
+            }
+        }
+        if (defaultPaths.isNotEmpty()) {
+            val stored = PreferenceManager.getDefaultSharedPreferences(context).all
+            for (path in defaultPaths) {
+                val raw = stored[path.removePrefix("s/")] ?: continue
+                valueJson(raw)?.let { result[path] = it }
+            }
+        }
+        if (pluginPaths.isNotEmpty()) {
+            val validFiles = pluginFiles(context).toSet()
+            val grouped = pluginPaths.groupBy {
+                it.removePrefix("p/").substringBefore('/')
+            }
+            for ((name, paths) in grouped) {
+                if (name !in validFiles) continue
+                val stored = context.getSharedPreferences(name, Context.MODE_PRIVATE).all
+                for (path in paths) {
+                    val key = path.removePrefix("p/$name/")
+                    val raw = stored[key] ?: continue
+                    valueJson(raw)?.takeIf { it.length <= 524288 }?.let { result[path] = it }
+                }
+            }
+        }
+        return result
+    }
+
     private fun edit(editor: SharedPreferences.Editor, key: String, raw: String?) {
         if (raw == null) {
             editor.remove(key)

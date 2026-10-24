@@ -22,7 +22,10 @@ internal object SyncDirtyMarkerCleaner {
         val prefs = SyncConfiguration(context).preferences
         val markers = prefs.all.filterKeys { it.startsWith("modified/") }
         if (markers.isEmpty()) return Stats(0, 0, 0, 0)
-        val now = ProfileIdentity.toRemote(SyncData.snapshot(context), profiles)
+        val native = markers.keys.mapNotNull {
+            ProfileIdentity.nativePath(it.removePrefix("modified/"), profiles)
+        }
+        val now = ProfileIdentity.toRemote(SyncData.snapshotSelected(context, native), profiles)
         val editor = prefs.edit()
         var removed = 0
         var newer = 0
