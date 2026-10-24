@@ -326,8 +326,9 @@ internal object SyncCoordinator {
      * Explicit deletion evidence only. No missing key in a partial local
      * snapshot can be interpreted as a request to delete remote data.
      */
-    private fun verifiedDeletionPaths(context: Context, config: SyncConfiguration): Set<String> {
-    val preflightBase = baseline(context)
+    private fun verifiedDeletionPaths(
+        context: Context, config: SyncConfiguration, preflightBase: Map<String, String>
+    ): Set<String> {
     val preflightMarked = config.preferences.all.keys.asSequence()
         .filter { it.startsWith("modified/") }
         .map { it.removePrefix("modified/") }.toSet()
@@ -337,8 +338,8 @@ internal object SyncCoordinator {
     }
     val preflightLocal = ProfileIdentity.toRemote(
         SyncData.snapshotSelected(context, preflightNative), preflightProfiles)
-    val preferenceRemovals = preflightBase.keys.filter { key ->
-        key in preflightMarked && key !in preflightLocal
+    val preferenceRemovals = preflightMarked.filter { key ->
+        key in preflightBase && key !in preflightLocal
     }.toSet()
     SyncTrace.info("deletion-preflight-scan",
         "marked=${preflightMarked.size} selected=${preflightLocal.size} " +
@@ -507,7 +508,8 @@ internal object SyncCoordinator {
 
             // A synced device may propagate actual deletions automatically.
             // An unlinked device has no baseline and never emits deletions.
-            val verifiedRemovals = verifiedDeletionPaths(context, config)
+            val base = baseline(context)
+            val verifiedRemovals = verifiedDeletionPaths(context, config, base)
             // The final Git commit checks membership against this verified set.
             (backend as GithubSyncAdapter).allowVerifiedDeletions(verifiedRemovals)
 
@@ -592,13 +594,28 @@ internal object SyncCoordinator {
             val marked = config.preferences.all.keys.asSequence()
                 .filter { it.startsWith("modified/") }
                 .map { it.removePrefix("modified/") }.toSet()
-            val profileRosterChanged = ProfileSync.encode(ProfileSync.decode(profileLocal)) !=
-                targetProfiles
-            val headerNeedsAudit = (remoteValues.keys + marked).any {
+            val oldRoster = ProfileSync.decode(profileLocal)
+            val rosterIdentitiesChanged =
+                oldRoster.items.mapValues { ProfileIdentity.uuid(it.value) } !=
+                    profileMerge.target.items.mapValues { ProfileIdentity.uuid(it.value) }
+            // Received generated headers need the full reference graph for safe
+            // restore. Dirty local headers alone do not require repeating an audit.
+            val incomingHeaders = remoteValues.keys.any {
                 it.startsWith("d/download_header_cache/")
             }
+            val localHeaderMarkers = marked.count {
+                it.startsWith("d/download_header_cache/")
+            }
+            val periodicAuditDue = needsLocalAudit()
             val completeLocal = pull.full || firstRemoteRestore ||
-                profileRosterChanged || headerNeedsAudit || needsLocalAudit()
+                rosterIdentitiesChanged || incomingHeaders || periodicAuditDue
+            SyncTrace.info("local-audit-decision",
+                "mode=${if (completeLocal) "audit" else "changed-only"} " +
+                    "fullPull=${pull.full} firstRestore=$firstRemoteRestore " +
+                    "rosterIdentityChange=$rosterIdentitiesChanged " +
+                    "incomingHeader=$incomingHeaders markedHeaders=$localHeaderMarkers " +
+                    "periodicDue=$periodicAuditDue lastAuditMs=$lastCompleteLocalAuditAt " +
+                    "remoteKeys=${remoteValues.size} dirty=${marked.size}")
             val local = if (completeLocal) {
                 ProfileIdentity.toRemote(SyncData.snapshot(context), profileMerge.target)
             } else {
@@ -614,7 +631,6 @@ internal object SyncCoordinator {
             if (completeLocal) SyncTrace.keys("local-audit", local.keys)
             else SyncTrace.keys("local-changed", local.keys)
             val currentPlugins = PluginInventory.snapshot(context)
-            val base = baseline(context)
             stage = "comparing changed settings"
             val savedLists = config.preferences.getString("list_baselines", null)
             val priorLists = if (savedLists == null) JSONObject() else JSONObject(

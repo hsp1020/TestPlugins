@@ -91,6 +91,26 @@ class SyncDomainRegressionTest {
         assertFalse(merged.changedRemote)
     }
 
+    @Test fun selectedAndFullSnapshotShareOrphanHeaderExclusion() {
+        val referenced = setOf("42", "88")
+        assertTrue(SyncData.includeHeaderCache("download_header_cache/42", referenced))
+        assertTrue(SyncData.includeHeaderCache("download_header_cache/88", referenced))
+        assertFalse(SyncData.includeHeaderCache("download_header_cache/41", referenced))
+        assertFalse(SyncData.includeHeaderCache("download_header_cache/99", emptySet()))
+        assertTrue(SyncData.includeHeaderCache("0/video_pos_dur/42", referenced))
+    }
+
+    @Test fun unreferencedHeaderMarkerCannotJustifyDeletingAnExistingServerValue() {
+        val state = ProfileSync.decode(roster(profile(0, "Main")))
+        val key = "d/download_header_cache/unused"
+        val plan = SyncPreferencePlanner.reconcile(
+            emptyMap(), emptyMap(), mutableMapOf(key to SyncBackend.digest("old")),
+            state, setOf(0), emptySet(), emptySet(), JSONObject(), false,
+            false, false)
+        assertFalse(plan.upload.containsKey(key))
+        assertTrue(plan.next.containsKey(key))
+    }
+
     @Test fun progressThrottleIsBoundedAndDoesNotDelayOtherPreferences() {
         assertTrue(SyncPlaybackThrottle.isProgressPath("d/0/video_pos_dur/123"))
         assertTrue(SyncPlaybackThrottle.isProgressPath("d/0/result_resume_watching_2/123"))

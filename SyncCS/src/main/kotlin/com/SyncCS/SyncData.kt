@@ -253,6 +253,11 @@ internal object SyncData {
         }
         return result.toString()
     }
+    /** Keep both snapshot modes identical for generated, unreferenced header caches. */
+    internal fun includeHeaderCache(key: String, referencedIds: Set<String>): Boolean =
+        !key.startsWith("download_header_cache/") ||
+            key.removePrefix("download_header_cache/") in referencedIds
+
     fun snapshot(context: Context): MutableMap<String, String> {
         val result = mutableMapOf<String, String>()
         val data = with(DataStore) { context.getSharedPrefs() }
@@ -264,8 +269,7 @@ internal object SyncData {
             it.substringBefore('/').toIntOrNull() in profileIndices
         })
         for ((name, value) in stored) {
-            if (name.startsWith("download_header_cache/") &&
-                name.removePrefix("download_header_cache/") !in headerIds) continue
+            if (!includeHeaderCache(name, headerIds)) continue
             if (!belongsToInstalledProfile(name, profileIndices)) continue
             if (!dataAllowed(name) || name.length > 500) continue
             valueJson(value)?.let { if (it.length <= 524288) result["d/" + name] = it }
@@ -308,9 +312,15 @@ internal object SyncData {
             val indices = DataStoreHelper.getAccounts(context)
                 .mapTo(mutableSetOf()) { it.keyIndex }
             val stored = with(DataStore) { context.getSharedPrefs() }.all
+            val referencedHeaders = if (dataPaths.any {
+                it.startsWith("d/download_header_cache/")
+            }) referencedHeaderIds(stored.keys.filter {
+                it.substringBefore('/').toIntOrNull() in indices
+            }) else emptySet()
             for (path in dataPaths) {
                 val key = path.removePrefix("d/")
-                if (!belongsToInstalledProfile(key, indices) || key.length > 500) continue
+                if (!belongsToInstalledProfile(key, indices) || key.length > 500 ||
+                    !includeHeaderCache(key, referencedHeaders)) continue
                 val raw = stored[key] ?: continue
                 valueJson(raw)?.takeIf { it.length <= 524288 }?.let { result[path] = it }
             }
