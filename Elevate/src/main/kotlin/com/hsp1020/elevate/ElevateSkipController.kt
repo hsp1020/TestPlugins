@@ -55,6 +55,22 @@ internal class ElevateSkipController(private val application: Application) :
     private var lastPosition: Long? = null
     private var suppressedUntilOutside = false
     private var polling = false
+    private var attachAttempts = 0
+    private val attachRetry = object : Runnable {
+        override fun run() {
+            if (fragment == null || mediaPlayer != null || attachAttempts >= 12) return
+            attachAttempts++
+            refresh()
+            if (mediaPlayer == null) main.postDelayed(this, 300L)
+        }
+    }
+
+    private fun retryPlayerAttach() {
+        if (mediaPlayer != null || fragment == null) return
+        attachAttempts = 0
+        main.removeCallbacks(attachRetry)
+        main.postDelayed(attachRetry, 300L)
+    }
 
     private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key?.startsWith("AUTO_SKIP_") == true) main.post { scheduleAutoSkip() }
@@ -129,7 +145,10 @@ internal class ElevateSkipController(private val application: Application) :
                 }
             }
         }
-        val linksObserver = Observer<VideoLive<Set<VideoLink>>> { refresh() }
+        val linksObserver = Observer<VideoLive<Set<VideoLink>>> {
+            refresh()
+            retryPlayerAttach()
+        }
         vm.currentStamps.observe(candidate.viewLifecycleOwner, stampsObserver)
         vm.currentLinks.observe(candidate.viewLifecycleOwner, linksObserver)
         unobserve = {
@@ -137,6 +156,7 @@ internal class ElevateSkipController(private val application: Application) :
             vm.currentLinks.removeObserver(linksObserver)
         }
         refresh()
+        retryPlayerAttach()
     }
 
     private fun detach() {
@@ -150,6 +170,8 @@ internal class ElevateSkipController(private val application: Application) :
         mediaPlayer = null
         polling = false
         main.removeCallbacks(autoTick)
+        main.removeCallbacks(attachRetry)
+        attachAttempts = 0
         restoreNative()
         model = null
         fragment = null
