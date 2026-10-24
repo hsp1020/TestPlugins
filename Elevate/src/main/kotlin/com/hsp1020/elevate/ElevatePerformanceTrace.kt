@@ -27,6 +27,7 @@ import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.player.VideoLink
 import com.lagradost.cloudstream3.ui.player.VideoLive
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
+import java.lang.ref.WeakReference
 import java.lang.ref.PhantomReference
 import java.lang.ref.ReferenceQueue
 import java.util.concurrent.ConcurrentHashMap
@@ -172,14 +173,178 @@ internal class ElevatePerformanceTrace(private val application: Application) :
     private var lastHttpEnsureAt = 0L
     private val httpQueue = ReferenceQueue<ResponseBody>()
     private val httpPending = ConcurrentHashMap<PhantomReference<ResponseBody>, HttpRecord>()
+
+    // Response cleanup is event-driven. Keep only weak references while an
+    // identified CineStream cfGet() retry is imminent; never retain media bodies.
+    private data class CfPending(
+        val stage: Int,
+        val id: Long,
+        val atMs: Long,
+        val body: WeakReference<ResponseBody>
+    )
+    private val cfGuardLock = Any()
+    private val cfPending = LinkedHashMap<String, CfPending>()
+    private val cfAmbiguous = LinkedHashMap<String, Long>()
+    private val cfGuardLimit = 64
+
+    private fun guardLog(
+        stage: String, request: Request, id: Long, detail: String = ""
+    ) {
+        // Never log query strings, media URLs or credentials.
+        Log.i(tag, "http-guard stage=" + stage +
+            " requestId=" + id + " host=" + request.url.host +
+            " urlKey=" + Integer.toHexString(request.url.toString().hashCode()) +
+            " method=" + request.method + " " + detail)
+    }
+
+    private fun cfCallerStage(origin: CallOrigin?): Int {
+        val frames = origin?.frames ?: return 0
+        // The withLock block becomes CineStreamExtractors$cfGet$... after
+        // coroutine suspension. Check it before the outer function frame.
+        if (frames.any { it.className.startsWith("com.megix.") &&
+                it.className.contains("CineStreamExtractors") &&
+                it.className.contains("\$cfGet") }) return 2
+        if (frames.any { it.className == "com.megix.CineStreamExtractors" &&
+                (it.methodName == "cfGet" || it.methodName == "cfPost") })
+            return if (frames.any { it.methodName == "cfGet" }) 1 else 0
+        return 0
+    }
+
+    private fun cfRetryStarted(request: Request, origin: CallOrigin?): Int {
+        val callerStage = cfCallerStage(origin)
+        if (request.method != "GET" || callerStage != 2) return callerStage
+        val key = request.url.toString()
+        val now = SystemClock.elapsedRealtime()
+        synchronized(cfGuardLock) {
+            val conflictAt = cfAmbiguous[key]
+            if (conflictAt != null) {
+                if (now - conflictAt < 10_000L) {
+                    guardLog("cf-retry-skipped", request, 0, "reason=parallel-ambiguous")
+                    return 0
+                }
+                cfAmbiguous.remove(key)
+            }
+            val previous = cfPending.remove(key)
+            if (previous == null) {
+                guardLog("cf-retry-skipped", request, 0, "reason=no-identified-predecessor")
+                return 0
+            }
+            if (now - previous.atMs > 15_000L) {
+                guardLog("cf-retry-skipped", request, previous.id,
+                    "reason=predecessor-stale priorStage=" + previous.stage)
+                return 0
+            }
+            val previousBody = previous.body.get()
+            if (previousBody == null) {
+                guardLog("cf-retry-skipped", request, previous.id,
+                    "reason=predecessor-reclaimed priorStage=" + previous.stage)
+                return 0
+            }
+            return try {
+                previousBody.close()
+                val nextStage = previous.stage + 1
+                guardLog("cf-previous-closed", request, previous.id,
+                    "priorStage=" + previous.stage + " nextStage=" + nextStage +
+                        " delayMs=" + (now - previous.atMs))
+                nextStage
+            } catch (failure: Exception) {
+                guardLog("cf-close-failed", request, previous.id,
+                    "reason=" + failure.javaClass.simpleName)
+                0
+            }
+        }
+    }
+
+    private fun rememberCfFailure(
+        request: Request, stage: Int, id: Long, body: ResponseBody
+    ) {
+        if (stage !in 1..2) return // Never treat final response as abandoned.
+        val key = request.url.toString()
+        val now = SystemClock.elapsedRealtime()
+        synchronized(cfGuardLock) {
+            val conflictAt = cfAmbiguous[key]
+            if (conflictAt != null && now - conflictAt < 10_000L) {
+                guardLog("cf-candidate-skipped", request, id,
+                    "stage=" + stage + " reason=parallel-ambiguous")
+                return
+            }
+            if (cfPending.containsKey(key)) {
+                cfPending.remove(key)
+                cfAmbiguous[key] = now
+                guardLog("cf-candidate-skipped", request, id,
+                    "stage=" + stage + " reason=multiple-inflight-same-url")
+                return
+            }
+            cfPending[key] = CfPending(stage, id, now, WeakReference(body))
+            // Only bounded error-path bookkeeping; no background cleanup work.
+            while (cfPending.size > cfGuardLimit) {
+                val firstKey = cfPending.keys.first()
+                cfPending.remove(firstKey)
+            }
+            while (cfAmbiguous.size > cfGuardLimit) {
+                cfAmbiguous.remove(cfAmbiguous.keys.first())
+            }
+            guardLog("cf-candidate", request, id, "stage=" + stage)
+        }
+    }
+
+    private fun streamPlayHeaderOnly(
+        request: Request, response: okhttp3.Response, origin: CallOrigin?
+    ): Boolean {
+        if (request.method != "GET" ||
+            !request.url.encodedPath.endsWith("/download") ||
+            response.header("HX-Redirect").isNullOrBlank()) return false
+        val referer = request.header("Referer")?.trimEnd('/') ?: return false
+        if (referer != request.url.toString().substringBeforeLast("/download").trimEnd('/'))
+            return false
+        // Verified header-only BuzzServer paths in the reference StreamPlay fork.
+        return origin?.frames?.any {
+            it.className.startsWith("com.Phisher98.") &&
+                (it.className.contains("BuzzServer") ||
+                    it.className.contains("Hubcloudone") ||
+                    it.className.contains("VCloud"))
+        } == true
+    }
     private val httpInterceptor = Interceptor { chain ->
         val request = chain.request()
+        val origin = if (monitoring)
+            callOrigins[request] ?: callOrigins[chain.call().request()]
+        else null
+        // The next request proves the preceding retry response was abandoned.
+        // Unknown callers/parallel executions are intentionally not force-closed.
+        val cfStage = if (monitoring) cfRetryStarted(request, origin) else 0
         val response = chain.proceed(request)
         val body = response.body
-        if (!monitoring || body == null || response.code == 101) {
+        if (!monitoring || response.code == 101) {
+            response
+        } else if (request.method == "HEAD") {
+            // RFC HEAD has no response representation body; code/headers remain
+            // readable through NiceResponse even after this close.
+            runCatching { body?.close() }
+                .onSuccess {
+                    guardLog("head-closed", request, 0,
+                        "code=" + response.code + " bodyPresent=" + (body != null) +
+                            " owner=" + (origin?.provider ?: "unknown"))
+                }.onFailure {
+                    guardLog("head-close-failed", request, 0,
+                        "reason=" + it.javaClass.simpleName)
+                }
+            response
+        } else if (body != null && streamPlayHeaderOnly(request, response, origin)) {
+            // These verified callers only inspect HX-Redirect, never the body.
+            runCatching { body.close() }
+                .onSuccess {
+                    guardLog("streamplay-header-closed", request, 0,
+                        "code=" + response.code +
+                            " caller=" + (origin?.entryPoint ?: "unknown"))
+                }.onFailure {
+                    guardLog("streamplay-header-close-failed", request, 0,
+                        "reason=" + it.javaClass.simpleName)
+                }
+            response
+        } else if (body == null) {
             response
         } else {
-            val origin = callOrigins[request] ?: callOrigins[chain.call().request()]
             val record = HttpRecord(
                 id = httpSequence.incrementAndGet(),
                 started = SystemClock.elapsedRealtime(),
@@ -191,8 +356,6 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                 contentLength = body.contentLength(),
                 rangeRequest = request.header("Range") != null,
                 sourceThread = Thread.currentThread().name,
-                // Interceptor entry gives the actual HTTP execution stack. Async
-                // OkHttp dispatch can obscure which plugin initiated the request.
                 executionStack = Thread.currentThread().stackTrace.drop(2).take(24),
                 callOrigin = origin
             )
@@ -207,6 +370,19 @@ internal class ElevatePerformanceTrace(private val application: Application) :
             reference = PhantomReference(tracked as ResponseBody, httpQueue)
             httpPending[reference] = record
             httpOpenCount.incrementAndGet()
+            if (response.code == 403 || response.code == 503) {
+                when (cfStage) {
+                    1, 2 -> rememberCfFailure(request, cfStage, record.id, tracked)
+                    3 -> guardLog("cf-final-preserved", request, record.id,
+                        "code=" + response.code + " stage=3")
+                    else -> if (origin?.provider == "CineStream") {
+                        guardLog("cf-unresolved", request, record.id,
+                            "code=" + response.code +
+                                " caller=" + (origin.entryPoint) +
+                                " reason=unverified-request-origin")
+                    }
+                }
+            }
             response.newBuilder().body(tracked).build()
         }
     }
@@ -494,6 +670,10 @@ internal class ElevatePerformanceTrace(private val application: Application) :
         }
         httpPending.clear()
         callOrigins.clear()
+        synchronized(cfGuardLock) {
+            cfPending.clear()
+            cfAmbiguous.clear()
+        }
         worker?.interrupt()
         worker = null
         main.removeCallbacks(heartbeat)
