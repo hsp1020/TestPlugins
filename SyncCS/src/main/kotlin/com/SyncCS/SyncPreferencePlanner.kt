@@ -21,7 +21,7 @@ internal object SyncPreferencePlanner {
     fun reconcile(
         remoteValues: Map<String, String?>,
         local: Map<String, String>,
-        base: MutableMap<String, String>,
+        base: Map<String, String>,
         profiles: ProfileSync.State,
         activeProfiles: Set<Int>,
         replacedProfileUuids: Set<String>,

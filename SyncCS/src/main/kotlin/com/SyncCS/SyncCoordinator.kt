@@ -66,9 +66,23 @@ internal object SyncCoordinator {
             "/result_subscribed_state_data/" in key
         )
 
-    private fun baseline(context: Context): MutableMap<String, String> {
-        val json = JSONObject(SyncConfiguration(context).preferences.getString("base", "{}") ?: "{}")
-        return json.keys().asSequence().associateWith { json.getString(it) }.toMutableMap()
+    // Cache only the last verified revision's immutable baseline. Source text
+    // comparison invalidates it on another plugin instance, rollback or relink.
+    @Volatile private var cachedBaseline: Pair<String, Map<String, String>>? = null
+    private fun baseline(context: Context): Map<String, String> {
+        val raw = SyncConfiguration(context).preferences.getString("base", "{}") ?: "{}"
+        val cached = cachedBaseline
+        if (cached != null && cached.first == raw) {
+            SyncTrace.info("baseline-cache", "hit=true keys=${cached.second.size}")
+            return cached.second
+        }
+        val started = android.os.SystemClock.elapsedRealtime()
+        val json = JSONObject(raw)
+        val parsed = json.keys().asSequence().associateWith { json.getString(it) }.toMap()
+        cachedBaseline = raw to parsed
+        SyncTrace.info("baseline-cache",
+            "hit=false keys=${parsed.size} parseMs=${android.os.SystemClock.elapsedRealtime() - started}")
+        return parsed
     }
 
     fun markChanged(context: Context, path: String) {
@@ -379,6 +393,7 @@ internal object SyncCoordinator {
     ) {
     val baseJson = JSONObject()
     for ((key, hash) in next) baseJson.put(key, hash)
+    val baseRaw = baseJson.toString()
     val revisionJson = JSONObject()
     versions.forEach { (key, version) -> revisionJson.put(key, version) }
     val listBaselineJson = if (completeLocal) JSONObject()
@@ -392,7 +407,7 @@ internal object SyncCoordinator {
         } else listBaselineJson.remove(key)
     }
     val persisted = config.preferences.edit()
-        .putString("base", baseJson.toString())
+        .putString("base", baseRaw)
         .putString("remote_versions", revisionJson.toString())
         .putString("list_baselines", LocalVault.encrypt(
             listBaselineJson.toString().toByteArray(Charsets.UTF_8)))
@@ -407,6 +422,8 @@ internal object SyncCoordinator {
         persisted.remove("plugin_remote_snapshot")
     }
     check(persisted.commit())
+    cachedBaseline = baseRaw to next
+    SyncTrace.info("baseline-cache", "updated=true keys=${next.size}")
     }
 
     private suspend fun synchronizePass(context: Context, activity: Activity?): String {
