@@ -40,6 +40,7 @@ import okhttp3.Request
 import okhttp3.Interceptor
 import okhttp3.MediaType
 import okhttp3.ResponseBody
+import okhttp3.ResponseBody.Companion.toResponseBody
 import okio.Buffer
 import okio.BufferedSource
 import okio.ForwardingSource
@@ -180,7 +181,8 @@ internal class ElevatePerformanceTrace(private val application: Application) :
         val stage: Int,
         val id: Long,
         val atMs: Long,
-        val body: WeakReference<ResponseBody>
+        val body: WeakReference<ResponseBody>?,
+        val alreadyClosed: Boolean = false
     )
     private val cfGuardLock = Any()
     private val cfPending = LinkedHashMap<String, CfPending>()
@@ -234,7 +236,12 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                     "reason=predecessor-stale priorStage=" + previous.stage)
                 return 0
             }
-            val previousBody = previous.body.get()
+            if (previous.alreadyClosed) {
+                guardLog("cf-first-retry-confirmed", request, previous.id,
+                    "priorStage=" + previous.stage + " nextStage=2")
+                return 2
+            }
+            val previousBody = previous.body?.get()
             if (previousBody == null) {
                 guardLog("cf-retry-skipped", request, previous.id,
                     "reason=predecessor-reclaimed priorStage=" + previous.stage)
@@ -256,7 +263,8 @@ internal class ElevatePerformanceTrace(private val application: Application) :
     }
 
     private fun rememberCfFailure(
-        request: Request, stage: Int, id: Long, body: ResponseBody
+        request: Request, stage: Int, id: Long, body: ResponseBody?,
+        alreadyClosed: Boolean = false
     ) {
         if (stage !in 1..2) return // Never treat final response as abandoned.
         val key = request.url.toString()
@@ -275,7 +283,8 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                     "stage=" + stage + " reason=multiple-inflight-same-url")
                 return
             }
-            cfPending[key] = CfPending(stage, id, now, WeakReference(body))
+            cfPending[key] = CfPending(stage, id, now,
+                body?.let(::WeakReference), alreadyClosed)
             // Only bounded error-path bookkeeping; no background cleanup work.
             while (cfPending.size > cfGuardLimit) {
                 val firstKey = cfPending.keys.first()
@@ -289,37 +298,104 @@ internal class ElevatePerformanceTrace(private val application: Application) :
     }
 
     private fun streamPlayHeaderOnly(
-        request: Request, response: okhttp3.Response, origin: CallOrigin?
+        request: Request, origin: CallOrigin?
+    ): Boolean {
+        if (request.method != "GET" || origin?.provider?.startsWith("StreamPlay") != true)
+            return false
+        val frames = origin.frames
+        // The installed plugin uses com.phisher98 (lowercase), not the
+        // package spelling in the reference fork source tree.
+        val buzz = frames.any {
+            it.className.startsWith("com.phisher98.", ignoreCase = true) &&
+                (it.className.contains("BuzzServer", ignoreCase = true) ||
+                    it.className.contains("Hubcloudone", ignoreCase = true) ||
+                    it.className.contains("VCloud", ignoreCase = true))
+        }
+        if (buzz && request.url.encodedPath.endsWith("/download")) {
+            val referer = request.header("Referer")?.trimEnd('/')
+            val source = request.url.toString().substringBeforeLast("/download").trimEnd('/')
+            // The BuzzServer path reads HX-Redirect even if it is absent or
+            // the response is 204. The header must NOT be required here.
+            return referer != null && referer == source
+        }
+        // Verified redirect-only paths in the reference extractor use
+        // Location, never the response body.
+        return false
+    }
+
+    private fun cineMovieboxHeaderOnly(
+        request: Request, origin: CallOrigin?
     ): Boolean {
         if (request.method != "GET" ||
-            !request.url.encodedPath.endsWith("/download") ||
-            response.header("HX-Redirect").isNullOrBlank()) return false
-        val referer = request.header("Referer")?.trimEnd('/') ?: return false
-        if (referer != request.url.toString().substringBeforeLast("/download").trimEnd('/'))
-            return false
-        // Verified header-only BuzzServer paths in the reference StreamPlay fork.
+            request.url.host != "h5-api.aoneroom.com" ||
+            request.url.encodedPath != "/wefeed-h5api-bff/app/get-latest-app-pkgs") return false
         return origin?.frames?.any {
-            it.className.startsWith("com.Phisher98.") &&
-                (it.className.contains("BuzzServer") ||
-                    it.className.contains("Hubcloudone") ||
-                    it.className.contains("VCloud"))
+            it.className.startsWith("com.megix.", ignoreCase = true) &&
+                it.className.contains("CineStreamExtractors") &&
+                it.methodName.contains("invokeMoviebox", ignoreCase = true)
         } == true
     }
+
+    // Eagerly release the socket for tiny, fully sized provider error
+    // messages, while retaining *identical* bytes for the caller's .text /
+    // .document / .parsedSafe. Unknown-length or large responses stay untouched
+    // because probing them would introduce blocking I/O and allocation.
+    private fun bufferSmallProviderError(
+        request: Request, response: okhttp3.Response, origin: CallOrigin?
+    ): okhttp3.Response? {
+        if (request.header("Range") != null ||
+            response.code !in 400..599 ||
+            origin?.provider?.startsWith("StreamPlay") != true) return null
+        val actor = origin.entryPoint
+        val targeted = listOf(
+            "invokeVidy", "invokeMapple", "miruroPipeRequestForDomain",
+            "resolveTryEmbed", "getMovieBoxToken", "invokeAtlantic",
+            "invokeZshow", "safeGet"
+        ).any { actor.contains(it, ignoreCase = true) }
+        if (!targeted) return null
+        val originalBody = response.body ?: return null
+        val length = originalBody.contentLength()
+        val mediaType = originalBody.contentType()?.toString().orEmpty()
+        if (mediaType.startsWith("video/") || mediaType.contains("mpegurl", true))
+            return null
+        if (length < 0 || length > 16_384L) {
+            guardLog("streamplay-error-unbuffered", request, 0,
+                "code=" + response.code + " length=" + length +
+                    " caller=" + actor +
+                    " reason=" + (if (length < 0) "unknown-length" else "large-body"))
+            return null
+        }
+        return try {
+            val bytes = originalBody.bytes() // consumes and closes the socket
+            originalBody.close()
+            guardLog("streamplay-error-buffered", request, 0,
+                "code=" + response.code + " length=" + bytes.size +
+                    " caller=" + actor)
+            response.newBuilder().body(bytes.toResponseBody(originalBody.contentType())).build()
+        } catch (failure: Exception) {
+            // The upstream body may be partly consumed. Propagate the same read
+            // failure rather than silently returning an invalid response.
+            runCatching { originalBody.close() }
+            guardLog("streamplay-error-buffer-failed", request, 0,
+                "code=" + response.code + " caller=" + actor +
+                    " reason=" + failure.javaClass.simpleName)
+            throw failure
+        }
+    }
+
     private val httpInterceptor = Interceptor { chain ->
         val request = chain.request()
         val origin = if (monitoring)
             callOrigins[request] ?: callOrigins[chain.call().request()]
         else null
-        // The next request proves the preceding retry response was abandoned.
-        // Unknown callers/parallel executions are intentionally not force-closed.
         val cfStage = if (monitoring) cfRetryStarted(request, origin) else 0
         val response = chain.proceed(request)
         val body = response.body
         if (!monitoring || response.code == 101) {
             response
         } else if (request.method == "HEAD") {
-            // RFC HEAD has no response representation body; code/headers remain
-            // readable through NiceResponse even after this close.
+            // HEAD never supplies a representation body. The status and
+            // Location header are still readable after closing it.
             runCatching { body?.close() }
                 .onSuccess {
                     guardLog("head-closed", request, 0,
@@ -330,8 +406,7 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                         "reason=" + it.javaClass.simpleName)
                 }
             response
-        } else if (body != null && streamPlayHeaderOnly(request, response, origin)) {
-            // These verified callers only inspect HX-Redirect, never the body.
+        } else if (body != null && streamPlayHeaderOnly(request, origin)) {
             runCatching { body.close() }
                 .onSuccess {
                     guardLog("streamplay-header-closed", request, 0,
@@ -342,48 +417,79 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                         "reason=" + it.javaClass.simpleName)
                 }
             response
+        } else if (body != null && cineMovieboxHeaderOnly(request, origin)) {
+            runCatching { body.close() }
+                .onSuccess {
+                    guardLog("cine-moviebox-header-closed", request, 0,
+                        "code=" + response.code)
+                }.onFailure {
+                    guardLog("cine-moviebox-header-close-failed", request, 0,
+                        "reason=" + it.javaClass.simpleName)
+                }
+            response
+        } else if (cfStage == 1 && (response.code == 403 || response.code == 503)) {
+            // cfGet first attempt is NEVER returned on 403/503; its only
+            // next action is the CloudflareKiller retry. Close immediately,
+            // before waiting on the per-host Mutex or WebView challenge.
+            val id = httpSequence.incrementAndGet()
+            runCatching { body?.close() }
+                .onSuccess {
+                    rememberCfFailure(request, 1, id, null, alreadyClosed = true)
+                    guardLog("cf-first-closed", request, id,
+                        "code=" + response.code + " stage=1")
+                }.onFailure {
+                    guardLog("cf-first-close-failed", request, id,
+                        "code=" + response.code +
+                            " reason=" + it.javaClass.simpleName)
+                }
+            response
         } else if (body == null) {
             response
         } else {
-            val record = HttpRecord(
-                id = httpSequence.incrementAndGet(),
-                started = SystemClock.elapsedRealtime(),
-                host = request.url.host,
-                route = "",
-                code = response.code,
-                method = request.method,
-                contentType = body.contentType()?.toString().orEmpty().take(48),
-                contentLength = body.contentLength(),
-                rangeRequest = request.header("Range") != null,
-                sourceThread = Thread.currentThread().name,
-                executionStack = Thread.currentThread().stackTrace.drop(2).take(24),
-                callOrigin = origin
-            )
-            lateinit var reference: PhantomReference<ResponseBody>
-            val tracked = TracedResponseBody(body,
-                onRead = { count ->
-                    if (count > 0L) record.readBytes.addAndGet(count)
-                    else if (count == -1L) record.readEof = true
-                },
-                onClose = { onHttpClosed(record, reference) }
-            )
-            reference = PhantomReference(tracked as ResponseBody, httpQueue)
-            httpPending[reference] = record
-            httpOpenCount.incrementAndGet()
-            if (response.code == 403 || response.code == 503) {
-                when (cfStage) {
-                    1, 2 -> rememberCfFailure(request, cfStage, record.id, tracked)
-                    3 -> guardLog("cf-final-preserved", request, record.id,
-                        "code=" + response.code + " stage=3")
-                    else -> if (origin?.provider == "CineStream") {
-                        guardLog("cf-unresolved", request, record.id,
-                            "code=" + response.code +
-                                " caller=" + (origin.entryPoint) +
-                                " reason=unverified-request-origin")
+            val buffered = bufferSmallProviderError(request, response, origin)
+            if (buffered != null) {
+                buffered
+            } else {
+                val record = HttpRecord(
+                    id = httpSequence.incrementAndGet(),
+                    started = SystemClock.elapsedRealtime(),
+                    host = request.url.host,
+                    route = "",
+                    code = response.code,
+                    method = request.method,
+                    contentType = body.contentType()?.toString().orEmpty().take(48),
+                    contentLength = body.contentLength(),
+                    rangeRequest = request.header("Range") != null,
+                    sourceThread = Thread.currentThread().name,
+                    executionStack = Thread.currentThread().stackTrace.drop(2).take(24),
+                    callOrigin = origin
+                )
+                lateinit var reference: PhantomReference<ResponseBody>
+                val tracked = TracedResponseBody(body,
+                    onRead = { count ->
+                        if (count > 0L) record.readBytes.addAndGet(count)
+                        else if (count == -1L) record.readEof = true
+                    },
+                    onClose = { onHttpClosed(record, reference) }
+                )
+                reference = PhantomReference(tracked as ResponseBody, httpQueue)
+                httpPending[reference] = record
+                httpOpenCount.incrementAndGet()
+                if (response.code == 403 || response.code == 503) {
+                    when (cfStage) {
+                        2 -> rememberCfFailure(request, 2, record.id, tracked)
+                        3 -> guardLog("cf-final-preserved", request, record.id,
+                            "code=" + response.code + " stage=3")
+                        else -> if (origin?.provider == "CineStream") {
+                            guardLog("cf-unresolved", request, record.id,
+                                "code=" + response.code +
+                                    " caller=" + origin.entryPoint +
+                                    " reason=unverified-request-origin")
+                        }
                     }
                 }
+                response.newBuilder().body(tracked).build()
             }
-            response.newBuilder().body(tracked).build()
         }
     }
 
