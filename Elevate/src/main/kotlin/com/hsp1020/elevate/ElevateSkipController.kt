@@ -60,7 +60,7 @@ internal class ElevateSkipController(private val application: Application) :
     private var suppressedUntilOutside = false
     private var polling = false
     // Keep the native MaterialButton and its click/focus/animation handlers intact.
-    // Only swap phone/tablet constraint anchors; TV is already above the bottom bar.
+    // Anchor the same native button to the fixed player surface on phone, tablet and TV.
     private data class SkipButtonPosition(
         val button: View,
         val topToTop: Int,
@@ -81,19 +81,26 @@ internal class ElevateSkipController(private val application: Application) :
         if (button.parent !== bottomBar.parent) return
         if (savedButtonPosition?.button === button) return
         restoreNativeSkipButton()
-        // Native TV is already constrained to the bottom bar: leave it untouched.
-        if (params.bottomToTop == bottomBar.id) return
+        // bottom_player_bar changes visibility/translation when controls toggle.
+        // Anchoring a skip button to that bar moves it even though the video did not move.
+        // Anchor to the fixed player_video_holder instead (also on TV).
+        val tvLayout = params.bottomToTop == bottomBar.id
         savedButtonPosition = SkipButtonPosition(
             button, params.topToTop, params.topToBottom, params.bottomToTop,
             params.bottomToBottom, params.topMargin, params.bottomMargin, params.marginEnd
         )
         params.topToTop = ConstraintLayout.LayoutParams.UNSET
         params.topToBottom = ConstraintLayout.LayoutParams.UNSET
-        params.bottomToBottom = ConstraintLayout.LayoutParams.UNSET
-        params.bottomToTop = bottomBar.id
+        params.bottomToTop = ConstraintLayout.LayoutParams.UNSET
+        params.bottomToBottom = ConstraintLayout.LayoutParams.PARENT_ID
         params.topMargin = 0
-        params.bottomMargin = (16 * button.resources.displayMetrics.density + 0.5f).toInt()
-        params.marginEnd = (24 * button.resources.displayMetrics.density + 0.5f).toInt()
+        // Fixed offsets are independent of control-bar visibility and animation.
+        // Keep the TV button's original right inset and native D-pad focus.
+        params.bottomMargin = ((if (tvLayout) 96 else 84) *
+            button.resources.displayMetrics.density + 0.5f).toInt()
+        if (!tvLayout) {
+            params.marginEnd = (24 * button.resources.displayMetrics.density + 0.5f).toInt()
+        }
         button.layoutParams = params
     }
 
