@@ -1984,25 +1984,31 @@ internal class RatingPlotImageHook(
             })
         }
 
+        private var lastProviderOptions: List<String> = emptyList()
+
         private fun updateOptions() {
             val spinner = combo ?: return
             applying = true
             try {
                 val names = statuses.keys.map { titles[it] ?: it }
-                val activity = fragment.requireActivity()
-                val checkId = pluginResources.getIdentifier(
-                    "addon_check_icon", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
-                spinner.adapter = catalogStyledAdapter(activity, names, spinner,
-                    android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT,
-                        android.graphics.Typeface.BOLD),
-                    android.widget.TextView(activity).textSize,
-                    if (checkId != 0) pluginResources.getDrawable(checkId, null) else null)
+                if (spinner.adapter == null || names != lastProviderOptions) {
+                    val activity = fragment.requireActivity()
+                    val checkId = pluginResources.getIdentifier(
+                        "addon_check_icon", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
+                    spinner.adapter = catalogStyledAdapter(activity, names, spinner,
+                        android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT,
+                            android.graphics.Typeface.BOLD),
+                        android.widget.TextView(activity).textSize,
+                        if (checkId != 0) pluginResources.getDrawable(checkId, null) else null)
+                    lastProviderOptions = names
+                }
                 spinner.isEnabled = statuses.size > 1
                 spinner.isClickable = statuses.size > 1
                 spinner.isFocusable = statuses.size > 1
                 comboArrow?.visibility = if (statuses.size > 1) View.VISIBLE else View.GONE
                 val position = statuses.keys.indexOf(selected).coerceAtLeast(0)
-                if (names.isNotEmpty()) spinner.setSelection(position, false)
+                if (names.isNotEmpty() && spinner.selectedItemPosition != position)
+                    spinner.setSelection(position, false)
             } finally { applying = false }
         }
 
@@ -2039,11 +2045,11 @@ internal class RatingPlotImageHook(
                     saveButton?.isEnabled = false
                     plus?.isEnabled = false
                     minus?.isEnabled = false
-                    maximum?.text = "/ ?"
-                    bar?.progress = 0
-                    current?.setText("")
-                    checks?.clearChoices()
-                    scoreLabel?.text = "?"
+                    if (maximum?.text?.toString() != "/ ?") maximum?.text = "/ ?"
+                    if (bar?.progress != 0) bar?.progress = 0
+                    if (!current?.text.isNullOrEmpty()) current?.setText("")
+                    if (checks?.checkedItemCount != 0) checks?.clearChoices()
+                    if (scoreLabel?.text?.toString() != "?") scoreLabel?.text = "?"
                 } finally { applying = false }
 
                 return
@@ -2055,15 +2061,20 @@ internal class RatingPlotImageHook(
                 shimmer?.visibility = View.GONE
                 (shimmer as? com.facebook.shimmer.ShimmerFrameLayout)?.stopShimmer()
                 val max = target.total?.takeIf { it > 0 }
-                maximum?.text = if (max == null) "/ ?" else "/ $max"
-                bar?.max = (max ?: maxOf(1, data.watched)).coerceAtMost(1000000) * 1000
-                bar?.progress = data.watched.coerceAtMost(1000000) * 1000
+                val maxLabel = if (max == null) "/ ?" else "/ $max"
+                if (maximum?.text?.toString() != maxLabel) maximum?.text = maxLabel
+                val barMax = (max ?: maxOf(1, data.watched)).coerceAtMost(1000000) * 1000
+                val barProgress = data.watched.coerceAtMost(1000000) * 1000
+                if (bar?.max != barMax) bar?.max = barMax
+                if (bar?.progress != barProgress) bar?.progress = barProgress
                 val newText = data.watched.toString()
                 if (current?.text?.toString() != newText) {
                     current?.setText(newText)
                     current?.setSelection(newText.length)
                 }
-                checks?.setItemChecked(data.status.internalId + 1, true)
+                val checked = data.status.internalId + 1
+                if (checks?.checkedItemPosition != checked)
+                    checks?.setItemChecked(checked, true)
 
                 checks?.isEnabled = !isWriteInFlight(target) && target.writeBlocked == null &&
                     (target.simklSeason == null || target.simklSeason?.listStatus != null) &&
@@ -2071,8 +2082,10 @@ internal class RatingPlotImageHook(
                 slider?.isEnabled = !isWriteInFlight(target) && target.writeBlocked == null &&
                     (target.simklAnime == null || target.ratingLoaded)
                 val valScore = data.score?.toFloat(10) ?: 0f
-                slider?.value = valScore.coerceIn(0f,10f).toInt().toFloat()
-                scoreLabel?.text = data.score?.toInt(10)?.toString()?.plus("/10") ?: "?"
+                val value = valScore.coerceIn(0f,10f).toInt().toFloat()
+                if (slider?.value != value) slider?.value = value
+                val scoreText = data.score?.toInt(10)?.toString()?.plus("/10") ?: "?"
+                if (scoreLabel?.text?.toString() != scoreText) scoreLabel?.text = scoreText
                 saveButton?.isEnabled = !isWriteInFlight(target) && target.writeBlocked == null
                 current?.isEnabled = !isWriteInFlight(target) && target.writeBlocked == null
                 plus?.isEnabled = !isWriteInFlight(target) && target.writeBlocked == null
@@ -2402,6 +2415,7 @@ internal class RatingPlotImageHook(
             comboContainer = null
             comboArrow = null
             combo = null
+            lastProviderOptions = emptyList()
             oldNames?.visibility = View.VISIBLE
             oldNames = null
             syncModel?.let { model ->
@@ -2551,19 +2565,30 @@ internal class RatingPlotImageHook(
             }
             true
         }
-        private val detailPreDraw = ViewTreeObserver.OnPreDrawListener {
+        // Bind on actual layout changes, never on every draw frame.
+        // RecyclerView click handlers resolve the current adapter position at
+        // click time, so recycled cards do not need per-frame rebinding.
+        private val detailLayout = ViewTreeObserver.OnGlobalLayoutListener {
             if (fragment.isAdded) {
                 castItems?.takeIf { it.isShown }?.let { list ->
-                    for (i in 0 until list.childCount) {
-                        val card = list.getChildAt(i)
+                    val children = (0 until list.childCount).map(list::getChildAt).toSet()
+                    for (card in children) {
+                        if (actorCardForegrounds.containsKey(card)) continue
                         card.setOnClickListener(castClick)
                         card.setOnLongClickListener(castLongClick)
                         bindActorCardRipple(card)
                     }
+                    val removed = actorCardForegrounds.keys.filterNot(children::contains)
+                    for (card in removed) {
+                        card.setOnClickListener(null)
+                        card.setOnLongClickListener(null)
+                        card.setOnTouchListener(null)
+                        card.isPressed = false
+                        card.foreground = actorCardForegrounds.remove(card)
+                    }
                 }
                 bindGenreClicks()
             }
-            true
         }
         fun start() {
             actorInformation.start()
@@ -2571,14 +2596,15 @@ internal class RatingPlotImageHook(
             }
             view.addTextChangedListener(this)
             if (castItems != null || genreGroup != null)
-                root.viewTreeObserver.addOnPreDrawListener(detailPreDraw)
+                root.viewTreeObserver.addOnGlobalLayoutListener(detailLayout)
+            detailLayout.onGlobalLayout()
             runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() }
         }
         fun detach() {
             seasonSyncProbe.stop()
             actorInformation.stop()
             view.removeTextChangedListener(this)
-            if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(detailPreDraw)
+            if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnGlobalLayoutListener(detailLayout)
             boundGenreChips.keys.forEach { chip ->
                 chip.setOnClickListener(null)
                 chip.setOnTouchListener(null)
