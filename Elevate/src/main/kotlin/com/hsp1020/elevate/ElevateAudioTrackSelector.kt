@@ -17,7 +17,6 @@ import androidx.media3.common.Player as Media3Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
-import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.TvType
@@ -42,7 +41,6 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
     private var waitingOn: ViewTreeObserver? = null
     private var lastInstance: Int? = null
     private var lastProvider: String? = null
-    private var sourceEligible = false
     private var isAnime = false
     private var selected = false
     private var started = false
@@ -132,17 +130,6 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         scan(next.supportFragmentManager)
     }
 
-    private fun isSupportedProvider(name: String): Boolean {
-        when (name.lowercase(Locale.ROOT)) {
-            "stremioc", "streamplay", "streamplay-anime",
-            "cinestream", "cinetmdb", "cinesimkl" -> return true
-        }
-        return APIHolder.allProviders.any { provider ->
-            provider.name.equals(name, ignoreCase = true) &&
-                provider.javaClass.name == "com.hsp1020.StremioC"
-        }
-    }
-
     private fun animeFlag(episode: ResultEpisode?): Boolean? {
         val data = episode?.data?.takeIf { it.trimStart().startsWith("{") } ?: return null
         return runCatching {
@@ -189,13 +176,13 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         if (lastInstance == state.instance && lastProvider == name) return
         lastInstance = state.instance
         lastProvider = name
-        sourceEligible = isSupportedProvider(name)
         selected = false
         val episode = generator.meta as? ResultEpisode
         val flag = animeFlag(episode)
-        isAnime = flag ?: ((episode?.tvType ?: response.type) in setOf(
+        val tags = response.tags.orEmpty().map { it.trim().lowercase(Locale.ROOT) }.toSet()
+        isAnime = (flag ?: ((episode?.tvType ?: response.type) in setOf(
             TvType.Anime, TvType.AnimeMovie, TvType.OVA
-        ))
+        ))) || "anime" in tags || ("animation" in tags && "japanese" in tags)
         val activePlayer = player
         if (activePlayer != null) {
             select(activePlayer.currentTracks)
@@ -206,7 +193,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
 
     private fun select(tracks: Tracks) {
         val current = player ?: return
-        if (!sourceEligible || selected) return
+        if (selected) return
         val groups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
         if (groups.isEmpty()) return
         val appLanguage = fragment?.context?.resources?.configuration?.let {
@@ -250,7 +237,6 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         model = null
         lastInstance = null
         lastProvider = null
-        sourceEligible = false
         fragment = null
         selected = false
     }
