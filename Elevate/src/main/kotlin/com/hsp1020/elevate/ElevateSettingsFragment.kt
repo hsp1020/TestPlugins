@@ -105,25 +105,66 @@ class ElevateSettingsFragment : DialogFragment() {
                     LinearLayout(ctx).apply {
                         orientation = LinearLayout.VERTICAL
                         setPadding(dp(14), 0, 0, dp(8))
-                        val names = listOf(
-                            "AUTO_SKIP_OPENING" to "Auto-skip opening",
-                            "AUTO_SKIP_ENDING" to "Auto-skip ending",
-                            "AUTO_SKIP_RECAP" to "Auto-skip recap",
-                            "AUTO_SKIP_MOVIE_CREDITS" to "Auto-skip movie credits"
+                        // Keep existing preference keys, only match Nuvio's labels and descriptions.
+                        val skipItems = listOf(
+                            Triple(
+                                "AUTO_SKIP_OPENING",
+                                "Intro / Opening",
+                                "Skip intros and anime openings automatically."
+                            ),
+                            Triple(
+                                "AUTO_SKIP_RECAP",
+                                "Recap",
+                                "Skip recap segments automatically."
+                            ),
+                            Triple(
+                                "AUTO_SKIP_ENDING",
+                                "Outro / Ending",
+                                "Skip outros and anime endings automatically."
+                            ),
+                            Triple(
+                                "AUTO_SKIP_MOVIE_CREDITS",
+                                "End Credits",
+                                "Skip movie credits, keeping post-credits scenes."
+                            )
                         )
-                        for ((key, label) in names) {
-                            val item = SwitchCompat(ctx).apply {
-                                text = label
-                                textSize = 13f
+                        for ((key, title, description) in skipItems) {
+                            val itemRow = LinearLayout(ctx).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                gravity = Gravity.CENTER_VERTICAL
+                                setPadding(0, dp(6), 0, dp(6))
+                            }
+                            val itemLabels = LinearLayout(ctx).apply {
+                                orientation = LinearLayout.VERTICAL
+                            }
+                            itemLabels.addView(TextView(ctx).apply {
+                                text = title
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                            })
+                            itemLabels.addView(TextView(ctx).apply {
+                                text = description
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                alpha = 0.73f
+                                setPadding(0, dp(3), 0, 0)
+                            })
+                            itemRow.addView(
+                                itemLabels,
+                                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                            )
+                            itemRow.addView(SwitchCompat(ctx).apply {
+                                contentDescription = title
                                 isChecked = preferences.getBoolean(key, false)
                                 setOnCheckedChangeListener { _, checked ->
                                     preferences.edit().putBoolean(key, checked).apply()
                                 }
-                            }
-                            addView(item, LinearLayout.LayoutParams(
+                            }, LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT
+                            ).apply { marginStart = dp(12) })
+                            addView(itemRow, LinearLayout.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
                                 ViewGroup.LayoutParams.WRAP_CONTENT
-                            ).apply { topMargin = dp(5) })
+                            ))
                         }
                     }
                 } else null
