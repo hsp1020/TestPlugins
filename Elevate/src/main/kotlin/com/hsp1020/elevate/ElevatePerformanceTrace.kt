@@ -32,6 +32,10 @@ import java.lang.ref.ReferenceQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.WeakHashMap
+import java.util.Collections
+import okhttp3.EventListener
+import okhttp3.Request
 import okhttp3.Interceptor
 import okhttp3.MediaType
 import okhttp3.ResponseBody
@@ -91,6 +95,9 @@ internal class ElevatePerformanceTrace(private val application: Application) :
     private var lastHeapAt = 0L
     private var lastWebSignature = ""
     private var lastPreviewSignature = ""
+    @Volatile private var lastDetachAtMs = 0L
+    private var lastPreviewThreads = 0
+    private var lastWebThreads = 0
     private var priorVmPolicy: StrictMode.VmPolicy? = null
     private var installedVmPolicy: StrictMode.VmPolicy? = null
     private val httpSequence = AtomicLong()
@@ -98,6 +105,34 @@ internal class ElevatePerformanceTrace(private val application: Application) :
     private val httpCloseCount = AtomicInteger()
     private val httpLeaks = AtomicInteger()
     private val sampledLeakHosts = HashSet<String>()
+    // OkHttp calls EventListener.Factory.create synchronously when newCall()
+    // is created, before asynchronous dispatch. Preserve the existing factory
+    // and use a weak map to correlate the initiating call stack with a response.
+    private data class CallOrigin(
+        val callerThread: String, val createdMs: Long,
+        val frames: Array<StackTraceElement>
+    )
+    private val callOrigins = Collections.synchronizedMap(
+        WeakHashMap<Request, CallOrigin>())
+    @Volatile private var parentEventFactory: EventListener.Factory? = null
+    private val originEventFactory = EventListener.Factory { call ->
+        if (monitoring) {
+            val candidate = Thread.currentThread().stackTrace.filter { frame ->
+                val name = frame.className
+                name.startsWith("com.hsp1020.") ||
+                    name.startsWith("com.lagradost.") ||
+                    name.startsWith("com.phisher98.") ||
+                    name.startsWith("com.CineStream.") ||
+                    name.contains("StreamPlay") ||
+                    name.contains("cloudstream")
+            }.take(16).toTypedArray()
+            callOrigins[call.request()] = CallOrigin(
+                Thread.currentThread().name,
+                SystemClock.elapsedRealtime(), candidate)
+        }
+        // Delegation is essential: do not disable host timing/analytics hooks.
+        parentEventFactory?.create(call) ?: EventListener.NONE
+    }
     private var lastHttpEnsureAt = 0L
     private val httpQueue = ReferenceQueue<ResponseBody>()
     private val httpPending = ConcurrentHashMap<PhantomReference<ResponseBody>, HttpRecord>()
@@ -108,6 +143,7 @@ internal class ElevatePerformanceTrace(private val application: Application) :
         if (!monitoring || body == null || response.code == 101) {
             response
         } else {
+            val origin = callOrigins[request]
             val record = HttpRecord(
                 id = httpSequence.incrementAndGet(),
                 started = SystemClock.elapsedRealtime(),
@@ -118,7 +154,8 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                 sourceThread = Thread.currentThread().name,
                 // Interceptor entry gives the actual HTTP execution stack. Async
                 // OkHttp dispatch can obscure which plugin initiated the request.
-                executionStack = Thread.currentThread().stackTrace.drop(2).take(24)
+                executionStack = Thread.currentThread().stackTrace.drop(2).take(24),
+                callOrigin = origin
             )
             lateinit var reference: PhantomReference<ResponseBody>
             val tracked = TracedResponseBody(body) {
@@ -140,6 +177,7 @@ internal class ElevatePerformanceTrace(private val application: Application) :
         val contentType: String,
         val sourceThread: String,
         val executionStack: List<StackTraceElement>,
+        val callOrigin: CallOrigin?,
         @Volatile var warned: Boolean = false
     )
 
@@ -183,10 +221,17 @@ internal class ElevatePerformanceTrace(private val application: Application) :
         // Install on the current client only, preserving existing interceptors.
         runCatching {
             val client = app.baseClient
-            if (client.interceptors.none { it === httpInterceptor }) {
-                app.baseClient = client.newBuilder().addInterceptor(httpInterceptor).build()
+            val missingInterceptor = client.interceptors.none { it === httpInterceptor }
+            val missingCallOrigin = client.eventListenerFactory !== originEventFactory
+            if (missingInterceptor || missingCallOrigin) {
+                if (missingCallOrigin) parentEventFactory = client.eventListenerFactory
+                app.baseClient = client.newBuilder().apply {
+                    if (missingInterceptor) addInterceptor(httpInterceptor)
+                    if (missingCallOrigin) eventListenerFactory(originEventFactory)
+                }.build()
                 log("http-interceptor-installed", "clientId=" +
-                    System.identityHashCode(app.baseClient))
+                    System.identityHashCode(app.baseClient) +
+                    " originCapture=" + missingCallOrigin)
             }
         }.onFailure { Log.w(tag, "http-interceptor-install-failed " +
             it.javaClass.simpleName) }
@@ -219,6 +264,14 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                     " httpCode=" + record.code + " type=" + record.contentType +
                     " ageMs=" + age(now, record.started) +
                     " executedOn=" + record.sourceThread)
+                record.callOrigin?.let { origin ->
+                    log("http-origin", "requestId=" + record.id +
+                        " host=" + record.host + " createdThread=" +
+                        origin.callerThread + " originAgeMs=" +
+                        age(now, origin.createdMs))
+                    stack("http-origin-stack requestId=" + record.id,
+                        Thread.currentThread(), origin.frames)
+                }
                 stack("http-unclosed-acquisition requestId=" + record.id,
                     Thread.currentThread(), record.executionStack.toTypedArray())
             }
@@ -234,6 +287,14 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                     "requestId=" + record.id + " host=" + record.host +
                     " httpCode=" + record.code + " type=" + record.contentType +
                     " executedOn=" + record.sourceThread)
+                record.callOrigin?.let { origin ->
+                    log("http-origin", "requestId=" + record.id +
+                        " host=" + record.host + " createdThread=" +
+                        origin.callerThread + " originAgeMs=" +
+                        age(now, origin.createdMs))
+                    stack("http-origin-stack requestId=" + record.id,
+                        Thread.currentThread(), origin.frames)
+                }
                 stack("http-body-acquisition requestId=" + record.id,
                     Thread.currentThread(), record.executionStack.toTypedArray())
             }
@@ -313,13 +374,17 @@ internal class ElevatePerformanceTrace(private val application: Application) :
         monitoring = false
         runCatching {
             val client = app.baseClient
-            if (client.interceptors.any { it === httpInterceptor }) {
+            if (client.interceptors.any { it === httpInterceptor } ||
+                client.eventListenerFactory === originEventFactory) {
                 app.baseClient = client.newBuilder().apply {
                     interceptors().removeAll { it === httpInterceptor }
+                    if (client.eventListenerFactory === originEventFactory)
+                        parentEventFactory?.let(::eventListenerFactory)
                 }.build()
             }
         }
         httpPending.clear()
+        callOrigins.clear()
         worker?.interrupt()
         worker = null
         main.removeCallbacks(heartbeat)
@@ -359,7 +424,9 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                         " lastPlayerMs=" + age(now, lastPlayerAt))
                     stack("main-stall-stack", mainThread, mainThread.stackTrace)
                 }
-                if (fragment != null && now - lastHotSampleAt >= 1250L) {
+                if ((fragment != null ||
+                        (lastDetachAtMs > 0L && now - lastDetachAtMs < 45_000L)) &&
+                    now - lastHotSampleAt >= 1250L) {
                     lastHotSampleAt = now
                     inspectHotThreads()
                 }
@@ -414,10 +481,21 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                 stack("webview-active-callstack", thread, frames)
             }
         }
-        if (webActive + previewActive + extractActive > 0) {
-            log("extractor-sample", "webviewThreads=" + webActive +
-                " previewThreads=" + previewActive + " otherExtractors=" + extractActive)
+        val now = SystemClock.elapsedRealtime()
+        val sinceDetach = age(now, lastDetachAtMs)
+        // Capture the full lifecycle rather than stopping telemetry the moment
+        // GeneratorPlayer is destroyed; native preview work may outlive it.
+        if (lastPreviewThreads != previewActive || lastWebThreads != webActive ||
+            (previewActive > 0 && sinceDetach in 0..45_000L)) {
+            log("extractor-lifecycle", "webviewThreads=" + webActive +
+                " previewThreads=" + previewActive +
+                " otherExtractors=" + extractActive +
+                " playerDetachedMsAgo=" + sinceDetach +
+                " previewThreadsPrev=" + lastPreviewThreads +
+                " webThreadsPrev=" + lastWebThreads)
         }
+        lastPreviewThreads = previewActive
+        lastWebThreads = webActive
     }
 
     private fun bindHost(activity: FragmentActivity) {
@@ -439,6 +517,7 @@ internal class ElevatePerformanceTrace(private val application: Application) :
         if (f !is GeneratorPlayer || !f.isAdded || f.view == null || f === fragment) return
         detach()
         fragment = f
+        lastDetachAtMs = 0L
         model = ViewModelProvider(f)[PlayerGeneratorViewModel::class.java]
         session++
         lastSubtitleSet = emptySet()
@@ -618,6 +697,12 @@ internal class ElevatePerformanceTrace(private val application: Application) :
         viewObservers.clear()
         unsubscribe?.invoke()
         unsubscribe = null
+        if (fragment != null) {
+            lastDetachAtMs = SystemClock.elapsedRealtime()
+            log("player-detach", "lastPlayerId=" + lastPlayerId +
+                " lastLoadingMs=" + age(lastDetachAtMs, lastLoadingAt) +
+                " lastLinksMs=" + age(lastDetachAtMs, lastLinksAt))
+        }
         fragment = null
         model = null
         lastDrawAt = 0L
