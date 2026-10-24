@@ -205,6 +205,48 @@ class GithubStoreIntegrationTest {
             delta.encryptedChanges.getValue("d/0/video_pos_dur/movie")!!))
     }
 
+
+    @Test fun unchangedPartialWriteDoesNotCreateAnotherGitCommit() {
+        val api = FakeGit()
+        val a = store(api, "A")
+        val c = cipher()
+        val key = "d/0/video_pos_dur/movie"
+        val old = a.initialize(c, mapOf(key to "100"))
+        val same = a.publishPartial(old, 1, c, mapOf(key to "100"), emptySet())
+        assertEquals(old, same)
+        assertEquals(old, a.current(c)!!.revision)
+    }
+
+    @Test fun concurrentPartialWriteCannotPublishOverAnotherDevice() {
+        val api = FakeGit()
+        val a = store(api, "A")
+        val b = store(api, "B")
+        val c = cipher()
+        val base = a.initialize(c, mapOf("d/0/video_pos_dur/movie" to "100"))
+        val newer = a.publishPartial(base, 1, c,
+            mapOf("d/0/video_pos_dur/movie" to "200"), emptySet())
+        assertThrows(IOException::class.java) {
+            b.publishPartial(base, 1, c,
+                mapOf("p/StremioC/settings" to "new"), emptySet())
+        }
+        assertEquals(newer, a.current(c)!!.revision)
+        assertEquals("200", b.current(c)!!.values["d/0/video_pos_dur/movie"])
+        assertNull(b.current(c)!!.values["p/StremioC/settings"])
+    }
+
+    @Test fun partialDeletionWithoutExplicitProofCannotPublish() {
+        val api = FakeGit()
+        val a = store(api, "A")
+        val c = cipher()
+        val key = "d/0/video_pos_dur/movie"
+        val old = a.initialize(c, mapOf(key to "100"))
+        assertThrows(IllegalStateException::class.java) {
+            a.publishPartial(old, 1, c, mapOf(key to null), emptySet())
+        }
+        assertEquals(old, a.current(c)!!.revision)
+        assertEquals("100", a.current(c)!!.values[key])
+    }
+
     @Test fun incrementalThreeKeysAfterInitialSnapshotAndNoChange() {
         val api = FakeGit()
         val a = store(api, "A")

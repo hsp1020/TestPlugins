@@ -35,6 +35,62 @@ class SyncDomainRegressionTest {
             .put("deleted", JSONArray(deleted)).toString()
 
 
+
+    @Test fun changedOnlyReadDoesNotLoseUnrelatedBaselineKeys() {
+        val profiles = ProfileSync.decode(roster(profile(0, "Main")))
+        val changedKey = "p/StremioC/theme"
+        val untouchedKey = "p/StreamPlay/settings"
+        val previous = "{\"type\":\"string\",\"value\":\"old\"}"
+        val newValue = "{\"type\":\"string\",\"value\":\"new\"}"
+        val oldHash = SyncBackend.digest(previous)
+        val baselines = mutableMapOf(changedKey to oldHash, untouchedKey to oldHash)
+        val plan = SyncPreferencePlanner.reconcile(
+            emptyMap(), mapOf(changedKey to newValue), baselines, profiles,
+            setOf(0), emptySet(), setOf(changedKey), JSONObject(), false,
+            false, false)
+        assertEquals(newValue, plan.upload[changedKey])
+        assertFalse(plan.upload.containsKey(untouchedKey))
+        assertFalse(plan.apply.containsKey(untouchedKey))
+        assertEquals(oldHash, plan.next[untouchedKey])
+    }
+
+    @Test fun completeAuditFindsUnobservedNewPreferenceWithoutDeletion() {
+        val profiles = ProfileSync.decode(roster(profile(0, "Main")))
+        val key = "p/StremioC/unobserved_new_setting"
+        val current = "{\"type\":\"string\",\"value\":\"present\"}"
+        val plan = SyncPreferencePlanner.reconcile(
+            emptyMap(), mapOf(key to current), mutableMapOf(), profiles,
+            setOf(0), emptySet(), emptySet(), JSONObject(), false,
+            false, true)
+        assertEquals(current, plan.upload[key])
+        assertEquals(SyncBackend.digest(current), plan.next[key])
+        assertTrue(plan.apply.isEmpty())
+    }
+
+    @Test fun explicitLocalDeletionIsStillPropagatedWithoutFullSnapshot() {
+        val profiles = ProfileSync.decode(roster(profile(0, "Main")))
+        val key = "p/StremioC/deleted_setting"
+        val previous = "{\"type\":\"bool\",\"value\":true}"
+        val plan = SyncPreferencePlanner.reconcile(
+            emptyMap(), emptyMap(), mutableMapOf(key to SyncBackend.digest(previous)),
+            profiles, setOf(0), emptySet(), setOf(key), JSONObject(),
+            false, false, false)
+        assertTrue(plan.upload.containsKey(key))
+        assertNull(plan.upload[key])
+        assertEquals("<deleted>", plan.next[key])
+        assertTrue(SyncDirtyMarkerCleaner.matchesVerifiedBaseline(null, "<deleted>"))
+    }
+
+    @Test fun pluginJsonFieldOrderDoesNotCauseNewGitCommit() {
+        val old = inventory(plugin("StremioC", 17, "https://example.org/stremioc.cs3"))
+        val permuted = JSONObject().put("sha", "a".repeat(64))
+            .put("version", 17).put("url", "https://example.org/stremioc.cs3")
+            .put("repo", "https://example.org/repo.json").put("name", "StremioC")
+            .put("type", "online")
+        val merged = PluginSync.merge(inventory(permuted), old, old, true)
+        assertFalse(merged.changedRemote)
+    }
+
     @Test fun progressThrottleIsBoundedAndDoesNotDelayOtherPreferences() {
         assertTrue(SyncPlaybackThrottle.isProgressPath("d/0/video_pos_dur/123"))
         assertTrue(SyncPlaybackThrottle.isProgressPath("d/0/result_resume_watching_2/123"))
