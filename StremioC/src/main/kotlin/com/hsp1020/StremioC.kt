@@ -1963,7 +1963,8 @@ open class StremioC(
                 val isEnabled = if (prefs.contains(tabKey)) prefs.getBoolean(tabKey, true)
                     else prefs.getBoolean("tab_enabled_${legacyKey}_${tab.key}", true)
 
-                if (isEnabled) add(tab.urlPath to tab.displayName)
+                if (isEnabled && prefs.getBoolean("tab_home_${uniqueKey}_${tab.key}", true))
+                    add(tab.urlPath to tab.displayName)
             }
         }
         return mainPageOf(*enabledTabs.toTypedArray())
@@ -1980,7 +1981,8 @@ open class StremioC(
                 val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
                 val addonKey = stremioCatalogKey(mainUrl)
                 val homeSettings = prefs.all.filterKeys {
-                    it == "catalog_order_$addonKey" || it.startsWith("tab_enabled_${addonKey}_")
+                    it == "catalog_order_$addonKey" || it.startsWith("tab_enabled_${addonKey}_") ||
+                        it.startsWith("tab_home_${addonKey}_")
                 }.toSortedMap()
                 val signature = (raw + homeSettings.toString()).toUniqueKey()
                 preparedMainPageData?.let { prepared ->

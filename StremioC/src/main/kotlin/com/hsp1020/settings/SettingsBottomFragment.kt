@@ -269,9 +269,10 @@ class SettingsBottomFragment(
     }
 
     private data class ConfigFlatTab(
-        val key: String, 
-        val displayName: String, 
-        var isChecked: Boolean = true
+        val key: String,
+        val displayName: String,
+        var isChecked: Boolean = true,
+        var showOnHome: Boolean = true
     )
 
     private var searchJob: Job? = null 
@@ -2405,8 +2406,9 @@ private fun showLanguageSelectDialog() {
 
                         flatTabs.add(ConfigFlatTab(
                             key = "${id}_${type}_default", 
-                            displayName = "$name - $displayType", 
-                            isChecked = sharedPref.getBoolean("tab_enabled_${uniqueId}_${id}_${type}_default", true)
+                            displayName = "$name - $displayType",
+                            isChecked = sharedPref.getBoolean("tab_enabled_${uniqueId}_${id}_${type}_default", true),
+                            showOnHome = sharedPref.getBoolean("tab_home_${uniqueId}_${id}_${type}_default", true)
                         ))
                     }
                 }
@@ -2463,7 +2465,7 @@ private fun showLanguageSelectDialog() {
         titleView.maxLines = 2
         titleView.ellipsize = android.text.TextUtils.TruncateAt.END
         dialogContainer.addView(titleView)
-        dialogContainer.addView(popupMessage("Order controls the catalog display sequence.").apply { textSize = 12f })
+        dialogContainer.addView(popupMessage("Order controls the catalog display sequence. The home icon controls Home visibility only.").apply { textSize = 12f })
 
         val rv = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context)
@@ -2488,7 +2490,8 @@ private fun showLanguageSelectDialog() {
                 }
             }
 
-            inner class VH(val view: LinearLayout, val checkbox: CheckBox, val etOrder: EditText, val dragHandle: ImageView) : RecyclerView.ViewHolder(view) {
+            inner class VH(val view: LinearLayout, val checkbox: CheckBox, val etOrder: EditText,
+                val dragHandle: ImageView, val homeIcon: ImageView) : RecyclerView.ViewHolder(view) {
                 var displayedOrder = 0
             }
 
@@ -2496,7 +2499,7 @@ private fun showLanguageSelectDialog() {
                 val layout = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(dp(8), dp(4), dp(8), dp(4))
+                    setPadding(dp(4), dp(4), dp(4), dp(4))
                     background = getCardBg()
                     layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                         setMargins(0, dp(4), 0, dp(4))
@@ -2507,7 +2510,7 @@ private fun showLanguageSelectDialog() {
                     contentDescription = "Drag to reorder catalog"
                     isClickable = true
                     isFocusable = false
-                    layoutParams = LinearLayout.LayoutParams(dp(24), dp(24))
+                    layoutParams = LinearLayout.LayoutParams(dp(20), dp(24))
                     makeTvCompatible()
                 }
 
@@ -2516,7 +2519,7 @@ private fun showLanguageSelectDialog() {
                     imeOptions = EditorInfo.IME_ACTION_DONE
                     setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                     textSize = 14f
-                    setPadding(dp(8), 0, dp(8), 0)
+                    setPadding(dp(4), 0, dp(4), 0)
                     background = getCardBg()
                     gravity = android.view.Gravity.CENTER
                     isSingleLine = true
@@ -2533,16 +2536,30 @@ private fun showLanguageSelectDialog() {
                     setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 }
+                val homeIcon = ImageView(context).apply {
+                    setImageResource(HostR.drawable.home_icon_filled_24)
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    isClickable = true
+                    isFocusable = true
+                    layoutParams = LinearLayout.LayoutParams(dp(28), dp(28)).apply {
+                        marginStart = dp(4)
+                    }
+                    val ripple = android.util.TypedValue()
+                    if (context.theme.resolveAttribute(
+                            android.R.attr.selectableItemBackgroundBorderless, ripple, true
+                        ) && ripple.resourceId != 0) setBackgroundResource(ripple.resourceId)
+                }
                 layout.addView(dragHandle)
                 layout.addView(inputSlot(etOrder).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(56), dp(48)).apply { marginEnd = dp(8) }
+                    layoutParams = LinearLayout.LayoutParams(dp(44), dp(48)).apply { marginEnd = dp(4) }
                 })
                 layout.addView(checkbox)
+                layout.addView(homeIcon)
                 checkbox.maxLines = 2
                 normalizeTypeface(layout)
                 prepareControls(layout)
-                horizontalFocus(etOrder, checkbox)
-                return VH(layout, checkbox, etOrder, dragHandle).also { holder ->
+                horizontalFocus(etOrder, checkbox, homeIcon)
+                return VH(layout, checkbox, etOrder, dragHandle, homeIcon).also { holder ->
                     holder.dragHandle.setOnTouchListener { _, event ->
                         if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN &&
                             holder.adapterPosition != RecyclerView.NO_POSITION)
@@ -2555,6 +2572,17 @@ private fun showLanguageSelectDialog() {
             override fun onBindViewHolder(holder: VH, position: Int) {
                 val tab = visibleTabs[position]
 
+                fun updateHomeIcon() {
+                    holder.homeIcon.imageTintList = ColorStateList.valueOf(
+                        if (tab.showOnHome) hostContext.colorFromAttribute(HostR.attr.colorPrimary) else Color.GRAY)
+                    holder.homeIcon.contentDescription =
+                        "${tab.displayName}: Home ${if (tab.showOnHome) "shown" else "hidden"}"
+                }
+                updateHomeIcon()
+                holder.homeIcon.setOnClickListener {
+                    tab.showOnHome = !tab.showOnHome
+                    updateHomeIcon()
+                }
                 holder.checkbox.setOnCheckedChangeListener(null)
                 holder.checkbox.isChecked = tab.isChecked
                 holder.checkbox.text = tab.displayName
@@ -2744,6 +2772,7 @@ private fun showLanguageSelectDialog() {
             masterTabs.forEach { 
                 keysToSave.put(it.key) 
                 editor.putBoolean("tab_enabled_${uniqueId}_${it.key}", it.isChecked)
+                editor.putBoolean("tab_home_${uniqueId}_${it.key}", it.showOnHome)
             }
 
             val currentKeys = masterTabs.map { it.key }.toSet()
