@@ -382,7 +382,6 @@ class SyncPlugin : Plugin() {
         config(context).preferences.edit().putString("active_instance", owner).commit()
         val session = config(context)
 
-        GithubAuthDiagnostics.snapshot(session, "plugin-loaded")
         ready = SyncRuntime.refreshLoadedState()
         ProfileIdentity.observe(context)
         MainActivity.bookmarksUpdatedEvent += bookmarks
