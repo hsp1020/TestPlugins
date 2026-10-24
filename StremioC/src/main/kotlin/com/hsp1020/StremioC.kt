@@ -215,6 +215,10 @@ private object MetadataDiskCache {
     private val lock = Any()
     private var quotaChecked = false
     private var cleanedOldTemps = false
+    private var writesSinceQuotaCheck = 0
+    private var lastQuotaCheckAtMs = 0L
+    private const val QUOTA_CHECK_WRITES = 16
+    private const val QUOTA_CHECK_MS = 30_000L
 
     data class Entry(val json: String, val timestamp: Long, val ttlMs: Long)
 
@@ -231,38 +235,45 @@ private object MetadataDiskCache {
         readWithTtl(kind, key)?.let { it.json to it.timestamp }
 
     suspend fun readWithTtl(kind: String, key: String): Entry? = withContext(Dispatchers.IO) {
-        // A cache miss must not wait behind another writer's global quota scan.
-        // Existing files are still read under the lock to preserve eviction safety.
+        val begin = android.os.SystemClock.elapsedRealtime()
+        // Writers publish complete files using atomic rename. Reading a completed
+        // file does not need the writer's global eviction/quota monitor.
         val file = directory()?.let { target(it, kind, key) } ?: return@withContext null
         if (!file.isFile) return@withContext null
-        synchronized(lock) {
-            if (!file.isFile) return@synchronized null
-            try {
-                val body = GZIPInputStream(file.inputStream()).bufferedReader(Charsets.UTF_8).use { it.readText() }
-                val stamp = body.substringBefore('\n').toLongOrNull()
-                val now = System.currentTimeMillis()
-                val firstNewline = body.indexOf('\n')
-                val secondNewline = if (kind == "meta" && firstNewline >= 0)
-                    body.indexOf('\n', firstNewline + 1) else -1
-                val ttl = when (kind) {
-                    "season" -> SEASON_TTL_MS
-                    "missing_anime" -> ANIME_EMPTY_TTL_MS
-                    "meta" -> if (secondNewline > firstNewline)
-                        body.substring(firstNewline + 1, secondNewline).toLongOrNull() ?: 0L else 0L
-                    else -> TTL_MS
-                }
-                if (stamp == null || stamp > now || ttl <= 0L ||
-                    now - stamp >= ttl || firstNewline < 0 || (kind == "meta" && secondNewline < 0)) {
-                    file.delete()
-                    null
-                } else {
-                    file.setLastModified(now) 
-                    Entry(body.substring(if (kind == "meta") secondNewline + 1 else firstNewline + 1), stamp, ttl)
-                }
-            } catch (error: Exception) {
-                file.delete()
-                null
+        try {
+            val body = GZIPInputStream(file.inputStream()).bufferedReader(Charsets.UTF_8).use {
+                it.readText()
             }
+            val stamp = body.substringBefore('\n').toLongOrNull()
+            val now = System.currentTimeMillis()
+            val firstNewline = body.indexOf('\n')
+            val secondNewline = if (kind == "meta" && firstNewline >= 0)
+                body.indexOf('\n', firstNewline + 1) else -1
+            val ttl = when (kind) {
+                "season" -> SEASON_TTL_MS
+                "missing_anime" -> ANIME_EMPTY_TTL_MS
+                "meta" -> if (secondNewline > firstNewline)
+                    body.substring(firstNewline + 1, secondNewline).toLongOrNull() ?: 0L else 0L
+                else -> TTL_MS
+            }
+            if (stamp == null || stamp > now || ttl <= 0L ||
+                now - stamp >= ttl || firstNewline < 0 ||
+                (kind == "meta" && secondNewline < 0)) {
+                // Never delete here. A concurrent writer might have replaced this
+                // filename while the old inode was being read.
+                null
+            } else {
+                file.setLastModified(now)
+                Entry(body.substring(if (kind == "meta") secondNewline + 1
+                    else firstNewline + 1), stamp, ttl)
+            }
+        } catch (_: Exception) {
+            // An eviction racing this read is a cache miss, never a playback error.
+            null
+        } finally {
+            val duration = android.os.SystemClock.elapsedRealtime() - begin
+            if (duration >= 120L) android.util.Log.i(
+                "StremioC-Cache", "slow-read kind=$kind elapsedMs=$duration")
         }
     }
 
@@ -295,7 +306,9 @@ private object MetadataDiskCache {
                 if (temp.length() > MAX_ENTRY_BYTES) {
                     return@withContext
                 }
+                val begin = android.os.SystemClock.elapsedRealtime()
                 synchronized(lock) {
+                    val acquired = android.os.SystemClock.elapsedRealtime()
                     if (!cleanedOldTemps) {
                         cleanedOldTemps = true
                         val cutoff = System.currentTimeMillis() - 10L * 60 * 1000
@@ -304,15 +317,34 @@ private object MetadataDiskCache {
                     }
                     val file = target(dir, kind, key)
                     if (temp.renameTo(file)) {
-                        val files = dir.listFiles()?.filter { it.isFile && it.name.endsWith(".gz") }.orEmpty()
-                        val totalBytes = files.sumOf { it.length() }
-                        val kindCount = files.count { it.name.startsWith("${kind}_") }
-                        if (!quotaChecked || totalBytes > MAX_BYTES ||
-                            kindCount > (entryLimits[kind] ?: Int.MAX_VALUE)) {
-                            trim(dir)
+                        writesSinceQuotaCheck++
+                        val due = !quotaChecked ||
+                            writesSinceQuotaCheck >= QUOTA_CHECK_WRITES ||
+                            acquired - lastQuotaCheckAtMs >= QUOTA_CHECK_MS
+                        if (due) {
+                            val scanStart = android.os.SystemClock.elapsedRealtime()
+                            val files = dir.listFiles()?.filter {
+                                it.isFile && it.name.endsWith(".gz")
+                            }.orEmpty()
+                            val totalBytes = files.sumOf { it.length() }
+                            val kindCount = files.count { it.name.startsWith("${kind}_") }
+                            val trimNeeded = totalBytes > MAX_BYTES ||
+                                kindCount > (entryLimits[kind] ?: Int.MAX_VALUE)
+                            if (trimNeeded) trim(dir)
                             quotaChecked = true
+                            writesSinceQuotaCheck = 0
+                            lastQuotaCheckAtMs = android.os.SystemClock.elapsedRealtime()
+                            val scanMs = lastQuotaCheckAtMs - scanStart
+                            if (scanMs >= 100L || trimNeeded) android.util.Log.i(
+                                "StremioC-Cache", "quota kind=$kind files=${files.size} " +
+                                    "bytes=$totalBytes trimmed=$trimNeeded elapsedMs=$scanMs")
                         }
                     }
+                    val lockMs = android.os.SystemClock.elapsedRealtime() - acquired
+                    val waitMs = acquired - begin
+                    if (waitMs >= 100L || lockMs >= 100L) android.util.Log.i(
+                        "StremioC-Cache", "write-lock kind=$kind waitMs=$waitMs " +
+                            "heldMs=$lockMs quotaChecked=$quotaChecked")
                 }
             } catch (error: Exception) {
             } finally {
