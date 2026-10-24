@@ -248,8 +248,10 @@ internal class ElevateSkipController(private val application: Application) :
     }
 
     private fun scheduleAutoSkip() {
+        val next = autoEnabled() && fragment?.view != null
+        if (polling == next) return
         main.removeCallbacks(autoTick)
-        polling = autoEnabled() && fragment?.view != null
+        polling = next
         if (polling) main.postDelayed(autoTick, 600L)
     }
 
@@ -286,7 +288,9 @@ internal class ElevateSkipController(private val application: Application) :
             com.lagradost.cloudstream3.utils.videoskip.SkipType.MixedOpening -> "AUTO_SKIP_OPENING"
             com.lagradost.cloudstream3.utils.videoskip.SkipType.Recap -> "AUTO_SKIP_RECAP"
             com.lagradost.cloudstream3.utils.videoskip.SkipType.Credits ->
-                if ((vm.state.generatorState?.response?.type == com.lagradost.cloudstream3.TvType.Movie)) {
+                if (vm.state.generatorState?.response?.type in setOf(
+                        com.lagradost.cloudstream3.TvType.Movie,
+                        com.lagradost.cloudstream3.TvType.AnimeMovie)) {
                     "AUTO_SKIP_MOVIE_CREDITS"
                 } else "AUTO_SKIP_ENDING"
             else -> "AUTO_SKIP_ENDING"
