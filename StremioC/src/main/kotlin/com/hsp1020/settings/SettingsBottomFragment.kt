@@ -1856,6 +1856,7 @@ class SettingsBottomFragment(
         }
 
         prepareControls(view)
+        etMdbListApiKey.transformationMethod = PasswordTransformationMethod.getInstance()
         if (hub != null) listOf(addlinks, showlinks, saveIcon, btnSelectLanguage).forEach {
             it.isFocusable = false; it.isClickable = false; it.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
