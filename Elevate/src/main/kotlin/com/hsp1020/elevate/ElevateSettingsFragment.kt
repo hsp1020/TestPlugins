@@ -34,6 +34,8 @@ internal enum class ElevateFeature(
         "Prefer matching embedded subtitles and discard stale tracks when videos change."),
     AUDIO_TRACKS("Playback & Subtitles", "Automatic Audio Language",
         "Select app-language audio, then Japanese for anime or English for other titles."),
+    SKIP("Playback & Subtitles", "Unified Skip Intervals",
+        "Combine native timestamps with AniSkip, Anime Skip, IntroDb and TheIntroDB."),
     PIP_BUTTON("Playback & Subtitles", "Picture-in-Picture Button",
         "Show a native-style PiP player button when PiP is enabled in CloudStream."),
     PIP_SUBTITLES("Playback & Subtitles", "PiP Subtitle Styling",
@@ -99,18 +101,48 @@ class ElevateSettingsFragment : DialogFragment() {
                         setPadding(dp(8), 0, 0, dp(12))
                     }
                 } else null
+                val skipControls = if (feature == ElevateFeature.SKIP) {
+                    LinearLayout(ctx).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(dp(14), 0, 0, dp(8))
+                        val names = listOf(
+                            "AUTO_SKIP_OPENING" to "Auto-skip opening",
+                            "AUTO_SKIP_ENDING" to "Auto-skip ending",
+                            "AUTO_SKIP_RECAP" to "Auto-skip recap",
+                            "AUTO_SKIP_MOVIE_CREDITS" to "Auto-skip movie credits"
+                        )
+                        for ((key, label) in names) {
+                            val item = SwitchCompat(ctx).apply {
+                                text = label
+                                textSize = 13f
+                                isChecked = preferences.getBoolean(key, false)
+                                setOnCheckedChangeListener { _, checked ->
+                                    preferences.edit().putBoolean(key, checked).apply()
+                                }
+                            }
+                            addView(item, LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT
+                            ).apply { topMargin = dp(5) })
+                        }
+                    }
+                } else null
                 row.addView(SwitchCompat(ctx).apply {
                     isChecked = preferences.getBoolean(feature.name, ElevateFeaturePrefs.defaultEnabled(feature))
                     contentDescription = feature.label
                     posterControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
+                    skipControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     setOnCheckedChangeListener { _, checked ->
                         preferences.edit().putBoolean(feature.name, checked).apply()
                         posterControls?.visibility =
+                            if (checked) android.view.View.VISIBLE else android.view.View.GONE
+                        skipControls?.visibility =
                             if (checked) android.view.View.VISIBLE else android.view.View.GONE
                     }
                 }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
                 content.addView(row)
+                skipControls?.let { content.addView(it) }
                 posterControls?.let { container ->
                     savePosterSettings = LibraryPosterPrefs.controls(ctx, container, ::dp)
                     content.addView(container)
