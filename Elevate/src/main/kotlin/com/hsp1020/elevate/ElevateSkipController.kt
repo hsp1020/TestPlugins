@@ -11,6 +11,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.View
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.constraintlayout.widget.ConstraintLayout
@@ -197,7 +199,10 @@ internal class ElevateSkipController(private val application: Application) :
                     args[2] == Media3Player.DISCONTINUITY_REASON_SEEK) {
                     val from = (args[0] as? Media3Player.PositionInfo)?.positionMs
                     val to = (args[1] as? Media3Player.PositionInfo)?.positionMs
-                    if (from != null && to != null) recordSeek(from, to)
+                    if (from != null && to != null) {
+                        skipButtonTimer?.onPlaybackSeek(from, to)
+                        recordSeek(from, to)
+                    }
                 }
                 null
             }
@@ -598,6 +603,47 @@ internal class ElevateSkipButtonTimer(
     private var lastRestoreAtMs = 0L
     private var lastNativeHideAtMs = 0L
     private var tickQueued = false
+    private var completedManualKey: String? = null
+    private var manualPendingKey: String? = null
+
+    private fun stampKey(stamp: VideoSkipStamp): String =
+        "${stamp.source}:${stamp.timestamp.type}:${stamp.timestamp.startMs}:${stamp.timestamp.endMs}"
+
+    // Preserve CloudStream's existing click handler; this runs immediately
+    // before the native SkipCurrentChapter seek starts.
+    private fun markManualSkip() {
+        val stamp = currentInterval() ?: return
+        if (shouldHide(stamp)) return
+        completedManualKey = stampKey(stamp)
+        manualPendingKey = completedManualKey
+        indicator?.visibility = View.GONE
+        fragment.skipIndex++
+        if (!hiddenByTimer) {
+            hiddenByTimer = true
+            lastNativeHideAtMs = SystemClock.uptimeMillis()
+            fragment.onTimestamp(null)
+        }
+        refreshVisibility()
+    }
+
+    fun onPlaybackSeek(from: Long, to: Long) {
+        val returned = model.state.stamps.firstOrNull {
+            to >= it.timestamp.startMs && to < it.timestamp.endMs
+        }
+        if (to < from && returned != null) {
+            completedManualKey = null
+            manualPendingKey = null
+            active = false
+            intervalKey = null
+        } else if (manualPendingKey != null) {
+            val started = model.state.stamps.firstOrNull { stampKey(it) == manualPendingKey }
+            if (started == null || to < started.timestamp.endMs - 1000L) {
+                completedManualKey = null
+            }
+            manualPendingKey = null
+        }
+        refreshVisibility()
+    }
 
     private fun queueTick(delayMs: Long = 0L) {
         if (tickQueued || button == null) return
@@ -613,7 +659,8 @@ internal class ElevateSkipButtonTimer(
     /** Suppression affects interaction, not the native six-second display timer. */
     fun refreshVisibility() {
         val b = button ?: return
-        val suppressed = isSuppressed()
+        val stamp = currentInterval()
+        val suppressed = isSuppressed() || (stamp != null && stampKey(stamp) == completedManualKey)
         val alpha = if (suppressed) 0f else originalAlpha
         if (b.alpha != alpha) b.alpha = alpha
         val enabled = !suppressed && originalEnabled
@@ -641,7 +688,6 @@ internal class ElevateSkipButtonTimer(
         lastRestoreAtMs = now
         // CloudStream's timestampShowState can remain true even after a stale
         // hide-animation onEnd makes the view GONE. Normalize that state first.
-        fragment.onTimestamp(null)
         fragment.onTimestamp(stamp)
         // Cancel the core's independent 6-second delayed hide; Elevate's
         // countdown is authoritative for this active interval.
@@ -656,7 +702,7 @@ internal class ElevateSkipButtonTimer(
             if (fragment.view == null) return
             val now = SystemClock.uptimeMillis()
             val stamp = currentInterval()
-            if (stamp == null || isSuppressed()) {
+            if (stamp == null || isSuppressed() || stampKey(stamp) == completedManualKey) {
                 if (active) {
                     reset()
                     // Only clear when this interval was actually ours.
@@ -700,8 +746,7 @@ internal class ElevateSkipButtonTimer(
                 // 10-second timeout, matching Nuvio's (!autoHidden || controls).
                 val wasHiddenByUs = hiddenByTimer
                 hiddenByTimer = false
-                if (wasHiddenByUs || b.visibility != View.VISIBLE ||
-                    b.width <= dp(25f)) {
+                if (wasHiddenByUs && controlsVisible) {
                     showNative(stamp, now)
                 }
                 if (b.alpha != originalAlpha) b.alpha = originalAlpha
@@ -778,6 +823,17 @@ internal class ElevateSkipButtonTimer(
         parent.addView(strip, params)
         indicator = strip
         fill = progress
+        next.setOnTouchListener { v, event ->
+            if (event.actionMasked == MotionEvent.ACTION_UP && v.isPressed) markManualSkip()
+            false
+        }
+        next.setOnKeyListener { _, code, event ->
+            if (event.action == KeyEvent.ACTION_UP && (code == KeyEvent.KEYCODE_DPAD_CENTER ||
+                code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER)) {
+                markManualSkip()
+            }
+            false
+        }
         refreshVisibility()
     }
 
@@ -797,7 +853,11 @@ internal class ElevateSkipButtonTimer(
         reset()
         val previous = button
         main.removeCallbacks(tick)
+        completedManualKey = null
+        manualPendingKey = null
         tickQueued = false
+        previous?.setOnTouchListener(null)
+        previous?.setOnKeyListener(null)
         previous?.alpha = originalAlpha
         previous?.isEnabled = originalEnabled
         previous?.isFocusable = originalFocusable
