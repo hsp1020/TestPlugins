@@ -124,13 +124,21 @@ internal class HomeHeroToggle(private val app: Application) :
         private var hidden = false
         private var lastPagerVisibility = View.VISIBLE
         private var lastButtonsVisibility = View.VISIBLE
-        private val guard = ViewTreeObserver.OnPreDrawListener {
-            if (hidden) enforceHidden()
-            true
+        // UI visibility/layout is changed on layout events, not every frame.
+        // Coalesce callbacks outside the ongoing layout pass to avoid nested
+        // requestLayout() caused by adjusting the hero height.
+        private var enforceScheduled = false
+        private val guard = ViewTreeObserver.OnGlobalLayoutListener {
+            if (!hidden || enforceScheduled) return@OnGlobalLayoutListener
+            enforceScheduled = true
+            root.post {
+                enforceScheduled = false
+                if (hidden) enforceHidden()
+            }
         }
 
         init {
-            if (tree.isAlive) tree.addOnPreDrawListener(guard)
+            if (tree.isAlive) tree.addOnGlobalLayoutListener(guard)
         }
 
         fun apply(visible: Boolean) {
@@ -185,7 +193,7 @@ internal class HomeHeroToggle(private val app: Application) :
         }
 
         fun release() {
-            if (tree.isAlive) tree.removeOnPreDrawListener(guard)
+            if (tree.isAlive) tree.removeOnGlobalLayoutListener(guard)
             apply(true)
         }
     }
