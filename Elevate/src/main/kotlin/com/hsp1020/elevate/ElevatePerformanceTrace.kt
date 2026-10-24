@@ -39,6 +39,7 @@ import okhttp3.Request
 import okhttp3.Interceptor
 import okhttp3.MediaType
 import okhttp3.ResponseBody
+import okio.Buffer
 import okio.BufferedSource
 import okio.ForwardingSource
 import okio.buffer
@@ -112,25 +113,58 @@ internal class ElevatePerformanceTrace(private val application: Application) :
     // and use a weak map to correlate the initiating call stack with a response.
     private data class CallOrigin(
         val callerThread: String, val createdMs: Long,
-        val frames: Array<StackTraceElement>
+        val frames: Array<StackTraceElement>,
+        val provider: String,
+        val entryPoint: String
     )
+
+    private fun providerOf(frames: Array<StackTraceElement>): Pair<String, String> {
+        // Real plugin package names are case-sensitive: StreamPlay uses
+        // com.Phisher98 and CineStream uses com.megix.
+        val cine = frames.firstOrNull {
+            it.className.startsWith("com.megix.", ignoreCase = true)
+        }
+        if (cine != null)
+            return "CineStream" to (cine.className.substringAfterLast(".") + "." + cine.methodName)
+        val stream = frames.firstOrNull {
+            it.className.startsWith("com.phisher98.", ignoreCase = true)
+        }
+        if (stream != null) {
+            val actor = stream.className.substringAfterLast(".") + "." + stream.methodName
+            val anime = frames.any { it.className.contains("StreamPlayAnime", ignoreCase = true) }
+            return (if (anime) "StreamPlay-Anime" else "StreamPlay-family") to actor
+        }
+        val mine = frames.firstOrNull { it.className.startsWith("com.hsp1020.") &&
+            !it.className.contains("ElevatePerformanceTrace") }
+        if (mine != null)
+            return "StremioC-or-other-HSP" to
+                (mine.className.substringAfterLast(".") + "." + mine.methodName)
+        val core = frames.firstOrNull {
+            it.className.startsWith("com.lagradost.") &&
+                !it.className.contains("nicehttp", ignoreCase = true)
+        }
+        return if (core != null)
+            "CloudStream-core" to (core.className.substringAfterLast(".") + "." + core.methodName)
+        else "unknown" to "unknown"
+    }
     private val callOrigins = Collections.synchronizedMap(
         WeakHashMap<Request, CallOrigin>())
     @Volatile private var parentEventFactory: EventListener.Factory? = null
     private val originEventFactory = EventListener.Factory { call ->
         if (monitoring) {
             val candidate = Thread.currentThread().stackTrace.filter { frame ->
-                val name = frame.className
+                val name = frame.className.lowercase(java.util.Locale.ROOT)
                 name.startsWith("com.hsp1020.") ||
                     name.startsWith("com.lagradost.") ||
                     name.startsWith("com.phisher98.") ||
-                    name.startsWith("com.CineStream.") ||
-                    name.contains("StreamPlay") ||
+                    name.startsWith("com.megix.") ||
+                    name.contains("streamplay") ||
                     name.contains("cloudstream")
-            }.take(16).toTypedArray()
+            }.take(36).toTypedArray()
+            val (provider, entry) = providerOf(candidate)
             callOrigins[call.request()] = CallOrigin(
                 Thread.currentThread().name,
-                SystemClock.elapsedRealtime(), candidate)
+                SystemClock.elapsedRealtime(), candidate, provider, entry)
         }
         // Delegation is essential: do not disable host timing/analytics hooks.
         parentEventFactory?.create(call) ?: EventListener.NONE
@@ -145,14 +179,17 @@ internal class ElevatePerformanceTrace(private val application: Application) :
         if (!monitoring || body == null || response.code == 101) {
             response
         } else {
-            val origin = callOrigins[request]
+            val origin = callOrigins[request] ?: callOrigins[chain.call().request()]
             val record = HttpRecord(
                 id = httpSequence.incrementAndGet(),
                 started = SystemClock.elapsedRealtime(),
                 host = request.url.host,
                 route = "",
                 code = response.code,
+                method = request.method,
                 contentType = body.contentType()?.toString().orEmpty().take(48),
+                contentLength = body.contentLength(),
+                rangeRequest = request.header("Range") != null,
                 sourceThread = Thread.currentThread().name,
                 // Interceptor entry gives the actual HTTP execution stack. Async
                 // OkHttp dispatch can obscure which plugin initiated the request.
@@ -160,9 +197,13 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                 callOrigin = origin
             )
             lateinit var reference: PhantomReference<ResponseBody>
-            val tracked = TracedResponseBody(body) {
-                onHttpClosed(record, reference)
-            }
+            val tracked = TracedResponseBody(body,
+                onRead = { count ->
+                    if (count > 0L) record.readBytes.addAndGet(count)
+                    else if (count == -1L) record.readEof = true
+                },
+                onClose = { onHttpClosed(record, reference) }
+            )
             reference = PhantomReference(tracked as ResponseBody, httpQueue)
             httpPending[reference] = record
             httpOpenCount.incrementAndGet()
@@ -176,20 +217,47 @@ internal class ElevatePerformanceTrace(private val application: Application) :
         val host: String,
         val route: String,
         val code: Int,
+        val method: String,
         val contentType: String,
+        val contentLength: Long,
+        val rangeRequest: Boolean,
         val sourceThread: String,
         val executionStack: List<StackTraceElement>,
         val callOrigin: CallOrigin?,
+        val readBytes: AtomicLong = AtomicLong(),
+        @Volatile var readEof: Boolean = false,
         @Volatile var warned: Boolean = false
-    )
+    ) {
+        val provider: String get() = callOrigin?.provider ?: "unknown"
+        val entryPoint: String get() = callOrigin?.entryPoint ?: "unknown"
+        // EOF is a valid stream completion, while an abandoned 403/503 body
+        // with zero reads is more strongly indicative of missing close().
+        fun category(): String {
+            if (readEof) return "eof-no-explicit-close"
+            if (rangeRequest || contentType.startsWith("video/") ||
+                contentType.contains("mpegurl", ignoreCase = true))
+                return if (readBytes.get() > 0) "media-partial-ambiguous" else "media-unread-ambiguous"
+            if (readBytes.get() > 0) return "partial-read-no-close"
+            if (code == 204 || code == 205 || code == 304) return "no-body-or-empty-status"
+            if (code in listOf(301, 302, 303, 307, 308, 403, 429, 500, 503))
+                return "unread-redirect-or-error"
+            return "unread-response"
+        }
+    }
 
     private class TracedResponseBody(
         private val delegate: ResponseBody,
+        private val onRead: (Long) -> Unit,
         private val onClose: () -> Unit
     ) : ResponseBody() {
         private val closed = java.util.concurrent.atomic.AtomicBoolean()
         private val trackedSource: BufferedSource by lazy {
             object : ForwardingSource(delegate.source()) {
+                override fun read(sink: Buffer, byteCount: Long): Long {
+                    val result = super.read(sink, byteCount)
+                    onRead(result)
+                    return result
+                }
                 override fun close() {
                     try {
                         super.close()
@@ -211,7 +279,9 @@ internal class ElevatePerformanceTrace(private val application: Application) :
         if (record.warned && monitoring) {
             log("http-close-after-warning",
                 "requestId=" + record.id + " host=" + record.host +
-                " elapsedMs=" + (SystemClock.elapsedRealtime() - record.started))
+                " elapsedMs=" + (SystemClock.elapsedRealtime() - record.started) +
+                " owner=" + record.provider + " caller=" + record.entryPoint +
+                " bytes=" + record.readBytes.get() + " eof=" + record.readEof)
             stack("http-close-stack requestId=" + record.id,
                 Thread.currentThread(), Thread.currentThread().stackTrace)
         }
@@ -243,6 +313,7 @@ internal class ElevatePerformanceTrace(private val application: Application) :
         var scanned = 0
         var warned = 0
         val leakedByHost = linkedMapOf<String, Int>()
+        val leakedByCaller = linkedMapOf<String, Int>()
         val firstLeakSamples = ArrayList<HttpRecord>()
         while (true) {
             @Suppress("UNCHECKED_CAST")
@@ -252,11 +323,18 @@ internal class ElevatePerformanceTrace(private val application: Application) :
             if (record != null) {
                 httpLeaks.incrementAndGet()
                 leakedByHost[record.host] = (leakedByHost[record.host] ?: 0) + 1
-                if (sampledLeakHosts.add(record.host) && firstLeakSamples.size < 8)
+                val key = record.provider + "/" + record.entryPoint + "/" + record.category()
+                leakedByCaller[key] = (leakedByCaller[key] ?: 0) + 1
+                // Sample each distinct path+failure category once, rather than
+                // collecting dozens of identical stacks each GC cycle.
+                if (sampledLeakHosts.add(key) && firstLeakSamples.size < 12)
                     firstLeakSamples.add(record)
             }
         }
         if (leakedByHost.isNotEmpty()) {
+            log("http-unclosed-by-caller",
+                leakedByCaller.entries.sortedByDescending { it.value }.take(15)
+                    .joinToString(",") { it.key + ":" + it.value })
             log("http-gc-leaks-by-host",
                 leakedByHost.entries.sortedByDescending { it.value }
                     .take(15).joinToString(",") { it.key + ":" + it.value })
@@ -265,6 +343,14 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                     "requestId=" + record.id + " host=" + record.host +
                     " httpCode=" + record.code + " type=" + record.contentType +
                     " ageMs=" + age(now, record.started) +
+                    " owner=" + record.provider +
+                    " caller=" + record.entryPoint +
+                    " category=" + record.category() +
+                    " method=" + record.method +
+                    " bytesRead=" + record.readBytes.get() +
+                    " eof=" + record.readEof +
+                    " declaredBytes=" + record.contentLength +
+                    " rangeRequest=" + record.rangeRequest +
                     " executedOn=" + record.sourceThread)
                 record.callOrigin?.let { origin ->
                     log("http-origin", "requestId=" + record.id +
@@ -288,6 +374,12 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                 log("http-body-open-30s",
                     "requestId=" + record.id + " host=" + record.host +
                     " httpCode=" + record.code + " type=" + record.contentType +
+                    " owner=" + record.provider +
+                    " caller=" + record.entryPoint +
+                    " category=" + record.category() +
+                    " bytesRead=" + record.readBytes.get() +
+                    " eof=" + record.readEof +
+                    " rangeRequest=" + record.rangeRequest +
                     " executedOn=" + record.sourceThread)
                 record.callOrigin?.let { origin ->
                     log("http-origin", "requestId=" + record.id +
