@@ -363,6 +363,72 @@ class SyncDomainRegressionTest {
         assertEquals(credential, GithubDeviceCode.Credential.decode(credential.encode()))
     }
 
+    @Test fun unexpected401RenewsAndRetriesExactlyOnce() {
+        val seen = mutableListOf<String>()
+        var renewals = 0
+        val outcome = GithubAuthRetry.once("old", { rejected ->
+            assertEquals("old", rejected)
+            renewals++
+            "fresh"
+        }) { token ->
+            seen += token
+            if (token == "old") throw GithubBackupStore.ApiException(401, "Bad credentials")
+            "verified"
+        }
+        assertEquals("verified", outcome)
+        assertEquals(listOf("old", "fresh"), seen)
+        assertEquals(1, renewals)
+    }
+
+    @Test fun unexpected401WithoutRefreshDoesNotRepeatRequest() {
+        var attempts = 0
+        try {
+            GithubAuthRetry.once("old", { null }) {
+                attempts++
+                throw GithubBackupStore.ApiException(401, "Bad credentials")
+            }
+            fail("401 must stop without a fresh credential")
+        } catch (error: GithubBackupStore.ApiException) {
+            assertEquals(401, error.code)
+        }
+        assertEquals(1, attempts)
+    }
+
+    @Test fun unauthorizedRetryRejectsSecond401WithoutFurtherRefresh() {
+        var attempts = 0
+        var renewals = 0
+        try {
+            GithubAuthRetry.once("old", {
+                renewals++
+                "fresh"
+            }) {
+                attempts++
+                throw GithubBackupStore.ApiException(401, "Bad credentials")
+            }
+            fail("Repeated 401 must not loop")
+        } catch (error: GithubBackupStore.ApiException) {
+            assertEquals(401, error.code)
+        }
+        assertEquals(2, attempts)
+        assertEquals(1, renewals)
+    }
+
+    @Test fun otherGitHubErrorsMustNotTriggerRefresh() {
+        var renewals = 0
+        try {
+            GithubAuthRetry.once("old", {
+                renewals++
+                "fresh"
+            }) {
+                throw GithubBackupStore.ApiException(403, "Forbidden")
+            }
+            fail("403 must propagate")
+        } catch (error: GithubBackupStore.ApiException) {
+            assertEquals(403, error.code)
+        }
+        assertEquals(0, renewals)
+    }
+
     @Test fun oauthLegacyCredentialWithoutExpirationStaysCompatible() {
         val legacy = GithubDeviceCode.Credential.decode("old-token")
         assertEquals("old-token", legacy.access)

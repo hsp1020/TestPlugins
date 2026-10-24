@@ -44,6 +44,33 @@ internal object GithubHttpDiagnostics {
     }
 }
 
+/** A rejected request is replayed at most once with a renewed credential. */
+internal object GithubAuthRetry {
+    fun <T> once(
+        token: String, recover: ((String) -> String?)?, request: (String) -> T
+    ): T {
+        try {
+            return request(token)
+        } catch (failure: GithubBackupStore.ApiException) {
+            if (failure.code != 401 || recover == null) throw failure
+            val replacement = recover(token)
+            if (replacement.isNullOrBlank() || replacement == token) {
+                SyncTrace.info("github-401-recovery", "event=unavailable action=pause")
+                throw failure
+            }
+            SyncTrace.info("github-401-recovery", "event=retry action=repeat-once")
+            return try {
+                request(replacement)
+            } catch (second: GithubBackupStore.ApiException) {
+                if (second.code == 401) {
+                    SyncTrace.info("github-401-recovery", "event=retry-rejected action=pause")
+                }
+                throw second
+            }
+        }
+    }
+}
+
 /**
  * Standalone GitHub storage engine. It cannot touch the Supabase account.
  * A backup is visible only after the complete set of encrypted shards and a
@@ -56,7 +83,8 @@ internal class GithubBackupStore(
     private val deviceName: String = "Unspecified device",
     private val deviceId: String = "unknown",
     // Allows deterministic, offline Git object/CAS integration tests.
-    private val transport: ((String, String, JSONObject?) -> JSONObject)? = null
+    private val transport: ((String, String, JSONObject?) -> JSONObject)? = null,
+    private val recoverUnauthorized: ((String) -> String?)? = null
 ) {
     data class Snapshot(
         val revision: String, val tree: String, val branch: String,
@@ -66,15 +94,27 @@ internal class GithubBackupStore(
     private val apiRoot = "https://api.github.com/repos/$owner/$repository"
     internal class ApiException(val code: Int, text: String) : IOException(text)
 
+    @Volatile private var activeToken: String = token
+
+    private fun <T> authorized(request: (String) -> T): T =
+        GithubAuthRetry.once(activeToken, recoverUnauthorized?.let { recover ->
+            { rejected ->
+                recover(rejected)?.also { renewed ->
+                    if (renewed != rejected) activeToken = renewed
+                }
+            }
+        }, request)
+
     private fun api(url: String, method: String = "GET", json: JSONObject? = null): JSONObject {
         require(url.startsWith("https://api.github.com/"))
-        transport?.let { return it(url, method, json) }
+        return authorized { currentToken ->
+        transport?.let { return@authorized it(url, method, json) }
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.requestMethod = method
         conn.instanceFollowRedirects = false
         conn.connectTimeout = 12000
         conn.readTimeout = 25000
-        conn.setRequestProperty("Authorization", "Bearer $token")
+        conn.setRequestProperty("Authorization", "Bearer $currentToken")
         conn.setRequestProperty("Accept", "application/vnd.github+json")
         conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
         conn.setRequestProperty("User-Agent", "SyncCS-Backup")
@@ -100,10 +140,11 @@ internal class GithubBackupStore(
                 GithubHttpDiagnostics.report(stage, status, conn, response)
                 throw ApiException(status, "GitHub API HTTP $status (stage=$stage)")
             }
-            return if (response.isEmpty()) JSONObject()
+            if (response.isEmpty()) JSONObject()
                 else JSONObject(String(response, Charsets.UTF_8))
         } finally {
             conn.disconnect()
+        }
         }
     }
     private fun get(path: String): JSONObject = api(apiRoot + path)
@@ -294,23 +335,23 @@ internal class GithubBackupStore(
         }.sortedByDescending { it.timestamp }
     }
 
-    fun manualBackups(): List<Revision> {
+    fun manualBackups(): List<Revision> = authorized { currentToken ->
         val url = apiRoot + "/git/matching-refs/tags/synccs/manual/"
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.connectTimeout = 12000
         conn.readTimeout = 25000
-        conn.setRequestProperty("Authorization", "Bearer $token")
+        conn.setRequestProperty("Authorization", "Bearer $currentToken")
         conn.setRequestProperty("Accept", "application/vnd.github+json")
         conn.setRequestProperty("User-Agent", "SyncCS-Backup")
         try {
             val status = conn.responseCode
-            if (status == 404) return emptyList()
+            if (status == 404) return@authorized emptyList()
             if (status != 200) {
                 GithubHttpDiagnostics.report("manual-backup-list", status, conn,
                     conn.errorStream?.use { it.readBytes() })
                 throw ApiException(status, "Cannot load GitHub user backups (HTTP $status).")
             }
-            return parseManualBackups(JSONArray(String(conn.inputStream.use {
+            parseManualBackups(JSONArray(String(conn.inputStream.use {
                 it.readBytes()
             }, Charsets.UTF_8)))
         } finally { conn.disconnect() }
@@ -342,19 +383,24 @@ internal class GithubBackupStore(
         return historyArray(branch, limit)
     }
 
-    private fun historyArray(branch: String, limit: Int): List<Revision> {
+    private fun historyArray(branch: String, limit: Int): List<Revision> = authorized { currentToken ->
         val url = "https://api.github.com/repos/$owner/$repository/commits?sha=" +
             URLEncoder.encode(branch, "UTF-8") + "&per_page=$limit"
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.connectTimeout = 12000
         conn.readTimeout = 25000
-        conn.setRequestProperty("Authorization", "Bearer $token")
+        conn.setRequestProperty("Authorization", "Bearer $currentToken")
         conn.setRequestProperty("Accept", "application/vnd.github+json")
         conn.setRequestProperty("User-Agent", "SyncCS-Backup")
         try {
-            check(conn.responseCode == 200) { "Cannot load GitHub backup revisions." }
+            val status = conn.responseCode
+            if (status != 200) {
+                GithubHttpDiagnostics.report("backup-history", status, conn,
+                    conn.errorStream?.use { it.readBytes() })
+                throw ApiException(status, "Cannot load GitHub backup revisions (HTTP $status).")
+            }
             val rows = JSONArray(String(conn.inputStream.use { it.readBytes() }, Charsets.UTF_8))
-            return (0 until rows.length()).map { i ->
+            (0 until rows.length()).map { i ->
                 val entry = rows.getJSONObject(i)
                 val commit = entry.getJSONObject("commit")
                 Revision(entry.getString("sha"), commit.optString("message").lineSequence().first(),

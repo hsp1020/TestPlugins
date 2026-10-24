@@ -465,7 +465,10 @@ class SyncSettingsFragment : DialogFragment() {
                                 GithubOAuthSession.accessToken(config),
                                 config.preferences.getString("github_login", null)
                                     ?: error("Missing GitHub account"),
-                                deviceName = config.deviceName, deviceId = config.deviceId)
+                                deviceName = config.deviceName, deviceId = config.deviceId,
+                                recoverUnauthorized = { rejected ->
+                                    GithubOAuthSession.recoverAfter401(config, rejected)
+                                })
                             val snapshot = store.current(SyncCipher.saved(config))
                                 ?: error("No verified GitHub backup is available.")
                             check(config.preferences.getString("github_base_revision", null)
@@ -522,7 +525,10 @@ class SyncSettingsFragment : DialogFragment() {
                                 GithubOAuthSession.accessToken(config),
                                 config.preferences.getString("github_login", null)
                                     ?: error("Missing GitHub account"),
-                                deviceName = config.deviceName, deviceId = config.deviceId)
+                                deviceName = config.deviceName, deviceId = config.deviceId,
+                                recoverUnauthorized = { rejected ->
+                                    GithubOAuthSession.recoverAfter401(config, rejected)
+                                })
                             val current = store.current(SyncCipher.saved(config))
                                 ?: error("No GitHub backup available.")
                             try {
@@ -681,7 +687,10 @@ class SyncSettingsFragment : DialogFragment() {
                                     GithubOAuthSession.accessToken(config),
                                     config.preferences.getString("github_login", null)
                                         ?: error("Missing GitHub login"),
-                                    deviceName = config.deviceName, deviceId = config.deviceId)
+                                    deviceName = config.deviceName, deviceId = config.deviceId,
+                                recoverUnauthorized = { rejected ->
+                                    GithubOAuthSession.recoverAfter401(config, rejected)
+                                })
                                 val cipher = SyncCipher.saved(config)
                                 val current = store.current(cipher)
                                     ?: error("No current GitHub backup.")

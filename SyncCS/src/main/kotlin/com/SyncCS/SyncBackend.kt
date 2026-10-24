@@ -180,7 +180,44 @@ internal object GithubOAuthSession {
                 "event=unavailable reason=${if (encryptedRefresh == null) "missing-refresh" else "missing-client"}")
             return token
         }
-        SyncTrace.info("github-auth-refresh", "event=start")
+        return rotate(prefs, clientId, encryptedRefresh, "pre-expiry")
+    }
+
+    /**
+     * Recover an unexpected 401 only when this credential is still current.
+     * Concurrent shard requests reuse the credential rotated by the first request.
+     */
+    @Synchronized
+    fun recoverAfter401(config: SyncConfiguration, rejectedToken: String): String? {
+        val prefs = config.preferences
+        val encrypted = prefs.getString("github_token", null) ?: return null
+        val saved = String(LocalVault.decrypt(encrypted), Charsets.UTF_8)
+        if (saved != rejectedToken) {
+            SyncTrace.info("github-401-recovery", "event=use-rotated-credential")
+            return saved
+        }
+        val encryptedRefresh = prefs.getString("github_refresh_token", null)
+        val clientId = prefs.getString("github_client_id", null)
+        if (encryptedRefresh == null || clientId == null) {
+            SyncTrace.info("github-401-recovery",
+                "event=no-refresh-token legacyCredential=true action=pause")
+            return null
+        }
+        return try {
+            rotate(prefs, clientId, encryptedRefresh, "http-401")
+        } catch (error: GithubBackupStore.ApiException) {
+            if (error.code != 401) throw error
+            SyncTrace.info("github-401-recovery",
+                "event=refresh-rejected http=401 action=pause")
+            null
+        }
+    }
+
+    private fun rotate(
+        prefs: android.content.SharedPreferences, clientId: String,
+        encryptedRefresh: String, reason: String
+    ): String {
+        SyncTrace.info("github-auth-refresh", "event=start reason=$reason")
         val renewed = GithubAuthFlow.retry("refresh-token") {
             GithubDeviceCode.refresh(clientId,
                 String(LocalVault.decrypt(encryptedRefresh), Charsets.UTF_8))
@@ -194,8 +231,8 @@ internal object GithubOAuthSession {
             .putLong("github_refresh_expires_at", renewed.refreshExpiresAt)
             .commit()) { "Cannot persist renewed GitHub authorization" }
         SyncTrace.info("github-auth-refresh",
-            "event=success issuedAtMs=${renewed.issuedAt} expiresAtMs=${renewed.expiresAt} " +
-            "refreshExpiresAtMs=${renewed.refreshExpiresAt} " +
+            "event=success reason=$reason issuedAtMs=${renewed.issuedAt} " +
+            "expiresAtMs=${renewed.expiresAt} refreshExpiresAtMs=${renewed.refreshExpiresAt} " +
             "fingerprint=${SyncBackend.digest(renewed.access).take(12)}")
         return renewed.access
     }

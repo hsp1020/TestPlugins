@@ -36,7 +36,10 @@ internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
         ?: error("Missing GitHub account identifier")
     private val github by lazy {
         GithubBackupStore(token, login,
-            deviceName = config.deviceName, deviceId = config.deviceId)
+            deviceName = config.deviceName, deviceId = config.deviceId,
+            recoverUnauthorized = { rejected ->
+                GithubOAuthSession.recoverAfter401(config, rejected)
+            })
     }
     private var latest: GithubBackupStore.Snapshot? = null
     var createdFreshBackup: Boolean = false
