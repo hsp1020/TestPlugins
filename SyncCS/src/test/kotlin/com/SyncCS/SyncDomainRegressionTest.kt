@@ -91,6 +91,25 @@ class SyncDomainRegressionTest {
         assertFalse(merged.changedRemote)
     }
 
+    @Test fun nativeUuidMarkerIsUsedForFastProgressChangeMapping() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val native = with(com.lagradost.cloudstream3.utils.DataStore) {
+            context.getSharedPrefs()
+        }
+        val uuid = "11111111-1111-4111-8111-111111111111"
+        native.edit().putString("0/synccs_profile_uuid", uuid).commit()
+        try {
+            assertEquals("u/$uuid/video_pos_dur/567",
+                ProfileIdentity.remotePathForChange(context, "d/0/video_pos_dur/567"))
+            assertEquals("d/download_header_cache/567",
+                ProfileIdentity.remotePathForChange(context, "d/download_header_cache/567"))
+            assertEquals("p/StremioC/theme",
+                ProfileIdentity.remotePathForChange(context, "p/StremioC/theme"))
+        } finally {
+            native.edit().remove("0/synccs_profile_uuid").commit()
+        }
+    }
+
     @Test fun selectedReadSupportsAllNativePreferenceTypesWithoutCloning() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val prefs = context.getSharedPreferences("synccs-selected-test", Context.MODE_PRIVATE)

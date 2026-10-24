@@ -88,9 +88,7 @@ internal object SyncCoordinator {
     fun markChanged(context: Context, path: String) {
         if (applying) return
         val config = SyncConfiguration(context)
-        val remotePath = if (path.startsWith("d/")) {
-            ProfileIdentity.remotePath(path, ProfileSync.decode(ProfileSync.snapshot(context)))
-        } else path
+        val remotePath = ProfileIdentity.remotePathForChange(context, path)
         val key = "modified/" + remotePath
         config.preferences.edit().putLong(key, System.currentTimeMillis()).apply()
     }

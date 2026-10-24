@@ -130,6 +130,30 @@ internal object ProfileIdentity {
      * 'u/<uuid>/VIDEO_POS_DUR/...'. Old generation data stays attached to the
      * retired UUID, NEVER to a newly created account occupying slot 1.
      */
+    /**
+     * Core change callbacks can run on the UI thread. A healthy native UUID
+     * marker already proves the profile identity without reloading the full
+     * account roster and encoding its JSON on every playback position write.
+     * If a marker was removed during account deletion/reuse, the slow verified
+     * path generates/adopts the new UUID rather than reusing an old slot.
+     */
+    fun remotePathForChange(context: Context, nativePath: String): String {
+        if (!nativePath.startsWith("d/")) return nativePath
+        val raw = nativePath.removePrefix("d/")
+        val slotText = raw.substringBefore('/')
+        val slot = slotText.toIntOrNull() ?: return nativePath
+        if ('/' !in raw || slot < 0) return nativePath
+        val core = with(DataStore) { context.getSharedPrefs() }
+        val markerId = core.getString(marker(slot), null)
+        if (markerId != null && valid(markerId)) {
+            return "u/$markerId/" + raw.substringAfter('/')
+        }
+        SyncTrace.info("profile-mark-fallback",
+            "reason=${if (markerId == null) "missing-marker" else "invalid-marker"} " +
+                "slot=$slot")
+        return remotePath(nativePath, ProfileSync.decode(ProfileSync.snapshot(context)))
+    }
+
     fun remotePath(nativePath: String, profiles: ProfileSync.State): String {
         if (!nativePath.startsWith("d/")) return nativePath
         val number = nativePath.removePrefix("d/").substringBefore('/')
