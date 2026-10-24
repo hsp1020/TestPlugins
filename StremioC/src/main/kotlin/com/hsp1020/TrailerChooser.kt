@@ -323,16 +323,6 @@ internal class TrailerChooser(
                     scaleType = ImageView.ScaleType.CENTER_CROP
                     loadImage("https://i.ytimg.com/vi/" + entry.youtubeId + "/hqdefault.jpg")
                 }, FrameLayout.LayoutParams(dp(112), dp(63)))
-                addView(TextView(activity).apply {
-                    text = "▶"
-                    textSize = 16f
-                    gravity = Gravity.CENTER
-                    setTextColor(Color.WHITE)
-                    background = android.graphics.drawable.GradientDrawable().apply {
-                        shape = android.graphics.drawable.GradientDrawable.OVAL
-                        setColor(0xB3000000.toInt())
-                    }
-                }, FrameLayout.LayoutParams(dp(36), dp(36), Gravity.CENTER))
             }
             row.addView(thumbnail, LinearLayout.LayoutParams(dp(112), dp(63)))
             val labels = LinearLayout(activity).apply {
