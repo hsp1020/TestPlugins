@@ -28,6 +28,7 @@ import okhttp3.Callback
 import okhttp3.Dispatcher
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.OkHttpClient
 import java.io.IOException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -40,6 +41,9 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
     @Volatile private var active = false
     @Volatile private var subtitleReferers: Map<String, List<String>> = emptyMap()
 
+    @Volatile private var retryClient: OkHttpClient? = null
+    @Volatile private var retryBaseClient: OkHttpClient? = null
+    private val retryClientLock = Any()
     private val retryDispatcher = Dispatcher().apply {
         maxRequests = 8
         maxRequestsPerHost = 8
@@ -61,13 +65,26 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
         }
     }
 
+    private fun reusableRetryClient(): OkHttpClient {
+        val base = app.baseClient
+        val cached = retryClient
+        if (cached != null && retryBaseClient === base) return cached
+        return synchronized(retryClientLock) {
+            retryClient?.takeIf { retryBaseClient === base } ?: base.newBuilder()
+                .dispatcher(retryDispatcher).build().also {
+                    retryBaseClient = base
+                    retryClient = it
+                }
+        }
+    }
+
     private fun retryInParallel(
         chain: Interceptor.Chain,
         request: Request,
         original: Response,
         referers: List<String>
     ): Response {
-        val client = app.baseClient.newBuilder().dispatcher(retryDispatcher).build()
+        val client = reusableRetryClient()
         val finished = LinkedBlockingQueue<Pair<Call, Response?>>()
         val lock = Any()
         val calls = ArrayList<Call>()
@@ -185,6 +202,10 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
             active = false
             detach()
             retryDispatcher.cancelAll()
+            synchronized(retryClientLock) {
+                retryClient = null
+                retryBaseClient = null
+            }
             worker?.shutdownNow()
             worker = null
             host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)

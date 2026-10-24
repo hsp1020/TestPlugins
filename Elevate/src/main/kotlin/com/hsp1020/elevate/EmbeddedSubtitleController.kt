@@ -53,6 +53,8 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private var instance: Int? = null
     private var linkUrl: String? = null
     private var previousEmbedded = emptySet<SubtitleData>()
+    private var lastHandledSubtitles: Set<SubtitleData>? = null
+    private var lastHandledInstance: Int? = null
     private var manualOverride = false
     private var selectionDialog: Dialog? = null
     private var selectionBeforeDialog: SubtitleData? = null
@@ -340,6 +342,11 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         val subtitleObserver = Observer<VideoLive<Set<SubtitleData>>> { event ->
             if (event != null && event.instance == model?.state?.instance) {
                 synchronizeSource()
+                if (lastHandledInstance == event.instance &&
+                    (lastHandledSubtitles === event.value ||
+                        lastHandledSubtitles == event.value)) return@Observer
+                lastHandledInstance = event.instance
+                lastHandledSubtitles = event.value
                 labeledDialog = null
                 previousEmbedded = model?.state?.subtitles
                     ?.filterTo(mutableSetOf()) { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
@@ -382,6 +389,8 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         instance = null
         linkUrl = null
         previousEmbedded = emptySet()
+        lastHandledSubtitles = null
+        lastHandledInstance = null
         manualOverride = false
         selectionDialog = null
         selectionBeforeDialog = null
