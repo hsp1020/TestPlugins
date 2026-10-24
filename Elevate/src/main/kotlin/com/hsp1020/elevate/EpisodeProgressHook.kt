@@ -3,9 +3,11 @@ package com.hsp1020.elevate
 import android.app.Activity
 import android.app.Application
 import android.content.Context
-import android.graphics.drawable.ClipDrawable
-import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.LayerDrawable
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Color
+import android.os.SystemClock
+import android.util.Log
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -88,6 +90,31 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
         private var adapter: RecyclerView.Adapter<*>? = null
         private var refreshScheduled = false
         private val rows = mutableMapOf<View, RowProgress>()
+        private var created = 0
+        private var refreshCount = 0
+        private var totalRefreshUs = 0L
+        private var slowestRefreshUs = 0L
+        private var lastReport = SystemClock.elapsedRealtime()
+        private val primaryColor by lazy { root.context.colorFromAttribute(R.attr.colorPrimary) }
+        private val rowHeight by lazy {
+            (3f * root.resources.displayMetrics.density + 0.5f).toInt().coerceAtLeast(1)
+        }
+        private fun reportPerformance(force: Boolean = false) {
+            val now = SystemClock.elapsedRealtime()
+            if (!force && now - lastReport < 2000L) return
+            if (created != 0 || refreshCount != 0)
+                Log.i("Elevate-EpisodePerf",
+                    "stage=episode-row-window created=" + created +
+                    " updated=" + refreshCount +
+                    " totalUs=" + totalRefreshUs + " maxUs=" + slowestRefreshUs +
+                    " attached=" + rows.size +
+                    " elapsedMs=" + (now - lastReport))
+            created = 0
+            refreshCount = 0
+            totalRefreshUs = 0
+            slowestRefreshUs = 0
+            lastReport = now
+        }
         private val dataObserver = object : RecyclerView.AdapterDataObserver() {
             override fun onChanged() = scheduleRefresh()
             override fun onItemRangeChanged(positionStart: Int, itemCount: Int) = scheduleRefresh()
@@ -99,13 +126,15 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
 
         private val children = object : RecyclerView.OnChildAttachStateChangeListener {
             override fun onChildViewAttachedToWindow(view: View) {
-                refreshRow(view)
+                // Adapter inserts/layout are already on the main thread.
+                // Never allocate overlays from RecyclerView's layout traversal.
+                scheduleRefresh()
             }
             override fun onChildViewDetachedFromWindow(view: View) {
                 rows.remove(view)?.restore()
             }
         }
-        private val listLayout = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> refreshRows() }
+        private val listLayout = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> scheduleRefresh() }
         private val globalLayout = ViewTreeObserver.OnGlobalLayoutListener { syncList() }
 
         fun start() {
@@ -115,6 +144,7 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
 
         fun stop() {
             if (tree.isAlive) tree.removeOnGlobalLayoutListener(globalLayout)
+            reportPerformance(force = true)
             releaseList()
         }
 
@@ -136,7 +166,7 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
                 nextAdapter?.registerAdapterDataObserver(dataObserver)
                 changed = true
             }
-            if (changed) refreshRows()
+            if (changed) scheduleRefresh()
         }
 
         private fun releaseList() {
@@ -161,10 +191,13 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
 
         private fun refreshRows() {
             val recycler = list ?: return
+            // Coalesced once per frame, after any RecyclerView layout pass.
             for (i in 0 until recycler.childCount) refreshRow(recycler.getChildAt(i))
+            reportPerformance()
         }
 
         private fun refreshRow(row: View) {
+            val beginNs = SystemClock.elapsedRealtimeNanos()
             val nativeProgress = row.findViewById<ProgressBar>(R.id.episode_progress)
             val poster = row.findViewById<ImageView>(R.id.episode_poster)
             val originalOverlay = row.findViewById<View>(R.id.watch_progress_container)
@@ -179,37 +212,52 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
                 current
             } else {
                 current?.restore()
-                RowProgress(nativeProgress, frame, originalOverlay, createProgressBar(frame.context)).also {
+                RowProgress(nativeProgress, frame, originalOverlay,
+                    SlimProgressView(frame.context, primaryColor).apply {
+                        layoutParams = FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, rowHeight, Gravity.BOTTOM)
+                    }).also {
                     frame.addView(it.horizontal)
                     rows[row] = it
+                    created++
                 }
             }
-            state.update()
+            val elapsedUs = (SystemClock.elapsedRealtimeNanos() - beginNs) / 1000L
+            refreshCount++
+            totalRefreshUs += elapsedUs
+            if (elapsedUs > slowestRefreshUs) slowestRefreshUs = elapsedUs
+            if (elapsedUs >= 8000L)
+                Log.w("Elevate-EpisodePerf", "stage=episode-row-slow durationUs=" +
+                    elapsedUs + " created=" + created + " attached=" + rows.size)
         }
+    }
 
-        private fun createProgressBar(context: Context): ProgressBar {
-            val primary = context.colorFromAttribute(R.attr.colorPrimary)
-            val track = 0xB3FFFFFF.toInt()
-            val fill = GradientDrawable().apply { setColor(primary) }
-            val background = GradientDrawable().apply { setColor(track) }
-            val layers = LayerDrawable(arrayOf(
-                background,
-                ClipDrawable(fill, Gravity.START, ClipDrawable.HORIZONTAL)
-            )).apply {
-                setId(0, android.R.id.background)
-                setId(1, android.R.id.progress)
+    // The native ProgressBar constructor parses theme XML and animated vector
+    // drawables even when the control is only a 3dp, noninteractive indicator.
+    // A lightweight, equivalent bar avoids these per-row allocations.
+    private class SlimProgressView(context: Context, primary: Int) : View(context) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val foreground = primary
+        private val track = Color.argb(179, 255, 255, 255)
+        var progress: Int = 0
+            set(value) {
+                val bounded = value.coerceIn(0, 1000)
+                if (field == bounded) return
+                field = bounded
+                invalidate()
             }
-            return ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
-                isIndeterminate = false
-                progressDrawable = layers
-                max = 1000
-                visibility = View.GONE
-                isClickable = false
-                isFocusable = false
-                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                val height = (3f * resources.displayMetrics.density + 0.5f).toInt().coerceAtLeast(1)
-                layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height, Gravity.BOTTOM)
-            }
+        init {
+            visibility = GONE
+            isClickable = false
+            isFocusable = false
+            importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            paint.color = track
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+            paint.color = foreground
+            canvas.drawRect(0f, 0f, width * progress / 1000f, height.toFloat(), paint)
         }
     }
 
@@ -217,7 +265,7 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
         val native: ProgressBar,
         val frame: FrameLayout,
         val overlay: View,
-        val horizontal: ProgressBar
+        val horizontal: SlimProgressView
     ) {
         private val originalOverlayVisibility = overlay.visibility
 
