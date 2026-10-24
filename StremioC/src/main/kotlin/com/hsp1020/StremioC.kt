@@ -782,7 +782,7 @@ open class StremioC(
         // A separate supervisor prevents the parent detail load from joining background requests.
         private val simklSuggestionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val simklSuggestionSemaphore = Semaphore(3)
-        private const val SIMKL_RECOMMENDATION_WAIT_MS = 700L
+        private const val SIMKL_RECOMMENDATION_WAIT_MS = 1000L
         private const val SIMKL_RECOMMENDATION_TTL_MS = 24L * 60 * 60 * 1000
         private const val SIMKL_RECOMMENDATION_EMPTY_TTL_MS = 15L * 60 * 1000
         private val recommendationTraceSequence = java.util.concurrent.atomic.AtomicLong()
@@ -859,52 +859,141 @@ open class StremioC(
                 trace, "id", "source=sync-cache segment=${found.first} simklId=${found.second}"
             )
             val target = found ?: run {
-                val lookup = when {
-                    malId != null -> "mal" to malId.toString()
-                    !imdbId.isNullOrBlank() -> "imdb" to imdbId
-                    else -> "tmdb" to tmdbId
-                }
-                val requestAt = android.os.SystemClock.elapsedRealtime()
-                val response = try {
-                    customSession.get(
-                        "https://api.simkl.com/search/id",
-                        params = mapOf("client_id" to clientId, lookup.first to lookup.second),
-                        headers = headers, timeout = 4L
+                // Search-by-ID returns a thin result: ids.simkl is reliable, but
+                // ids.imdb / ids.tmdb may be missing even for an exact ID match.
+                val lookups = mutableListOf<Pair<String, String>>()
+                malId?.takeIf { it > 0 }?.let { lookups += "mal" to it.toString() }
+                imdbId?.takeIf { IMDB_ID_REGEX.matches(it) }?.let { lookups += "imdb" to it }
+                lookups += "tmdb" to tmdbId
+                val paramsBase = mapOf(
+                    "client_id" to clientId,
+                    "app-name" to "stremioc",
+                    "app-version" to "1.0"
+                )
+                val requestHeaders = headers + ("User-Agent" to "StremioC/1.0")
+                var resolved: Pair<String, String>? = null
+                var attempts = 0
+                for ((lookupKey, lookupValue) in lookups.distinct()) {
+                    attempts++
+                    val requestAt = android.os.SystemClock.elapsedRealtime()
+                    val params = paramsBase + (lookupKey to lookupValue) +
+                        (if (lookupKey == "tmdb") mapOf("type" to
+                            (if (type == "movie") "movie" else "show")) else emptyMap())
+                    val response = try {
+                        customSession.get(
+                            "https://api.simkl.com/search/id",
+                            params = params, headers = requestHeaders, timeout = 4L
+                        )
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        recommendationLog(trace, "http",
+                            "endpoint=search-id lookup=$lookupKey attempt=$attempts status=exception" +
+                                " error=${e.javaClass.simpleName} elapsedMs=${android.os.SystemClock.elapsedRealtime() - requestAt}")
+                        continue
+                    }
+                    recommendationLog(trace, "http",
+                        "endpoint=search-id lookup=$lookupKey attempt=$attempts status=${response.code}" +
+                            " elapsedMs=${android.os.SystemClock.elapsedRealtime() - requestAt}")
+                    if (response.code !in 200..299) {
+                        recommendationLog(trace, "id",
+                            "source=search-id lookup=$lookupKey result=http-error status=${response.code}" +
+                                " resultCount=0 validSimklIdCount=0 selectedType=none")
+                        // Invalid credentials and rate limits will affect every ID;
+                        // avoid consuming extra requests in these cases.
+                        if (response.code in listOf(401, 403, 412, 429)) break
+                        continue
+                    }
+                    val parsed = try {
+                        parseJson<JsonNode>(response.text)
+                    } catch (e: Exception) {
+                        recommendationLog(trace, "id",
+                            "source=search-id lookup=$lookupKey result=parse-error error=${e.javaClass.simpleName}" +
+                                " resultCount=0 validSimklIdCount=0 selectedType=none")
+                        continue
+                    }
+                    if (!parsed.isArray) {
+                        recommendationLog(trace, "id",
+                            "source=search-id lookup=$lookupKey result=unexpected-shape" +
+                                " shape=${parsed.nodeType} resultCount=0 validSimklIdCount=0 selectedType=none")
+                        continue
+                    }
+                    val rows = parsed.toList()
+                    var validSimklIdCount = 0
+                    data class Candidate(
+                        val segment: String, val simklId: String,
+                        val sourceType: String, val typeScore: Int, val idMatches: Boolean
                     )
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    recommendationLog(trace, "http", "endpoint=search-id status=exception error=${e.javaClass.simpleName} elapsedMs=${android.os.SystemClock.elapsedRealtime() - requestAt}")
+                    val candidates = rows.mapNotNull { row ->
+                        val ids = row.get("ids")
+                        val simklId = ids?.get("simkl")?.asText()?.trim()
+                            ?.takeIf { it.toLongOrNull()?.let { n -> n > 0L } == true }
+                            ?: return@mapNotNull null
+                        validSimklIdCount++
+                        val rawType = row.get("type")?.asText()?.lowercase()
+                        val animeType = row.get("anime_type")?.asText()?.lowercase()
+                        val segment = when (rawType) {
+                            "anime" -> "anime"
+                            "movie", "movies" -> "movies"
+                            "tv", "show", "shows" -> "tv"
+                            else -> return@mapNotNull null
+                        }
+                        val score = when {
+                            type == "movie" && segment == "movies" -> 3
+                            type == "movie" && segment == "anime" && animeType == "movie" -> 2
+                            type != "movie" && segment == "tv" -> 3
+                            type != "movie" && segment == "anime" && animeType != "movie" -> 2
+                            else -> 0
+                        }
+                        if (score == 0) return@mapNotNull null
+                        Candidate(
+                            segment, simklId, rawType,
+                            if (lookupKey == "mal" && segment == "anime") 4 else score,
+                            ids?.get(lookupKey)?.asText() == lookupValue
+                        )
+                    }
+                    val selected = candidates.sortedWith(
+                        compareByDescending<Candidate> { it.typeScore }
+                            .thenByDescending { it.idMatches }
+                    ).firstOrNull()
+                    val reason = when {
+                        rows.isEmpty() -> "empty"
+                        validSimklIdCount == 0 -> "no-valid-simkl-id"
+                        candidates.isEmpty() -> "type-mismatch"
+                        else -> "matched"
+                    }
+                    recommendationLog(trace, "id",
+                        "source=search-id lookup=$lookupKey attempt=$attempts result=$reason" +
+                            " resultCount=${rows.size} validSimklIdCount=$validSimklIdCount" +
+                            " typeMatchedCount=${candidates.size}" +
+                            " selectedType=${selected?.sourceType ?: "none"}" +
+                            " selectedSegment=${selected?.segment ?: "none"}" +
+                            " selectedSimklId=${selected?.simklId ?: "none"}")
+                    if (selected != null) {
+                        resolved = selected.segment to selected.simklId
+                        break
+                    }
+                    recommendationLog(trace, "fallback",
+                        "after=$lookupKey next=${lookups.distinct().getOrNull(attempts)?.first ?: "none"} reason=$reason")
+                }
+                if (resolved == null) {
+                    recommendationLog(trace, "id",
+                        "source=search-id result=unresolved attempts=$attempts" +
+                            " lookupOrder=${lookups.joinToString(",") { it.first }}")
                     return@withPermit emptyList()
                 }
-                recommendationLog(trace, "http", "endpoint=search-id status=${response.code} elapsedMs=${android.os.SystemClock.elapsedRealtime() - requestAt}")
-                if (response.code !in 200..299) return@withPermit emptyList()
-                val array = parseJson<JsonNode>(response.text)
-                val item = array.takeIf { it.isArray }?.firstOrNull { row ->
-                    val ids = row.get("ids")
-                    ids?.get(lookup.first)?.asText() == lookup.second
-                } ?: run {
-                    recommendationLog(trace, "id", "source=search-id result=no-match lookup=${lookup.first}")
-                    return@withPermit emptyList()
-                }
-                val id = item.get("ids")?.get("simkl")?.asText()
-                    ?.takeIf { it.all(Char::isDigit) && it != "0" }
-                    ?: return@withPermit emptyList()
-                val segment = when (item.get("type")?.asText()?.lowercase()) {
-                    "movie", "movies" -> "movies"
-                    "anime" -> "anime"
-                    "tv", "shows", "show" -> "tv"
-                    else -> if (type == "movie") "movies" else "tv"
-                }
-                recommendationLog(trace, "id", "source=search-id segment=$segment simklId=$id lookup=${lookup.first}")
-                segment to id
+                recommendationLog(trace, "id",
+                    "source=search-id result=resolved attempts=$attempts" +
+                        " selectedSegment=${resolved.first} selectedSimklId=${resolved.second}")
+                resolved
             }
             val detailAt = android.os.SystemClock.elapsedRealtime()
             val response = try {
                 customSession.get(
                     "https://api.simkl.com/" + target.first + "/" + target.second,
-                    params = mapOf("client_id" to clientId, "extended" to "full"),
-                    headers = headers, timeout = 5L
+                    params = mapOf("client_id" to clientId, "extended" to "full",
+                        "app-name" to "stremioc", "app-version" to "1.0"),
+                    headers = headers + ("User-Agent" to "StremioC/1.0"), timeout = 5L
                 )
             } catch (e: CancellationException) {
                 throw e
