@@ -166,6 +166,20 @@ class GithubStoreIntegrationTest {
         "strong-github-backup-passphrase", "https://api.github.com", "test-owner-id"
     )
 
+    @Test fun changedShardCorruptionFailsClosedInsteadOfApplyingPartialData() {
+        val api = FakeGit()
+        val a = store(api, "A")
+        val b = store(api, "B")
+        val c = cipher()
+        val key = "d/0/video_pos_dur/movie"
+        val first = a.initialize(c, mapOf(key to "100"))
+        a.publishPartial(first, 1, c, mapOf(key to "200"), emptySet())
+        api.corruptOneDataBlob()
+        assertThrows(IllegalStateException::class.java) {
+            b.incrementalSince(first, c, 1)
+        }
+    }
+
     @Test fun moreThanEightCommitsRemainsIncremental() {
         val api = FakeGit()
         val writer = store(api, "A")
@@ -185,7 +199,7 @@ class GithubStoreIntegrationTest {
             delta.encryptedChanges.getValue("d/0/video_pos_dur/seed")!!))
     }
 
-    @Test fun multiPageHistoryOverOneHundredCommitsRemainsIncremental() {
+    @Test fun longHistoryOverOneHundredCommitsRemainsIncremental() {
         val api = FakeGit()
         val writer = store(api, "A")
         val reader = store(api, "B")

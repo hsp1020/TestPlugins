@@ -355,53 +355,81 @@ internal class GithubBackupStore(
         return manifest.getInt("generation") to changes
     }
 
+    /** SHA-256 digests are sealed with the account's AES key in each full root. */
+    private data class VerifiedRoot(val generation: Int, val hashes: List<String>)
+
+    private fun verifiedRoot(files: Map<String, String>, cipher: SyncCipher): VerifiedRoot {
+        val manifestId = files["synccs/manifest.json"] ?: error("Missing backup root")
+        val manifest = JSONObject(String(blob(manifestId), Charsets.UTF_8))
+        check(manifest.getInt("format") == 2 && manifest.getBoolean("complete")) {
+            "Incomplete GitHub backup root"
+        }
+        check(cipher.decrypt("synccs/check", manifest.getString("verification")) ==
+            "synccs-github-v1") { "Untrusted GitHub backup root" }
+        val shardArray = manifest.getJSONArray("shards")
+        check(shardArray.length() == 16) { "Incomplete shard manifest" }
+        val hashes = (0 until 16).map { shardArray.getString(it) }
+        check(hashes.all { it.matches(Regex("[0-9a-f]{64}")) })
+        check(cipher.decrypt("synccs/data-root", manifest.getString("rootSeal")) ==
+            hashes.joinToString("|")) { "Backup root authentication failed" }
+        return VerifiedRoot(manifest.getInt("generation"), hashes)
+    }
+
     /**
-     * GitHub comparison is chronological and paginated. Never fall back to a
-     * 25k-key snapshot just because more than a handful of commits accumulated.
-     * A missing journal, broken ancestry or recovery-generation change still
-     * requires the complete authenticated snapshot.
+     * Use authenticated snapshots at TWO Git revisions, not one network request
+     * per intervening commit. This works even if thousands of commits accumulated,
+     * and works across older backups without per-commit journals.
+     *
+     * Only the changed shards are retrieved; unchanged ciphertext remains
+     * verbatim in Git. A missing or altered shard fails closed.
      */
     fun incrementalSince(base: String, cipher: SyncCipher, generation: Int): Incremental? {
         if (!base.matches(Regex("[0-9a-f]{40}")) || generation <= 0) return null
         val branch = ensurePrivateRepository()
         val head = revision(branch)
         if (head == base) return Incremental(head, generation, emptyMap())
+        // GitHub's "ahead" status establishes base as an ancestor of HEAD.
+        // Any restore that changes the authenticated generation must fall back.
+        val comparison = get("/compare/$base...$head?per_page=1")
+        if (comparison.optString("status") != "ahead") return null
 
-        val pageSize = 100 // GitHub's maximum per_page; not a sync history limit.
-        var page = 1
-        var total = -1
-        var processed = 0
-        var parent = base
-        val latest = linkedMapOf<String, String?>()
+        val (_, baseFiles) = index(base)
+        val (_, headFiles) = index(head)
+        val oldRoot = verifiedRoot(baseFiles, cipher)
+        val newRoot = verifiedRoot(headFiles, cipher)
+        if (oldRoot.generation != generation || newRoot.generation != generation)
+            return null
 
-        while (total < 0 || processed < total) {
-            val compare = get("/compare/$base...$head?per_page=$pageSize&page=$page")
-            if (compare.optString("status") != "ahead") return null
-            val count = compare.optInt("total_commits", -1)
-            if (count < 1 || (total >= 0 && total != count)) return null
-            if (total < 0) total = count
-            val list = compare.getJSONArray("commits")
-            val expected = minOf(pageSize, total - processed)
-            if (list.length() != expected) return null
-
-            for (i in 0 until list.length()) {
-                val item = list.getJSONObject(i)
-                val parents = item.getJSONArray("parents")
-                val rev = item.getString("sha")
-                if (parents.length() != 1 ||
-                    parents.getJSONObject(0).getString("sha") != parent) return null
-                val delta = readJournal(rev, cipher) ?: return null
-                if (delta.first != generation) return null
-                latest.putAll(delta.second)
-                parent = rev
+        val result = linkedMapOf<String, String?>()
+        var alteredShards = 0
+        for (bucketIndex in 0 until 16) {
+            if (oldRoot.hashes[bucketIndex] == newRoot.hashes[bucketIndex]) continue
+            alteredShards++
+            val path = shard(bucketIndex)
+            val oldData = blob(baseFiles[path] ?: error("Missing base shard $bucketIndex"))
+            val newData = blob(headFiles[path] ?: error("Missing head shard $bucketIndex"))
+            check(SyncBackend.digestBytes(oldData) == oldRoot.hashes[bucketIndex] &&
+                SyncBackend.digestBytes(newData) == newRoot.hashes[bucketIndex]) {
+                "Altered GitHub backup shard; incremental sync blocked."
             }
-            processed += list.length()
-            page++
+            val oldEntries = JSONObject(String(oldData, Charsets.UTF_8))
+            val newEntries = JSONObject(String(newData, Charsets.UTF_8))
+            for (key in (oldEntries.keys().asSequence().toSet() +
+                    newEntries.keys().asSequence().toSet())) {
+                check(bucket(key) == bucketIndex) { "Invalid authenticated shard assignment" }
+                val previous = if (oldEntries.has(key)) oldEntries.getString(key) else null
+                val current = if (newEntries.has(key)) newEntries.getString(key) else null
+                if (previous != current) {
+                    if (current != null) cipher.decrypt(key, current)
+                    result[key] = current
+                }
+            }
         }
-        if (processed != total || parent != head) return null
-        SyncTrace.info("github-delta-verified",
-            "commits=$total pages=${page - 1} changed=${latest.size} revision=${head.take(12)}")
-        return Incremental(head, generation, latest)
+        SyncSafety.validateChanges(result.size)
+        SyncTrace.info("github-delta-shard-diff",
+            "changedShards=$alteredShards changedKeys=${result.size} " +
+                "old=${base.take(12)} current=${head.take(12)}")
+        return Incremental(head, generation, result)
     }
 
     /**
