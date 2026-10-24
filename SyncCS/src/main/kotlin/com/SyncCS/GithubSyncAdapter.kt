@@ -29,15 +29,15 @@ internal interface SyncStorage {
 internal class GithubSyncAdapter(private val context: Context) : SyncStorage {
     private val config = SyncConfiguration(context)
     private val preferences = config.preferences
-    private val token: String = preferences.getString("github_token", null)?.let {
-        String(LocalVault.decrypt(it), Charsets.UTF_8)
-    } ?: error("Sign in with GitHub before synchronizing.")
+    private val token: String by lazy { GithubOAuthSession.accessToken(config) }
     private val login = preferences.getString("github_login", null)
         ?: error("Missing GitHub login")
     private val accountId = preferences.getString("github_account_id", null)
         ?: error("Missing GitHub account identifier")
-    private val github = GithubBackupStore(token, login,
-        deviceName = config.deviceName, deviceId = config.deviceId)
+    private val github by lazy {
+        GithubBackupStore(token, login,
+            deviceName = config.deviceName, deviceId = config.deviceId)
+    }
     private var latest: GithubBackupStore.Snapshot? = null
     var createdFreshBackup: Boolean = false
         private set

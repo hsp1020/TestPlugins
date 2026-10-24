@@ -342,7 +342,10 @@ class SyncPlugin : Plugin() {
         SyncTrace.info("github-credential-state",
             "present=${session.preferences.contains("github_token")} " +
                 "tokenId=${SyncAuthGuard.tokenHash(session.preferences.getString("github_token", null))?.take(12) ?: "missing"} " +
-                "rejected=${SyncAuthGuard.needsReauthentication(session)}")
+                "rejected=${SyncAuthGuard.needsReauthentication(session)} " +
+                "issuedAtMs=${session.preferences.getLong("github_token_issued_at", 0L)} " +
+                "expiresAtMs=${session.preferences.getLong("github_token_expires_at", 0L)} " +
+                "refreshPresent=${session.preferences.contains("github_refresh_token")}")
         ready = SyncRuntime.refreshLoadedState()
         ProfileIdentity.observe(context)
         MainActivity.bookmarksUpdatedEvent += bookmarks

@@ -461,10 +461,8 @@ class SyncSettingsFragment : DialogFragment() {
                                 !config.preferences.getBoolean("github_recovery_in_progress", false)) {
                                 "GitHub authorization or recovery is incomplete."
                             }
-                            val encryptedToken = config.preferences.getString("github_token", null)
-                                ?: error("Missing GitHub token")
                             val store = GithubBackupStore(
-                                String(LocalVault.decrypt(encryptedToken), Charsets.UTF_8),
+                                GithubOAuthSession.accessToken(config),
                                 config.preferences.getString("github_login", null)
                                     ?: error("Missing GitHub account"),
                                 deviceName = config.deviceName, deviceId = config.deviceId)
@@ -520,10 +518,8 @@ class SyncSettingsFragment : DialogFragment() {
                 if (config.active()) {
                     withContext(Dispatchers.IO) {
                         try {
-                            val encryptedToken = config.preferences.getString("github_token", null)
-                                ?: error("Missing GitHub token")
                             val store = GithubBackupStore(
-                                String(LocalVault.decrypt(encryptedToken), Charsets.UTF_8),
+                                GithubOAuthSession.accessToken(config),
                                 config.preferences.getString("github_login", null)
                                     ?: error("Missing GitHub account"),
                                 deviceName = config.deviceName, deviceId = config.deviceId)
@@ -681,10 +677,8 @@ class SyncSettingsFragment : DialogFragment() {
                             check(config.preferences.edit()
                                 .putBoolean("github_recovery_in_progress", true).commit())
                             try {
-                                val token = config.preferences.getString("github_token", null)
-                                    ?: error("Missing GitHub access token")
                                 val store = GithubBackupStore(
-                                    String(LocalVault.decrypt(token), Charsets.UTF_8),
+                                    GithubOAuthSession.accessToken(config),
                                     config.preferences.getString("github_login", null)
                                         ?: error("Missing GitHub login"),
                                     deviceName = config.deviceName, deviceId = config.deviceId)
@@ -802,7 +796,7 @@ class SyncSettingsFragment : DialogFragment() {
                         val savedToken = withContext(Dispatchers.IO) {
                             GithubAuthFlow.pending(config, client)
                         }
-                        val accessToken = if (savedToken != null) {
+                        val credential = if (savedToken != null) {
                             SyncTrace.info("github-auth-step", "step=pending-token event=reused")
                             feedback.text = "Resuming GitHub setup with saved authorization..."
                             savedToken
@@ -830,7 +824,7 @@ class SyncSettingsFragment : DialogFragment() {
                             }
                             authStep = "access-token"
                             SyncTrace.info("github-auth-step", "step=access-token event=start")
-                            var token: String? = null
+                            var token: GithubDeviceCode.Credential? = null
                             var interval = challenge.pollSeconds
                             withTimeout(challenge.expiresSeconds * 1000L) {
                                 while (token == null) {
@@ -857,6 +851,7 @@ class SyncSettingsFragment : DialogFragment() {
                             SyncTrace.info("github-auth-step", "step=access-token event=success")
                             token ?: error("GitHub authorization did not complete.")
                         }
+                        val accessToken = credential.access
                         feedback.text = "GitHub authorized. Returning to CloudStream..."
                         returnToCloudStreamAfterAuthorization(host)
                         authStep = "account-profile"
@@ -915,7 +910,13 @@ class SyncSettingsFragment : DialogFragment() {
                             val edit = config.preferences.edit()
                                 .putString("secret", verifiedCipher.encryptForLocalStorage())
                                 .putString("github_token", LocalVault.encrypt(
-                                    accessToken.toByteArray(Charsets.UTF_8)))
+                                    credential.access.toByteArray(Charsets.UTF_8)))
+                                .putString("github_refresh_token", credential.refresh?.let {
+                                    LocalVault.encrypt(it.toByteArray(Charsets.UTF_8))
+                                })
+                                .putLong("github_token_expires_at", credential.expiresAt)
+                                .putLong("github_token_issued_at", credential.issuedAt)
+                                .putLong("github_refresh_expires_at", credential.refreshExpiresAt)
                                 .putString("github_account_id", profile.id)
                                 .putString("github_login", profile.login)
                                 .putString("github_client_id", client)

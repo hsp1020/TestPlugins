@@ -12,6 +12,38 @@ import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 
+/** Safe diagnostics: log GitHub's error class and request ID, never OAuth secrets. */
+internal object GithubHttpDiagnostics {
+    fun report(stage: String, status: Int, conn: HttpURLConnection, response: ByteArray? = null) {
+        val message = runCatching {
+            JSONObject(String(response ?: ByteArray(0), Charsets.UTF_8)).optString("message")
+        }.getOrDefault("")
+        val kind = when {
+            message.equals("Bad credentials", true) -> "bad-credentials"
+            message.contains("Requires authentication", true) -> "authentication-required"
+            message.contains("Resource not accessible", true) -> "access-denied"
+            message.contains("rate limit", true) -> "rate-limit"
+            message.equals("Not Found", true) -> "not-found"
+            message.isBlank() -> "no-error-message"
+            else -> "other"
+        }
+        val auth = conn.getHeaderField("WWW-Authenticate") ?: ""
+        val authError = Regex("""error="?([a-z_]+)""").find(auth)?.groupValues?.get(1)
+            ?: "unspecified"
+        val request = conn.getHeaderField("X-GitHub-Request-Id")
+            ?.takeIf { it.matches(Regex("[A-Za-z0-9:-]{1,100}")) } ?: "missing"
+        val scopes = conn.getHeaderField("X-OAuth-Scopes")
+            ?.replace(Regex("[^a-zA-Z0-9_, -]"), "")?.take(100) ?: "unknown"
+        val accepted = conn.getHeaderField("X-Accepted-OAuth-Scopes")
+            ?.replace(Regex("[^a-zA-Z0-9_, -]"), "")?.take(100) ?: "unknown"
+        val limit = conn.getHeaderField("X-RateLimit-Remaining")
+            ?.takeIf { it.matches(Regex("[0-9]{1,12}")) } ?: "unknown"
+        SyncTrace.info("github-http-failure",
+            "phase=$stage http=$status message=$kind authError=$authError " +
+            "requestId=$request scopes=$scopes acceptedScopes=$accepted rateRemaining=$limit")
+    }
+}
+
 /**
  * Standalone GitHub storage engine. It cannot touch the Supabase account.
  * A backup is visible only after the complete set of encrypted shards and a
@@ -55,8 +87,19 @@ internal class GithubBackupStore(
             val status = conn.responseCode
             val response = (if (status in 200..299) conn.inputStream else conn.errorStream)
                 ?.use { it.readBytes() } ?: ByteArray(0)
-            if (status !in 200..299) throw ApiException(status,
-                "GitHub API HTTP $status: " + String(response, Charsets.UTF_8).take(200))
+            if (status !in 200..299) {
+                val stage = when {
+                    url == apiRoot -> "repository-access"
+                    url.contains("/git/ref/heads/") -> "remote-head"
+                    url.contains("/git/trees/") -> "tree-read"
+                    url.contains("/git/blobs/") -> "blob-read"
+                    url.endsWith("/user/repos") -> "repository-create"
+                    url.contains("/git/refs") -> "ref-write"
+                    else -> "backup-api"
+                }
+                GithubHttpDiagnostics.report(stage, status, conn, response)
+                throw ApiException(status, "GitHub API HTTP $status (stage=$stage)")
+            }
             return if (response.isEmpty()) JSONObject()
                 else JSONObject(String(response, Charsets.UTF_8))
         } finally {
@@ -262,8 +305,11 @@ internal class GithubBackupStore(
         try {
             val status = conn.responseCode
             if (status == 404) return emptyList()
-            if (status != 200) throw ApiException(status,
-                "Cannot load GitHub user backups (HTTP $status).")
+            if (status != 200) {
+                GithubHttpDiagnostics.report("manual-backup-list", status, conn,
+                    conn.errorStream?.use { it.readBytes() })
+                throw ApiException(status, "Cannot load GitHub user backups (HTTP $status).")
+            }
             return parseManualBackups(JSONArray(String(conn.inputStream.use {
                 it.readBytes()
             }, Charsets.UTF_8)))
@@ -536,6 +582,39 @@ internal class GithubBackupStore(
 
 internal object GithubDeviceCode {
     data class Profile(val login: String, val id: String)
+    data class Credential(
+        val access: String, val refresh: String? = null,
+        val expiresAt: Long = 0L, val issuedAt: Long = 0L,
+        val refreshExpiresAt: Long = 0L
+    ) {
+        fun encode(): String = JSONObject().put("access_token", access)
+            .put("refresh_token", refresh).put("expires_at", expiresAt)
+            .put("issued_at", issuedAt)
+            .put("refresh_expires_at", refreshExpiresAt).toString()
+
+        companion object {
+            fun decode(saved: String): Credential {
+                if (!saved.startsWith("{")) return Credential(saved)
+                val json = JSONObject(saved)
+                return Credential(json.getString("access_token"),
+                    json.optString("refresh_token").takeIf { it.isNotBlank() && it != "null" },
+                    json.optLong("expires_at", 0L),
+                    json.optLong("issued_at", 0L),
+                    json.optLong("refresh_expires_at", 0L))
+            }
+
+            fun issued(response: JSONObject): Credential {
+                val now = System.currentTimeMillis()
+                val expires = response.optLong("expires_in", 0L)
+                val refreshExpires = response.optLong("refresh_token_expires_in", 0L)
+                return Credential(response.getString("access_token"),
+                    response.optString("refresh_token").takeIf { it.isNotBlank() },
+                    if (expires > 0L) now + expires * 1000L else 0L,
+                    now,
+                    if (refreshExpires > 0L) now + refreshExpires * 1000L else 0L)
+            }
+        }
+    }
 
     fun profile(token: String): Profile {
         val connection = URL("https://api.github.com/user").openConnection()
@@ -548,8 +627,12 @@ internal object GithubDeviceCode {
         connection.setRequestProperty("User-Agent", "SyncCS-Backup")
         try {
             val status = connection.responseCode
-            if (status != 200) throw GithubBackupStore.ApiException(
-                status, "Cannot verify GitHub account (HTTP $status).")
+            if (status != 200) {
+                GithubHttpDiagnostics.report("account-profile", status, connection,
+                    connection.errorStream?.use { it.readBytes() })
+                throw GithubBackupStore.ApiException(
+                    status, "Cannot verify GitHub account (HTTP $status).")
+            }
             val response = JSONObject(String(connection.inputStream.use {
                 it.readBytes()
             }, Charsets.UTF_8))
@@ -581,8 +664,10 @@ internal object GithubDeviceCode {
             val status = connection.responseCode
             val response = (if (status in 200..299) connection.inputStream else connection.errorStream)
                 ?.use { it.readBytes() } ?: ByteArray(0)
-            if (status !in 200..299) throw GithubBackupStore.ApiException(
-                status, "GitHub OAuth HTTP $status")
+            if (status !in 200..299) {
+                GithubHttpDiagnostics.report("oauth-$endpoint", status, connection, response)
+                throw GithubBackupStore.ApiException(status, "GitHub OAuth HTTP $status")
+            }
             return JSONObject(String(response, Charsets.UTF_8))
         } finally {
             connection.disconnect()
@@ -596,16 +681,49 @@ internal object GithubDeviceCode {
             r.getString("verification_uri"), r.optLong("interval", 5).coerceAtLeast(5),
             r.getLong("expires_in"))
     }
-    fun poll(clientId: String, challenge: Challenge): String? {
+    fun poll(clientId: String, challenge: Challenge): Credential? {
         val r = post("oauth/access_token", mapOf("client_id" to clientId,
             "device_code" to challenge.code,
             "grant_type" to "urn:ietf:params:oauth:grant-type:device_code"))
         return when (r.optString("error")) {
-            "" -> r.getString("access_token")
+            "" -> Credential.issued(r).also {
+                SyncTrace.info("github-oauth-issued",
+                    "fingerprint=${SyncBackend.digest(it.access).take(12)} " +
+                    "type=${if (it.expiresAt > 0L) "expiring" else "non-expiring"} " +
+                    "issuedAtMs=${it.issuedAt} expiresAtMs=${it.expiresAt} " +
+                    "refreshPresent=${it.refresh != null} " +
+                    "refreshExpiresAtMs=${it.refreshExpiresAt}")
+            }
             "authorization_pending" -> null
             "slow_down" -> throw IOException("GitHub OAuth requested slower polling.")
-            else -> throw IOException("GitHub OAuth refused: " +
-                r.optString("error_description", r.optString("error")).take(150))
+            else -> {
+                val code = r.optString("error")
+                SyncTrace.info("github-oauth-response",
+                    "phase=device-poll error=${code.takeIf {
+                        it.matches(Regex("[a-z_]{1,64}"))
+                    } ?: "unknown"}")
+                throw IOException("GitHub OAuth refused: " +
+                    r.optString("error_description", code).take(150))
+            }
+        }
+    }
+
+    fun refresh(clientId: String, refreshToken: String): Credential {
+        val r = post("oauth/access_token", mapOf("client_id" to clientId,
+            "grant_type" to "refresh_token", "refresh_token" to refreshToken))
+        if (r.has("error")) {
+            val code = r.optString("error")
+            SyncTrace.info("github-oauth-response",
+                "phase=refresh error=${code.takeIf {
+                    it.matches(Regex("[a-z_]{1,64}"))
+                } ?: "unknown"}")
+            throw GithubBackupStore.ApiException(401,
+                "GitHub refresh authorization was rejected; sign in again.")
+        }
+        return Credential.issued(r).also {
+            check(!it.refresh.isNullOrBlank() && it.expiresAt > 0L) {
+                "GitHub did not provide a rotating refresh token."
+            }
         }
     }
 }

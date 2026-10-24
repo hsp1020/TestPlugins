@@ -348,9 +348,35 @@ class SyncDomainRegressionTest {
         assertTrue(parsed.all { it.summary == "SyncCS user backup" })
     }
 
+    @Test fun oauthCredentialPersistsExpirationAndRefreshDetails() {
+        val before = System.currentTimeMillis()
+        val credential = GithubDeviceCode.Credential.issued(JSONObject()
+            .put("access_token", "access1")
+            .put("refresh_token", "refresh1")
+            .put("expires_in", 28800)
+            .put("refresh_token_expires_in", 15897600))
+        assertEquals("access1", credential.access)
+        assertEquals("refresh1", credential.refresh)
+        assertTrue(credential.issuedAt >= before)
+        assertTrue(credential.expiresAt >= before + 28800000L)
+        assertTrue(credential.refreshExpiresAt >= before + 15897600000L)
+        assertEquals(credential, GithubDeviceCode.Credential.decode(credential.encode()))
+    }
+
+    @Test fun oauthLegacyCredentialWithoutExpirationStaysCompatible() {
+        val legacy = GithubDeviceCode.Credential.decode("old-token")
+        assertEquals("old-token", legacy.access)
+        assertNull(legacy.refresh)
+        assertEquals(0L, legacy.expiresAt)
+        assertEquals(0L, legacy.issuedAt)
+        assertEquals(0L, legacy.refreshExpiresAt)
+    }
+
     @Test fun interruptedSyncMustNotRollbackNewGithubCredentials() {
         for (key in listOf("github_token", "github_login", "github_account_id",
-                "github_client_id", "sync_transport", "secret")) {
+                "github_client_id", "github_refresh_token",
+                "github_token_expires_at", "github_token_issued_at",
+                "github_refresh_expires_at", "sync_transport", "secret")) {
             assertFalse(LocalSyncJournal.canRestoreJournalKey(key))
         }
         for (key in listOf("base", "remote_cursor", "profile_baseline",

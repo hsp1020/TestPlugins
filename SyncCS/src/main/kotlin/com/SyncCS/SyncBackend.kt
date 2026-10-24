@@ -55,7 +55,9 @@ internal class SyncConfiguration(context: Context) {
             "github_local_recovery_saved", "github_local_restore_pause", "github_client_id",
             "github_initial_backup_confirmed", "github_recovery_in_progress",
             "session", "oauth_pending", "configured", "email",
-            "github_pending_token", "github_pending_client"
+            "github_pending_token", "github_pending_client",
+            "github_refresh_token", "github_token_expires_at",
+            "github_token_issued_at", "github_refresh_expires_at"
         )) editor.remove(key)
         check(editor.commit())
     }
@@ -146,16 +148,70 @@ internal class SyncBackend private constructor() {
     }
 }
 
+/**
+ * Refresh expiring OAuth tokens without issuing another device authorization.
+ * Rotate access and refresh tokens together; never include either in a backup.
+ */
+internal object GithubOAuthSession {
+    @Synchronized
+    fun accessToken(config: SyncConfiguration): String {
+        val prefs = config.preferences
+        val encrypted = prefs.getString("github_token", null)
+            ?: error("GitHub authorization is missing")
+        val token = String(LocalVault.decrypt(encrypted), Charsets.UTF_8)
+        val until = prefs.getLong("github_token_expires_at", 0L)
+        val issuedAt = prefs.getLong("github_token_issued_at", 0L)
+        val refreshExpires = prefs.getLong("github_refresh_expires_at", 0L)
+        val now = System.currentTimeMillis()
+        val encryptedRefresh = prefs.getString("github_refresh_token", null)
+        val clientId = prefs.getString("github_client_id", null)
+        val expiring = until > 0L
+        val due = expiring && now + 120_000L >= until
+        SyncTrace.info("github-credential-diagnostic",
+            "fingerprint=${SyncBackend.digest(token).take(12)} " +
+            "issuedAtMs=${issuedAt.takeIf { it > 0L } ?: "unknown"} " +
+            "expiresAtMs=${until.takeIf { it > 0L } ?: "unknown"} " +
+            "remainingSeconds=${if (expiring) (until - now) / 1000L else "unknown"} " +
+            "refreshPresent=${encryptedRefresh != null} refreshExpiresAtMs=$refreshExpires " +
+            "refreshDue=$due")
+        if (!due) return token
+        if (encryptedRefresh == null || clientId == null) {
+            SyncTrace.info("github-auth-refresh",
+                "event=unavailable reason=${if (encryptedRefresh == null) "missing-refresh" else "missing-client"}")
+            return token
+        }
+        SyncTrace.info("github-auth-refresh", "event=start")
+        val renewed = GithubAuthFlow.retry("refresh-token") {
+            GithubDeviceCode.refresh(clientId,
+                String(LocalVault.decrypt(encryptedRefresh), Charsets.UTF_8))
+        }
+        check(prefs.edit()
+            .putString("github_token", LocalVault.encrypt(renewed.access.toByteArray(Charsets.UTF_8)))
+            .putString("github_refresh_token", LocalVault.encrypt(
+                renewed.refresh!!.toByteArray(Charsets.UTF_8)))
+            .putLong("github_token_expires_at", renewed.expiresAt)
+            .putLong("github_token_issued_at", renewed.issuedAt)
+            .putLong("github_refresh_expires_at", renewed.refreshExpiresAt)
+            .commit()) { "Cannot persist renewed GitHub authorization" }
+        SyncTrace.info("github-auth-refresh",
+            "event=success issuedAtMs=${renewed.issuedAt} expiresAtMs=${renewed.expiresAt} " +
+            "refreshExpiresAtMs=${renewed.refreshExpiresAt} " +
+            "fingerprint=${SyncBackend.digest(renewed.access).take(12)}")
+        return renewed.access
+    }
+}
+
 // OAuth authorization is stored separately from an activated sync session.
 internal object GithubAuthFlow {
     private const val PENDING_TOKEN = "github_pending_token"
     private const val PENDING_CLIENT = "github_pending_client"
 
-    fun pending(config: SyncConfiguration, clientId: String): String? {
+    fun pending(config: SyncConfiguration, clientId: String): GithubDeviceCode.Credential? {
         if (config.preferences.getString(PENDING_CLIENT, null) != clientId) return null
         val encrypted = config.preferences.getString(PENDING_TOKEN, null) ?: return null
         return try {
-            String(LocalVault.decrypt(encrypted), Charsets.UTF_8)
+            GithubDeviceCode.Credential.decode(
+                String(LocalVault.decrypt(encrypted), Charsets.UTF_8))
         } catch (error: Exception) {
             clear(config)
             SyncTrace.info("github-auth-pending",
@@ -164,9 +220,9 @@ internal object GithubAuthFlow {
         }
     }
 
-    fun save(config: SyncConfiguration, clientId: String, token: String) {
-        check(token.isNotBlank()) { "Empty GitHub authorization" }
-        val encrypted = LocalVault.encrypt(token.toByteArray(Charsets.UTF_8))
+    fun save(config: SyncConfiguration, clientId: String, token: GithubDeviceCode.Credential) {
+        check(token.access.isNotBlank()) { "Empty GitHub authorization" }
+        val encrypted = LocalVault.encrypt(token.encode().toByteArray(Charsets.UTF_8))
         check(config.preferences.edit()
             .putString(PENDING_CLIENT, clientId)
             .putString(PENDING_TOKEN, encrypted)
