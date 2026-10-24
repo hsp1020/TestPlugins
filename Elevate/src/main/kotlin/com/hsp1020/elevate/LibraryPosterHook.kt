@@ -83,6 +83,7 @@ internal class LibraryPosterHook(private val appContext: Application) :
     private var revision = 0
     private var config = LibraryPosterPrefs.get(appContext)
     private var xrdbVersion: String? = null
+    private var xrdbVersionChecked = false
     private var xrdbCheckAt = 0L
     private var xrdbCheck: Job? = null
 
@@ -101,6 +102,7 @@ internal class LibraryPosterHook(private val appContext: Application) :
                 xrdbCheck?.cancel()
                 xrdbCheck = null
                 xrdbVersion = null
+                xrdbVersionChecked = false
                 xrdbCheckAt = 0L
                 revision++
                 cancelPending()
@@ -316,6 +318,10 @@ internal class LibraryPosterHook(private val appContext: Application) :
         image.setTag(R.id.imageView, id)
         val token = revision
         val setting = config
+        // Avoid showing an unversioned XRDB cover and immediately replacing it
+        // with the versioned cover on the very first library load.
+        if (setting.service == PosterService.XRDB && setting.xrdbProfile.isNotBlank() &&
+            !xrdbVersionChecked) return
         val version = xrdbVersion
         pending[image] = scope.launch {
             try {
@@ -377,8 +383,13 @@ internal class LibraryPosterHook(private val appContext: Application) :
         xrdbCheckAt = now
         xrdbCheck = scope.launch {
             val token = withContext(Dispatchers.IO) { fetchXrdbVersion(snapshot) }
-            if (config != snapshot || library?.view == null ||
-                token == null || token == xrdbVersion) return@launch
+            if (config != snapshot || library?.view == null) return@launch
+            val initial = !xrdbVersionChecked
+            xrdbVersionChecked = true
+            if (token == null || token == xrdbVersion) {
+                if (initial) rescan()
+                return@launch
+            }
             xrdbVersion = token
             revision++
             cancelPending()
