@@ -38,11 +38,17 @@ internal class PhoneHeroHook(
     private var pager: ViewPager2? = null
     private var recycler: RecyclerView? = null
     private val pages = HashMap<View, Page>()
+    private var refreshQueued = false
     private fun dp(value: Int) = (value * activity.resources.displayMetrics.density + 0.5f).toInt()
 
     private fun scheduleRefresh() {
         val list = recycler ?: return
-        list.post { if (recycler === list) refresh() }
+        if (refreshQueued) return
+        refreshQueued = true
+        list.post {
+            refreshQueued = false
+            if (recycler === list) refresh()
+        }
     }
     private val previewObserver = Observer<Resource<Pair<Boolean, List<LoadResponse>>>> { scheduleRefresh() }
     private val selectionListener = object : ViewPager2.OnPageChangeCallback() {
@@ -50,7 +56,7 @@ internal class PhoneHeroHook(
     }
     private val childListener = object : RecyclerView.OnChildAttachStateChangeListener {
         override fun onChildViewAttachedToWindow(view: View) {
-            view.post { if (recycler?.indexOfChild(view)?.let { it >= 0 } == true) refresh() }
+            scheduleRefresh()
         }
         override fun onChildViewDetachedFromWindow(view: View) {
             pages.remove(view)?.restore()
@@ -94,6 +100,7 @@ internal class PhoneHeroHook(
         if (pager != null) home.preview.removeObserver(previewObserver)
         pages.values.forEach { it.restore() }
         pages.clear()
+        refreshQueued = false
         recycler = null
         pager = null
     }
@@ -149,8 +156,14 @@ internal class PhoneHeroHook(
             isClickable = false
             isFocusable = false
         }
-        private val preDraw = ViewTreeObserver.OnPreDrawListener {
+        // Window-coordinate lookup and margin updates must NOT run on every
+        // frame. Global layout handles actual geometry/controls reflows.
+        private val geometryChanged = ViewTreeObserver.OnGlobalLayoutListener {
             updateSpacing()
+        }
+        // Coil may replace an ImageView drawable without triggering layout;
+        // keep the cheap identity guard for image cropping only.
+        private val preDraw = ViewTreeObserver.OnPreDrawListener {
             applyCropIfNeeded()
             true
         }
@@ -213,6 +226,8 @@ internal class PhoneHeroHook(
             holder?.addView(genres, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
             image?.scaleType = ImageView.ScaleType.MATRIX
             image?.viewTreeObserver?.addOnPreDrawListener(preDraw)
+            root.viewTreeObserver.addOnGlobalLayoutListener(geometryChanged)
+            root.post { updateSpacing() }
         }
 
         fun bind(item: LoadResponse) {
@@ -270,6 +285,7 @@ internal class PhoneHeroHook(
 
         fun restore() {
             image?.viewTreeObserver?.let { if (it.isAlive) it.removeOnPreDrawListener(preDraw) }
+            root.viewTreeObserver.let { if (it.isAlive) it.removeOnGlobalLayoutListener(geometryChanged) }
             image?.scaleType = originalScale ?: ImageView.ScaleType.CENTER_CROP
             (gradient.parent as? ViewGroup)?.removeView(gradient)
             (details.parent as? ViewGroup)?.removeView(details)
