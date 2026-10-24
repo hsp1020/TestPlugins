@@ -44,6 +44,7 @@ class ElevatePlugin : Plugin() {
     private var homeHero: HomeHeroToggle? = null
     private var libraryPosters: LibraryPosterHook? = null
     private var performanceTrace: ElevatePerformanceTrace? = null
+    private var nativeRecyclerGuard: NativeRecyclerListenerGuard? = null
     private var featurePrefs: SharedPreferences? = null
     private var featureListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
     private var app: Application? = null
@@ -65,6 +66,7 @@ class ElevatePlugin : Plugin() {
             stopAll()
             app = application
             performanceTrace = ElevatePerformanceTrace(application).also { it.start() }
+            nativeRecyclerGuard = NativeRecyclerListenerGuard(application).also { it.start() }
             try {
                 val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
                 // Preserve the user's previous visible/hidden choice when changing to "ON = hide".
@@ -226,6 +228,8 @@ class ElevatePlugin : Plugin() {
         libraryPosters = null
         performanceTrace?.stop()
         performanceTrace = null
+        nativeRecyclerGuard?.stop()
+        nativeRecyclerGuard = null
         app = null
     }
 
