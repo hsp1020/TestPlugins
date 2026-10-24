@@ -678,12 +678,12 @@ internal class ElevateSkipButtonTimer(
     }
 
     private fun showNative(stamp: com.lagradost.cloudstream3.utils.videoskip.VideoSkipStamp,
-                           now: Long) {
-        val b = button ?: return
+                           now: Long): Boolean {
+        val b = button ?: return false
         // The native hide animator's onEnd sets GONE even when cancelled.
         // Never reopen during that animation; wait for its callback to finish.
         if (now - lastNativeHideAtMs < NATIVE_ANIMATION_MS + 100L ||
-            now - lastRestoreAtMs < NATIVE_ANIMATION_MS + 100L) return
+            now - lastRestoreAtMs < NATIVE_ANIMATION_MS + 100L) return false
         lastRestoreAtMs = now
         // CloudStream's timestampShowState can remain true even after a stale
         // hide-animation onEnd makes the view GONE. Normalize that state first.
@@ -692,6 +692,7 @@ internal class ElevateSkipButtonTimer(
         // countdown is authoritative for this active interval.
         fragment.skipIndex++
         if (b.alpha != originalAlpha) b.alpha = originalAlpha
+        return b.visibility == View.VISIBLE
     }
 
     private val tick = object : Runnable {
@@ -751,8 +752,10 @@ internal class ElevateSkipButtonTimer(
                 // 10-second timeout, matching Nuvio's (!autoHidden || controls).
                 val wasHiddenByUs = hiddenByTimer
                 hiddenByTimer = false
-                if (wasHiddenByUs && controlsVisible) {
-                    showNative(stamp, now)
+                if (wasHiddenByUs && controlsVisible && !showNative(stamp, now)) {
+                    // Keep retry eligibility while the 500ms hide animation
+                    // is finishing; a single premature attempt is not enough.
+                    hiddenByTimer = true
                 }
                 if (b.alpha != originalAlpha) b.alpha = originalAlpha
                 indicator?.visibility =
