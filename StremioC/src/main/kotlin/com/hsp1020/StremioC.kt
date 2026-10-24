@@ -785,6 +785,11 @@ open class StremioC(
         private const val SIMKL_RECOMMENDATION_WAIT_MS = 700L
         private const val SIMKL_RECOMMENDATION_TTL_MS = 24L * 60 * 60 * 1000
         private const val SIMKL_RECOMMENDATION_EMPTY_TTL_MS = 15L * 60 * 1000
+        private val recommendationTraceSequence = java.util.concurrent.atomic.AtomicLong()
+
+        private fun recommendationLog(trace: Long, stage: String, message: String) {
+            android.util.Log.i("StremioC-Recs", "trace=$trace stage=$stage $message")
+        }
 
         private fun simklSuggestionsFromDetail(text: String): List<SimklSuggestion> {
             val detail = parseJson<JsonNode>(text)
@@ -837,32 +842,51 @@ open class StremioC(
 
         private suspend fun loadSimklSuggestions(
             userId: String, type: String, tmdbId: String, imdbId: String?, malId: Int?,
-            headers: Map<String, String>, clientId: String, key: String
+            headers: Map<String, String>, clientId: String, key: String, trace: Long
         ): List<SimklSuggestion> = simklSuggestionSemaphore.withPermit {
             val disk = MetadataDiskCache.read("simkl_recs", key)
             if (disk != null && System.currentTimeMillis() >= disk.second &&
                 System.currentTimeMillis() - disk.second < SIMKL_RECOMMENDATION_TTL_MS) {
                 val cached = runCatching { simklSuggestionsFromDetail(disk.first) }.getOrNull()
-                if (!cached.isNullOrEmpty()) return@withPermit cached
+                if (!cached.isNullOrEmpty()) {
+                    recommendationLog(trace, "cache", "source=disk count=${cached.size}")
+                    return@withPermit cached
+                }
             }
+            if (disk != null) recommendationLog(trace, "cache", "source=disk result=expired_or_empty")
             val found = cachedSimklTitle(userId, type, tmdbId, imdbId, malId)
+            if (found != null) recommendationLog(
+                trace, "id", "source=sync-cache segment=${found.first} simklId=${found.second}"
+            )
             val target = found ?: run {
                 val lookup = when {
                     malId != null -> "mal" to malId.toString()
                     !imdbId.isNullOrBlank() -> "imdb" to imdbId
                     else -> "tmdb" to tmdbId
                 }
-                val response = customSession.get(
-                    "https://api.simkl.com/search/id",
-                    params = mapOf("client_id" to clientId, lookup.first to lookup.second),
-                    headers = headers, timeout = 4L
-                )
+                val requestAt = android.os.SystemClock.elapsedRealtime()
+                val response = try {
+                    customSession.get(
+                        "https://api.simkl.com/search/id",
+                        params = mapOf("client_id" to clientId, lookup.first to lookup.second),
+                        headers = headers, timeout = 4L
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    recommendationLog(trace, "http", "endpoint=search-id status=exception error=${e.javaClass.simpleName} elapsedMs=${android.os.SystemClock.elapsedRealtime() - requestAt}")
+                    return@withPermit emptyList()
+                }
+                recommendationLog(trace, "http", "endpoint=search-id status=${response.code} elapsedMs=${android.os.SystemClock.elapsedRealtime() - requestAt}")
                 if (response.code !in 200..299) return@withPermit emptyList()
                 val array = parseJson<JsonNode>(response.text)
                 val item = array.takeIf { it.isArray }?.firstOrNull { row ->
                     val ids = row.get("ids")
                     ids?.get(lookup.first)?.asText() == lookup.second
-                } ?: return@withPermit emptyList()
+                } ?: run {
+                    recommendationLog(trace, "id", "source=search-id result=no-match lookup=${lookup.first}")
+                    return@withPermit emptyList()
+                }
                 val id = item.get("ids")?.get("simkl")?.asText()
                     ?.takeIf { it.all(Char::isDigit) && it != "0" }
                     ?: return@withPermit emptyList()
@@ -872,50 +896,85 @@ open class StremioC(
                     "tv", "shows", "show" -> "tv"
                     else -> if (type == "movie") "movies" else "tv"
                 }
+                recommendationLog(trace, "id", "source=search-id segment=$segment simklId=$id lookup=${lookup.first}")
                 segment to id
             }
-            val response = customSession.get(
-                "https://api.simkl.com/" + target.first + "/" + target.second,
-                params = mapOf("client_id" to clientId, "extended" to "full"),
-                headers = headers, timeout = 5L
-            )
-            if (response.code !in 200..299 || response.text.isBlank()) return@withPermit emptyList()
+            val detailAt = android.os.SystemClock.elapsedRealtime()
+            val response = try {
+                customSession.get(
+                    "https://api.simkl.com/" + target.first + "/" + target.second,
+                    params = mapOf("client_id" to clientId, "extended" to "full"),
+                    headers = headers, timeout = 5L
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                recommendationLog(trace, "http", "endpoint=detail status=exception error=${e.javaClass.simpleName} elapsedMs=${android.os.SystemClock.elapsedRealtime() - detailAt}")
+                return@withPermit emptyList()
+            }
+            recommendationLog(trace, "http", "endpoint=detail status=${response.code} elapsedMs=${android.os.SystemClock.elapsedRealtime() - detailAt}")
+            if (response.code !in 200..299 || response.text.isBlank()) {
+                recommendationLog(trace, "result", "source=simkl count=0 reason=http_or_empty")
+                return@withPermit emptyList()
+            }
             val result = simklSuggestionsFromDetail(response.text)
+            recommendationLog(trace, "result", "source=simkl count=${result.size}")
             if (result.isNotEmpty()) MetadataDiskCache.write("simkl_recs", key, response.text)
             result
         }
 
         private fun requestSimklSuggestions(
-            type: String, tmdbId: String, imdbId: String?, malId: Int?
+            type: String, tmdbId: String, imdbId: String?, malId: Int?, trace: Long
         ): Deferred<List<SimklSuggestion>>? {
-            if (tmdbId.toIntOrNull()?.let { it > 0 } != true) return null
+            if (tmdbId.toIntOrNull()?.let { it > 0 } != true) {
+                recommendationLog(trace, "request", "result=skip reason=invalid-tmdb-id")
+                return null
+            }
             val auth = AccountManager.syncApis.firstOrNull { it.idPrefix == "simkl" }
-                ?.authData() ?: return null
+                ?.authData()
+            if (auth == null) {
+                recommendationLog(trace, "request", "result=skip reason=no-simkl-auth")
+                return null
+            }
             val headers = SimklApi.getHeaders(auth.token)
-            val clientId = headers["simkl-api-key"]?.takeIf(String::isNotBlank) ?: return null
+            val clientId = headers["simkl-api-key"]?.takeIf(String::isNotBlank)
+            if (clientId == null) {
+                recommendationLog(trace, "request", "result=skip reason=no-client-id")
+                return null
+            }
             val key = listOf(type, tmdbId, imdbId.orEmpty(), malId?.toString().orEmpty()).joinToString("|")
             val cached = simklSuggestionCache[key]
             val now = System.currentTimeMillis()
             if (cached != null && now >= cached.at &&
                 now - cached.at < if (cached.entries.isEmpty()) SIMKL_RECOMMENDATION_EMPTY_TTL_MS else SIMKL_RECOMMENDATION_TTL_MS) {
+                recommendationLog(trace, "cache", "source=memory count=${cached.entries.size}")
                 return CompletableDeferred(cached.entries)
             }
             val userId = auth.user.id.toString()
+            var startedNewRequest = false
             val task = synchronized(simklSuggestionLock) {
                 simklSuggestionFlights[key] ?: simklSuggestionScope.async(start = CoroutineStart.LAZY) {
-                    val rows = try {
+                    val backgroundAt = android.os.SystemClock.elapsedRealtime()
+                    val result = try {
                         withTimeoutOrNull(6500L) {
-                            loadSimklSuggestions(userId, type, tmdbId, imdbId, malId, headers, clientId, key)
-                        } ?: emptyList()
+                            loadSimklSuggestions(userId, type, tmdbId, imdbId, malId, headers, clientId, key, trace)
+                        }
                     } catch (e: CancellationException) {
                         throw e
-                    } catch (_: Exception) {
+                    } catch (e: Exception) {
+                        recommendationLog(trace, "result", "source=simkl count=0 reason=exception error=${e.javaClass.simpleName}")
                         emptyList()
                     }
+                    val rows = result.orEmpty()
+                    recommendationLog(trace, "background", "status=${if (result == null) "timeout" else "completed"} count=${rows.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - backgroundAt}")
                     simklSuggestionCache[key] = SimklSuggestionCache(rows, System.currentTimeMillis())
                     rows
-                }.also { simklSuggestionFlights[key] = it }
+                }.also {
+                    simklSuggestionFlights[key] = it
+                    startedNewRequest = true
+                }
             }
+            recommendationLog(trace, "request", "source=${if (startedNewRequest) "network" else "shared-flight"} media=$type tmdb=$tmdbId")
             task.invokeOnCompletion {
                 synchronized(simklSuggestionLock) {
                     if (simklSuggestionFlights[key] === task) simklSuggestionFlights.remove(key)
@@ -4238,6 +4297,12 @@ open class StremioC(
             recommendationPoster: String? = null,
             recommendationMalId: Int? = null
         ): FetchedTmdbData {
+            val recommendationTrace = StremioC.recommendationTraceSequence.incrementAndGet()
+            val recommendationStartedAt = android.os.SystemClock.elapsedRealtime()
+            StremioC.recommendationLog(
+                recommendationTrace, "begin",
+                "media=$tmdbMediaType tmdb=$tmdbIdStr imdbKnown=${!finalImdbId.isNullOrBlank()} malKnown=${recommendationMalId != null}"
+            )
             var fetchedRecommendations: List<SearchResponse>? = null
 
             val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
@@ -4271,6 +4336,7 @@ open class StremioC(
             }
 
             if (detailRes == null) {
+                StremioC.recommendationLog(recommendationTrace, "final", "result=skip reason=tmdb-detail-unavailable elapsedMs=${android.os.SystemClock.elapsedRealtime() - recommendationStartedAt}")
                 return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null, null)
             }
 
@@ -4278,7 +4344,7 @@ open class StremioC(
                 tmdbMediaType, tmdbIdStr,
                 finalImdbId?.takeIf { StremioC.IMDB_ID_REGEX.matches(it) }
                     ?: detailRes.external_ids?.imdb_id,
-                recommendationMalId
+                recommendationMalId, recommendationTrace
             )
 
             val episodeTmdbMeta = ConcurrentHashMap<String, TmdbEpisode>()
@@ -4396,7 +4462,8 @@ open class StremioC(
                 detailRes.recommendations?.results.orEmpty().forEachIndexed { idx, media ->
                     addTmdb(media, null, idx)
                 }
-                val simklRows = withTimeoutOrNull(StremioC.SIMKL_RECOMMENDATION_WAIT_MS) {
+                val waitAt = android.os.SystemClock.elapsedRealtime()
+                val awaitedSimklRows = withTimeoutOrNull(StremioC.SIMKL_RECOMMENDATION_WAIT_MS) {
                     try {
                         simklJob?.await() ?: emptyList()
                     } catch (e: CancellationException) {
@@ -4405,7 +4472,13 @@ open class StremioC(
                     } catch (_: Exception) {
                         emptyList()
                     }
-                }.orEmpty()
+                }
+                val simklRows = awaitedSimklRows.orEmpty()
+                StremioC.recommendationLog(
+                    recommendationTrace, "wait",
+                    "status=${if (simklJob == null) "skipped" else if (awaitedSimklRows == null) "timeout" else "completed"}" +
+                        " elapsedMs=${android.os.SystemClock.elapsedRealtime() - waitAt} budgetMs=${StremioC.SIMKL_RECOMMENDATION_WAIT_MS} received=${simklRows.size}"
+                )
                 simklRows.forEach { rec ->
                     if (rec.tmdbId?.toString() == tmdbIdStr) return@forEach
                     val key = rec.type + ":" + (rec.tmdbId?.let { "tmdb:$it" } ?: rec.id)
@@ -4415,6 +4488,9 @@ open class StremioC(
                     card.simklRank = rec.rank
                     card.fallbackPoster = rec.poster
                 }
+                val tmdbCount = candidates.values.count { it.tmdbRank != null }
+                val overlapCount = candidates.values.count { it.tmdbRank != null && it.simklRank != null }
+                val collectionCount = candidates.values.count { it.collectionIndex != null }
                 val ordered = candidates.values.sortedWith(
                     compareByDescending<SuggestedCard> { it.collectionIndex != null }
                         .thenBy { it.collectionDate ?: "" }
@@ -4441,6 +4517,12 @@ open class StremioC(
                         if (rec.type == "movie") TvType.Movie else TvType.TvSeries
                     ) { this.posterUrl = poster }
                 }
+                StremioC.recommendationLog(
+                    recommendationTrace, "final",
+                    "tmdb=$tmdbCount simklReceived=${simklRows.size} overlap=$overlapCount" +
+                        " collection=$collectionCount unique=${candidates.size} shown=${fetchedRecommendations?.size ?: 0}" +
+                        " elapsedMs=${android.os.SystemClock.elapsedRealtime() - recommendationStartedAt}"
+                )
             }
 
             val countryCode = langCode.substringAfter("-", "KR").uppercase()
