@@ -60,7 +60,7 @@ internal class ElevateSkipController(private val application: Application) :
     private var suppressedUntilOutside = false
     private var polling = false
     // Keep the native MaterialButton and its click/focus/animation handlers intact.
-    // Anchor the same native button to the fixed player surface on phone, tablet and TV.
+    // Move the touch-layout skip button only; leave the native TV constraints untouched.
     private data class SkipButtonPosition(
         val button: View,
         val topToTop: Int,
@@ -81,10 +81,11 @@ internal class ElevateSkipController(private val application: Application) :
         if (button.parent !== bottomBar.parent) return
         if (savedButtonPosition?.button === button) return
         restoreNativeSkipButton()
-        // bottom_player_bar changes visibility/translation when controls toggle.
-        // Anchoring a skip button to that bar moves it even though the video did not move.
-        // Anchor to the fixed player_video_holder instead (also on TV).
-        val tvLayout = params.bottomToTop == bottomBar.id
+        // TV already places the skip button at the lower right with native D-pad
+        // navigation. Never override that layout or its original margins.
+        if (params.bottomToTop == bottomBar.id) return
+        // On touch layouts, bottom_player_bar can change size/translation when
+        // controls appear. Anchor to the fixed player surface, never to the bar.
         savedButtonPosition = SkipButtonPosition(
             button, params.topToTop, params.topToBottom, params.bottomToTop,
             params.bottomToBottom, params.topMargin, params.bottomMargin, params.marginEnd
@@ -94,13 +95,12 @@ internal class ElevateSkipController(private val application: Application) :
         params.bottomToTop = ConstraintLayout.LayoutParams.UNSET
         params.bottomToBottom = ConstraintLayout.LayoutParams.PARENT_ID
         params.topMargin = 0
-        // Fixed offsets are independent of control-bar visibility and animation.
-        // Keep the TV button's original right inset and native D-pad focus.
-        params.bottomMargin = ((if (tvLayout) 96 else 84) *
-            button.resources.displayMetrics.density + 0.5f).toInt()
-        if (!tvLayout) {
-            params.marginEnd = (24 * button.resources.displayMetrics.density + 0.5f).toInt()
-        }
+        // Native touch layout: 30dp seek row + 60dp control row + 10dp
+        // bottom margin. Reserve another 24dp above all controls and the
+        // progress scrubber, whether they are currently shown or hidden.
+        // This is a fixed constraint, not a measured or animated position.
+        params.bottomMargin = (124 * button.resources.displayMetrics.density + 0.5f).toInt()
+        params.marginEnd = (24 * button.resources.displayMetrics.density + 0.5f).toInt()
         button.layoutParams = params
     }
 
