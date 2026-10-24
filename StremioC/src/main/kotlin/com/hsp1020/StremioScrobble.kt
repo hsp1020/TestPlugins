@@ -488,11 +488,14 @@ internal class StremioScrobble(context: Context) {
             body.put("played", report.played ?: (report.duration > 0L &&
                 report.position.toDouble() / report.duration >= 0.80))
         val type = if (item.movie) "movie" else "series"
-        app.post(
+        // Scrobble is a fire-and-forget status request; its response body is
+        // never consumed. Close it even for 204 and error status codes.
+        val response = app.post(
             report.target + "/playback/" + type + "/" + Uri.encode(videoId) + ".json",
             headers = mapOf("Content-Type" to "application/json"),
             requestBody = body.toString().toRequestBody("application/json; charset=utf-8".toMediaType()),
             timeout = 15L
         )
+        response.okhttpResponse.close()
     }
 }
