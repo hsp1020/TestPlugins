@@ -903,11 +903,11 @@ open class StremioC(
             val task = synchronized(simklSuggestionLock) {
                 simklSuggestionFlights[key] ?: simklSuggestionScope.async(start = CoroutineStart.LAZY) {
                     val rows = try {
-                        withTimeout(6500L) {
+                        withTimeoutOrNull(6500L) {
                             loadSimklSuggestions(userId, type, tmdbId, imdbId, malId, headers, clientId, key)
-                        }
+                        } ?: emptyList()
                     } catch (e: CancellationException) {
-                        if (!currentCoroutineContext().isActive) emptyList() else throw e
+                        throw e
                     } catch (_: Exception) {
                         emptyList()
                     }
@@ -4386,8 +4386,9 @@ open class StremioC(
                         card.collectionDate = media.releaseDate ?: media.firstAirDate ?: "9999-12-31"
                     }
                     if (rank != null) card.tmdbRank = rank
-                    if (media.original_language == detailRes.original_language ||
-                        (media.origin_country.orEmpty().any { it in detailRes.origin_country.orEmpty() }))
+                    if ((!media.original_language.isNullOrBlank() &&
+                            media.original_language == detailRes.original_language) ||
+                        media.origin_country.orEmpty().any { it in detailRes.origin_country.orEmpty() })
                         card.sameOrigin = true
                 }
                 collectionParts.forEachIndexed { idx, media -> addTmdb(media, idx, null) }
@@ -4395,7 +4396,14 @@ open class StremioC(
                     addTmdb(media, null, idx)
                 }
                 val simklRows = withTimeoutOrNull(StremioC.SIMKL_RECOMMENDATION_WAIT_MS) {
-                    simklJob?.await() ?: emptyList()
+                    try {
+                        simklJob?.await() ?: emptyList()
+                    } catch (e: CancellationException) {
+                        if (!currentCoroutineContext().isActive) throw e
+                        emptyList()
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
                 }.orEmpty()
                 simklRows.forEach { rec ->
                     if (rec.tmdbId?.toString() == tmdbIdStr) return@forEach
