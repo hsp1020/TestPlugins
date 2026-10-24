@@ -5,6 +5,8 @@ import android.app.Application
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
 import android.view.View
 import android.widget.TextView
 import androidx.fragment.app.Fragment
@@ -37,6 +39,39 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private var generation = 0
     private val watched = mutableMapOf<RecyclerView, RowWatch>()
     private val repaired = mutableSetOf<String>()
+    private var scanScheduled = false
+    private var scanRequests = 0
+    private var scansPerformed = 0
+    private var repairsPerformed = 0
+    private var maxScanUs = 0L
+    private var lastReportAt = SystemClock.elapsedRealtime()
+
+    private fun recordWindow(force: Boolean = false) {
+        val now = SystemClock.elapsedRealtime()
+        if (!force && now - lastReportAt < 4000L) return
+        if (scanRequests != 0 || repairsPerformed != 0)
+            Log.i("Elevate-HomePerf", "stage=home-cache-guard requests=" +
+                scanRequests + " scans=" + scansPerformed +
+                " repaired=" + repairsPerformed + " maxScanUs=" +
+                maxScanUs + " watchedRows=" + watched.size)
+        scanRequests = 0
+        scansPerformed = 0
+        repairsPerformed = 0
+        maxScanUs = 0L
+        lastReportAt = now
+    }
+
+    private fun queueScan() {
+        scanRequests++
+        if (scanScheduled) return
+        val rv = root ?: return
+        val seq = generation
+        scanScheduled = true
+        rv.post {
+            scanScheduled = false
+            if (seq == generation && rv === root && !rv.isComputingLayout) scanRows()
+        }
+    }
 
     private val apiObserver = Observer<String> { next ->
         if (provider != null && provider != next) {
@@ -80,17 +115,13 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         override fun onItemRangeMoved(from: Int, to: Int, n: Int) = queue()
         private fun queue() {
             if (expected == null) return
-            val seq = generation
-            root?.post { if (seq == generation) scanRows() }
+            queueScan()
         }
     }
     private val parentViews = object : RecyclerView.OnChildAttachStateChangeListener {
         override fun onChildViewAttachedToWindow(view: View) {
             if (expected == null) return
-            val seq = generation
-            root?.post {
-                if (seq == generation && view.parent === root) watchRow(view)
-            }
+            if (view.parent === root) queueScan()
         }
         override fun onChildViewDetachedFromWindow(view: View) {
             view.findViewById<RecyclerView>(R.id.home_child_recyclerview)?.let {
@@ -147,6 +178,8 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     }
     private fun unbindActivity() {
         generation++
+        scanScheduled = false
+        recordWindow(force = true)
         model?.apiName?.removeObserver(apiObserver)
         model?.page?.removeObserver(pageObserver)
         activity?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
@@ -166,7 +199,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         root = rv
         rv?.addOnChildAttachStateChangeListener(parentViews)
         observeParent()
-        scanRows()
+        queueScan()
     }
     private fun unbindHome() {
         clearRows()
@@ -190,8 +223,20 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private fun scanRows() {
         val rv = root ?: return
         if (expected == null) return
+        if (rv.isComputingLayout) {
+            queueScan()
+            return
+        }
+        val begin = SystemClock.elapsedRealtimeNanos()
         observeParent()
         for (i in 0 until rv.childCount) watchRow(rv.getChildAt(i))
+        scansPerformed++
+        val us = (SystemClock.elapsedRealtimeNanos() - begin) / 1000L
+        if (us > maxScanUs) maxScanUs = us
+        if (us >= 8_000L)
+            Log.w("Elevate-HomePerf", "stage=home-scan-slow durationUs=" + us +
+                " rows=" + rv.childCount)
+        recordWindow()
     }
     private fun watchRow(view: View) {
         if (expected == null) return
@@ -202,6 +247,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
 
     private inner class RowWatch(private val recycler: RecyclerView) {
         private var adapter: RecyclerView.Adapter<*>? = null
+        private var verifyScheduled = false
         private val updates = object : RecyclerView.AdapterDataObserver() {
             override fun onChanged() = queue()
             override fun onItemRangeInserted(p: Int, n: Int) = queue()
@@ -214,8 +260,14 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
             override fun onChildViewDetachedFromWindow(view: View) = Unit
         }
         private fun queue() {
+            if (verifyScheduled) return
+            verifyScheduled = true
             val seq = generation
-            recycler.post { if (seq == generation) verify(recycler) }
+            recycler.post {
+                verifyScheduled = false
+                if (seq == generation && watched[recycler] === this@RowWatch &&
+                    !recycler.isComputingLayout) verify(recycler)
+            }
         }
         fun start() {
             recycler.addOnChildAttachStateChangeListener(views)
@@ -232,6 +284,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         fun close() {
             adapter?.unregisterAdapterDataObserver(updates)
             adapter = null
+            verifyScheduled = false
             recycler.removeOnChildAttachStateChangeListener(views)
         }
     }
@@ -266,7 +319,10 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                     child.adapter === adapter && adapter.getItemOrNull(pos)?.url == card.url &&
                     child.findViewHolderForAdapterPosition(pos)?.itemView === bound.itemView &&
                     repaired.add(key)
-                ) adapter.notifyItemChanged(pos)
+                ) {
+                    repairsPerformed++
+                    adapter.notifyItemChanged(pos)
+                }
             }
         }
     }
