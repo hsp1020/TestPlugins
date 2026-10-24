@@ -343,8 +343,9 @@ internal class ElevateSkipController(private val application: Application) :
         custom = emptyList()
         published = emptyList()
         autoSkipped.clear()
-        lastPosition = null
-        suppressedUntilOutside = false
+        manualSeekProtected.clear()
+        lastManualSeek = null
+        ownSeek = null
         scheduleAutoSkip()
         job = scope.launch {
             val result = ElevateSkipRepository.fetch(identity)
