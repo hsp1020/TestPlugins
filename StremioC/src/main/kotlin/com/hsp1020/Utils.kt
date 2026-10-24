@@ -1709,7 +1709,8 @@ internal class RatingPlotImageHook(
             }
             reset()
             val gen = generation
-            ensureUi()
+            // Do not inflate the custom spinner during the result-page
+            // transition. Create it only if a matched sync provider exists.
             fetchJob = scope.launch {
                 var mappedSeason: SeasonTrackerIds? = null
                 val ids = if (!multi) rawSyncs.filterKeys { it in allowed }
@@ -1987,6 +1988,8 @@ internal class RatingPlotImageHook(
         private var lastProviderOptions: List<String> = emptyList()
 
         private fun updateOptions() {
+            if (!active || !fragment.isAdded) return
+            if (combo == null) ensureUi()
             val spinner = combo ?: return
             applying = true
             try {

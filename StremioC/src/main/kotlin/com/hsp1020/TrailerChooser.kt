@@ -128,13 +128,13 @@ internal class TrailerChooser(
     private val tvContainer = find("result_play_trailer")
     private val isTv = tvButton != null && tvContainer != null
     private val pickerClick = View.OnClickListener { showPicker() }
-    private val tvPreDraw = ViewTreeObserver.OnPreDrawListener {
+    // The TV trailer button can be rebound when the result layout changes;
+    // it does not need to be polled on each rendered frame.
+    private val tvLayout = ViewTreeObserver.OnGlobalLayoutListener {
         if (fragment.isAdded) {
-
             refresh()
             syncTvButton()
         }
-        true
     }
 
     private fun find(name: String): View? {
@@ -170,7 +170,7 @@ internal class TrailerChooser(
         if (isTv) {
 
             tvButton?.setOnClickListener(pickerClick)
-            root.viewTreeObserver.addOnPreDrawListener(tvPreDraw)
+            root.viewTreeObserver.addOnGlobalLayoutListener(tvLayout)
         }
         refresh()
     }
@@ -472,7 +472,7 @@ internal class TrailerChooser(
         fragment.lifecycle.removeObserver(resumeObserver)
         title?.removeTextChangedListener(titleWatcher)
         if (isTv) {
-            if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnPreDrawListener(tvPreDraw)
+            if (root.viewTreeObserver.isAlive) root.viewTreeObserver.removeOnGlobalLayoutListener(tvLayout)
         }
 
         extractionJob?.cancel()
