@@ -1372,20 +1372,47 @@ internal class CatalogBrowserDialog(
             val position = IntArray(2)
             view.getLocationOnScreen(position)
             val safeTop = (statusTop - position[1]).coerceAtLeast(0)
-            val homeToolbar = activity.findViewById<View>(R.id.home_padding)
-                ?.takeIf { it.isAttachedToWindow && it.height > 0 && it.getGlobalVisibleRect(Rect()) }
-            val homePosition = homeToolbar?.let { toolbar ->
-                IntArray(2).also { toolbar.getLocationOnScreen(it) }
+            val homeSearch = activity.findViewById<SearchView>(R.id.home_search)
+            val homeIcon = listOfNotNull(
+                homeSearch?.findViewById<ImageView>(androidx.appcompat.R.id.search_button),
+                homeSearch?.findViewById<ImageView>(androidx.appcompat.R.id.search_mag_icon),
+                activity.findViewById<ImageView>(R.id.home_preview_search_button)
+            ).firstOrNull { icon ->
+                icon.isAttachedToWindow && icon.isShown &&
+                    icon.width > 0 && icon.height > 0 && icon.getGlobalVisibleRect(Rect())
             }
-            val alignedTop = homePosition?.get(1)?.minus(position[1])
-                ?.coerceAtLeast(safeTop) ?: safeTop
+            val iconCenter = homeIcon?.let { icon ->
+                val location = IntArray(2).also { icon.getLocationOnScreen(it) }
+                (location[0] + icon.width / 2) to (location[1] + icon.height / 2)
+            }
+            // Align the back arrow with the visible home search icon, not home_padding.
+            val alignedTop = iconCenter?.let { (_, y) ->
+                (y - position[1] - dp(22)).coerceAtLeast(safeTop)
+            } ?: safeTop
             if (view.paddingTop != alignedTop) view.setPadding(0, alignedTop, 0, 0)
-            val left = homePosition?.get(0)?.minus(position[0])?.coerceAtLeast(0) ?: 0
+            val backLeft = iconCenter?.let { (x, _) ->
+                (x - position[0] - dp(12)).coerceAtLeast(0)
+            } ?: 0
             val navigationRow = controls.getChildAt(0) as LinearLayout
-            if (navigationRow.paddingLeft != left) {
-                navigationRow.setPadding(left, 0, dp(10), 0)
+            if (navigationRow.paddingLeft != backLeft) {
+                navigationRow.setPadding(backLeft, 0, dp(10), 0)
+            }
+            // Align the browser search icon's left edge with the Type spinner.
+            val spinnerLeft = if (typeSelector.isAttachedToWindow && typeSelector.width > 0) {
+                val location = IntArray(2).also { typeSelector.getLocationOnScreen(it) }
+                location[0] - position[0]
+            } else dp(10) + dp(82)
+            val searchField = navigationRow.getChildAt(1)
+            val searchParams = searchField.layoutParams as LinearLayout.LayoutParams
+            val searchMargin = (spinnerLeft - backLeft - dp(24)).coerceAtLeast(0)
+            if (searchParams.marginStart != searchMargin) {
+                searchParams.marginStart = searchMargin
+                searchField.layoutParams = searchParams
             }
             insets
+        }
+        controls.doOnPreDraw {
+            if (!closed && dialog.isShowing) ViewCompat.requestApplyInsets(root)
         }
         grid.spanCount = activity.getSpanCount(false)
         root.addView(content, CoordinatorLayout.LayoutParams(-1, -1).apply {
