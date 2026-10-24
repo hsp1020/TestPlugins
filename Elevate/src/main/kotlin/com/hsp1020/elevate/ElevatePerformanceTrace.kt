@@ -76,6 +76,11 @@ internal class ElevatePerformanceTrace(private val application: Application) :
     private var layoutPasses = 0
     private var unchangedLayouts = 0
     private var layoutChanges = 0
+    private val layoutCounts = mutableMapOf<String, Int>()
+    private var subtitleWindowEvents = 0
+    private var subtitleWindowMax = 0
+    private var subtitleWindowAdded = 0
+    private var subtitleWindowRemoved = 0
     private var lastDrawAt = 0L
     private var lastReportAt = 0L
     @Volatile private var lastHeartbeatAt = SystemClock.elapsedRealtime()
@@ -429,6 +434,11 @@ internal class ElevatePerformanceTrace(private val application: Application) :
         layoutPasses = 0
         unchangedLayouts = 0
         layoutChanges = 0
+        layoutCounts.clear()
+        subtitleWindowEvents = 0
+        subtitleWindowMax = 0
+        subtitleWindowAdded = 0
+        subtitleWindowRemoved = 0
         lastReportAt = SystemClock.elapsedRealtime()
         log("player-attach")
         val vm = model ?: return
@@ -441,12 +451,15 @@ internal class ElevatePerformanceTrace(private val application: Application) :
             val removed = (prior - current).size
             lastSubtitleSet = current
             lastSubtitleEventAt = SystemClock.elapsedRealtime()
-            log("subtitle-list-change", "eventInstance=" + update.instance +
-                " total=" + current.size + " prevTotal=" + prior.size +
-                " added=" + added + " removed=" + removed +
-                " instanceMatched=" + (update.instance == vm.state.instance) +
-                " refSame=" + (current === prior) +
-                " observerCostUs=" + (SystemClock.elapsedRealtimeNanos() - started) / 1000L)
+            subtitleWindowEvents++
+            subtitleWindowMax = maxOf(subtitleWindowMax, current.size)
+            subtitleWindowAdded += added
+            subtitleWindowRemoved += removed
+            // Sample only anomalously expensive observer executions.
+            val observerUs = (SystemClock.elapsedRealtimeNanos() - started) / 1000L
+            if (observerUs > 5000L)
+                log("subtitle-observer-slow", "costUs=" + observerUs +
+                    " size=" + current.size + " added=" + added + " removed=" + removed)
         }
         val links = Observer<VideoLive<Set<VideoLink>>> { update ->
             if (update != null) {
@@ -492,13 +505,26 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                     " sinceLoadingMs=" + age(now, lastLoadingAt))
             }
             if (now - lastReportAt >= 1000L) {
-                if (layoutPasses > 1 || layoutChanges > 0) log("layout-window",
+                if (layoutPasses > 1 || layoutChanges > 0 ||
+                    subtitleWindowEvents > 0) log("layout-window",
                     "passes=" + layoutPasses + " changes=" + layoutChanges +
                     " sameBounds=" + unchangedLayouts +
+                    " targets=" + layoutCounts.entries
+                        .sortedByDescending { it.value }.take(6)
+                        .joinToString(",") { it.key + ":" + it.value } +
+                    " subtitleEvents=" + subtitleWindowEvents +
+                    " subtitleMax=" + subtitleWindowMax +
+                    " subtitleAdded=" + subtitleWindowAdded +
+                    " subtitleRemoved=" + subtitleWindowRemoved +
                     " sinceSubtitleMs=" + age(now, lastSubtitleEventAt) +
                     " sincePlayerMs=" + age(now, lastPlayerAt))
                 layoutPasses = 0
                 layoutChanges = 0
+                layoutCounts.clear()
+                subtitleWindowEvents = 0
+                subtitleWindowMax = 0
+                subtitleWindowAdded = 0
+                subtitleWindowRemoved = 0
                 unchangedLayouts = 0
                 lastReportAt = now
             }
@@ -526,7 +552,10 @@ internal class ElevatePerformanceTrace(private val application: Application) :
                     layoutChanges++
                     val same = l == ol && t == ot && r == orr && b == ob
                     if (same) unchangedLayouts++
-                    if (layoutChanges <= 12 || !same) {
+                    layoutCounts[idName] = (layoutCounts[idName] ?: 0) + 1
+                    // Animation normally changes width every 16 ms. Aggregating
+                    // avoids hundreds of logcat writes on the UI thread.
+                    if (!same && layoutChanges == 1) {
                         log("layout-target", "view=" + idName +
                             " viewId=" + System.identityHashCode(v) +
                             " from=" + (orr-ol) + "x" + (ob-ot) +

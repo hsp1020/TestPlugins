@@ -6,10 +6,11 @@ import android.app.Dialog
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.Spanned
 import android.text.SpannedString
 import android.view.View
-import android.view.ViewTreeObserver
 import android.widget.ArrayAdapter
 import android.widget.HeaderViewListAdapter
 import android.widget.ListView
@@ -46,7 +47,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private var host: FragmentActivity? = null
     private var fragment: GeneratorPlayer? = null
     private var model: PlayerGeneratorViewModel? = null
-    private var viewTree: ViewTreeObserver? = null
+    private val dialogHandler = Handler(Looper.getMainLooper())
     private var removeObserver: (() -> Unit)? = null
     private var player: Media3Player? = null
     private var instance: Int? = null
@@ -225,7 +226,8 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         return true
     }
 
-    private val onDraw = ViewTreeObserver.OnPreDrawListener {
+    private val dialogTick = object : Runnable {
+      override fun run() {
         if (fragment?.playerView?.player?.let { it !== player } == true) synchronizeSource()
         fragment?.let { f ->
             trackDialog(f)
@@ -240,7 +242,8 @@ internal class EmbeddedSubtitleController(private val application: Application) 
                 }
             }
         }
-        true
+        if (fragment != null) dialogHandler.postDelayed(this, 200L)
+      }
     }
 
     private fun markActive(f: GeneratorPlayer, embedded: Set<SubtitleData>): Boolean =
@@ -361,17 +364,13 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             model?.currentLinks?.removeObserver(linksObserver)
             model?.loadingLinks?.removeObserver(loadingObserver)
         }
-        candidate.view?.viewTreeObserver?.takeIf { it.isAlive }?.let {
-            it.addOnPreDrawListener(onDraw)
-            viewTree = it
-        }
+        dialogHandler.post(dialogTick)
         synchronizeSource()
     }
 
     private fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
-        viewTree?.let { if (it.isAlive) it.removeOnPreDrawListener(onDraw) }
-        viewTree = null
+        dialogHandler.removeCallbacks(dialogTick)
         player?.removeListener(listener)
         player = null
         settings?.unregisterOnSharedPreferenceChangeListener(settingsListener)

@@ -283,7 +283,7 @@ internal fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
 internal class StremioSubtitleController {
     private var fragment: GeneratorPlayer? = null
     private var model: PlayerGeneratorViewModel? = null
-    private var viewTree: ViewTreeObserver? = null
+    private val dialogHandler = Handler(Looper.getMainLooper())
     private var lastInstance = -1
     private var sortedDialog: Dialog? = null
     private var pendingDialog: Dialog? = null
@@ -299,7 +299,10 @@ internal class StremioSubtitleController {
             APIHolder.allProviders.any { it is StremioC && it.name.equals(response.apiName, true) }
     }
 
-    private val onDraw = ViewTreeObserver.OnPreDrawListener {
+    // A native dialog lives in another window: inspect it occasionally, not
+    // on every player draw. All dialog UI changes still run on the main thread.
+    private val dialogTick = object : Runnable {
+      override fun run() {
         val f = fragment
         val state = model?.state
         if (f != null && state != null) {
@@ -322,7 +325,8 @@ internal class StremioSubtitleController {
                 }
             }
         }
-        true
+        if (fragment != null) dialogHandler.postDelayed(this, 200L)
+      }
     }
 
     fun watch(candidate: Fragment) {
@@ -330,10 +334,7 @@ internal class StremioSubtitleController {
         detach()
         fragment = candidate
         model = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
-        candidate.view?.viewTreeObserver?.takeIf { it.isAlive }?.let {
-            it.addOnPreDrawListener(onDraw)
-            viewTree = it
-        }
+        dialogHandler.post(dialogTick)
     }
 
     private fun sortPopup(dialog: Dialog): Boolean {
@@ -388,8 +389,7 @@ internal class StremioSubtitleController {
 
     fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
-        viewTree?.let { if (it.isAlive) it.removeOnPreDrawListener(onDraw) }
-        viewTree = null
+        dialogHandler.removeCallbacks(dialogTick)
         fragment = null
         model = null
         lastInstance = -1
