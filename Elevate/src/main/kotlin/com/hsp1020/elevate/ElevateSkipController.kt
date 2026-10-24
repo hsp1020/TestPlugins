@@ -44,6 +44,7 @@ internal class ElevateSkipController(private val application: Application) :
     private var activity: FragmentActivity? = null
     private var fragment: GeneratorPlayer? = null
     private var model: PlayerGeneratorViewModel? = null
+    private var skipButtonTimer: ElevateSkipButtonTimer? = null
     private var mediaPlayer: Media3Player? = null
     private var unobserve: (() -> Unit)? = null
     private var job: Job? = null
@@ -203,6 +204,7 @@ internal class ElevateSkipController(private val application: Application) :
         placeNativeSkipButton()
         val vm = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
         model = vm
+        skipButtonTimer = ElevateSkipButtonTimer(candidate, vm).also { it.attach() }
         val stampsObserver = Observer<VideoLive<List<VideoSkipStamp>>> { event ->
             if (event != null && event.instance == vm.state.instance) {
                 val incoming = event.value
@@ -240,6 +242,8 @@ internal class ElevateSkipController(private val application: Application) :
         main.removeCallbacks(autoTick)
         main.removeCallbacks(attachRetry)
         attachAttempts = 0
+        skipButtonTimer?.dispose()
+        skipButtonTimer = null
         restoreNativeSkipButton()
         restoreNative()
         model = null
@@ -272,6 +276,7 @@ internal class ElevateSkipController(private val application: Application) :
         val vm = model ?: return
         val f = fragment ?: return
         placeNativeSkipButton()
+        skipButtonTimer?.attach()
         val nextPlayer = f.playerView?.player
         if (nextPlayer !== mediaPlayer) {
             mediaPlayer?.removeListener(playerListener)
