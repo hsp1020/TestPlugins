@@ -294,9 +294,12 @@ internal class ElevateSkipController(private val application: Application) :
         val current = player.currentPosition
         val previous = lastPosition
         lastPosition = current
-        // A resume/initial seek is user intent, not permission to skip the containing interval.
-        val manualSeek = if (previous == null) current > 2_500L
-            else current < previous - 1000L || current > previous + 3500L
+        // Protect a real resume position without suppressing intro auto-skip merely because
+        // network metadata arrived a few seconds after playback started.
+        val resume = (vm.state.generatorState?.meta as? ResultEpisode)?.position ?: 0L
+        val manualSeek = if (previous == null) {
+            resume > 5_000L && kotlin.math.abs(resume - current) < 20_000L
+        } else current < previous - 1000L || current > previous + 3500L
         val active = published.firstOrNull {
             current >= it.timestamp.startMs && current < it.timestamp.endMs
         }
