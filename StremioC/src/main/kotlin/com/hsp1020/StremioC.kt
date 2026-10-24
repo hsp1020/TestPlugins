@@ -795,14 +795,59 @@ open class StremioC(
             android.util.Log.i("StremioC-Recs", "trace=$trace stage=$stage $message")
         }
 
-        private fun simklSuggestionsFromDetail(text: String): List<SimklSuggestion> {
+        private fun simklSuggestionsFromDetail(
+            text: String, trace: Long, origin: String
+        ): List<SimklSuggestion> {
             val detail = parseJson<JsonNode>(text)
-            val userSuggestions = detail.get("users_recommendations")
-            val rows = if (userSuggestions != null && userSuggestions.isArray && userSuggestions.size() > 0)
-                userSuggestions else detail.get("similar")
-            if (rows == null || !rows.isArray) return emptyList()
-            return rows.take(30).mapIndexedNotNull { index, row ->
-                val ids = row.get("ids") ?: return@mapIndexedNotNull null
+            val viewers = detail.get("users_recommendations")
+            val similar = detail.get("similar")
+            val viewerRaw = if (viewers?.isArray == true) viewers.size() else 0
+            val similarRaw = if (similar?.isArray == true) similar.size() else 0
+            val selectedSource = when {
+                viewerRaw > 0 -> "users_recommendations"
+                similar?.isArray == true -> "similar"
+                else -> "none"
+            }
+            val rows = when (selectedSource) {
+                "users_recommendations" -> viewers
+                "similar" -> similar
+                else -> null
+            }
+            val raw = if (rows?.isArray == true) rows.size() else 0
+            val inspected = minOf(raw, 30)
+            recommendationLog(trace, "simkl-raw",
+                "origin=$origin viewers=$viewerRaw viewersShape=${viewers?.nodeType ?: "missing"}" +
+                    " similar=$similarRaw similarShape=${similar?.nodeType ?: "missing"}" +
+                    " selected=$selectedSource selectedRaw=$raw inspected=$inspected" +
+                    " capDropped=${raw - inspected}")
+            if (rows == null || !rows.isArray) {
+                recommendationLog(trace, "simkl-filter",
+                    "origin=$origin selected=$selectedSource inspected=0 retained=0" +
+                        " rejected=0 capDropped=0 reasons=none")
+                return emptyList()
+            }
+
+            val rejected = linkedMapOf<String, Int>()
+            fun drop(index: Int, reason: String, ids: JsonNode?) {
+                rejected[reason] = (rejected[reason] ?: 0) + 1
+                recommendationLog(trace, "simkl-drop",
+                    "origin=$origin source=$selectedSource index=$index reason=$reason" +
+                        " tmdb=${ids?.get("tmdb")?.asInt(0) ?: 0}" +
+                        " mal=${ids?.get("mal")?.asInt(0) ?: 0}" +
+                        " imdbPresent=${ids?.get("imdb") != null}")
+            }
+            val kept = ArrayList<SimklSuggestion>(inspected)
+            val seen = HashSet<Pair<String, String>>()
+            for ((index, row) in rows.take(30).withIndex()) {
+                if (!row.isObject) {
+                    drop(index, "invalid-row", null)
+                    continue
+                }
+                val ids = row.get("ids")
+                if (ids == null) {
+                    drop(index, "missing-ids", null)
+                    continue
+                }
                 val tmdb = ids.get("tmdb")?.asInt(0)?.takeIf { it > 0 }
                 val mal = ids.get("mal")?.asInt(0)?.takeIf { it > 0 }
                 val imdb = ids.get("imdb")?.asText()?.takeIf { IMDB_ID_REGEX.matches(it) }
@@ -813,15 +858,34 @@ open class StremioC(
                 val type = if (movie) "movie" else "series"
                 val id = if (isAnime && mal != null) "mal:$mal"
                     else tmdb?.let { "tmdb:$it" }
-                        ?: imdb ?: mal?.let { "mal:$it" } ?: return@mapIndexedNotNull null
+                        ?: imdb ?: mal?.let { "mal:$it" }
+                if (id == null) {
+                    drop(index, "no-usable-external-id", ids)
+                    continue
+                }
                 val title = listOf("en_title", "title", "name")
                     .firstNotNullOfOrNull { row.get(it)?.asText()?.trim()?.takeIf(String::isNotBlank) }
-                    ?: return@mapIndexedNotNull null
+                if (title == null) {
+                    drop(index, "missing-title", ids)
+                    continue
+                }
+                val identity = type to (tmdb?.let { "tmdb:$it" } ?: id)
+                if (!seen.add(identity)) {
+                    drop(index, "duplicate-in-simkl", ids)
+                    continue
+                }
                 val art = row.get("poster")?.asText()?.trim()
                     ?.takeIf { it.matches(Regex("[A-Za-z0-9_/-]{1,160}")) }
                     ?.let { "https://wsrv.nl/?url=https://simkl.in/posters/" + it + "_m.webp" }
-                SimklSuggestion(type, id, tmdb, title, art, index)
-            }.distinctBy { it.type to (it.tmdbId?.let { id -> "tmdb:$id" } ?: it.id) }
+                kept.add(SimklSuggestion(type, id, tmdb, title, art, index))
+            }
+            val reasons = if (rejected.isEmpty()) "none" else
+                rejected.entries.joinToString(",") { "${it.key}:${it.value}" }
+            recommendationLog(trace, "simkl-filter",
+                "origin=$origin selected=$selectedSource raw=$raw inspected=$inspected" +
+                    " capDropped=${raw - inspected} rejected=${rejected.values.sum()}" +
+                    " reasons=$reasons retained=${kept.size}")
+            return kept
         }
 
         private fun cachedSimklTitle(
@@ -894,7 +958,7 @@ open class StremioC(
                     " hit=${disk != null}")
             if (disk != null && System.currentTimeMillis() >= disk.second &&
                 System.currentTimeMillis() - disk.second < SIMKL_RECOMMENDATION_TTL_MS) {
-                val cached = runCatching { simklSuggestionsFromDetail(disk.first) }.getOrNull()
+                val cached = runCatching { simklSuggestionsFromDetail(disk.first, trace, "disk") }.getOrNull()
                 if (!cached.isNullOrEmpty()) {
                     recommendationLog(trace, "cache", "source=disk count=${cached.size}")
                     return@withPermit cached
@@ -1059,7 +1123,7 @@ open class StremioC(
                 return@withPermit emptyList()
             }
             val parseAt = android.os.SystemClock.elapsedRealtime()
-            val result = simklSuggestionsFromDetail(response.text)
+            val result = simklSuggestionsFromDetail(response.text, trace, "network")
             recommendationLog(trace, "timing",
                 "step=detail-parse elapsedMs=${android.os.SystemClock.elapsedRealtime() - parseAt}")
             recommendationLog(trace, "result", "source=simkl count=${result.size}")
@@ -1110,7 +1174,7 @@ open class StremioC(
             val now = System.currentTimeMillis()
             if (cached != null && now >= cached.at &&
                 now - cached.at < if (cached.entries.isEmpty()) SIMKL_RECOMMENDATION_EMPTY_TTL_MS else SIMKL_RECOMMENDATION_TTL_MS) {
-                recommendationLog(trace, "cache", "source=memory count=${cached.entries.size}")
+                recommendationLog(trace, "cache", "source=memory count=${cached.entries.size} rawCounters=unavailable-memory-cache")
                 return CompletableDeferred(cached.entries)
             }
             val userId = auth.user.id.toString()
@@ -4598,13 +4662,41 @@ open class StremioC(
                     var sameOrigin: Boolean = false
                 )
                 val candidates = linkedMapOf<String, SuggestedCard>()
+                val collectionRawCount = collectionParts.size
+                val tmdbRecommendationRawCount = detailRes.recommendations?.results.orEmpty().size
+                var tmdbAdded = 0
+                var tmdbDuplicate = 0
+                var tmdbSelfDropped = 0
+                var tmdbInvalidIdDropped = 0
+                var tmdbMissingTitleDropped = 0
                 fun addTmdb(media: TmdbMedia, collectionIndex: Int?, rank: Int?) {
-                    val id = media.id?.takeIf { it > 0 && it.toString() != tmdbIdStr } ?: return
+                    val id = media.id?.takeIf { it > 0 && it.toString() != tmdbIdStr }
+                    if (id == null) {
+                        val reason = if (media.id?.toString() == tmdbIdStr) {
+                            tmdbSelfDropped++
+                            "current-title"
+                        } else {
+                            tmdbInvalidIdDropped++
+                            "invalid-tmdb-id"
+                        }
+                        StremioC.recommendationLog(recommendationTrace, "tmdb-drop",
+                            "source=${if (collectionIndex != null) "collection" else "recommendations"}" +
+                                " index=${collectionIndex ?: rank ?: -1} reason=$reason")
+                        return
+                    }
                     val movie = media.mediaType == "movie" ||
                         (media.mediaType != "tv" && (media.title != null || tmdbMediaType == "movie"))
                     val type = if (movie) "movie" else "series"
                     val key = "$type:tmdb:$id"
-                    val title = media.title ?: media.name ?: media.originalTitle ?: return
+                    val title = media.title ?: media.name ?: media.originalTitle
+                    if (title == null) {
+                        tmdbMissingTitleDropped++
+                        StremioC.recommendationLog(recommendationTrace, "tmdb-drop",
+                            "source=${if (collectionIndex != null) "collection" else "recommendations"}" +
+                                " index=${collectionIndex ?: rank ?: -1} reason=missing-title tmdb=$id")
+                        return
+                    }
+                    if (candidates.containsKey(key)) tmdbDuplicate++ else tmdbAdded++
                     val poster = media.poster_path?.takeIf(String::isNotBlank)
                         ?.let { "https://image.tmdb.org/t/p/w500$it" }
                     val card = candidates.getOrPut(key) {
@@ -4625,6 +4717,12 @@ open class StremioC(
                 detailRes.recommendations?.results.orEmpty().forEachIndexed { idx, media ->
                     addTmdb(media, null, idx)
                 }
+                StremioC.recommendationLog(recommendationTrace, "tmdb-filter",
+                    "collectionRaw=$collectionRawCount recommendationsRaw=$tmdbRecommendationRawCount" +
+                        " raw=${collectionRawCount + tmdbRecommendationRawCount}" +
+                        " added=$tmdbAdded duplicate=$tmdbDuplicate" +
+                        " selfDropped=$tmdbSelfDropped invalidIdDropped=$tmdbInvalidIdDropped" +
+                        " missingTitleDropped=$tmdbMissingTitleDropped unique=${candidates.size}")
                 val waitAt = android.os.SystemClock.elapsedRealtime()
                 val awaitedSimklRows = withTimeoutOrNull(StremioC.SIMKL_RECOMMENDATION_WAIT_MS) {
                     try {
@@ -4642,9 +4740,31 @@ open class StremioC(
                     "status=${if (simklJob == null) "skipped" else if (awaitedSimklRows == null) "timeout" else "completed"}" +
                         " elapsedMs=${android.os.SystemClock.elapsedRealtime() - waitAt} budgetMs=${StremioC.SIMKL_RECOMMENDATION_WAIT_MS} received=${simklRows.size}"
                 )
-                simklRows.forEach { rec ->
-                    if (rec.tmdbId?.toString() == tmdbIdStr) return@forEach
+                var simklSelfDropped = 0
+                var simklAdded = 0
+                var simklOverlappedTmdb = 0
+                var simklOverlappedCollection = 0
+                var simklOtherExisting = 0
+                simklRows.forEachIndexed { index, rec ->
+                    if (rec.tmdbId?.toString() == tmdbIdStr) {
+                        simklSelfDropped++
+                        StremioC.recommendationLog(recommendationTrace, "simkl-merge-drop",
+                            "index=$index reason=current-title tmdb=${rec.tmdbId}")
+                        return@forEachIndexed
+                    }
                     val key = rec.type + ":" + (rec.tmdbId?.let { "tmdb:$it" } ?: rec.id)
+                    val existing = candidates[key]
+                    if (existing == null) {
+                        simklAdded++
+                    } else {
+                        if (existing.tmdbRank != null) simklOverlappedTmdb++
+                        if (existing.collectionIndex != null) simklOverlappedCollection++
+                        if (existing.tmdbRank == null && existing.collectionIndex == null) simklOtherExisting++
+                        StremioC.recommendationLog(recommendationTrace, "simkl-merge-overlap",
+                            "index=$index tmdb=${rec.tmdbId ?: 0}" +
+                                " withTmdb=${existing.tmdbRank != null}" +
+                                " withCollection=${existing.collectionIndex != null}")
+                    }
                     val card = candidates.getOrPut(key) {
                         SuggestedCard(rec.type, rec.id, rec.tmdbId, rec.name, rec.poster)
                     }
@@ -4654,6 +4774,12 @@ open class StremioC(
                 val tmdbCount = candidates.values.count { it.tmdbRank != null }
                 val overlapCount = candidates.values.count { it.tmdbRank != null && it.simklRank != null }
                 val collectionCount = candidates.values.count { it.collectionIndex != null }
+                StremioC.recommendationLog(recommendationTrace, "simkl-merge",
+                    "received=${simklRows.size} selfDropped=$simklSelfDropped" +
+                        " added=$simklAdded overlapTmdb=$simklOverlappedTmdb" +
+                        " overlapCollection=$simklOverlappedCollection otherExisting=$simklOtherExisting" +
+                        " overlapUnique=${simklRows.size - simklSelfDropped - simklAdded}" +
+                        " before=${tmdbAdded} after=${candidates.size}")
                 val ordered = candidates.values.sortedWith(
                     compareByDescending<SuggestedCard> { it.collectionIndex != null }
                         .thenBy { it.collectionDate ?: "" }
@@ -4667,6 +4793,10 @@ open class StremioC(
                         .thenBy { it.collectionIndex ?: Int.MAX_VALUE }
                         .thenBy { it.tmdbRank ?: it.simklRank ?: Int.MAX_VALUE }
                 ).take(50)
+                StremioC.recommendationLog(recommendationTrace, "display-cap",
+                    "mergedUnique=${candidates.size} limit=50" +
+                        " excludedByLimit=${(candidates.size - ordered.size).coerceAtLeast(0)}" +
+                        " shown=${ordered.size}")
                 fetchedRecommendations = ordered.map { rec ->
                     val fallback = rec.poster ?: rec.fallbackPoster ?: TRANSPARENT_PIXEL
                     val poster = rec.tmdbId?.let {
