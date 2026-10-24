@@ -319,20 +319,20 @@ internal class TrailerChooser(
             }
             val thumbnail = CardView(activity).apply {
                 cardElevation = 0f
+                radius = activity.resources.getDimension(R.dimen.rounded_image_radius)
                 addView(ImageView(activity).apply {
                     scaleType = ImageView.ScaleType.CENTER_CROP
                     loadImage("https://i.ytimg.com/vi/" + entry.youtubeId + "/hqdefault.jpg")
-                }, FrameLayout.LayoutParams(dp(112), dp(63)))
+                }, FrameLayout.LayoutParams(dp(126), dp(72)))
             }
-            row.addView(thumbnail, LinearLayout.LayoutParams(dp(112), dp(63)))
+            row.addView(thumbnail, LinearLayout.LayoutParams(dp(126), dp(72)))
             val labels = LinearLayout(activity).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(12), 0, dp(6), 0)
+                setPadding(dp(15), 0, dp(6), 0)
             }
             labels.addView(TextView(activity).apply {
                 text = "${index + 1}. ${entry.title}"
-                textSize = 14f
-                typeface = Typeface.DEFAULT_BOLD
+                setTypeface(typeface, Typeface.BOLD)
                 maxLines = 2
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 setTextColor(foreground)
@@ -340,8 +340,7 @@ internal class TrailerChooser(
             labels.addView(TextView(activity).apply {
                 text = (if (entry.type.equals("Trailer", true)) activity.getString(R.string.trailer) else entry.type) +
                     (localizedLanguage(entry.language)?.let { " · " + it } ?: "")
-                textSize = 12f
-                setTextColor(foreground)
+                setTextColor(themeColor("grayTextColor", foreground))
             })
             row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             rows.addView(row)
