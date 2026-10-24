@@ -50,8 +50,6 @@ internal object GithubAuthRetry {
         try {
             return request(token)
         } catch (failure: GithubBackupStore.ApiException) {
-            if (failure.code == 401)
-
             if (failure.code != 401 || recover == null) throw failure
             val replacement = recover(token)
             if (replacement.isNullOrBlank() || replacement == token) {
