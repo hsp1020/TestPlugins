@@ -62,6 +62,8 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import coil3.request.crossfade
+import coil3.request.placeholder
 import org.json.JSONObject
 
 internal class LibraryPosterHook(private val appContext: Application) :
@@ -308,6 +310,7 @@ internal class LibraryPosterHook(private val appContext: Application) :
         val id = "${item.apiName}:${item.syncId}:${item.url}:${item.name}"
         if (bound[image]?.identity == id || pending[image]?.isActive == true &&
             image.getTag(R.id.imageView) == id) return
+        val sameItem = image.getTag(R.id.imageView) == id
         pending.remove(image)?.cancel()
         bound.remove(image)
         image.setTag(R.id.imageView, id)
@@ -327,8 +330,13 @@ internal class LibraryPosterHook(private val appContext: Application) :
                 if (revision != token || image.getTag(R.id.imageView) != id ||
                     !image.isAttachedToWindow || poster in unavailable) return@launch
                 val entry = Binding(id, poster, item.posterUrl, item.posterHeaders)
+                // Coil disposes the current request on replacement; preserve a cover for
+                // the same title until its updated artwork is actually ready.
+                val retained = image.drawable.takeIf { sameItem }
                 bound[image] = entry
                 image.loadImage(poster) {
+                    if (retained != null) placeholder(retained)
+                    crossfade(false)
                     listener(onError = { _, _ ->
                         if (bound[image] === entry && image.isAttachedToWindow) {
                             unavailable.add(poster)
@@ -374,7 +382,9 @@ internal class LibraryPosterHook(private val appContext: Application) :
             xrdbVersion = token
             revision++
             cancelPending()
-            restoreAll()
+            // A version refresh must not restore every visible cover to the original.
+            // Existing artwork remains while the replacement is being loaded.
+            bound.clear()
             unavailable.clear()
             rescan()
         }
