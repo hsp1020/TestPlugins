@@ -2595,13 +2595,22 @@ private fun showLanguageSelectDialog() {
                 val tab = visibleTabs[position]
 
                 fun updateHomeIcon() {
+                    holder.homeIcon.isEnabled = tab.isChecked
+                    holder.homeIcon.isClickable = tab.isChecked
+                    holder.homeIcon.isFocusable = tab.isChecked
                     holder.homeIcon.imageTintList = ColorStateList.valueOf(
-                        if (tab.showOnHome) hostContext.colorFromAttribute(HostR.attr.colorPrimary) else Color.GRAY)
-                    holder.homeIcon.contentDescription =
-                        "${tab.displayName}: Home ${if (tab.showOnHome) "shown" else "hidden"}"
+                        if (tab.isChecked && tab.showOnHome)
+                            hostContext.colorFromAttribute(HostR.attr.colorPrimary)
+                        else Color.GRAY)
+                    holder.homeIcon.contentDescription = when {
+                        !tab.isChecked -> "${tab.displayName}: Enable catalog to change Home visibility"
+                        tab.showOnHome -> "${tab.displayName}: Shown on Home"
+                        else -> "${tab.displayName}: Hidden from Home"
+                    }
                 }
                 updateHomeIcon()
                 holder.homeIcon.setOnClickListener {
+                    if (!tab.isChecked) return@setOnClickListener
                     tab.showOnHome = !tab.showOnHome
                     updateHomeIcon()
                 }
@@ -2615,7 +2624,8 @@ private fun showLanguageSelectDialog() {
                 holder.checkbox.buttonTintList = ColorStateList.valueOf(itemColor)
                 holder.checkbox.setOnCheckedChangeListener { _, isChecked ->
                     (rv.findFocus() as? EditText)?.clearFocus()
-                    tab.isChecked = isChecked 
+                    tab.isChecked = isChecked
+                    updateHomeIcon()
 
                     val checkedTabs = masterTabs.filter { it.isChecked }
                     val uncheckedTabs = masterTabs.filter { !it.isChecked }

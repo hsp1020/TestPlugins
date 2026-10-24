@@ -675,6 +675,7 @@ internal class CatalogBrowserDialog(
             SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
             SEARCH_ACTION_LOAD -> {
                 val covered = detailHandoff.begin()
+                if (covered) holdNativeNavigation()
                 SearchHelper.handleSearchClickCallback(click)
                 if (!covered) dismiss()
             }
@@ -699,6 +700,7 @@ internal class CatalogBrowserDialog(
                 SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
                 SEARCH_ACTION_LOAD -> {
                     val covered = detailHandoff.begin()
+                    if (covered) holdNativeNavigation()
                     SearchHelper.handleSearchClickCallback(click)
                     if (!covered) dismiss()
                 }
@@ -961,7 +963,9 @@ internal class CatalogBrowserDialog(
                     if (!dialog.isShowing) dialog.show()
                 }
             },
+            onReady = ::releaseNativeNavigation,
             onReturnStart = {
+                releaseNativeNavigation()
                 if (!closed) {
                     fitWindowToNavigation(force = true)
                     dialog.show()
@@ -969,6 +973,7 @@ internal class CatalogBrowserDialog(
             },
             preserveNestedNavigation = true)
     }
+    private var heldNavigationViews: List<View> = emptyList()
     private var pendingDestinationCheck: Runnable? = null
     private var suspendedForNavigation = false
     private var originEntryId: String? = null
@@ -976,7 +981,12 @@ internal class CatalogBrowserDialog(
         fitWindowToNavigation()
     }
     private val destinationListener = NavController.OnDestinationChangedListener { controller, destination, _ ->
-        if (closed || detailHandoff.isActive) return@OnDestinationChangedListener
+        if (closed) return@OnDestinationChangedListener
+        if (detailHandoff.isActive) {
+            if (destination.id != R.id.navigation_home)
+                heldNavigationViews.forEach { if (it.visibility != View.VISIBLE) it.visibility = View.VISIBLE }
+            return@OnDestinationChangedListener
+        }
         val entryId = controller.currentBackStackEntry?.id
         if (destination.id == R.id.navigation_search || destination.id == R.id.navigation_library) {
             cancelDestinationCheck()
@@ -1034,6 +1044,21 @@ internal class CatalogBrowserDialog(
         pendingBackPress?.let { pending -> backButton?.removeCallbacks(pending) }
         pendingBackPress = null
         backButton?.isPressed = false
+    }
+
+    private fun holdNativeNavigation() {
+        heldNavigationViews = listOf(R.id.nav_rail_view, R.id.nav_view)
+            .mapNotNull { activity.findViewById<View>(it) }
+            .filter { it.isShown && it.width > 0 && it.height > 0 }
+    }
+
+    private fun releaseNativeNavigation() {
+        val destination = navigation?.currentDestination?.id
+        if (destination in setOf(R.id.navigation_results_phone, R.id.navigation_results_tv,
+                R.id.navigation_player, R.id.navigation_quick_search)) {
+            heldNavigationViews.forEach { it.visibility = View.GONE }
+        }
+        heldNavigationViews = emptyList()
     }
 
     private fun cancelDestinationCheck() {
@@ -1436,6 +1461,7 @@ internal class CatalogBrowserDialog(
             inlineSheet = null
             inlineInput?.setOnQueryTextListener(null)
             inlineResults.adapter = null
+            releaseNativeNavigation()
             navigation?.removeOnDestinationChangedListener(destinationListener)
             activity.window.decorView.removeOnLayoutChangeListener(windowBoundsListener)
             activity.findViewById<View>(R.id.nav_rail_view)
@@ -1482,6 +1508,7 @@ internal class CatalogBrowserDialog(
         if (closed) return
         closed = true
         cancelPendingBackPress()
+        releaseNativeNavigation()
         detailHandoff.close()
         generation++
         scope.cancel()
