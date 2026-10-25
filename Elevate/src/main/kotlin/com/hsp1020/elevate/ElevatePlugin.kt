@@ -11,6 +11,8 @@ import android.widget.ImageView
 import android.widget.ArrayAdapter
 import android.widget.AdapterView
 import android.view.Gravity
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.util.TypedValue
 import android.text.TextUtils
 import android.graphics.drawable.ColorDrawable
@@ -25,9 +27,8 @@ import androidx.core.view.isVisible
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.ui.download.DownloadButtonSetup
-import com.lagradost.cloudstream3.ui.player.CSPlayerEvent
+import com.lagradost.cloudstream3.ui.player.FullScreenPlayer
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
-import com.lagradost.cloudstream3.ui.player.PlayerEventSource
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.result.ACTION_CLICK_DEFAULT
 import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
@@ -58,6 +59,8 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment
 import com.lagradost.cloudstream3.ui.settings.Globals.PHONE
+import com.lagradost.cloudstream3.ui.settings.Globals.TV
+import com.lagradost.cloudstream3.ui.settings.Globals.EMULATOR
 import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
 import com.lagradost.cloudstream3.utils.UIHelper.hideKeyboard
 import com.lagradost.cloudstream3.utils.UIHelper.navigate
@@ -587,8 +590,27 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
     private val screens = LinkedHashMap<GeneratorPlayer, Screen>()
     private val previousPlayStatusField by lazy {
         runCatching {
-            com.lagradost.cloudstream3.ui.player.FullScreenPlayer::class.java
-                .getDeclaredField("previousPlayStatus").apply { isAccessible = true }
+            FullScreenPlayer::class.java.getDeclaredField("previousPlayStatus")
+                .apply { isAccessible = true }
+        }.getOrNull()
+    }
+    private val overlayShownField by lazy {
+        runCatching {
+            FullScreenPlayer::class.java.getDeclaredField("isShowingEpisodeOverlay")
+                .apply { isAccessible = true }
+        }.getOrNull()
+    }
+    private val overlayAnimator by lazy {
+        runCatching {
+            FullScreenPlayer::class.java.getDeclaredMethod(
+                "animateEpisodesOverlay", Boolean::class.javaPrimitiveType!!
+            ).apply { isAccessible = true }
+        }.getOrNull()
+    }
+    private val lockedField by lazy {
+        runCatching {
+            FullScreenPlayer::class.java.getDeclaredField("isLocked")
+                .apply { isAccessible = true }
         }.getOrNull()
     }
 
@@ -610,6 +632,17 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         private val list = root.findViewById<RecyclerView>(R.id.player_episode_list)
         private val oldBackground: Drawable? = overlay?.background
         private val oldNextFocusUpId = list?.nextFocusUpId
+        private val episodeButton = root.findViewById<View>(R.id.player_episodes_button)
+        private var nativeFocusListener: View.OnFocusChangeListener? = null
+        private var guardedFocusListener: View.OnFocusChangeListener? = null
+        private var nativeKeyListener: ((Pair<KeyEvent?, Boolean>) -> Boolean)? = null
+        private var guardedKeyListener: ((Pair<KeyEvent?, Boolean>) -> Boolean)? = null
+        private val touchGuard = View.OnTouchListener { button, event ->
+            if (event.actionMasked == MotionEvent.ACTION_UP && button.isPressed &&
+                event.x >= 0 && event.x < button.width && event.y >= 0 && event.y < button.height
+            ) openWithoutPause()
+            false // Keep native touch, ripple, and click dispatch.
+        }
         private val originalCardColors = LinkedHashMap<CardView, ColorStateList>()
         private var selector: AppCompatSpinner? = null
         private val tree = root.viewTreeObserver
@@ -698,9 +731,74 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             target.callbacks = guard
         }
 
+        // Only the native overlay toggle's Pause is avoided. The player object is
+        // never replaced, so CS3IPlayer-only preview and compressor APIs still work.
+        private fun openWithoutPause() {
+            if (!fragment.isAdded || fragment.view !== root || !fragment.isThereEpisodes()) return
+            val shown = overlayShownField ?: return
+            val previous = previousPlayStatusField ?: return
+            val animate = overlayAnimator ?: return
+            val alreadyShowing = runCatching { shown.getBoolean(fragment) }.getOrNull() ?: return
+            if (alreadyShowing) return
+            val oldStatus = runCatching { previous.getBoolean(fragment) }.getOrNull() ?: return
+            try {
+                fragment.showEpisodesOverlay()
+                previous.setBoolean(fragment, false) // Native close must not issue a redundant Play.
+                shown.setBoolean(fragment, true)
+                animate.invoke(fragment, true)
+            } catch (_: Exception) {
+                // Fail closed: let the original click/focus/key callback open normally.
+                runCatching {
+                    shown.setBoolean(fragment, false)
+                    previous.setBoolean(fragment, oldStatus)
+                    overlay?.animate()?.cancel()
+                    overlay?.isGone = true
+                }
+            }
+        }
+
+        private fun installButtonGuards() {
+            val button = episodeButton ?: return
+            nativeFocusListener = button.onFocusChangeListener
+            val original = nativeFocusListener
+            guardedFocusListener = View.OnFocusChangeListener { view, focused ->
+                if (focused && isLayout(TV or EMULATOR)) openWithoutPause()
+                original?.onFocusChange(view, focused) // Preserve native focus text and styling.
+            }.also { button.onFocusChangeListener = it }
+            button.setOnTouchListener(touchGuard)
+        }
+
+        fun installRemoteGuard() {
+            if (!fragment.isResumed || fragment.view !== root) return
+            val current = CommonActivity.keyEventListener ?: return
+            if (current === guardedKeyListener) return
+            removeRemoteGuard()
+            val wrapper: (Pair<KeyEvent?, Boolean>) -> Boolean = { input ->
+                val event = input.first
+                if (!input.second && event?.action == KeyEvent.ACTION_DOWN &&
+                    (event.keyCode == KeyEvent.KEYCODE_MENU ||
+                        event.keyCode == KeyEvent.KEYCODE_SETTINGS) &&
+                    fragment.player.isActive() && fragment.isThereEpisodes() &&
+                    runCatching { lockedField?.getBoolean(fragment) == false }.getOrDefault(false)
+                ) openWithoutPause()
+                current(input) // Preserve all native key behavior.
+            }
+            nativeKeyListener = current
+            guardedKeyListener = wrapper
+            CommonActivity.keyEventListener = wrapper
+        }
+
+        fun removeRemoteGuard() {
+            if (CommonActivity.keyEventListener === guardedKeyListener)
+                CommonActivity.keyEventListener = nativeKeyListener
+            nativeKeyListener = null
+            guardedKeyListener = null
+        }
+
         fun attach() {
-            // Preserve concrete CS3IPlayer type for preview scrubbing and
-            // native audio compressor; no IPlayer proxy is ever installed.
+            // Preserve concrete CS3IPlayer for preview scrubbing and compressor.
+            installButtonGuards()
+            installRemoteGuard()
             if (tree.isAlive) tree.addOnGlobalLayoutListener(overlayLayout)
             scheduleOverlayCheck()
 
@@ -730,6 +828,12 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             val restoreNativeList = fragment.isAdded && fragment.view === root &&
                 overlay?.isShown == true && filteredAdapter != null &&
                 list?.adapter === filteredAdapter
+            removeRemoteGuard()
+            episodeButton?.setOnTouchListener(null)
+            if (episodeButton?.onFocusChangeListener === guardedFocusListener)
+                episodeButton.onFocusChangeListener = nativeFocusListener
+            guardedFocusListener = null
+            nativeFocusListener = null
             if (tree.isAlive) tree.removeOnGlobalLayoutListener(overlayLayout)
             main.removeCallbacks(overlayCheck)
             overlayCheckQueued = false
@@ -753,18 +857,10 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         }
 
         fun overlayOpening() {
-            // Native showEpisodesOverlay() creates a new adapter after Pause.
-            // Detect that adapter without intercepting IPlayer. Restore playback
-            // only if native FullScreenPlayer recorded that it was playing.
+            // Native and pause-free openings share the same season UI setup.
             main.post {
                 if (!fragment.isAdded || fragment.view !== root ||
                     overlay?.isVisible != true) return@post
-                val before = runCatching {
-                    previousPlayStatusField?.getBoolean(fragment)
-                }.getOrNull()
-                val resume = before == true && !fragment.player.getIsPlaying()
-                if (resume)
-                    fragment.player.handleEvent(CSPlayerEvent.Play, PlayerEventSource.Player)
                 guardAutoHide()
                 configureSeasons()
             }
@@ -963,6 +1059,14 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             if (fragment is GeneratorPlayer) main.post {
                 if (fragment.isAdded && fragment.view === view) watch(fragment, view)
             }
+        }
+
+        override fun onFragmentResumed(fm: FragmentManager, fragment: Fragment) {
+            (fragment as? GeneratorPlayer)?.let { screens[it]?.installRemoteGuard() }
+        }
+
+        override fun onFragmentPaused(fm: FragmentManager, fragment: Fragment) {
+            (fragment as? GeneratorPlayer)?.let { screens[it]?.removeRemoteGuard() }
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, fragment: Fragment) {
