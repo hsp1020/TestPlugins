@@ -9,6 +9,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Bundle
 import androidx.navigation.NavOptions
+import androidx.navigation.NavController
+import androidx.navigation.fragment.NavHostFragment
 import android.widget.Toast
 import android.view.View
 import android.view.ViewGroup
@@ -49,11 +51,13 @@ import com.lagradost.cloudstream3.ui.search.SearchAdapter
 import com.lagradost.cloudstream3.ui.settings.Globals
 import com.lagradost.cloudstream3.utils.UIHelper.navigate
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.TvSeriesLoadResponse
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import java.util.IdentityHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.math.roundToInt
 
 internal class YouTubeCardHook(private val app: Application) : Application.ActivityLifecycleCallbacks {
@@ -67,9 +71,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private val dialogs = mutableMapOf<View, Screen>()
     private data class PlayedEpisode(val number: Int, val season: Int?)
     private data class DirectPlayback(
+        val card: SearchResponse,
         val parentId: Int,
         val startingNumber: Int,
         val startingSeason: Int?,
+        val episodes: CopyOnWriteArrayList<ResultEpisode>,
+        var prefetchStarted: Boolean = false,
     )
     private var lastPlayed: PlayedEpisode? = null
     private var directPlayback: DirectPlayback? = null
@@ -77,82 +84,215 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     // One pending selection bridges player exit and the native detail ViewModel.
     private var pendingRange: Pair<Int, PlayedEpisode>? = null
     private var appliedRange: Pair<Int, PlayedEpisode>? = null
+    private var playbackNav: NavController? = null
+    private var playbackReturnListener: NavController.OnDestinationChangedListener? = null
+    private var playerFragment: Fragment? = null
 
-    private fun playHomeVideo(card: SearchResponse) {
-        if (directLoading || directPlayback != null) return
-        val activity = host ?: return
+    private fun clearPlaybackReturnListener() {
+        playbackNav?.let { nav ->
+            playbackReturnListener?.let(nav::removeOnDestinationChangedListener)
+        }
+        playbackNav = null
+        playbackReturnListener = null
+    }
+
+    /**
+     * The native player pops its current destination on back. Before the
+     * previous Home destination can draw, replace that destination with the
+     * native details destination. Unlike pushing details before the player,
+     * this does not start any detail HTTP request on initial playback.
+     */
+    private fun registerReturn(
+        controller: NavController,
+        session: DirectPlayback,
+    ) {
+        clearPlaybackReturnListener()
+        val origin = controller.currentDestination?.id ?: return
+        var enteredPlayer = false
+        val listener = NavController.OnDestinationChangedListener { nav, destination, _ ->
+            if (destination.id == R.id.navigation_player) {
+                enteredPlayer = true
+            } else if (enteredPlayer) {
+                clearPlaybackReturnListener()
+                if (directPlayback === session) {
+                    playerFragment?.let(::recordPlayerEpisode)
+                    val played = lastPlayed
+                        ?: PlayedEpisode(session.startingNumber, session.startingSeason)
+                    selectLastPlaybackRange(session.parentId, played)
+                    directPlayback = null
+                    lastPlayed = null
+                    appliedRange = null
+                    playerFragment = null
+                    if (destination.id == origin) {
+                        val target = if (Globals.isLayout(Globals.TV or Globals.EMULATOR)) {
+                            R.id.global_to_navigation_results_tv
+                        } else R.id.global_to_navigation_results_phone
+                        val noTransition = NavOptions.Builder()
+                            .setEnterAnim(0).setExitAnim(0)
+                            .setPopEnterAnim(0).setPopExitAnim(0).build()
+                        // Prefer immediate transition within the destination
+                        // callback so Home is never drawn between player and detail.
+                        // If Navigation is still dispatching a pop, retry on the
+                        // next main-loop turn rather than crashing the player.
+                        try {
+                            nav.navigate(target, ResultFragment.newInstance(session.card), noTransition)
+                        } catch (_: IllegalStateException) {
+                            main.post {
+                                if (playbackNav == null && host != null &&
+                                    nav.currentDestination?.id == origin) {
+                                    runCatching {
+                                        nav.navigate(target, ResultFragment.newInstance(session.card), noTransition)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        playbackNav = controller
+        playbackReturnListener = listener
+        controller.addOnDestinationChangedListener(listener)
+    }
+
+    /** Never delay the first stream for YouTube recommendations. */
+    private fun prefetchAfterLinks(fragment: Fragment) {
+        val session = directPlayback ?: return
+        if (session.prefetchStarted || fragment.javaClass.name != PLAYER_SCREEN) return
         val api = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
-        val videoId = YoutubeUtils.extractYoutubeId(card.url) ?: return
-        directLoading = true
-        activity.lifecycleScope.launch {
-            try {
-                val page = withContext(Dispatchers.IO) { api.loadForDirectPlayback(card.url) } as? TvSeriesLoadResponse
-                    ?: return@launch
-                val parentId = page.uniqueUrl.replace(api.mainUrl, "").replace("/", "").hashCode()
-                val episodes = page.episodes.sortedBy {
+        val model = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
+        model.loadingLinks.observe(fragment.viewLifecycleOwner) { update ->
+            if (session.prefetchStarted ||
+                update?.value !is Resource.Success ||
+                model.state.links.isEmpty() ||
+                directPlayback !== session) return@observe
+            session.prefetchStarted = true
+            if (session.card.url.contains("/shorts/")) return@observe
+            fragment.viewLifecycleOwner.lifecycleScope.launch {
+                val full = try {
+                    withContext(Dispatchers.IO) {
+                        api.prefetchDirectDetails(session.card.url)
+                    }
+                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                    throw cancel
+                } catch (_: Exception) {
+                    null
+                } ?: return@launch
+                if (directPlayback !== session) return@launch
+                val known = session.episodes.mapTo(hashSetOf()) {
+                    YoutubeUtils.extractYoutubeId(it.data) ?: it.data
+                }
+                val previousCount = session.episodes.size
+                full.episodes.sortedBy {
                     (it.season?.times(10_000) ?: 0) + (it.episode ?: 0)
-                }.mapIndexed { index, episode ->
+                }.forEachIndexed { index, episode ->
+                    val key = YoutubeUtils.extractYoutubeId(episode.data) ?: episode.data
+                    if (!known.add(key)) return@forEachIndexed
                     val number = episode.episode ?: index + 1
-                    buildResultEpisode(
-                        headerName = page.name,
+                    session.episodes.add(buildResultEpisode(
+                        headerName = full.name,
                         name = episode.name,
                         poster = episode.posterUrl,
                         episode = number,
                         seasonIndex = episode.season,
                         season = episode.season,
                         data = episode.data,
-                        apiName = page.apiName,
-                        id = parentId + (episode.season?.times(100_000) ?: 0) + number + 1,
-                        index = index,
+                        apiName = full.apiName,
+                        id = session.parentId +
+                            (episode.season?.times(100_000) ?: 0) + number + 1,
+                        index = session.episodes.size,
                         rating = episode.score,
                         description = episode.description,
                         isFiller = null,
-                        tvType = page.type,
-                        parentId = parentId,
+                        tvType = full.type,
+                        parentId = session.parentId,
                         airDate = episode.date,
                         runTime = episode.runTime,
-                    )
+                    ))
                 }
-                val selectedIndex = episodes.indexOfFirst {
-                    YoutubeUtils.extractYoutubeId(it.data) == videoId
+                if (session.episodes.size > previousCount) {
+                    // Preserve the native next-episode/resume metadata without
+                    // reloading any video link, player, or UI hierarchy.
+                    model.modifyState {
+                        val old = generatorState ?: return@modifyState this
+                        copy(generatorState = old.copy(
+                            nextMeta = session.episodes.getOrNull(old.index + 1),
+                            allMeta = session.episodes,
+                        ))
+                    }
                 }
-                if (selectedIndex < 0) return@launch
-                if (host !== activity || activity.isFinishing) return@launch
-                directPlayback = DirectPlayback(
-                    parentId, episodes[selectedIndex].episode,
-                    episodes[selectedIndex].season
-                )
-                lastPlayed = null
-                pendingRange = null
-                appliedRange = null
-                // Prepare the return destination below the player in the same UI dispatch.
-                // Zero animations avoid ever rendering an intermediate detail transition.
-                val resultsId = if (Globals.isLayout(Globals.TV or Globals.EMULATOR)) {
-                    R.id.global_to_navigation_results_tv
-                } else {
-                    R.id.global_to_navigation_results_phone
-                }
-                val noTransition = NavOptions.Builder()
-                    .setEnterAnim(0)
-                    .setExitAnim(0)
-                    .setPopEnterAnim(0)
-                    .setPopExitAnim(0)
-                    .build()
-                activity.navigate(resultsId, ResultFragment.newInstance(card), noTransition)
-                activity.navigate(
-                    R.id.global_to_navigation_player,
-                    GeneratorPlayer.newInstance(
-                        RepoLinkGenerator(episodes, page = page),
-                        selectedIndex,
-                        HashMap(page.syncData),
-                    ),
-                )
-            } catch (e: Exception) {
-                directPlayback = null
-                Toast.makeText(activity, e.localizedMessage ?: "Unable to play video", Toast.LENGTH_SHORT).show()
-            } finally {
-                directLoading = false
             }
+        }
+    }
+
+    private fun playHomeVideo(card: SearchResponse) {
+        if (directLoading || directPlayback != null) return
+        val activity = host ?: return
+        val api = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
+        val navHost = activity.supportFragmentManager
+            .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment ?: return
+        val videoId = YoutubeUtils.extractYoutubeId(card.url) ?: return
+        directLoading = true
+        activity.lifecycleScope.launch {
+        try {
+            // Construct episodes from the Home card and existing Shorts list only.
+            // No HTTP or full-detail Fragment is involved in launching playback.
+            val page = api.quickPlaybackPage(card)
+            val parentId = page.uniqueUrl.replace(api.mainUrl, "")
+                .replace("/", "").hashCode()
+            val initial = page.episodes.sortedBy {
+                (it.season?.times(10_000) ?: 0) + (it.episode ?: 0)
+            }.mapIndexed { index, episode ->
+                val number = episode.episode ?: index + 1
+                buildResultEpisode(
+                    headerName = page.name,
+                    name = episode.name,
+                    poster = episode.posterUrl,
+                    episode = number,
+                    seasonIndex = episode.season,
+                    season = episode.season,
+                    data = episode.data,
+                    apiName = page.apiName,
+                    id = parentId + (episode.season?.times(100_000) ?: 0) + number + 1,
+                    index = index,
+                    rating = episode.score,
+                    description = episode.description,
+                    isFiller = null,
+                    tvType = page.type,
+                    parentId = parentId,
+                    airDate = episode.date,
+                    runTime = episode.runTime,
+                )
+            }
+            val selectedIndex = initial.indexOfFirst {
+                YoutubeUtils.extractYoutubeId(it.data) == videoId
+            }
+            if (selectedIndex < 0) return@launch
+            val episodes = CopyOnWriteArrayList(initial)
+            val session = DirectPlayback(
+                card, parentId, initial[selectedIndex].episode,
+                initial[selectedIndex].season, episodes,
+            )
+            lastPlayed = null
+            pendingRange = null
+            appliedRange = null
+            directPlayback = session
+            registerReturn(navHost.navController, session)
+            navHost.navController.navigate(
+                R.id.global_to_navigation_player,
+                GeneratorPlayer.newInstance(
+                    RepoLinkGenerator(episodes, page = page),
+                    selectedIndex,
+                    HashMap(page.syncData),
+                ),
+            )
+        } catch (e: Exception) {
+            clearPlaybackReturnListener()
+            directPlayback = null
+            Toast.makeText(activity, e.localizedMessage ?: "Unable to play video", Toast.LENGTH_SHORT).show()
+        } finally {
+            directLoading = false
+        }
         }
     }
 
@@ -188,25 +328,18 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
             recordPlayerEpisode(f)
-            if (f.javaClass.name != PLAYER_SCREEN) return
-            val playback = directPlayback ?: return
-            selectLastPlaybackRange(
-                playback.parentId,
-                lastPlayed ?: PlayedEpisode(playback.startingNumber, playback.startingSeason)
-            )
         }
 
         override fun onFragmentDestroyed(fm: FragmentManager, f: Fragment) {
             if (f.javaClass.name != PLAYER_SCREEN) return
             recordPlayerEpisode(f)
-            val playback = directPlayback ?: return
-            selectLastPlaybackRange(
-                playback.parentId,
-                lastPlayed ?: PlayedEpisode(playback.startingNumber, playback.startingSeason)
-            )
-            directPlayback = null
-            lastPlayed = null
-            appliedRange = null
+            if (playerFragment === f) playerFragment = null
+            // Normally the destination listener already handled return.
+            // Disarm a stale listener if the player was removed externally.
+            if (directPlayback != null && playbackReturnListener == null) {
+                directPlayback = null
+                lastPlayed = null
+            }
         }
 
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
@@ -214,6 +347,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
 
         override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, view: View, state: Bundle?) {
+            if (f.javaClass.name == PLAYER_SCREEN) {
+                playerFragment = f
+                prefetchAfterLinks(f)
+            }
             attach(f, view)
         }
 
@@ -233,6 +370,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     }
 
     private fun release() {
+        clearPlaybackReturnListener()
+        playerFragment = null
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
         focusTree = null

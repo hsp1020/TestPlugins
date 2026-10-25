@@ -3192,7 +3192,51 @@ class YoutubeProvider(
         }
     }
 
-    override suspend fun load(url: String): LoadResponse = loadPage(url, direct = false)
+    private val directPageCache = ConcurrentHashMap<String, Pair<Long, TvSeriesLoadResponse>>()
+
+    /**
+     * The full detail screen is opened only after playback. Reuse metadata
+     * already gathered for the player's recommendations rather than fetching
+     * the same YouTube HTML again during the return transition.
+     */
+    override suspend fun load(url: String): LoadResponse {
+        val saved = directPageCache.remove(url)
+        if (saved != null && System.currentTimeMillis() - saved.first < 5 * 60_000L) {
+            return saved.second
+        }
+        return loadPage(url, direct = false)
+    }
+
+    /** Construct the initial player episode list from the home card, with no HTTP. */
+    internal suspend fun quickPlaybackPage(card: SearchResponse): TvSeriesLoadResponse {
+        val url = card.url
+        val videoId = YoutubeUtils.extractYoutubeId(url) ?: error("Invalid YouTube video")
+        val shorts = url.contains("/shorts/")
+        val list = if (shorts) {
+            val source = if (url.contains("ctx=search")) searchShorts else homeShorts
+            synchronized(source) { source.map { it.copy() } }
+        } else emptyList()
+        val episodes = if (list.isNotEmpty() &&
+            list.any { YoutubeUtils.extractYoutubeId(it.data) == videoId }) {
+            list.onEachIndexed { index, episode -> episode.episode = index + 1 }
+        } else listOf(newEpisode(url) {
+            name = card.name
+            posterUrl = card.posterUrl
+            episode = 1
+        })
+        return newTvSeriesLoadResponse(card.name, url, TvType.TvSeries, episodes) {
+            posterUrl = card.posterUrl
+            plot = "\u200b"
+        }
+    }
+
+    /** Fetch recommendations only after native stream links have been resolved. */
+    internal suspend fun prefetchDirectDetails(url: String): TvSeriesLoadResponse? {
+        val page = loadPage(url, direct = true) as? TvSeriesLoadResponse ?: return null
+        if (directPageCache.size >= 16) directPageCache.clear()
+        directPageCache[url] = System.currentTimeMillis() to page
+        return page
+    }
 
     /**
      * Direct home playback skips extended NewPipe metadata.
