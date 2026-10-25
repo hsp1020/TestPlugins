@@ -1,6 +1,27 @@
 package com.hsp1020.elevate
 
 import android.app.Activity
+import android.view.ContextThemeWrapper
+import android.graphics.drawable.Drawable
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import androidx.core.view.isGone
+import androidx.core.view.isVisible
+import androidx.lifecycle.ViewModelProvider
+import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.button.MaterialButton
+import com.lagradost.cloudstream3.ui.download.DownloadButtonSetup
+import com.lagradost.cloudstream3.ui.player.CSPlayerEvent
+import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
+import com.lagradost.cloudstream3.ui.player.IPlayer
+import com.lagradost.cloudstream3.ui.player.PlayerEventSource
+import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
+import com.lagradost.cloudstream3.ui.result.ACTION_CLICK_DEFAULT
+import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
+import com.lagradost.cloudstream3.ui.result.ResultEpisode
+import com.lagradost.cloudstream3.ui.result.ResultViewModel2
+import com.lagradost.cloudstream3.utils.DataStoreHelper.getViewPos
+import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showDialog
 import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
@@ -45,6 +66,7 @@ class ElevatePlugin : Plugin() {
     private var libraryPosters: LibraryPosterHook? = null
     private var performanceTrace: ElevatePerformanceTrace? = null
     private var nativeRecyclerGuard: NativeRecyclerListenerGuard? = null
+    private var nativeEpisodeOverlay: NativeEpisodeOverlayHook? = null
     private var featurePrefs: SharedPreferences? = null
     private var featureListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
     private var app: Application? = null
@@ -67,6 +89,7 @@ class ElevatePlugin : Plugin() {
             app = application
             performanceTrace = ElevatePerformanceTrace(application).also { it.start() }
             nativeRecyclerGuard = NativeRecyclerListenerGuard(application).also { it.start() }
+            nativeEpisodeOverlay = NativeEpisodeOverlayHook(application).also { it.start() }
             try {
                 val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
                 // Preserve the user's previous visible/hidden choice when changing to "ON = hide".
@@ -228,6 +251,8 @@ class ElevatePlugin : Plugin() {
         libraryPosters = null
         performanceTrace?.stop()
         performanceTrace = null
+        nativeEpisodeOverlay?.stop()
+        nativeEpisodeOverlay = null
         nativeRecyclerGuard?.stop()
         nativeRecyclerGuard = null
         app = null
@@ -527,4 +552,285 @@ private class NativeDetailSearchHook(private val app: Application) : Application
             "com.lagradost.cloudstream3.ui.result.ResultFragmentTv"
         )
     }
+}
+
+
+/**
+ * Changes only the native episode overlay. The native player, episode loading,
+ * overlay animation, and controls remain owned by CloudStream.
+ */
+internal class NativeEpisodeOverlayHook(private val application: Application) :
+    Application.ActivityLifecycleCallbacks {
+    private val main = Handler(Looper.getMainLooper())
+    private var activity: FragmentActivity? = null
+    private val screens = LinkedHashMap<GeneratorPlayer, Screen>()
+
+    private inner class Screen(val fragment: GeneratorPlayer, val root: View) {
+        private val overlay = root.findViewById<LinearLayout>(R.id.player_episode_overlay)
+        private val title = root.findViewById<TextView>(R.id.player_episode_overlay_title)
+        private val list = root.findViewById<RecyclerView>(R.id.player_episode_list)
+        private val oldBackground: Drawable? = overlay?.background
+        private val oldNextFocusUpId = list?.nextFocusUpId
+        private var selector: MaterialButton? = null
+        private var wrapper: OverlayPlayer? = null
+        private var model: PlayerGeneratorViewModel? = null
+        private var fullEpisodes = emptyList<ResultEpisode>()
+        private var selectedSeason: Int? = null
+        private var filteredAdapter: EpisodeAdapter? = null
+
+        fun attach() {
+            val native = fragment.player
+            if (native is OverlayPlayer) return
+            wrapper = OverlayPlayer(native, this).also { fragment.player = it }
+            // Alpha belongs to the panel background, not to episode text/posters.
+            val translucent = oldBackground?.constantState?.newDrawable(root.resources)?.mutate()
+            if (translucent != null) {
+                translucent.alpha = (255 * 0.7f).toInt()
+                overlay?.background = translucent
+            }
+        }
+
+        fun detach() {
+            if (fragment.player === wrapper) {
+                wrapper?.let { fragment.player = it.native }
+            }
+            selector?.let { (it.parent as? ViewGroup)?.removeView(it) }
+            selector = null
+            title?.isGone = false
+            overlay?.background = oldBackground
+            oldNextFocusUpId?.let { list?.nextFocusUpId = it }
+            filteredAdapter = null
+            model = null
+            wrapper = null
+            fullEpisodes = emptyList()
+        }
+
+        fun overlayOpening() {
+            // Native showEpisodesOverlay() replaces its adapter after issuing Pause.
+            // Run once after that method, never poll or observe layout frames.
+            main.post {
+                if (fragment.view === root && fragment.isAdded && overlay?.isVisible == true) {
+                    configureSeasons()
+                }
+            }
+        }
+
+        private fun seasonOf(episode: ResultEpisode) =
+            episode.seasonIndex ?: episode.season ?: 0
+
+        private fun configureSeasons() {
+            val vm = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
+            model = vm
+            val state = vm.state.generatorState ?: return
+            fullEpisodes = state.allMeta?.filterIsInstance<ResultEpisode>()
+                ?.map { episode ->
+                    getViewPos(episode.id)?.let { saved ->
+                        episode.copy(position = saved.position, duration = saved.duration)
+                    } ?: episode
+                } ?: emptyList()
+
+            val distinct = fullEpisodes.distinctBy(::seasonOf)
+            if (distinct.size <= 1) {
+                selector?.isGone = true
+                title?.isVisible = true
+                filteredAdapter = null
+                return
+            }
+
+            if (selector == null) {
+                val context = overlay?.context ?: return
+                val density = context.resources.displayMetrics.density
+                selector = MaterialButton(ContextThemeWrapper(context, R.style.MultiSelectButton)).apply {
+                    id = View.generateViewId()
+                    isAllCaps = false
+                    setCompoundDrawablesRelativeWithIntrinsicBounds(
+                        0, 0, R.drawable.ic_baseline_keyboard_arrow_down_24, 0
+                    )
+                    compoundDrawablePadding = (5 * density).toInt()
+                    setPadding((10 * density).toInt(), 0, (5 * density).toInt(), 0)
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, (40 * density).toInt()
+                    ).apply { setMargins(0, (5 * density).toInt(), 0, (5 * density).toInt()) }
+                    nextFocusDownId = list?.id ?: View.NO_ID
+                    setOnClickListener { openSeasonDialog() }
+                }.also { overlay?.addView(it, 0) }
+            }
+            title?.isGone = true
+            selector?.isVisible = true
+            list?.nextFocusUpId = selector?.id ?: View.NO_ID
+
+            // Reopen on the season of the episode that is actually playing.
+            val current = fullEpisodes.getOrNull(state.index)
+            selectedSeason = seasonOf(current ?: distinct.first())
+            if (filteredAdapter == null) filteredAdapter = EpisodeAdapter(false, { event ->
+                if (event.action == ACTION_CLICK_DEFAULT) {
+                    // Adapter positions become season-local after filtering. Use
+                    // the native generator's global list index, not that position.
+                    val index = fullEpisodes.indexOfFirst {
+                        it.id == event.data.id && it.index == event.data.index
+                    }
+                    if (index >= 0) {
+                        // Match the native overlay's explicit episode-choice path.
+                        runCatching {
+                            GeneratorPlayer::class.java.getDeclaredField("isNextEpisode").apply {
+                                isAccessible = true
+                            }.setBoolean(fragment, false)
+                        }
+                        fragment.releasePlayer()
+                        overlay?.isGone = true
+                        vm.loadThisEpisode(index)
+                    }
+                }
+            }, { download -> DownloadButtonSetup.handleDownloadClick(download) })
+            list?.adapter = filteredAdapter
+            renderSeason()
+        }
+
+        private fun openSeasonDialog() {
+            val context = fragment.activity ?: return
+            val distinct = fullEpisodes.distinctBy(::seasonOf)
+            val numbers = distinct.map(::seasonOf)
+            val names = distinct.map { episode ->
+                ResultViewModel2.seasonToTxt(episode.seasonData, seasonOf(episode))
+                    ?.asStringNull(context) ?: context.getString(R.string.season)
+            }
+            with(com.lagradost.cloudstream3.utils.SingleSelectionHelper) {
+                context.showDialog(
+                    names,
+                    numbers.indexOf(selectedSeason),
+                    context.getString(R.string.season),
+                    false,
+                    {}
+                ) { index ->
+                    selectedSeason = numbers.getOrNull(index) ?: return@showDialog
+                    renderSeason()
+                }
+            }
+        }
+
+        private fun renderSeason() {
+            val season = selectedSeason ?: return
+            val context = overlay?.context ?: return
+            val episode = fullEpisodes.firstOrNull { seasonOf(it) == season } ?: return
+            selector?.text = ResultViewModel2.seasonToTxt(episode.seasonData, season)
+                ?.asStringNull(context) ?: context.getString(R.string.season)
+            val visible = fullEpisodes.filter { seasonOf(it) == season }
+            val currentId = model?.state?.generatorState?.meta as? ResultEpisode
+            val currentPosition = visible.indexOfFirst { it.id == currentId?.id }
+                .takeIf { it >= 0 } ?: 0
+            filteredAdapter?.submitList(visible) {
+                if (selectedSeason != season || fragment.view !== root) return@submitList
+                list?.scrollToPosition(currentPosition)
+                if (com.lagradost.cloudstream3.ui.settings.Globals.isLayout(
+                        com.lagradost.cloudstream3.ui.settings.Globals.TV
+                    )) {
+                    list?.post {
+                        if (selectedSeason == season && fragment.view === root) {
+                            list?.findViewHolderForAdapterPosition(currentPosition)
+                                ?.itemView?.requestFocus()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private inner class OverlayPlayer(val native: IPlayer, private val screen: Screen) :
+        IPlayer by native {
+        private var suppressedPause = false
+
+        override fun handleEvent(event: CSPlayerEvent, source: PlayerEventSource) {
+            if (event == CSPlayerEvent.Pause || event == CSPlayerEvent.Play) {
+                // The only native call site to suppress is the open/close branch
+                // of FullScreenPlayer.toggleEpisodesOverlay().
+                val fromEpisodes = Thread.currentThread().stackTrace.any {
+                    it.className == "com.lagradost.cloudstream3.ui.player.FullScreenPlayer" &&
+                        it.methodName == "toggleEpisodesOverlay"
+                }
+                if (fromEpisodes) {
+                    if (event == CSPlayerEvent.Pause) {
+                        screen.overlayOpening()
+                        suppressedPause = native.getIsPlaying()
+                        // Preserve playWhenReady during initial loading/rebuffering too.
+                        return
+                    } else if (suppressedPause) {
+                        // Native tries to restore an already uninterrupted stream.
+                        suppressedPause = false
+                        return
+                    }
+                }
+            }
+            native.handleEvent(event, source)
+        }
+
+        override fun release() {
+            suppressedPause = false
+            native.release()
+        }
+    }
+
+    private val callbacks = object : FragmentManager.FragmentLifecycleCallbacks() {
+        override fun onFragmentViewCreated(
+            fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
+        ) {
+            if (fragment is GeneratorPlayer) main.post {
+                if (fragment.isAdded && fragment.view === view) watch(fragment, view)
+            }
+        }
+
+        override fun onFragmentViewDestroyed(fm: FragmentManager, fragment: Fragment) {
+            (fragment as? GeneratorPlayer)?.let { screens.remove(it)?.detach() }
+        }
+    }
+
+    private fun watch(fragment: GeneratorPlayer, view: View) {
+        if (screens[fragment]?.root === view) return
+        screens.remove(fragment)?.detach()
+        screens[fragment] = Screen(fragment, view).also { it.attach() }
+    }
+
+    private fun use(next: FragmentActivity) {
+        if (activity === next) return
+        unbind()
+        activity = next
+        next.supportFragmentManager.registerFragmentLifecycleCallbacks(callbacks, true)
+        fun scan(fm: FragmentManager) {
+            fm.fragments.forEach { fragment ->
+                if (fragment is GeneratorPlayer) fragment.view?.let { watch(fragment, it) }
+                if (fragment.isAdded) scan(fragment.childFragmentManager)
+            }
+        }
+        scan(next.supportFragmentManager)
+    }
+
+    fun start() {
+        application.registerActivityLifecycleCallbacks(this)
+        (CommonActivity.activity as? MainActivity)?.let(::use)
+    }
+
+    fun stop() {
+        application.unregisterActivityLifecycleCallbacks(this)
+        unbind()
+    }
+
+    private fun unbind() {
+        activity?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(callbacks)
+        screens.values.forEach { it.detach() }
+        screens.clear()
+        activity = null
+    }
+
+    override fun onActivityStarted(activity: Activity) {
+        if (activity is MainActivity) use(activity)
+    }
+    override fun onActivityResumed(activity: Activity) {
+        if (activity is MainActivity) use(activity)
+    }
+    override fun onActivityDestroyed(activity: Activity) {
+        if (this.activity === activity) unbind()
+    }
+    override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+    override fun onActivityPaused(activity: Activity) = Unit
+    override fun onActivityStopped(activity: Activity) = Unit
+    override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
 }
