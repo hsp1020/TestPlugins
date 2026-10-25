@@ -45,29 +45,83 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private var homeTree: ViewTreeObserver? = null
     private val homeLayout = ViewTreeObserver.OnGlobalLayoutListener { queueScan() }
     private val playerScreens = LinkedHashMap<Fragment, PlayerWatch>()
+    private val listenerDiagnostics = mutableSetOf<String>()
+    private val removalLogCount = mutableMapOf<String, Int>()
+    private val readFailureLogged = mutableSetOf<String>()
 
     private val listenerField by lazy {
-        runCatching {
+        val field = runCatching {
             RecyclerView::class.java.getDeclaredField("mScrollListeners").apply {
                 isAccessible = true
             }
+        }.onFailure {
+            Log.w(RECYCLER_LOG_TAG, "stage=reflection screen=all success=false reason=" +
+                it.javaClass.simpleName)
         }.getOrNull()
+        if (field != null)
+            Log.i(RECYCLER_LOG_TAG, "stage=reflection screen=all success=true field=mScrollListeners")
+        field
     }
 
-    /** Remove only old listeners from the same native call site. */
-    private fun prune(recycler: RecyclerView, owner: String, callSite: String) {
+    /** Bounded diagnostics: one class sample per outcome and first six removals per screen. */
+    private fun prune(
+        recycler: RecyclerView, owner: String, callSite: String, screen: String
+    ) {
         val field = listenerField ?: return
-        val snapshot = runCatching {
+        val read = runCatching {
             @Suppress("UNCHECKED_CAST")
             (field.get(recycler) as? List<RecyclerView.OnScrollListener>)?.toList()
-        }.getOrNull() ?: return
-        if (snapshot.size < 2) return
+        }
+        val snapshot = read.getOrElse {
+            if (readFailureLogged.add(screen))
+                Log.w(RECYCLER_LOG_TAG, "stage=read screen=$screen success=false reason=" +
+                    it.javaClass.simpleName)
+            return
+        } ?: run {
+            if (readFailureLogged.add(screen))
+                Log.w(RECYCLER_LOG_TAG, "stage=read screen=$screen success=false reason=null-list")
+            return
+        }
         val matches = snapshot.filter {
             val name = it.javaClass.name
             name.startsWith(owner) && name.contains(callSite)
         }
-        if (matches.size > 1) {
-            matches.dropLast(1).forEach(recycler::removeOnScrollListener)
+        val state = when {
+            snapshot.isEmpty() -> "empty"
+            matches.isNotEmpty() -> "match"
+            else -> "no-match"
+        }
+        if (listenerDiagnostics.add("$screen:$state")) {
+            val sampled = matches.firstOrNull() ?: snapshot.firstOrNull()
+            Log.i(RECYCLER_LOG_TAG,
+                "stage=identify screen=$screen status=$state before=" + snapshot.size +
+                    " matched=" + matches.size +
+                    " class=" + (sampled?.javaClass?.name ?: "none"))
+        }
+        if (matches.size < 2) return
+        var removed = 0
+        for (old in matches.dropLast(1)) {
+            recycler.removeOnScrollListener(old)
+            removed++
+        }
+        if (removed > 0) {
+            val count = removalLogCount[screen] ?: 0
+            if (count < 6) {
+                val after = runCatching {
+                    @Suppress("UNCHECKED_CAST")
+                    (field.get(recycler) as? List<RecyclerView.OnScrollListener>)?.toList()
+                }.getOrNull()
+                val remaining = after?.count {
+                    it.javaClass.name.startsWith(owner) &&
+                        it.javaClass.name.contains(callSite)
+                }
+                Log.i(RECYCLER_LOG_TAG,
+                    "stage=pruned screen=$screen before=" + snapshot.size +
+                        " matched=" + matches.size + " removed=$removed" +
+                        " after=" + (after?.size ?: -1) +
+                        " remainingNative=" + (remaining ?: -1))
+            }
+            removalLogCount[screen] = count + 1
         }
     }
 
@@ -81,7 +135,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
             view.findViewById<RecyclerView>(R.id.player_episode_list)?.let {
                 prune(it,
                     "com.lagradost.cloudstream3.ui.player.GeneratorPlayer" + "$",
-                    "showEpisodesOverlay")
+                    "showEpisodesOverlay", "player")
             }
         }
         fun start() {
@@ -249,6 +303,9 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         unbindHome()
         playerScreens.values.forEach { it.close() }
         playerScreens.clear()
+        listenerDiagnostics.clear()
+        removalLogCount.clear()
+        readFailureLogged.clear()
         model = null
         activity = null
         provider = null
@@ -261,6 +318,8 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         if (home === f && root === rv) return
         unbindHome()
         home = f
+        if (listenerDiagnostics.add("home:attached"))
+            Log.i(RECYCLER_LOG_TAG, "stage=attached screen=home found=" + (rv != null))
         root = rv
         rv?.addOnChildAttachStateChangeListener(parentViews)
         homeTree = rv?.viewTreeObserver?.also {
@@ -272,6 +331,8 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private fun bindPlayer(f: Fragment, v: View) {
         if (playerScreens[f]?.view === v) return
         playerScreens.remove(f)?.close()
+        if (listenerDiagnostics.add("player:attached"))
+            Log.i(RECYCLER_LOG_TAG, "stage=attached screen=player found=true")
         playerScreens[f] = PlayerWatch(f, v).also { it.start() }
     }
     private fun unbindHome() {
@@ -307,7 +368,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
             val child = view.findViewById<RecyclerView>(R.id.home_child_recyclerview) ?: continue
             prune(child,
                 "com.lagradost.cloudstream3.ui.home.ParentItemAdapter" + "$",
-                "onBindContent")
+                "onBindContent", "home")
             if (repairEnabled && expected != null) watchRow(view)
         }
     }
@@ -414,5 +475,6 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private companion object {
         const val HOME_CLASS = "com.lagradost.cloudstream3.ui.home.HomeFragment"
         const val PLAYER_CLASS = "com.lagradost.cloudstream3.ui.player.GeneratorPlayer"
+        const val RECYCLER_LOG_TAG = "Elevate-RecyclerGuard"
     }
 }
