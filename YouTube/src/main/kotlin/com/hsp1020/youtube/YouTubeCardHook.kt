@@ -279,7 +279,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 val image = view.findViewById<ImageView>(R.id.imageView) ?: return
                 val state = modified[view] ?: CardState(title, card, image).also { modified[view] = it }
                 val expanded = !card.contains(title)
-                val lines = 4
+                val lines = if (role == Role.RESUME_CARD) 2 else 4
                 if (Build.VERSION.SDK_INT >= 29 && title.isSingleLine) title.setSingleLine(false)
                 if (title.maxLines != lines) title.maxLines = lines
                 if (title.minLines != 1) title.minLines = 1
@@ -510,6 +510,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             "com.lagradost.cloudstream3.ui.search.SearchFragment",
             "com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment",
             "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
+            "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer",
             "com.lagradost.cloudstream3.ui.result.ResultFragmentTv"
         )
     }
