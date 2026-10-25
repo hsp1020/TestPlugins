@@ -700,7 +700,7 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         private fun fadeCard(view: View) {
             val card = view as? CardView ?: return
             val oldColor = originalCardColors.getOrPut(card) { card.cardBackgroundColor }
-            // The panel supplies the 55% opacity. A second opaque card layer
+            // The panel supplies the 40% opacity. A second opaque card layer
             // would darken it further.
             // Keep the card shape, ripple and contents, but eliminate its
             // redundant solid fill so video remains visible behind every row.
@@ -817,7 +817,7 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
 
             // Only the panel surface is translucent; text and images stay opaque.
             oldBackground?.constantState?.newDrawable(root.resources)?.mutate()?.let {
-                it.alpha = (255 * 0.55f).toInt()
+                it.alpha = (255 * 0.40f).toInt()
                 overlay?.background = it
             }
             list?.addOnChildAttachStateChangeListener(cardListener)
