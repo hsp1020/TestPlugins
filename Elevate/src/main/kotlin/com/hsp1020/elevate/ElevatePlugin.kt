@@ -1,7 +1,22 @@
 package com.hsp1020.elevate
 
 import android.app.Activity
-import android.view.ContextThemeWrapper
+import com.lagradost.cloudstream3.ui.player.PlayerView
+import com.lagradost.cloudstream3.ui.player.AbstractPlayerFragment
+import androidx.cardview.widget.CardView
+import androidx.appcompat.widget.AppCompatSpinner
+import androidx.appcompat.content.res.AppCompatResources
+import android.widget.Spinner
+import android.widget.ImageView
+import android.widget.ArrayAdapter
+import android.widget.AdapterView
+import android.view.Gravity
+import android.util.TypedValue
+import android.text.TextUtils
+import android.graphics.drawable.ColorDrawable
+import android.graphics.Typeface
+import android.graphics.Color
+import android.content.res.ColorStateList
 import android.graphics.drawable.Drawable
 import android.view.ViewGroup
 import android.widget.LinearLayout
@@ -9,7 +24,6 @@ import androidx.core.view.isGone
 import androidx.core.view.isVisible
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
-import com.google.android.material.button.MaterialButton
 import com.lagradost.cloudstream3.ui.download.DownloadButtonSetup
 import com.lagradost.cloudstream3.ui.player.CSPlayerEvent
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
@@ -21,7 +35,6 @@ import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.utils.DataStoreHelper.getViewPos
-import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showDialog
 import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
@@ -565,40 +578,116 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
     private var activity: FragmentActivity? = null
     private val screens = LinkedHashMap<GeneratorPlayer, Screen>()
 
+    private fun Context.dp(size: Int) = (size * resources.displayMetrics.density).toInt()
+
+    private fun Context.themeColor(attribute: Int): Int {
+        val array = obtainStyledAttributes(intArrayOf(attribute))
+        return try {
+            array.getColor(0, Color.WHITE)
+        } finally {
+            array.recycle()
+        }
+    }
+
     private inner class Screen(val fragment: GeneratorPlayer, val root: View) {
         private val overlay = root.findViewById<LinearLayout>(R.id.player_episode_overlay)
         private val title = root.findViewById<TextView>(R.id.player_episode_overlay_title)
+        private val titlePosition = title?.let { overlay?.indexOfChild(it) }?.takeIf { it >= 0 } ?: 0
         private val list = root.findViewById<RecyclerView>(R.id.player_episode_list)
         private val oldBackground: Drawable? = overlay?.background
         private val oldNextFocusUpId = list?.nextFocusUpId
-        private var selector: MaterialButton? = null
+        private val originalCardColors = LinkedHashMap<CardView, ColorStateList>()
+        private var selector: AppCompatSpinner? = null
         private var wrapper: OverlayPlayer? = null
         private var model: PlayerGeneratorViewModel? = null
         private var fullEpisodes = emptyList<ResultEpisode>()
         private var selectedSeason: Int? = null
         private var filteredAdapter: EpisodeAdapter? = null
+        private var host: PlayerView? = null
+        private var callbacks: PlayerView.Callbacks? = null
+        private var guardedCallbacks: PlayerView.Callbacks? = null
+
+        private val cardListener = object : RecyclerView.OnChildAttachStateChangeListener {
+            override fun onChildViewAttachedToWindow(view: View) = fadeCard(view)
+            override fun onChildViewDetachedFromWindow(view: View) = restoreCard(view)
+        }
+
+        private fun fadeCard(view: View) {
+            val card = view as? CardView ?: return
+            val oldColor = originalCardColors.getOrPut(card) { card.cardBackgroundColor }
+            val color = oldColor.defaultColor
+            card.setCardBackgroundColor(Color.argb(
+                (Color.alpha(color) * 0.7f).toInt(),
+                Color.red(color), Color.green(color), Color.blue(color)
+            ))
+        }
+
+        private fun restoreCard(view: View) {
+            val card = view as? CardView ?: return
+            originalCardColors.remove(card)?.let { card.setCardBackgroundColor(it) }
+        }
+
+        private fun guardAutoHide() {
+            // The native timer dispatches via PlayerView.Callbacks; intercept only its
+            // auto-hide event while the native episodes panel is visible.
+            val target = runCatching {
+                AbstractPlayerFragment::class.java.getDeclaredField("playerHostView")
+                    .apply { isAccessible = true }.get(fragment) as? PlayerView
+            }.getOrNull() ?: return
+            if (target === host && target.callbacks === guardedCallbacks) return
+            val original = target.callbacks ?: return
+            val guard = object : PlayerView.Callbacks by original {
+                override fun onAutoHideUI() {
+                    if (overlay?.isShown != true) original.onAutoHideUI()
+                }
+            }
+            if (host?.callbacks === guardedCallbacks) host?.callbacks = callbacks
+            host = target
+            callbacks = original
+            guardedCallbacks = guard
+            target.callbacks = guard
+        }
 
         fun attach() {
             val native = fragment.player
             if (native is OverlayPlayer) return
             wrapper = OverlayPlayer(native, this).also { fragment.player = it }
-            // Alpha belongs to the panel background, not to episode text/posters.
-            val translucent = oldBackground?.constantState?.newDrawable(root.resources)?.mutate()
-            if (translucent != null) {
-                translucent.alpha = (255 * 0.7f).toInt()
-                overlay?.background = translucent
+
+            // Only the panel surface is translucent; text and images stay opaque.
+            oldBackground?.constantState?.newDrawable(root.resources)?.mutate()?.let {
+                it.alpha = (255 * 0.7f).toInt()
+                overlay?.background = it
             }
+            list?.addOnChildAttachStateChangeListener(cardListener)
+            list?.let { recycler ->
+                for (i in 0 until recycler.childCount) fadeCard(recycler.getChildAt(i))
+            }
+            guardAutoHide()
+        }
+
+        private fun removeSelector() {
+            selector?.let { (it.parent as? ViewGroup)?.removeView(it) }
+            selector = null
+            title?.let {
+                if (it.parent !== overlay) overlay?.addView(it, titlePosition)
+                it.isVisible = true
+            }
+            oldNextFocusUpId?.let { list?.nextFocusUpId = it }
         }
 
         fun detach() {
-            if (fragment.player === wrapper) {
-                wrapper?.let { fragment.player = it.native }
+            if (fragment.player === wrapper) wrapper?.let { fragment.player = it.native }
+            if (host?.callbacks === guardedCallbacks) host?.callbacks = callbacks
+            host = null
+            callbacks = null
+            guardedCallbacks = null
+            list?.removeOnChildAttachStateChangeListener(cardListener)
+            originalCardColors.toMap().forEach { (card, color) ->
+                card.setCardBackgroundColor(color)
             }
-            selector?.let { (it.parent as? ViewGroup)?.removeView(it) }
-            selector = null
-            title?.isGone = false
+            originalCardColors.clear()
+            removeSelector()
             overlay?.background = oldBackground
-            oldNextFocusUpId?.let { list?.nextFocusUpId = it }
             filteredAdapter = null
             model = null
             wrapper = null
@@ -606,17 +695,120 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         }
 
         fun overlayOpening() {
-            // Native showEpisodesOverlay() replaces its adapter after issuing Pause.
-            // Run once after that method, never poll or observe layout frames.
+            // Native showEpisodesOverlay() replaces the adapter after dispatching Pause.
             main.post {
-                if (fragment.view === root && fragment.isAdded && overlay?.isVisible == true) {
+                if (fragment.isAdded && fragment.view === root && overlay?.isVisible == true) {
+                    guardAutoHide()
                     configureSeasons()
                 }
             }
         }
 
-        private fun seasonOf(episode: ResultEpisode) =
+        private fun seasonOf(episode: ResultEpisode): Int =
             episode.seasonIndex ?: episode.season ?: 0
+
+        private fun seasonLabel(episode: ResultEpisode, context: Context): String =
+            ResultViewModel2.seasonToTxt(episode.seasonData, seasonOf(episode))
+                ?.asStringNull(context) ?: context.getString(R.string.season)
+
+        private fun makeSeasonSpinner(context: Context): AppCompatSpinner {
+            val choices = fullEpisodes.distinctBy(::seasonOf)
+            val labels = choices.map { seasonLabel(it, context) }
+            val normalTextColor = title?.currentTextColor ?: context.themeColor(R.attr.textColor)
+            val nativeBackground = context.themeColor(R.attr.primaryGrayBackground)
+            val spinner = AppCompatSpinner(
+                context, null, androidx.appcompat.R.attr.spinnerStyle, Spinner.MODE_DROPDOWN
+            )
+            spinner.id = View.generateViewId()
+            spinner.isFocusable = true
+            spinner.minimumHeight = context.dp(44)
+            spinner.background = ColorDrawable(Color.TRANSPARENT)
+            val rippleValue = TypedValue()
+            if (context.theme.resolveAttribute(
+                    android.R.attr.selectableItemBackground, rippleValue, true
+                ) && rippleValue.resourceId != 0) {
+                if (android.os.Build.VERSION.SDK_INT >= 23) {
+                    spinner.foreground = AppCompatResources.getDrawable(
+                        context, rippleValue.resourceId
+                    )
+                }
+            }
+            spinner.setPopupBackgroundDrawable(ColorDrawable(nativeBackground))
+            spinner.dropDownWidth = list?.layoutParams?.width?.takeIf { it > 0 }
+                ?: context.dp(350)
+            spinner.adapter = object : ArrayAdapter<String>(
+                context, android.R.layout.simple_spinner_item, labels
+            ) {
+                override fun getView(
+                    position: Int, convertView: View?, parent: ViewGroup
+                ): View = TextView(context).apply {
+                    text = labels[position]
+                    setTextColor(normalTextColor)
+                    setTextSize(TypedValue.COMPLEX_UNIT_PX, title?.textSize ?: context.dp(15).toFloat())
+                    typeface = title?.typeface ?: Typeface.DEFAULT_BOLD
+                    gravity = Gravity.CENTER_VERTICAL
+                    isSingleLine = true
+                    ellipsize = TextUtils.TruncateAt.END
+                    setPadding(context.dp(10), 0, context.dp(10), 0)
+                    minimumHeight = context.dp(44)
+                    val arrow = AppCompatResources.getDrawable(
+                        context, R.drawable.ic_baseline_keyboard_arrow_down_24
+                    )?.mutate()
+                    arrow?.setTint(normalTextColor)
+                    setCompoundDrawablesRelativeWithIntrinsicBounds(null, null, arrow, null)
+                    compoundDrawablePadding = context.dp(6)
+                }
+
+                override fun getDropDownView(
+                    position: Int, convertView: View?, parent: ViewGroup
+                ): View = LinearLayout(context).apply {
+                    gravity = Gravity.CENTER_VERTICAL
+                    orientation = LinearLayout.HORIZONTAL
+                    minimumHeight = context.dp(48)
+                    setPadding(context.dp(16), 0, context.dp(12), 0)
+                    setBackgroundColor(nativeBackground)
+                    val ripple = TypedValue()
+                    if (context.theme.resolveAttribute(
+                            android.R.attr.selectableItemBackground, ripple, true
+                        ) && ripple.resourceId != 0) {
+                        if (android.os.Build.VERSION.SDK_INT >= 23) {
+                            foreground = AppCompatResources.getDrawable(context, ripple.resourceId)
+                        }
+                    }
+                    addView(TextView(context).apply {
+                        text = labels[position]
+                        setTextColor(normalTextColor)
+                        setTextSize(TypedValue.COMPLEX_UNIT_PX, title?.textSize ?: context.dp(15).toFloat())
+                        typeface = title?.typeface ?: Typeface.DEFAULT_BOLD
+                        gravity = Gravity.CENTER_VERTICAL
+                        isSingleLine = true
+                        ellipsize = TextUtils.TruncateAt.END
+                    }, LinearLayout.LayoutParams(0, context.dp(48), 1f))
+                    addView(ImageView(context).apply {
+                        if (position == spinner.selectedItemPosition) {
+                            setImageResource(R.drawable.ic_baseline_check_24)
+                            imageTintList = ColorStateList.valueOf(normalTextColor)
+                        }
+                    }, LinearLayout.LayoutParams(context.dp(28), context.dp(24)))
+                }
+            }
+            val current = choices.indexOfFirst { seasonOf(it) == selectedSeason }
+                .takeIf { it >= 0 } ?: 0
+            spinner.setSelection(current, false)
+            spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                override fun onItemSelected(
+                    parent: AdapterView<*>?, view: View?, position: Int, id: Long
+                ) {
+                    val newSeason = choices.getOrNull(position)?.let(::seasonOf) ?: return
+                    if (selectedSeason != newSeason) {
+                        selectedSeason = newSeason
+                        renderSeason()
+                    }
+                }
+            }
+            return spinner
+        }
 
         private fun configureSeasons() {
             val vm = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
@@ -628,53 +820,41 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
                         episode.copy(position = saved.position, duration = saved.duration)
                     } ?: episode
                 } ?: emptyList()
-
             val distinct = fullEpisodes.distinctBy(::seasonOf)
             if (distinct.size <= 1) {
-                selector?.isGone = true
-                title?.isVisible = true
+                removeSelector()
                 filteredAdapter = null
                 return
             }
 
+            // Replace the native season label in the SAME position, rather
+            // than adding another row above it.
             if (selector == null) {
                 val context = overlay?.context ?: return
-                val density = context.resources.displayMetrics.density
-                selector = MaterialButton(ContextThemeWrapper(context, R.style.MultiSelectButton)).apply {
-                    id = View.generateViewId()
-                    isAllCaps = false
-                    setCompoundDrawablesRelativeWithIntrinsicBounds(
-                        0, 0, R.drawable.ic_baseline_keyboard_arrow_down_24, 0
-                    )
-                    compoundDrawablePadding = (5 * density).toInt()
-                    setPadding((10 * density).toInt(), 0, (5 * density).toInt(), 0)
-                    layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT, (40 * density).toInt()
-                    ).apply { setMargins(0, (5 * density).toInt(), 0, (5 * density).toInt()) }
-                    nextFocusDownId = list?.id ?: View.NO_ID
-                    setOnClickListener { openSeasonDialog() }
-                }.also { overlay?.addView(it, 0) }
+                selectedSeason = seasonOf(fullEpisodes.getOrNull(state.index) ?: distinct.first())
+                selector = makeSeasonSpinner(context)
+                title?.let { overlay.removeView(it) }
+                overlay.addView(selector, titlePosition,
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, context.dp(44)))
+            } else {
+                selectedSeason = seasonOf(fullEpisodes.getOrNull(state.index) ?: distinct.first())
+                val position = distinct.indexOfFirst { seasonOf(it) == selectedSeason }
+                if (position >= 0) selector?.setSelection(position, false)
             }
-            title?.isGone = true
-            selector?.isVisible = true
             list?.nextFocusUpId = selector?.id ?: View.NO_ID
 
-            // Reopen on the season of the episode that is actually playing.
-            val current = fullEpisodes.getOrNull(state.index)
-            selectedSeason = seasonOf(current ?: distinct.first())
-            if (filteredAdapter == null) filteredAdapter = EpisodeAdapter(false, { event ->
-                if (event.action == ACTION_CLICK_DEFAULT) {
-                    // Adapter positions become season-local after filtering. Use
-                    // the native generator's global list index, not that position.
+            if (filteredAdapter == null) filteredAdapter = EpisodeAdapter(false, { click ->
+                if (click.action == ACTION_CLICK_DEFAULT) {
+                    // Native adapter positions become season-local after filtering.
+                    // Resolve the original generator list index before playback.
                     val index = fullEpisodes.indexOfFirst {
-                        it.id == event.data.id && it.index == event.data.index
+                        it.id == click.data.id && it.index == click.data.index
                     }
                     if (index >= 0) {
-                        // Match the native overlay's explicit episode-choice path.
                         runCatching {
-                            GeneratorPlayer::class.java.getDeclaredField("isNextEpisode").apply {
-                                isAccessible = true
-                            }.setBoolean(fragment, false)
+                            GeneratorPlayer::class.java.getDeclaredField("isNextEpisode")
+                                .apply { isAccessible = true }
+                                .setBoolean(fragment, false)
                         }
                         fragment.releasePlayer()
                         overlay?.isGone = true
@@ -686,37 +866,11 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             renderSeason()
         }
 
-        private fun openSeasonDialog() {
-            val context = fragment.activity ?: return
-            val distinct = fullEpisodes.distinctBy(::seasonOf)
-            val numbers = distinct.map(::seasonOf)
-            val names = distinct.map { episode ->
-                ResultViewModel2.seasonToTxt(episode.seasonData, seasonOf(episode))
-                    ?.asStringNull(context) ?: context.getString(R.string.season)
-            }
-            with(com.lagradost.cloudstream3.utils.SingleSelectionHelper) {
-                context.showDialog(
-                    names,
-                    numbers.indexOf(selectedSeason),
-                    context.getString(R.string.season),
-                    false,
-                    {}
-                ) { index ->
-                    selectedSeason = numbers.getOrNull(index) ?: return@showDialog
-                    renderSeason()
-                }
-            }
-        }
-
         private fun renderSeason() {
             val season = selectedSeason ?: return
-            val context = overlay?.context ?: return
-            val episode = fullEpisodes.firstOrNull { seasonOf(it) == season } ?: return
-            selector?.text = ResultViewModel2.seasonToTxt(episode.seasonData, season)
-                ?.asStringNull(context) ?: context.getString(R.string.season)
             val visible = fullEpisodes.filter { seasonOf(it) == season }
-            val currentId = model?.state?.generatorState?.meta as? ResultEpisode
-            val currentPosition = visible.indexOfFirst { it.id == currentId?.id }
+            val currentId = (model?.state?.generatorState?.meta as? ResultEpisode)?.id
+            val currentPosition = visible.indexOfFirst { it.id == currentId }
                 .takeIf { it >= 0 } ?: 0
             filteredAdapter?.submitList(visible) {
                 if (selectedSeason != season || fragment.view !== root) return@submitList
@@ -741,20 +895,17 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
 
         override fun handleEvent(event: CSPlayerEvent, source: PlayerEventSource) {
             if (event == CSPlayerEvent.Pause || event == CSPlayerEvent.Play) {
-                // The only native call site to suppress is the open/close branch
-                // of FullScreenPlayer.toggleEpisodesOverlay().
-                val fromEpisodes = Thread.currentThread().stackTrace.any {
+                val episodeToggle = Thread.currentThread().stackTrace.any {
                     it.className == "com.lagradost.cloudstream3.ui.player.FullScreenPlayer" &&
                         it.methodName == "toggleEpisodesOverlay"
                 }
-                if (fromEpisodes) {
+                if (episodeToggle) {
                     if (event == CSPlayerEvent.Pause) {
                         screen.overlayOpening()
                         suppressedPause = native.getIsPlaying()
-                        // Preserve playWhenReady during initial loading/rebuffering too.
+                        // Do not interrupt buffering or playWhenReady, either.
                         return
                     } else if (suppressedPause) {
-                        // Native tries to restore an already uninterrupted stream.
                         suppressedPause = false
                         return
                     }
@@ -794,8 +945,8 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         unbind()
         activity = next
         next.supportFragmentManager.registerFragmentLifecycleCallbacks(callbacks, true)
-        fun scan(fm: FragmentManager) {
-            fm.fragments.forEach { fragment ->
+        fun scan(manager: FragmentManager) {
+            manager.fragments.forEach { fragment ->
                 if (fragment is GeneratorPlayer) fragment.view?.let { watch(fragment, it) }
                 if (fragment.isAdded) scan(fragment.childFragmentManager)
             }
