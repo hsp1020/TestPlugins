@@ -23,7 +23,8 @@ import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
-import com.lagradost.cloudstream3.ui.result.START_ACTION_LOAD_EP
+import com.lagradost.cloudstream3.ui.result.EpisodeClickEvent
+import com.lagradost.cloudstream3.mvvm.Resource
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
@@ -66,22 +67,15 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         playedEpisodes[episode.parentId] = PlayedEpisode(videoId, episode.episode)
     }
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
-        override fun onFragmentPreCreated(fm: FragmentManager, f: Fragment, state: Bundle?) {
+        override fun onFragmentCreated(fm: FragmentManager, f: Fragment, state: Bundle?) {
             if (f.javaClass.name !in DETAIL_SCREENS) return
             val args = f.arguments ?: return
-            if (args.getString("apiName") != "YouTube") return
+            if (args.getString("apiName") != "YouTube" || args.getInt("startAction", 0) != 0) return
             val pageUrl = args.getString("url") ?: return
-            // Do not override an explicit resume/episode action.
-            if (args.getInt("startAction", 0) != 0) return
-            val selected = when {
-                pageUrl.contains("/shorts/") -> YoutubeProvider.homeShortIndex(pageUrl)
-                pageUrl.contains("/watch?v=") && !pageUrl.contains("list=") -> 0
-                else -> null
-            } ?: return
-            // Mirrors the core's TvSeries ResultEpisode ID: mainId + episode + 1.
-            val mainId = pageUrl.replace("https://www.youtube.com", "").replace("/", "").hashCode()
-            args.putInt("startAction", START_ACTION_LOAD_EP)
-            args.putInt("startValue", mainId + selected + 2)
+            val isShortFromHome = pageUrl.contains("/shorts/") && pageUrl.contains("ctx=home")
+            val isVideo = pageUrl.contains("/watch?v=") && !pageUrl.contains("list=")
+            if (!isShortFromHome && !isVideo) return
+            YoutubeUtils.extractYoutubeId(pageUrl)?.let { args.putString(AUTO_PLAY_ID_KEY, it) }
         }
 
         override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
@@ -249,7 +243,29 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
         }
 
+        private val requestedAutoPlayId = fragment?.arguments?.getString(AUTO_PLAY_ID_KEY)
+        private var autoPlayStarted = false
+
+        private fun observeAutoPlay() {
+            val targetId = requestedAutoPlayId ?: return
+            val detail = fragment ?: return
+            val model = ViewModelProvider(detail)[ResultViewModel2::class.java]
+            model.episodes.observe(detail.viewLifecycleOwner) { result ->
+                if (autoPlayStarted || result !is Resource.Success) return@observe
+                val target = result.value.firstOrNull {
+                    it.apiName == "YouTube" && YoutubeUtils.extractYoutubeId(it.data) == targetId
+                } ?: return@observe
+                val activity = detail.activity ?: return@observe
+                // Use the bound ResultEpisode rather than predicting CloudStream's generated IDs.
+                autoPlayStarted = true
+                model.handleAction(
+                    EpisodeClickEvent(EpisodeAdapter.getPlayerAction(activity), target)
+                )
+            }
+        }
+
         init {
+            observeAutoPlay()
             if (popup) root.findViewById<RecyclerView>(R.id.home_expanded_recycler)
                 ?.let { watch(it, Role.DIALOG_GRID) }
             root.findViewById<RecyclerView>(R.id.home_master_recycler)?.let { watch(it, Role.HOME_PARENT) }
@@ -617,6 +633,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
     private companion object {
         const val PLAYER_SCREEN = "com.lagradost.cloudstream3.ui.player.GeneratorPlayer"
+        const val AUTO_PLAY_ID_KEY = "youtube_auto_play_video_id"
         val DETAIL_SCREENS = setOf(
             "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
             "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer",
