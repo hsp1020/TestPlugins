@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Bundle
+import androidx.navigation.NavOptions
 import android.graphics.Rect
 import android.widget.Toast
 import android.view.View
@@ -23,6 +24,7 @@ import com.lagradost.cloudstream3.ui.result.ActorAdaptor
 import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
+import com.lagradost.cloudstream3.ui.result.ResultFragment
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.RepoLinkGenerator
@@ -43,7 +45,7 @@ import com.lagradost.cloudstream3.ui.AutofitRecyclerView
 import com.lagradost.cloudstream3.ui.BaseAdapter
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
-import com.lagradost.cloudstream3.utils.AppContextUtils.loadSearchResult
+import com.lagradost.cloudstream3.ui.settings.Globals
 import com.lagradost.cloudstream3.utils.UIHelper.navigate
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.TvSeriesLoadResponse
@@ -117,6 +119,22 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 directPlayback = DirectPlayback(
                     card, parentId, videoId, episodes[selectedIndex].episode
                 )
+                directReturn = null
+                playedEpisodes.remove(parentId)
+                // Prepare the return destination below the player in the same UI dispatch.
+                // Zero animations avoid ever rendering an intermediate detail transition.
+                val resultsId = if (Globals.isLayout(Globals.TV or Globals.EMULATOR)) {
+                    R.id.global_to_navigation_results_tv
+                } else {
+                    R.id.global_to_navigation_results_phone
+                }
+                val noTransition = NavOptions.Builder()
+                    .setEnterAnim(0)
+                    .setExitAnim(0)
+                    .setPopEnterAnim(0)
+                    .setPopExitAnim(0)
+                    .build()
+                activity.navigate(resultsId, ResultFragment.newInstance(card), noTransition)
                 activity.navigate(
                     R.id.global_to_navigation_player,
                     GeneratorPlayer.newInstance(
@@ -148,7 +166,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
             recordPlayerEpisode(f)
-            screens[f]?.pagePaused()
         }
 
         override fun onFragmentStopped(fm: FragmentManager, f: Fragment) {
@@ -164,11 +181,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 playedEpisodes.remove(playback.parentId)
                     ?: PlayedEpisode(playback.startingVideoId, playback.startingNumber)
                 )
-            val activity = host ?: return
+            // The detail page is already the player's parent destination.
+            // Never enqueue a second navigation after the Home page resumes.
             main.post {
-                if (host === activity && !activity.isFinishing) {
-                    activity.loadSearchResult(playback.card)
-                }
+                screens.values.forEach { it.applyReturnIfReady() }
             }
         }
 
@@ -280,57 +296,60 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             fragment?.arguments?.getString("apiName") == "YouTube" &&
                 (it.contains("/shorts/") || it.contains("/watch?v="))
         }?.replace("https://www.youtube.com", "")?.replace("/", "")?.hashCode()
-        private val returnedEpisode = pageId?.let { page ->
-            directReturn?.takeIf { it.first == page }?.second?.also { directReturn = null }
-        }
-        private var leftDetail = false
-        private var pendingFocus: String? = returnedEpisode?.videoId
-        private var returnNumber: Int? = returnedEpisode?.number
+        private var pendingFocus: String? = null
+        private var returnNumber: Int? = null
         private var returnRangeRequested = false
         private var focusPosted = false
 
+        private fun applyReturnRange(list: RecyclerView, ranges: List<Pair<com.lagradost.cloudstream3.utils.UiText?, com.lagradost.cloudstream3.ui.result.EpisodeRange>>) {
+            val number = returnNumber ?: return
+            val visible = (list.adapter as? EpisodeAdapter)?.immutableCurrentList
+                ?.any { YoutubeUtils.extractYoutubeId(it.data) == pendingFocus } == true
+            if (!visible && !returnRangeRequested) {
+                val detail = fragment ?: return
+                val model = ViewModelProvider(detail)[ResultViewModel2::class.java]
+                val index = ranges.indexOfFirst {
+                    number in it.second.startEpisode..it.second.endEpisode
+                }
+                if (index >= 0 && model.selectedRangeIndex.value != index) {
+                    returnRangeRequested = true
+                    model.changeRange(ranges[index].second)
+                }
+            }
+            focusSelectedEpisode(list)
+        }
+
         private fun observeReturnRange() {
-            if (pendingFocus == null) return
             val detail = fragment ?: return
+            if (pageId == null) return
             val model = ViewModelProvider(detail)[ResultViewModel2::class.java]
             model.rangeSelections.observe(detail.viewLifecycleOwner) { ranges ->
-                val number = returnNumber ?: return@observe
-                val list = root.findViewById<RecyclerView>(R.id.result_episodes) ?: return@observe
-                val visible = (list.adapter as? EpisodeAdapter)?.immutableCurrentList
-                    ?.any { YoutubeUtils.extractYoutubeId(it.data) == pendingFocus } == true
-                if (!visible && !returnRangeRequested) {
-                    val index = ranges.indexOfFirst {
-                        number in it.second.startEpisode..it.second.endEpisode
-                    }
-                    if (index >= 0 && model.selectedRangeIndex.value != index) {
-                        returnRangeRequested = true
-                        model.changeRange(ranges[index].second)
-                    }
+                root.findViewById<RecyclerView>(R.id.result_episodes)?.let {
+                    applyReturnRange(it, ranges)
                 }
-                focusSelectedEpisode(list)
             }
         }
 
-        fun pagePaused() {
-            if (pageId != null) leftDetail = true
+        fun applyReturnIfReady() {
+            val id = pageId ?: return
+            val saved = directReturn?.takeIf { it.first == id }?.second
+            val current = directPlayback?.takeIf { it.parentId == id }
+                ?.let { playedEpisodes[id] }
+            val played = saved ?: current ?: return
+            if (saved != null) directReturn = null
+            if (current != null) playedEpisodes.remove(id)
+            if (directPlayback?.parentId == id && current != null) directPlayback = null
+            pendingFocus = played.videoId
+            returnNumber = played.number
+            returnRangeRequested = false
+            val detail = fragment ?: return
+            val list = root.findViewById<RecyclerView>(R.id.result_episodes) ?: return
+            val model = ViewModelProvider(detail)[ResultViewModel2::class.java]
+            applyReturnRange(list, model.rangeSelections.value.orEmpty())
         }
 
         fun pageResumed() {
-            if (!leftDetail) return
-            leftDetail = false
-            val selected = pageId?.let(playedEpisodes::remove) ?: return
-            pendingFocus = selected.videoId
-            val host = fragment ?: return
-            val list = root.findViewById<RecyclerView>(R.id.result_episodes) ?: return
-            val position = (list.adapter as? EpisodeAdapter)?.immutableCurrentList
-                ?.indexOfFirst { YoutubeUtils.extractYoutubeId(it.data) == selected.videoId } ?: -1
-            if (position < 0) {
-                val model = ViewModelProvider(host)[ResultViewModel2::class.java]
-                model.rangeSelections.value?.firstOrNull {
-                    selected.number in it.second.startEpisode..it.second.endEpisode
-                }?.second?.let(model::changeRange)
-            }
-            focusSelectedEpisode(list)
+            applyReturnIfReady()
         }
 
         private fun focusSelectedEpisode(list: RecyclerView) {
