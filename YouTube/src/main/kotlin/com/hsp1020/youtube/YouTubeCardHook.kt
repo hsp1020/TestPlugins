@@ -9,7 +9,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Bundle
 import androidx.navigation.NavOptions
-import android.graphics.Rect
 import android.widget.Toast
 import android.view.View
 import android.view.ViewGroup
@@ -19,6 +18,8 @@ import android.widget.ImageView
 import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
 import com.lagradost.cloudstream3.utils.AppContextUtils.loadResult
 import com.lagradost.cloudstream3.utils.DataStoreHelper
+import com.lagradost.cloudstream3.utils.DataStoreHelper.setResultEpisode
+import com.lagradost.cloudstream3.utils.DataStoreHelper.setResultSeason
 import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.ui.result.ActorAdaptor
 import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
@@ -35,7 +36,6 @@ import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
-import androidx.core.widget.NestedScrollView
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
@@ -64,12 +64,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     }
     private val screens = mutableMapOf<Fragment, Screen>()
     private val dialogs = mutableMapOf<View, Screen>()
-    private data class PlayedEpisode(val videoId: String, val number: Int)
+    private data class PlayedEpisode(val number: Int, val season: Int?)
     private data class DirectPlayback(
         val card: SearchResponse,
         val parentId: Int,
-        val startingVideoId: String,
         val startingNumber: Int,
+        val startingSeason: Int?,
     )
     private val playedEpisodes = mutableMapOf<Int, PlayedEpisode>()
     private var directPlayback: DirectPlayback? = null
@@ -117,7 +117,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 if (selectedIndex < 0) return@launch
                 if (host !== activity || activity.isFinishing) return@launch
                 directPlayback = DirectPlayback(
-                    card, parentId, videoId, episodes[selectedIndex].episode
+                    card, parentId, episodes[selectedIndex].episode,
+                    episodes[selectedIndex].season
                 )
                 directReturn = null
                 playedEpisodes.remove(parentId)
@@ -159,21 +160,30 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 .state.generatorState?.meta as? ResultEpisode
         }.getOrNull() ?: return
         if (episode.apiName != "YouTube") return
-        val videoId = YoutubeUtils.extractYoutubeId(episode.data) ?: return
         if (playedEpisodes.size >= 32) playedEpisodes.clear()
-        playedEpisodes[episode.parentId] = PlayedEpisode(videoId, episode.episode)
+        playedEpisodes[episode.parentId] = PlayedEpisode(episode.episode, episode.season)
     }
+    /**
+     * Native CloudStream remembers the selected season and episode *range*, not
+     * the focused episode card. Persist the range's starting episode and let the
+     * existing detail ViewModel own the selection and RecyclerView binding.
+     */
+    private fun selectLastPlaybackRange(parentId: Int, played: PlayedEpisode) {
+        val rangeSize = if (Globals.isLayout(Globals.TV or Globals.EMULATOR)) 50 else 20
+        val startEpisode = ((played.number.coerceAtLeast(1) - 1) / rangeSize) * rangeSize + 1
+        setResultEpisode(parentId, startEpisode)
+        played.season?.let { setResultSeason(parentId, it) }
+        screens.values.forEach { it.selectNativeRange(parentId, played) }
+    }
+
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
             recordPlayerEpisode(f)
-            if (f.javaClass.name == PLAYER_SCREEN) {
-                val playback = directPlayback
-                val last = playback?.let { playedEpisodes[it.parentId] }
-                if (playback != null && last != null) {
-                    // Prepare focus behind the player, before its back-stack pop is drawn.
-                    screens.values.forEach { it.primeReturnFocus(playback.parentId, last) }
-                }
-            }
+            if (f.javaClass.name != PLAYER_SCREEN) return
+            val playback = directPlayback ?: return
+            val played = playedEpisodes[playback.parentId]
+                ?: PlayedEpisode(playback.startingNumber, playback.startingSeason)
+            selectLastPlaybackRange(playback.parentId, played)
         }
 
         override fun onFragmentStopped(fm: FragmentManager, f: Fragment) {
@@ -185,19 +195,14 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             recordPlayerEpisode(f)
             val playback = directPlayback ?: return
             directPlayback = null
-            directReturn = playback.parentId to (
-                playedEpisodes.remove(playback.parentId)
-                    ?: PlayedEpisode(playback.startingVideoId, playback.startingNumber)
-                )
-            // The detail page is already the player's parent destination.
-            // Never enqueue a second navigation after the Home page resumes.
-            main.post {
-                screens.values.forEach { it.applyReturnIfReady() }
-            }
+            val played = playedEpisodes.remove(playback.parentId)
+                ?: PlayedEpisode(playback.startingNumber, playback.startingSeason)
+            selectLastPlaybackRange(playback.parentId, played)
+            directReturn = playback.parentId to played
         }
 
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
-            screens[f]?.pageResumed()
+            screens[f]?.applyNativeRangeIfPending()
         }
 
         override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, view: View, state: Bundle?) {
@@ -304,101 +309,68 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             fragment?.arguments?.getString("apiName") == "YouTube" &&
                 (it.contains("/shorts/") || it.contains("/watch?v="))
         }?.replace("https://www.youtube.com", "")?.replace("/", "")?.hashCode()
-        private var pendingFocus: String? = null
-        private var returnNumber: Int? = null
-        private var returnRangeRequested = false
-        private var focusPosted = false
 
-        private fun applyReturnRange(list: RecyclerView, ranges: List<Pair<com.lagradost.cloudstream3.utils.UiText?, com.lagradost.cloudstream3.ui.result.EpisodeRange>>) {
-            val number = returnNumber ?: return
-            val visible = (list.adapter as? EpisodeAdapter)?.immutableCurrentList
-                ?.any { YoutubeUtils.extractYoutubeId(it.data) == pendingFocus } == true
-            if (!visible && !returnRangeRequested) {
-                val detail = fragment ?: return
-                val model = ViewModelProvider(detail)[ResultViewModel2::class.java]
-                val index = ranges.indexOfFirst {
-                    number in it.second.startEpisode..it.second.endEpisode
-                }
-                if (index >= 0 && model.selectedRangeIndex.value != index) {
-                    returnRangeRequested = true
-                    model.changeRange(ranges[index].second)
-                }
-            }
-            focusSelectedEpisode(list)
+        private var pendingSelection: PlayedEpisode? = pageId?.let { id ->
+            directReturn?.takeIf { it.first == id }?.second?.also { directReturn = null }
         }
+        private var switchingSeason = false
 
-        private fun observeReturnRange() {
-            val detail = fragment ?: return
+        private fun observeNativeRanges() {
             if (pageId == null) return
-            val model = ViewModelProvider(detail)[ResultViewModel2::class.java]
-            model.rangeSelections.observe(detail.viewLifecycleOwner) { ranges ->
-                root.findViewById<RecyclerView>(R.id.result_episodes)?.let {
-                    applyReturnRange(it, ranges)
-                }
+            val hostFragment = fragment ?: return
+            val model = ViewModelProvider(hostFragment)[ResultViewModel2::class.java]
+            model.seasonSelections.observe(hostFragment.viewLifecycleOwner) {
+                applyNativeRangeIfPending()
+            }
+            model.selectedSeasonIndex.observe(hostFragment.viewLifecycleOwner) {
+                applyNativeRangeIfPending()
+            }
+            model.rangeSelections.observe(hostFragment.viewLifecycleOwner) {
+                applyNativeRangeIfPending()
             }
         }
 
-        fun primeReturnFocus(parentId: Int, episode: PlayedEpisode) {
+        fun selectNativeRange(parentId: Int, played: PlayedEpisode) {
             if (pageId != parentId) return
-            pendingFocus = episode.videoId
-            returnNumber = episode.number
-            returnRangeRequested = false
-            val host = fragment ?: return
-            val list = root.findViewById<RecyclerView>(R.id.result_episodes) ?: return
-            val model = ViewModelProvider(host)[ResultViewModel2::class.java]
-            applyReturnRange(list, model.rangeSelections.value.orEmpty())
+            pendingSelection = played
+            switchingSeason = false
+            applyNativeRangeIfPending()
         }
 
-        fun applyReturnIfReady() {
-            val id = pageId ?: return
-            val saved = directReturn?.takeIf { it.first == id }?.second
-            val current = directPlayback?.takeIf { it.parentId == id }
-                ?.let { playedEpisodes[id] }
-            val played = saved ?: current ?: return
-            if (saved != null) directReturn = null
-            if (current != null) playedEpisodes.remove(id)
-            if (directPlayback?.parentId == id && current != null) directPlayback = null
-            pendingFocus = played.videoId
-            returnNumber = played.number
-            returnRangeRequested = false
-            val detail = fragment ?: return
-            val list = root.findViewById<RecyclerView>(R.id.result_episodes) ?: return
-            val model = ViewModelProvider(detail)[ResultViewModel2::class.java]
-            applyReturnRange(list, model.rangeSelections.value.orEmpty())
-        }
-
-        fun pageResumed() {
-            applyReturnIfReady()
-        }
-
-        private fun focusSelectedEpisode(list: RecyclerView) {
-            val target = pendingFocus ?: return
-            val adapter = list.adapter as? EpisodeAdapter ?: return
-            val position = adapter.immutableCurrentList.indexOfFirst {
-                YoutubeUtils.extractYoutubeId(it.data) == target
-            }
-            if (position < 0 || focusPosted) return
-            focusPosted = true
-            list.scrollToPosition(position)
-            list.post {
-                focusPosted = false
-                if (pendingFocus != target) return@post
-                val card = list.findViewHolderForAdapterPosition(position)?.itemView ?: return@post
-                var parent = card.parent
-                while (parent is View && parent !is NestedScrollView) parent = parent.parent
-                if (parent is NestedScrollView) {
-                    val rect = Rect(0, 0, card.width, card.height)
-                    parent.offsetDescendantRectToMyCoords(card, rect)
-                    parent.scrollTo(0, (rect.top - dp(80)).coerceAtLeast(0))
+        fun applyNativeRangeIfPending() {
+            if (pageId == null) return
+            val played = pendingSelection ?: return
+            val hostFragment = fragment ?: return
+            val model = ViewModelProvider(hostFragment)[ResultViewModel2::class.java]
+            val seasons = model.seasonSelections.value.orEmpty()
+            val targetSeason = played.season
+            if (targetSeason != null) {
+                if (seasons.isEmpty()) return
+                val index = seasons.indexOfFirst { it.second == targetSeason }
+                if (index < 0) return
+                if (model.selectedSeasonIndex.value != index) {
+                    if (!switchingSeason) {
+                        switchingSeason = true
+                        model.changeSeason(targetSeason)
+                    }
+                    return
                 }
-                card.requestFocus()
-                pendingFocus = null
-                returnNumber = null
+            }
+            switchingSeason = false
+            val ranges = model.rangeSelections.value.orEmpty()
+            if (ranges.isEmpty()) return
+            val targetIndex = ranges.indexOfFirst {
+                played.number in it.second.startEpisode..it.second.endEpisode
+            }
+            if (targetIndex < 0) return
+            pendingSelection = null
+            if (model.selectedRangeIndex.value != targetIndex) {
+                model.changeRange(ranges[targetIndex].second)
             }
         }
 
         init {
-            observeReturnRange()
+            observeNativeRanges()
             if (popup) root.findViewById<RecyclerView>(R.id.home_expanded_recycler)
                 ?.let { watch(it, Role.DIALOG_GRID) }
             root.findViewById<RecyclerView>(R.id.home_master_recycler)?.let { watch(it, Role.HOME_PARENT) }
@@ -432,8 +404,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             private val modified = IdentityHashMap<View, CardState>()
             private val episodeSizes = IdentityHashMap<View, Pair<View, Pair<Int, Int>>>()
             private val directClicks = IdentityHashMap<View, View.OnClickListener>()
-            private val initialMinHeight = list.minimumHeight
             private var observed: RecyclerView.Adapter<*>? = null
+            private var visibleShorts: Boolean? = null
+            private var adaptiveRemeasurePosted = false
             private var posted = false
 
             private val changes = object : RecyclerView.AdapterDataObserver() {
@@ -447,6 +420,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 override fun onChildViewAttachedToWindow(view: View) {
                     syncAdapter()
                     apply(view)
+                    if (role == Role.HOME_CARD) remeasureOnVisibleShortsChange()
                     if (!isParent) view.post {
                         if (view.parent === list && watchers[list] === this@Watcher) apply(view)
                     }
@@ -465,6 +439,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                         directClicks.remove(view)
                         restore(view)
                     }
+                    if (role == Role.HOME_CARD) remeasureOnVisibleShortsChange()
                 }
             }
             private val resized = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
@@ -488,7 +463,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 modified.clear()
                 episodeSizes.keys.toList().forEach(::restoreEpisode)
                 directClicks.clear()
-                if (list.minimumHeight != initialMinHeight) list.minimumHeight = initialMinHeight
+                visibleShorts = null
+                adaptiveRemeasurePosted = false
                 posted = false
             }
 
@@ -512,34 +488,39 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
 
             private fun scan() {
-                stabilizeMixedHomeRow()
                 for (i in 0 until list.childCount) apply(list.getChildAt(i))
-                if (role == Role.DETAIL_EPISODE) focusSelectedEpisode(list)
+                if (role == Role.HOME_CARD) remeasureOnVisibleShortsChange()
             }
 
             /**
-             * A horizontal RecyclerView with wrap_content height may shrink when
-             * all visible items are landscape; the taller Shorts' caption then gets
-             * clipped when returning to them. Reserve the full portrait + 4-line
-             * caption height only for mixed YouTube home catalog rows.
+             * CloudStream's horizontal catalog is wrap_content. Its measured height
+             * can shrink while only landscape cards are visible. When Shorts return,
+             * request one native measure pass so the newly bound four-line caption
+             * contributes to the row height. Never set fixed/minimum row heights.
              */
-            private fun stabilizeMixedHomeRow() {
+            private fun remeasureOnVisibleShortsChange() {
                 if (role != Role.HOME_CARD) return
-                val items = (list.adapter as? HomeChildItemAdapter)?.immutableCurrentList
-                val mixed = items?.any {
-                    it.apiName == "YouTube" && it.url.contains("/shorts/")
-                } == true && items?.any {
-                    it.apiName == "YouTube" && it.url.contains("/watch?v=")
-                } == true
-                val desired = if (mixed) {
-                    val width = HomeChildItemAdapter.minPosterSize.takeIf { it > 0 } ?: dp(114)
-                    val title = list.getChildAt(0)
-                        ?.findViewById<TextView>(R.id.imageText)
-                    val lineHeight = maxOf(title?.lineHeight ?: 0, dp(19))
-                    maxOf(initialMinHeight, (width * 16f / 9f).roundToInt() +
-                        4 * lineHeight + dp(18))
-                } else initialMinHeight
-                if (list.minimumHeight != desired) list.minimumHeight = desired
+                val adapter = list.adapter as? HomeChildItemAdapter ?: return
+                var hasShorts = false
+                for (i in 0 until list.childCount) {
+                    val position = list.getChildAdapterPosition(list.getChildAt(i))
+                    if (position == RecyclerView.NO_POSITION) continue
+                    val item = adapter.getItemOrNull(position) ?: continue
+                    if (item.apiName == "YouTube" && item.url.contains("/shorts/")) {
+                        hasShorts = true
+                        break
+                    }
+                }
+                val previous = visibleShorts
+                visibleShorts = hasShorts
+                if (previous == null || previous == hasShorts || adaptiveRemeasurePosted) return
+                adaptiveRemeasurePosted = true
+                list.post {
+                    adaptiveRemeasurePosted = false
+                    if (watchers[list] === this@Watcher && list.isAttachedToWindow) {
+                        list.requestLayout()
+                    }
+                }
             }
 
             private fun apply(view: View) {
@@ -656,7 +637,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     params.height = height
                     frame.layoutParams = params
                 }
-                if (pendingFocus != null) focusSelectedEpisode(list)
             }
 
             private fun restoreEpisode(view: View) {
