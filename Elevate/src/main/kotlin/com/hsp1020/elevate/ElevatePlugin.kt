@@ -613,6 +613,8 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         private var readyLogged = false
         private var media3Connections = 0
         private var media3StateLogs = 0
+        private var media3TransitionLogs = 0
+        private var media3PlayingLogs = 0
         private var previewProbeScheduled = false
         private val previewProbe = Runnable {
             previewProbeScheduled = false
@@ -631,6 +633,21 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         }
 
         private val media3Listener = object : Media3Player.Listener {
+            override fun onMediaItemTransition(
+                mediaItem: androidx.media3.common.MediaItem?, reason: Int
+            ) {
+                if (media3TransitionLogs++ < 8)
+                    Log.i(PLAYER_LOG, "stage=media-transition instance=" + media3Connections +
+                        " reason=" + reason + " mediaKey=" +
+                        (mediaItem?.mediaId?.hashCode() ?: 0))
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (media3PlayingLogs++ < 8)
+                    Log.i(PLAYER_LOG, "stage=playing-change playing=" + isPlaying +
+                        " instance=" + media3Connections)
+            }
+
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Media3Player.STATE_READY) {
                     if (!readyLogged) {
@@ -659,6 +676,8 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             media3Player = next
             readyLogged = false
             media3StateLogs = 0
+            media3TransitionLogs = 0
+            media3PlayingLogs = 0
             media3AttachedAt = SystemClock.elapsedRealtime()
             if (next != null) {
                 media3Connections++
