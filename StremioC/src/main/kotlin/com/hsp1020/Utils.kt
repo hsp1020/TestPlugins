@@ -44,10 +44,7 @@ import android.content.res.Resources
 import android.content.res.ColorStateList
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.RippleDrawable
-import android.view.MotionEvent
 import android.view.Gravity
-import androidx.cardview.widget.CardView
 import com.google.android.material.chip.Chip
 import android.os.Bundle
 import android.os.Handler
@@ -79,6 +76,7 @@ import com.lagradost.cloudstream3.ui.result.ResultData
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.ui.result.SyncViewModel
 import com.lagradost.cloudstream3.ui.result.ActorAdaptor
+import com.lagradost.cloudstream3.ui.ViewHolderState
 import com.lagradost.cloudstream3.utils.AppContextUtils.html
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity
@@ -114,7 +112,6 @@ internal fun applyEpisodeChipFeedback(chip: Chip) {
     chip.tag = chip.context.getString(R.string.tv_no_focus_tag)
 }
 
-internal const val STREMIOC_DETAIL_RIPPLE_COLOR = 0x55FFFFFF
 private val QUALITY_REGEX = Regex("(\\d{3,4}[pP])")
 private val TT_REGEX = Regex("^tt\\d+$")
 
@@ -2503,31 +2500,7 @@ internal class RatingPlotImageHook(
         private val actorInformation = ActorInformation.Controller(fragment, detailUrl)
         private val genreGroup = root.findViewById<ChipGroup>(R.id.result_tag)
         private val boundGenreChips = mutableMapOf<View, CatalogShortcutTarget>()
-        private val actorCardForegrounds = mutableMapOf<View, Drawable?>()
-
-        private fun bindActorCardRipple(card: View) {
-            if (actorCardForegrounds.containsKey(card)) return
-            val original = card.foreground
-            val mask = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = (card as? CardView)?.radius ?: 0f
-                setColor(android.graphics.Color.WHITE)
-            }
-            card.foreground = RippleDrawable(
-                ColorStateList.valueOf(STREMIOC_DETAIL_RIPPLE_COLOR), original, mask
-            )
-            card.setOnTouchListener { view, event ->
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        view.foreground?.setHotspot(event.x, event.y)
-                        view.isPressed = true
-                    }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> view.isPressed = false
-                }
-                false 
-            }
-            actorCardForegrounds[card] = original
-        }
+        private val boundActorCards = mutableSetOf<View>()
 
         private fun bindGenreClicks() {
             val group = genreGroup ?: return
@@ -2569,11 +2542,25 @@ internal class RatingPlotImageHook(
                 .setPopEnterAnim(enter).setPopExitAnim(exit)
                 .build())
         }
-        private val castClick = View.OnClickListener { card ->
-            val list = castItems ?: return@OnClickListener
-            val position = list.getChildAdapterPosition(card)
-            if (position == RecyclerView.NO_POSITION) return@OnClickListener
-            (list.adapter as? ActorAdaptor)?.getItemOrNull(position)?.let { actorInformation.click(position, it) }
+        private val castClick = object : View.OnClickListener {
+            override fun onClick(card: View) {
+                val list = castItems ?: return
+                val position = list.getChildAdapterPosition(card)
+                if (position == RecyclerView.NO_POSITION) return
+                val adapter = list.adapter as? ActorAdaptor ?: return
+                val actor = adapter.getItemOrNull(position) ?: return
+                val holder = list.findViewHolderForAdapterPosition(position)
+                if (holder is ViewHolderState<*>) {
+                    @Suppress("UNCHECKED_CAST")
+                    val nativeHolder = holder as ViewHolderState<Any>
+                    adapter.onUpdateContent(nativeHolder, actor, position)
+                    // Core rebinds its default click and long-click handlers.
+                    // Restore StremioC's actor dialog and in-app person search.
+                    card.setOnClickListener(this)
+                    card.setOnLongClickListener(castLongClick)
+                }
+                actorInformation.click(position, actor)
+            }
         }
         private val castLongClick = View.OnLongClickListener { card ->
             if (actorNameId != 0) {
@@ -2589,18 +2576,15 @@ internal class RatingPlotImageHook(
                 castItems?.takeIf { it.isShown }?.let { list ->
                     val children = (0 until list.childCount).map(list::getChildAt).toSet()
                     for (card in children) {
-                        if (actorCardForegrounds.containsKey(card)) continue
+                        if (!boundActorCards.add(card)) continue
                         card.setOnClickListener(castClick)
                         card.setOnLongClickListener(castLongClick)
-                        bindActorCardRipple(card)
                     }
-                    val removed = actorCardForegrounds.keys.filterNot(children::contains)
+                    val removed = boundActorCards.filterNot(children::contains)
                     for (card in removed) {
                         card.setOnClickListener(null)
                         card.setOnLongClickListener(null)
-                        card.setOnTouchListener(null)
-                        card.isPressed = false
-                        card.foreground = actorCardForegrounds.remove(card)
+                        boundActorCards.remove(card)
                     }
                 }
                 bindGenreClicks()
@@ -2628,14 +2612,11 @@ internal class RatingPlotImageHook(
                 chip.isFocusable = false
             }
             boundGenreChips.clear()
-            actorCardForegrounds.forEach { (card, foreground) ->
+            boundActorCards.forEach { card ->
                 card.setOnClickListener(null)
                 card.setOnLongClickListener(null)
-                card.setOnTouchListener(null)
-                card.isPressed = false
-                card.foreground = foreground
             }
-            actorCardForegrounds.clear()
+            boundActorCards.clear()
             runCatching { trailers.stop() }; runCatching { backdrop.stop() }; runCatching { restore() }
         }
         private fun restore() {

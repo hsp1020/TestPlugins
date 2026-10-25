@@ -11,9 +11,6 @@ import android.os.Bundle
 import androidx.navigation.NavOptions
 import android.widget.Toast
 import android.view.View
-import android.view.MotionEvent
-import android.view.animation.AccelerateDecelerateInterpolator
-import android.view.animation.OvershootInterpolator
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.view.inspector.WindowInspector
@@ -46,6 +43,7 @@ import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.ui.AutofitRecyclerView
 import com.lagradost.cloudstream3.ui.BaseAdapter
+import com.lagradost.cloudstream3.ui.ViewHolderState
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
 import com.lagradost.cloudstream3.ui.settings.Globals
@@ -662,43 +660,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 view.isLongClickable = false
                 // cast_item.xml defines this root as focusable by default.
                 view.isFocusable = true
-                view.findViewById<View>(R.id.voice_actor_image_holder2)?.apply {
-                    animate().cancel()
-                    scaleX = 1f
-                    scaleY = 1f
-                }
-            }
-
-            /**
-             * ActorAdaptor runs the native 0.8-to-1.0 scale animation when an
-             * actor is clicked. Its channel navigation override skips that
-             * callback, so reproduce the press/release response on the same
-             * circular image holder without affecting the surrounding text.
-             */
-            private fun setChannelPressAnimation(view: View) {
-                val portrait = view.findViewById<View>(R.id.voice_actor_image_holder2)
-                    ?: return
-                view.setOnTouchListener { _, event ->
-                    when (event.actionMasked) {
-                        MotionEvent.ACTION_DOWN -> {
-                            portrait.animate().cancel()
-                            portrait.animate()
-                                .scaleX(0.8f).scaleY(0.8f)
-                                .setDuration(80L)
-                                .setInterpolator(AccelerateDecelerateInterpolator())
-                                .start()
-                        }
-                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                            portrait.animate().cancel()
-                            portrait.animate()
-                                .scaleX(1f).scaleY(1f)
-                                .setDuration(200L)
-                                .setInterpolator(OvershootInterpolator())
-                                .start()
-                        }
-                    }
-                    false
-                }
+                view.findViewById<View>(R.id.voice_actor_image_holder2)?.clearAnimation()
             }
 
             private fun applyCast(view: View) {
@@ -723,15 +685,33 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     }
                     view.isFocusable = true
                     view.isClickable = true
-                    // Preserve the core channel long-click search behavior.
-                    view.setOnClickListener {
-                        if (link != null) {
-                            hostFragment.activity?.loadResult(
-                                link.url, "YouTube", link.name
-                            )
+                    view.setOnTouchListener(null)
+                    // Reuse CloudStream's actual ActorAdaptor animation rather
+                    // than maintaining another gesture/animation implementation.
+                    view.setOnClickListener(object : View.OnClickListener {
+                        override fun onClick(clicked: View) {
+                            val currentPosition = list.getChildAdapterPosition(view)
+                            if (currentPosition == RecyclerView.NO_POSITION) return
+                            val currentActor = adapter.getItemOrNull(currentPosition)
+                                ?: return
+                            val holder = list.findViewHolderForAdapterPosition(currentPosition)
+                            if (holder is ViewHolderState<*>) {
+                                @Suppress("UNCHECKED_CAST")
+                                val nativeHolder = holder as ViewHolderState<Any>
+                                adapter.onUpdateContent(
+                                    nativeHolder, currentActor, currentPosition
+                                )
+                                // Native onUpdateContent also rebinds the
+                                // native click listener; retain channel navigation.
+                                view.setOnClickListener(this)
+                            }
+                            if (link != null) {
+                                hostFragment.activity?.loadResult(
+                                    link.url, "YouTube", link.name
+                                )
+                            }
                         }
-                    }
-                    setChannelPressAnimation(view)
+                    })
                 } else {
                     // Subscriber/video counts are display-only statistics, not
                     // actors. Native ActorAdaptor binds both click-to-invert and
@@ -742,11 +722,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     view.isClickable = false
                     view.isLongClickable = false
                     view.isFocusable = false
-                    view.findViewById<View>(R.id.voice_actor_image_holder2)?.apply {
-                        animate().cancel()
-                        scaleX = 1f
-                        scaleY = 1f
-                    }
+                    view.findViewById<View>(R.id.voice_actor_image_holder2)?.clearAnimation()
                 }
             }
 
