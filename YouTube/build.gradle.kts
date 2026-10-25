@@ -24,6 +24,8 @@ cloudstream {
 
 dependencies {
     compileOnly("androidx.media3:media3-ui:1.9.3")
+    // Compile against the host app Navigation API without bundling a duplicate runtime.
+    compileOnly("androidx.navigation:navigation-common:2.9.8")
 }
 
 // Compile the shared extractor into this plugin's own classes.dex.
