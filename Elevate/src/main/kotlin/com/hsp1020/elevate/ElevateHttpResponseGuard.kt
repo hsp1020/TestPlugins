@@ -7,19 +7,22 @@ import okhttp3.EventListener
 import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
-import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.util.Collections
 import java.util.LinkedHashMap
 import java.util.WeakHashMap
 
 /**
- * Production HTTP response cleanup only. No frame listeners, GC samplers,
- * per-response tracking objects, stack dumps, polling or watchdog threads.
- * The one caller classification at OkHttp call creation is required because
- * third-party providers cannot be edited.
+ * StreamPlay/CineStream HTTP response disposal guard (not a performance tracer).
+ * There are no frame/GC/watchdog samplers or diagnostic stack dumps. Source
+ * identification requires caller inspection for untagged third-party
+ * GET/POST requests. API 34+ walks frames lazily; older Android uses the
+ * original trace-array fallback. We cache all possible
+ * source classifications to avoid per-provider-call Origin object allocation.
+ * Do not remove source checks: generic HTTP 403/302 responses are not
+ * necessarily disposable or safe to buffer for unrelated providers.
  */
-internal class ElevatePerformanceTrace(@Suppress("UNUSED_PARAMETER") application: Application) {
+internal class ElevateHttpResponseGuard(@Suppress("UNUSED_PARAMETER") application: Application) {
     private data class Origin(
         val streamPlay: Boolean,
         val cineStream: Boolean,
@@ -29,39 +32,101 @@ internal class ElevatePerformanceTrace(@Suppress("UNUSED_PARAMETER") application
         val moviebox: Boolean
     )
 
+    private val originCache = Array(64) { flags ->
+        Origin(
+            streamPlay = flags and 1 != 0,
+            cineStream = flags and 2 != 0,
+            cfFirst = flags and 4 != 0,
+            cfRetry = flags and 8 != 0,
+            buzz = flags and 16 != 0,
+            moviebox = flags and 32 != 0
+        )
+    }
+
     @Volatile private var active = false
     @Volatile private var priorFactory: EventListener.Factory? = null
     private val originMap = Collections.synchronizedMap(WeakHashMap<Request, Origin>())
-    private val originFactory = EventListener.Factory { call ->
-        if (active && (call.request().method == "GET" || call.request().method == "POST")) {
-            val frames = Thread.currentThread().stackTrace
-            var stream = false
-            var cine = false
-            var first = false
-            var retry = false
-            var buzz = false
-            var movie = false
-            for (f in frames) {
-                val name = f.className
-                if (name.startsWith("com.phisher98.", ignoreCase = true)) {
-                    stream = true
-                    if (name.contains("BuzzServer", true) ||
-                        name.contains("Hubcloudone", true) || name.contains("VCloud", true))
-                        buzz = true
-                }
-                if (name.startsWith("com.megix.", ignoreCase = true)) {
-                    cine = true
-                    if (name.contains("CineStreamExtractors")) {
-                        if (name.contains("$" + "cfGet")) retry = true
-                        if (name == "com.megix.CineStreamExtractors" && f.methodName == "cfGet")
-                            first = true
-                        if (f.methodName.contains("invokeMoviebox", ignoreCase = true))
-                            movie = true
-                    }
+    private companion object {
+        private fun frameFlags(name: String, method: String, previous: Int): Int {
+            var flags = previous
+            if (name.startsWith("com.phisher98.", ignoreCase = true)) {
+                flags = flags or 1
+                if (name.contains("BuzzServer", true) ||
+                    name.contains("Hubcloudone", true) || name.contains("VCloud", true))
+                    flags = flags or 16
+            }
+            if (name.startsWith("com.megix.", ignoreCase = true)) {
+                flags = flags or 2
+                if (name.contains("CineStreamExtractors")) {
+                    if (name.contains("$" + "cfGet")) flags = flags or 8
+                    if (name == "com.megix.CineStreamExtractors" && method == "cfGet")
+                        flags = flags or 4
+                    if (method.contains("invokeMoviebox", ignoreCase = true))
+                        flags = flags or 32
                 }
             }
-            if (stream || cine)
-                originMap[call.request()] = Origin(stream, cine, first, retry, buzz, movie)
+            return flags
+        }
+    }
+
+    // API 34+ supports lazy frame iteration without allocating an entire
+    // StackTraceElement[] for every OkHttp call. Keep SHOW_HIDDEN_FRAMES so
+    // coroutine/lambda source frames are visible as in the legacy classifier.
+    @androidx.annotation.RequiresApi(34)
+    private object Api34Frames {
+        private val walker = java.lang.StackWalker.getInstance(
+            java.lang.StackWalker.Option.SHOW_HIDDEN_FRAMES
+        )
+        fun classify(): Int = walker.walk<Int> { stream ->
+            var flags = 0
+            val iterator = stream.iterator()
+            while (iterator.hasNext()) {
+                val f = iterator.next()
+                flags = frameFlags(f.className, f.methodName, flags)
+            }
+            flags
+        }
+    }
+
+    @Volatile private var walkerEnabled = true
+    @Volatile private var legacyComparisonRemaining = 8
+    @Volatile private var totalComparisonRemaining = 32
+    private fun classifyLegacy(): Int {
+        var flags = 0
+        for (frame in Thread.currentThread().stackTrace) {
+            flags = frameFlags(frame.className, frame.methodName, flags)
+        }
+        return flags
+    }
+
+    private fun classifyCaller(): Int {
+        if (!walkerEnabled || android.os.Build.VERSION.SDK_INT < 34)
+            return classifyLegacy()
+        val modern = try {
+            Api34Frames.classify()
+        } catch (_: Throwable) {
+            walkerEnabled = false
+            return classifyLegacy()
+        }
+        // A bounded, one-time compatibility check protects OEM implementations
+        // and Kotlin continuation call sites. Never log a stack trace.
+        if (legacyComparisonRemaining > 0 && totalComparisonRemaining > 0) {
+            totalComparisonRemaining--
+            val legacy = classifyLegacy()
+            if (modern != legacy) {
+                walkerEnabled = false
+                return legacy
+            }
+            if (legacy != 0) legacyComparisonRemaining--
+        }
+        return modern
+    }
+
+    private val originFactory = EventListener.Factory { call ->
+        val request = call.request()
+        if (active && (request.method == "GET" || request.method == "POST")) {
+            val flags = classifyCaller()
+            if (flags and 3 != 0) originMap[request] = originCache[flags]
         }
         priorFactory?.create(call) ?: EventListener.NONE
     }

@@ -77,8 +77,7 @@ class ElevatePlugin : Plugin() {
     private var embeddedSubtitles: EmbeddedSubtitleController? = null
     private var homeHero: HomeHeroToggle? = null
     private var libraryPosters: LibraryPosterHook? = null
-    private var performanceTrace: ElevatePerformanceTrace? = null
-    private var nativeRecyclerGuard: NativeRecyclerListenerGuard? = null
+    private var httpResponseGuard: ElevateHttpResponseGuard? = null
     private var nativeEpisodeOverlay: NativeEpisodeOverlayHook? = null
     private var featurePrefs: SharedPreferences? = null
     private var featureListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
@@ -100,8 +99,8 @@ class ElevatePlugin : Plugin() {
             if (generation.get() != token) return@post
             stopAll()
             app = application
-            performanceTrace = ElevatePerformanceTrace(application).also { it.start() }
-            nativeRecyclerGuard = NativeRecyclerListenerGuard(application).also { it.start() }
+            httpResponseGuard = ElevateHttpResponseGuard(application).also { it.start() }
+            homeRecyclerGuard = HomeRecyclerCacheGuard(application).also { it.start() }
             try {
                 val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
                 // Preserve the user's previous visible/hidden choice when changing to "ON = hide".
@@ -167,14 +166,9 @@ class ElevatePlugin : Plugin() {
             homeHero?.stop()
             homeHero = null
         }
-        if (enabled(ElevateFeature.HOME_REPAIR)) {
-            if (homeRecyclerGuard == null) {
-                homeRecyclerGuard = HomeRecyclerCacheGuard(application).also { it.start() }
-            }
-        } else {
-            homeRecyclerGuard?.stop()
-            homeRecyclerGuard = null
-        }
+        // Native RecyclerView listener cleanup always runs; only stale-poster
+        // rebind repair is controlled by the Home Poster Refresh setting.
+        homeRecyclerGuard?.setRepairEnabled(enabled(ElevateFeature.HOME_REPAIR))
         if (enabled(ElevateFeature.LIBRARY_POSTERS)) {
             if (libraryPosters == null) libraryPosters = LibraryPosterHook(application).also { it.start() }
         } else {
@@ -269,12 +263,10 @@ class ElevatePlugin : Plugin() {
         homeHero = null
         libraryPosters?.stop()
         libraryPosters = null
-        performanceTrace?.stop()
-        performanceTrace = null
+        httpResponseGuard?.stop()
+        httpResponseGuard = null
         nativeEpisodeOverlay?.stop()
         nativeEpisodeOverlay = null
-        nativeRecyclerGuard?.stop()
-        nativeRecyclerGuard = null
         app = null
     }
 

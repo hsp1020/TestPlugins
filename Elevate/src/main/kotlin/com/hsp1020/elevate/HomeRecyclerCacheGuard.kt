@@ -8,6 +8,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
+import android.view.ViewTreeObserver
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
@@ -27,6 +28,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var enabled = false
+    private var repairEnabled = false
     private var started = false
     private var activity: FragmentActivity? = null
     private var model: HomeViewModel? = null
@@ -40,6 +42,63 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private val watched = mutableMapOf<RecyclerView, RowWatch>()
     private val repaired = mutableSetOf<String>()
     private var scanScheduled = false
+    private var homeTree: ViewTreeObserver? = null
+    private val homeLayout = ViewTreeObserver.OnGlobalLayoutListener { queueScan() }
+    private val playerScreens = LinkedHashMap<Fragment, PlayerWatch>()
+
+    private val listenerField by lazy {
+        runCatching {
+            RecyclerView::class.java.getDeclaredField("mScrollListeners").apply {
+                isAccessible = true
+            }
+        }.getOrNull()
+    }
+
+    /** Remove only old listeners from the same native call site. */
+    private fun prune(recycler: RecyclerView, owner: String, callSite: String) {
+        val field = listenerField ?: return
+        val snapshot = runCatching {
+            @Suppress("UNCHECKED_CAST")
+            (field.get(recycler) as? List<RecyclerView.OnScrollListener>)?.toList()
+        }.getOrNull() ?: return
+        if (snapshot.size < 2) return
+        val matches = snapshot.filter {
+            val name = it.javaClass.name
+            name.startsWith(owner) && name.contains(callSite)
+        }
+        if (matches.size > 1) {
+            matches.dropLast(1).forEach(recycler::removeOnScrollListener)
+        }
+    }
+
+    private inner class PlayerWatch(private val fragment: Fragment, val view: View) {
+        private val tree = view.viewTreeObserver
+        private var queued = false
+        private val listener = ViewTreeObserver.OnGlobalLayoutListener { schedule() }
+        private val action = Runnable {
+            queued = false
+            if (!fragment.isAdded || fragment.view !== view) return@Runnable
+            view.findViewById<RecyclerView>(R.id.player_episode_list)?.let {
+                prune(it,
+                    "com.lagradost.cloudstream3.ui.player.GeneratorPlayer" + "$",
+                    "showEpisodesOverlay")
+            }
+        }
+        fun start() {
+            if (tree.isAlive) tree.addOnGlobalLayoutListener(listener)
+            schedule()
+        }
+        private fun schedule() {
+            if (queued) return
+            queued = true
+            main.postDelayed(action, 120L)
+        }
+        fun close() {
+            if (tree.isAlive) tree.removeOnGlobalLayoutListener(listener)
+            main.removeCallbacks(action)
+            queued = false
+        }
+    }
     private fun queueScan() {
         if (scanScheduled) return
         val rv = root ?: return
@@ -92,13 +151,11 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         override fun onItemRangeChanged(p: Int, n: Int) = queue()
         override fun onItemRangeMoved(from: Int, to: Int, n: Int) = queue()
         private fun queue() {
-            if (expected == null) return
             queueScan()
         }
     }
     private val parentViews = object : RecyclerView.OnChildAttachStateChangeListener {
         override fun onChildViewAttachedToWindow(view: View) {
-            if (expected == null) return
             if (view.parent === root) queueScan()
         }
         override fun onChildViewDetachedFromWindow(view: View) {
@@ -112,9 +169,35 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
             fm: FragmentManager, f: Fragment, v: View, saved: Bundle?
         ) {
             if (f.javaClass.name == HOME_CLASS) bindHome(f, v)
+            if (f.javaClass.name == PLAYER_CLASS) bindPlayer(f, v)
         }
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
             if (f === home) unbindHome()
+            playerScreens.remove(f)?.close()
+        }
+    }
+
+    /** Home repair toggle affects stale-poster repair only, not native listener cleanup. */
+    fun setRepairEnabled(value: Boolean) {
+        if (repairEnabled == value) return
+        repairEnabled = value
+        main.post {
+            if (!started) return@post
+            val vm = model ?: return@post
+            vm.apiName.removeObserver(apiObserver)
+            vm.page.removeObserver(pageObserver)
+            generation++
+            clearRows()
+            repaired.clear()
+            expected = null
+            pendingProvider = null
+            if (repairEnabled) {
+                provider = vm.apiName.value
+                val owner = activity ?: return@post
+                vm.apiName.observe(owner, apiObserver)
+                vm.page.observe(owner, pageObserver)
+            }
+            queueScan()
         }
     }
 
@@ -144,11 +227,14 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         model = vm
         provider = vm.apiName.value
         next.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
-        vm.apiName.observe(next, apiObserver)
-        vm.page.observe(next, pageObserver)
+        if (repairEnabled) {
+            vm.apiName.observe(next, apiObserver)
+            vm.page.observe(next, pageObserver)
+        }
         fun find(fm: FragmentManager) {
             fm.fragments.forEach { f ->
                 if (f.javaClass.name == HOME_CLASS) f.view?.let { bindHome(f, it) }
+                if (f.javaClass.name == PLAYER_CLASS) f.view?.let { bindPlayer(f, it) }
                 if (f.isAdded) find(f.childFragmentManager)
             }
         }
@@ -161,6 +247,8 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         model?.page?.removeObserver(pageObserver)
         activity?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         unbindHome()
+        playerScreens.values.forEach { it.close() }
+        playerScreens.clear()
         model = null
         activity = null
         provider = null
@@ -175,10 +263,20 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         home = f
         root = rv
         rv?.addOnChildAttachStateChangeListener(parentViews)
+        homeTree = rv?.viewTreeObserver?.also {
+            if (it.isAlive) it.addOnGlobalLayoutListener(homeLayout)
+        }
         observeParent()
         queueScan()
     }
+    private fun bindPlayer(f: Fragment, v: View) {
+        if (playerScreens[f]?.view === v) return
+        playerScreens.remove(f)?.close()
+        playerScreens[f] = PlayerWatch(f, v).also { it.start() }
+    }
     private fun unbindHome() {
+        homeTree?.let { if (it.isAlive) it.removeOnGlobalLayoutListener(homeLayout) }
+        homeTree = null
         clearRows()
         parentAdapter?.unregisterAdapterDataObserver(parentUpdates)
         parentAdapter = null
@@ -199,16 +297,22 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     }
     private fun scanRows() {
         val rv = root ?: return
-        if (expected == null) return
         if (rv.isComputingLayout) {
             queueScan()
             return
         }
         observeParent()
-        for (i in 0 until rv.childCount) watchRow(rv.getChildAt(i))
+        for (i in 0 until rv.childCount) {
+            val view = rv.getChildAt(i)
+            val child = view.findViewById<RecyclerView>(R.id.home_child_recyclerview) ?: continue
+            prune(child,
+                "com.lagradost.cloudstream3.ui.home.ParentItemAdapter" + "$",
+                "onBindContent")
+            if (repairEnabled && expected != null) watchRow(view)
+        }
     }
     private fun watchRow(view: View) {
-        if (expected == null) return
+        if (!repairEnabled || expected == null) return
         val rv = view.findViewById<RecyclerView>(R.id.home_child_recyclerview) ?: return
         watched.getOrPut(rv) { RowWatch(rv).also { it.start() } }.sync()
         verify(rv)
@@ -269,7 +373,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
             } ?: return
         val holder = outer.findContainingViewHolder(row) ?: return
         val item = parent.getItemOrNull(holder.bindingAdapterPosition - parent.headers) ?: return
-        if (latest.none {
+        if (!repairEnabled || latest.none {
                 it.list.name == item.list.name &&
                     it.list.list.firstOrNull()?.url == item.list.list.firstOrNull()?.url
             }) return
@@ -309,5 +413,6 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
 
     private companion object {
         const val HOME_CLASS = "com.lagradost.cloudstream3.ui.home.HomeFragment"
+        const val PLAYER_CLASS = "com.lagradost.cloudstream3.ui.player.GeneratorPlayer"
     }
 }
