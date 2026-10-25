@@ -34,7 +34,6 @@ import com.lagradost.cloudstream3.ui.result.ACTION_CLICK_DEFAULT
 import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
-import com.lagradost.cloudstream3.utils.DataStoreHelper.getViewPos
 import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
@@ -614,11 +613,11 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         private fun fadeCard(view: View) {
             val card = view as? CardView ?: return
             val oldColor = originalCardColors.getOrPut(card) { card.cardBackgroundColor }
-            val color = oldColor.defaultColor
-            card.setCardBackgroundColor(Color.argb(
-                (Color.alpha(color) * 0.7f).toInt(),
-                Color.red(color), Color.green(color), Color.blue(color)
-            ))
+            // Panel is already 70% opaque. Painting another 70%-opaque card
+            // over it would make the combined surface 91% opaque.
+            // Keep the card shape, ripple and contents, but eliminate its
+            // redundant solid fill so video remains visible behind every row.
+            card.setCardBackgroundColor(Color.TRANSPARENT)
         }
 
         private fun restoreCard(view: View) {
@@ -817,12 +816,13 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             val vm = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
             model = vm
             val state = vm.state.generatorState ?: return
-            fullEpisodes = state.allMeta?.filterIsInstance<ResultEpisode>()
-                ?.map { episode ->
-                    getViewPos(episode.id)?.let { saved ->
-                        episode.copy(position = saved.position, duration = saved.duration)
-                    } ?: episode
-                } ?: emptyList()
+            // CloudStream has JUST refreshed every episode's watch progress
+            // in showEpisodesOverlay() and submitted it to this native adapter.
+            // Reuse that snapshot instead of re-reading preferences per episode
+            // on the main thread. The fallback only handles an empty adapter.
+            val nativeEpisodes = (list?.adapter as? EpisodeAdapter)?.immutableCurrentList
+            fullEpisodes = nativeEpisodes?.takeIf { it.isNotEmpty() }
+                ?: state.allMeta?.filterIsInstance<ResultEpisode>().orEmpty()
             val distinct = fullEpisodes.distinctBy(::seasonOf)
             if (distinct.size <= 1) {
                 removeSelector()
@@ -897,7 +897,10 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         private var suppressedPause = false
 
         override fun handleEvent(event: CSPlayerEvent, source: PlayerEventSource) {
-            if (event == CSPlayerEvent.Pause || event == CSPlayerEvent.Play) {
+            // Only the native UI's explicit overlay toggle needs call-site
+            // checking. Player-originated events must never allocate stacks.
+            if (source == PlayerEventSource.UI &&
+                (event == CSPlayerEvent.Pause || (event == CSPlayerEvent.Play && suppressedPause))) {
                 val episodeToggle = Thread.currentThread().stackTrace.any {
                     it.className == "com.lagradost.cloudstream3.ui.player.FullScreenPlayer" &&
                         it.methodName == "toggleEpisodesOverlay"
