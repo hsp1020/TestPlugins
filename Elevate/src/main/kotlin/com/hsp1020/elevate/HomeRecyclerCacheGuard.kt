@@ -177,8 +177,10 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         val seq = generation
         queued = true
         recycler.post {
-            queued = false
-            if (enabled && seq == generation && recycler === root) refreshVisible()
+            if (enabled && seq == generation && recycler === root) {
+                queued = false
+                refreshVisible()
+            }
         }
     }
 
@@ -305,6 +307,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
 
     private fun unbindHome() {
         disarm()
+        queued = false
         root = null
         home = null
     }
