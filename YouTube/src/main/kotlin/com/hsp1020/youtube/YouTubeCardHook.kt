@@ -47,7 +47,6 @@ import com.lagradost.cloudstream3.utils.AppContextUtils.loadSearchResult
 import com.lagradost.cloudstream3.utils.UIHelper.navigate
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.TvSeriesLoadResponse
-import com.youtube.YoutubeProvider
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
