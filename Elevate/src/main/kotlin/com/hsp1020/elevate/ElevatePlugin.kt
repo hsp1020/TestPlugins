@@ -613,6 +613,22 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         private var readyLogged = false
         private var media3Connections = 0
         private var media3StateLogs = 0
+        private var previewProbeScheduled = false
+        private val previewProbe = Runnable {
+            previewProbeScheduled = false
+            if (fragment.isAdded && fragment.view === root)
+                logNativeCapabilities("preview-after-ready")
+        }
+
+        private fun logNativeCapabilities(stage: String) {
+            val native = fragment.player as? CS3IPlayer
+            val previews = native?.imageGenerator
+            Log.i(PLAYER_LOG, "stage=" + stage +
+                " nativeCs3=" + (native != null) +
+                " previewReady=" + (native?.hasPreview() ?: false) +
+                " previewImages=" + (previews?.loadedImages ?: -1) +
+                " compressorAccessible=" + (native != null))
+        }
 
         private val media3Listener = object : Media3Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -622,6 +638,10 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
                         Log.i(PLAYER_LOG, "stage=player-ready elapsedMs=" +
                             (SystemClock.elapsedRealtime() - media3AttachedAt) +
                             " instance=" + media3Connections)
+                        if (!previewProbeScheduled) {
+                            previewProbeScheduled = true
+                            main.postDelayed(previewProbe, 3000L)
+                        }
                     }
                 } else if (media3StateLogs++ < 8) {
                     Log.i(PLAYER_LOG, "stage=player-state state=" + playbackState +
@@ -634,6 +654,8 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             val next = fragment.playerView?.player
             if (next === media3Player) return
             media3Player?.removeListener(media3Listener)
+            main.removeCallbacks(previewProbe)
+            previewProbeScheduled = false
             media3Player = next
             readyLogged = false
             media3StateLogs = 0
@@ -675,7 +697,13 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         }
 
         private val overlayLayout = ViewTreeObserver.OnGlobalLayoutListener {
-            scheduleOverlayCheck()
+            val showing = overlay?.isShown == true
+            val currentAdapter = list?.adapter
+            val nativeChanged = currentAdapter is EpisodeAdapter &&
+                currentAdapter !== filteredAdapter && currentAdapter !== lastNativeAdapter
+            if (showing != overlayWasShown || nativeChanged ||
+                fragment.playerView?.player !== media3Player)
+                scheduleOverlayCheck()
         }
         private var model: PlayerGeneratorViewModel? = null
         private var fullEpisodes = emptyList<ResultEpisode>()
@@ -735,6 +763,7 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             Log.i(PLAYER_LOG, "stage=compat-attached nativeCs3=" +
                 (fragment.player is CS3IPlayer) +
                 " playerType=" + fragment.player.javaClass.simpleName)
+            logNativeCapabilities("native-capabilities")
             if (tree.isAlive) tree.addOnGlobalLayoutListener(overlayLayout)
             scheduleOverlayCheck()
 
@@ -769,6 +798,8 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             overlayCheckQueued = false
             media3Player?.removeListener(media3Listener)
             media3Player = null
+            main.removeCallbacks(previewProbe)
+            previewProbeScheduled = false
             if (host?.callbacks === guardedCallbacks) host?.callbacks = callbacks
             host = null
             callbacks = null
@@ -809,6 +840,7 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
                 configureSeasons()
                 Log.i(PLAYER_LOG, "stage=overlay-ready spinner=" + (selector != null) +
                     " filteredCount=" + (list?.adapter?.itemCount ?: -1))
+                logNativeCapabilities("overlay-capabilities")
             }
         }
 
