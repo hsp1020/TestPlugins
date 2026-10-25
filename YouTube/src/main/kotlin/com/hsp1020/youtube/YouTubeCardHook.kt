@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Bundle
+import android.graphics.Rect
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -20,10 +21,14 @@ import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.ui.result.ActorAdaptor
 import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
+import com.lagradost.cloudstream3.ui.result.ResultViewModel2
+import com.lagradost.cloudstream3.ui.result.START_ACTION_LOAD_EP
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
+import androidx.lifecycle.ViewModelProvider
+import androidx.core.widget.NestedScrollView
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
@@ -46,6 +51,29 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private val screens = mutableMapOf<Fragment, Screen>()
     private val dialogs = mutableMapOf<View, Screen>()
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
+        override fun onFragmentPreCreated(fm: FragmentManager, f: Fragment, state: Bundle?) {
+            if (f.javaClass.name !in DETAIL_SCREENS) return
+            val args = f.arguments ?: return
+            if (args.getString("apiName") != "YouTube") return
+            val pageUrl = args.getString("url") ?: return
+            val selected = YoutubeProvider.homeShortIndex(pageUrl) ?: return
+            val videoId = YoutubeUtils.extractYoutubeId(pageUrl) ?: return
+            // Mirrors the core's LoadResponse ID and TvSeries episode ID formula.
+            val mainId = pageUrl.replace("https://www.youtube.com", "").replace("/", "").hashCode()
+            args.putInt("startAction", START_ACTION_LOAD_EP)
+            args.putInt("startValue", mainId + selected + 2)
+            args.putString(HOME_SHORT_ID_KEY, videoId)
+            args.putInt(HOME_SHORT_NUMBER_KEY, selected + 1)
+        }
+
+        override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
+            screens[f]?.pagePaused()
+        }
+
+        override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
+            screens[f]?.pageResumed()
+        }
+
         override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, view: View, state: Bundle?) {
             attach(f, view)
         }
@@ -141,6 +169,59 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
     private inner class Screen(val root: View, popup: Boolean = false, private val fragment: Fragment? = null) {
         private val watchers = mutableMapOf<RecyclerView, Watcher>()
+        private val selectedShort = fragment?.arguments?.getString(HOME_SHORT_ID_KEY)
+        private var leftDetail = false
+        private var focusReturned = false
+        private var pendingFocus: String? = null
+        private var focusPosted = false
+
+        fun pagePaused() {
+            if (selectedShort != null) leftDetail = true
+        }
+
+        fun pageResumed() {
+            if (!leftDetail || focusReturned || selectedShort == null) return
+            leftDetail = false
+            focusReturned = true
+            pendingFocus = selectedShort
+            val host = fragment ?: return
+            val list = root.findViewById<RecyclerView>(R.id.result_episodes) ?: return
+            val position = (list.adapter as? EpisodeAdapter)?.immutableCurrentList
+                ?.indexOfFirst { YoutubeUtils.extractYoutubeId(it.data) == selectedShort } ?: -1
+            if (position < 0) {
+                val number = host.arguments?.getInt(HOME_SHORT_NUMBER_KEY) ?: return
+                val model = ViewModelProvider(host)[ResultViewModel2::class.java]
+                model.rangeSelections.value?.firstOrNull {
+                    number in it.second.startEpisode..it.second.endEpisode
+                }?.second?.let(model::changeRange)
+            }
+            focusSelectedEpisode(list)
+        }
+
+        private fun focusSelectedEpisode(list: RecyclerView) {
+            val target = pendingFocus ?: return
+            val adapter = list.adapter as? EpisodeAdapter ?: return
+            val position = adapter.immutableCurrentList.indexOfFirst {
+                YoutubeUtils.extractYoutubeId(it.data) == target
+            }
+            if (position < 0 || focusPosted) return
+            focusPosted = true
+            list.scrollToPosition(position)
+            list.post {
+                focusPosted = false
+                if (pendingFocus != target) return@post
+                val card = list.findViewHolderForAdapterPosition(position)?.itemView ?: return@post
+                var parent = card.parent
+                while (parent is View && parent !is NestedScrollView) parent = parent.parent
+                if (parent is NestedScrollView) {
+                    val rect = Rect(0, 0, card.width, card.height)
+                    parent.offsetDescendantRectToMyCoords(card, rect)
+                    parent.smoothScrollTo(0, (rect.top - dp(80)).coerceAtLeast(0))
+                }
+                card.requestFocus()
+                pendingFocus = null
+            }
+        }
 
         init {
             if (popup) root.findViewById<RecyclerView>(R.id.home_expanded_recycler)
@@ -252,6 +333,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
             private fun scan() {
                 for (i in 0 until list.childCount) apply(list.getChildAt(i))
+                if (role == Role.DETAIL_EPISODE) focusSelectedEpisode(list)
             }
 
             private fun apply(view: View) {
@@ -285,10 +367,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 if (title.minLines != 1) title.minLines = 1
 
                 if (role == Role.RESUME_CARD && item is DataStoreHelper.ResumeWatchingResult) {
-                    val original = if (item.url.contains("/shorts/")) {
-                        YoutubeUtils.extractYoutubeId(item.url)?.let(YoutubeUtils::getShortsSearchPoster)
-                    } else YoutubeUtils.unwrapProxiedPoster(item.posterUrl)
-                    if (!original.isNullOrBlank() && original != item.posterUrl) {
+                    val videoId = YoutubeUtils.extractYoutubeId(item.url)
+                    val original = videoId?.let {
+                        if (item.url.contains("/shorts/")) YoutubeUtils.getShortsSearchPoster(it)
+                        else YoutubeUtils.buildThumbnailFromId(it)
+                    }
+                    if (original != null && original != item.posterUrl) {
                         item.posterUrl = original
                         image.loadImage(original)
                     }
@@ -346,6 +430,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     params.height = height
                     frame.layoutParams = params
                 }
+                if (pendingFocus != null) focusSelectedEpisode(list)
             }
 
             private fun restoreEpisode(view: View) {
@@ -505,6 +590,13 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private enum class Role { HOME_PARENT, SEARCH_PARENT, HOME_CARD, SEARCH_CARD, SEARCH_GRID, DIALOG_GRID, RESUME_CARD, DETAIL_RECOMMEND, DETAIL_EPISODE, DETAIL_CAST }
 
     private companion object {
+        const val HOME_SHORT_ID_KEY = "youtube_home_short_video"
+        const val HOME_SHORT_NUMBER_KEY = "youtube_home_short_number"
+        val DETAIL_SCREENS = setOf(
+            "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
+            "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer",
+            "com.lagradost.cloudstream3.ui.result.ResultFragmentTv"
+        )
         val SCREENS = setOf(
             "com.lagradost.cloudstream3.ui.home.HomeFragment",
             "com.lagradost.cloudstream3.ui.search.SearchFragment",

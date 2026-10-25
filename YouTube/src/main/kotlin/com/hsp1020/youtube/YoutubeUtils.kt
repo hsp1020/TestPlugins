@@ -1,7 +1,6 @@
 package com.hsp1020.youtube
 
 import android.content.SharedPreferences
-import android.net.Uri
 import java.net.URLDecoder
 import java.security.MessageDigest
 import java.nio.charset.StandardCharsets
@@ -69,20 +68,6 @@ object YoutubeUtils {
         cookieBuilder.append("PREF=f6=40000000&hl=$lang; CONSENT=YES+fx.456722336;")
         return Pair(cookieBuilder.toString(), sapisidVal)
     }
-
-    fun getProxiedPoster(poster: String?): String? = poster
-
-    /** Convert previously cached resume artwork to the original YouTube URL. */
-    fun unwrapProxiedPoster(poster: String?): String? {
-        if (poster.isNullOrBlank() || !poster.startsWith("https://wsrv.nl/")) return poster
-        return runCatching {
-            Uri.parse(poster).getQueryParameter("url")
-                ?.takeIf { it.startsWith("https://") }
-        }.getOrNull() ?: poster
-    }
-
-    fun getProxiedPosterBottom(poster: String?): String? = getProxiedPoster(poster)
-    fun getProxiedPosterNormal(poster: String?): String? = getProxiedPoster(poster)
 
     fun getShortsSearchPoster(videoId: String): String =
         "https://i.ytimg.com/vi/$videoId/oardefault.jpg"

@@ -188,6 +188,18 @@ class YoutubeProvider(
         }
 
         private val homeShorts = Collections.synchronizedList(mutableListOf<Episode>())
+
+        /** Number of the tapped home Shorts item in the current home catalog. */
+        internal fun homeShortIndex(url: String): Int? {
+            if (!url.contains("/shorts/") || !url.contains("ctx=home")) return null
+            val videoId = YoutubeUtils.extractYoutubeId(url) ?: return null
+            return synchronized(homeShorts) {
+                homeShorts.indexOfFirst {
+                    YoutubeUtils.extractYoutubeId(it.data) == videoId
+                }.takeIf { it >= 0 }
+            }
+        }
+
         private val searchShorts = Collections.synchronizedList(mutableListOf<Episode>())
 
         private val continuationTokenCache: MutableMap<String, String> = Collections.synchronizedMap(
@@ -1897,7 +1909,7 @@ class YoutubeProvider(
                         "$mainUrl/$targetPath",
                         TvType.TvSeries
                     ) {
-                        this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
+                        this.posterUrl = poster
                     }
                 }
             }
@@ -2015,7 +2027,7 @@ class YoutubeProvider(
                     "$mainUrl/channel/$id",
                     TvType.Live
                 ) {
-                    this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
+                    this.posterUrl = poster
                 }
             }
         }
@@ -3635,7 +3647,7 @@ class YoutubeProvider(
                 }
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, allEpisodes) {
-                    this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
+                    this.posterUrl = poster
                     this.plot = channelDescription.ifBlank { "\u200b" }
 
                     val actorList = mutableListOf<ActorData>()
@@ -3701,14 +3713,14 @@ class YoutubeProvider(
                     }
                     
                     newMovieSearchResponse(formattedTitle, ep.data, TvType.Movie) {
-                        this.posterUrl = YoutubeUtils.getProxiedPoster(ep.posterUrl)
+                        this.posterUrl = ep.posterUrl
                     }
                 }
                
                 recList.addAll(episodeResponses)
                 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                    this.posterUrl = YoutubeUtils.getProxiedPoster(playlistPoster)
+                    this.posterUrl = playlistPoster
                     this.recommendations = recList
                     
                     this.plot = "\u200b" 
@@ -3945,7 +3957,7 @@ class YoutubeProvider(
         }
         
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-            this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
+            this.posterUrl = poster
             this.plot = plot.ifBlank { "\u200b" }
             this.recommendations = filteredRecs 
             
