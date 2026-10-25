@@ -612,14 +612,39 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         private var media3AttachedAt = 0L
         private var readyLogged = false
         private var media3Connections = 0
-        private var media3StateLogs = 0
-        private var media3TransitionLogs = 0
-        private var media3PlayingLogs = 0
         private var previewProbeScheduled = false
-        private val previewProbe = Runnable {
-            previewProbeScheduled = false
-            if (fragment.isAdded && fragment.view === root)
-                logNativeCapabilities("preview-after-ready")
+        // Poll only a fixed handful of times after a *new* player is attached.
+        // Do not implement Media3Player.Listener here: CloudStream's runtime
+        // Media3 ABI is not guaranteed to match the plugin compile-time ABI.
+        private var initialProbeCount = 0
+        private val previewProbe = object : Runnable {
+            override fun run() {
+                previewProbeScheduled = false
+                if (!fragment.isAdded || fragment.view !== root) return
+                val current = fragment.playerView?.player
+                if (current !== media3Player) {
+                    refreshMedia3()
+                    return
+                }
+                if (current != null) {
+                    if (current.playbackState == Media3Player.STATE_READY && !readyLogged) {
+                        readyLogged = true
+                        Log.i(PLAYER_LOG, "stage=player-ready elapsedMs=" +
+                            (SystemClock.elapsedRealtime() - media3AttachedAt) +
+                            " instance=" + media3Connections)
+                    }
+                    if (initialProbeCount == 2 || (readyLogged && initialProbeCount > 0))
+                        logNativeCapabilities("preview-after-ready")
+                    initialProbeCount++
+                    if (initialProbeCount < 3 && !readyLogged) schedulePreviewProbe()
+                }
+            }
+        }
+
+        private fun schedulePreviewProbe() {
+            if (previewProbeScheduled) return
+            previewProbeScheduled = true
+            main.postDelayed(previewProbe, if (initialProbeCount == 0) 300L else 1200L)
         }
 
         private fun logNativeCapabilities(stage: String) {
@@ -632,61 +657,20 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
                 " compressorAccessible=" + (native != null))
         }
 
-        private val media3Listener = object : Media3Player.Listener {
-            override fun onMediaItemTransition(
-                mediaItem: androidx.media3.common.MediaItem?, reason: Int
-            ) {
-                if (media3TransitionLogs++ < 8)
-                    Log.i(PLAYER_LOG, "stage=media-transition instance=" + media3Connections +
-                        " reason=" + reason + " mediaKey=" +
-                        (mediaItem?.localConfiguration?.uri?.toString()?.hashCode()
-                            ?: mediaItem?.mediaId?.hashCode() ?: 0))
-            }
-
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (media3PlayingLogs++ < 8)
-                    Log.i(PLAYER_LOG, "stage=playing-change playing=" + isPlaying +
-                        " instance=" + media3Connections)
-            }
-
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Media3Player.STATE_READY) {
-                    if (!readyLogged) {
-                        readyLogged = true
-                        Log.i(PLAYER_LOG, "stage=player-ready elapsedMs=" +
-                            (SystemClock.elapsedRealtime() - media3AttachedAt) +
-                            " instance=" + media3Connections)
-                        if (!previewProbeScheduled) {
-                            previewProbeScheduled = true
-                            main.postDelayed(previewProbe, 3000L)
-                        }
-                    }
-                } else if (media3StateLogs++ < 8) {
-                    Log.i(PLAYER_LOG, "stage=player-state state=" + playbackState +
-                        " instance=" + media3Connections)
-                }
-            }
-        }
-
         private fun refreshMedia3() {
             val next = fragment.playerView?.player
             if (next === media3Player) return
-            media3Player?.removeListener(media3Listener)
             main.removeCallbacks(previewProbe)
             previewProbeScheduled = false
             media3Player = next
             readyLogged = false
-            media3StateLogs = 0
-            media3TransitionLogs = 0
-            media3PlayingLogs = 0
+            initialProbeCount = 0
             media3AttachedAt = SystemClock.elapsedRealtime()
             if (next != null) {
                 media3Connections++
-                next.addListener(media3Listener)
                 Log.i(PLAYER_LOG, "stage=player-attached instance=" + media3Connections +
                     " playbackState=" + next.playbackState)
-                if (next.playbackState == Media3Player.STATE_READY)
-                    media3Listener.onPlaybackStateChanged(Media3Player.STATE_READY)
+                schedulePreviewProbe()
             } else if (media3Connections > 0) {
                 Log.i(PLAYER_LOG, "stage=player-detached instance=" + media3Connections)
             }
@@ -816,7 +800,6 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             if (tree.isAlive) tree.removeOnGlobalLayoutListener(overlayLayout)
             main.removeCallbacks(overlayCheck)
             overlayCheckQueued = false
-            media3Player?.removeListener(media3Listener)
             media3Player = null
             main.removeCallbacks(previewProbe)
             previewProbeScheduled = false

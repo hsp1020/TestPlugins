@@ -187,6 +187,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
             expected = null
             repaired.clear()
             clearRows()
+            Log.i(RECYCLER_LOG_TAG, "stage=provider-change generation=" + generation)
         }
         provider = next
     }
@@ -207,8 +208,10 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                         } || lists.all { it.list.list.isEmpty() }
                     ) {
                         expected = lists
+                        Log.i(RECYCLER_LOG_TAG, "stage=home-data-ready generation=" +
+                            generation + " rows=" + lists.size)
                         observeParent()
-                        scanRows()
+                        queueScan()
                     }
                 }
             }
@@ -251,6 +254,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     fun setRepairEnabled(value: Boolean) {
         if (repairEnabled == value) return
         repairEnabled = value
+        Log.i(RECYCLER_LOG_TAG, "stage=repair-setting enabled=" + value)
         main.post {
             if (!started) return@post
             val vm = model ?: return@post
@@ -446,35 +450,71 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private fun verify(child: RecyclerView) {
         val latest = expected ?: return
         val outer = root ?: return
-        if (outer.isComputingLayout || child.isComputingLayout) return
+        if (!repairEnabled || outer.isComputingLayout || child.isComputingLayout) return
         val parent = outer.adapter as? ParentItemAdapter ?: return
         val row = (0 until outer.childCount).map { outer.getChildAt(it) }
             .firstOrNull {
                 it.findViewById<RecyclerView>(R.id.home_child_recyclerview) === child
             } ?: return
         val holder = outer.findContainingViewHolder(row) ?: return
-        val item = parent.getItemOrNull(holder.bindingAdapterPosition - parent.headers) ?: return
-        if (!repairEnabled || latest.none {
+        val rowPosition = holder.bindingAdapterPosition
+        if (rowPosition < parent.headers || rowPosition == RecyclerView.NO_POSITION) return
+        val item = parent.getItemOrNull(rowPosition - parent.headers) ?: return
+        if (latest.none {
                 it.list.name == item.list.name &&
                     it.list.list.firstOrNull()?.url == item.list.list.firstOrNull()?.url
             }) return
-        if (row.findViewById<TextView>(R.id.home_child_more_info)?.text?.toString() != item.list.name) return
+        if (row.findViewById<TextView>(R.id.home_child_more_info)?.text?.toString() != item.list.name)
+            return
         val adapter = child.adapter as? HomeChildItemAdapter ?: return
-        for (pos in 0 until minOf(2, adapter.itemCount)) {
+        val seq = generation
+        val max = minOf(2, adapter.itemCount, item.list.list.size)
+        if (max == 0) return
+        // If child adapter is stale, refresh the parent row, not the stale child.
+        val wrongData = (0 until max).firstOrNull { pos ->
+            item.list.list[pos].url != adapter.getItemOrNull(pos)?.url
+        }
+        if (wrongData != null) {
+            val key = "parent:" + seq + ":" + System.identityHashCode(row) + ":" + item.list.name
+            if (!repaired.add(key)) return
+            Log.i(RECYCLER_LOG_TAG,
+                "stage=repair-parent generation=" + seq + " row=" + rowPosition +
+                    " stalePos=" + wrongData)
+            outer.post {
+                if (seq == generation && repairEnabled &&
+                    outer.adapter === parent && !outer.isComputingLayout &&
+                    parent.getItemOrNull(rowPosition - parent.headers)?.list?.name == item.list.name
+                ) {
+                    parent.notifyItemChanged(rowPosition)
+                } else {
+                    repaired.remove(key)
+                }
+            }
+            return
+        }
+        for (pos in 0 until max) {
             val card = adapter.getItemOrNull(pos) ?: continue
-            if (item.list.list.getOrNull(pos)?.url != card.url) continue
             val bound = child.findViewHolderForAdapterPosition(pos) ?: continue
-            if (bound.itemView.findViewById<TextView>(R.id.imageText)?.text?.toString() == card.name) continue
-            val key = "${System.identityHashCode(bound.itemView)}:${card.url}"
-            if (key in repaired) continue
-            val seq = generation
+            val shownTitle = bound.itemView.findViewById<TextView>(R.id.imageText)?.text?.toString()
+            // Once per provider generation, reload the first two images even if
+            // their title is correct, because the recycled drawable may be stale.
+            val forceRefresh = seq > 0
+            if (!forceRefresh && shownTitle == card.name) continue
+            val key = "card:" + seq + ":" + System.identityHashCode(bound.itemView) +
+                ":" + pos + ":" + card.url
+            if (!repaired.add(key)) continue
+            Log.i(RECYCLER_LOG_TAG,
+                "stage=repair-card generation=" + seq + " pos=" + pos +
+                    " forced=" + forceRefresh)
             child.post {
-                if (seq == generation && expected != null && !child.isComputingLayout &&
-                    child.adapter === adapter && adapter.getItemOrNull(pos)?.url == card.url &&
-                    child.findViewHolderForAdapterPosition(pos)?.itemView === bound.itemView &&
-                    repaired.add(key)
+                if (seq == generation && repairEnabled &&
+                    child.adapter === adapter && !child.isComputingLayout &&
+                    adapter.getItemOrNull(pos)?.url == card.url &&
+                    child.findViewHolderForAdapterPosition(pos)?.itemView === bound.itemView
                 ) {
                     adapter.notifyItemChanged(pos)
+                } else {
+                    repaired.remove(key)
                 }
             }
         }
