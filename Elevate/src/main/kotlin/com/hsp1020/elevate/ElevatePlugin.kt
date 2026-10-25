@@ -102,7 +102,6 @@ class ElevatePlugin : Plugin() {
             app = application
             performanceTrace = ElevatePerformanceTrace(application).also { it.start() }
             nativeRecyclerGuard = NativeRecyclerListenerGuard(application).also { it.start() }
-            nativeEpisodeOverlay = NativeEpisodeOverlayHook(application).also { it.start() }
             try {
                 val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
                 // Preserve the user's previous visible/hidden choice when changing to "ON = hide".
@@ -189,6 +188,14 @@ class ElevatePlugin : Plugin() {
         } else {
             episodeProgress?.stop()
             episodeProgress = null
+        }
+        if (enabled(ElevateFeature.EPISODE_OVERLAY)) {
+            if (nativeEpisodeOverlay == null) {
+                nativeEpisodeOverlay = NativeEpisodeOverlayHook(application).also { it.start() }
+            }
+        } else {
+            nativeEpisodeOverlay?.stop()
+            nativeEpisodeOverlay = null
         }
         if (enabled(ElevateFeature.AUDIO_TRACKS)) {
             if (audioSelector == null) {
@@ -676,6 +683,9 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         }
 
         fun detach() {
+            val restoreNativeList = fragment.isAdded && fragment.view === root &&
+                overlay?.isShown == true && filteredAdapter != null &&
+                list?.adapter === filteredAdapter
             if (fragment.player === wrapper) wrapper?.let { fragment.player = it.native }
             if (host?.callbacks === guardedCallbacks) host?.callbacks = callbacks
             host = null
@@ -688,6 +698,7 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             originalCardColors.clear()
             removeSelector()
             overlay?.background = oldBackground
+            if (restoreNativeList) fragment.showEpisodesOverlay()
             filteredAdapter = null
             model = null
             wrapper = null

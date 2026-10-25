@@ -30,6 +30,8 @@ internal enum class ElevateFeature(
         "Replace library covers via RPDB, XRDB, OPDB, AIORatings, TOP Posters or EasyRatingsDB."),
     EPISODE_PROGRESS("Home & Library", "Episode Progress Indicators",
         "Show watched progress on large episode thumbnails."),
+    EPISODE_OVERLAY("Playback & Subtitles", "Player Episode List",
+        "Keep playback running when browsing episodes, with a season dropdown and translucent cards."),
     EMBEDDED_SUBTITLES("Playback & Subtitles", "Embedded Subtitle Management",
         "Prefer matching embedded subtitles and discard stale tracks when videos change."),
     AUDIO_TRACKS("Playback & Subtitles", "Automatic Audio Language",
