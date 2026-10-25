@@ -3230,9 +3230,21 @@ class YoutubeProvider(
         }
     }
 
-    /** Fetch recommendations only after native stream links have been resolved. */
+    /** Supply an instant, network-free Shorts detail fallback for an early Back. */
+    internal fun cacheShortsReturnPage(url: String, page: TvSeriesLoadResponse) {
+        if (!url.contains("/shorts/")) return
+        if (directPageCache.size >= 16) directPageCache.clear()
+        directPageCache[url] = System.currentTimeMillis() to page
+    }
+
+    /** Fetch detailed metadata only after native stream links have been resolved.
+     * Shorts use the full detail path here so the card's channel information,
+     * view count, and recommendation data are retained when available.
+     * This IO never blocks the direct-play launch.
+     */
     internal suspend fun prefetchDirectDetails(url: String): TvSeriesLoadResponse? {
-        val page = loadPage(url, direct = true) as? TvSeriesLoadResponse ?: return null
+        val page = loadPage(url, direct = !url.contains("/shorts/"))
+            as? TvSeriesLoadResponse ?: return null
         if (directPageCache.size >= 16) directPageCache.clear()
         directPageCache[url] = System.currentTimeMillis() to page
         return page

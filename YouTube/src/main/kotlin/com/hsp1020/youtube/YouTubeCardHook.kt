@@ -167,7 +167,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 model.state.links.isEmpty() ||
                 directPlayback !== session) return@observe
             session.prefetchStarted = true
-            if (session.card.url.contains("/shorts/")) return@observe
             fragment.viewLifecycleOwner.lifecycleScope.launch {
                 val full = try {
                     withContext(Dispatchers.IO) {
@@ -220,6 +219,24 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                             allMeta = session.episodes,
                         ))
                     }
+                    // Native GeneratorPlayer updates the next button mainly in
+                    // playerPositionChanged(). If recommendations arrived later
+                    // (or playback is paused/buffering), its previous GONE state
+                    // otherwise lingers despite the episodes overlay being populated.
+                    // Synchronize the existing native controls once, on actual
+                    // episode-list growth. The native click listeners remain intact.
+                    if (model.hasNextEpisode() == true) {
+                        val root = fragment.view
+                        if (Globals.isLayout(Globals.PHONE)) {
+                            root?.findViewById<View>(R.id.player_skip_episode)?.visibility =
+                                View.VISIBLE
+                        } else {
+                            root?.findViewById<View>(R.id.player_go_forward_root)?.visibility =
+                                View.VISIBLE
+                            root?.findViewById<View>(R.id.player_go_forward)?.visibility =
+                                View.VISIBLE
+                        }
+                    }
                 }
             }
         }
@@ -238,6 +255,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             // Construct episodes from the Home card and existing Shorts list only.
             // No HTTP or full-detail Fragment is involved in launching playback.
             val page = api.quickPlaybackPage(card)
+            api.cacheShortsReturnPage(card.url, page)
             val parentId = page.uniqueUrl.replace(api.mainUrl, "")
                 .replace("/", "").hashCode()
             val initial = page.episodes.sortedBy {
