@@ -1,6 +1,7 @@
 package com.hsp1020.youtube
 
 import com.lagradost.cloudstream3.CloudStreamApp
+import com.lagradost.cloudstream3.utils.DataStoreHelper
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mvvm.logError
@@ -727,7 +728,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         callback(
             newExtractorLink(
-                this@YoutubeExtractor.name,
+                "YouTube (HLS)",
                 "YouTube Auto (HLS)",
                 finalHlsUrl,
                 type = ExtractorLinkType.M3U8
@@ -756,7 +757,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 if (directUrl.isNotEmpty() && height > 0) {
                     callback(
                         newExtractorLink(
-                            this@YoutubeExtractor.name,
+                            "YouTube (MP4) ${height}p",
                             "YouTube ${height}p (MP4)",
                             directUrl,
                             type = ExtractorLinkType.VIDEO
@@ -945,7 +946,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val finalName = "YouTube ${video.label} (DASH)"
                     callback(
                         newExtractorLink(
-                            this@YoutubeExtractor.name, finalName, localLink, type = ExtractorLinkType.DASH
+                            "YouTube (DASH) ${video.label}", finalName, localLink, type = ExtractorLinkType.DASH
                         ) {
                             this.referer = mainUrl
                             this.quality = video.height
@@ -972,6 +973,21 @@ open class YoutubeExtractor : ExtractorApi() {
         val langCode = prefs?.getString("youtube_language", "en") ?: "en"
         val downloaderType = prefs?.getString("downloader_app_type", "none") ?: "none"
         val customPkg = prefs?.getString("downloader_custom_package", "") ?: ""
+
+        // The global source-priority dialog discovers names from saved priority
+        // keys, while the player discovers them from ExtractorLink.source.
+        // Register only sources actually found, using CloudStream's neutral
+        // default priority (1), without overwriting user-defined priorities.
+        val discovered = HashSet<String>()
+        val sourceCallback: (ExtractorLink) -> Unit = { link ->
+            if (discovered.add(link.source)) {
+                val folder = "${DataStoreHelper.currentAccount}/video_source_priority/1"
+                if (CloudStreamApp.getKey<Int>(folder, link.source) == null) {
+                    CloudStreamApp.setKey(folder, link.source, 1)
+                }
+            }
+            callback(link)
+        }
 
         val (pkgName, appName) = when (downloaderType) {
             "ytdlnis" -> Pair("com.deniscerri.ytdl", "YTDLnis")
@@ -1043,9 +1059,9 @@ open class YoutubeExtractor : ExtractorApi() {
                 val isLive = playerResponse.optJSONObject("videoDetails")?.optBoolean("isLive") ?: false
 
                 if (isLive && hlsUrl.isNotBlank()) {
-                    callback(
+                    sourceCallback(
                         newExtractorLink(
-                            this@YoutubeExtractor.name,
+                            "YouTube (HLS) Live",
                             "YouTube Live (HLS)",
                             hlsUrl,
                             type = ExtractorLinkType.M3U8
@@ -1059,16 +1075,16 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 if (hlsUrl.isNotBlank()) {
-                    parseHlsManifest(hlsUrl, playerId, callback)
+                    parseHlsManifest(hlsUrl, playerId, sourceCallback)
                 }
 
-                parseAdaptiveFormats(streamingData, playerId, durationSeconds, langCode, callback)
+                parseAdaptiveFormats(streamingData, playerId, durationSeconds, langCode, sourceCallback)
 
                 if (dashUrl.isNotBlank()) {
                     val finalDashUrl = if (playerId.isNotBlank()) deobfuscateManifestUrl(dashUrl, playerId) else dashUrl
-                    callback(
+                    sourceCallback(
                         newExtractorLink(
-                            this@YoutubeExtractor.name,
+                            "YouTube (DASH) Auto",
                             "YouTube Auto (DASH)",
                             finalDashUrl,
                             type = ExtractorLinkType.DASH
@@ -1083,7 +1099,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 val originalUrl = "https://www.youtube.com/watch?v=$videoId"
                 if (pkgName.isNotEmpty()) {
                     val redirectUrl = getAppRedirectUrl(pkgName, originalUrl) ?: originalUrl
-                    callback(newExtractorLink(
+                    sourceCallback(newExtractorLink(
                         source = "YouTube Downloader", 
                         name = "$appName Download", 
                         url = redirectUrl, 
