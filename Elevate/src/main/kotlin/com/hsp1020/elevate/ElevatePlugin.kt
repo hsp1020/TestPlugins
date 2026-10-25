@@ -72,6 +72,7 @@ class ElevatePlugin : Plugin() {
     private var episodeProgress: EpisodeProgressHook? = null
     private var subtitleRetry: SubtitleRefererRetry? = null
     private var homeRecyclerGuard: HomeRecyclerCacheGuard? = null
+    private var liveHomeAutoplay: LiveHomeAutoplayHook? = null
     private var nativeRecyclerGuard: NativeRecyclerListenerGuard? = null
     private var searchProviderOrder: SearchProviderOrderHook? = null
     private var audioSelector: ElevateAudioTrackSelector? = null
@@ -179,6 +180,12 @@ class ElevatePlugin : Plugin() {
             homeRecyclerGuard?.stop()
             homeRecyclerGuard = null
         }
+        if (enabled(ElevateFeature.LIVE_HOME_AUTOPLAY)) {
+            if (liveHomeAutoplay == null) liveHomeAutoplay = LiveHomeAutoplayHook(application).also { it.start() }
+        } else {
+            liveHomeAutoplay?.stop()
+            liveHomeAutoplay = null
+        }
         if (enabled(ElevateFeature.LIBRARY_POSTERS)) {
             if (libraryPosters == null) libraryPosters = LibraryPosterHook(application).also { it.start() }
         } else {
@@ -261,6 +268,8 @@ class ElevatePlugin : Plugin() {
         subtitleRetry = null
         homeRecyclerGuard?.stop()
         homeRecyclerGuard = null
+        liveHomeAutoplay?.stop()
+        liveHomeAutoplay = null
         nativeRecyclerGuard?.stop()
         nativeRecyclerGuard = null
         searchProviderOrder?.stop()

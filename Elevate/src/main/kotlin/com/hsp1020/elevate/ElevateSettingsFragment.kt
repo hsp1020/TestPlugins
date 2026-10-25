@@ -24,6 +24,8 @@ internal enum class ElevateFeature(
         "Use saved provider order on Home and Search, including related search providers."),
     HERO_CAROUSEL("Home & Library", "Hide Home Hero Carousel",
         "Hide the featured Home banner while keeping search and profile controls available."),
+    LIVE_HOME_AUTOPLAY("Home & Library", "Live Home Autoplay",
+        "Play live streams directly when selecting a Home catalog card; keep native player back navigation."),
     HOME_REPAIR("Home & Library", "Home Poster Refresh",
         "Repair stale Home cards when switching providers."),
     LIBRARY_POSTERS("Home & Library", "Custom Library Posters",
@@ -49,7 +51,9 @@ internal enum class ElevateFeature(
 internal object ElevateFeaturePrefs {
     const val FILE = "ElevateFeatures"
     fun defaultEnabled(feature: ElevateFeature): Boolean =
-        feature != ElevateFeature.HERO_CAROUSEL && feature != ElevateFeature.LIBRARY_POSTERS
+        feature != ElevateFeature.HERO_CAROUSEL &&
+            feature != ElevateFeature.LIBRARY_POSTERS &&
+            feature != ElevateFeature.LIVE_HOME_AUTOPLAY
     fun enabled(context: Context, feature: ElevateFeature): Boolean =
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
             .getBoolean(feature.name, defaultEnabled(feature))
