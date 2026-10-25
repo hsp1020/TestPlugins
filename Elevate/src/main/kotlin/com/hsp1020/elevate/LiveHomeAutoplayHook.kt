@@ -2,27 +2,29 @@ package com.hsp1020.elevate
 
 import android.app.Activity
 import android.app.Application
-import com.google.android.material.bottomsheet.BottomSheetDialog
+import android.content.Context
+import android.content.ContextWrapper
+import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.view.ViewTreeObserver
+import android.view.inspector.WindowInspector
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
-import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.APIHolder.getApiFromNameNull
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
-import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.ui.result.START_ACTION_LOAD_EP
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
 import com.lagradost.cloudstream3.ui.search.SearchClickCallback
-import com.lagradost.cloudstream3.utils.AppContextUtils.ownHide
+import com.lagradost.cloudstream3.ui.search.SearchHelper.handleSearchClickCallback
 import com.lagradost.cloudstream3.utils.AppContextUtils.loadSearchResult
 
 /**
@@ -36,15 +38,19 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
     private var home: Fragment? = null
     private var list: RecyclerView? = null
     private var parentAdapter: RecyclerView.Adapter<*>? = null
+    private var popupList: RecyclerView? = null
     private var popupAdapter: SearchAdapter? = null
-    private var originalPopupClick: ((SearchClickCallback) -> Unit)? = null
+    private var popupScanPending = false
+    private var focusTree: ViewTreeObserver? = null
+    private val focusListener = ViewTreeObserver.OnWindowFocusChangeListener {
+        list?.post { if (enabled) discoverPopup() }
+    }
     private var enabled = false
     private var pendingTree: ViewTreeObserver? = null
     private var pendingDraw: ViewTreeObserver.OnPreDrawListener? = null
 
     private inner class LiveClick(
-        val original: (SearchClickCallback) -> Unit,
-        val afterLive: (() -> Unit)? = null
+        val original: (SearchClickCallback) -> Unit
     ) : (SearchClickCallback) -> Unit {
         override fun invoke(event: SearchClickCallback) {
             val card = event.card
@@ -61,7 +67,6 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
             // The core builds a single movie/live episode with this ID.
             val id = card.url.replace(api.mainUrl, "").replace("/", "").hashCode()
             loadSearchResult(card, START_ACTION_LOAD_EP, id)
-            afterLive?.invoke()
         }
     }
 
@@ -137,63 +142,148 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
         list = recycler
         recycler.addOnChildAttachStateChangeListener(attaches)
         scan()
-        // The expanded Home catalog uses a separate native SearchAdapter.
-        val activity = host ?: return
-        ViewModelProvider(activity)[HomeViewModel::class.java].popup
-            .observe(fragment.viewLifecycleOwner) { value ->
-                if (value == null) unbindPopup()
-                else root.post { if (home === fragment) bindPopup(fragment) }
-            }
         // Native parent rows can be attached/bound after this fragment callback.
         // Match the first verified working version's deferred re-scan.
         recycler.post { if (home === fragment && list === recycler) scan() }
     }
 
-    private fun bindPopup(fragment: Fragment) {
-        val dialog = try {
-            fragment.javaClass.getDeclaredField("bottomSheetDialog").apply {
-                isAccessible = true
-            }.get(fragment) as? BottomSheetDialog
-        } catch (_: ReflectiveOperationException) {
-            null
-        } catch (_: SecurityException) {
-            null
-        } ?: return
-
-        val adapter = dialog.findViewById<RecyclerView>(R.id.home_expanded_recycler)
-            ?.adapter as? SearchAdapter ?: return
-        if (adapter === popupAdapter) return
+    // Same public window/card-view approach as YouTubeCardHook. No access to
+    // HomeFragment.bottomSheetDialog or SearchAdapter.clickCallback.
+    private fun discoverPopup() {
+        val activity = host ?: return
+        val windows: List<View> = if (Build.VERSION.SDK_INT >= 29) {
+            WindowInspector.getGlobalWindowViews()
+        } else {
+            // Match the existing YouTube compatibility path on Android 9 and below.
+            runCatching {
+                val type = Class.forName("android.view.WindowManagerGlobal")
+                val manager = type.getMethod("getInstance").invoke(null)
+                @Suppress("UNCHECKED_CAST")
+                type.getDeclaredField("mViews").apply { isAccessible = true }
+                    .get(manager) as List<View>
+            }.getOrDefault(emptyList())
+        }
+        for (window in windows) {
+            if (!window.isAttachedToWindow || windowOwner(window.context) !== activity) continue
+            val recycler = window.findViewById<RecyclerView>(R.id.home_expanded_recycler)
+                ?: continue
+            if (recycler.adapter !is SearchAdapter) continue
+            if (popupList !== recycler || popupAdapter !== recycler.adapter) attachPopup(recycler)
+            return
+        }
         unbindPopup()
-        try {
-            val field = SearchAdapter::class.java.getDeclaredField("clickCallback")
-                .apply { isAccessible = true }
-            @Suppress("UNCHECKED_CAST")
-            val original = field.get(adapter) as? ((SearchClickCallback) -> Unit) ?: return
-            if (original is LiveClick) return
-            field.set(adapter, LiveClick(original) { dialog.ownHide() })
-            popupAdapter = adapter
-            originalPopupClick = original
-            // The native SearchAdapter binds its click listener, so rebind
-            // only this popup once to apply the existing click callback.
-            if (adapter.itemCount > 0) adapter.notifyItemRangeChanged(0, adapter.itemCount)
-        } catch (_: ReflectiveOperationException) {
-            unbindPopup()
-        } catch (_: SecurityException) {
-            unbindPopup()
+    }
+
+    private fun windowOwner(context: Context): Activity? {
+        var current = context
+        repeat(12) {
+            if (current is Activity) return current
+            current = (current as? ContextWrapper)?.baseContext ?: return null
+        }
+        return null
+    }
+
+    private fun attachPopup(recycler: RecyclerView) {
+        unbindPopup()
+        val adapter = recycler.adapter as? SearchAdapter ?: return
+        popupList = recycler
+        popupAdapter = adapter
+        adapter.registerAdapterDataObserver(popupChanges)
+        recycler.addOnChildAttachStateChangeListener(popupAttaches)
+        scanPopup()
+    }
+
+    private val popupChanges = object : RecyclerView.AdapterDataObserver() {
+        override fun onChanged() = schedulePopupScan()
+        override fun onItemRangeChanged(start: Int, count: Int) = schedulePopupScan()
+        override fun onItemRangeInserted(start: Int, count: Int) = schedulePopupScan()
+        override fun onItemRangeRemoved(start: Int, count: Int) = schedulePopupScan()
+        override fun onItemRangeMoved(from: Int, to: Int, count: Int) = schedulePopupScan()
+    }
+
+    private val popupAttaches = object : RecyclerView.OnChildAttachStateChangeListener {
+        override fun onChildViewAttachedToWindow(view: View) {
+            val recycler = popupList ?: return
+            view.post {
+                if (popupList === recycler && view.parent === recycler) {
+                    applyPopupCard(recycler, view)
+                }
+            }
+        }
+        override fun onChildViewDetachedFromWindow(view: View) = Unit
+    }
+
+    private fun schedulePopupScan() {
+        val recycler = popupList ?: return
+        if (popupScanPending) return
+        popupScanPending = true
+        recycler.post {
+            popupScanPending = false
+            if (popupList === recycler) scanPopup()
         }
     }
 
+    private fun scanPopup() {
+        val recycler = popupList ?: return
+        if (recycler.adapter !== popupAdapter) {
+            attachPopup(recycler)
+            return
+        }
+        for (index in 0 until recycler.childCount) {
+            applyPopupCard(recycler, recycler.getChildAt(index))
+        }
+    }
+
+    private fun applyPopupCard(recycler: RecyclerView, view: View) {
+        val adapter = recycler.adapter as? SearchAdapter ?: return
+        val position = recycler.getChildViewHolder(view).bindingAdapterPosition
+        if (position == RecyclerView.NO_POSITION) return
+        val card = adapter.getItemOrNull(position) as? SearchResponse ?: return
+        if (card.type != TvType.Live) return
+        val background = view.findViewById<View>(R.id.background_card) ?: return
+
+        // Only live cards are changed. Native SearchAdapter still owns the
+        // poster, focus, long-press, and every other card's click handling.
+        val click = View.OnClickListener { clicked ->
+            val currentPosition = recycler.getChildViewHolder(view).bindingAdapterPosition
+            if (currentPosition == RecyclerView.NO_POSITION) return@OnClickListener
+            val current = (recycler.adapter as? SearchAdapter)
+                ?.getItemOrNull(currentPosition) as? SearchResponse ?: return@OnClickListener
+            val api = if (enabled && current.type == TvType.Live) {
+                getApiFromNameNull(current.apiName)
+            } else null
+            if (api == null) {
+                // During adapter changes or while switching OFF, retain native
+                // navigation instead of swallowing a card click.
+                handleSearchClickCallback(
+                    SearchClickCallback(SEARCH_ACTION_LOAD, clicked, currentPosition, current)
+                )
+                return@OnClickListener
+            }
+            val id = current.url.replace(api.mainUrl, "").replace("/", "").hashCode()
+            loadSearchResult(current, START_ACTION_LOAD_EP, id)
+            // HomeFragment.onDestroyView() performs its native ownHide().
+        }
+        view.setOnClickListener(click)
+        background.setOnClickListener(click)
+    }
+
     private fun unbindPopup() {
+        val recycler = popupList
         val adapter = popupAdapter
-        val original = originalPopupClick
+        popupList = null
         popupAdapter = null
-        originalPopupClick = null
-        if (adapter != null && original != null) try {
-            val field = SearchAdapter::class.java.getDeclaredField("clickCallback")
-                .apply { isAccessible = true }
-            if (field.get(adapter) is LiveClick) field.set(adapter, original)
-        } catch (_: ReflectiveOperationException) {
-        } catch (_: SecurityException) {
+        popupScanPending = false
+        recycler?.removeOnChildAttachStateChangeListener(popupAttaches)
+        adapter?.unregisterAdapterDataObserver(popupChanges)
+        // Native SearchResultBuilder.bind() restores the click listeners;
+        // do not retain or reflectively access the private native callback.
+        if (recycler != null && adapter != null && recycler.isAttachedToWindow) {
+            recycler.post {
+                if (recycler.adapter === adapter && adapter.itemCount > 0) {
+                    adapter.notifyItemRangeChanged(0, adapter.itemCount)
+                }
+            }
         }
     }
 
@@ -224,9 +314,15 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
     private fun use(activity: FragmentActivity) {
         if (host === activity) return
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
+        focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
+        focusTree = null
         unbindHome()
         host = activity
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
+        activity.window.decorView.viewTreeObserver.also { tree ->
+            focusTree = tree
+            if (tree.isAlive) tree.addOnWindowFocusChangeListener(focusListener)
+        }
         fun scanFragments(fm: FragmentManager) {
             for (fragment in fm.fragments) {
                 if (fragment.javaClass.name == HOME_CLASS) fragment.view?.let { bindHome(fragment, it) }
@@ -234,6 +330,7 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
             }
         }
         scanFragments(activity.supportFragmentManager)
+        activity.window.decorView.post { if (host === activity) discoverPopup() }
     }
 
     fun start() {
@@ -246,6 +343,8 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
         enabled = false
         app.unregisterActivityLifecycleCallbacks(this)
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
+        focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
+        focusTree = null
         unbindHome()
         host = null
     }
@@ -256,6 +355,8 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
     override fun onActivityDestroyed(activity: Activity) {
         if (host === activity) {
             host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
+            focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
+            focusTree = null
             unbindHome()
             host = null
         }
