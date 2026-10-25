@@ -22,6 +22,7 @@ import com.lagradost.cloudstream3.ui.result.ActorAdaptor
 import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
+import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.result.START_ACTION_LOAD_EP
 import android.widget.TextView
 import androidx.fragment.app.Fragment
@@ -50,24 +51,46 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     }
     private val screens = mutableMapOf<Fragment, Screen>()
     private val dialogs = mutableMapOf<View, Screen>()
+    private data class PlayedEpisode(val videoId: String, val number: Int)
+    private val playedEpisodes = mutableMapOf<Int, PlayedEpisode>()
+
+    private fun recordPlayerEpisode(fragment: Fragment) {
+        if (fragment.javaClass.name != PLAYER_SCREEN) return
+        val episode = runCatching {
+            ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
+                .state.generatorState?.meta as? ResultEpisode
+        }.getOrNull() ?: return
+        if (episode.apiName != "YouTube") return
+        val videoId = YoutubeUtils.extractYoutubeId(episode.data) ?: return
+        if (playedEpisodes.size >= 32) playedEpisodes.clear()
+        playedEpisodes[episode.parentId] = PlayedEpisode(videoId, episode.episode)
+    }
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentPreCreated(fm: FragmentManager, f: Fragment, state: Bundle?) {
             if (f.javaClass.name !in DETAIL_SCREENS) return
             val args = f.arguments ?: return
             if (args.getString("apiName") != "YouTube") return
             val pageUrl = args.getString("url") ?: return
-            val selected = YoutubeProvider.homeShortIndex(pageUrl) ?: return
-            val videoId = YoutubeUtils.extractYoutubeId(pageUrl) ?: return
-            // Mirrors the core's LoadResponse ID and TvSeries episode ID formula.
+            // Do not override an explicit resume/episode action.
+            if (args.getInt("startAction", 0) != 0) return
+            val selected = when {
+                pageUrl.contains("/shorts/") -> YoutubeProvider.homeShortIndex(pageUrl)
+                pageUrl.contains("/watch?v=") && !pageUrl.contains("list=") -> 0
+                else -> null
+            } ?: return
+            // Mirrors the core's TvSeries ResultEpisode ID: mainId + episode + 1.
             val mainId = pageUrl.replace("https://www.youtube.com", "").replace("/", "").hashCode()
             args.putInt("startAction", START_ACTION_LOAD_EP)
             args.putInt("startValue", mainId + selected + 2)
-            args.putString(HOME_SHORT_ID_KEY, videoId)
-            args.putInt(HOME_SHORT_NUMBER_KEY, selected + 1)
         }
 
         override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
+            recordPlayerEpisode(f)
             screens[f]?.pagePaused()
+        }
+
+        override fun onFragmentStopped(fm: FragmentManager, f: Fragment) {
+            recordPlayerEpisode(f)
         }
 
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
@@ -101,6 +124,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         dialogs.clear()
         screens.values.toList().forEach { it.close() }
         screens.clear()
+        playedEpisodes.clear()
         host = null
     }
 
@@ -169,30 +193,32 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
     private inner class Screen(val root: View, popup: Boolean = false, private val fragment: Fragment? = null) {
         private val watchers = mutableMapOf<RecyclerView, Watcher>()
-        private val selectedShort = fragment?.arguments?.getString(HOME_SHORT_ID_KEY)
+        private val pageUrl = fragment?.arguments?.getString("url").orEmpty()
+        private val pageId = pageUrl.takeIf {
+            fragment?.arguments?.getString("apiName") == "YouTube" &&
+                (it.contains("/shorts/") || it.contains("/watch?v="))
+        }?.replace("https://www.youtube.com", "")?.replace("/", "")?.hashCode()
         private var leftDetail = false
-        private var focusReturned = false
         private var pendingFocus: String? = null
         private var focusPosted = false
 
         fun pagePaused() {
-            if (selectedShort != null) leftDetail = true
+            if (pageId != null) leftDetail = true
         }
 
         fun pageResumed() {
-            if (!leftDetail || focusReturned || selectedShort == null) return
+            if (!leftDetail) return
             leftDetail = false
-            focusReturned = true
-            pendingFocus = selectedShort
+            val selected = pageId?.let(playedEpisodes::remove) ?: return
+            pendingFocus = selected.videoId
             val host = fragment ?: return
             val list = root.findViewById<RecyclerView>(R.id.result_episodes) ?: return
             val position = (list.adapter as? EpisodeAdapter)?.immutableCurrentList
-                ?.indexOfFirst { YoutubeUtils.extractYoutubeId(it.data) == selectedShort } ?: -1
+                ?.indexOfFirst { YoutubeUtils.extractYoutubeId(it.data) == selected.videoId } ?: -1
             if (position < 0) {
-                val number = host.arguments?.getInt(HOME_SHORT_NUMBER_KEY) ?: return
                 val model = ViewModelProvider(host)[ResultViewModel2::class.java]
                 model.rangeSelections.value?.firstOrNull {
-                    number in it.second.startEpisode..it.second.endEpisode
+                    selected.number in it.second.startEpisode..it.second.endEpisode
                 }?.second?.let(model::changeRange)
             }
             focusSelectedEpisode(list)
@@ -590,8 +616,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private enum class Role { HOME_PARENT, SEARCH_PARENT, HOME_CARD, SEARCH_CARD, SEARCH_GRID, DIALOG_GRID, RESUME_CARD, DETAIL_RECOMMEND, DETAIL_EPISODE, DETAIL_CAST }
 
     private companion object {
-        const val HOME_SHORT_ID_KEY = "youtube_home_short_video"
-        const val HOME_SHORT_NUMBER_KEY = "youtube_home_short_number"
+        const val PLAYER_SCREEN = "com.lagradost.cloudstream3.ui.player.GeneratorPlayer"
         val DETAIL_SCREENS = setOf(
             "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
             "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer",
