@@ -35,7 +35,8 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private var parentAdapter: RecyclerView.Adapter<*>? = null
     private var provider: String? = null
     private var pendingProvider: String? = null
-    private var currentPageLoadingObserved = false
+    private var previousProvider: String? = null
+    private var observedPendingLoading = false
     private var expected: List<HomeViewModel.ExpandableHomepageList>? = null
     private var generation = 0
     private val watched = mutableMapOf<RecyclerView, RowWatch>()
@@ -67,7 +68,8 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
             val previous = provider
             generation++
             pendingProvider = next
-            currentPageLoadingObserved = false
+            previousProvider = previous
+            observedPendingLoading = false
             expected = null
             repaired.clear()
             traced.clear()
@@ -85,14 +87,15 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
             }
             when (result) {
                 is Resource.Loading -> {
-                    currentPageLoadingObserved = true
+                    observedPendingLoading = true
                     expected = null
                     traceOnce("loading", "page-loading", "expectedCleared=true")
                 }
                 is Resource.Failure -> {
                     traceOnce("failure", "page-failure", "pendingCleared=true")
                     pendingProvider = null
-                    currentPageLoadingObserved = false
+                    previousProvider = null
+                    observedPendingLoading = false
                     expected = null
                     clearRows()
                 }
@@ -102,8 +105,22 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                         row.list.list.firstOrNull()?.apiName == pendingProvider
                     }
                     val allEmpty = lists.all { it.list.list.isEmpty() }
+                    val sourceNames = lists.mapNotNull {
+                        it.list.list.firstOrNull()?.apiName
+                    }.toSet()
+                    // The selected homepage can be an aggregate (e.g. OTT)
+                    // whose catalogs legitimately contain several other API
+                    // names. The VM's current provider and its fresh Loading
+                    // event identify this response; never require a card's
+                    // apiName to equal the aggregate's display name.
+                    val groupedPage = !providerPresent && !allEmpty &&
+                        observedPendingLoading && model?.apiName?.value == pendingProvider &&
+                        sourceNames.isNotEmpty() &&
+                        sourceNames.any { it != previousProvider }
                     traceOnce("page-success", "page-success", "rows=" + lists.size +
-                        " providerPresent=" + providerPresent + " allEmpty=" + allEmpty)
+                        " providerPresent=" + providerPresent + " allEmpty=" + allEmpty +
+                        " groupedPage=" + groupedPage + " loadingSeen=" + observedPendingLoading +
+                        " sourceCount=" + sourceNames.size)
                     // Log every catalog from every selected home provider. Only
                     // identifiers/hashes are logged; no poster URLs/API tokens.
                     lists.forEachIndexed { index, row ->
@@ -119,36 +136,16 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                                 " secondUrlHash=" + hash(two?.url) +
                                 " secondPosterHash=" + hash(two?.posterUrl))
                     }
-                    // Home API names can represent an aggregate catalogue (e.g.
-                    // OTT), while SearchResponse.apiName names individual
-                    // providers such as TVChak and TVWiki. The old equality
-                    // check rejected valid aggregate pages, disabling all
-                    // stale-poster repair after a provider switch.
-                    //
-                    // Accept mixed-provider data only after this selection
-                    // actually entered Loading and is still the selected API.
-                    // This protects against accepting a late success from a
-                    // previously selected home provider.
-                    val currentSelection = model?.apiName?.value == pendingProvider &&
-                        provider == pendingProvider
-                    val compositePage = !providerPresent && !allEmpty &&
-                        currentPageLoadingObserved && currentSelection
-                    if (providerPresent || allEmpty || compositePage) {
-                        if (compositePage) {
-                            traceOnce("page-accepted-aggregate", "page-accepted-aggregate",
-                                "rows=" + lists.size + " selection=" + pendingProvider +
-                                    " firstApi=" + lists.firstOrNull()
-                                        ?.list?.list?.firstOrNull()?.apiName)
-                        }
+                    if (providerPresent || allEmpty || groupedPage) {
                         expected = lists
+                        traceOnce("page-accepted", "page-accepted",
+                            "mode=" + if (providerPresent) "direct" else if (allEmpty) "empty" else "grouped")
                         observeParent()
+                        scanRows()
                         queueScan()
                     } else {
                         traceOnce("page-rejected", "page-rejected",
-                            "reason=provider-not-current-or-no-loading" +
-                                " selected=" + model?.apiName?.value +
-                                " loadingSeen=" + currentPageLoadingObserved +
-                                " providerPresent=" + providerPresent)
+                            "reason=no-content-with-selected-provider")
                     }
                 }
             }
@@ -235,7 +232,8 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         activity = null
         provider = null
         pendingProvider = null
-        currentPageLoadingObserved = false
+        previousProvider = null
+        observedPendingLoading = false
         expected = null
         repaired.clear()
     }
@@ -420,16 +418,46 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                     " parentMatches=" + parentMatches +
                     " titleMatches=" + titleMatches)
             if (!parentMatches) {
-                traceOnce("skip:mismatch:" + rowKey + ":" + pos, "card-skipped",
+                // A stale child adapter cannot be fixed by rebinding its own
+                // ViewHolder: it still holds the previous provider's items.
+                // Ask the native parent to rebind this row so onBindContent()
+                // submits the CURRENT parent list to the child adapter.
+                val parentPosition = holder.bindingAdapterPosition
+                val parentKey = "parent:" + generation + ":" +
+                    System.identityHashCode(row) + ":" + item.list.name
+                traceOnce("mismatch:" + rowKey + ":" + pos, "child-parent-mismatch",
                     "row=" + item.list.name + " pos=" + pos +
-                        " reason=child-parent-url-mismatch")
-                continue
+                        " parentHash=" + hash(parentCard?.url) +
+                        " childHash=" + hash(card.url))
+                if (parentPosition != RecyclerView.NO_POSITION &&
+                    repaired.add(parentKey)
+                ) {
+                    val seq = generation
+                    outer.post {
+                        if (seq == generation && expected != null &&
+                            !outer.isComputingLayout && outer.adapter === parent &&
+                            holder.bindingAdapterPosition == parentPosition
+                        ) {
+                            Log.i("Elevate-HomePoster",
+                                "generation=" + seq + " event=parent-refresh-dispatched" +
+                                    " row=" + item.list.name + " pos=" + parentPosition)
+                            parent.notifyItemChanged(parentPosition)
+                        } else {
+                            repaired.remove(parentKey)
+                        }
+                    }
+                }
+                return
             }
             if (bound == null) continue
-            if (titleMatches) {
+            // A recycled ImageView can still display the previous provider's
+            // image even when its new title and URL already match. Rebind
+            // at most once per visible holder/card in each provider generation.
+            val refreshAfterSwitch = generation > 1
+            if (titleMatches && !refreshAfterSwitch) {
                 traceOnce("skip:title:" + rowKey + ":" + pos, "card-skipped",
                     "row=" + item.list.name + " pos=" + pos +
-                        " reason=title-matches-image-not-verified")
+                        " reason=title-matches-no-provider-switch")
                 continue
             }
             val key = "${System.identityHashCode(bound.itemView)}:${card.url}"
@@ -449,6 +477,9 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                         "generation=" + seq + " event=repair-executed" +
                             " provider=" + provider + " row=" + item.list.name +
                             " pos=" + pos + " cardHash=" + hash(card.url))
+                    Log.i("Elevate-HomePoster", "generation=" + seq +
+                        " event=refresh-dispatched row=" + item.list.name +
+                        " pos=" + pos + " forcedBySwitch=" + (boundTitle == card.name))
                     adapter.notifyItemChanged(pos)
                 } else {
                     traceOnce("repair:not-executed:" + rowKey + ":" + pos, "repair-not-executed",
