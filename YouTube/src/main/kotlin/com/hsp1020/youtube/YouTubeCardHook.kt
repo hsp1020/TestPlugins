@@ -11,6 +11,9 @@ import android.os.Bundle
 import androidx.navigation.NavOptions
 import android.widget.Toast
 import android.view.View
+import android.view.MotionEvent
+import android.view.animation.AccelerateDecelerateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.view.inspector.WindowInspector
@@ -400,6 +403,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             private val modified = IdentityHashMap<View, CardState>()
             private val episodeSizes = IdentityHashMap<View, Pair<View, Pair<Int, Int>>>()
             private val directClicks = IdentityHashMap<View, View.OnClickListener>()
+            private val castViews = IdentityHashMap<View, Boolean>()
             private var observed: RecyclerView.Adapter<*>? = null
             private var visibleShorts: Boolean? = null
             private var adaptiveRemeasurePosted = false
@@ -431,7 +435,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                         }
                     } else if (role == Role.DETAIL_EPISODE) {
                         restoreEpisode(view)
-                    } else if (role != Role.DETAIL_CAST) {
+                    } else if (role == Role.DETAIL_CAST) {
+                        restoreCast(view)
+                    } else {
                         directClicks.remove(view)
                         restore(view)
                     }
@@ -458,6 +464,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 modified.keys.toList().forEach(::restore)
                 modified.clear()
                 episodeSizes.keys.toList().forEach(::restoreEpisode)
+                castViews.keys.toList().forEach(::restoreCast)
                 directClicks.clear()
                 visibleShorts = null
                 adaptiveRemeasurePosted = false
@@ -645,6 +652,55 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 }
             }
 
+            /** Restore modified cast holders before RecyclerView recycles them. */
+            private fun restoreCast(view: View) {
+                if (castViews.remove(view) == null) return
+                view.setOnTouchListener(null)
+                view.setOnClickListener(null)
+                view.setOnLongClickListener(null)
+                view.isClickable = false
+                view.isLongClickable = false
+                // cast_item.xml defines this root as focusable by default.
+                view.isFocusable = true
+                view.findViewById<View>(R.id.voice_actor_image_holder2)?.apply {
+                    animate().cancel()
+                    scaleX = 1f
+                    scaleY = 1f
+                }
+            }
+
+            /**
+             * ActorAdaptor runs the native 0.8-to-1.0 scale animation when an
+             * actor is clicked. Its channel navigation override skips that
+             * callback, so reproduce the press/release response on the same
+             * circular image holder without affecting the surrounding text.
+             */
+            private fun setChannelPressAnimation(view: View) {
+                val portrait = view.findViewById<View>(R.id.voice_actor_image_holder2)
+                    ?: return
+                view.setOnTouchListener { _, event ->
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> {
+                            portrait.animate().cancel()
+                            portrait.animate()
+                                .scaleX(0.8f).scaleY(0.8f)
+                                .setDuration(80L)
+                                .setInterpolator(AccelerateDecelerateInterpolator())
+                                .start()
+                        }
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                            portrait.animate().cancel()
+                            portrait.animate()
+                                .scaleX(1f).scaleY(1f)
+                                .setDuration(200L)
+                                .setInterpolator(OvershootInterpolator())
+                                .start()
+                        }
+                    }
+                    false
+                }
+            }
+
             private fun applyCast(view: View) {
                 val hostFragment = fragment ?: return
                 if (hostFragment.arguments?.getString("apiName") != "YouTube") return
@@ -652,19 +708,45 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 val position = list.getChildViewHolder(view).bindingAdapterPosition
                 if (position == RecyclerView.NO_POSITION) return
                 val actor = adapter.getItemOrNull(position) as? ActorData ?: return
-                val pageUrl = hostFragment.arguments?.getString("url").orEmpty()
-                val channel = YoutubeProvider.channelForUrl(pageUrl)
-                if (channel != null && position == 0 &&
-                    actor.actor.name.equals(channel.name, ignoreCase = true)) {
-                    view.setOnClickListener {
-                        hostFragment.activity?.loadResult(channel.url, "YouTube", channel.name)
+                castViews[view] = true
+                if (position == 0) {
+                    // First actor is the channel. The channel's own profile
+                    // should never recursively navigate to itself.
+                    val pageUrl = hostFragment.arguments?.getString("url").orEmpty()
+                    val isChannelPage = pageUrl.contains("/channel/") ||
+                        pageUrl.contains("/@") || pageUrl.contains("/c/") ||
+                        pageUrl.contains("/user/")
+                    val channel = YoutubeProvider.channelForUrl(pageUrl)
+                    val link = channel?.takeIf {
+                        !isChannelPage &&
+                            actor.actor.name.equals(it.name, ignoreCase = true)
                     }
-                } else if (channel == null && position == 0 &&
-                    (pageUrl.contains("/channel/") || pageUrl.contains("/@") ||
-                        pageUrl.contains("/c/") || pageUrl.contains("/user/"))) {
-                    // The channel's own portrait must not open the same page.
-                    // Long-click remains the native actor search action.
-                    view.setOnClickListener { }
+                    view.isFocusable = true
+                    view.isClickable = true
+                    // Preserve the core channel long-click search behavior.
+                    view.setOnClickListener {
+                        if (link != null) {
+                            hostFragment.activity?.loadResult(
+                                link.url, "YouTube", link.name
+                            )
+                        }
+                    }
+                    setChannelPressAnimation(view)
+                } else {
+                    // Subscriber/video counts are display-only statistics, not
+                    // actors. Native ActorAdaptor binds both click-to-invert and
+                    // long-click web search to every item: disable both here.
+                    view.setOnTouchListener(null)
+                    view.setOnClickListener(null)
+                    view.setOnLongClickListener(null)
+                    view.isClickable = false
+                    view.isLongClickable = false
+                    view.isFocusable = false
+                    view.findViewById<View>(R.id.voice_actor_image_holder2)?.apply {
+                        animate().cancel()
+                        scaleX = 1f
+                        scaleY = 1f
+                    }
                 }
             }
 
