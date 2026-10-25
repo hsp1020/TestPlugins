@@ -9,9 +9,9 @@ import android.view.ViewTreeObserver
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
-import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
+import com.lagradost.cloudstream3.APIHolder.getApiFromNameNull
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
@@ -19,24 +19,17 @@ import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.ui.home.ParentItemAdapter
-import com.lagradost.cloudstream3.mvvm.Resource
-import com.lagradost.cloudstream3.ui.result.ACTION_CLICK_DEFAULT
-import com.lagradost.cloudstream3.ui.result.EpisodeClickEvent
-import com.lagradost.cloudstream3.ui.result.ResultEpisode
-import com.lagradost.cloudstream3.ui.result.ResultFragment
-import com.lagradost.cloudstream3.ui.result.ResultViewModel2
-import com.lagradost.cloudstream3.ui.settings.Globals
-import com.lagradost.cloudstream3.utils.UiText
+import com.lagradost.cloudstream3.ui.result.START_ACTION_LOAD_EP
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
 import com.lagradost.cloudstream3.ui.search.SearchClickCallback
-import com.lagradost.cloudstream3.utils.UIHelper.navigate
 import com.lagradost.cloudstream3.utils.AppContextUtils.ownHide
+import com.lagradost.cloudstream3.utils.AppContextUtils.loadSearchResult
 
 /**
- * Intercept only live Home card clicks. Let CloudStream load the actual
- * ResultEpisode, then invoke its native player action exactly once.
- * Neither Continue Watching progress nor provider URL hashes are used.
+ * Only intercept Home and expanded-catalog live card clicks. Reuse the
+ * same native START_ACTION_LOAD_EP route verified in commit 31597b6.
+ * Do not use resume-latest or a separate result-fragment observer.
  */
 internal class LiveHomeAutoplayHook(private val app: Application) :
     Application.ActivityLifecycleCallbacks {
@@ -63,18 +56,15 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
                 original(event)
                 return
             }
-            val activity = CommonActivity.activity ?: run {
+            val api = getApiFromNameNull(card.apiName)
+            if (api == null) {
                 original(event)
                 return
             }
-            val resultsId = if (Globals.isLayout(Globals.TV or Globals.EMULATOR)) {
-                R.id.global_to_navigation_results_tv
-            } else {
-                R.id.global_to_navigation_results_phone
-            }
-            activity.navigate(resultsId, ResultFragment.newInstance(card).apply {
-                putBoolean(AUTOPLAY_MARKER, true)
-            })
+            // Restore the working native ResultFragment auto-start path.
+            // The core builds a single movie/live episode with this ID.
+            val id = card.url.replace(api.mainUrl, "").replace("/", "").hashCode()
+            loadSearchResult(card, START_ACTION_LOAD_EP, id)
             afterLive?.invoke()
         }
     }
@@ -189,17 +179,16 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
         list = recycler
         recycler.addOnChildAttachStateChangeListener(attaches)
         scan()
-        // The native expanded Home catalog is a BottomSheetDialog, not a
-        // HomeChildItemAdapter. Observe the native popup state, never poll.
+        // The expanded Home catalog uses a separate native SearchAdapter.
         val activity = host ?: return
         ViewModelProvider(activity)[HomeViewModel::class.java].popup
             .observe(fragment.viewLifecycleOwner) { value ->
                 if (value == null) unbindPopup()
                 else root.post { if (home === fragment) bindPopup(fragment) }
             }
-        if (recycler.adapter == null) {
-            recycler.post { if (home === fragment && list === recycler) scan() }
-        }
+        // Native parent rows can be attached/bound after this fragment callback.
+        // Match the first verified working version's deferred re-scan.
+        recycler.post { if (home === fragment && list === recycler) scan() }
     }
 
     private fun bindPopup(fragment: Fragment) {
@@ -266,33 +255,11 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
         home = null
     }
 
-    private fun playLoadedLive(fragment: Fragment) {
-        val args = fragment.arguments ?: return
-        if (!args.getBoolean(AUTOPLAY_MARKER, false)) return
-        // Observe the real native episode; do not drop the request before
-        // the provider's result arrives.
-        val model = ViewModelProvider(fragment)[ResultViewModel2::class.java]
-        val observer = object : Observer<Resource<Pair<UiText, ResultEpisode>>?> {
-            override fun onChanged(result: Resource<Pair<UiText, ResultEpisode>>?) {
-                val episode = (result as? Resource.Success)?.value?.second ?: return
-                model.movie.removeObserver(this)
-                if (episode.tvType == TvType.Live && args.getBoolean(AUTOPLAY_MARKER, false)) {
-                    args.remove(AUTOPLAY_MARKER)
-                    model.handleAction(EpisodeClickEvent(ACTION_CLICK_DEFAULT, episode))
-                }
-            }
-        }
-        model.movie.observe(fragment.viewLifecycleOwner, observer)
-    }
-
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
             fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
         ) {
-            when (fragment.javaClass.name) {
-                HOME_CLASS -> bindHome(fragment, view)
-                RESULT_PHONE, RESULT_TV -> playLoadedLive(fragment)
-            }
+            if (fragment.javaClass.name == HOME_CLASS) bindHome(fragment, view)
         }
         override fun onFragmentViewDestroyed(fm: FragmentManager, fragment: Fragment) {
             if (fragment === home) unbindHome()
@@ -346,8 +313,5 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
 
     private companion object {
         const val HOME_CLASS = "com.lagradost.cloudstream3.ui.home.HomeFragment"
-        const val RESULT_PHONE = "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone"
-        const val RESULT_TV = "com.lagradost.cloudstream3.ui.result.ResultFragmentTv"
-        const val AUTOPLAY_MARKER = "elevate_live_home_autoplay"
     }
 }
