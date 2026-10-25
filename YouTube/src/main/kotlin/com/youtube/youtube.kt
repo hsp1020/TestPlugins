@@ -3192,18 +3192,11 @@ class YoutubeProvider(
         }
     }
 
-    private val directPageCache = ConcurrentHashMap<String, Pair<Long, TvSeriesLoadResponse>>()
+    private val directPageCache = ConcurrentHashMap<String, TvSeriesLoadResponse>()
 
-    /**
-     * The full detail screen is opened only after playback. Reuse metadata
-     * already gathered for the player's recommendations rather than fetching
-     * the same YouTube HTML again during the return transition.
-     */
+    /** One-shot detail cache, valid for the entire playback regardless of duration. */
     override suspend fun load(url: String): LoadResponse {
-        val saved = directPageCache.remove(url)
-        if (saved != null && System.currentTimeMillis() - saved.first < 5 * 60_000L) {
-            return saved.second
-        }
+        directPageCache.remove(url)?.let { return it }
         return loadPage(url, direct = false)
     }
 
@@ -3230,53 +3223,27 @@ class YoutubeProvider(
         }
     }
 
-    /** Supply an instant, network-free Shorts detail fallback for an early Back. */
-    internal fun cacheShortsReturnPage(url: String, page: TvSeriesLoadResponse) {
-        if (!url.contains("/shorts/")) return
+    /** Supply a network-free detail fallback for Back, for both videos and Shorts. */
+    internal fun cacheDirectReturnPage(url: String, page: TvSeriesLoadResponse) {
         if (directPageCache.size >= 16) directPageCache.clear()
-        directPageCache[url] = System.currentTimeMillis() to page
+        directPageCache[url] = page
     }
 
-    /** Fetch detailed metadata only after native stream links have been resolved.
-     * Shorts use the full detail path here so the card's channel information,
-     * view count, and recommendation data are retained when available.
-     * This IO never blocks the direct-play launch.
-     */
+    /** Fetch HTML metadata only after stream links resolve; never block initial playback. */
     internal suspend fun prefetchDirectDetails(url: String): TvSeriesLoadResponse? {
-        val page = loadPage(url, direct = !url.contains("/shorts/"))
+        val page = loadPage(url, direct = true)
             as? TvSeriesLoadResponse ?: return null
         if (directPageCache.size >= 16) directPageCache.clear()
-        directPageCache[url] = System.currentTimeMillis() to page
+        directPageCache[url] = page
         return page
     }
 
-    /**
-     * Direct home playback skips extended NewPipe metadata.
-     * Shorts already have a full home-catalog episode list, so that path needs no
-     * additional YouTube detail requests before opening the player.
-     */
+    /** HTML-only detail path; initial playback uses quickPlaybackPage(). */
     internal suspend fun loadForDirectPlayback(url: String): LoadResponse =
         loadPage(url, direct = true)
 
     private suspend fun loadPage(url: String, direct: Boolean): LoadResponse {
         if (url.contains("/shorts/")) {
-            if (direct) {
-                val videoId = YoutubeUtils.extractYoutubeId(url)
-                val source = if (url.contains("ctx=search")) searchShorts else homeShorts
-                val current = synchronized(source) { source.map { it.copy() } }
-                if (videoId != null && current.size > 1 &&
-                    current.any { YoutubeUtils.extractYoutubeId(it.data) == videoId }) {
-                    current.forEachIndexed { index, ep -> ep.episode = index + 1 }
-                    val selected = current.first { YoutubeUtils.extractYoutubeId(it.data) == videoId }
-                    return newTvSeriesLoadResponse(
-                        "#${selected.episode} ${selected.name ?: "Shorts"}",
-                        url, TvType.TvSeries, current
-                    ) {
-                        this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
-                        this.plot = "\u200b"
-                    }
-                }
-            }
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
             val sourceList = if (useSearchList) searchShorts else homeShorts

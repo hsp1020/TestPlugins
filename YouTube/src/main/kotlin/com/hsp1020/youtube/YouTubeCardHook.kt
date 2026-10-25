@@ -252,10 +252,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         directLoading = true
         activity.lifecycleScope.launch {
         try {
-            // Construct episodes from the Home card and existing Shorts list only.
-            // No HTTP or full-detail Fragment is involved in launching playback.
+            // Build the player from the card (plus the existing Shorts list), without HTTP.
             val page = api.quickPlaybackPage(card)
-            api.cacheShortsReturnPage(card.url, page)
+            api.cacheDirectReturnPage(card.url, page)
             val parentId = page.uniqueUrl.replace(api.mainUrl, "")
                 .replace("/", "").hashCode()
             val initial = page.episodes.sortedBy {
