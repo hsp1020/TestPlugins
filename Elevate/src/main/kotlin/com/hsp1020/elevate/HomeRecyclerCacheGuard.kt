@@ -35,6 +35,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private var parentAdapter: RecyclerView.Adapter<*>? = null
     private var provider: String? = null
     private var pendingProvider: String? = null
+    private var currentPageLoadingObserved = false
     private var expected: List<HomeViewModel.ExpandableHomepageList>? = null
     private var generation = 0
     private val watched = mutableMapOf<RecyclerView, RowWatch>()
@@ -66,6 +67,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
             val previous = provider
             generation++
             pendingProvider = next
+            currentPageLoadingObserved = false
             expected = null
             repaired.clear()
             traced.clear()
@@ -83,12 +85,14 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
             }
             when (result) {
                 is Resource.Loading -> {
+                    currentPageLoadingObserved = true
                     expected = null
                     traceOnce("loading", "page-loading", "expectedCleared=true")
                 }
                 is Resource.Failure -> {
                     traceOnce("failure", "page-failure", "pendingCleared=true")
                     pendingProvider = null
+                    currentPageLoadingObserved = false
                     expected = null
                     clearRows()
                 }
@@ -115,13 +119,36 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                                 " secondUrlHash=" + hash(two?.url) +
                                 " secondPosterHash=" + hash(two?.posterUrl))
                     }
-                    if (providerPresent || allEmpty) {
+                    // Home API names can represent an aggregate catalogue (e.g.
+                    // OTT), while SearchResponse.apiName names individual
+                    // providers such as TVChak and TVWiki. The old equality
+                    // check rejected valid aggregate pages, disabling all
+                    // stale-poster repair after a provider switch.
+                    //
+                    // Accept mixed-provider data only after this selection
+                    // actually entered Loading and is still the selected API.
+                    // This protects against accepting a late success from a
+                    // previously selected home provider.
+                    val currentSelection = model?.apiName?.value == pendingProvider &&
+                        provider == pendingProvider
+                    val compositePage = !providerPresent && !allEmpty &&
+                        currentPageLoadingObserved && currentSelection
+                    if (providerPresent || allEmpty || compositePage) {
+                        if (compositePage) {
+                            traceOnce("page-accepted-aggregate", "page-accepted-aggregate",
+                                "rows=" + lists.size + " selection=" + pendingProvider +
+                                    " firstApi=" + lists.firstOrNull()
+                                        ?.list?.list?.firstOrNull()?.apiName)
+                        }
                         expected = lists
                         observeParent()
-                        scanRows()
+                        queueScan()
                     } else {
                         traceOnce("page-rejected", "page-rejected",
-                            "reason=no-content-with-selected-provider")
+                            "reason=provider-not-current-or-no-loading" +
+                                " selected=" + model?.apiName?.value +
+                                " loadingSeen=" + currentPageLoadingObserved +
+                                " providerPresent=" + providerPresent)
                     }
                 }
             }
@@ -208,6 +235,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         activity = null
         provider = null
         pendingProvider = null
+        currentPageLoadingObserved = false
         expected = null
         repaired.clear()
     }
