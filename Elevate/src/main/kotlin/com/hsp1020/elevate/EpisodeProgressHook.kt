@@ -36,6 +36,10 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
             bind(fragment, view)
         }
 
+        override fun onFragmentResumed(fm: FragmentManager, fragment: Fragment) {
+            screens[fragment]?.onResume()
+        }
+
         override fun onFragmentViewDestroyed(fm: FragmentManager, fragment: Fragment) {
             screens.remove(fragment)?.stop()
         }
@@ -88,7 +92,7 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
         private val tree = root.viewTreeObserver
         private var list: RecyclerView? = null
         private var adapter: RecyclerView.Adapter<*>? = null
-        private var refreshScheduled = false
+        private var refreshTree: ViewTreeObserver? = null
         private var fullRefreshPending = false
         private val dirtyRows = LinkedHashSet<View>()
         private val rows = mutableMapOf<View, RowProgress>()
@@ -124,6 +128,33 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
                 scheduleRefresh()
         }
         private val globalLayout = ViewTreeObserver.OnGlobalLayoutListener { syncList() }
+        // RecyclerView handles pending adapter changes during layout, before pre-draw.
+        private val preDraw = ViewTreeObserver.OnPreDrawListener {
+            cancelRefresh()
+            val recycler = list
+            if (recycler != null && fragment.view === root && fragment.isResumed) {
+                if (fullRefreshPending) {
+                    fullRefreshPending = false
+                    dirtyRows.clear()
+                    for (i in 0 until recycler.childCount) refreshRow(recycler.getChildAt(i))
+                } else {
+                    val changed = dirtyRows.toList()
+                    dirtyRows.clear()
+                    changed.forEach { row ->
+                        if (row.parent === recycler) refreshRow(row)
+                    }
+                }
+            } else {
+                dirtyRows.clear()
+                fullRefreshPending = false
+            }
+            true
+        }
+
+        fun onResume() {
+            syncList()
+            scheduleRefresh()
+        }
 
         fun start() {
             if (tree.isAlive) tree.addOnGlobalLayoutListener(globalLayout)
@@ -157,6 +188,7 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
         }
 
         private fun releaseList() {
+            cancelRefresh()
             adapter?.unregisterAdapterDataObserver(dataObserver)
             adapter = null
             list?.removeOnChildAttachStateChangeListener(children)
@@ -192,27 +224,23 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
         }
 
         private fun postRefresh() {
-            if (refreshScheduled) return
-            val recycler = list ?: return
-            refreshScheduled = true
-            recycler.postOnAnimation {
-                refreshScheduled = false
-                if (list !== recycler || fragment.view !== root) {
-                    dirtyRows.clear()
-                    fullRefreshPending = false
-                    return@postOnAnimation
-                }
-                if (fullRefreshPending) {
-                    fullRefreshPending = false
-                    dirtyRows.clear()
-                    for (i in 0 until recycler.childCount) refreshRow(recycler.getChildAt(i))
-                } else {
-                    val changed = dirtyRows.toList()
-                    dirtyRows.clear()
-                    changed.forEach { row ->
-                        if (row.parent === recycler) refreshRow(row)
-                    }
-                }
+            if (!fragment.isResumed) return // Deferred to onResume while the player is open.
+            val observer = list?.viewTreeObserver ?: return
+            if (!observer.isAlive) return
+            if (refreshTree === observer) return
+            cancelRefresh()
+            refreshTree = observer
+            observer.addOnPreDrawListener(preDraw)
+        }
+
+        private fun cancelRefresh() {
+            val previous = refreshTree ?: return
+            refreshTree = null
+            if (previous.isAlive) previous.removeOnPreDrawListener(preDraw)
+            // A detached view's observer may have been merged into the active one.
+            val active = list?.viewTreeObserver
+            if (active !== previous && active?.isAlive == true) {
+                active.removeOnPreDrawListener(preDraw)
             }
         }
 
