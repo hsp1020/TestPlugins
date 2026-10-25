@@ -9,13 +9,12 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.recyclerview.widget.RecyclerView
-import com.lagradost.cloudstream3.APIHolder.getApiFromNameNull
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
-import com.lagradost.cloudstream3.ui.result.START_ACTION_LOAD_EP
+import com.lagradost.cloudstream3.ui.result.START_ACTION_RESUME_LATEST
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
 import com.lagradost.cloudstream3.ui.search.SearchClickCallback
 import com.lagradost.cloudstream3.utils.AppContextUtils.loadSearchResult
@@ -30,7 +29,6 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
     private var home: Fragment? = null
     private var list: RecyclerView? = null
     private var parentAdapter: RecyclerView.Adapter<*>? = null
-    private val wrapped = LinkedHashSet<HomeChildItemAdapter>()
     private var pendingTree: ViewTreeObserver? = null
     private var pendingDraw: ViewTreeObserver.OnPreDrawListener? = null
 
@@ -42,15 +40,9 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
                 original(event)
                 return
             }
-            val api = getApiFromNameNull(card.apiName)
-            if (api == null) {
-                original(event)
-                return
-            }
-            // Mirrors ResultViewModel2's single-episode ID for live responses.
-            // KKTV and Streamed both retain the search URL as the load uniqueUrl.
-            val id = card.url.replace(api.mainUrl, "").replace("/", "").hashCode()
-            loadSearchResult(card, START_ACTION_LOAD_EP, id)
+            // Native one-episode auto-start resolves the episode only after
+            // the provider has loaded its actual response/uniqueUrl.
+            loadSearchResult(card, START_ACTION_RESUME_LATEST)
         }
     }
 
@@ -59,7 +51,13 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
         val adapter = child.adapter as? HomeChildItemAdapter ?: return
         if (adapter.clickCallback is LiveClick) return
         adapter.clickCallback = LiveClick(adapter.clickCallback)
-        wrapped.add(adapter)
+    }
+
+    private fun unwrapRow(row: View) {
+        val adapter = row.findViewById<RecyclerView>(R.id.home_child_recyclerview)
+            ?.adapter as? HomeChildItemAdapter ?: return
+        val click = adapter.clickCallback
+        if (click is LiveClick) adapter.clickCallback = click.original
     }
 
     private fun scan() {
@@ -84,7 +82,7 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
     }
     private val attaches = object : RecyclerView.OnChildAttachStateChangeListener {
         override fun onChildViewAttachedToWindow(view: View) { wrapRow(view) }
-        override fun onChildViewDetachedFromWindow(view: View) = Unit
+        override fun onChildViewDetachedFromWindow(view: View) { unwrapRow(view) }
     }
 
     private fun clearScheduled() {
@@ -118,7 +116,10 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
         list = recycler
         recycler.addOnChildAttachStateChangeListener(attaches)
         scan()
-        recycler.post { if (home === fragment && list === recycler) scan() }
+        // An adapter installed after fragment creation needs one deferred bind.
+        if (recycler.adapter == null) {
+            recycler.post { if (home === fragment && list === recycler) scan() }
+        }
     }
 
     private fun unbindHome() {
@@ -126,11 +127,9 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
         parentAdapter?.unregisterAdapterDataObserver(changes)
         parentAdapter = null
         list?.removeOnChildAttachStateChangeListener(attaches)
-        for (adapter in wrapped) {
-            val callback = adapter.clickCallback
-            if (callback is LiveClick) adapter.clickCallback = callback.original
+        list?.let { recycler ->
+            for (i in 0 until recycler.childCount) unwrapRow(recycler.getChildAt(i))
         }
-        wrapped.clear()
         list = null
         home = null
     }
