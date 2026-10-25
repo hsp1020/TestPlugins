@@ -639,7 +639,8 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
                 if (media3TransitionLogs++ < 8)
                     Log.i(PLAYER_LOG, "stage=media-transition instance=" + media3Connections +
                         " reason=" + reason + " mediaKey=" +
-                        (mediaItem?.mediaId?.hashCode() ?: 0))
+                        (mediaItem?.localConfiguration?.uri?.toString()?.hashCode()
+                            ?: mediaItem?.mediaId?.hashCode() ?: 0))
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -856,9 +857,11 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
                     " previousPlaying=" + before + " resumeApplied=" + resume +
                     " episodes=" + (list?.adapter?.itemCount ?: -1))
                 guardAutoHide()
+                val renderStart = SystemClock.elapsedRealtime()
                 configureSeasons()
                 Log.i(PLAYER_LOG, "stage=overlay-ready spinner=" + (selector != null) +
-                    " filteredCount=" + (list?.adapter?.itemCount ?: -1))
+                    " filteredCount=" + (list?.adapter?.itemCount ?: -1) +
+                    " configureMs=" + (SystemClock.elapsedRealtime() - renderStart))
                 logNativeCapabilities("overlay-capabilities")
             }
         }
