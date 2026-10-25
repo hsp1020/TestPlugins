@@ -1,6 +1,8 @@
 package com.hsp1020.elevate
 
 import android.app.Activity
+import android.util.Log
+import androidx.media3.common.Player as Media3Player
 import com.lagradost.cloudstream3.ui.player.PlayerView
 import com.lagradost.cloudstream3.ui.player.AbstractPlayerFragment
 import androidx.cardview.widget.CardView
@@ -27,7 +29,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.ui.download.DownloadButtonSetup
 import com.lagradost.cloudstream3.ui.player.CSPlayerEvent
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
-import com.lagradost.cloudstream3.ui.player.IPlayer
+import com.lagradost.cloudstream3.ui.player.CS3IPlayer
 import com.lagradost.cloudstream3.ui.player.PlayerEventSource
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.result.ACTION_CLICK_DEFAULT
@@ -575,6 +577,12 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
     private val main = Handler(Looper.getMainLooper())
     private var activity: FragmentActivity? = null
     private val screens = LinkedHashMap<GeneratorPlayer, Screen>()
+    private val previousPlayStatusField by lazy {
+        runCatching {
+            com.lagradost.cloudstream3.ui.player.FullScreenPlayer::class.java
+                .getDeclaredField("previousPlayStatus").apply { isAccessible = true }
+        }.getOrNull()
+    }
 
     private fun Context.dp(size: Int) = (size * resources.displayMetrics.density).toInt()
 
@@ -596,7 +604,79 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         private val oldNextFocusUpId = list?.nextFocusUpId
         private val originalCardColors = LinkedHashMap<CardView, ColorStateList>()
         private var selector: AppCompatSpinner? = null
-        private var wrapper: OverlayPlayer? = null
+        private val tree = root.viewTreeObserver
+        private var overlayCheckQueued = false
+        private var lastNativeAdapter: RecyclerView.Adapter<*>? = null
+        private var overlayWasShown = false
+        private var media3Player: Media3Player? = null
+        private var media3AttachedAt = 0L
+        private var readyLogged = false
+        private var media3Connections = 0
+        private var media3StateLogs = 0
+
+        private val media3Listener = object : Media3Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Media3Player.STATE_READY) {
+                    if (!readyLogged) {
+                        readyLogged = true
+                        Log.i(PLAYER_LOG, "stage=player-ready elapsedMs=" +
+                            (SystemClock.elapsedRealtime() - media3AttachedAt) +
+                            " instance=" + media3Connections)
+                    }
+                } else if (media3StateLogs++ < 8) {
+                    Log.i(PLAYER_LOG, "stage=player-state state=" + playbackState +
+                        " instance=" + media3Connections)
+                }
+            }
+        }
+
+        private fun refreshMedia3() {
+            val next = fragment.playerView?.player
+            if (next === media3Player) return
+            media3Player?.removeListener(media3Listener)
+            media3Player = next
+            readyLogged = false
+            media3StateLogs = 0
+            media3AttachedAt = SystemClock.elapsedRealtime()
+            if (next != null) {
+                media3Connections++
+                next.addListener(media3Listener)
+                Log.i(PLAYER_LOG, "stage=player-attached instance=" + media3Connections +
+                    " playbackState=" + next.playbackState)
+                if (next.playbackState == Media3Player.STATE_READY)
+                    media3Listener.onPlaybackStateChanged(Media3Player.STATE_READY)
+            } else if (media3Connections > 0) {
+                Log.i(PLAYER_LOG, "stage=player-detached instance=" + media3Connections)
+            }
+        }
+
+        private val overlayCheck = Runnable {
+            overlayCheckQueued = false
+            if (!fragment.isAdded || fragment.view !== root) return@Runnable
+            refreshMedia3()
+            val showing = overlay?.isShown == true
+            if (!showing) {
+                if (overlayWasShown) Log.i(PLAYER_LOG, "stage=overlay-closed")
+                overlayWasShown = false
+                return@Runnable
+            }
+            val nativeAdapter = list?.adapter as? EpisodeAdapter ?: return@Runnable
+            if (nativeAdapter === filteredAdapter || nativeAdapter === lastNativeAdapter)
+                return@Runnable
+            lastNativeAdapter = nativeAdapter
+            overlayWasShown = true
+            overlayOpening()
+        }
+
+        private fun scheduleOverlayCheck() {
+            if (overlayCheckQueued) return
+            overlayCheckQueued = true
+            main.post(overlayCheck)
+        }
+
+        private val overlayLayout = ViewTreeObserver.OnGlobalLayoutListener {
+            scheduleOverlayCheck()
+        }
         private var model: PlayerGeneratorViewModel? = null
         private var fullEpisodes = emptyList<ResultEpisode>()
         private var selectedSeason: Int? = null
@@ -606,7 +686,10 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         private var guardedCallbacks: PlayerView.Callbacks? = null
 
         private val cardListener = object : RecyclerView.OnChildAttachStateChangeListener {
-            override fun onChildViewAttachedToWindow(view: View) = fadeCard(view)
+            override fun onChildViewAttachedToWindow(view: View) {
+                fadeCard(view)
+                scheduleOverlayCheck()
+            }
             override fun onChildViewDetachedFromWindow(view: View) = restoreCard(view)
         }
 
@@ -647,9 +730,13 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         }
 
         fun attach() {
-            val native = fragment.player
-            if (native is OverlayPlayer) return
-            wrapper = OverlayPlayer(native, this).also { fragment.player = it }
+            // Preserve concrete CS3IPlayer type for preview scrubbing and
+            // native audio compressor; no IPlayer proxy is ever installed.
+            Log.i(PLAYER_LOG, "stage=compat-attached nativeCs3=" +
+                (fragment.player is CS3IPlayer) +
+                " playerType=" + fragment.player.javaClass.simpleName)
+            if (tree.isAlive) tree.addOnGlobalLayoutListener(overlayLayout)
+            scheduleOverlayCheck()
 
             // Only the panel surface is translucent; text and images stay opaque.
             oldBackground?.constantState?.newDrawable(root.resources)?.mutate()?.let {
@@ -677,7 +764,11 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             val restoreNativeList = fragment.isAdded && fragment.view === root &&
                 overlay?.isShown == true && filteredAdapter != null &&
                 list?.adapter === filteredAdapter
-            if (fragment.player === wrapper) wrapper?.let { fragment.player = it.native }
+            if (tree.isAlive) tree.removeOnGlobalLayoutListener(overlayLayout)
+            main.removeCallbacks(overlayCheck)
+            overlayCheckQueued = false
+            media3Player?.removeListener(media3Listener)
+            media3Player = null
             if (host?.callbacks === guardedCallbacks) host?.callbacks = callbacks
             host = null
             callbacks = null
@@ -692,17 +783,32 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             if (restoreNativeList) fragment.showEpisodesOverlay()
             filteredAdapter = null
             model = null
-            wrapper = null
+            lastNativeAdapter = null
+            overlayWasShown = false
             fullEpisodes = emptyList()
         }
 
         fun overlayOpening() {
-            // Native showEpisodesOverlay() replaces the adapter after dispatching Pause.
+            // Native showEpisodesOverlay() creates a new adapter after Pause.
+            // Detect that adapter without intercepting IPlayer. Restore playback
+            // only if native FullScreenPlayer recorded that it was playing.
             main.post {
-                if (fragment.isAdded && fragment.view === root && overlay?.isVisible == true) {
-                    guardAutoHide()
-                    configureSeasons()
-                }
+                if (!fragment.isAdded || fragment.view !== root ||
+                    overlay?.isVisible != true) return@post
+                val before = runCatching {
+                    previousPlayStatusField?.getBoolean(fragment)
+                }.getOrNull()
+                val nativeCs3 = fragment.player is CS3IPlayer
+                val resume = before == true && !fragment.player.getIsPlaying()
+                if (resume)
+                    fragment.player.handleEvent(CSPlayerEvent.Play, PlayerEventSource.Player)
+                Log.i(PLAYER_LOG, "stage=overlay-open nativeCs3=" + nativeCs3 +
+                    " previousPlaying=" + before + " resumeApplied=" + resume +
+                    " episodes=" + (list?.adapter?.itemCount ?: -1))
+                guardAutoHide()
+                configureSeasons()
+                Log.i(PLAYER_LOG, "stage=overlay-ready spinner=" + (selector != null) +
+                    " filteredCount=" + (list?.adapter?.itemCount ?: -1))
             }
         }
 
@@ -892,38 +998,8 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         }
     }
 
-    private inner class OverlayPlayer(val native: IPlayer, private val screen: Screen) :
-        IPlayer by native {
-        private var suppressedPause = false
-
-        override fun handleEvent(event: CSPlayerEvent, source: PlayerEventSource) {
-            // Only the native UI's explicit overlay toggle needs call-site
-            // checking. Player-originated events must never allocate stacks.
-            if (source == PlayerEventSource.UI &&
-                (event == CSPlayerEvent.Pause || (event == CSPlayerEvent.Play && suppressedPause))) {
-                val episodeToggle = Thread.currentThread().stackTrace.any {
-                    it.className == "com.lagradost.cloudstream3.ui.player.FullScreenPlayer" &&
-                        it.methodName == "toggleEpisodesOverlay"
-                }
-                if (episodeToggle) {
-                    if (event == CSPlayerEvent.Pause) {
-                        screen.overlayOpening()
-                        suppressedPause = native.getIsPlaying()
-                        // Do not interrupt buffering or playWhenReady, either.
-                        return
-                    } else if (suppressedPause) {
-                        suppressedPause = false
-                        return
-                    }
-                }
-            }
-            native.handleEvent(event, source)
-        }
-
-        override fun release() {
-            suppressedPause = false
-            native.release()
-        }
+    private companion object {
+        const val PLAYER_LOG = "Elevate-PlayerCompat"
     }
 
     private val callbacks = object : FragmentManager.FragmentLifecycleCallbacks() {

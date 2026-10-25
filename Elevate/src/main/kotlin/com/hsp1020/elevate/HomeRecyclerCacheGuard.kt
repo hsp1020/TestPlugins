@@ -78,8 +78,10 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                     it.javaClass.simpleName)
             return
         } ?: run {
-            if (readFailureLogged.add(screen))
-                Log.w(RECYCLER_LOG_TAG, "stage=read screen=$screen success=false reason=null-list")
+            // RecyclerView leaves the field null until its first listener is added.
+            // This is a normal uninitialized state, not a reflection failure.
+            if (listenerDiagnostics.add("$screen:uninitialized"))
+                Log.i(RECYCLER_LOG_TAG, "stage=read screen=$screen status=uninitialized")
             return
         }
         val matches = snapshot.filter {
@@ -363,6 +365,9 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
             return
         }
         observeParent()
+        if (listenerDiagnostics.add("home:scan"))
+            Log.i(RECYCLER_LOG_TAG,
+                "stage=scan screen=home visibleRows=${rv.childCount} adapterPresent=${rv.adapter != null}")
         for (i in 0 until rv.childCount) {
             val view = rv.getChildAt(i)
             val child = view.findViewById<RecyclerView>(R.id.home_child_recyclerview) ?: continue
