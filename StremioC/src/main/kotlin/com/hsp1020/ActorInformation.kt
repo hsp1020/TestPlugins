@@ -125,6 +125,10 @@ internal object ActorInformation {
     }
 
     @Synchronized
+    fun hasTmdbPerson(url: String?, repo: StremioC?, page: ResultData, position: Int, item: ActorData): Boolean =
+        resolve(url, repo, page, position, item) != null
+
+    @Synchronized
     private fun posterFor(source: String?, detailUrl: String, credit: Credit): String? {
         val snapshot = source?.let { snapshots[key(it, detailUrl)] }
         return StremioC.actorPosterUrl(

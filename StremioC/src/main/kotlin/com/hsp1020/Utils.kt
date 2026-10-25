@@ -1568,6 +1568,27 @@ internal class RatingPlotImageHook(
             return false
         }
 
+        private val castItems by lazy { root.findViewById<RecyclerView>(R.id.result_cast_items) }
+        private val castCache = object : LinkedHashMap<Int, List<ActorData>>(24, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, List<ActorData>>) = size > 24
+        }
+        private var seasonCast: List<ActorData>? = null
+
+        private fun castEnabled() = castItems != null &&
+            androidx.preference.PreferenceManager.getDefaultSharedPreferences(root.context)
+                .getBoolean(root.context.getString(R.string.show_cast_in_details_key), true)
+
+        private fun showSeasonCast(actors: List<ActorData>) {
+            if (!active || !castEnabled()) return
+            val list = castItems ?: return
+            val adapter = list.adapter as? ActorAdaptor ?: return
+            if (adapter.itemCount != actors.size ||
+                (actors.isNotEmpty() && adapter.getItemOrNull(0) !== actors.first())) {
+                adapter.submitList(actors)
+            }
+            list.visibility = if (actors.isEmpty()) View.GONE else View.VISIBLE
+        }
+
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
         private val saveScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -1649,6 +1670,13 @@ internal class RatingPlotImageHook(
                             reset()
                         } else {
                             rawSyncs = data.syncData.toMap()
+                            seasonCast?.let { actors ->
+                                val currentGeneration = generation
+                                val currentSeason = season
+                                root.post {
+                                    if (valid(currentGeneration, currentSeason)) showSeasonCast(actors)
+                                }
+                            }
                         }
                         resolve()
                     }
@@ -1683,8 +1711,13 @@ internal class RatingPlotImageHook(
 
         private fun resolve() {
             val chosen = selectionIndex?.let { seasonNumbers.getOrNull(it) }
+                ?: if (seasonNumbers.isEmpty() && rawSyncs["anilist"] != null) 1 else null
             if (pageUrl == null || chosen == null || chosen <= 0) return
             if (chosen == season) return
+            if (seasonCast != null) {
+                seasonCast = null
+                showSeasonCast(emptyList())
+            }
             season = chosen
             generation++
             begin()
@@ -1705,7 +1738,7 @@ internal class RatingPlotImageHook(
                 ?: detailUrl?.let { StremioC.animeAudioByUrl[it] }
             val multi = seasonNumbers.size > 1
             val generalSimkl = isAnime != true && multi && rawSyncs.containsKey("simkl")
-            if ((isAnime != true && !generalSimkl) || syncModel == null) {
+            if (isAnime != true && !generalSimkl) {
                 reset()
                 teardownUi()
                 return
@@ -1745,9 +1778,55 @@ internal class RatingPlotImageHook(
                         }
                     }
                 }
-                if (!valid(gen, sn)) { return@launch }
-                val matched = AccountManager.syncApis.filter { ids.containsKey(it.idPrefix) }
-                    .filter { it.authUser() != null }
+                if (!valid(gen, sn)) return@launch
+                val matched = if (syncModel != null && seasonNumbers.isNotEmpty())
+                    AccountManager.syncApis.filter { ids.containsKey(it.idPrefix) }
+                        .filter { it.authUser() != null }
+                else emptyList()
+                val animeId = if (isAnime == true && castEnabled()) {
+                    ids["anilist"]?.toIntOrNull()?.takeIf { it > 0 } ?: run {
+                        if (multi) null else {
+                            val source = listOf("mal", "kitsu").firstNotNullOfOrNull { kind ->
+                                ids[kind]?.toIntOrNull()?.takeIf { it > 0 }?.let { "${kind}:${it}" }
+                            }
+                            val provider = APIHolder.allProviders.filterIsInstance<StremioC>()
+                                .firstOrNull { it.name == fragment.arguments?.getString("apiName") }
+                                ?: APIHolder.allProviders.filterIsInstance<StremioC>().firstOrNull()
+                            if (source == null || provider == null) null
+                            else withContext(Dispatchers.IO) {
+                                provider.playbackTrackerIds(
+                                    StremioC.LoadData(id = source, isAnime = true)
+                                )?.aniList
+                            }
+                        }
+                    }
+                } else null
+                val castNeeded = isAnime == true &&
+                    (multi || syncModel == null || ids["anilist"] == null)
+                if (castNeeded && animeId != null) {
+                    val cached = castCache[animeId]
+                    if (cached != null) {
+                        seasonCast = cached
+                        showSeasonCast(cached)
+                    } else if (matched.none { it.idPrefix == "anilist" &&
+                            ids["anilist"] == animeId.toString() }) {
+                        launch {
+                            val actors = withContext(Dispatchers.IO) {
+                                com.lagradost.cloudstream3.syncproviders.SyncRepo(AccountManager.aniListApi)
+                                    .load(animeId.toString()).getOrNull()?.actors
+                            }
+                            if (valid(gen, sn) && !actors.isNullOrEmpty()) {
+                                castCache[animeId] = actors
+                                seasonCast = actors
+                                showSeasonCast(actors)
+                            }
+                        }
+                    }
+                }
+                if (syncModel == null || seasonNumbers.isEmpty()) {
+                    teardownUi()
+                    return@launch
+                }
                 if (matched.isEmpty()) {
                     render()
                     return@launch
@@ -1772,6 +1851,17 @@ internal class RatingPlotImageHook(
 
                         val meta = if (repo.idPrefix == "mal" || repo.idPrefix == "kitsu")
                             null else repo.load(id)
+                        if (castNeeded && animeId != null && repo.idPrefix == "anilist" &&
+                            id == animeId.toString()) {
+                            val actors = meta?.getOrNull()?.actors
+                            if (!actors.isNullOrEmpty()) withContext(Dispatchers.Main) {
+                                if (valid(gen, sn)) {
+                                    castCache[animeId] = actors
+                                    seasonCast = actors
+                                    showSeasonCast(actors)
+                                }
+                            }
+                        }
                         val remote = state.getOrNull()
                         val simklExact = if (generalSimkl && repo.idPrefix == "simkl")
                             simklSeasonRead(repo, id, sn) else null
@@ -2549,7 +2639,23 @@ internal class RatingPlotImageHook(
                 if (position == RecyclerView.NO_POSITION) return
                 val adapter = list.adapter as? ActorAdaptor ?: return
                 val actor = adapter.getItemOrNull(position) ?: return
+                val model = ViewModelProvider(fragment)[ResultViewModel2::class.java]
+                val page = (model.page.value as? Resource.Success<ResultData>)?.value
+                val nativeAnimeCast = page != null &&
+                    (StremioC.animeAudioByUrl[page.url] == true ||
+                        detailUrl?.let { StremioC.animeAudioByUrl[it] } == true) &&
+                    !ActorInformation.hasTmdbPerson(page.url, model.currentRepo?.api as? StremioC,
+                        page, position, actor)
                 val holder = list.findViewHolderForAdapterPosition(position)
+                if (nativeAnimeCast) {
+                    if (holder is ViewHolderState<*>) {
+                        @Suppress("UNCHECKED_CAST")
+                        val nativeHolder = holder as ViewHolderState<Any>
+                        adapter.inverted[actor] = adapter.inverted[actor] != true
+                        adapter.onUpdateContent(nativeHolder, actor, position)
+                    }
+                    return
+                }
                 if (holder is ViewHolderState<*>) {
                     @Suppress("UNCHECKED_CAST")
                     val nativeHolder = holder as ViewHolderState<Any>
