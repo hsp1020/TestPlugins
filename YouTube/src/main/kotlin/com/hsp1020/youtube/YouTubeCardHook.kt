@@ -66,15 +66,16 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private val dialogs = mutableMapOf<View, Screen>()
     private data class PlayedEpisode(val number: Int, val season: Int?)
     private data class DirectPlayback(
-        val card: SearchResponse,
         val parentId: Int,
         val startingNumber: Int,
         val startingSeason: Int?,
     )
-    private val playedEpisodes = mutableMapOf<Int, PlayedEpisode>()
+    private var lastPlayed: PlayedEpisode? = null
     private var directPlayback: DirectPlayback? = null
     private var directLoading = false
-    private var directReturn: Pair<Int, PlayedEpisode>? = null
+    // One pending selection bridges player exit and the native detail ViewModel.
+    private var pendingRange: Pair<Int, PlayedEpisode>? = null
+    private var appliedRange: Pair<Int, PlayedEpisode>? = null
 
     private fun playHomeVideo(card: SearchResponse) {
         if (directLoading || directPlayback != null) return
@@ -117,11 +118,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 if (selectedIndex < 0) return@launch
                 if (host !== activity || activity.isFinishing) return@launch
                 directPlayback = DirectPlayback(
-                    card, parentId, episodes[selectedIndex].episode,
+                    parentId, episodes[selectedIndex].episode,
                     episodes[selectedIndex].season
                 )
-                directReturn = null
-                playedEpisodes.remove(parentId)
+                lastPlayed = null
+                pendingRange = null
+                appliedRange = null
                 // Prepare the return destination below the player in the same UI dispatch.
                 // Zero animations avoid ever rendering an intermediate detail transition.
                 val resultsId = if (Globals.isLayout(Globals.TV or Globals.EMULATOR)) {
@@ -154,26 +156,32 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     }
 
     private fun recordPlayerEpisode(fragment: Fragment) {
+        val playback = directPlayback ?: return
         if (fragment.javaClass.name != PLAYER_SCREEN) return
         val episode = runCatching {
             ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
                 .state.generatorState?.meta as? ResultEpisode
         }.getOrNull() ?: return
-        if (episode.apiName != "YouTube") return
-        if (playedEpisodes.size >= 32) playedEpisodes.clear()
-        playedEpisodes[episode.parentId] = PlayedEpisode(episode.episode, episode.season)
+        if (episode.apiName != "YouTube" || episode.parentId != playback.parentId) return
+        lastPlayed = PlayedEpisode(episode.episode, episode.season)
     }
+
     /**
-     * Native CloudStream remembers the selected season and episode *range*, not
-     * the focused episode card. Persist the range's starting episode and let the
-     * existing detail ViewModel own the selection and RecyclerView binding.
+     * CloudStream remembers the selected season and the beginning of the
+     * selected episode range. It does not focus an individual episode on return.
+     * Persist those native preferences and ask an already-loaded detail model to
+     * select the actual EpisodeRange, without manipulating RecyclerView.
      */
     private fun selectLastPlaybackRange(parentId: Int, played: PlayedEpisode) {
+        val selection = parentId to played
+        if (appliedRange == selection) return
+        appliedRange = selection
         val rangeSize = if (Globals.isLayout(Globals.TV or Globals.EMULATOR)) 50 else 20
         val startEpisode = ((played.number.coerceAtLeast(1) - 1) / rangeSize) * rangeSize + 1
         setResultEpisode(parentId, startEpisode)
         played.season?.let { setResultSeason(parentId, it) }
-        screens.values.forEach { it.selectNativeRange(parentId, played) }
+        pendingRange = selection
+        screens.values.forEach { it.applyNativeRangeIfPending() }
     }
 
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
@@ -181,24 +189,23 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             recordPlayerEpisode(f)
             if (f.javaClass.name != PLAYER_SCREEN) return
             val playback = directPlayback ?: return
-            val played = playedEpisodes[playback.parentId]
-                ?: PlayedEpisode(playback.startingNumber, playback.startingSeason)
-            selectLastPlaybackRange(playback.parentId, played)
-        }
-
-        override fun onFragmentStopped(fm: FragmentManager, f: Fragment) {
-            recordPlayerEpisode(f)
+            selectLastPlaybackRange(
+                playback.parentId,
+                lastPlayed ?: PlayedEpisode(playback.startingNumber, playback.startingSeason)
+            )
         }
 
         override fun onFragmentDestroyed(fm: FragmentManager, f: Fragment) {
             if (f.javaClass.name != PLAYER_SCREEN) return
             recordPlayerEpisode(f)
             val playback = directPlayback ?: return
+            selectLastPlaybackRange(
+                playback.parentId,
+                lastPlayed ?: PlayedEpisode(playback.startingNumber, playback.startingSeason)
+            )
             directPlayback = null
-            val played = playedEpisodes.remove(playback.parentId)
-                ?: PlayedEpisode(playback.startingNumber, playback.startingSeason)
-            selectLastPlaybackRange(playback.parentId, played)
-            directReturn = playback.parentId to played
+            lastPlayed = null
+            appliedRange = null
         }
 
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
@@ -232,9 +239,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         dialogs.clear()
         screens.values.toList().forEach { it.close() }
         screens.clear()
-        playedEpisodes.clear()
+        lastPlayed = null
         directPlayback = null
-        directReturn = null
+        pendingRange = null
+        appliedRange = null
         directLoading = false
         host = null
     }
@@ -310,62 +318,50 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 (it.contains("/shorts/") || it.contains("/watch?v="))
         }?.replace("https://www.youtube.com", "")?.replace("/", "")?.hashCode()
 
-        private var pendingSelection: PlayedEpisode? = pageId?.let { id ->
-            directReturn?.takeIf { it.first == id }?.second?.also { directReturn = null }
-        }
-        private var switchingSeason = false
+        private var requestedSeason: Int? = null
 
+        /**
+         * In CloudStream's postEpisodeRange(), selectedRangeIndex is posted
+         * after seasonSelections, rangeSelections and selectedSeasonIndex.
+         * This one native signal covers both initial loading and season changes.
+         */
         private fun observeNativeRanges() {
             if (pageId == null) return
             val hostFragment = fragment ?: return
             val model = ViewModelProvider(hostFragment)[ResultViewModel2::class.java]
-            model.seasonSelections.observe(hostFragment.viewLifecycleOwner) {
+            model.selectedRangeIndex.observe(hostFragment.viewLifecycleOwner) {
                 applyNativeRangeIfPending()
             }
-            model.selectedSeasonIndex.observe(hostFragment.viewLifecycleOwner) {
-                applyNativeRangeIfPending()
-            }
-            model.rangeSelections.observe(hostFragment.viewLifecycleOwner) {
-                applyNativeRangeIfPending()
-            }
-        }
-
-        fun selectNativeRange(parentId: Int, played: PlayedEpisode) {
-            if (pageId != parentId) return
-            pendingSelection = played
-            switchingSeason = false
-            applyNativeRangeIfPending()
         }
 
         fun applyNativeRangeIfPending() {
-            if (pageId == null) return
-            val played = pendingSelection ?: return
+            val (parentId, played) = pendingRange ?: return
+            if (pageId != parentId) return
             val hostFragment = fragment ?: return
             val model = ViewModelProvider(hostFragment)[ResultViewModel2::class.java]
-            val seasons = model.seasonSelections.value.orEmpty()
-            val targetSeason = played.season
-            if (targetSeason != null) {
+            played.season?.let { season ->
+                val seasons = model.seasonSelections.value.orEmpty()
                 if (seasons.isEmpty()) return
-                val index = seasons.indexOfFirst { it.second == targetSeason }
-                if (index < 0) return
-                if (model.selectedSeasonIndex.value != index) {
-                    if (!switchingSeason) {
-                        switchingSeason = true
-                        model.changeSeason(targetSeason)
+                val targetSeasonIndex = seasons.indexOfFirst { it.second == season }
+                if (targetSeasonIndex < 0) return
+                if (model.selectedSeasonIndex.value != targetSeasonIndex) {
+                    if (requestedSeason != season) {
+                        requestedSeason = season
+                        model.changeSeason(season)
                     }
                     return
                 }
             }
-            switchingSeason = false
+            requestedSeason = null
             val ranges = model.rangeSelections.value.orEmpty()
-            if (ranges.isEmpty()) return
-            val targetIndex = ranges.indexOfFirst {
+            val targetRangeIndex = ranges.indexOfFirst {
                 played.number in it.second.startEpisode..it.second.endEpisode
             }
-            if (targetIndex < 0) return
-            pendingSelection = null
-            if (model.selectedRangeIndex.value != targetIndex) {
-                model.changeRange(ranges[targetIndex].second)
+            if (targetRangeIndex < 0) return
+            // Consume before changing the ViewModel to prevent reentrant updates.
+            pendingRange = null
+            if (model.selectedRangeIndex.value != targetRangeIndex) {
+                model.changeRange(ranges[targetRangeIndex].second)
             }
         }
 
