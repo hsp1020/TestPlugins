@@ -13,6 +13,13 @@ import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.view.inspector.WindowInspector
 import android.widget.ImageView
+import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
+import com.lagradost.cloudstream3.utils.AppContextUtils.loadResult
+import com.lagradost.cloudstream3.utils.DataStoreHelper
+import com.lagradost.cloudstream3.ActorData
+import com.lagradost.cloudstream3.ui.result.ActorAdaptor
+import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
+import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
@@ -92,7 +99,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         if (fragment.javaClass.name !in SCREENS) return
         if (screens[fragment]?.root === root) return
         screens.remove(fragment)?.close()
-        screens[fragment] = Screen(root)
+        screens[fragment] = Screen(root, fragment = fragment)
     }
 
     private fun discoverDialogs() {
@@ -132,7 +139,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         return null
     }
 
-    private inner class Screen(val root: View, popup: Boolean = false) {
+    private inner class Screen(val root: View, popup: Boolean = false, private val fragment: Fragment? = null) {
         private val watchers = mutableMapOf<RecyclerView, Watcher>()
 
         init {
@@ -143,6 +150,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             root.findViewById<RecyclerView>(R.id.quick_search_master_recycler)?.let { watch(it, Role.SEARCH_PARENT) }
             root.findViewById<RecyclerView>(R.id.search_autofit_results)?.let { watch(it, Role.SEARCH_GRID) }
             root.findViewById<RecyclerView>(R.id.quick_search_autofit_results)?.let { watch(it, Role.SEARCH_GRID) }
+            root.findViewById<RecyclerView>(R.id.home_watch_child_recyclerview)?.let { watch(it, Role.RESUME_CARD) }
+            if (fragment?.arguments?.getString("apiName") == "YouTube") {
+                root.findViewById<RecyclerView>(R.id.result_recommendations_list)?.let { watch(it, Role.DETAIL_RECOMMEND) }
+                root.findViewById<RecyclerView>(R.id.result_episodes)?.let { watch(it, Role.DETAIL_EPISODE) }
+                root.findViewById<RecyclerView>(R.id.result_cast_items)?.let { watch(it, Role.DETAIL_CAST) }
+            }
         }
 
         fun close() {
@@ -161,6 +174,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
         private inner class Watcher(private val list: RecyclerView, private val role: Role) {
             private val modified = IdentityHashMap<View, CardState>()
+            private val episodeSizes = IdentityHashMap<View, Pair<View, Pair<Int, Int>>>()
             private var observed: RecyclerView.Adapter<*>? = null
             private var posted = false
 
@@ -183,7 +197,13 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 override fun onChildViewDetachedFromWindow(view: View) {
                     if (isParent) {
                         view.findViewById<RecyclerView>(R.id.home_child_recyclerview)?.let(::unwatch)
-                    } else {
+                        if (role == Role.HOME_PARENT) {
+                            view.findViewById<RecyclerView>(R.id.home_watch_child_recyclerview)
+                                ?.let(::unwatch)
+                        }
+                    } else if (role == Role.DETAIL_EPISODE) {
+                        restoreEpisode(view)
+                    } else if (role != Role.DETAIL_CAST) {
                         restore(view)
                     }
                 }
@@ -207,6 +227,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 observed = null
                 modified.keys.toList().forEach(::restore)
                 modified.clear()
+                episodeSizes.keys.toList().forEach(::restoreEpisode)
                 posted = false
             }
 
@@ -238,9 +259,15 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     view.findViewById<RecyclerView>(R.id.home_child_recyclerview)?.let {
                         watch(it, if (role == Role.HOME_PARENT) Role.HOME_CARD else Role.SEARCH_CARD)
                     }
+                    if (role == Role.HOME_PARENT) {
+                        view.findViewById<RecyclerView>(R.id.home_watch_child_recyclerview)
+                            ?.let { watch(it, Role.RESUME_CARD) }
+                    }
                     return
                 }
 
+                if (role == Role.DETAIL_EPISODE) return applyEpisode(view)
+                if (role == Role.DETAIL_CAST) return applyCast(view)
                 val adapter = list.adapter as? BaseAdapter<*, *> ?: return restore(view)
                 if (adapter !is SearchAdapter && adapter !is HomeChildItemAdapter) return restore(view)
                 val position = list.getChildViewHolder(view).bindingAdapterPosition
@@ -257,6 +284,15 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 if (title.maxLines != lines) title.maxLines = lines
                 if (title.minLines != 1) title.minLines = 1
 
+                if (role == Role.RESUME_CARD && item is DataStoreHelper.ResumeWatchingResult) {
+                    val original = if (item.url.contains("/shorts/")) {
+                        YoutubeUtils.extractYoutubeId(item.url)?.let(YoutubeUtils::getShortsSearchPoster)
+                    } else YoutubeUtils.unwrapProxiedPoster(item.posterUrl)
+                    if (!original.isNullOrBlank() && original != item.posterUrl) {
+                        item.posterUrl = original
+                        image.loadImage(original)
+                    }
+                }
                 val video = item.url.contains("/watch?v=")
                 val shorts = item.url.contains("/shorts/")
                 if (!video && !shorts) {
@@ -264,7 +300,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     return
                 }
 
-                if (role == Role.SEARCH_GRID || role == Role.DIALOG_GRID) {
+                if (role == Role.SEARCH_GRID || role == Role.DIALOG_GRID || role == Role.DETAIL_RECOMMEND) {
                     val baseWidth = (list as? AutofitRecyclerView)?.itemWidth
                         ?.minus(dp(4))?.takeIf { it > 0 }
                         ?: card.width.takeIf { it > 0 } ?: return
@@ -273,19 +309,75 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                             .takeIf { it > 0 } ?: dp(252))
                     } else baseWidth
                     state.setCardWidth(width)
-                    state.setImageHeight((width * (if (shorts) 1.5f else 9f / 16f)).roundToInt())
+                    state.setImageHeight((width * (if (shorts) 16f / 9f else 9f / 16f)).roundToInt())
                 } else {
                     val wide = HomeChildItemAdapter.maxPosterSize.takeIf { it > 0 } ?: dp(180)
                     val narrow = HomeChildItemAdapter.minPosterSize.takeIf { it > 0 } ?: dp(114)
                     state.setCardSize(
                         if (shorts) narrow else wide,
-                        if (shorts) wide else (wide * 9f / 16f).roundToInt()
+                        if (shorts) (narrow * 16f / 9f).roundToInt() else (wide * 9f / 16f).roundToInt()
                     )
                 }
                 if (expanded && role != Role.DIALOG_GRID) {
                     val titleWidth = card.layoutParams.width.takeIf { it > 0 }
                         ?: card.width.takeIf { it > 0 }
                     if (titleWidth != null) state.setTitleWidth(titleWidth)
+                }
+            }
+
+            private fun applyEpisode(view: View) {
+                val adapter = list.adapter as? EpisodeAdapter ?: return restoreEpisode(view)
+                val position = list.getChildViewHolder(view).bindingAdapterPosition
+                val ep = if (position == RecyclerView.NO_POSITION) null
+                    else adapter.getItemOrNull(position) as? ResultEpisode
+                if (ep?.apiName != "YouTube" || !ep.data.contains("/shorts/"))
+                    return restoreEpisode(view)
+                val frame = view.findViewById<ImageView>(R.id.episode_poster)?.parent as? View
+                    ?: return restoreEpisode(view)
+                if (episodeSizes[view]?.first !== frame) {
+                    restoreEpisode(view)
+                    episodeSizes[view] = frame to (frame.layoutParams.width to frame.layoutParams.height)
+                }
+                val params = frame.layoutParams
+                val width = dp(72)
+                val height = dp(128)
+                if (params.width != width || params.height != height) {
+                    params.width = width
+                    params.height = height
+                    frame.layoutParams = params
+                }
+            }
+
+            private fun restoreEpisode(view: View) {
+                val original = episodeSizes.remove(view) ?: return
+                val params = original.first.layoutParams
+                if (params.width != original.second.first || params.height != original.second.second) {
+                    params.width = original.second.first
+                    params.height = original.second.second
+                    original.first.layoutParams = params
+                }
+            }
+
+            private fun applyCast(view: View) {
+                val hostFragment = fragment ?: return
+                if (hostFragment.arguments?.getString("apiName") != "YouTube") return
+                val adapter = list.adapter as? ActorAdaptor ?: return
+                val position = list.getChildViewHolder(view).bindingAdapterPosition
+                if (position == RecyclerView.NO_POSITION) return
+                val actor = adapter.getItemOrNull(position) as? ActorData ?: return
+                val pageUrl = hostFragment.arguments?.getString("url").orEmpty()
+                val channel = YoutubeProvider.channelForUrl(pageUrl)
+                if (channel != null && position == 0 &&
+                    actor.actor.name.equals(channel.name, ignoreCase = true)) {
+                    view.setOnClickListener {
+                        hostFragment.activity?.loadResult(channel.url, "YouTube", channel.name)
+                    }
+                } else if (channel == null && position == 0 &&
+                    (pageUrl.contains("/channel/") || pageUrl.contains("/@") ||
+                        pageUrl.contains("/c/") || pageUrl.contains("/user/"))) {
+                    // The channel's own portrait must not open the same page.
+                    // Long-click remains the native actor search action.
+                    view.setOnClickListener { }
                 }
             }
 
@@ -410,13 +502,15 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     override fun onActivityStopped(activity: Activity) = Unit
     override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
 
-    private enum class Role { HOME_PARENT, SEARCH_PARENT, HOME_CARD, SEARCH_CARD, SEARCH_GRID, DIALOG_GRID }
+    private enum class Role { HOME_PARENT, SEARCH_PARENT, HOME_CARD, SEARCH_CARD, SEARCH_GRID, DIALOG_GRID, RESUME_CARD, DETAIL_RECOMMEND, DETAIL_EPISODE, DETAIL_CAST }
 
     private companion object {
         val SCREENS = setOf(
             "com.lagradost.cloudstream3.ui.home.HomeFragment",
             "com.lagradost.cloudstream3.ui.search.SearchFragment",
-            "com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment"
+            "com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment",
+            "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
+            "com.lagradost.cloudstream3.ui.result.ResultFragmentTv"
         )
     }
 }

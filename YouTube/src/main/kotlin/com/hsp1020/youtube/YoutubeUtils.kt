@@ -1,8 +1,8 @@
 package com.hsp1020.youtube
 
 import android.content.SharedPreferences
+import android.net.Uri
 import java.net.URLDecoder
-import java.net.URLEncoder
 import java.security.MessageDigest
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
@@ -70,23 +70,22 @@ object YoutubeUtils {
         return Pair(cookieBuilder.toString(), sapisidVal)
     }
 
-    fun getProxiedPoster(poster: String?): String? {
-        if (poster.isNullOrBlank()) return null
-        return try {
-            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black"
-        } catch (e: Exception) {
-            poster
-        }
+    fun getProxiedPoster(poster: String?): String? = poster
+
+    /** Convert previously cached resume artwork to the original YouTube URL. */
+    fun unwrapProxiedPoster(poster: String?): String? {
+        if (poster.isNullOrBlank() || !poster.startsWith("https://wsrv.nl/")) return poster
+        return runCatching {
+            Uri.parse(poster).getQueryParameter("url")
+                ?.takeIf { it.startsWith("https://") }
+        }.getOrNull() ?: poster
     }
 
     fun getProxiedPosterBottom(poster: String?): String? = getProxiedPoster(poster)
     fun getProxiedPosterNormal(poster: String?): String? = getProxiedPoster(poster)
 
-    fun getShortsSearchPoster(videoId: String): String {
-        val prefix = "https%3A%2F%2Fi.ytimg.com%2Fvi%2F"
-        val suffix = "%2Foardefault.jpg%3Fsqp%3D-oaymwEoCJUDENAFSFqQAgHyq4qpAxcIARUAAIhC2AEB4gEKCBgQAhgGOAFAAQ%3D%3D%26rs%3DAOn4CLDWlHo9hImueeIb7JfDzDGNRuQ5tg%26usqp%3DCCk"
-        return "https://wsrv.nl/?url=$prefix$videoId$suffix&w=800&h=1200&fit=contain&cbg=black"
-    }
+    fun getShortsSearchPoster(videoId: String): String =
+        "https://i.ytimg.com/vi/$videoId/oardefault.jpg"
 
     fun getShortsEpisodeThumbnail(videoId: String): String {
         return getShortsSearchPoster(videoId)

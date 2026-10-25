@@ -164,6 +164,29 @@ class YoutubeProvider(
         @Volatile
         private var sharedLastCustomSectionsJson: String? = null
 
+        internal data class ChannelLink(val name: String, val url: String)
+
+        private val channelLinks = Collections.synchronizedMap(
+            object : LinkedHashMap<String, ChannelLink>(128, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ChannelLink>?): Boolean =
+                    size > 128
+            }
+        )
+
+        internal fun channelForUrl(pageUrl: String): ChannelLink? = channelLinks[pageUrl]
+
+        private fun rememberChannel(pageUrl: String, name: String, id: String) {
+            if (name.isBlank() || id.isBlank()) return
+            val target = when {
+                id.startsWith("https://www.youtube.com/") -> id
+                id.startsWith("/") -> "https://www.youtube.com$id"
+                id.startsWith("@") -> "https://www.youtube.com/$id"
+                id.startsWith("UC") -> "https://www.youtube.com/channel/$id"
+                else -> "https://www.youtube.com/$id"
+            }
+            channelLinks[pageUrl] = ChannelLink(name, target)
+        }
+
         private val homeShorts = Collections.synchronizedList(mutableListOf<Episode>())
         private val searchShorts = Collections.synchronizedList(mutableListOf<Episode>())
 
@@ -2874,7 +2897,7 @@ class YoutubeProvider(
         return null
     }
 
-    private fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
+    private fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>, isShortsTab: Boolean = false) {
         items.forEachIndexed { index, item ->
             try {
                 val map = item as? Map<*, *>
@@ -2941,9 +2964,11 @@ class YoutubeProvider(
                             metaString = viewRaw.stripWhitespace().ifBlank { "\u200b" }
                         }
 
-                        collectTo.add(newEpisode("$mainUrl/watch?v=$vidId") {
+                        val videoUrl = if (isShortsTab) "$mainUrl/shorts/$vidId" else "$mainUrl/watch?v=$vidId"
+                        collectTo.add(newEpisode(videoUrl) {
                             this.name = vidTitle
-                            this.posterUrl = thumb
+                            this.posterUrl = if (isShortsTab)
+                                vidId?.let(YoutubeUtils::getShortsEpisodeThumbnail) ?: thumb else thumb
                             this.description = metaString
                         })
                         break 
@@ -3320,15 +3345,8 @@ class YoutubeProvider(
             val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
             val finalPlot = "\u200b"
 
+            rememberChannel(url, channelName, channelId)
             val finalRecs = mutableListOf<SearchResponse>()
-            
-            if (channelName.isNotBlank() && channelId.isNotBlank()) {
-                val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
-                val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
-                    this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) 
-                }
-                finalRecs.add(channelCard) 
-            }
             
             finalRecs.addAll(recs.filter { it.url.contains("/shorts/") }) 
             
@@ -3355,10 +3373,10 @@ class YoutubeProvider(
                 if (npTags.isNotEmpty()) this.tags = npTags
 
                 val actorList = mutableListOf<ActorData>()
-                if (npActor != null) {
-                    actorList.add(npActor!!)
-                } else if (channelName.isNotBlank()) {
+                if (channelName.isNotBlank()) {
                     actorList.add(ActorData(Actor(channelName, channelAvatar)))
+                } else if (npActor != null) {
+                    actorList.add(npActor!!)
                 }
                 if (subscriberCount.isNotBlank()) {
                     actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/YouTube/Subscribe.jpg")))
@@ -3542,7 +3560,7 @@ class YoutubeProvider(
                         }
 
                         if (initialItems != null) {
-                            extractVideosFromItems(initialItems, tabEpisodes)
+                            extractVideosFromItems(initialItems, tabEpisodes, tabUrl.endsWith("/shorts"))
                         }
 
                         var currentToken: String? = findContinuationFromItems(initialItems)
@@ -3572,7 +3590,7 @@ class YoutubeProvider(
                                 val headers = mapOf("X-Youtube-Client-Name" to "WEB", "X-Youtube-Client-Version" to clientVersion)
                                 val jsonResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>() ?: break
                                 val javaContinuationItems = findContinuationItemsRecursive(jsonResponse) ?: break
-                                extractVideosFromItems(javaContinuationItems, tabEpisodes)
+                                extractVideosFromItems(javaContinuationItems, tabEpisodes, tabUrl.endsWith("/shorts"))
                                 currentToken = findContinuationFromItems(javaContinuationItems)
                             } catch (e: Exception) {
                                 break
@@ -3671,19 +3689,8 @@ class YoutubeProvider(
 
                 val playlistPoster = episodes.firstOrNull()?.posterUrl ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
+                rememberChannel(url, author, playlistMeta.channelId)
                 val recList = mutableListOf<SearchResponse>()
-                if (author.isNotBlank() && playlistMeta.channelId.isNotBlank()) {
-                    val cId = playlistMeta.channelId
-                    val channelUrlFull = if (cId.startsWith("UC") || cId.startsWith("@")) "$mainUrl/channel/$cId" else "$mainUrl/$cId"
-                    val channelCard = newMovieSearchResponse(
-                        author,
-                        channelUrlFull,
-                        TvType.Live
-                    ) {
-                        this.posterUrl = YoutubeUtils.getProxiedPoster(playlistMeta.channelAvatar)
-                    }
-                    recList.add(channelCard)
-                }
                 
                 val episodeResponses = episodes.map { ep ->
                     val desc = ep.description ?: ""
@@ -3851,15 +3858,9 @@ class YoutubeProvider(
             }
         }
 
-        if (channelName.isNotBlank() && channelId.isNotBlank()) {
-            val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
-            val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
-                this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) 
-            }
-            recommendations.add(0, channelCard)
-        }
+        rememberChannel(url, channelName, channelId)
 
-        val filteredRecs = recommendations.filter { !it.url.contains("/shorts/") }
+        val filteredRecs = recommendations.filter { it.type != TvType.Live && !it.url.contains("/shorts/") }
         val episodes = mutableListOf<Episode>()
         
         var ep1Dur = ""
@@ -3953,10 +3954,10 @@ class YoutubeProvider(
             }
 
             val actorList = mutableListOf<ActorData>()
-            if (npActor != null) {
-                npActor?.let { actorList.add(it) }
-            } else if (channelName.isNotBlank()) {
+            if (channelName.isNotBlank()) {
                 actorList.add(ActorData(Actor(channelName, channelAvatar)))
+            } else {
+                npActor?.let { actorList.add(it) }
             }
 
             if (subscriberCount.isNotBlank()) {
