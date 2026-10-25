@@ -638,10 +638,12 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         private var nativeKeyListener: ((Pair<KeyEvent?, Boolean>) -> Boolean)? = null
         private var guardedKeyListener: ((Pair<KeyEvent?, Boolean>) -> Boolean)? = null
         private val touchGuard = View.OnTouchListener { button, event ->
-            if (event.actionMasked == MotionEvent.ACTION_UP && button.isPressed &&
-                event.x >= 0 && event.x < button.width && event.y >= 0 && event.y < button.height
-            ) openWithoutPause()
-            false // Keep native touch, ripple, and click dispatch.
+            val opened = event.actionMasked == MotionEvent.ACTION_UP && button.isPressed &&
+                event.x >= 0 && event.x < button.width && event.y >= 0 && event.y < button.height &&
+                openWithoutPause()
+            if (opened) button.isPressed = false
+            // Consume UP only after a successful open: native onClick would close it again.
+            opened
         }
         private val originalCardColors = LinkedHashMap<CardView, ColorStateList>()
         private var selector: AppCompatSpinner? = null
@@ -733,19 +735,20 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
 
         // Only the native overlay toggle's Pause is avoided. The player object is
         // never replaced, so CS3IPlayer-only preview and compressor APIs still work.
-        private fun openWithoutPause() {
-            if (!fragment.isAdded || fragment.view !== root || !fragment.isThereEpisodes()) return
-            val shown = overlayShownField ?: return
-            val previous = previousPlayStatusField ?: return
-            val animate = overlayAnimator ?: return
-            val alreadyShowing = runCatching { shown.getBoolean(fragment) }.getOrNull() ?: return
-            if (alreadyShowing) return
-            val oldStatus = runCatching { previous.getBoolean(fragment) }.getOrNull() ?: return
-            try {
+        private fun openWithoutPause(): Boolean {
+            if (!fragment.isAdded || fragment.view !== root || !fragment.isThereEpisodes()) return false
+            val shown = overlayShownField ?: return false
+            val previous = previousPlayStatusField ?: return false
+            val animate = overlayAnimator ?: return false
+            val alreadyShowing = runCatching { shown.getBoolean(fragment) }.getOrNull() ?: return false
+            if (alreadyShowing) return false
+            val oldStatus = runCatching { previous.getBoolean(fragment) }.getOrNull() ?: return false
+            return try {
                 fragment.showEpisodesOverlay()
                 previous.setBoolean(fragment, false) // Native close must not issue a redundant Play.
                 shown.setBoolean(fragment, true)
                 animate.invoke(fragment, true)
+                true
             } catch (_: Exception) {
                 // Fail closed: let the original click/focus/key callback open normally.
                 runCatching {
@@ -754,6 +757,7 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
                     overlay?.animate()?.cancel()
                     overlay?.isGone = true
                 }
+                false
             }
         }
 
@@ -762,8 +766,16 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             nativeFocusListener = button.onFocusChangeListener
             val original = nativeFocusListener
             guardedFocusListener = View.OnFocusChangeListener { view, focused ->
-                if (focused && isLayout(TV or EMULATOR)) openWithoutPause()
-                original?.onFocusChange(view, focused) // Preserve native focus text and styling.
+                val opened = focused && isLayout(TV or EMULATOR) && openWithoutPause()
+                if (opened) {
+                    // Native focus callback would immediately toggle the new overlay closed.
+                    root.findViewById<TextView>(R.id.player_episodes_button_text)?.apply {
+                        isSelected = true
+                        isVisible = true
+                    }
+                } else {
+                    original?.onFocusChange(view, focused)
+                }
             }.also { button.onFocusChangeListener = it }
             button.setOnTouchListener(touchGuard)
         }
@@ -775,13 +787,14 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             removeRemoteGuard()
             val wrapper: (Pair<KeyEvent?, Boolean>) -> Boolean = { input ->
                 val event = input.first
-                if (!input.second && event?.action == KeyEvent.ACTION_DOWN &&
+                val opened = !input.second && event?.action == KeyEvent.ACTION_DOWN &&
                     (event.keyCode == KeyEvent.KEYCODE_MENU ||
                         event.keyCode == KeyEvent.KEYCODE_SETTINGS) &&
                     fragment.player.isActive() && fragment.isThereEpisodes() &&
-                    runCatching { lockedField?.getBoolean(fragment) == false }.getOrDefault(false)
-                ) openWithoutPause()
-                current(input) // Preserve all native key behavior.
+                    runCatching { lockedField?.getBoolean(fragment) == false }.getOrDefault(false) &&
+                    openWithoutPause()
+                // Only bypass the native key callback if the overlay is already opened.
+                opened || current(input)
             }
             nativeKeyListener = current
             guardedKeyListener = wrapper
