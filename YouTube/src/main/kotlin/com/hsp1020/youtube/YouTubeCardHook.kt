@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Bundle
 import android.graphics.Rect
+import android.widget.Toast
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -23,13 +24,15 @@ import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
-import com.lagradost.cloudstream3.ui.result.EpisodeClickEvent
-import com.lagradost.cloudstream3.mvvm.Resource
+import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
+import com.lagradost.cloudstream3.ui.player.RepoLinkGenerator
+import com.lagradost.cloudstream3.ui.result.buildResultEpisode
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.core.widget.NestedScrollView
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.CommonActivity
@@ -40,6 +43,14 @@ import com.lagradost.cloudstream3.ui.AutofitRecyclerView
 import com.lagradost.cloudstream3.ui.BaseAdapter
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
+import com.lagradost.cloudstream3.utils.AppContextUtils.loadSearchResult
+import com.lagradost.cloudstream3.utils.UIHelper.navigate
+import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.TvSeriesLoadResponse
+import com.youtube.YoutubeProvider
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import java.util.IdentityHashMap
 import kotlin.math.roundToInt
 
@@ -53,7 +64,76 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private val screens = mutableMapOf<Fragment, Screen>()
     private val dialogs = mutableMapOf<View, Screen>()
     private data class PlayedEpisode(val videoId: String, val number: Int)
+    private data class DirectPlayback(
+        val card: SearchResponse,
+        val parentId: Int,
+        val startingVideoId: String,
+        val startingNumber: Int,
+    )
     private val playedEpisodes = mutableMapOf<Int, PlayedEpisode>()
+    private var directPlayback: DirectPlayback? = null
+    private var directLoading = false
+    private var directReturn: Pair<Int, PlayedEpisode>? = null
+
+    private fun playHomeVideo(card: SearchResponse) {
+        if (directLoading || directPlayback != null) return
+        val activity = host ?: return
+        val api = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
+        val videoId = YoutubeUtils.extractYoutubeId(card.url) ?: return
+        directLoading = true
+        activity.lifecycleScope.launch {
+            try {
+                val page = withContext(Dispatchers.IO) { api.load(card.url) } as? TvSeriesLoadResponse
+                    ?: return@launch
+                val parentId = page.uniqueUrl.replace(api.mainUrl, "").replace("/", "").hashCode()
+                val episodes = page.episodes.sortedBy {
+                    (it.season?.times(10_000) ?: 0) + (it.episode ?: 0)
+                }.mapIndexed { index, episode ->
+                    val number = episode.episode ?: index + 1
+                    buildResultEpisode(
+                        headerName = page.name,
+                        name = episode.name,
+                        poster = episode.posterUrl,
+                        episode = number,
+                        seasonIndex = episode.season,
+                        season = episode.season,
+                        data = episode.data,
+                        apiName = page.apiName,
+                        id = parentId + (episode.season?.times(100_000) ?: 0) + number + 1,
+                        index = index,
+                        rating = episode.score,
+                        description = episode.description,
+                        isFiller = null,
+                        tvType = page.type,
+                        parentId = parentId,
+                        airDate = episode.date,
+                        runTime = episode.runTime,
+                    )
+                }
+                val selectedIndex = episodes.indexOfFirst {
+                    YoutubeUtils.extractYoutubeId(it.data) == videoId
+                }
+                if (selectedIndex < 0) return@launch
+                if (host !== activity || activity.isFinishing) return@launch
+                directPlayback = DirectPlayback(
+                    card, parentId, videoId, episodes[selectedIndex].episode
+                )
+                activity.navigate(
+                    R.id.global_to_navigation_player,
+                    GeneratorPlayer.newInstance(
+                        RepoLinkGenerator(episodes, page = page),
+                        selectedIndex,
+                        HashMap(page.syncData),
+                    ),
+                )
+            } catch (e: Exception) {
+                directPlayback = null
+                Toast.makeText(activity, e.localizedMessage ?: "Unable to play video", Toast.LENGTH_SHORT).show()
+            } finally {
+                directLoading = false
+            }
+        }
+    }
 
     private fun recordPlayerEpisode(fragment: Fragment) {
         if (fragment.javaClass.name != PLAYER_SCREEN) return
@@ -67,17 +147,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         playedEpisodes[episode.parentId] = PlayedEpisode(videoId, episode.episode)
     }
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
-        override fun onFragmentCreated(fm: FragmentManager, f: Fragment, state: Bundle?) {
-            if (f.javaClass.name !in DETAIL_SCREENS) return
-            val args = f.arguments ?: return
-            if (args.getString("apiName") != "YouTube" || args.getInt("startAction", 0) != 0) return
-            val pageUrl = args.getString("url") ?: return
-            val isShortFromHome = pageUrl.contains("/shorts/") && pageUrl.contains("ctx=home")
-            val isVideo = pageUrl.contains("/watch?v=") && !pageUrl.contains("list=")
-            if (!isShortFromHome && !isVideo) return
-            YoutubeUtils.extractYoutubeId(pageUrl)?.let { args.putString(AUTO_PLAY_ID_KEY, it) }
-        }
-
         override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
             recordPlayerEpisode(f)
             screens[f]?.pagePaused()
@@ -85,6 +154,23 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
         override fun onFragmentStopped(fm: FragmentManager, f: Fragment) {
             recordPlayerEpisode(f)
+        }
+
+        override fun onFragmentDestroyed(fm: FragmentManager, f: Fragment) {
+            if (f.javaClass.name != PLAYER_SCREEN) return
+            recordPlayerEpisode(f)
+            val playback = directPlayback ?: return
+            directPlayback = null
+            directReturn = playback.parentId to (
+                playedEpisodes.remove(playback.parentId)
+                    ?: PlayedEpisode(playback.startingVideoId, playback.startingNumber)
+                )
+            val activity = host ?: return
+            main.post {
+                if (host === activity && !activity.isFinishing) {
+                    activity.loadSearchResult(playback.card)
+                }
+            }
         }
 
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
@@ -119,6 +205,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         screens.values.toList().forEach { it.close() }
         screens.clear()
         playedEpisodes.clear()
+        directPlayback = null
+        directReturn = null
+        directLoading = false
         host = null
     }
 
@@ -192,9 +281,36 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             fragment?.arguments?.getString("apiName") == "YouTube" &&
                 (it.contains("/shorts/") || it.contains("/watch?v="))
         }?.replace("https://www.youtube.com", "")?.replace("/", "")?.hashCode()
+        private val returnedEpisode = pageId?.let { page ->
+            directReturn?.takeIf { it.first == page }?.second?.also { directReturn = null }
+        }
         private var leftDetail = false
-        private var pendingFocus: String? = null
+        private var pendingFocus: String? = returnedEpisode?.videoId
+        private var returnNumber: Int? = returnedEpisode?.number
+        private var returnRangeRequested = false
         private var focusPosted = false
+
+        private fun observeReturnRange() {
+            if (pendingFocus == null) return
+            val detail = fragment ?: return
+            val model = ViewModelProvider(detail)[ResultViewModel2::class.java]
+            model.rangeSelections.observe(detail.viewLifecycleOwner) { ranges ->
+                val number = returnNumber ?: return@observe
+                val list = root.findViewById<RecyclerView>(R.id.result_episodes) ?: return@observe
+                val visible = (list.adapter as? EpisodeAdapter)?.immutableCurrentList
+                    ?.any { YoutubeUtils.extractYoutubeId(it.data) == pendingFocus } == true
+                if (!visible && !returnRangeRequested) {
+                    val index = ranges.indexOfFirst {
+                        number in it.second.startEpisode..it.second.endEpisode
+                    }
+                    if (index >= 0 && model.selectedRangeIndex.value != index) {
+                        returnRangeRequested = true
+                        model.changeRange(ranges[index].second)
+                    }
+                }
+                focusSelectedEpisode(list)
+            }
+        }
 
         fun pagePaused() {
             if (pageId != null) leftDetail = true
@@ -240,32 +356,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 }
                 card.requestFocus()
                 pendingFocus = null
-            }
-        }
-
-        private val requestedAutoPlayId = fragment?.arguments?.getString(AUTO_PLAY_ID_KEY)
-        private var autoPlayStarted = false
-
-        private fun observeAutoPlay() {
-            val targetId = requestedAutoPlayId ?: return
-            val detail = fragment ?: return
-            val model = ViewModelProvider(detail)[ResultViewModel2::class.java]
-            model.episodes.observe(detail.viewLifecycleOwner) { result ->
-                if (autoPlayStarted || result !is Resource.Success) return@observe
-                val target = result.value.firstOrNull {
-                    it.apiName == "YouTube" && YoutubeUtils.extractYoutubeId(it.data) == targetId
-                } ?: return@observe
-                val activity = detail.activity ?: return@observe
-                // Use the bound ResultEpisode rather than predicting CloudStream's generated IDs.
-                autoPlayStarted = true
-                model.handleAction(
-                    EpisodeClickEvent(EpisodeAdapter.getPlayerAction(activity), target)
-                )
+                returnNumber = null
             }
         }
 
         init {
-            observeAutoPlay()
+            observeReturnRange()
             if (popup) root.findViewById<RecyclerView>(R.id.home_expanded_recycler)
                 ?.let { watch(it, Role.DIALOG_GRID) }
             root.findViewById<RecyclerView>(R.id.home_master_recycler)?.let { watch(it, Role.HOME_PARENT) }
@@ -298,6 +394,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         private inner class Watcher(private val list: RecyclerView, private val role: Role) {
             private val modified = IdentityHashMap<View, CardState>()
             private val episodeSizes = IdentityHashMap<View, Pair<View, Pair<Int, Int>>>()
+            private val directClicks = IdentityHashMap<View, View.OnClickListener>()
             private var observed: RecyclerView.Adapter<*>? = null
             private var posted = false
 
@@ -327,6 +424,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     } else if (role == Role.DETAIL_EPISODE) {
                         restoreEpisode(view)
                     } else if (role != Role.DETAIL_CAST) {
+                        directClicks.remove(view)
                         restore(view)
                     }
                 }
@@ -351,6 +449,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 modified.keys.toList().forEach(::restore)
                 modified.clear()
                 episodeSizes.keys.toList().forEach(::restoreEpisode)
+                directClicks.clear()
                 posted = false
             }
 
@@ -421,6 +520,26 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 }
                 val video = item.url.contains("/watch?v=")
                 val shorts = item.url.contains("/shorts/")
+                if (role == Role.HOME_CARD && (video || shorts) &&
+                    !item.url.contains("list=") &&
+                    item !is DataStoreHelper.ResumeWatchingResult) {
+                    val click = directClicks.getOrPut(view) {
+                        View.OnClickListener {
+                            val currentPosition = list.getChildViewHolder(view).bindingAdapterPosition
+                            val current = if (currentPosition == RecyclerView.NO_POSITION) null
+                                else (list.adapter as? BaseAdapter<*, *>)?.getItemOrNull(currentPosition)
+                                    as? SearchResponse
+                            if (current?.apiName == "YouTube" &&
+                                (current.url.contains("/watch?v=") ||
+                                    current.url.contains("/shorts/")) &&
+                                !current.url.contains("list=")) {
+                                playHomeVideo(current)
+                            }
+                        }
+                    }
+                    view.setOnClickListener(click)
+                    card.setOnClickListener(click)
+                }
                 if (!video && !shorts) {
                     state.restoreSize()
                     return
@@ -633,7 +752,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
     private companion object {
         const val PLAYER_SCREEN = "com.lagradost.cloudstream3.ui.player.GeneratorPlayer"
-        const val AUTO_PLAY_ID_KEY = "youtube_auto_play_video_id"
         val DETAIL_SCREENS = setOf(
             "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
             "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer",
