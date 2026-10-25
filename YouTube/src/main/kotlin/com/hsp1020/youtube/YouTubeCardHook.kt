@@ -567,8 +567,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 }
                 val video = item.url.contains("/watch?v=")
                 val shorts = item.url.contains("/shorts/")
-                if (role == Role.HOME_CARD && (video || shorts) &&
-                    !item.url.contains("list=") &&
+                // The expanded Home catalog uses DIALOG_GRID and SearchAdapter.
+                // Apply the same direct-play click to its cards; the HomeFragment
+                // itself performs the native bottom-sheet hide on navigation.
+                if ((role == Role.HOME_CARD || role == Role.DIALOG_GRID) &&
+                    (video || shorts) && !item.url.contains("list=") &&
                     item !is DataStoreHelper.ResumeWatchingResult) {
                     val click = directClicks.getOrPut(view) {
                         View.OnClickListener {
