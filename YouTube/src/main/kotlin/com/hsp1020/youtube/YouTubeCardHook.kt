@@ -84,7 +84,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         directLoading = true
         activity.lifecycleScope.launch {
             try {
-                val page = withContext(Dispatchers.IO) { api.load(card.url) } as? TvSeriesLoadResponse
+                val page = withContext(Dispatchers.IO) { api.loadForDirectPlayback(card.url) } as? TvSeriesLoadResponse
                     ?: return@launch
                 val parentId = page.uniqueUrl.replace(api.mainUrl, "").replace("/", "").hashCode()
                 val episodes = page.episodes.sortedBy {
@@ -166,6 +166,14 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
             recordPlayerEpisode(f)
+            if (f.javaClass.name == PLAYER_SCREEN) {
+                val playback = directPlayback
+                val last = playback?.let { playedEpisodes[it.parentId] }
+                if (playback != null && last != null) {
+                    // Prepare focus behind the player, before its back-stack pop is drawn.
+                    screens.values.forEach { it.primeReturnFocus(playback.parentId, last) }
+                }
+            }
         }
 
         override fun onFragmentStopped(fm: FragmentManager, f: Fragment) {
@@ -330,6 +338,17 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
         }
 
+        fun primeReturnFocus(parentId: Int, episode: PlayedEpisode) {
+            if (pageId != parentId) return
+            pendingFocus = episode.videoId
+            returnNumber = episode.number
+            returnRangeRequested = false
+            val host = fragment ?: return
+            val list = root.findViewById<RecyclerView>(R.id.result_episodes) ?: return
+            val model = ViewModelProvider(host)[ResultViewModel2::class.java]
+            applyReturnRange(list, model.rangeSelections.value.orEmpty())
+        }
+
         fun applyReturnIfReady() {
             val id = pageId ?: return
             val saved = directReturn?.takeIf { it.first == id }?.second
@@ -370,7 +389,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 if (parent is NestedScrollView) {
                     val rect = Rect(0, 0, card.width, card.height)
                     parent.offsetDescendantRectToMyCoords(card, rect)
-                    parent.smoothScrollTo(0, (rect.top - dp(80)).coerceAtLeast(0))
+                    parent.scrollTo(0, (rect.top - dp(80)).coerceAtLeast(0))
                 }
                 card.requestFocus()
                 pendingFocus = null
@@ -413,6 +432,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             private val modified = IdentityHashMap<View, CardState>()
             private val episodeSizes = IdentityHashMap<View, Pair<View, Pair<Int, Int>>>()
             private val directClicks = IdentityHashMap<View, View.OnClickListener>()
+            private val initialMinHeight = list.minimumHeight
             private var observed: RecyclerView.Adapter<*>? = null
             private var posted = false
 
@@ -468,6 +488,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 modified.clear()
                 episodeSizes.keys.toList().forEach(::restoreEpisode)
                 directClicks.clear()
+                if (list.minimumHeight != initialMinHeight) list.minimumHeight = initialMinHeight
                 posted = false
             }
 
@@ -491,8 +512,34 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
 
             private fun scan() {
+                stabilizeMixedHomeRow()
                 for (i in 0 until list.childCount) apply(list.getChildAt(i))
                 if (role == Role.DETAIL_EPISODE) focusSelectedEpisode(list)
+            }
+
+            /**
+             * A horizontal RecyclerView with wrap_content height may shrink when
+             * all visible items are landscape; the taller Shorts' caption then gets
+             * clipped when returning to them. Reserve the full portrait + 4-line
+             * caption height only for mixed YouTube home catalog rows.
+             */
+            private fun stabilizeMixedHomeRow() {
+                if (role != Role.HOME_CARD) return
+                val items = (list.adapter as? HomeChildItemAdapter)?.immutableCurrentList
+                val mixed = items?.any {
+                    it.apiName == "YouTube" && it.url.contains("/shorts/")
+                } == true && items?.any {
+                    it.apiName == "YouTube" && it.url.contains("/watch?v=")
+                } == true
+                val desired = if (mixed) {
+                    val width = HomeChildItemAdapter.minPosterSize.takeIf { it > 0 } ?: dp(114)
+                    val title = list.getChildAt(0)
+                        ?.findViewById<TextView>(R.id.imageText)
+                    val lineHeight = maxOf(title?.lineHeight ?: 0, dp(19))
+                    maxOf(initialMinHeight, (width * 16f / 9f).roundToInt() +
+                        4 * lineHeight + dp(18))
+                } else initialMinHeight
+                if (list.minimumHeight != desired) list.minimumHeight = desired
             }
 
             private fun apply(view: View) {

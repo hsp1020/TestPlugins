@@ -3192,8 +3192,35 @@ class YoutubeProvider(
         }
     }
 
-    override suspend fun load(url: String): LoadResponse {
+    override suspend fun load(url: String): LoadResponse = loadPage(url, direct = false)
+
+    /**
+     * Direct home playback skips extended NewPipe metadata.
+     * Shorts already have a full home-catalog episode list, so that path needs no
+     * additional YouTube detail requests before opening the player.
+     */
+    internal suspend fun loadForDirectPlayback(url: String): LoadResponse =
+        loadPage(url, direct = true)
+
+    private suspend fun loadPage(url: String, direct: Boolean): LoadResponse {
         if (url.contains("/shorts/")) {
+            if (direct) {
+                val videoId = YoutubeUtils.extractYoutubeId(url)
+                val source = if (url.contains("ctx=search")) searchShorts else homeShorts
+                val current = synchronized(source) { source.map { it.copy() } }
+                if (videoId != null && current.size > 1 &&
+                    current.any { YoutubeUtils.extractYoutubeId(it.data) == videoId }) {
+                    current.forEachIndexed { index, ep -> ep.episode = index + 1 }
+                    val selected = current.first { YoutubeUtils.extractYoutubeId(it.data) == videoId }
+                    return newTvSeriesLoadResponse(
+                        "#${selected.episode} ${selected.name ?: "Shorts"}",
+                        url, TvType.TvSeries, current
+                    ) {
+                        this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
+                        this.plot = "\u200b"
+                    }
+                }
+            }
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
             val sourceList = if (useSearchList) searchShorts else homeShorts
@@ -3217,7 +3244,7 @@ class YoutubeProvider(
             
             val pairResult = coroutineScope {
                 val npDeferred = async(Dispatchers.IO) {
-                    try {
+                    if (direct) null else try {
                         val extractor = ServiceList.YouTube.getStreamExtractor(watchUrl)
                         configureExtractorLocalization(extractor)
                         extractor.fetchPage()
@@ -3759,7 +3786,7 @@ class YoutubeProvider(
 
         val pairResult = coroutineScope {
             val npDeferred = async(Dispatchers.IO) {
-                try {
+                if (direct) null else try {
                     val extractor = ServiceList.YouTube.getStreamExtractor(url)
                     configureExtractorLocalization(extractor)
                     extractor.fetchPage()
