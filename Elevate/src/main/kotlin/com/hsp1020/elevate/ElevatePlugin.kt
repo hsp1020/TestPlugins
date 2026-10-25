@@ -72,6 +72,7 @@ class ElevatePlugin : Plugin() {
     private var episodeProgress: EpisodeProgressHook? = null
     private var subtitleRetry: SubtitleRefererRetry? = null
     private var homeRecyclerGuard: HomeRecyclerCacheGuard? = null
+    private var nativeRecyclerGuard: NativeRecyclerListenerGuard? = null
     private var searchProviderOrder: SearchProviderOrderHook? = null
     private var audioSelector: ElevateAudioTrackSelector? = null
     private var skipController: ElevateSkipController? = null
@@ -101,7 +102,7 @@ class ElevatePlugin : Plugin() {
             stopAll()
             app = application
             httpResponseGuard = ElevateHttpResponseGuard(application).also { it.start() }
-            homeRecyclerGuard = HomeRecyclerCacheGuard(application).also { it.start() }
+            nativeRecyclerGuard = NativeRecyclerListenerGuard(application).also { it.start() }
             try {
                 val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
                 // Preserve the user's previous visible/hidden choice when changing to "ON = hide".
@@ -167,9 +168,17 @@ class ElevatePlugin : Plugin() {
             homeHero?.stop()
             homeHero = null
         }
-        // Native RecyclerView listener cleanup always runs; only stale-poster
-        // rebind repair is controlled by the Home Poster Refresh setting.
-        homeRecyclerGuard?.setRepairEnabled(enabled(ElevateFeature.HOME_REPAIR))
+        // Original pre-merge behavior: the dedicated poster guard owns its
+        // provider/page observers only while Home Poster Refresh is enabled.
+        // Native scroll-listener cleanup is independent.
+        if (enabled(ElevateFeature.HOME_REPAIR)) {
+            if (homeRecyclerGuard == null) {
+                homeRecyclerGuard = HomeRecyclerCacheGuard(application).also { it.start() }
+            }
+        } else {
+            homeRecyclerGuard?.stop()
+            homeRecyclerGuard = null
+        }
         if (enabled(ElevateFeature.LIBRARY_POSTERS)) {
             if (libraryPosters == null) libraryPosters = LibraryPosterHook(application).also { it.start() }
         } else {
@@ -252,6 +261,8 @@ class ElevatePlugin : Plugin() {
         subtitleRetry = null
         homeRecyclerGuard?.stop()
         homeRecyclerGuard = null
+        nativeRecyclerGuard?.stop()
+        nativeRecyclerGuard = null
         searchProviderOrder?.stop()
         searchProviderOrder = null
         audioSelector?.stop()

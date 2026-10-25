@@ -8,7 +8,6 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
-import android.view.ViewTreeObserver
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
@@ -28,7 +27,6 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var enabled = false
-    private var repairEnabled = false
     private var started = false
     private var activity: FragmentActivity? = null
     private var model: HomeViewModel? = null
@@ -42,133 +40,6 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private val watched = mutableMapOf<RecyclerView, RowWatch>()
     private val repaired = mutableSetOf<String>()
     private var scanScheduled = false
-    private var homeTree: ViewTreeObserver? = null
-    private val homeLayout = ViewTreeObserver.OnGlobalLayoutListener { queueScan() }
-    private val playerScreens = LinkedHashMap<Fragment, PlayerWatch>()
-    private val listenerDiagnostics = mutableSetOf<String>()
-    private val removalLogCount = mutableMapOf<String, Int>()
-    private val readFailureLogged = mutableSetOf<String>()
-    // Weak keys: no RecyclerView retention after recycling/destruction.
-    // Avoid cloning/filtering the same listener list on every layout pass.
-    private val inspectedListeners = java.util.WeakHashMap<RecyclerView, Long>()
-    private fun signature(list: List<RecyclerView.OnScrollListener>): Long =
-        (list.size.toLong() shl 32) xor
-            System.identityHashCode(list.lastOrNull()).toLong()
-
-    private val listenerField by lazy {
-        val field = runCatching {
-            RecyclerView::class.java.getDeclaredField("mScrollListeners").apply {
-                isAccessible = true
-            }
-        }.onFailure {
-            Log.w(RECYCLER_LOG_TAG, "stage=reflection screen=all success=false reason=" +
-                it.javaClass.simpleName)
-        }.getOrNull()
-        if (field != null)
-            Log.i(RECYCLER_LOG_TAG, "stage=reflection screen=all success=true field=mScrollListeners")
-        field
-    }
-
-    /** Bounded diagnostics: one class sample per outcome and first six removals per screen. */
-    private fun prune(
-        recycler: RecyclerView, owner: String, callSite: String, screen: String
-    ) {
-        val field = listenerField ?: return
-        val read = runCatching {
-            @Suppress("UNCHECKED_CAST")
-            field.get(recycler) as? List<RecyclerView.OnScrollListener>
-        }
-        val current = read.getOrElse {
-            if (readFailureLogged.add(screen))
-                Log.w(RECYCLER_LOG_TAG, "stage=read screen=$screen success=false reason=" +
-                    it.javaClass.simpleName)
-            return
-        } ?: run {
-            // RecyclerView leaves the field null until its first listener is added.
-            // This is a normal uninitialized state, not a reflection failure.
-            if (listenerDiagnostics.add("$screen:uninitialized"))
-                Log.i(RECYCLER_LOG_TAG, "stage=read screen=$screen status=uninitialized")
-            return
-        }
-        val beforeSignature = signature(current)
-        if (inspectedListeners[recycler] == beforeSignature) return
-        val snapshot = current.toList()
-        val matches = snapshot.filter {
-            val name = it.javaClass.name
-            name.startsWith(owner) && name.contains(callSite)
-        }
-        val state = when {
-            snapshot.isEmpty() -> "empty"
-            matches.isNotEmpty() -> "match"
-            else -> "no-match"
-        }
-        if (listenerDiagnostics.add("$screen:$state")) {
-            val sampled = matches.firstOrNull() ?: snapshot.firstOrNull()
-            Log.i(RECYCLER_LOG_TAG,
-                "stage=identify screen=$screen status=$state before=" + snapshot.size +
-                    " matched=" + matches.size +
-                    " class=" + (sampled?.javaClass?.name ?: "none"))
-        }
-        if (matches.size < 2) {
-            inspectedListeners[recycler] = beforeSignature
-            return
-        }
-        var removed = 0
-        for (old in matches.dropLast(1)) {
-            recycler.removeOnScrollListener(old)
-            removed++
-        }
-        if (removed > 0) {
-            val after = runCatching {
-                @Suppress("UNCHECKED_CAST")
-                field.get(recycler) as? List<RecyclerView.OnScrollListener>
-            }.getOrNull()
-            if (after != null) inspectedListeners[recycler] = signature(after)
-            else inspectedListeners.remove(recycler)
-            val count = removalLogCount[screen] ?: 0
-            if (count < 6) {
-                val remaining = after?.count {
-                    it.javaClass.name.startsWith(owner) &&
-                        it.javaClass.name.contains(callSite)
-                }
-                Log.i(RECYCLER_LOG_TAG,
-                    "stage=pruned screen=$screen before=" + snapshot.size +
-                        " matched=" + matches.size + " removed=$removed" +
-                        " after=" + (after?.size ?: -1) +
-                        " remainingNative=" + (remaining ?: -1))
-            }
-            removalLogCount[screen] = count + 1
-        }
-    }
-
-    private inner class PlayerWatch(private val fragment: Fragment, val view: View) {
-        private val tree = view.viewTreeObserver
-        private var queued = false
-        private val listener = ViewTreeObserver.OnGlobalLayoutListener { schedule() }
-        private val action = Runnable {
-            queued = false
-            if (!fragment.isAdded || fragment.view !== view) return@Runnable
-            view.findViewById<RecyclerView>(R.id.player_episode_list)?.let {
-                prune(it,
-                    "com.lagradost.cloudstream3.ui.player.GeneratorPlayer" + "$",
-                    "showEpisodesOverlay", "player")
-            }
-        }
-        fun start() {
-            if (tree.isAlive) tree.addOnGlobalLayoutListener(listener)
-            schedule()
-        }
-        private fun schedule() {
-            if (queued) return
-            queued = true
-            main.postDelayed(action, 120L)
-        }
-        fun close() {
-            if (tree.isAlive) tree.removeOnGlobalLayoutListener(listener)
-            main.removeCallbacks(action)
-            queued = false
-        }
-    }
     private fun queueScan() {
         if (scanScheduled) return
         val rv = root ?: return
@@ -187,7 +58,6 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
             expected = null
             repaired.clear()
             clearRows()
-            Log.i(RECYCLER_LOG_TAG, "stage=provider-change generation=" + generation)
         }
         provider = next
     }
@@ -208,10 +78,8 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                         } || lists.all { it.list.list.isEmpty() }
                     ) {
                         expected = lists
-                        Log.i(RECYCLER_LOG_TAG, "stage=home-data-ready generation=" +
-                            generation + " rows=" + lists.size)
                         observeParent()
-                        queueScan()
+                        scanRows()
                     }
                 }
             }
@@ -224,11 +92,13 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         override fun onItemRangeChanged(p: Int, n: Int) = queue()
         override fun onItemRangeMoved(from: Int, to: Int, n: Int) = queue()
         private fun queue() {
+            if (expected == null) return
             queueScan()
         }
     }
     private val parentViews = object : RecyclerView.OnChildAttachStateChangeListener {
         override fun onChildViewAttachedToWindow(view: View) {
+            if (expected == null) return
             if (view.parent === root) queueScan()
         }
         override fun onChildViewDetachedFromWindow(view: View) {
@@ -242,36 +112,9 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
             fm: FragmentManager, f: Fragment, v: View, saved: Bundle?
         ) {
             if (f.javaClass.name == HOME_CLASS) bindHome(f, v)
-            if (f.javaClass.name == PLAYER_CLASS) bindPlayer(f, v)
         }
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
             if (f === home) unbindHome()
-            playerScreens.remove(f)?.close()
-        }
-    }
-
-    /** Home repair toggle affects stale-poster repair only, not native listener cleanup. */
-    fun setRepairEnabled(value: Boolean) {
-        if (repairEnabled == value) return
-        repairEnabled = value
-        Log.i(RECYCLER_LOG_TAG, "stage=repair-setting enabled=" + value)
-        main.post {
-            if (!started) return@post
-            val vm = model ?: return@post
-            vm.apiName.removeObserver(apiObserver)
-            vm.page.removeObserver(pageObserver)
-            generation++
-            clearRows()
-            repaired.clear()
-            expected = null
-            pendingProvider = null
-            if (repairEnabled) {
-                provider = vm.apiName.value
-                val owner = activity ?: return@post
-                vm.apiName.observe(owner, apiObserver)
-                vm.page.observe(owner, pageObserver)
-            }
-            queueScan()
         }
     }
 
@@ -301,14 +144,11 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         model = vm
         provider = vm.apiName.value
         next.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
-        if (repairEnabled) {
-            vm.apiName.observe(next, apiObserver)
-            vm.page.observe(next, pageObserver)
-        }
+        vm.apiName.observe(next, apiObserver)
+        vm.page.observe(next, pageObserver)
         fun find(fm: FragmentManager) {
             fm.fragments.forEach { f ->
                 if (f.javaClass.name == HOME_CLASS) f.view?.let { bindHome(f, it) }
-                if (f.javaClass.name == PLAYER_CLASS) f.view?.let { bindPlayer(f, it) }
                 if (f.isAdded) find(f.childFragmentManager)
             }
         }
@@ -321,12 +161,6 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         model?.page?.removeObserver(pageObserver)
         activity?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         unbindHome()
-        playerScreens.values.forEach { it.close() }
-        playerScreens.clear()
-        listenerDiagnostics.clear()
-        removalLogCount.clear()
-        readFailureLogged.clear()
-        inspectedListeners.clear()
         model = null
         activity = null
         provider = null
@@ -339,26 +173,12 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         if (home === f && root === rv) return
         unbindHome()
         home = f
-        if (listenerDiagnostics.add("home:attached"))
-            Log.i(RECYCLER_LOG_TAG, "stage=attached screen=home found=" + (rv != null))
         root = rv
         rv?.addOnChildAttachStateChangeListener(parentViews)
-        homeTree = rv?.viewTreeObserver?.also {
-            if (it.isAlive) it.addOnGlobalLayoutListener(homeLayout)
-        }
         observeParent()
         queueScan()
     }
-    private fun bindPlayer(f: Fragment, v: View) {
-        if (playerScreens[f]?.view === v) return
-        playerScreens.remove(f)?.close()
-        if (listenerDiagnostics.add("player:attached"))
-            Log.i(RECYCLER_LOG_TAG, "stage=attached screen=player found=true")
-        playerScreens[f] = PlayerWatch(f, v).also { it.start() }
-    }
     private fun unbindHome() {
-        homeTree?.let { if (it.isAlive) it.removeOnGlobalLayoutListener(homeLayout) }
-        homeTree = null
         clearRows()
         parentAdapter?.unregisterAdapterDataObserver(parentUpdates)
         parentAdapter = null
@@ -379,25 +199,16 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     }
     private fun scanRows() {
         val rv = root ?: return
+        if (expected == null) return
         if (rv.isComputingLayout) {
             queueScan()
             return
         }
         observeParent()
-        if (listenerDiagnostics.add("home:scan"))
-            Log.i(RECYCLER_LOG_TAG,
-                "stage=scan screen=home visibleRows=${rv.childCount} adapterPresent=${rv.adapter != null}")
-        for (i in 0 until rv.childCount) {
-            val view = rv.getChildAt(i)
-            val child = view.findViewById<RecyclerView>(R.id.home_child_recyclerview) ?: continue
-            prune(child,
-                "com.lagradost.cloudstream3.ui.home.ParentItemAdapter" + "$",
-                "onBindContent", "home")
-            if (repairEnabled && expected != null) watchRow(view)
-        }
+        for (i in 0 until rv.childCount) watchRow(rv.getChildAt(i))
     }
     private fun watchRow(view: View) {
-        if (!repairEnabled || expected == null) return
+        if (expected == null) return
         val rv = view.findViewById<RecyclerView>(R.id.home_child_recyclerview) ?: return
         watched.getOrPut(rv) { RowWatch(rv).also { it.start() } }.sync()
         verify(rv)
@@ -450,71 +261,35 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private fun verify(child: RecyclerView) {
         val latest = expected ?: return
         val outer = root ?: return
-        if (!repairEnabled || outer.isComputingLayout || child.isComputingLayout) return
+        if (outer.isComputingLayout || child.isComputingLayout) return
         val parent = outer.adapter as? ParentItemAdapter ?: return
         val row = (0 until outer.childCount).map { outer.getChildAt(it) }
             .firstOrNull {
                 it.findViewById<RecyclerView>(R.id.home_child_recyclerview) === child
             } ?: return
         val holder = outer.findContainingViewHolder(row) ?: return
-        val rowPosition = holder.bindingAdapterPosition
-        if (rowPosition < parent.headers || rowPosition == RecyclerView.NO_POSITION) return
-        val item = parent.getItemOrNull(rowPosition - parent.headers) ?: return
+        val item = parent.getItemOrNull(holder.bindingAdapterPosition - parent.headers) ?: return
         if (latest.none {
                 it.list.name == item.list.name &&
                     it.list.list.firstOrNull()?.url == item.list.list.firstOrNull()?.url
             }) return
-        if (row.findViewById<TextView>(R.id.home_child_more_info)?.text?.toString() != item.list.name)
-            return
+        if (row.findViewById<TextView>(R.id.home_child_more_info)?.text?.toString() != item.list.name) return
         val adapter = child.adapter as? HomeChildItemAdapter ?: return
-        val seq = generation
-        val max = minOf(2, adapter.itemCount, item.list.list.size)
-        if (max == 0) return
-        // If child adapter is stale, refresh the parent row, not the stale child.
-        val wrongData = (0 until max).firstOrNull { pos ->
-            item.list.list[pos].url != adapter.getItemOrNull(pos)?.url
-        }
-        if (wrongData != null) {
-            val key = "parent:" + seq + ":" + System.identityHashCode(row) + ":" + item.list.name
-            if (!repaired.add(key)) return
-            Log.i(RECYCLER_LOG_TAG,
-                "stage=repair-parent generation=" + seq + " row=" + rowPosition +
-                    " stalePos=" + wrongData)
-            outer.post {
-                if (seq == generation && repairEnabled &&
-                    outer.adapter === parent && !outer.isComputingLayout &&
-                    parent.getItemOrNull(rowPosition - parent.headers)?.list?.name == item.list.name
-                ) {
-                    parent.notifyItemChanged(rowPosition)
-                } else {
-                    repaired.remove(key)
-                }
-            }
-            return
-        }
-        for (pos in 0 until max) {
+        for (pos in 0 until minOf(2, adapter.itemCount)) {
             val card = adapter.getItemOrNull(pos) ?: continue
+            if (item.list.list.getOrNull(pos)?.url != card.url) continue
             val bound = child.findViewHolderForAdapterPosition(pos) ?: continue
-            val shownTitle = bound.itemView.findViewById<TextView>(R.id.imageText)?.text?.toString()
-            // Once per provider generation, reload the first two images even if
-            // their title is correct, because the recycled drawable may be stale.
-            val forceRefresh = seq > 0
-            if (!forceRefresh && shownTitle == card.name) continue
-            val key = "card:" + seq + ":" + System.identityHashCode(bound.itemView) +
-                ":" + pos + ":" + card.url
-            if (!repaired.add(key)) continue
-            Log.i(RECYCLER_LOG_TAG,
-                "stage=repair-card generation=" + seq + " pos=" + pos +
-                    " forced=" + forceRefresh)
+            if (bound.itemView.findViewById<TextView>(R.id.imageText)?.text?.toString() == card.name) continue
+            val key = "${System.identityHashCode(bound.itemView)}:${card.url}"
+            if (key in repaired) continue
+            val seq = generation
             child.post {
-                if (seq == generation && repairEnabled &&
-                    child.adapter === adapter && !child.isComputingLayout &&
-                    adapter.getItemOrNull(pos)?.url == card.url &&
-                    child.findViewHolderForAdapterPosition(pos)?.itemView === bound.itemView
+                if (seq == generation && expected != null && !child.isComputingLayout &&
+                    child.adapter === adapter && adapter.getItemOrNull(pos)?.url == card.url &&
+                    child.findViewHolderForAdapterPosition(pos)?.itemView === bound.itemView &&
+                    repaired.add(key)
                 ) {
                     adapter.notifyItemChanged(pos)
-                } else {
-                    repaired.remove(key)
                 }
             }
         }
@@ -534,7 +309,5 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
 
     private companion object {
         const val HOME_CLASS = "com.lagradost.cloudstream3.ui.home.HomeFragment"
-        const val PLAYER_CLASS = "com.lagradost.cloudstream3.ui.player.GeneratorPlayer"
-        const val RECYCLER_LOG_TAG = "Elevate-RecyclerGuard"
     }
 }
