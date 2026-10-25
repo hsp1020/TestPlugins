@@ -1,8 +1,6 @@
 package com.hsp1020.elevate
 
 import android.app.Activity
-import android.util.Log
-import androidx.media3.common.Player as Media3Player
 import com.lagradost.cloudstream3.ui.player.PlayerView
 import com.lagradost.cloudstream3.ui.player.AbstractPlayerFragment
 import androidx.cardview.widget.CardView
@@ -29,7 +27,6 @@ import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.ui.download.DownloadButtonSetup
 import com.lagradost.cloudstream3.ui.player.CSPlayerEvent
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
-import com.lagradost.cloudstream3.ui.player.CS3IPlayer
 import com.lagradost.cloudstream3.ui.player.PlayerEventSource
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.result.ACTION_CLICK_DEFAULT
@@ -42,7 +39,6 @@ import android.content.SharedPreferences
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.view.MenuItem
 import android.view.View
 import android.view.ViewTreeObserver
@@ -619,81 +615,11 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         private var overlayCheckQueued = false
         private var lastNativeAdapter: RecyclerView.Adapter<*>? = null
         private var overlayWasShown = false
-        private var media3Player: Media3Player? = null
-        private var media3AttachedAt = 0L
-        private var readyLogged = false
-        private var media3Connections = 0
-        private var previewProbeScheduled = false
-        // Poll only a fixed handful of times after a *new* player is attached.
-        // Do not implement Media3Player.Listener here: CloudStream's runtime
-        // Media3 ABI is not guaranteed to match the plugin compile-time ABI.
-        private var initialProbeCount = 0
-        private val previewProbe = object : Runnable {
-            override fun run() {
-                previewProbeScheduled = false
-                if (!fragment.isAdded || fragment.view !== root) return
-                val current = fragment.playerView?.player
-                if (current !== media3Player) {
-                    refreshMedia3()
-                    return
-                }
-                if (current != null) {
-                    if (current.playbackState == Media3Player.STATE_READY && !readyLogged) {
-                        readyLogged = true
-                        Log.i(PLAYER_LOG, "stage=player-ready elapsedMs=" +
-                            (SystemClock.elapsedRealtime() - media3AttachedAt) +
-                            " instance=" + media3Connections)
-                    }
-                    if (initialProbeCount == 2 || (readyLogged && initialProbeCount > 0))
-                        logNativeCapabilities("preview-after-ready")
-                    initialProbeCount++
-                    if (initialProbeCount < 3 && !readyLogged) schedulePreviewProbe()
-                }
-            }
-        }
-
-        private fun schedulePreviewProbe() {
-            if (previewProbeScheduled) return
-            previewProbeScheduled = true
-            main.postDelayed(previewProbe, if (initialProbeCount == 0) 300L else 1200L)
-        }
-
-        private fun logNativeCapabilities(stage: String) {
-            val native = fragment.player as? CS3IPlayer
-            val previews = native?.imageGenerator
-            Log.i(PLAYER_LOG, "stage=" + stage +
-                " nativeCs3=" + (native != null) +
-                " previewReady=" + (native?.hasPreview() ?: false) +
-                " previewImages=" + (previews?.loadedImages ?: -1) +
-                " compressorAccessible=" + (native != null))
-        }
-
-        private fun refreshMedia3() {
-            val next = fragment.playerView?.player
-            if (next === media3Player) return
-            main.removeCallbacks(previewProbe)
-            previewProbeScheduled = false
-            media3Player = next
-            readyLogged = false
-            initialProbeCount = 0
-            media3AttachedAt = SystemClock.elapsedRealtime()
-            if (next != null) {
-                media3Connections++
-                Log.i(PLAYER_LOG, "stage=player-attached instance=" + media3Connections +
-                    " playbackState=" + next.playbackState)
-                schedulePreviewProbe()
-            } else if (media3Connections > 0) {
-                Log.i(PLAYER_LOG, "stage=player-detached instance=" + media3Connections)
-            }
-        }
-
         private val overlayCheck = Runnable {
             overlayCheckQueued = false
             if (!fragment.isAdded || fragment.view !== root) return@Runnable
-            refreshMedia3()
             val showing = overlay?.isShown == true
             if (!showing) {
-                if (overlayWasShown) Log.i(PLAYER_LOG, "stage=overlay-closed")
                 overlayWasShown = false
                 return@Runnable
             }
@@ -716,8 +642,7 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             val currentAdapter = list?.adapter
             val nativeChanged = currentAdapter is EpisodeAdapter &&
                 currentAdapter !== filteredAdapter && currentAdapter !== lastNativeAdapter
-            if (showing != overlayWasShown || nativeChanged ||
-                fragment.playerView?.player !== media3Player)
+            if (showing != overlayWasShown || nativeChanged)
                 scheduleOverlayCheck()
         }
         private var model: PlayerGeneratorViewModel? = null
@@ -775,10 +700,6 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         fun attach() {
             // Preserve concrete CS3IPlayer type for preview scrubbing and
             // native audio compressor; no IPlayer proxy is ever installed.
-            Log.i(PLAYER_LOG, "stage=compat-attached nativeCs3=" +
-                (fragment.player is CS3IPlayer) +
-                " playerType=" + fragment.player.javaClass.simpleName)
-            logNativeCapabilities("native-capabilities")
             if (tree.isAlive) tree.addOnGlobalLayoutListener(overlayLayout)
             scheduleOverlayCheck()
 
@@ -811,9 +732,6 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
             if (tree.isAlive) tree.removeOnGlobalLayoutListener(overlayLayout)
             main.removeCallbacks(overlayCheck)
             overlayCheckQueued = false
-            media3Player = null
-            main.removeCallbacks(previewProbe)
-            previewProbeScheduled = false
             if (host?.callbacks === guardedCallbacks) host?.callbacks = callbacks
             host = null
             callbacks = null
@@ -843,20 +761,11 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
                 val before = runCatching {
                     previousPlayStatusField?.getBoolean(fragment)
                 }.getOrNull()
-                val nativeCs3 = fragment.player is CS3IPlayer
                 val resume = before == true && !fragment.player.getIsPlaying()
                 if (resume)
                     fragment.player.handleEvent(CSPlayerEvent.Play, PlayerEventSource.Player)
-                Log.i(PLAYER_LOG, "stage=overlay-open nativeCs3=" + nativeCs3 +
-                    " previousPlaying=" + before + " resumeApplied=" + resume +
-                    " episodes=" + (list?.adapter?.itemCount ?: -1))
                 guardAutoHide()
-                val renderStart = SystemClock.elapsedRealtime()
                 configureSeasons()
-                Log.i(PLAYER_LOG, "stage=overlay-ready spinner=" + (selector != null) +
-                    " filteredCount=" + (list?.adapter?.itemCount ?: -1) +
-                    " configureMs=" + (SystemClock.elapsedRealtime() - renderStart))
-                logNativeCapabilities("overlay-capabilities")
             }
         }
 
@@ -1044,10 +953,6 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
                 }
             }
         }
-    }
-
-    private companion object {
-        const val PLAYER_LOG = "Elevate-PlayerCompat"
     }
 
     private val callbacks = object : FragmentManager.FragmentLifecycleCallbacks() {

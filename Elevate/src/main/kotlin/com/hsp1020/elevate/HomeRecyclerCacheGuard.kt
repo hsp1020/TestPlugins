@@ -40,6 +40,16 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private val watched = mutableMapOf<RecyclerView, RowWatch>()
     private val repaired = mutableSetOf<String>()
     private var scanScheduled = false
+    // Diagnostics only; de-duplicate per provider generation, without a
+    // hardcoded allowlist of provider names or altering repair decisions.
+    private val traced = HashSet<String>()
+    private fun traceOnce(key: String, event: String, detail: String) {
+        if (traced.add(generation.toString() + ":" + key))
+            Log.i("Elevate-HomePoster", "generation=" + generation +
+                " event=" + event + " provider=" + provider +
+                " pending=" + pendingProvider + " " + detail)
+    }
+    private fun hash(url: String?): String = url?.hashCode()?.toString() ?: "null"
     private fun queueScan() {
         if (scanScheduled) return
         val rv = root ?: return
@@ -53,33 +63,65 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
 
     private val apiObserver = Observer<String> { next ->
         if (provider != null && provider != next) {
+            val previous = provider
             generation++
             pendingProvider = next
             expected = null
             repaired.clear()
+            traced.clear()
             clearRows()
+            traceOnce("switch", "provider-switch", "from=" + previous + " to=" + next)
         }
         provider = next
     }
     private val pageObserver =
         Observer<Resource<Map<String, HomeViewModel.ExpandableHomepageList>>> { result ->
-            if (pendingProvider == null) return@Observer
+            if (pendingProvider == null) {
+                if (result is Resource.Success)
+                    traceOnce("no-pending-success", "page-ignored", "reason=no-pending-provider")
+                return@Observer
+            }
             when (result) {
-                is Resource.Loading -> expected = null
+                is Resource.Loading -> {
+                    expected = null
+                    traceOnce("loading", "page-loading", "expectedCleared=true")
+                }
                 is Resource.Failure -> {
+                    traceOnce("failure", "page-failure", "pendingCleared=true")
                     pendingProvider = null
                     expected = null
                     clearRows()
                 }
                 is Resource.Success -> {
                     val lists = result.value.values.toList()
-                    if (lists.any { row ->
-                            row.list.list.firstOrNull()?.apiName == pendingProvider
-                        } || lists.all { it.list.list.isEmpty() }
-                    ) {
+                    val providerPresent = lists.any { row ->
+                        row.list.list.firstOrNull()?.apiName == pendingProvider
+                    }
+                    val allEmpty = lists.all { it.list.list.isEmpty() }
+                    traceOnce("page-success", "page-success", "rows=" + lists.size +
+                        " providerPresent=" + providerPresent + " allEmpty=" + allEmpty)
+                    // Log every catalog from every selected home provider. Only
+                    // identifiers/hashes are logged; no poster URLs/API tokens.
+                    lists.forEachIndexed { index, row ->
+                        val one = row.list.list.getOrNull(0)
+                        val two = row.list.list.getOrNull(1)
+                        traceOnce("page-row:" + index, "page-row",
+                            "index=" + index + " row=" + row.list.name +
+                                " count=" + row.list.list.size +
+                                " firstApi=" + one?.apiName +
+                                " firstUrlHash=" + hash(one?.url) +
+                                " firstPosterHash=" + hash(one?.posterUrl) +
+                                " secondApi=" + two?.apiName +
+                                " secondUrlHash=" + hash(two?.url) +
+                                " secondPosterHash=" + hash(two?.posterUrl))
+                    }
+                    if (providerPresent || allEmpty) {
                         expected = lists
                         observeParent()
                         scanRows()
+                    } else {
+                        traceOnce("page-rejected", "page-rejected",
+                            "reason=no-content-with-selected-provider")
                     }
                 }
             }
@@ -143,6 +185,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         val vm = ViewModelProvider(next)[HomeViewModel::class.java]
         model = vm
         provider = vm.apiName.value
+        traceOnce("activity-start", "activity-bound", "providerOnBind=" + provider)
         next.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
         vm.apiName.observe(next, apiObserver)
         vm.page.observe(next, pageObserver)
@@ -199,12 +242,17 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     }
     private fun scanRows() {
         val rv = root ?: return
-        if (expected == null) return
+        if (expected == null) {
+            traceOnce("scan-empty", "scan-skipped", "reason=no-expected-page")
+            return
+        }
         if (rv.isComputingLayout) {
             queueScan()
             return
         }
         observeParent()
+        traceOnce("scan", "scan-start", "visibleRows=" + rv.childCount +
+            " adapter=" + rv.adapter?.javaClass?.simpleName)
         for (i in 0 until rv.childCount) watchRow(rv.getChildAt(i))
     }
     private fun watchRow(view: View) {
@@ -259,29 +307,109 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     }
 
     private fun verify(child: RecyclerView) {
-        val latest = expected ?: return
-        val outer = root ?: return
-        if (outer.isComputingLayout || child.isComputingLayout) return
-        val parent = outer.adapter as? ParentItemAdapter ?: return
+        val latest = expected ?: run {
+            traceOnce("verify:no-page", "verify-skipped", "reason=no-expected-data")
+            return
+        }
+        val outer = root ?: run {
+            traceOnce("verify:root-missing", "verify-skipped", "reason=no-home-recycler")
+            return
+        }
+        if (outer.isComputingLayout || child.isComputingLayout) {
+            traceOnce("verify:layout", "verify-skipped", "reason=computing-layout")
+            return
+        }
+        val parent = outer.adapter as? ParentItemAdapter ?: run {
+            traceOnce("verify:parent-missing", "verify-skipped", "reason=wrong-or-missing-parent-adapter")
+            return
+        }
         val row = (0 until outer.childCount).map { outer.getChildAt(it) }
             .firstOrNull {
                 it.findViewById<RecyclerView>(R.id.home_child_recyclerview) === child
-            } ?: return
-        val holder = outer.findContainingViewHolder(row) ?: return
-        val item = parent.getItemOrNull(holder.bindingAdapterPosition - parent.headers) ?: return
+            } ?: run {
+                traceOnce("verify:row-not-found", "verify-skipped", "reason=child-not-in-visible-parent")
+                return
+            }
+        val holder = outer.findContainingViewHolder(row) ?: run {
+            traceOnce("verify:holder-missing", "verify-skipped", "reason=no-parent-viewholder")
+            return
+        }
+        val item = parent.getItemOrNull(holder.bindingAdapterPosition - parent.headers) ?: run {
+            traceOnce("verify:item-missing", "verify-skipped", "reason=parent-item-out-of-range")
+            return
+        }
+        val rowKey = item.list.name + ":" + System.identityHashCode(child)
+        val current = item.list.list.firstOrNull()
+        val wanted = latest.firstOrNull { it.list.name == item.list.name }
+        val expectedFirst = wanted?.list?.list?.firstOrNull()
+        traceOnce("row:" + rowKey, "row-compare",
+            "row=" + item.list.name + " parentCount=" + item.list.list.size +
+                " expectedCount=" + (wanted?.list?.list?.size ?: -1) +
+                " parentApi=" + current?.apiName + " expectedApi=" + expectedFirst?.apiName +
+                " parentFirstHash=" + hash(current?.url) +
+                " expectedFirstHash=" + hash(expectedFirst?.url) +
+                " parentPosterHash=" + hash(current?.posterUrl) +
+                " expectedPosterHash=" + hash(expectedFirst?.posterUrl))
         if (latest.none {
                 it.list.name == item.list.name &&
                     it.list.list.firstOrNull()?.url == item.list.list.firstOrNull()?.url
-            }) return
-        if (row.findViewById<TextView>(R.id.home_child_more_info)?.text?.toString() != item.list.name) return
-        val adapter = child.adapter as? HomeChildItemAdapter ?: return
+            }) {
+            traceOnce("skip:parent:" + rowKey, "row-skipped",
+                "row=" + item.list.name + " reason=parent-first-url-does-not-match-page")
+            return
+        }
+        if (row.findViewById<TextView>(R.id.home_child_more_info)?.text?.toString() != item.list.name) {
+            traceOnce("skip:header:" + rowKey, "row-skipped",
+                "row=" + item.list.name + " reason=header-title-mismatch")
+            return
+        }
+        val adapter = child.adapter as? HomeChildItemAdapter ?: run {
+            traceOnce("verify:child-adapter:" + rowKey, "row-skipped",
+                "row=" + item.list.name + " reason=missing-home-child-adapter")
+            return
+        }
         for (pos in 0 until minOf(2, adapter.itemCount)) {
             val card = adapter.getItemOrNull(pos) ?: continue
-            if (item.list.list.getOrNull(pos)?.url != card.url) continue
-            val bound = child.findViewHolderForAdapterPosition(pos) ?: continue
-            if (bound.itemView.findViewById<TextView>(R.id.imageText)?.text?.toString() == card.name) continue
+            val parentCard = item.list.list.getOrNull(pos)
+            val bound = child.findViewHolderForAdapterPosition(pos)
+            val boundTitle = bound?.itemView
+                ?.findViewById<TextView>(R.id.imageText)?.text?.toString()
+            val shownImage = bound?.itemView
+                ?.findViewById<android.widget.ImageView>(R.id.imageView)?.drawable
+            val imageState = shownImage?.constantState
+            val parentMatches = parentCard?.url == card.url
+            val titleMatches = boundTitle == card.name
+            traceOnce("card:" + rowKey + ":" + pos, "card-compare",
+                "row=" + item.list.name + " pos=" + pos +
+                    " cardApi=" + card.apiName +
+                    " childHash=" + hash(card.url) + " parentHash=" + hash(parentCard?.url) +
+                    " childPosterHash=" + hash(card.posterUrl) +
+                    " parentPosterHash=" + hash(parentCard?.posterUrl) +
+                    " hasView=" + (bound != null) +
+                    " drawableClass=" + shownImage?.javaClass?.simpleName +
+                    " drawableStateId=" + (if (imageState != null)
+                        System.identityHashCode(imageState) else 0) +
+                    " parentMatches=" + parentMatches +
+                    " titleMatches=" + titleMatches)
+            if (!parentMatches) {
+                traceOnce("skip:mismatch:" + rowKey + ":" + pos, "card-skipped",
+                    "row=" + item.list.name + " pos=" + pos +
+                        " reason=child-parent-url-mismatch")
+                continue
+            }
+            if (bound == null) continue
+            if (titleMatches) {
+                traceOnce("skip:title:" + rowKey + ":" + pos, "card-skipped",
+                    "row=" + item.list.name + " pos=" + pos +
+                        " reason=title-matches-image-not-verified")
+                continue
+            }
             val key = "${System.identityHashCode(bound.itemView)}:${card.url}"
-            if (key in repaired) continue
+            if (key in repaired) {
+                traceOnce("skip:cached:" + rowKey + ":" + pos, "card-skipped",
+                    "row=" + item.list.name + " pos=" + pos + " reason=already-repaired")
+                continue
+            }
             val seq = generation
             child.post {
                 if (seq == generation && expected != null && !child.isComputingLayout &&
@@ -289,7 +417,15 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                     child.findViewHolderForAdapterPosition(pos)?.itemView === bound.itemView &&
                     repaired.add(key)
                 ) {
+                    Log.i("Elevate-HomePoster",
+                        "generation=" + seq + " event=repair-executed" +
+                            " provider=" + provider + " row=" + item.list.name +
+                            " pos=" + pos + " cardHash=" + hash(card.url))
                     adapter.notifyItemChanged(pos)
+                } else {
+                    traceOnce("repair:not-executed:" + rowKey + ":" + pos, "repair-not-executed",
+                        "row=" + item.list.name + " pos=" + pos +
+                            " reason=generation-view-or-adapter-changed")
                 }
             }
         }
