@@ -48,6 +48,12 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private val listenerDiagnostics = mutableSetOf<String>()
     private val removalLogCount = mutableMapOf<String, Int>()
     private val readFailureLogged = mutableSetOf<String>()
+    // Weak keys: no RecyclerView retention after recycling/destruction.
+    // Avoid cloning/filtering the same listener list on every layout pass.
+    private val inspectedListeners = java.util.WeakHashMap<RecyclerView, Long>()
+    private fun signature(list: List<RecyclerView.OnScrollListener>): Long =
+        (list.size.toLong() shl 32) xor
+            System.identityHashCode(list.lastOrNull()).toLong()
 
     private val listenerField by lazy {
         val field = runCatching {
@@ -70,9 +76,9 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         val field = listenerField ?: return
         val read = runCatching {
             @Suppress("UNCHECKED_CAST")
-            (field.get(recycler) as? List<RecyclerView.OnScrollListener>)?.toList()
+            field.get(recycler) as? List<RecyclerView.OnScrollListener>
         }
-        val snapshot = read.getOrElse {
+        val current = read.getOrElse {
             if (readFailureLogged.add(screen))
                 Log.w(RECYCLER_LOG_TAG, "stage=read screen=$screen success=false reason=" +
                     it.javaClass.simpleName)
@@ -84,6 +90,9 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                 Log.i(RECYCLER_LOG_TAG, "stage=read screen=$screen status=uninitialized")
             return
         }
+        val beforeSignature = signature(current)
+        if (inspectedListeners[recycler] == beforeSignature) return
+        val snapshot = current.toList()
         val matches = snapshot.filter {
             val name = it.javaClass.name
             name.startsWith(owner) && name.contains(callSite)
@@ -100,19 +109,24 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                     " matched=" + matches.size +
                     " class=" + (sampled?.javaClass?.name ?: "none"))
         }
-        if (matches.size < 2) return
+        if (matches.size < 2) {
+            inspectedListeners[recycler] = beforeSignature
+            return
+        }
         var removed = 0
         for (old in matches.dropLast(1)) {
             recycler.removeOnScrollListener(old)
             removed++
         }
         if (removed > 0) {
+            val after = runCatching {
+                @Suppress("UNCHECKED_CAST")
+                field.get(recycler) as? List<RecyclerView.OnScrollListener>
+            }.getOrNull()
+            if (after != null) inspectedListeners[recycler] = signature(after)
+            else inspectedListeners.remove(recycler)
             val count = removalLogCount[screen] ?: 0
             if (count < 6) {
-                val after = runCatching {
-                    @Suppress("UNCHECKED_CAST")
-                    (field.get(recycler) as? List<RecyclerView.OnScrollListener>)?.toList()
-                }.getOrNull()
                 val remaining = after?.count {
                     it.javaClass.name.startsWith(owner) &&
                         it.javaClass.name.contains(callSite)
@@ -308,6 +322,7 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         listenerDiagnostics.clear()
         removalLogCount.clear()
         readFailureLogged.clear()
+        inspectedListeners.clear()
         model = null
         activity = null
         provider = null
