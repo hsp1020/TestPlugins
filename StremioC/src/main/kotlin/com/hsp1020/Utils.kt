@@ -2681,6 +2681,8 @@ internal class RatingPlotImageHook(
         }
         private val castClick = object : View.OnClickListener {
             override fun onClick(card: View) {
+                // Keep the first actor-dialog click until its native animation completes.
+                if (pendingActorOpenAnimation != null) return
                 val list = castItems ?: return
                 val position = list.getChildAdapterPosition(card)
                 if (position == RecyclerView.NO_POSITION) return
@@ -2706,7 +2708,6 @@ internal class RatingPlotImageHook(
                     }
                     return
                 }
-                cancelPendingActorOpen()
                 if (holder is ViewHolderState<*>) {
                     @Suppress("UNCHECKED_CAST")
                     val nativeHolder = holder as ViewHolderState<Any>
