@@ -7,7 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.View
-import android.view.ViewTreeObserver
+import android.widget.ImageView
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
@@ -15,6 +15,8 @@ import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
+import coil3.dispose
+import com.lagradost.cloudstream3.ui.ViewHolderState
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
@@ -22,11 +24,12 @@ import com.lagradost.cloudstream3.mvvm.Resource
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.ui.home.ParentItemAdapter
-import java.util.IdentityHashMap
+import java.util.WeakHashMap
 
 /**
- * Repairs the first two visible cards per Home row after a provider switch.
- * Uses native parent/child adapter updates; no polling or image-cache clearing.
+ * Rebinds only the first two cards of each Home row after provider changes.
+ * Native attach/data events also cover rows that become visible later.
+ * Cancels stale Coil targets; never clears the shared image cache.
  */
 internal class HomeRecyclerCacheGuard(private val app: Application) :
     Application.ActivityLifecycleCallbacks {
@@ -34,7 +37,8 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private data class RowStamp(val size: Int, val firstTwo: List<CardStamp>, val last: String?)
     private data class ChildWatch(
         val adapter: RecyclerView.Adapter<*>,
-        val observer: RecyclerView.AdapterDataObserver
+        val observer: RecyclerView.AdapterDataObserver,
+        val attaches: RecyclerView.OnChildAttachStateChangeListener
     )
 
     private val main = Handler(Looper.getMainLooper())
@@ -55,10 +59,9 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private val observedChildren = LinkedHashMap<RecyclerView, ChildWatch>()
     private var watchingAttaches = false
     private val refreshPayload = Any()
-    private val refreshed = IdentityHashMap<View, CardStamp>()
+    // Weak keys: recycled holders are never retained by this feature.
+    private val refreshed = WeakHashMap<View, CardStamp>()
     private val parentRepairs = HashSet<RecyclerView>()
-    private var drawTree: ViewTreeObserver? = null
-    private var drawObserver: ViewTreeObserver.OnPreDrawListener? = null
 
     private fun traceOnce(event: String, detail: String) {
         if (traced.add("$generation:$event:$detail"))
@@ -127,29 +130,42 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         override fun onChildViewAttachedToWindow(view: View) = queueRefresh()
         override fun onChildViewDetachedFromWindow(view: View) {
             view.findViewById<RecyclerView>(R.id.home_child_recyclerview)?.let { child ->
-                observedChildren.remove(child)?.let {
-                    it.adapter.unregisterAdapterDataObserver(it.observer)
-                }
+                unwatchChild(child)
                 parentRepairs.remove(child)
             }
+        }
+    }
+
+    private fun unwatchChild(recycler: RecyclerView) {
+        observedChildren.remove(recycler)?.let {
+            it.adapter.unregisterAdapterDataObserver(it.observer)
+            recycler.removeOnChildAttachStateChangeListener(it.attaches)
         }
     }
 
     private fun watchChild(recycler: RecyclerView) {
         val adapter = recycler.adapter ?: return
         if (observedChildren[recycler]?.adapter === adapter) return
-        observedChildren.remove(recycler)?.let {
-            it.adapter.unregisterAdapterDataObserver(it.observer)
-        }
-        val listener = object : RecyclerView.AdapterDataObserver() {
+        unwatchChild(recycler)
+        val observer = object : RecyclerView.AdapterDataObserver() {
             override fun onChanged() = queueRefresh()
             override fun onItemRangeChanged(p: Int, n: Int) = queueRefresh()
             override fun onItemRangeInserted(p: Int, n: Int) = queueRefresh()
             override fun onItemRangeRemoved(p: Int, n: Int) = queueRefresh()
             override fun onItemRangeMoved(from: Int, to: Int, n: Int) = queueRefresh()
         }
-        adapter.registerAdapterDataObserver(listener)
-        observedChildren[recycler] = ChildWatch(adapter, listener)
+        val attaches = object : RecyclerView.OnChildAttachStateChangeListener {
+            override fun onChildViewAttachedToWindow(view: View) {
+                val position = recycler.getChildViewHolder(view).bindingAdapterPosition
+                if (position == RecyclerView.NO_POSITION || position < 2) queueRefresh()
+            }
+            override fun onChildViewDetachedFromWindow(view: View) {
+                refreshed.remove(view)
+            }
+        }
+        adapter.registerAdapterDataObserver(observer)
+        recycler.addOnChildAttachStateChangeListener(attaches)
+        observedChildren[recycler] = ChildWatch(adapter, observer, attaches)
     }
 
     private fun arm() {
@@ -168,15 +184,9 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     }
 
     private fun disarm() {
-        drawObserver?.let { if (drawTree?.isAlive == true) drawTree?.removeOnPreDrawListener(it) }
-        drawObserver = null
-        drawTree = null
         observedParent?.unregisterAdapterDataObserver(parentObserver)
         observedParent = null
-        observedChildren.values.forEach {
-            it.adapter.unregisterAdapterDataObserver(it.observer)
-        }
-        observedChildren.clear()
+        observedChildren.keys.toList().forEach(::unwatchChild)
         if (watchingAttaches) {
             root?.removeOnChildAttachStateChangeListener(parentAttaches)
             watchingAttaches = false
@@ -215,65 +225,29 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         )
     }
 
-    /** Check again after native RecyclerView has had a chance to bind its updates. */
-    private fun afterNextDraw() {
-        if (drawObserver != null) return
-        val recycler = root ?: return
-        val tree = recycler.viewTreeObserver
-        if (!tree.isAlive) {
-            recycler.post { queueRefresh() }
-            return
-        }
-        val listener = object : ViewTreeObserver.OnPreDrawListener {
-            override fun onPreDraw(): Boolean {
-                if (tree.isAlive) tree.removeOnPreDrawListener(this)
-                if (drawObserver === this) {
-                    drawObserver = null
-                    drawTree = null
-                    queueRefresh()
-                }
-                return true
-            }
-        }
-        drawTree = tree
-        drawObserver = listener
-        tree.addOnPreDrawListener(listener)
-    }
-
     private fun refreshVisible() {
-        if (drawObserver != null) return
         val expected = expectedRows ?: return
         val recycler = root ?: return
         arm()
         val parent = recycler.adapter as? ParentItemAdapter ?: return
-        if (recycler.isComputingLayout) {
-            recycler.post { queueRefresh() }
-            return
-        }
-        // The native parent and child differ may commit on separate frames.
+        if (recycler.isComputingLayout) return
+        // Loading may finish before the native parent AsyncListDiffer commits.
         if (parent.itemCount - parent.headers != expected.size) return
         for (i in 0 until expected.size) {
-            val item = parent.getItemOrNull(i) ?: return
-            if (expected[item.list.name] != stamp(item.list)) return
+            val row = parent.getItemOrNull(i) ?: return
+            if (expected[row.list.name] != stamp(row.list)) return
         }
 
-        var visibleRows = 0
-        var waitingForChild = false
-        var rebound = 0
         for (i in 0 until recycler.childCount) {
             val row = recycler.getChildAt(i)
             val child = row.findViewById<RecyclerView>(R.id.home_child_recyclerview)
                 ?: continue
-            val holder = recycler.findContainingViewHolder(row) ?: continue
-            val parentPosition = holder.bindingAdapterPosition
+            val parentHolder = recycler.findContainingViewHolder(row) ?: continue
+            val parentPosition = parentHolder.bindingAdapterPosition
             val rowModel = parent.getItemOrNull(parentPosition - parent.headers) ?: continue
             val adapter = child.adapter as? HomeChildItemAdapter ?: continue
-            visibleRows++
             watchChild(child)
-            if (child.isComputingLayout) {
-                child.post { queueRefresh() }
-                return
-            }
+            if (child.isComputingLayout) continue
             val title = row.findViewById<TextView>(R.id.home_child_more_info)?.text?.toString()
             val headerMismatch = title != null && title != rowModel.list.name
             val childMismatch = (0 until 2).any { position ->
@@ -282,48 +256,48 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                 current?.url != wanted?.url || current?.posterUrl != wanted?.posterUrl
             }
             if (headerMismatch || childMismatch) {
-                waitingForChild = true
                 if (parentPosition != RecyclerView.NO_POSITION && parentRepairs.add(child)) {
-                    // Native parent payload update submits its current list to the child.
-                    // A stale header needs the native full row bind instead.
-                    afterNextDraw()
+                    // Updating the parent with a payload submits the current
+                    // native list to the child; a stale row title needs full bind.
                     if (headerMismatch) parent.notifyItemChanged(parentPosition)
                     else parent.notifyItemChanged(parentPosition, refreshPayload)
-                    traceOnce("parent-refresh", "catalog=${rowModel.list.name} full=$headerMismatch")
+                    traceOnce("parent-refresh",
+                        "catalog=${rowModel.list.name} full=$headerMismatch")
                 }
                 continue
             }
             parentRepairs.remove(child)
             for (position in 0 until minOf(2, adapter.itemCount)) {
                 val card = adapter.getItemOrNull(position) ?: continue
-                val bound = child.findViewHolderForAdapterPosition(position) ?: continue
-                val key = CardStamp(card.url, card.posterUrl)
-                val previous = refreshed[bound.itemView]
-                if (previous == key) {
-                    // A bound title is available without inspecting Coil or the bitmap.
-                    val shown = bound.itemView.findViewById<TextView>(R.id.imageText)
-                        ?.text?.toString()
-                    if (shown != null && shown != card.name) {
-                        traceOnce("card-unresolved",
-                            "catalog=${rowModel.list.name} position=$position")
-                    }
-                    continue
+                val holder = child.findViewHolderForAdapterPosition(position)
+                    as? ViewHolderState<Boolean> ?: continue
+                if (holder.bindingAdapterPosition != position) continue
+                val stamp = CardStamp(card.url, card.posterUrl)
+                if (refreshed[holder.itemView] == stamp) continue
+
+                // A reused ImageView can keep the previous provider's bitmap
+                // even when its data/title already match. Explicitly dispose
+                // only this visible target, not Coil's global cache.
+                holder.itemView.findViewById<ImageView>(R.id.imageView)?.apply {
+                    dispose()
+                    setImageDrawable(null)
                 }
-                refreshed[bound.itemView] = key
-                // Even when the title matches, a recycled ImageView can retain
-                // the old provider's poster. Only these first two need a rebind.
-                afterNextDraw()
-                adapter.notifyItemChanged(position, refreshPayload)
-                rebound++
+                // Bind the already-attached native ViewHolder synchronously:
+                // a notifyItemChanged request alone does not guarantee that
+                // RecyclerView has executed its bind before we finish.
+                adapter.onBindViewHolder(holder, position, mutableListOf(refreshPayload))
+                if (child.adapter === adapter &&
+                    holder.bindingAdapterPosition == position &&
+                    holder.itemView.findViewById<TextView>(R.id.imageText)?.text?.toString() == card.name
+                ) {
+                    refreshed[holder.itemView] = stamp
+                    traceOnce("card-bound", "catalog=${rowModel.list.name} position=$position")
+                }
             }
         }
-        if (rebound > 0) {
-            traceOnce("refresh", "catalogs=$visibleRows cards=$rebound")
-            return
-        }
-        if (waitingForChild || (visibleRows == 0 && expected.isNotEmpty())) return
-        traceOnce("refresh-complete", "catalogs=$visibleRows")
-        finish()
+        // Do NOT finish after the initially visible rows. The lightweight
+        // attach listeners must remain until provider change or Home teardown,
+        // so offscreen rows are covered without polling or pre-draw listeners.
     }
 
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
