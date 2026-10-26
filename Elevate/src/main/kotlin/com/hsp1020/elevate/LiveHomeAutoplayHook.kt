@@ -276,9 +276,9 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
         popupScanPending = false
         recycler?.removeOnChildAttachStateChangeListener(popupAttaches)
         adapter?.unregisterAdapterDataObserver(popupChanges)
-        // Rebind only when the option is disabled to restore native clicks.
-        // Normal navigation keeps the hidden dialog's card sizes and images intact.
-        if (!enabled && recycler != null && adapter != null && recycler.isAttachedToWindow) {
+        // Native SearchResultBuilder.bind() restores the click listeners;
+        // do not retain or reflectively access the private native callback.
+        if (recycler != null && adapter != null && recycler.isAttachedToWindow) {
             recycler.post {
                 if (recycler.adapter === adapter && adapter.itemCount > 0) {
                     adapter.notifyItemRangeChanged(0, adapter.itemCount)
