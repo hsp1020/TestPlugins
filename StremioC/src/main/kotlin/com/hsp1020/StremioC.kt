@@ -1238,6 +1238,53 @@ open class StremioC(
         internal val expectedLogoByUrl = lruCacheMap<String, Boolean>(200)
         internal val animeAudioByUrl = lruCacheMap<String, Boolean>(200)
         internal val animeFallbackActorsByUrl = lruCacheMap<String, List<ActorData>>(100)
+
+        // Successful AniList cast survives result-view recreation. No negative
+        // entries: an unavailable AniList response must remain retryable.
+        private val animeCastCache = lruCacheMap<Int, Pair<List<ActorData>, Long>>(24)
+        private val animeCastFlights = mutableMapOf<Int, Deferred<List<ActorData>?>>()
+        private val animeCastScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+        internal fun cachedAnimeCast(id: Int): List<ActorData>? {
+            if (id <= 0) return null
+            synchronized(animeCastCache) {
+                val cached = animeCastCache[id] ?: return null
+                val age = System.currentTimeMillis() - cached.second
+                if (age < 0 || age >= 24L * 60 * 60 * 1000) {
+                    animeCastCache.remove(id)
+                    return null
+                }
+                return cached.first
+            }
+        }
+
+        internal fun rememberAnimeCast(id: Int, actors: List<ActorData>?) {
+            if (id <= 0 || actors.isNullOrEmpty()) return
+            synchronized(animeCastCache) {
+                animeCastCache[id] = actors.toList() to System.currentTimeMillis()
+            }
+        }
+
+        // Only direct StremioC cast lookups use this flight. The normal
+        // SyncViewModel metadata lookup is never duplicated by this method.
+        internal suspend fun loadAnimeCast(id: Int): List<ActorData>? {
+            cachedAnimeCast(id)?.let { return it }
+            val flight = synchronized(animeCastFlights) {
+                animeCastFlights[id] ?: animeCastScope.async(start = CoroutineStart.LAZY) {
+                    try {
+                        val actors = com.lagradost.cloudstream3.syncproviders.SyncRepo(
+                            AccountManager.aniListApi
+                        ).load(id.toString()).getOrNull()?.actors
+                        rememberAnimeCast(id, actors)
+                        actors
+                    } finally {
+                        synchronized(animeCastFlights) { animeCastFlights.remove(id) }
+                    }
+                }.also { animeCastFlights[id] = it; it.start() }
+            }
+            return flight.await()
+        }
+
         internal val seasonEpisodeCountsByUrl = lruCacheMap<String, Map<Int, Int>>(200)
         internal val subtitleOrderByUrl = Collections.synchronizedMap(lruCacheMap<String, Int>(1200))
         internal val trailerChoicesByUrl = lruCacheMap<String, List<TrailerChoice>>(200)
