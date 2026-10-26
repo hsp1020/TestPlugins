@@ -1302,14 +1302,14 @@ internal class CatalogBrowserDialog(
             val navigationRow = LinearLayout(activity).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 // Align the 24dp back icon with Home's search icon while expanding its touch area.
-                setPadding(dp(8), 0, dp(10), 0)
+                setPadding(dp(9), 0, dp(10), 0)
                 val back = ImageView(activity).apply {
                     setImageResource(R.drawable.ic_baseline_arrow_back_24)
                     imageTintList = ColorStateList.valueOf(activity.colorFromAttribute(R.attr.white))
                     contentDescription = activity.getString(R.string.go_back)
                     isFocusable = true
                     isClickable = true
-                    setPadding(dp(4), dp(4), dp(4), dp(4))
+                    setPadding(dp(3), dp(3), dp(3), dp(3))
                     val ripple = TypedValue()
                     if (activity.theme.resolveAttribute(
                             android.R.attr.selectableItemBackgroundBorderless, ripple, true
@@ -1341,7 +1341,7 @@ internal class CatalogBrowserDialog(
                     }
                 }
                 backButton = back
-                addView(back, LinearLayout.LayoutParams(dp(32), dp(32)).apply {
+                addView(back, LinearLayout.LayoutParams(dp(30), dp(30)).apply {
                     gravity = Gravity.CENTER_VERTICAL
                 })
                 val searchField = FrameLayout(activity).apply {
@@ -1395,7 +1395,7 @@ internal class CatalogBrowserDialog(
                 }
                 addView(searchField, LinearLayout.LayoutParams(0, dp(44), 1f).apply {
                     // Type spinner starts at 10dp (row) + 82dp (label) = 92dp.
-                    marginStart = dp(52)
+                    marginStart = dp(53)
                 })
             }
             addView(navigationRow, LinearLayout.LayoutParams(-1, dp(44)))
