@@ -145,24 +145,17 @@ internal class StremioLoading(context: Context, rows: Int = 1) : FrameLayout(con
     }
 }
 
-internal fun stremioDestinationReady(
-    activity: FragmentActivity, destination: View, requireFullHost: Boolean = false,
-    requireAnimationEnd: Boolean = true
-): Boolean {
+internal fun stremioDestinationReady(activity: FragmentActivity, destination: View): Boolean {
     val host = activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)?.view
         ?: return false
     val bounds = host.parent as? ViewGroup ?: return false
-    val correctlySized = !requireFullHost || (
+    return host.visibility == View.VISIBLE &&
         host.left <= bounds.paddingLeft && host.top <= bounds.paddingTop &&
         host.right >= bounds.width - bounds.paddingRight &&
-        host.bottom >= bounds.height - bounds.paddingBottom
-    )
-    return correctlySized && host.isAttachedToWindow && host.isShown &&
-        host.width > 0 && host.height > 0 && !host.isLayoutRequested &&
-        destination.isAttachedToWindow && destination.isShown &&
+        host.bottom >= bounds.height - bounds.paddingBottom &&
+        !host.isLayoutRequested && destination.isShown &&
         destination.width > 0 && destination.height > 0 &&
-        !destination.isLayoutRequested &&
-        (!requireAnimationEnd || destination.animation?.hasEnded() != false)
+        !destination.isLayoutRequested && destination.animation?.hasEnded() != false
 }
 
 internal fun stremioCurrentDestinationView(
@@ -311,13 +304,6 @@ internal class StremioDetailHandoff(
                 return
             }
             if (origin != null && detailEntryId == nav?.currentBackStackEntry?.id) {
-                val detail = currentDestinationView()
-                if (detail != null && stremioDestinationReady(
-                        activity, detail, requireFullHost = true, requireAnimationEnd = false
-                    )) {
-                    revealDetailWhenReady(detail)
-                    return
-                }
                 recovering = true
                 val popped = runCatching { nav?.popBackStack() == true }.getOrDefault(false)
                 recovering = false
@@ -398,52 +384,46 @@ internal class StremioDetailHandoff(
 
     private fun revealDetailWhenReady(detail: View) {
         detailRevealEnd?.invoke()
-        val host = activity.supportFragmentManager
-            .findFragmentById(R.id.nav_host_fragment)?.view ?: return
         val ticket = generation
-        val decor = activity.window.decorView
-        var stable = 0
-        var scheduled = false
-        lateinit var check: Runnable
-        lateinit var listener: View.OnLayoutChangeListener
-        lateinit var release: () -> Unit
-        fun schedule() {
-            if (!scheduled) {
-                scheduled = true
-                decor.postOnAnimation(check)
+        detail.doOnPreDraw {
+            if (ticket != generation || !isActive || !pendingDetailDraw) return@doOnPreDraw
+            val observer = detail.viewTreeObserver
+            var stable = 0
+            lateinit var listener: ViewTreeObserver.OnPreDrawListener
+            lateinit var release: () -> Unit
+            release = {
+                if (observer.isAlive) observer.removeOnPreDrawListener(listener)
+                if (detailRevealEnd === release) detailRevealEnd = null
             }
-        }
-        release = {
-            detail.removeOnLayoutChangeListener(listener)
-            host.removeOnLayoutChangeListener(listener)
-            decor.removeCallbacks(check)
-            if (detailRevealEnd === release) detailRevealEnd = null
-        }
-        check = Runnable {
-            scheduled = false
-            if (ticket != generation || !isActive || !pendingDetailDraw ||
-                returnEntryId == null) {
-                release()
-            } else if (detailEntryId == navigation?.currentBackStackEntry?.id) {
-                val ready = currentDestinationView() === detail &&
-                    stremioDestinationReady(
-                        activity, detail, requireFullHost = true, requireAnimationEnd = false
-                    )
-                stable = if (ready) stable + 1 else 0
-                if (stable >= 1) {
+            listener = ViewTreeObserver.OnPreDrawListener {
+                if (ticket != generation || !isActive || !pendingDetailDraw ||
+                    returnEntryId == null || detailEntryId != navigation?.currentBackStackEntry?.id) {
                     release()
-                    pendingDetailDraw = false
-                    handler.removeCallbacks(navigationTimeout)
-                    dialog.hide()
-                    onReady()
-                } else if (ready) schedule()
+                } else {
+                    val ready = currentDestinationView() === detail &&
+                        stremioDestinationReady(activity, detail)
+                    stable = if (ready) stable + 1 else 0
+                    if (stable >= 3) {
+                        release()
+                        detail.postOnAnimation {
+                            if (ticket == generation && isActive && pendingDetailDraw &&
+                                returnEntryId != null && detailEntryId == navigation?.currentBackStackEntry?.id &&
+                                currentDestinationView() === detail &&
+                                stremioDestinationReady(activity, detail)) {
+                                pendingDetailDraw = false
+                                handler.removeCallbacks(navigationTimeout)
+                                dialog.hide()
+                                onReady()
+                            }
+                        }
+                    } else detail.postInvalidateOnAnimation()
+                }
+                true
             }
+            detailRevealEnd = release
+            observer.addOnPreDrawListener(listener)
+            detail.postInvalidateOnAnimation()
         }
-        listener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> schedule() }
-        detail.addOnLayoutChangeListener(listener)
-        host.addOnLayoutChangeListener(listener)
-        detailRevealEnd = release
-        schedule()
     }
 
     private val detailViewListener = object : FragmentManager.FragmentLifecycleCallbacks() {
@@ -486,12 +466,7 @@ internal class StremioDetailHandoff(
                     if (current != null) scheduleReturn(current, false)
                 }
                 recovering -> Unit
-                detailEntryId == null -> {
-                    detailEntryId = current
-                    if (controller.currentDestination?.id in setOf(
-                            R.id.navigation_results_phone, R.id.navigation_results_tv
-                        )) currentDestinationView()?.let(::revealDetailWhenReady)
-                }
+                detailEntryId == null -> detailEntryId = current
                 current != detailEntryId && preserveNestedNavigation &&
                     controller.currentDestination?.id in setOf(
                         R.id.navigation_search, R.id.navigation_quick_search,
@@ -700,6 +675,7 @@ internal class CatalogBrowserDialog(
             SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
             SEARCH_ACTION_LOAD -> {
                 val covered = detailHandoff.begin()
+                if (covered) holdNativeNavigation()
                 SearchHelper.handleSearchClickCallback(click)
                 if (!covered) dismiss()
             }
@@ -724,7 +700,8 @@ internal class CatalogBrowserDialog(
                 SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
                 SEARCH_ACTION_LOAD -> {
                     val covered = detailHandoff.begin()
-                        SearchHelper.handleSearchClickCallback(click)
+                    if (covered) holdNativeNavigation()
+                    SearchHelper.handleSearchClickCallback(click)
                     if (!covered) dismiss()
                 }
             }
@@ -981,15 +958,22 @@ internal class CatalogBrowserDialog(
     private val detailHandoff by lazy {
         StremioDetailHandoff(activity, dialog, navigation, ::dismiss,
             onReturn = {
-                if (!closed && !dialog.isShowing) dialog.show()
+                if (!closed) {
+                    fitWindowToNavigation(force = true)
+                    if (!dialog.isShowing) dialog.show()
+                }
             },
+            onReady = ::releaseNativeNavigation,
             onReturnStart = {
-                // Restore the existing browser window before Home can draw,
-                // without changing its saved bounds or recreating its content.
-                if (!closed) dialog.show()
+                releaseNativeNavigation()
+                if (!closed) {
+                    fitWindowToNavigation(force = true)
+                    dialog.show()
+                }
             },
             preserveNestedNavigation = true)
     }
+    private var heldNavigationViews: List<View> = emptyList()
     private var pendingDestinationCheck: Runnable? = null
     private var suspendedForNavigation = false
     private var originEntryId: String? = null
@@ -997,7 +981,12 @@ internal class CatalogBrowserDialog(
         fitWindowToNavigation()
     }
     private val destinationListener = NavController.OnDestinationChangedListener { controller, destination, _ ->
-        if (closed || detailHandoff.isActive) return@OnDestinationChangedListener
+        if (closed) return@OnDestinationChangedListener
+        if (detailHandoff.isActive) {
+            if (destination.id != R.id.navigation_home)
+                heldNavigationViews.forEach { if (it.visibility != View.VISIBLE) it.visibility = View.VISIBLE }
+            return@OnDestinationChangedListener
+        }
         val entryId = controller.currentBackStackEntry?.id
         if (destination.id == R.id.navigation_search || destination.id == R.id.navigation_library) {
             cancelDestinationCheck()
@@ -1055,6 +1044,21 @@ internal class CatalogBrowserDialog(
         pendingBackPress?.let { pending -> backButton?.removeCallbacks(pending) }
         pendingBackPress = null
         backButton?.isPressed = false
+    }
+
+    private fun holdNativeNavigation() {
+        heldNavigationViews = listOf(R.id.nav_rail_view, R.id.nav_view)
+            .mapNotNull { activity.findViewById<View>(it) }
+            .filter { it.isShown && it.width > 0 && it.height > 0 }
+    }
+
+    private fun releaseNativeNavigation() {
+        val destination = navigation?.currentDestination?.id
+        if (destination in setOf(R.id.navigation_results_phone, R.id.navigation_results_tv,
+                R.id.navigation_player, R.id.navigation_quick_search)) {
+            heldNavigationViews.forEach { it.visibility = View.GONE }
+        }
+        heldNavigationViews = emptyList()
     }
 
     private fun cancelDestinationCheck() {
@@ -1424,6 +1428,7 @@ internal class CatalogBrowserDialog(
             inlineSheet = null
             inlineInput?.setOnQueryTextListener(null)
             inlineResults.adapter = null
+            releaseNativeNavigation()
             navigation?.removeOnDestinationChangedListener(destinationListener)
             activity.window.decorView.removeOnLayoutChangeListener(windowBoundsListener)
             activity.findViewById<View>(R.id.nav_rail_view)
@@ -1470,6 +1475,7 @@ internal class CatalogBrowserDialog(
         if (closed) return
         closed = true
         cancelPendingBackPress()
+        releaseNativeNavigation()
         detailHandoff.close()
         generation++
         scope.cancel()
