@@ -1237,6 +1237,9 @@ open class StremioC(
         private val libraryOriginalUrlsByMeta = lruCacheMap<String, MutableSet<String>>(200)
         internal val expectedLogoByUrl = lruCacheMap<String, Boolean>(200)
         internal val animeAudioByUrl = lruCacheMap<String, Boolean>(200)
+        // Distinguish an episode-based result awaiting native season selection
+        // from a movie, which has no native seasonSelections event.
+        internal val episodeBasedByUrl = lruCacheMap<String, Boolean>(200)
         internal val animeFallbackActorsByUrl = lruCacheMap<String, List<ActorData>>(100)
 
         // Successful AniList cast survives result-view recreation. No negative
@@ -2692,6 +2695,7 @@ open class StremioC(
                             fallbackLogoTitles[source]?.let { fallbackLogoTitles[url] = it }
                             expectedLogoByUrl[source]?.let { expectedLogoByUrl[url] = it }
                             animeAudioByUrl[source]?.let { animeAudioByUrl[url] = it }
+                            episodeBasedByUrl[source]?.let { episodeBasedByUrl[url] = it }
                             seasonEpisodeCountsByUrl[source]?.let { seasonEpisodeCountsByUrl[url] = it }
                             trailerChoicesByUrl[source]?.let { trailerChoicesByUrl[url] = it }
                             genreCatalogsByUrl[source]?.let { genreCatalogsByUrl[url] = it }
@@ -5111,6 +5115,7 @@ open class StremioC(
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
                 StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
+                StremioC.episodeBasedByUrl[metaUrl] = false
                 if (isAnimeMedia && !tmdbData?.fetchedActors.isNullOrEmpty()) {
                     StremioC.animeFallbackActorsByUrl[metaUrl] = tmdbData!!.fetchedActors!!
                 } else StremioC.animeFallbackActorsByUrl.remove(metaUrl)
@@ -5198,6 +5203,7 @@ open class StremioC(
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
                 StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
+                StremioC.episodeBasedByUrl[metaUrl] = true
                 if (isAnimeMedia && !tmdbData?.fetchedActors.isNullOrEmpty()) {
                     StremioC.animeFallbackActorsByUrl[metaUrl] = tmdbData!!.fetchedActors!!
                 } else StremioC.animeFallbackActorsByUrl.remove(metaUrl)

@@ -1624,6 +1624,7 @@ internal class RatingPlotImageHook(
         private var seasonNumbers: List<Int> = emptyList()
         private var selectionIndex: Int? = null
         private var season: Int? = null
+        private var resolvedSeasonInputs: Triple<Int, List<Int>, Map<String, String>>? = null
         private var startedFor: String? = null
         private var selected: String? = null
         private var preferred: String? = null
@@ -1694,6 +1695,7 @@ internal class RatingPlotImageHook(
                             seasonNumbers = emptyList()
                             selectionIndex = null
                             season = null
+                            resolvedSeasonInputs = null
                             reset()
                         } else {
                             rawSyncs = data.syncData.toMap()
@@ -1704,7 +1706,9 @@ internal class RatingPlotImageHook(
                         resolve()
                         // Apply the cached cast after season selection, so
                         // resolve() cannot immediately clear the reused list.
-                        if (seasonCast == null && seasonNumbers.size <= 1 &&
+                        if (seasonCast == null &&
+                            (StremioC.episodeBasedByUrl[data.url] == false ||
+                                (seasonNumbers.size == 1 && selectionIndex?.let { it >= 0 } == true)) &&
                             StremioC.animeAudioByUrl[data.url] == true) {
                             rawSyncs["anilist"]?.toIntOrNull()
                                 ?.let { StremioC.cachedAnimeCast(it) }
@@ -1779,13 +1783,22 @@ internal class RatingPlotImageHook(
         }
 
         private fun resolve() {
-            val chosen = selectionIndex?.let { seasonNumbers.getOrNull(it) }
-                ?: if (seasonNumbers.isEmpty() &&
-                    (rawSyncs["anilist"] != null ||
-                        pageUrl?.let { StremioC.animeFallbackActorsByUrl.containsKey(it) } == true)) 1
-                else null
-            if (pageUrl == null || chosen == null || chosen <= 0) return
-            if (chosen == season) return
+            val url = pageUrl ?: return
+            // The core posts ResultData before seasonSelections and the selected
+            // season index. Starting a provisional season 1 at that point treats
+            // a multi-season anime as a single-season one. When the real season
+            // list arrives, the old season-only guard prevents ID remapping and
+            // MAL/AniList/Kitsu tracker setup until the user changes seasons.
+            val chosen = if (seasonNumbers.isNotEmpty()) {
+                selectionIndex?.takeIf { it >= 0 }
+                    ?.let { seasonNumbers.getOrNull(it) }
+            } else if (StremioC.episodeBasedByUrl[url] == false) {
+                1 // Movies have no native season selections.
+            } else null
+            if (chosen == null || chosen <= 0) return
+            val inputs = Triple(chosen, seasonNumbers.toList(), rawSyncs.toMap())
+            if (inputs == resolvedSeasonInputs) return
+            resolvedSeasonInputs = inputs
             if (seasonCast != null) {
                 seasonCast = null
                 showingAniListCast = false
