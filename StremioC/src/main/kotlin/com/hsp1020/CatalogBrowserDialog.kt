@@ -560,7 +560,10 @@ internal fun catalogStyledSelector(activity: FragmentActivity): AppCompatSpinner
         id = View.generateViewId()
         minimumHeight = dp(44)
         isFocusable = true
-        setPopupBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryGrayBackground)))
+        setPopupBackgroundDrawable(
+            androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, R.drawable.bg_color_both)?.mutate()
+                ?: ColorDrawable(activity.colorFromAttribute(R.attr.primaryGrayBackground))
+        )
         val cardBg = androidx.appcompat.content.res.AppCompatResources.getDrawable(activity, R.drawable.bg_color_both)?.mutate()
         val ripple = nativeCatalogRipple(activity)
         val backgroundDrawable = if (android.os.Build.VERSION.SDK_INT < 23 && cardBg != null && ripple != null)
@@ -596,6 +599,34 @@ internal fun catalogStyledAdapter(
                 val checked = position == spinner.selectedItemPosition
                 val color = activity.colorFromAttribute(if (checked) R.attr.colorPrimary else R.attr.textColor)
                 return object : LinearLayout(activity) {
+                    private val edgeClip = if (position == 0 || position == labels.lastIndex)
+                        android.graphics.Path() else null
+
+                    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+                        super.onSizeChanged(w, h, oldw, oldh)
+                        edgeClip?.apply {
+                            reset()
+                            val radius = activity.resources.getDimension(R.dimen.rounded_image_radius)
+                            val top = if (position == 0) radius else 0f
+                            val bottom = if (position == labels.lastIndex) radius else 0f
+                            addRoundRect(0f, 0f, w.toFloat(), h.toFloat(),
+                                floatArrayOf(top, top, top, top, bottom, bottom, bottom, bottom),
+                                android.graphics.Path.Direction.CW)
+                        }
+                    }
+
+                    override fun draw(canvas: android.graphics.Canvas) {
+                        val clip = edgeClip
+                        if (clip == null) {
+                            super.draw(canvas)
+                        } else {
+                            val save = canvas.save()
+                            canvas.clipPath(clip)
+                            super.draw(canvas)
+                            canvas.restoreToCount(save)
+                        }
+                    }
+
                     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
                         if (event.actionMasked == MotionEvent.ACTION_DOWN) {
                             background?.setHotspot(event.x, event.y)
