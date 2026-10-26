@@ -2679,6 +2679,42 @@ internal class RatingPlotImageHook(
                 .setPopEnterAnim(enter).setPopExitAnim(exit)
                 .build())
         }
+        // The native click expands 0.8 -> 1.0 in 200ms.
+        // Start the reverse press feedback immediately on ACTION_DOWN so the
+        // portrait reaches 0.8 before Android's normal long-click timeout.
+        private val castPressInterpolator = android.view.animation.DecelerateInterpolator()
+        private val castPressTouch = View.OnTouchListener { card, event ->
+            if (pendingActorOpenAnimation != null) return@OnTouchListener false
+            val portrait = card.findViewById<View>(R.id.voice_actor_image_holder2)
+                ?: return@OnTouchListener false
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    portrait.animate().cancel()
+                    portrait.clearAnimation()
+                    portrait.scaleX = 1f
+                    portrait.scaleY = 1f
+                    portrait.animate().scaleX(0.8f).scaleY(0.8f)
+                        .setDuration(200L)
+                        .setInterpolator(castPressInterpolator)
+                        .start()
+                }
+                android.view.MotionEvent.ACTION_UP,
+                android.view.MotionEvent.ACTION_CANCEL -> {
+                    portrait.animate().cancel()
+                    portrait.scaleX = 1f
+                    portrait.scaleY = 1f
+                }
+            }
+            // Preserve Android's normal click/long-click gesture recognition.
+            false
+        }
+        private fun restoreCastPress(card: View) {
+            card.findViewById<View>(R.id.voice_actor_image_holder2)?.let { portrait ->
+                portrait.animate().cancel()
+                portrait.scaleX = 1f
+                portrait.scaleY = 1f
+            }
+        }
         private val castClick = object : View.OnClickListener {
             override fun onClick(card: View) {
                 // Keep the first actor-dialog click until its native animation completes.
@@ -2743,6 +2779,7 @@ internal class RatingPlotImageHook(
             }
         }
         private val castLongClick = View.OnLongClickListener { card ->
+            if (pendingActorOpenAnimation != null) return@OnLongClickListener true
             val list = castItems
             val position = list?.getChildAdapterPosition(card) ?: RecyclerView.NO_POSITION
             if (position != RecyclerView.NO_POSITION) {
@@ -2773,11 +2810,14 @@ internal class RatingPlotImageHook(
                         // same attached card; restore only at actual layout boundaries.
                         card.setOnClickListener(castClick)
                         card.setOnLongClickListener(castLongClick)
+                        card.setOnTouchListener(castPressTouch)
                     }
                     val removed = boundActorCards.filterNot(children::contains)
                     for (card in removed) {
                         card.setOnClickListener(null)
                         card.setOnLongClickListener(null)
+                        card.setOnTouchListener(null)
+                        restoreCastPress(card)
                         boundActorCards.remove(card)
                     }
                 }
@@ -2810,6 +2850,8 @@ internal class RatingPlotImageHook(
             boundActorCards.forEach { card ->
                 card.setOnClickListener(null)
                 card.setOnLongClickListener(null)
+                card.setOnTouchListener(null)
+                restoreCastPress(card)
             }
             boundActorCards.clear()
             runCatching { trailers.stop() }; runCatching { backdrop.stop() }; runCatching { restore() }

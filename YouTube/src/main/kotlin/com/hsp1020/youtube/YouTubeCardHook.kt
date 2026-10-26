@@ -559,6 +559,39 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             private val episodeSizes = IdentityHashMap<View, Pair<View, Pair<Int, Int>>>()
             private val directClicks = IdentityHashMap<View, View.OnClickListener>()
             private val castViews = IdentityHashMap<View, Boolean>()
+            private val channelPressInterpolator = android.view.animation.DecelerateInterpolator()
+            private val channelPressTouch = View.OnTouchListener { card, event ->
+                if (pendingChannelNavigation?.first === card) return@OnTouchListener false
+                val portrait = card.findViewById<View>(R.id.voice_actor_image_holder2)
+                    ?: return@OnTouchListener false
+                when (event.actionMasked) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        portrait.animate().cancel()
+                        portrait.clearAnimation()
+                        portrait.scaleX = 1f
+                        portrait.scaleY = 1f
+                        portrait.animate().scaleX(0.8f).scaleY(0.8f)
+                            .setDuration(200L)
+                            .setInterpolator(channelPressInterpolator)
+                            .start()
+                    }
+                    android.view.MotionEvent.ACTION_UP,
+                    android.view.MotionEvent.ACTION_CANCEL -> {
+                        portrait.animate().cancel()
+                        portrait.scaleX = 1f
+                        portrait.scaleY = 1f
+                    }
+                }
+                // Let ActorAdaptor handle its original click and browser search.
+                false
+            }
+            private fun restoreChannelPress(card: View) {
+                card.findViewById<View>(R.id.voice_actor_image_holder2)?.let { portrait ->
+                    portrait.animate().cancel()
+                    portrait.scaleX = 1f
+                    portrait.scaleY = 1f
+                }
+            }
             private var pendingChannelNavigation: Pair<View, Animation>? = null
 
             private fun cancelPendingChannelNavigation(view: View? = null) {
@@ -824,6 +857,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             private fun restoreCast(view: View) {
                 cancelPendingChannelNavigation(view)
                 if (castViews.remove(view) == null) return
+                restoreChannelPress(view)
                 view.setOnTouchListener(null)
                 view.setOnClickListener(null)
                 view.setOnLongClickListener(null)
@@ -856,7 +890,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     }
                     view.isFocusable = true
                     view.isClickable = true
-                    view.setOnTouchListener(null)
+                    view.setOnTouchListener(channelPressTouch)
                     // Reuse CloudStream's actual ActorAdaptor animation rather
                     // than maintaining another gesture/animation implementation.
                     view.setOnClickListener(object : View.OnClickListener {
@@ -926,6 +960,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     view.isClickable = false
                     view.isLongClickable = false
                     view.isFocusable = false
+                    restoreChannelPress(view)
                     view.findViewById<View>(R.id.voice_actor_image_holder2)?.clearAnimation()
                 }
             }
