@@ -983,7 +983,9 @@ internal class CatalogBrowserDialog(
     private val destinationListener = NavController.OnDestinationChangedListener { controller, destination, _ ->
         if (closed) return@OnDestinationChangedListener
         if (detailHandoff.isActive) {
-            if (destination.id != R.id.navigation_home)
+            // CloudStream hides its navigation bars on result/player pages.
+            // Never restore the Home bar over a native full-screen destination.
+            if (destination.id == R.id.navigation_search || destination.id == R.id.navigation_library)
                 heldNavigationViews.forEach { if (it.visibility != View.VISIBLE) it.visibility = View.VISIBLE }
             return@OnDestinationChangedListener
         }
