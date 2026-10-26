@@ -2791,7 +2791,6 @@ private fun showLanguageSelectDialog() {
         setupCustomDialog(dialog, dialogContainer, rv, 800,
             initialFocus = { rv })
 
-        saveBtn.isFocusableInTouchMode = true
         saveBtn.setOnClickListener {
             if (!saveBtn.isEnabled) return@setOnClickListener
             rv.findFocus()?.clearFocus()
