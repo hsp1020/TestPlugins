@@ -84,9 +84,7 @@ private suspend fun extractTrailerMedia(youtubeId: String): Pair<List<ExtractorL
             { links.add(it) }
         )
         synchronized(links) { links.toList() }
-            .filter { it.source == "YouTube" && it.type in setOf(
-                ExtractorLinkType.VIDEO, ExtractorLinkType.DASH, ExtractorLinkType.M3U8
-            ) }.distinctBy { it.url } to
+            .distinctBy { it.url } to
             synchronized(subtitles) { subtitles.toList() }
                 .distinctBy { it.url }.map { PlayerSubtitleHelper.getSubtitleData(it) }
     }
