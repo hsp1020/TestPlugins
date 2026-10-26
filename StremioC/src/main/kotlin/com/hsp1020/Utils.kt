@@ -1573,6 +1573,8 @@ internal class RatingPlotImageHook(
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, List<ActorData>>) = size > 24
         }
         private var seasonCast: List<ActorData>? = null
+        private var originalCastAnimator: RecyclerView.ItemAnimator? = null
+        private var castAnimationsDisabled = false
 
         private fun castEnabled() = castItems != null &&
             androidx.preference.PreferenceManager.getDefaultSharedPreferences(root.context)
@@ -1582,11 +1584,17 @@ internal class RatingPlotImageHook(
             if (!active || !castEnabled()) return
             val list = castItems ?: return
             val adapter = list.adapter as? ActorAdaptor ?: return
-            if (adapter.itemCount != actors.size ||
-                (actors.isNotEmpty() && adapter.getItemOrNull(0) !== actors.first())) {
-                adapter.submitList(actors)
+            // Avoid RecyclerView remove/change fade during native season swaps.
+            if (!castAnimationsDisabled) {
+                originalCastAnimator = list.itemAnimator
+                list.itemAnimator = null
+                castAnimationsDisabled = true
             }
-            list.visibility = if (actors.isEmpty()) View.GONE else View.VISIBLE
+            // The core may return a different ActorData instance with identical content.
+            // Submitting it again reloads the same images and produces a visible flash.
+            if (adapter.immutableCurrentList != actors) adapter.submitList(actors)
+            val targetVisibility = if (actors.isEmpty()) View.GONE else View.VISIBLE
+            if (list.visibility != targetVisibility) list.visibility = targetVisibility
         }
 
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -1670,13 +1678,9 @@ internal class RatingPlotImageHook(
                             reset()
                         } else {
                             rawSyncs = data.syncData.toMap()
-                            seasonCast?.let { actors ->
-                                val currentGeneration = generation
-                                val currentSeason = season
-                                root.post {
-                                    if (valid(currentGeneration, currentSeason)) showSeasonCast(actors)
-                                }
-                            }
+                            // Native page rendering can re-submit its original cast.
+                            // Re-apply the selected season synchronously before the next draw.
+                            seasonCast?.let { actors -> showSeasonCast(actors) }
                         }
                         resolve()
                     }
@@ -2544,6 +2548,11 @@ internal class RatingPlotImageHook(
             scope.cancel()
             observers.forEach { it() }
             observers.clear()
+            if (castAnimationsDisabled) {
+                castItems?.itemAnimator = originalCastAnimator
+                castAnimationsDisabled = false
+                originalCastAnimator = null
+            }
             teardownUi()
             syncModel = null
         }

@@ -5105,7 +5105,7 @@ open class StremioC(
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
                     this.plot = finalDescription
-                    this.actors = if (isAnimeMedia && finalAniId != null) null else tmdbData?.fetchedActors
+                    this.actors = if (isAnimeMedia) null else tmdbData?.fetchedActors
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations 
                     this.duration = stremioRuntimeMinutes(this@CatalogEntry.runtime)
@@ -5115,7 +5115,7 @@ open class StremioC(
                     finalLogo?.let { this.logoUrl = it }
 
                 } }
-                if (!isAnimeMedia || finalAniId == null) {
+                if (!isAnimeMedia) {
                     ActorInformation.register(
                         provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty(),
                         recommendationPoster, provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host
@@ -5163,14 +5163,14 @@ open class StremioC(
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalRatingValue); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
                     this.plot = finalDescription
-                    this.actors = if (isAnimeMedia && finalAniId != null) null else tmdbData?.fetchedActors
+                    this.actors = if (isAnimeMedia) null else tmdbData?.fetchedActors
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations
                     this.contentRating = tmdbData?.fetchedAgeRating
                     finalLogo?.let { this.logoUrl = it }
 
                 } }
-                if (!isAnimeMedia || finalAniId == null) {
+                if (!isAnimeMedia) {
                     ActorInformation.register(
                         provider, metaUrl, tmdbData?.fetchedActors, tmdbData?.fetchedPeople.orEmpty(),
                         recommendationPoster, provider.metadataPosterAddonBaseUrl()?.toHttpUrlOrNull()?.host
