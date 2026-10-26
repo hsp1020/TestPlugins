@@ -2700,14 +2700,15 @@ internal class RatingPlotImageHook(
                         .setInterpolator(castPressInterpolator)
                         .start()
                 }
-                android.view.MotionEvent.ACTION_UP,
+                android.view.MotionEvent.ACTION_UP -> {
+                    // Do not jump to 1.0 here: onClick hands off to the native
+                    // 0.8 -> 1.0 scale animation in the same UI turn.
+                    if (!castLongPressHandled) portrait.animate().cancel()
+                }
                 android.view.MotionEvent.ACTION_CANCEL -> {
-                    // A successful long-click keeps its 0.8 image during navigation.
-                    if (!castLongPressHandled) {
-                        portrait.animate().cancel()
-                        portrait.scaleX = 1f
-                        portrait.scaleY = 1f
-                    }
+                    // A successful long-click keeps the image at 0.8 while
+                    // navigating; only an abandoned press resets immediately.
+                    if (!castLongPressHandled) restoreCastPress(card)
                 }
             }
             // Preserve Android's normal click/long-click gesture recognition.
@@ -2737,6 +2738,9 @@ internal class RatingPlotImageHook(
                     !ActorInformation.hasTmdbPerson(page.url, model.currentRepo?.api as? StremioC,
                         page, position, actor)
                 val holder = list.findViewHolderForAdapterPosition(position)
+                // Reset the property transform immediately before the native
+                // click animation. No intermediate 1.0 frame is rendered.
+                restoreCastPress(card)
                 if (nativeAnimeCast) {
                     if (holder is ViewHolderState<*>) {
                         @Suppress("UNCHECKED_CAST")

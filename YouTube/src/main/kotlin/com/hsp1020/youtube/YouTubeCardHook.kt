@@ -583,13 +583,13 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                             .setInterpolator(channelPressInterpolator)
                             .start()
                     }
-                    android.view.MotionEvent.ACTION_UP,
+                    android.view.MotionEvent.ACTION_UP -> {
+                        // Let the native click animation restore 0.8 -> 1.0;
+                        // resetting here causes a visible second scale pulse.
+                        if (!channelLongPressHandled) portrait.animate().cancel()
+                    }
                     android.view.MotionEvent.ACTION_CANCEL -> {
-                        if (!channelLongPressHandled) {
-                            portrait.animate().cancel()
-                            portrait.scaleX = 1f
-                            portrait.scaleY = 1f
-                        }
+                        if (!channelLongPressHandled) restoreChannelPress(card)
                     }
                 }
                 // Let ActorAdaptor handle its original click and browser search.
@@ -937,6 +937,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                             if (currentPosition == RecyclerView.NO_POSITION) return
                             val currentActor = adapter.getItemOrNull(currentPosition)
                                 ?: return
+                            // Property scale and legacy native ScaleAnimation must
+                            // never stack. The reset occurs before startAnimation
+                            // in the same UI turn, without a rendered 1.0 frame.
+                            restoreChannelPress(view)
                             val holder = list.findViewHolderForAdapterPosition(currentPosition)
                             if (holder is ViewHolderState<*>) {
                                 @Suppress("UNCHECKED_CAST")
