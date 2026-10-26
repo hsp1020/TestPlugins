@@ -1715,7 +1715,7 @@ internal class RatingPlotImageHook(
                 observe(model.metadata, owner) { result ->
                     // Core handles a directly-mapped single-season AniList actor list.
                     // Use the already fetched TMDB cast only on a terminal empty/error result.
-                    if (StremioC.animeAudioByUrl[pageUrl] == true &&
+                    if (pageUrl?.let { StremioC.animeAudioByUrl[it] } == true &&
                         seasonNumbers.size <= 1 && rawSyncs["anilist"] != null) {
                         when (result) {
                             is Resource.Success -> {
