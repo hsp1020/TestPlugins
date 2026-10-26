@@ -700,7 +700,6 @@ internal class CatalogBrowserDialog(
             SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
             SEARCH_ACTION_LOAD -> {
                 val covered = detailHandoff.begin()
-                if (covered) coverNavigationTransition()
                 SearchHelper.handleSearchClickCallback(click)
                 if (!covered) dismiss()
             }
@@ -725,8 +724,7 @@ internal class CatalogBrowserDialog(
                 SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
                 SEARCH_ACTION_LOAD -> {
                     val covered = detailHandoff.begin()
-                    if (covered) coverNavigationTransition()
-                    SearchHelper.handleSearchClickCallback(click)
+                        SearchHelper.handleSearchClickCallback(click)
                     if (!covered) dismiss()
                 }
             }
@@ -983,15 +981,12 @@ internal class CatalogBrowserDialog(
     private val detailHandoff by lazy {
         StremioDetailHandoff(activity, dialog, navigation, ::dismiss,
             onReturn = {
-                if (!closed) fitWindowToNavigation(force = true)
+                if (!closed && !dialog.isShowing) dialog.show()
             },
             onReturnStart = {
-                if (!closed) {
-                    // Cover the outgoing native detail before Home can draw.
-                    // Restore normal browser bounds only after Home is ready.
-                    coverNavigationTransition()
-                    dialog.show()
-                }
+                // Restore the existing browser window before Home can draw,
+                // without changing its saved bounds or recreating its content.
+                if (!closed) dialog.show()
             },
             preserveNestedNavigation = true)
     }
@@ -1060,15 +1055,6 @@ internal class CatalogBrowserDialog(
         pendingBackPress?.let { pending -> backButton?.removeCallbacks(pending) }
         pendingBackPress = null
         backButton?.isPressed = false
-    }
-
-    private fun coverNavigationTransition() {
-        val decor = activity.window.decorView
-        val window = dialog.window ?: return
-        if (decor.width > 0 && decor.height > 0) {
-            window.setGravity(Gravity.TOP or Gravity.END)
-            window.setLayout(decor.width, decor.height)
-        }
     }
 
     private fun cancelDestinationCheck() {
