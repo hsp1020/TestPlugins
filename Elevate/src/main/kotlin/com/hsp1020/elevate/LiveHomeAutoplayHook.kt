@@ -4,11 +4,13 @@ import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.view.ViewTreeObserver
 import android.view.inspector.WindowInspector
+import android.widget.ImageView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
@@ -19,13 +21,18 @@ import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.ui.AutofitRecyclerView
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
 import com.lagradost.cloudstream3.ui.result.START_ACTION_LOAD_EP
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
 import com.lagradost.cloudstream3.ui.search.SearchClickCallback
 import com.lagradost.cloudstream3.ui.search.SearchHelper.handleSearchClickCallback
+import com.lagradost.cloudstream3.ui.settings.Globals
 import com.lagradost.cloudstream3.utils.AppContextUtils.loadSearchResult
+import com.lagradost.cloudstream3.utils.UIHelper.getSpanCount
+import java.lang.ref.WeakReference
+import kotlin.math.roundToInt
 
 /**
  * Only intercept Home and expanded-catalog live card clicks. Reuse the
@@ -41,6 +48,9 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
     private var popupList: RecyclerView? = null
     private var popupAdapter: SearchAdapter? = null
     private var popupScanPending = false
+    private var returningPopup: WeakReference<AutofitRecyclerView>? = null
+    private var returnDrawTree: ViewTreeObserver? = null
+    private var returnDrawListener: ViewTreeObserver.OnPreDrawListener? = null
     private var focusTree: ViewTreeObserver? = null
     private val focusListener = ViewTreeObserver.OnWindowFocusChangeListener {
         list?.post { if (enabled) discoverPopup() }
@@ -261,11 +271,71 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
                 return@OnClickListener
             }
             val id = current.url.replace(api.mainUrl, "").replace("/", "").hashCode()
+            if (Globals.isLayout(Globals.PHONE)) {
+                returningPopup = (recycler as? AutofitRecyclerView)?.let { WeakReference(it) }
+            }
             loadSearchResult(current, START_ACTION_LOAD_EP, id)
             // HomeFragment.onDestroyView() performs its native ownHide().
         }
         view.setOnClickListener(click)
         background.setOnClickListener(click)
+    }
+
+    private fun clearReturnDraw() {
+        returnDrawTree?.takeIf { it.isAlive }?.let { tree ->
+            returnDrawListener?.let(tree::removeOnPreDrawListener)
+        }
+        returnDrawTree = null
+        returnDrawListener = null
+    }
+
+    /** Correct only bound popup image heights before the first Home return frame. */
+    private fun repairReturningPopup() {
+        val recycler = returningPopup?.get()
+        returningPopup = null
+        clearReturnDraw()
+        if (!enabled || !Globals.isLayout(Globals.PHONE) ||
+            recycler == null || !recycler.isAttachedToWindow) return
+        val adapter = recycler.adapter as? SearchAdapter ?: return
+        val tree = recycler.viewTreeObserver.takeIf { it.isAlive } ?: return
+        val listener = object : ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                clearReturnDraw()
+                if (!enabled || recycler.adapter !== adapter ||
+                    recycler.resources.configuration.orientation != Configuration.ORIENTATION_PORTRAIT) {
+                    return true
+                }
+
+                val columns = recycler.spanCount
+                val width = recycler.measuredWidth
+                if (columns <= 0 || width <= 0 ||
+                    width > recycler.resources.displayMetrics.widthPixels) return true
+                val ratio = when (columns) {
+                    recycler.context.getSpanCount(true) -> 1.8
+                    recycler.context.getSpanCount(false) -> 0.68
+                    else -> return true
+                }
+                val height = ((width / columns) / ratio).roundToInt()
+                var changed = false
+                for (index in 0 until recycler.childCount) {
+                    val card = recycler.getChildAt(index)
+                    if (recycler.getChildViewHolder(card).bindingAdapterPosition ==
+                        RecyclerView.NO_POSITION) continue
+                    val image = card.findViewById<ImageView>(R.id.imageView) ?: continue
+                    val params = image.layoutParams
+                    if (params.height > 0 && params.height != height) {
+                        params.height = height
+                        image.layoutParams = params
+                        changed = true
+                    }
+                }
+                // Request only the layout pass caused by corrected heights; skip its bad frame.
+                return !changed
+            }
+        }
+        returnDrawTree = tree
+        returnDrawListener = listener
+        tree.addOnPreDrawListener(listener)
     }
 
     private fun unbindPopup() {
@@ -304,7 +374,10 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
         override fun onFragmentViewCreated(
             fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
         ) {
-            if (fragment.javaClass.name == HOME_CLASS) bindHome(fragment, view)
+            if (fragment.javaClass.name == HOME_CLASS) {
+                bindHome(fragment, view)
+                repairReturningPopup()
+            }
         }
         override fun onFragmentViewDestroyed(fm: FragmentManager, fragment: Fragment) {
             if (fragment === home) unbindHome()
@@ -313,6 +386,8 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
 
     private fun use(activity: FragmentActivity) {
         if (host === activity) return
+        returningPopup = null
+        clearReturnDraw()
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
         focusTree = null
@@ -341,6 +416,8 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
 
     fun stop() {
         enabled = false
+        returningPopup = null
+        clearReturnDraw()
         app.unregisterActivityLifecycleCallbacks(this)
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
@@ -354,6 +431,8 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
     }
     override fun onActivityDestroyed(activity: Activity) {
         if (host === activity) {
+            returningPopup = null
+            clearReturnDraw()
             host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
             focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
             focusTree = null
