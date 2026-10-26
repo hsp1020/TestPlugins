@@ -2683,12 +2683,14 @@ internal class RatingPlotImageHook(
         // Start the reverse press feedback immediately on ACTION_DOWN so the
         // portrait reaches 0.8 before Android's normal long-click timeout.
         private val castPressInterpolator = android.view.animation.DecelerateInterpolator()
+        private var castLongPressHandled = false
         private val castPressTouch = View.OnTouchListener { card, event ->
             if (pendingActorOpenAnimation != null) return@OnTouchListener false
             val portrait = card.findViewById<View>(R.id.voice_actor_image_holder2)
                 ?: return@OnTouchListener false
             when (event.actionMasked) {
                 android.view.MotionEvent.ACTION_DOWN -> {
+                    castLongPressHandled = false
                     portrait.animate().cancel()
                     portrait.clearAnimation()
                     portrait.scaleX = 1f
@@ -2700,9 +2702,12 @@ internal class RatingPlotImageHook(
                 }
                 android.view.MotionEvent.ACTION_UP,
                 android.view.MotionEvent.ACTION_CANCEL -> {
-                    portrait.animate().cancel()
-                    portrait.scaleX = 1f
-                    portrait.scaleY = 1f
+                    // A successful long-click keeps its 0.8 image during navigation.
+                    if (!castLongPressHandled) {
+                        portrait.animate().cancel()
+                        portrait.scaleX = 1f
+                        portrait.scaleY = 1f
+                    }
                 }
             }
             // Preserve Android's normal click/long-click gesture recognition.
@@ -2792,7 +2797,10 @@ internal class RatingPlotImageHook(
                         !actor.voiceActor?.image.isNullOrBlank()
                     val query = (if (voiceShown) actor.voiceActor?.name else actor.actor.name)
                         ?.trim().orEmpty()
-                    openActorSearch(query)
+                    if (query.isNotBlank()) {
+                        castLongPressHandled = true
+                        openActorSearch(query)
+                    }
                 }
             }
             true
@@ -2835,6 +2843,7 @@ internal class RatingPlotImageHook(
             runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() }
         }
         fun detach() {
+            castLongPressHandled = false
             cancelPendingActorOpen()
             seasonSyncProbe.stop()
             actorInformation.stop()

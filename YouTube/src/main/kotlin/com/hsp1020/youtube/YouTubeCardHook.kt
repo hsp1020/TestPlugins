@@ -2,6 +2,8 @@ package com.hsp1020.youtube
 
 import android.app.Activity
 import android.app.Application
+import android.app.SearchManager
+import android.content.Intent
 import android.content.Context
 import android.content.ContextWrapper
 import android.os.Build
@@ -545,6 +547,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             watchers.clear()
         }
 
+        fun restoreChannelPressOnResume() {
+            watchers.values.forEach { it.restoreChannelPressOnResume() }
+        }
+
         private fun watch(list: RecyclerView, role: Role) {
             if (watchers.containsKey(list)) return
             Watcher(list, role).also { watchers[list] = it; it.open() }
@@ -560,12 +566,14 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             private val directClicks = IdentityHashMap<View, View.OnClickListener>()
             private val castViews = IdentityHashMap<View, Boolean>()
             private val channelPressInterpolator = android.view.animation.DecelerateInterpolator()
+            private var channelLongPressHandled = false
             private val channelPressTouch = View.OnTouchListener { card, event ->
                 if (pendingChannelNavigation?.first === card) return@OnTouchListener false
                 val portrait = card.findViewById<View>(R.id.voice_actor_image_holder2)
                     ?: return@OnTouchListener false
                 when (event.actionMasked) {
                     android.view.MotionEvent.ACTION_DOWN -> {
+                        channelLongPressHandled = false
                         portrait.animate().cancel()
                         portrait.clearAnimation()
                         portrait.scaleX = 1f
@@ -577,9 +585,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     }
                     android.view.MotionEvent.ACTION_UP,
                     android.view.MotionEvent.ACTION_CANCEL -> {
-                        portrait.animate().cancel()
-                        portrait.scaleX = 1f
-                        portrait.scaleY = 1f
+                        if (!channelLongPressHandled) {
+                            portrait.animate().cancel()
+                            portrait.scaleX = 1f
+                            portrait.scaleY = 1f
+                        }
                     }
                 }
                 // Let ActorAdaptor handle its original click and browser search.
@@ -591,6 +601,30 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     portrait.scaleX = 1f
                     portrait.scaleY = 1f
                 }
+            }
+            // ActorAdaptor's existing phone-only ACTION_WEB_SEARCH behavior,
+            // with press-state marking before launching the browser.
+            private val channelLongClick = View.OnLongClickListener { card ->
+                val position = list.getChildAdapterPosition(card)
+                val adapter = list.adapter as? ActorAdaptor
+                val actor = if (position == RecyclerView.NO_POSITION) null
+                    else adapter?.getItemOrNull(position) as? ActorData
+                if (actor != null && Globals.isLayout(Globals.PHONE)) {
+                    val intent = Intent(Intent.ACTION_WEB_SEARCH).apply {
+                        putExtra(SearchManager.QUERY, actor.actor.name)
+                    }
+                    if (intent.resolveActivity(card.context.packageManager) != null) {
+                        channelLongPressHandled = true
+                        card.context.startActivity(intent)
+                    }
+                }
+                true
+            }
+            // Existing onActivityResumed path; only restore after browser return.
+            fun restoreChannelPressOnResume() {
+                if (!channelLongPressHandled) return
+                channelLongPressHandled = false
+                castViews.keys.forEach(::restoreChannelPress)
             }
             private var pendingChannelNavigation: Pair<View, Animation>? = null
 
@@ -655,6 +689,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
             fun close() {
                 cancelPendingChannelNavigation()
+                channelLongPressHandled = false
                 list.removeOnChildAttachStateChangeListener(children)
                 list.removeOnLayoutChangeListener(resized)
                 observed?.unregisterAdapterDataObserver(changes)
@@ -891,6 +926,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     view.isFocusable = true
                     view.isClickable = true
                     view.setOnTouchListener(channelPressTouch)
+                    view.setOnLongClickListener(channelLongClick)
                     // Reuse CloudStream's actual ActorAdaptor animation rather
                     // than maintaining another gesture/animation implementation.
                     view.setOnClickListener(object : View.OnClickListener {
@@ -911,6 +947,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                                 // Native onUpdateContent also rebinds the
                                 // native click listener; retain channel navigation.
                                 view.setOnClickListener(this)
+                                view.setOnLongClickListener(channelLongClick)
                             }
                             if (link != null) {
                                 // The native ActorAdaptor starts a 200ms portrait scale
@@ -1073,7 +1110,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         (value * app.resources.displayMetrics.density + 0.5f).toInt()
 
     override fun onActivityResumed(activity: Activity) {
-        if (activity is MainActivity) use(activity)
+        if (activity is MainActivity) {
+            if (host === activity) screens.values.forEach { it.restoreChannelPressOnResume() }
+            use(activity)
+        }
     }
 
     override fun onActivityDestroyed(activity: Activity) {
