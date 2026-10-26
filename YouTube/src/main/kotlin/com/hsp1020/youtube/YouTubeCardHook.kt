@@ -2,6 +2,7 @@ package com.hsp1020.youtube
 
 import android.app.Activity
 import android.app.Application
+import android.app.Dialog
 import android.app.SearchManager
 import android.content.Intent
 import android.content.Context
@@ -84,12 +85,29 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private var lastPlayed: PlayedEpisode? = null
     private var directPlayback: DirectPlayback? = null
     private var directLoading = false
+    private var expandedReturnDialog: Dialog? = null
     // One pending selection bridges player exit and the native detail ViewModel.
     private var pendingRange: Pair<Int, PlayedEpisode>? = null
     private var appliedRange: Pair<Int, PlayedEpisode>? = null
     private var playbackNav: NavController? = null
     private var playbackReturnListener: NavController.OnDestinationChangedListener? = null
     private var playerFragment: Fragment? = null
+
+    /** Resolve only the native Home dialog containing this expanded catalog. */
+    private fun findExpandedDialog(windowRoot: View): Dialog? {
+        val home = screens.keys.firstOrNull {
+            it.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment"
+        } ?: return null
+        val recycler = windowRoot.findViewById<RecyclerView>(R.id.home_expanded_recycler)
+            ?: return null
+        return runCatching {
+            home.javaClass.getDeclaredField("bottomSheetDialog").apply {
+                isAccessible = true
+            }.get(home) as? Dialog
+        }.getOrNull()?.takeIf { dialog ->
+            dialog.window?.decorView?.findViewById<View>(R.id.home_expanded_recycler) === recycler
+        }
+    }
 
     private fun clearPlaybackReturnListener() {
         playbackNav?.let { nav ->
@@ -116,6 +134,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             if (destination.id == R.id.navigation_player) {
                 enteredPlayer = true
             } else if (enteredPlayer) {
+                if (destination.id == origin) expandedReturnDialog?.hide()
                 clearPlaybackReturnListener()
                 if (directPlayback === session) {
                     playerFragment?.let(::recordPlayerEpisode)
@@ -143,8 +162,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                             main.post {
                                 if (playbackNav == null && host != null &&
                                     nav.currentDestination?.id == origin) {
-                                    runCatching {
+                                    if (runCatching {
                                         nav.navigate(target, ResultFragment.newInstance(session.card), noTransition)
+                                    }.isFailure) {
+                                        expandedReturnDialog?.show()
+                                        expandedReturnDialog = null
                                     }
                                 }
                             }
@@ -245,13 +267,14 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
     }
 
-    private fun playHomeVideo(card: SearchResponse) {
+    private fun playHomeVideo(card: SearchResponse, popupRoot: View? = null) {
         if (directLoading || directPlayback != null) return
         val activity = host ?: return
         val api = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
         val navHost = activity.supportFragmentManager
             .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment ?: return
         val videoId = YoutubeUtils.extractYoutubeId(card.url) ?: return
+        val popupDialog = popupRoot?.let(::findExpandedDialog)
         directLoading = true
         activity.lifecycleScope.launch {
         try {
@@ -297,6 +320,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             pendingRange = null
             appliedRange = null
             directPlayback = session
+            if (popupDialog != null) {
+                popupDialog.hide()
+                expandedReturnDialog = popupDialog
+            }
             registerReturn(navHost.navController, session)
             navHost.navController.navigate(
                 R.id.global_to_navigation_player,
@@ -309,6 +336,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         } catch (e: Exception) {
             clearPlaybackReturnListener()
             directPlayback = null
+            if (expandedReturnDialog === popupDialog) {
+                expandedReturnDialog = null
+                popupDialog?.show()
+            }
             Toast.makeText(activity, e.localizedMessage ?: "Unable to play video", Toast.LENGTH_SHORT).show()
         } finally {
             directLoading = false
@@ -359,14 +390,22 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             if (directPlayback != null && playbackReturnListener == null) {
                 directPlayback = null
                 lastPlayed = null
+                expandedReturnDialog = null
             }
         }
 
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
+            when (f.javaClass.name) {
+                "com.lagradost.cloudstream3.ui.home.HomeFragment" -> expandedReturnDialog?.hide()
+                in DETAIL_SCREENS -> expandedReturnDialog = null
+            }
             screens[f]?.applyNativeRangeIfPending()
         }
 
         override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, view: View, state: Bundle?) {
+            if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment") {
+                expandedReturnDialog?.hide()
+            }
             if (f.javaClass.name == PLAYER_SCREEN) {
                 playerFragment = f
                 prefetchAfterLinks(f)
@@ -401,6 +440,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         screens.clear()
         lastPlayed = null
         directPlayback = null
+        expandedReturnDialog = null
         pendingRange = null
         appliedRange = null
         directLoading = false
@@ -821,7 +861,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                                 (current.url.contains("/watch?v=") ||
                                     current.url.contains("/shorts/")) &&
                                 !current.url.contains("list=")) {
-                                playHomeVideo(current)
+                                playHomeVideo(current, if (role == Role.DIALOG_GRID) root else null)
                             }
                         }
                     }
