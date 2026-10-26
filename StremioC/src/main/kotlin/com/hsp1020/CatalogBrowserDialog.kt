@@ -694,6 +694,37 @@ internal class CatalogBrowserDialog(
             }
         }
     }
+    private val catalogEmpty = TextView(activity).apply {
+        text = "No results."
+        gravity = Gravity.CENTER
+        setTextColor(activity.colorFromAttribute(R.attr.textColor))
+        visibility = View.GONE
+    }
+    private var showCatalogEnd = false
+    private val catalogEndText = "No more results."
+    private val catalogEndPaint = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        color = activity.colorFromAttribute(R.attr.textColor)
+        textSize = TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_SP, 14f, activity.resources.displayMetrics
+        )
+        textAlign = android.graphics.Paint.Align.CENTER
+    }
+    private val catalogEndDecoration = object : RecyclerView.ItemDecoration() {
+        override fun getItemOffsets(
+            outRect: Rect, view: View, parent: RecyclerView, state: RecyclerView.State
+        ) {
+            if (showCatalogEnd && parent.getChildAdapterPosition(view) == adapter.itemCount - 1)
+                outRect.bottom = dp(56)
+        }
+
+        override fun onDrawOver(
+            canvas: android.graphics.Canvas, parent: RecyclerView, state: RecyclerView.State
+        ) {
+            if (!showCatalogEnd || adapter.itemCount == 0) return
+            val last = parent.layoutManager?.findViewByPosition(adapter.itemCount - 1) ?: return
+            canvas.drawText(catalogEndText, parent.width / 2f, last.bottom + dp(36).toFloat(), catalogEndPaint)
+        }
+    }
 
     private val inlineStore = ViewModelStore()
     private val inlineModel = ViewModelProvider(
@@ -779,6 +810,7 @@ internal class CatalogBrowserDialog(
     private fun enterInlineSearch() {
         if (closed || inlineActive) return
         inlineActive = true
+        updateCatalogResultState()
         inlineRetryVisibility = retry.visibility
         inlineSelectors.forEach { it.visibility = View.GONE }
         grid.visibility = View.INVISIBLE
@@ -797,6 +829,7 @@ internal class CatalogBrowserDialog(
     private fun exitInlineSearch() {
         if (!inlineActive) return
         inlineActive = false
+        updateCatalogResultState()
         inlineSubmitted = false
         inlineModel.searchAndCancel("", providersActive = inlineProviders.toSet())
         inlineAdapter.submitList(emptyList())
@@ -858,6 +891,18 @@ internal class CatalogBrowserDialog(
     private var autoFillCount = 0
 
     private val maxAutoFillPages = 12
+    private fun updateCatalogResultState() {
+        val finished = chosen && !loading && !hasNext && retry.visibility != View.VISIBLE
+        catalogEmpty.visibility = if (!inlineActive && finished && items.isEmpty())
+            View.VISIBLE else View.GONE
+        val end = !inlineActive && finished && items.isNotEmpty()
+        if (showCatalogEnd != end) {
+            showCatalogEnd = end
+            if (grid.isComputingLayout) {
+                grid.post { if (!closed) grid.invalidateItemDecorations() }
+            } else grid.invalidateItemDecorations()
+        }
+    }
     private val homeTitleFocus = if (initialCatalog != null)
         activity.currentFocus?.takeIf { it.id == R.id.home_child_more_info } else null
     private fun initialProgress(active: Boolean) {
@@ -1356,6 +1401,7 @@ internal class CatalogBrowserDialog(
         }
         val content = FrameLayout(activity).apply {
             addView(grid, FrameLayout.LayoutParams(-1, -1))
+            addView(catalogEmpty, FrameLayout.LayoutParams(-1, -1))
             pageSkeleton.addView(pageSkeletonSlots, FrameLayout.LayoutParams(-1, -1))
             addView(pageSkeleton, FrameLayout.LayoutParams(-1, -1))
             addView(edgeFade, FrameLayout.LayoutParams(-1, dp(15), Gravity.TOP))
@@ -1390,6 +1436,7 @@ internal class CatalogBrowserDialog(
             gravity = Gravity.BOTTOM
         })
         grid.adapter = adapter
+        grid.addItemDecoration(catalogEndDecoration)
         grid.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
             if (pageSkeleton.visibility == View.VISIBLE) grid.post { updatePageSkeleton() }
             if (right - left != oldRight - oldLeft) {
@@ -1523,6 +1570,7 @@ internal class CatalogBrowserDialog(
         hasNext = false
         chosen = false
         retry.visibility = View.GONE
+        updateCatalogResultState()
     }
 
     private fun reloadLinks() {
@@ -1719,7 +1767,13 @@ internal class CatalogBrowserDialog(
             seen.addAll(home.items.map { it.url })
             offset = home.nextSkip
             hasNext = home.hasNext && next.catalog.supportsExtra("skip")
-            adapter.submitList(items.toList()) { if (!closed) initialProgress(false) }
+            adapter.submitList(items.toList()) {
+                if (!closed) {
+                    initialProgress(false)
+                    updateCatalogResultState()
+                }
+            }
+            updateCatalogResultState()
             autoFillIfShort(generation)
         } else {
             requestPage()
@@ -1846,6 +1900,7 @@ internal class CatalogBrowserDialog(
         val selectedGenre = genre
         val requestedOffset = offset
         loading = true
+        updateCatalogResultState()
         val firstPage = items.isEmpty()
         if (firstPage) initialProgress(true) else pageProgress(true)
         retry.visibility = View.GONE
@@ -1863,7 +1918,10 @@ internal class CatalogBrowserDialog(
                 offset += rawCount 
                 hasNext = selectedCatalog.supportsExtra("skip") && rawCount > 0 && !repeated && fresh.isNotEmpty()
                 adapter.submitList(items.toList()) {
-                    if (ticket == generation && !closed && firstPage) initialProgress(false)
+                    if (ticket == generation && !closed) {
+                        if (firstPage) initialProgress(false)
+                        updateCatalogResultState()
+                    }
                 }
                 if (selectedGenre == null) {
                     try {
@@ -1886,6 +1944,7 @@ internal class CatalogBrowserDialog(
                     loading = false
                     if (firstPage && items.isEmpty()) initialProgress(false)
                     if (!firstPage) pageProgress(false)
+                    updateCatalogResultState()
                 }
             }
         }
