@@ -2807,6 +2807,8 @@ internal class RatingPlotImageHook(
                     }
                 }
             }
+            // No valid search target: do not leave a consumed long-press scaled.
+            if (!castLongPressHandled) restoreCastPress(card)
             true
         }
         // Bind on actual layout changes, never on every draw frame.

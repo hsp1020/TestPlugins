@@ -618,6 +618,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                         card.context.startActivity(intent)
                     }
                 }
+                // The native handler also consumes unsupported searches.
+                // Restore the press only when nothing was launched.
+                if (!channelLongPressHandled) restoreChannelPress(card)
                 true
             }
             // Existing onActivityResumed path; only restore after browser return.
