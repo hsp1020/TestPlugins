@@ -1701,15 +1701,15 @@ internal class RatingPlotImageHook(
                             // Re-apply the selected season synchronously before the next draw.
                             seasonCast?.let { actors -> showSeasonCast(actors) }
                         }
-                        // Reuse only the matching AniList season's successful
-                        // cast. A new View never needs to refetch these actors.
+                        resolve()
+                        // Apply the cached cast after season selection, so
+                        // resolve() cannot immediately clear the reused list.
                         if (seasonCast == null && seasonNumbers.size <= 1 &&
                             StremioC.animeAudioByUrl[data.url] == true) {
                             rawSyncs["anilist"]?.toIntOrNull()
-                                ?.let(StremioC::cachedAnimeCast)
+                                ?.let { StremioC.cachedAnimeCast(it) }
                                 ?.let(::showAniListCast)
                         }
-                        resolve()
                     }
                     is Resource.Failure -> {}
                     else -> {}
@@ -1791,7 +1791,9 @@ internal class RatingPlotImageHook(
                 showingAniListCast = false
                 showSeasonCast(emptyList())
             }
-            coreAniListLoading = false
+            // The first season selection may occur after the core emitted
+            // Loading. Do not discard that request's terminal-result guard.
+            if (season != null) coreAniListLoading = false
             season = chosen
             generation++
             begin()
