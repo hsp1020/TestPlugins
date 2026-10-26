@@ -4636,6 +4636,10 @@ open class StremioC(
                     ?: detailRes.content_ratings?.results?.firstOrNull { it.iso_3166_1 == "US" }?.rating
             }
 
+            // Keep cast images nonblank so CloudStream's native cast cards remain visible.
+            // android.resource uses the host app's built-in fallback without an HTTP request.
+            val nativeCastPlaceholder =
+                "android.resource://${CloudStreamApp.context?.packageName ?: "com.lagradost.cloudstream3"}/drawable/default_cover"
             val crewPairs = detailRes.credits?.crew?.filter { it.job == "Director" || it.job == "Writer" }
                 ?.groupBy { it.id?.takeIf { id -> id > 0 }?.let { id -> "id:$id" }
                     ?: "name:" + (it.name ?: it.originalName).orEmpty() }
@@ -4645,7 +4649,7 @@ open class StremioC(
                     val jobs = roles.mapNotNull { it.job }.distinct()
                         .sortedBy { if (it == "Director") 1 else 2 }.joinToString(", ")
                     val img = roles.firstNotNullOfOrNull { it.profilePath }
-                        ?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
+                        ?.let { provider.getActorUrl(it) } ?: nativeCastPlaceholder
                     ActorData(Actor(name, img), roleString = jobs) to
                         ActorPersonRef(head.id, name, img, true)
                 }?.sortedBy { (item, _) ->
@@ -4654,7 +4658,7 @@ open class StremioC(
                 } ?: emptyList()
             val castPairs = detailRes.credits?.cast?.mapNotNull { cast ->
                 val actorName = cast.name ?: cast.originalName ?: return@mapNotNull null
-                val img = cast.profilePath?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
+                val img = cast.profilePath?.let { provider.getActorUrl(it) } ?: nativeCastPlaceholder
                 ActorData(Actor(actorName, img), roleString = cast.character) to
                     ActorPersonRef(cast.id, actorName, img, false)
             } ?: emptyList()

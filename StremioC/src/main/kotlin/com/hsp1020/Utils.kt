@@ -2653,6 +2653,9 @@ internal class RatingPlotImageHook(
                         val nativeHolder = holder as ViewHolderState<Any>
                         adapter.inverted[actor] = adapter.inverted[actor] != true
                         adapter.onUpdateContent(nativeHolder, actor, position)
+                        // Native rebind restores its browser-search handler.
+                        card.setOnClickListener(this)
+                        card.setOnLongClickListener(castLongClick)
                     }
                     return
                 }
@@ -2669,8 +2672,20 @@ internal class RatingPlotImageHook(
             }
         }
         private val castLongClick = View.OnLongClickListener { card ->
-            if (actorNameId != 0) {
-                openActorSearch(card.findViewById<TextView>(actorNameId)?.text?.toString()?.trim().orEmpty())
+            val list = castItems
+            val position = list?.getChildAdapterPosition(card) ?: RecyclerView.NO_POSITION
+            if (position != RecyclerView.NO_POSITION) {
+                val adapter = list?.adapter as? ActorAdaptor
+                val actor = adapter?.getItemOrNull(position)
+                if (actor != null) {
+                    // The native cast adapter flips its main photo using inverted,
+                    // but leaves actor_name unchanged. Search the visible photo's owner.
+                    val voiceShown = adapter.inverted[actor] == true &&
+                        !actor.voiceActor?.image.isNullOrBlank()
+                    val query = (if (voiceShown) actor.voiceActor?.name else actor.actor.name)
+                        ?.trim().orEmpty()
+                    openActorSearch(query)
+                }
             }
             true
         }
@@ -2682,7 +2697,9 @@ internal class RatingPlotImageHook(
                 castItems?.takeIf { it.isShown }?.let { list ->
                     val children = (0 until list.childCount).map(list::getChildAt).toSet()
                     for (card in children) {
-                        if (!boundActorCards.add(card)) continue
+                        boundActorCards.add(card)
+                        // A native item rebind may replace both listeners even on the
+                        // same attached card; restore only at actual layout boundaries.
                         card.setOnClickListener(castClick)
                         card.setOnLongClickListener(castLongClick)
                     }
