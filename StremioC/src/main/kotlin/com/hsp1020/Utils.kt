@@ -1581,9 +1581,17 @@ internal class RatingPlotImageHook(
         }
 
         private fun showTmdbFallback() {
+            // Do not render fallback before the native selected season is known.
+            // It can otherwise win the first frame of an episodic anime even
+            // though its AniList season mapping has not started yet.
+            val url = pageUrl ?: return
+            if (StremioC.episodeBasedByUrl[url] == true &&
+                (seasonNumbers.isEmpty() || selectionIndex?.let {
+                    seasonNumbers.getOrNull(it) != null
+                } != true)) return
             // A terminal fallback never displaces a successful AniList cast.
             if (showingAniListCast) return
-            val actors = pageUrl?.let { StremioC.animeFallbackActorsByUrl[it] }
+            val actors = StremioC.animeFallbackActorsByUrl[url]
                 ?.takeIf { it.isNotEmpty() } ?: return
             seasonCast = actors
             showSeasonCast(actors)
@@ -1734,44 +1742,7 @@ internal class RatingPlotImageHook(
                     }
                 }
                 observe(model.metadata, owner) { result ->
-                    // SyncViewModel.metadata is NOT an AniList-only stream: it
-                    // can return MAL/Kitsu after AniList fails. Only act on a
-                    // terminal result for the currently registered AniList ID.
-                    val expectedId = rawSyncs["anilist"]?.toIntOrNull()?.takeIf { it > 0 }
-                    val registeredId = model.getSyncs()["anilist"]?.toIntOrNull()
-                    if (pageUrl?.let { StremioC.animeAudioByUrl[it] } == true &&
-                        seasonNumbers.size <= 1 && expectedId != null &&
-                        registeredId == expectedId) {
-                        when (result) {
-                            is Resource.Loading -> coreAniListLoading = true
-                            is Resource.Success -> {
-                                val meta = result.value
-                                val actors = meta.actors
-                                if (meta.id == expectedId.toString()) {
-                                    if (!actors.isNullOrEmpty()) {
-                                        StremioC.rememberAnimeCast(expectedId, actors)
-                                        showAniListCast(actors)
-                                    } else if (actors != null || coreAniListLoading) {
-                                        showTmdbFallback()
-                                    }
-                                } else if (coreAniListLoading &&
-                                    model.getSyncs().any { (provider, id) ->
-                                        provider != "anilist" && id == meta.id
-                                    }) {
-                                    // The core tries registered AniList first.
-                                    // A different provider's terminal result
-                                    // means that attempt returned no metadata.
-                                    showTmdbFallback()
-                                }
-                                coreAniListLoading = false
-                            }
-                            is Resource.Failure -> {
-                                if (coreAniListLoading) showTmdbFallback()
-                                coreAniListLoading = false
-                            }
-                            else -> Unit
-                        }
-                    }
+                    applyCoreCastMetadata(result)
                     if (combo != null) {
                         root.post { if (active) render() }
                     }
@@ -1779,6 +1750,51 @@ internal class RatingPlotImageHook(
                 observe(model.synced, owner) {
                     if (combo != null) root.post { if (active) render() }
                 }
+            }
+        }
+
+        private fun applyCoreCastMetadata(result: Resource<SyncAPI.SyncResult>?) {
+            val url = pageUrl ?: return
+            val model = syncModel ?: return
+            val expectedId = rawSyncs["anilist"]?.toIntOrNull()?.takeIf { it > 0 }
+                ?: return
+            if (StremioC.animeAudioByUrl[url] != true ||
+                model.getSyncs()["anilist"]?.toIntOrNull() != expectedId) return
+            if (result is Resource.Loading) {
+                coreAniListLoading = true
+                return
+            }
+            // Core metadata is shared by all trackers. A terminal result is
+            // cast-relevant only after the native one-season selection arrives.
+            // Replay its latest value on that transition without another API call.
+            val singleReady = StremioC.episodeBasedByUrl[url] == false ||
+                (seasonNumbers.size == 1 && selectionIndex?.let {
+                    seasonNumbers.getOrNull(it) != null
+                } == true)
+            if (!singleReady) return
+            when (result) {
+                is Resource.Success -> {
+                    val meta = result.value
+                    if (meta.id == expectedId.toString()) {
+                        if (!meta.actors.isNullOrEmpty()) {
+                            StremioC.rememberAnimeCast(expectedId, meta.actors)
+                            showAniListCast(meta.actors)
+                        } else if (meta.actors != null || coreAniListLoading) {
+                            showTmdbFallback()
+                        }
+                    } else if (coreAniListLoading &&
+                        model.getSyncs().any { (provider, id) ->
+                            provider != "anilist" && id == meta.id
+                        }) {
+                        showTmdbFallback()
+                    }
+                    coreAniListLoading = false
+                }
+                is Resource.Failure -> {
+                    if (coreAniListLoading) showTmdbFallback()
+                    coreAniListLoading = false
+                }
+                else -> Unit
             }
         }
 
@@ -1810,6 +1826,10 @@ internal class RatingPlotImageHook(
             season = chosen
             generation++
             begin()
+            // The native metadata result may have arrived before its season
+            // selection. Reuse LiveData's current value, not a new network call.
+            if (seasonNumbers.size <= 1)
+                applyCoreCastMetadata(syncModel?.metadata?.value)
         }
 
         private fun reset() {
