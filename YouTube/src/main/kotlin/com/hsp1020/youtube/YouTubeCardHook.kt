@@ -15,6 +15,7 @@ import android.widget.Toast
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
+import android.view.animation.Animation
 import android.view.inspector.WindowInspector
 import android.widget.ImageView
 import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
@@ -558,6 +559,15 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             private val episodeSizes = IdentityHashMap<View, Pair<View, Pair<Int, Int>>>()
             private val directClicks = IdentityHashMap<View, View.OnClickListener>()
             private val castViews = IdentityHashMap<View, Boolean>()
+            private var pendingChannelNavigation: Pair<View, Animation>? = null
+
+            private fun cancelPendingChannelNavigation(view: View? = null) {
+                val pending = pendingChannelNavigation ?: return
+                if (view != null && pending.first !== view) return
+                pending.second.setAnimationListener(null)
+                pendingChannelNavigation = null
+            }
+
             private var observed: RecyclerView.Adapter<*>? = null
             private var visibleShorts: Boolean? = null
             private var adaptiveRemeasurePosted = false
@@ -611,6 +621,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
 
             fun close() {
+                cancelPendingChannelNavigation()
                 list.removeOnChildAttachStateChangeListener(children)
                 list.removeOnLayoutChangeListener(resized)
                 observed?.unregisterAdapterDataObserver(changes)
@@ -811,6 +822,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
             /** Restore modified cast holders before RecyclerView recycles them. */
             private fun restoreCast(view: View) {
+                cancelPendingChannelNavigation(view)
                 if (castViews.remove(view) == null) return
                 view.setOnTouchListener(null)
                 view.setOnClickListener(null)
@@ -849,6 +861,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     // than maintaining another gesture/animation implementation.
                     view.setOnClickListener(object : View.OnClickListener {
                         override fun onClick(clicked: View) {
+                            // A second tap must not restart the pending native animation.
+                            if (pendingChannelNavigation?.first === view) return
                             val currentPosition = list.getChildAdapterPosition(view)
                             if (currentPosition == RecyclerView.NO_POSITION) return
                             val currentActor = adapter.getItemOrNull(currentPosition)
@@ -865,9 +879,40 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                                 view.setOnClickListener(this)
                             }
                             if (link != null) {
-                                hostFragment.activity?.loadResult(
-                                    link.url, "YouTube", link.name
-                                )
+                                // The native ActorAdaptor starts a 200ms portrait scale
+                                // animation. Navigate only after its completion.
+                                val animation = view.findViewById<View>(
+                                    R.id.voice_actor_image_holder2
+                                )?.animation
+                                if (animation == null) {
+                                    hostFragment.activity?.loadResult(
+                                        link.url, "YouTube", link.name
+                                    )
+                                } else {
+                                    pendingChannelNavigation = view to animation
+                                    animation.setAnimationListener(object : Animation.AnimationListener {
+                                        override fun onAnimationStart(animation: Animation?) = Unit
+                                        override fun onAnimationRepeat(animation: Animation?) = Unit
+                                        override fun onAnimationEnd(animation: Animation?) {
+                                            val pending = pendingChannelNavigation
+                                            if (pending?.first !== view || pending.second !== animation) return
+                                            cancelPendingChannelNavigation(view)
+                                            // A stale / recycled card must never navigate.
+                                            if (watchers[list] !== this@Watcher ||
+                                                !hostFragment.isAdded ||
+                                                view.parent !== list ||
+                                                list.getChildAdapterPosition(view) != currentPosition ||
+                                                adapter.getItemOrNull(currentPosition) !== currentActor) return
+                                            val currentPage = hostFragment.arguments
+                                                ?.getString("url").orEmpty()
+                                            val target = YoutubeProvider.channelForUrl(currentPage)
+                                            if (target?.url != link.url || target.name != link.name) return
+                                            hostFragment.activity?.loadResult(
+                                                link.url, "YouTube", link.name
+                                            )
+                                        }
+                                    })
+                                }
                             }
                         }
                     })
