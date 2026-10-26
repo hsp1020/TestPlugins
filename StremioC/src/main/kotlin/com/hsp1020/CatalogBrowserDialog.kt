@@ -697,12 +697,14 @@ internal class CatalogBrowserDialog(
     private val catalogEmpty = TextView(activity).apply {
         text = "No results."
         gravity = Gravity.CENTER
+        typeface = Typeface.create(typeface, Typeface.BOLD)
         setTextColor(activity.colorFromAttribute(R.attr.textColor))
         visibility = View.GONE
     }
     private var showCatalogEnd = false
     private val catalogEndText = "No more results."
     private val catalogEndPaint = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.create(catalogEmpty.typeface, Typeface.BOLD)
         color = activity.colorFromAttribute(R.attr.textColor)
         textSize = TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_SP, 14f, activity.resources.displayMetrics
