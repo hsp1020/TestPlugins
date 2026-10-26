@@ -2666,28 +2666,10 @@ open class StremioC(
         val forceRefresh = requested?.queryParameter("__stremioc_refresh") == "1"
         val effectiveUrl = if (forceRefresh) requested!!.newBuilder()
             .removeAllQueryParameters("__stremioc_refresh").build().toString() else url
-        val key = effectiveUrl.hashCode().toString(16)
-        val started = SystemClock.uptimeMillis()
-        val hint = parseDetailUrlHint(effectiveUrl)
-        Log.i("StremioC-MetaTrace",
-            "key=$key stage=load_begin hintType=${hint?.type} idKind=${hint?.id?.substringBefore(':')?.take(12)}")
-        return try {
-            val response = loadInternal(effectiveUrl, forceRefresh)
-            Log.i("StremioC-MetaTrace",
-                "key=$key stage=load_success elapsed=${SystemClock.uptimeMillis() - started} " +
-                    "type=${response.type} anilistSync=${response.syncData.containsKey("anilist")}")
-            response
-        } catch (error: Throwable) {
-            Log.i("StremioC-MetaTrace",
-                "key=$key stage=load_failure elapsed=${SystemClock.uptimeMillis() - started} " +
-                    "error=${error.javaClass.simpleName}")
-            throw error
-        }
+        return loadInternal(effectiveUrl, forceRefresh)
     }
 
     private suspend fun loadInternal(url: String, forceRefresh: Boolean = false): LoadResponse = coroutineScope {
-        val traceStarted = SystemClock.uptimeMillis()
-        val traceKey = url.hashCode().toString(16)
         if (!isAddonEnabled()) throw IllegalStateException("This addon is disabled.")
         if (mainUrl.isBlank()) {
             val libraryService = when {
@@ -2840,10 +2822,6 @@ open class StremioC(
                 throw IllegalStateException("Metadata not found or parsing failed: $url", e)
             }
         }
-        Log.i("StremioC-MetaTrace",
-            "key=$traceKey stage=metadata_parsed elapsed=${SystemClock.uptimeMillis() - traceStarted} " +
-                "type=${res.type} idKind=${res.id?.substringBefore(':')?.take(12)} " +
-                "videos=${res.videos?.size ?: 0}")
         val hintMatchesAuthoritative = urlHint != null &&
             urlHint.id == res.id &&
             canonicalDetailType(urlHint.type) == canonicalDetailType(res.type)
@@ -2880,10 +2858,6 @@ open class StremioC(
         var resolvedTmdbId: String? = null
 
         if (originalMappingId != null) {
-            val mappingStarted = SystemClock.uptimeMillis()
-            Log.i("StremioC-MetaTrace",
-                "key=$traceKey stage=anime_mapping_wait elapsed=${mappingStarted - traceStarted} " +
-                    "idKind=${originalMappingId.substringBefore(':')}")
             val candidate = run {
                 if (hintedAnimeId == originalMappingId && speculativeAnimeDeferred != null) {
                     speculativeAnimeDeferred.await()
@@ -2891,9 +2865,6 @@ open class StremioC(
                     resolveAnimeIdForLoad(originalMappingId)
                 }
             }
-            Log.i("StremioC-MetaTrace",
-                "key=$traceKey stage=anime_mapping_return wait=${SystemClock.uptimeMillis() - mappingStarted} " +
-                    "found=${candidate != null}")
             val resolved = candidate?.takeIf { mapping ->
                 when {
                     res.id == originalMappingId -> true
@@ -2992,12 +2963,8 @@ open class StremioC(
 
         val resolvedIdHolder = arrayOf<String?>(null, null)
 
-        Log.i("StremioC-MetaTrace",
-            "key=$traceKey stage=response_build_begin elapsed=${SystemClock.uptimeMillis() - traceStarted}")
         val loadRes = run { res.toLoadResponse(
             provider = this@StremioC,
-            traceKey = traceKey,
-            traceStarted = traceStarted,
             imdbId = finalProcessedId,
             addonDeferred = addonDeferred,
             preFetchedDetail = preFetchedTmdbDetail,
@@ -3015,9 +2982,6 @@ open class StremioC(
             prefetchedAnimeMapping = speculativeImdbAnimeDeferred?.takeIf { hintedImdbId == res.id },
             prefetchedAnimeImdbId = hintedImdbId
         ) }
-        Log.i("StremioC-MetaTrace",
-            "key=$traceKey stage=response_build_end elapsed=${SystemClock.uptimeMillis() - traceStarted} " +
-                "type=${loadRes.type}")
 
         if (url != loadRes.url) {
             fallbackLogoTitles[loadRes.url]?.let { fallbackLogoTitles[url] = it }
@@ -4905,9 +4869,7 @@ open class StremioC(
         }
 
         suspend fun toLoadResponse(
-            provider: StremioC,
-            traceKey: String,
-            traceStarted: Long,
+            provider: StremioC, 
             imdbId: String?, 
             addonDeferred: Deferred<CatalogEntry?>?, 
             preFetchedDetail: TmdbDetailResponse? = null,
@@ -5018,9 +4980,6 @@ open class StremioC(
 
             var tmdbData: FetchedTmdbData? = null
             if (tmdbIdStr != null) {
-                val tmdbStarted = SystemClock.uptimeMillis()
-                Log.i("StremioC-MetaTrace",
-                    "key=$traceKey stage=tmdb_begin elapsed=${tmdbStarted - traceStarted}")
                 try {
                     val refinedMediaType = foundMediaType ?: if (finalType == "series" || finalType == "tv") "tv" else if (isSingleMovie(finalType, finalVideos) || finalType == "movie" || finalVideos.isNullOrEmpty()) "movie" else "tv"
                     val safePrefetchedDetail = preFetchedDetail?.takeIf {
@@ -5036,9 +4995,6 @@ open class StremioC(
                     }
                 } catch (e: Exception) {
                 }
-                Log.i("StremioC-MetaTrace",
-                    "key=$traceKey stage=tmdb_end wait=${SystemClock.uptimeMillis() - tmdbStarted} " +
-                        "found=${tmdbData != null}")
             }
 
             var finalName = originalName ?: this@CatalogEntry.name ?: "Unknown Content"
@@ -5098,15 +5054,7 @@ open class StremioC(
             val isCartoon = tmdbData?.fetchedGenreIds?.contains(16) == true ||
                 finalGenre?.any { it.contains("Animation", true) } == true
             val isAnimeFromMetadata = originalAnimeId != null || fetchedMalId != null || provider.isLibraryAnimeId(finalImdbId) || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
-            val syncStarted = SystemClock.uptimeMillis()
-            if (detailSyncMapping != null)
-                Log.i("StremioC-MetaTrace",
-                    "key=$traceKey stage=sync_mapping_wait elapsed=${syncStarted - traceStarted}")
             val imdbSyncMapping = run { detailSyncMapping?.await() }
-            if (detailSyncMapping != null)
-                Log.i("StremioC-MetaTrace",
-                    "key=$traceKey stage=sync_mapping_return wait=${SystemClock.uptimeMillis() - syncStarted} " +
-                        "found=${imdbSyncMapping != null}")
             val isAnimeMedia = isAnimeFromMetadata || imdbSyncMapping != null
             val originalTrackerId = originalAnimeId?.substringAfter(':')?.substringBefore(':')
                 ?.toIntOrNull()?.takeIf { it > 0 }

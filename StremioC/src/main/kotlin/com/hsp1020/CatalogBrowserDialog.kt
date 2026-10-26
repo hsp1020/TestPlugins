@@ -32,7 +32,6 @@ import com.google.android.material.button.MaterialButton
 import android.widget.LinearLayout
 import android.view.Gravity
 import android.util.TypedValue
-import android.util.Log
 import android.widget.TextView
 import android.widget.Toast
 import androidx.fragment.app.FragmentActivity
@@ -207,31 +206,6 @@ internal class StremioDetailHandoff(
     private var detailEntryId: String? = null
     private var pendingDetailDraw = false
     private var detailRevealEnd: (() -> Unit)? = null
-    private var traceKey: String? = null
-    private var traceStarted = 0L
-
-    private fun trace(stage: String, details: String = "") {
-        val key = traceKey ?: return
-        Log.i("StremioC-CatalogTrace",
-            "key=$key elapsed=${SystemClock.uptimeMillis() - traceStarted} stage=$stage $details")
-    }
-
-    private fun traceLayout(detail: View? = null): String {
-        fun shape(view: View?): String = if (view == null) "null" else
-            "${view.width}x${view.height}@${view.left},${view.top},${view.right},${view.bottom}" +
-                "/v=${view.visibility}/shown=${view.isShown}/layout=${view.isLayoutRequested}"
-        val host = activity.findViewById<View>(R.id.nav_host_fragment)
-        val parent = host?.parent as? ViewGroup
-        val inner = activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)?.view
-        return "host=${shape(host)} parent=${shape(parent)} inner=${shape(inner)} " +
-            "nav=${shape(activity.findViewById(R.id.nav_view))} " +
-            "rail=${shape(activity.findViewById(R.id.nav_rail_view))} " +
-            "detail=${shape(detail)} animEnd=${detail?.animation?.hasEnded()}"
-    }
-
-    fun traceBlockedClick(url: String) {
-        trace("blocked_click", "attempt=${url.hashCode().toString(16)}")
-    }
 
     private fun currentDestinationView(): View? =
         stremioCurrentDestinationView(activity, navigation)
@@ -280,7 +254,6 @@ internal class StremioDetailHandoff(
 
     private fun scheduleReturn(target: String, toOrigin: Boolean = true) {
         if (!isActive || (returning && returnTargetId == target)) return
-        trace("return_start", "target=$target toOrigin=$toOrigin ${traceLayout(currentDestinationView())}")
         detailRevealEnd?.invoke()
         returning = true
         pendingDetailDraw = false
@@ -295,7 +268,6 @@ internal class StremioDetailHandoff(
     }
 
     private fun recoverHome(): Boolean {
-        trace("recover_home", "entry=${navigation?.currentBackStackEntry?.id} ${traceLayout(currentDestinationView())}")
         if (!isActive || activity.isFinishing || activity.isDestroyed ||
             !activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return false
         val nav = navigation ?: return false
@@ -327,9 +299,6 @@ internal class StremioDetailHandoff(
             }
             val nav = navigation
             val origin = returnEntryId
-            trace("navigation_timeout", "attempt=$recoveryAttempts origin=$origin " +
-                "entry=${nav?.currentBackStackEntry?.id} detailEntry=$detailEntryId " +
-                traceLayout(currentDestinationView()))
             if (origin != null && nav?.currentBackStackEntry?.id == origin) {
                 scheduleReturn(origin)
                 return
@@ -337,7 +306,6 @@ internal class StremioDetailHandoff(
             if (origin != null && detailEntryId == nav?.currentBackStackEntry?.id) {
                 recovering = true
                 val popped = runCatching { nav?.popBackStack() == true }.getOrDefault(false)
-                trace("timeout_pop", "popped=$popped entry=${nav?.currentBackStackEntry?.id}")
                 recovering = false
                 if (popped && nav?.currentBackStackEntry?.id == origin) {
                     scheduleReturn(origin)
@@ -374,13 +342,10 @@ internal class StremioDetailHandoff(
         }
     }
 
-    fun begin(url: String? = null): Boolean {
+    fun begin(): Boolean {
         if (isActive || activity.isFinishing || activity.isDestroyed) return false
         val origin = navigation?.currentBackStackEntry?.id ?: return false
         generation++
-        traceKey = url?.hashCode()?.toString(16)
-        traceStarted = SystemClock.uptimeMillis()
-        trace("begin", "origin=$origin dest=${navigation?.currentDestination?.id} ${traceLayout()}")
         returnEntryId = origin
         detailEntryId = null
         pendingDetailDraw = true
@@ -397,8 +362,6 @@ internal class StremioDetailHandoff(
     }
 
     fun close() {
-        trace("close", "returning=$returning pending=$pendingDetailDraw entry=${navigation?.currentBackStackEntry?.id}")
-        traceKey = null
         generation++
         handler.removeCallbacks(navigationTimeout)
         handler.removeCallbacks(returnTimeout)
@@ -420,50 +383,52 @@ internal class StremioDetailHandoff(
     }
 
     private fun revealDetailWhenReady(detail: View) {
-        trace("candidate", traceLayout(detail))
         detailRevealEnd?.invoke()
         val ticket = generation
         detail.doOnPreDraw {
-            trace("first_predraw", traceLayout(detail))
             if (ticket != generation || !isActive || !pendingDetailDraw) return@doOnPreDraw
             val observer = detail.viewTreeObserver
             var stable = 0
-            var sampled = false
+            var pendingReveal: Runnable? = null
             lateinit var listener: ViewTreeObserver.OnPreDrawListener
             lateinit var release: () -> Unit
             release = {
                 if (observer.isAlive) observer.removeOnPreDrawListener(listener)
+                pendingReveal?.let(detail::removeCallbacks)
+                pendingReveal = null
                 if (detailRevealEnd === release) detailRevealEnd = null
             }
             listener = ViewTreeObserver.OnPreDrawListener {
                 if (ticket != generation || !isActive || !pendingDetailDraw ||
                     returnEntryId == null || detailEntryId != navigation?.currentBackStackEntry?.id) {
                     release()
-                } else {
+                } else if (pendingReveal == null) {
                     val ready = currentDestinationView() === detail &&
                         stremioDestinationReady(activity, detail)
-                    if (!sampled) {
-                        sampled = true
-                        trace("first_ready_check", "ready=$ready ${traceLayout(detail)}")
-                    }
                     stable = if (ready) stable + 1 else 0
                     if (stable >= 3) {
-                        release()
-                        detail.postOnAnimation {
-                            if (ticket == generation && isActive && pendingDetailDraw &&
-                                returnEntryId != null && detailEntryId == navigation?.currentBackStackEntry?.id &&
-                                currentDestinationView() === detail &&
+                        val reveal = Runnable {
+                            pendingReveal = null
+                            if (ticket != generation || !isActive || !pendingDetailDraw ||
+                                returnEntryId == null ||
+                                detailEntryId != navigation?.currentBackStackEntry?.id) {
+                                release()
+                            } else if (currentDestinationView() === detail &&
                                 stremioDestinationReady(activity, detail)) {
-                                trace("reveal", traceLayout(detail))
+                                release()
                                 pendingDetailDraw = false
                                 handler.removeCallbacks(navigationTimeout)
                                 dialog.hide()
                                 onReady()
-                                trace("reveal_after_nav", traceLayout(detail))
                             } else {
-                                trace("reveal_recheck_failed", traceLayout(detail))
+                                // A late native layout pass invalidated the final check.
+                                // Re-arm the original readiness check instead of getting stuck.
+                                stable = 0
+                                detail.postInvalidateOnAnimation()
                             }
                         }
+                        pendingReveal = reveal
+                        detail.postOnAnimation(reveal)
                     } else detail.postInvalidateOnAnimation()
                 }
                 true
@@ -478,8 +443,6 @@ internal class StremioDetailHandoff(
         override fun onFragmentViewCreated(
             fm: FragmentManager, fragment: Fragment, view: View, savedInstanceState: Bundle?
         ) {
-            trace("fragment_created", "type=${fragment.javaClass.simpleName} returning=$returning " +
-                traceLayout(view))
             if (returning) {
                 val ticket = generation
                 view.doOnPreDraw {
@@ -505,9 +468,6 @@ internal class StremioDetailHandoff(
         }
     }
     private val destinationListener = NavController.OnDestinationChangedListener { controller, _, _ ->
-        trace("destination", "destination=${controller.currentDestination?.id} " +
-            "entry=${controller.currentBackStackEntry?.id} detailEntry=$detailEntryId " +
-            traceLayout(currentDestinationView()))
         val origin = returnEntryId
         if (isActive && origin != null) {
             val current = controller.currentBackStackEntry?.id
@@ -724,15 +684,10 @@ internal class CatalogBrowserDialog(
     }
     private val grid = AutofitRecyclerView(activity)
     private val adapter = SearchAdapter(grid, false) { click ->
-        if (click.action == SEARCH_ACTION_LOAD) {
-            if (detailHandoff.isActive) detailHandoff.traceBlockedClick(click.card.url)
-            else Log.i("StremioC-CatalogTrace",
-                "key=${click.card.url.hashCode().toString(16)} stage=card_click type=${click.card.type}")
-        }
         if (!closed && !detailHandoff.isActive) when (click.action) {
             SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
             SEARCH_ACTION_LOAD -> {
-                val covered = detailHandoff.begin(click.card.url)
+                val covered = detailHandoff.begin()
                 if (covered) holdNativeNavigation()
                 SearchHelper.handleSearchClickCallback(click)
                 if (!covered) dismiss()
@@ -754,15 +709,10 @@ internal class CatalogBrowserDialog(
     private val inlineAdapter = ParentItemAdapter(
         "StremioCCatalogInlineSearch".hashCode(),
         { click ->
-            if (click.action == SEARCH_ACTION_LOAD) {
-                if (detailHandoff.isActive) detailHandoff.traceBlockedClick(click.card.url)
-                else Log.i("StremioC-CatalogTrace",
-                    "key=${click.card.url.hashCode().toString(16)} stage=card_click type=${click.card.type}")
-            }
             if (!closed && !detailHandoff.isActive) when (click.action) {
                 SEARCH_ACTION_SHOW_METADATA -> SearchHelper.handleSearchClickCallback(click)
                 SEARCH_ACTION_LOAD -> {
-                    val covered = detailHandoff.begin(click.card.url)
+                    val covered = detailHandoff.begin()
                     if (covered) holdNativeNavigation()
                     SearchHelper.handleSearchClickCallback(click)
                     if (!covered) dismiss()
