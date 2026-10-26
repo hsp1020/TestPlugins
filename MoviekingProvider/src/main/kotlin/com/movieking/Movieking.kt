@@ -457,7 +457,11 @@ class MovieKing : MainAPI() {
 
         println("[MovieKing DBG] 🎬 파싱 완료: 에피소드 수=${episodeList.size}, 연도=${year ?: "없음"}, 태그=${tags.size}개")
 
-        return if (episodeList.size <= 1) {
+        val isSeries = episodeList.size > 1 || episodeList.any {
+            it.name?.contains(Regex("회|화|부|ep|episode", RegexOption.IGNORE_CASE)) == true
+        }
+
+        return if (!isSeries) {
             newMovieLoadResponse(title, finalUrl, TvType.Movie, finalUrl) {
                 this.posterUrl = fixUrl(poster)
                 this.year = year
