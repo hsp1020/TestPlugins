@@ -3324,20 +3324,45 @@ open class StremioC(
             }
             return result
         }
+        // Keep stream callbacks in each addon's response order, regardless of preparation time.
+        suspend fun emitOrderedAddonStreams(
+            streams: List<Stream>?,
+            source: String,
+            subtitleHandler: (SubtitleFile) -> Unit,
+            extractorSubtitleHandler: (SubtitleFile) -> Unit,
+            category: String,
+            preferredName: String? = null
+        ): Int = coroutineScope {
+            val jobs = streams.orEmpty().map { stream -> async(Dispatchers.IO) {
+                val readyLinks = Collections.synchronizedList(mutableListOf<ExtractorLink>())
+                withStreamCallback(category) {
+                    stream.runCallback(this@StremioC, source, subtitleHandler, extractorSubtitleHandler,
+                        { readyLinks.add(it) }, preferredName)
+                }
+                readyLinks
+            } }
+            var emitted = 0
+            jobs.forEach { job ->
+                job.await().forEach { link ->
+                    emitted++
+                    wrappedCallback(link)
+                }
+            }
+            emitted
+        }
+
         runAllAsync(
             {
 
                 loadData.embeddedStreams?.let { json ->
                     runSuspendCatching {
                         val streams = parseJson<List<Stream>>(json)
-                        coroutineScope {
-                            streams.map { stream -> async(Dispatchers.IO) {
-                                val named = if (stream.name == null && stream.title == null && stream.description == null)
-                                    stream.copy(title = loadData.embeddedStreamTitle) else stream
-                                withStreamCallback("embedded") { named.runCallback(this@StremioC, name,
-                                    stremioSubtitleFrom(currentMainUrl), extractorSubtitleFrom(currentMainUrl), wrappedCallback) }
-                            } }.awaitAll()
+                        val namedStreams = streams.map { stream ->
+                            if (stream.name == null && stream.title == null && stream.description == null)
+                                stream.copy(title = loadData.embeddedStreamTitle) else stream
                         }
+                        emitOrderedAddonStreams(namedStreams, name,
+                            stremioSubtitleFrom(currentMainUrl), extractorSubtitleFrom(currentMainUrl), "embedded")
                     }
                 }
             },
@@ -3350,22 +3375,8 @@ open class StremioC(
                             val response = customSession.get(streamRequestUrl, timeout = 25L)
                             val text = response.text
                             val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
-                            val emitted = java.util.concurrent.atomic.AtomicInteger(0)
-                            coroutineScope {
-                                res?.streams?.map { stream -> async(Dispatchers.IO) {
-                                    withStreamCallback("main") { stream.runCallback(
-                                        this@StremioC,
-                                        name,
-                                        stremioSubtitleFrom(currentMainUrl),
-                                        extractorSubtitleFrom(currentMainUrl),
-                                        { link ->
-                                            emitted.incrementAndGet()
-                                            wrappedCallback(link)
-                                        }
-                                    ) }
-                                } }?.awaitAll()
-                            }
-                            emitted.get()
+                            emitOrderedAddonStreams(res?.streams, name,
+                                stremioSubtitleFrom(currentMainUrl), extractorSubtitleFrom(currentMainUrl), "main")
                         }
                             .getOrDefault(0)
 
@@ -3429,13 +3440,9 @@ open class StremioC(
                                             val response = customSession.get(requestUrl, timeout = 25L)
                                             val text = response.text
                                             val streams = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
-                                            coroutineScope {
-                                                streams?.streams?.map { stream -> async(Dispatchers.IO) {
-                                                    withStreamCallback("extra") { stream.runCallback(this@StremioC, source,
-                                                        stremioSubtitleFrom(addonUrl), extractorSubtitleFrom(addonUrl), wrappedCallback,
-                                                        preferredName = addon.name) }
-                                                } }?.awaitAll()
-                                            }
+                                            emitOrderedAddonStreams(streams?.streams, source,
+                                                stremioSubtitleFrom(addonUrl), extractorSubtitleFrom(addonUrl),
+                                                "extra", addon.name)
                                         }
 
                                     }
