@@ -146,7 +146,8 @@ internal class StremioLoading(context: Context, rows: Int = 1) : FrameLayout(con
 }
 
 internal fun stremioDestinationReady(
-    activity: FragmentActivity, destination: View, requireFullHost: Boolean = false
+    activity: FragmentActivity, destination: View, requireFullHost: Boolean = false,
+    requireAnimationEnd: Boolean = true
 ): Boolean {
     val host = activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)?.view
         ?: return false
@@ -160,7 +161,8 @@ internal fun stremioDestinationReady(
         host.width > 0 && host.height > 0 && !host.isLayoutRequested &&
         destination.isAttachedToWindow && destination.isShown &&
         destination.width > 0 && destination.height > 0 &&
-        !destination.isLayoutRequested && destination.animation?.hasEnded() != false
+        !destination.isLayoutRequested &&
+        (!requireAnimationEnd || destination.animation?.hasEnded() != false)
 }
 
 internal fun stremioCurrentDestinationView(
@@ -311,7 +313,7 @@ internal class StremioDetailHandoff(
             if (origin != null && detailEntryId == nav?.currentBackStackEntry?.id) {
                 val detail = currentDestinationView()
                 if (detail != null && stremioDestinationReady(
-                        activity, detail, requireFullHost = true
+                        activity, detail, requireFullHost = true, requireAnimationEnd = false
                     )) {
                     revealDetailWhenReady(detail)
                     return
@@ -424,9 +426,11 @@ internal class StremioDetailHandoff(
                 release()
             } else if (detailEntryId == navigation?.currentBackStackEntry?.id) {
                 val ready = currentDestinationView() === detail &&
-                    stremioDestinationReady(activity, detail, requireFullHost = true)
+                    stremioDestinationReady(
+                        activity, detail, requireFullHost = true, requireAnimationEnd = false
+                    )
                 stable = if (ready) stable + 1 else 0
-                if (stable >= 3) {
+                if (stable >= 1) {
                     release()
                     pendingDetailDraw = false
                     handler.removeCallbacks(navigationTimeout)
@@ -979,8 +983,13 @@ internal class CatalogBrowserDialog(
     private val detailHandoff by lazy {
         StremioDetailHandoff(activity, dialog, navigation, ::dismiss,
             onReturn = {
+                if (!closed) fitWindowToNavigation(force = true)
+            },
+            onReturnStart = {
                 if (!closed) {
-                    fitWindowToNavigation(force = true)
+                    // Cover the outgoing native detail before Home can draw.
+                    // Restore normal browser bounds only after Home is ready.
+                    coverNavigationTransition()
                     dialog.show()
                 }
             },
