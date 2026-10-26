@@ -2629,6 +2629,12 @@ internal class RatingPlotImageHook(
             .takeIf { it != 0 }?.let { root.findViewById<RecyclerView>(it) }
         private val actorNameId = root.resources.getIdentifier("actor_name", "id", root.context.packageName)
         private val actorInformation = ActorInformation.Controller(fragment, detailUrl)
+        private var pendingActorOpenAnimation: android.view.animation.Animation? = null
+
+        private fun cancelPendingActorOpen() {
+            pendingActorOpenAnimation?.setAnimationListener(null)
+            pendingActorOpenAnimation = null
+        }
         private val genreGroup = root.findViewById<ChipGroup>(R.id.result_tag)
         private val boundGenreChips = mutableMapOf<View, CatalogShortcutTarget>()
         private val boundActorCards = mutableSetOf<View>()
@@ -2700,6 +2706,7 @@ internal class RatingPlotImageHook(
                     }
                     return
                 }
+                cancelPendingActorOpen()
                 if (holder is ViewHolderState<*>) {
                     @Suppress("UNCHECKED_CAST")
                     val nativeHolder = holder as ViewHolderState<Any>
@@ -2709,7 +2716,29 @@ internal class RatingPlotImageHook(
                     card.setOnClickListener(this)
                     card.setOnLongClickListener(castLongClick)
                 }
-                actorInformation.click(position, actor)
+                // Wait for the native portrait's 200ms scale animation, not a guessed delay.
+                val runningAnimation = card.findViewById<View>(
+                    R.id.voice_actor_image_holder2
+                )?.animation
+                if (runningAnimation == null) {
+                    actorInformation.click(position, actor)
+                } else {
+                    pendingActorOpenAnimation = runningAnimation
+                    runningAnimation.setAnimationListener(object :
+                        android.view.animation.Animation.AnimationListener {
+                        override fun onAnimationStart(animation: android.view.animation.Animation?) = Unit
+                        override fun onAnimationRepeat(animation: android.view.animation.Animation?) = Unit
+                        override fun onAnimationEnd(animation: android.view.animation.Animation?) {
+                            if (pendingActorOpenAnimation !== runningAnimation) return
+                            pendingActorOpenAnimation = null
+                            runningAnimation.setAnimationListener(null)
+                            if (!fragment.isAdded || !card.isAttachedToWindow ||
+                                list.getChildAdapterPosition(card) != position ||
+                                adapter.getItemOrNull(position) !== actor) return
+                            actorInformation.click(position, actor)
+                        }
+                    })
+                }
             }
         }
         private val castLongClick = View.OnLongClickListener { card ->
@@ -2765,6 +2794,7 @@ internal class RatingPlotImageHook(
             runCatching { backdrop.start() }; runCatching { trailers.start() }; runCatching { render() }
         }
         fun detach() {
+            cancelPendingActorOpen()
             seasonSyncProbe.stop()
             actorInformation.stop()
             view.removeTextChangedListener(this)
