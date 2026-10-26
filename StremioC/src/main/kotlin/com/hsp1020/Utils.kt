@@ -1573,6 +1573,15 @@ internal class RatingPlotImageHook(
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, List<ActorData>>) = size > 24
         }
         private var seasonCast: List<ActorData>? = null
+
+        private fun showCastOrFallback(actors: List<ActorData>?) {
+            val resolved = actors?.takeIf { it.isNotEmpty() }
+                ?: pageUrl?.let { StremioC.animeFallbackActorsByUrl[it] }
+                ?: return
+            seasonCast = resolved
+            showSeasonCast(resolved)
+        }
+
         private var originalCastAnimator: RecyclerView.ItemAnimator? = null
         private var castAnimationsDisabled = false
 
@@ -1672,6 +1681,7 @@ internal class RatingPlotImageHook(
                             generation++
                             pageUrl = data.url
                             rawSyncs = data.syncData.toMap()
+                            seasonCast = null
                             seasonNumbers = emptyList()
                             selectionIndex = null
                             season = null
@@ -1703,6 +1713,24 @@ internal class RatingPlotImageHook(
                     }
                 }
                 observe(model.metadata, owner) { result ->
+                    // Core handles a directly-mapped single-season AniList actor list.
+                    // Use the already fetched TMDB cast only on a terminal empty/error result.
+                    if (StremioC.animeAudioByUrl[pageUrl] == true &&
+                        seasonNumbers.size <= 1 && rawSyncs["anilist"] != null) {
+                        when (result) {
+                            is Resource.Success -> {
+                                if (result.value.actors.isNullOrEmpty()) {
+                                    if (seasonCast == null) showCastOrFallback(null)
+                                } else if (seasonCast != null) {
+                                    showCastOrFallback(result.value.actors)
+                                }
+                            }
+                            is Resource.Failure -> {
+                                if (seasonCast == null) showCastOrFallback(null)
+                            }
+                            else -> Unit
+                        }
+                    }
                     if (combo != null) {
                         root.post { if (active) render() }
                     }
@@ -1715,7 +1743,10 @@ internal class RatingPlotImageHook(
 
         private fun resolve() {
             val chosen = selectionIndex?.let { seasonNumbers.getOrNull(it) }
-                ?: if (seasonNumbers.isEmpty() && rawSyncs["anilist"] != null) 1 else null
+                ?: if (seasonNumbers.isEmpty() &&
+                    (rawSyncs["anilist"] != null ||
+                        pageUrl?.let { StremioC.animeFallbackActorsByUrl.containsKey(it) } == true)) 1
+                else null
             if (pageUrl == null || chosen == null || chosen <= 0) return
             if (chosen == season) return
             if (seasonCast != null) {
@@ -1807,22 +1838,24 @@ internal class RatingPlotImageHook(
                 } else null
                 val castNeeded = isAnime == true &&
                     (multi || syncModel == null || ids["anilist"] == null)
-                if (castNeeded && animeId != null) {
-                    val cached = castCache[animeId]
-                    if (cached != null) {
-                        seasonCast = cached
-                        showSeasonCast(cached)
-                    } else if (matched.none { it.idPrefix == "anilist" &&
-                            ids["anilist"] == animeId.toString() }) {
-                        launch {
-                            val actors = withContext(Dispatchers.IO) {
-                                com.lagradost.cloudstream3.syncproviders.SyncRepo(AccountManager.aniListApi)
-                                    .load(animeId.toString()).getOrNull()?.actors
-                            }
-                            if (valid(gen, sn) && !actors.isNullOrEmpty()) {
-                                castCache[animeId] = actors
-                                seasonCast = actors
-                                showSeasonCast(actors)
+                if (castNeeded) {
+                    if (animeId == null) {
+                        showCastOrFallback(null)
+                    } else {
+                        val cached = castCache[animeId]
+                        if (cached != null) {
+                            showCastOrFallback(cached)
+                        } else if (matched.none { it.idPrefix == "anilist" &&
+                                ids["anilist"] == animeId.toString() }) {
+                            launch {
+                                val actors = withContext(Dispatchers.IO) {
+                                    com.lagradost.cloudstream3.syncproviders.SyncRepo(AccountManager.aniListApi)
+                                        .load(animeId.toString()).getOrNull()?.actors
+                                }
+                                if (valid(gen, sn)) {
+                                    if (!actors.isNullOrEmpty()) castCache[animeId] = actors
+                                    showCastOrFallback(actors)
+                                }
                             }
                         }
                     }
@@ -1858,11 +1891,10 @@ internal class RatingPlotImageHook(
                         if (castNeeded && animeId != null && repo.idPrefix == "anilist" &&
                             id == animeId.toString()) {
                             val actors = meta?.getOrNull()?.actors
-                            if (!actors.isNullOrEmpty()) withContext(Dispatchers.Main) {
+                            withContext(Dispatchers.Main) {
                                 if (valid(gen, sn)) {
-                                    castCache[animeId] = actors
-                                    seasonCast = actors
-                                    showSeasonCast(actors)
+                                    if (!actors.isNullOrEmpty()) castCache[animeId] = actors
+                                    showCastOrFallback(actors)
                                 }
                             }
                         }

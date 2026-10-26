@@ -1237,6 +1237,7 @@ open class StremioC(
         private val libraryOriginalUrlsByMeta = lruCacheMap<String, MutableSet<String>>(200)
         internal val expectedLogoByUrl = lruCacheMap<String, Boolean>(200)
         internal val animeAudioByUrl = lruCacheMap<String, Boolean>(200)
+        internal val animeFallbackActorsByUrl = lruCacheMap<String, List<ActorData>>(100)
         internal val seasonEpisodeCountsByUrl = lruCacheMap<String, Map<Int, Int>>(200)
         internal val subtitleOrderByUrl = Collections.synchronizedMap(lruCacheMap<String, Int>(1200))
         internal val trailerChoicesByUrl = lruCacheMap<String, List<TrailerChoice>>(200)
@@ -4648,7 +4649,7 @@ open class StremioC(
                     val name = head.name ?: head.originalName ?: return@mapNotNull null
                     val jobs = roles.mapNotNull { it.job }.distinct()
                         .sortedBy { if (it == "Director") 1 else 2 }.joinToString(", ")
-                    val img = roles.firstNotNullOfOrNull { it.profilePath }
+                    val img = roles.firstNotNullOfOrNull { it.profilePath?.takeIf { path -> path.startsWith("/") } }
                         ?.let { provider.getActorUrl(it) } ?: nativeCastPlaceholder
                     ActorData(Actor(name, img), roleString = jobs) to
                         ActorPersonRef(head.id, name, img, true)
@@ -4658,7 +4659,8 @@ open class StremioC(
                 } ?: emptyList()
             val castPairs = detailRes.credits?.cast?.mapNotNull { cast ->
                 val actorName = cast.name ?: cast.originalName ?: return@mapNotNull null
-                val img = cast.profilePath?.let { provider.getActorUrl(it) } ?: nativeCastPlaceholder
+                val img = cast.profilePath?.takeIf { it.startsWith("/") }
+                    ?.let { provider.getActorUrl(it) } ?: nativeCastPlaceholder
                 ActorData(Actor(actorName, img), roleString = cast.character) to
                     ActorPersonRef(cast.id, actorName, img, false)
             } ?: emptyList()
@@ -5067,6 +5069,9 @@ open class StremioC(
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
                 StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
+                if (isAnimeMedia && !tmdbData?.fetchedActors.isNullOrEmpty()) {
+                    StremioC.animeFallbackActorsByUrl[metaUrl] = tmdbData!!.fetchedActors!!
+                } else StremioC.animeFallbackActorsByUrl.remove(metaUrl)
                 StremioC.seasonEpisodeCountsByUrl[metaUrl] = finalVideos.orEmpty()
                     .mapNotNull { video -> video.seasonNumber?.takeIf { it > 0 }?.let { it to video } }
                     .groupBy({ it.first }, { it.second })
@@ -5151,6 +5156,9 @@ open class StremioC(
                 StremioC.fallbackLogoTitles[metaUrl] = finalLogoFallback
                 StremioC.expectedLogoByUrl[metaUrl] = !finalLogo.isNullOrBlank()
                 StremioC.animeAudioByUrl[metaUrl] = isAnimeMedia
+                if (isAnimeMedia && !tmdbData?.fetchedActors.isNullOrEmpty()) {
+                    StremioC.animeFallbackActorsByUrl[metaUrl] = tmdbData!!.fetchedActors!!
+                } else StremioC.animeFallbackActorsByUrl.remove(metaUrl)
                 StremioC.seasonEpisodeCountsByUrl[metaUrl] = finalVideos.orEmpty()
                     .mapNotNull { video -> video.seasonNumber?.takeIf { it > 0 }?.let { it to video } }
                     .groupBy({ it.first }, { it.second })
