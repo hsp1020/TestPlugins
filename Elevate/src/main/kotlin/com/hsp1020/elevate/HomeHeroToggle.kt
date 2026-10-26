@@ -3,6 +3,7 @@ package com.hsp1020.elevate
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -21,6 +22,8 @@ internal class HomeHeroToggle(private val app: Application) :
     private var list: RecyclerView? = null
     private var binding: Hero? = null
     private var loadingBanner: View? = null
+    private var loadingRows: ViewGroup? = null
+    private val extraLoadingRows = mutableListOf<View>()
     private var loadingBannerVisibility = View.VISIBLE
     private var hideHero = false
     private val layout = ViewTreeObserver.OnGlobalLayoutListener { scan() }
@@ -59,10 +62,7 @@ internal class HomeHeroToggle(private val app: Application) :
     fun setHidden(value: Boolean) {
         if (hideHero == value) return
         hideHero = value
-        loadingBanner?.let { banner ->
-            val visibility = if (value) View.GONE else loadingBannerVisibility
-            if (banner.visibility != visibility) banner.visibility = visibility
-        }
+        applyLoadingState()
         binding?.apply(!value)
         scan()
     }
@@ -88,18 +88,35 @@ internal class HomeHeroToggle(private val app: Application) :
         unbindHome()
         home = fragment
         list = next
-        // Native phone/TV loading layouts have the hero placeholder followed by
-        // three loading_list rows. Collapse only that first placeholder.
+        // Native phone/TV shimmer: hero placeholder, then three loading_list rows.
         val shimmerContent = (root.findViewById<ViewGroup>(R.id.home_loading_shimmer)
             ?.getChildAt(0) as? ViewGroup)
-        loadingBanner = shimmerContent
             ?.takeIf { it.childCount == 2 && it.getChildAt(1) is ViewGroup }
-            ?.getChildAt(0)
+        loadingBanner = shimmerContent?.getChildAt(0)
+        loadingRows = (shimmerContent?.getChildAt(1) as? ViewGroup)
+            ?.takeIf { it.childCount == 3 }
         loadingBannerVisibility = loadingBanner?.visibility ?: View.VISIBLE
-        if (hideHero) loadingBanner?.visibility = View.GONE
+        applyLoadingState()
         next.addOnChildAttachStateChangeListener(childListener)
         next.viewTreeObserver.takeIf { it.isAlive }?.addOnGlobalLayoutListener(layout)
         scan()
+    }
+
+    private fun applyLoadingState() {
+        val banner = loadingBanner ?: return
+        val visibility = if (hideHero) View.GONE else loadingBannerVisibility
+        if (banner.visibility != visibility) banner.visibility = visibility
+        val rows = loadingRows ?: return
+        if (hideHero && extraLoadingRows.isEmpty()) {
+            repeat(2) {
+                val row = LayoutInflater.from(rows.context).inflate(R.layout.loading_list, rows, false)
+                rows.addView(row)
+                extraLoadingRows.add(row)
+            }
+        } else if (!hideHero && extraLoadingRows.isNotEmpty()) {
+            extraLoadingRows.forEach(rows::removeView)
+            extraLoadingRows.clear()
+        }
     }
 
     private fun unbindHome() {
@@ -109,6 +126,9 @@ internal class HomeHeroToggle(private val app: Application) :
             if (banner.visibility != loadingBannerVisibility) banner.visibility = loadingBannerVisibility
         }
         loadingBanner = null
+        extraLoadingRows.forEach { (it.parent as? ViewGroup)?.removeView(it) }
+        extraLoadingRows.clear()
+        loadingRows = null
         list?.removeOnChildAttachStateChangeListener(childListener)
         list?.viewTreeObserver?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(layout)
         list = null
