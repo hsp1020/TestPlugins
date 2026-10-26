@@ -895,7 +895,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                                         override fun onAnimationRepeat(animation: Animation?) = Unit
                                         override fun onAnimationEnd(animation: Animation?) {
                                             val pending = pendingChannelNavigation
-                                            if (pending?.first !== view || pending.second !== animation) return
+                                            if (pending == null || pending.first !== view || pending.second !== animation) return
                                             cancelPendingChannelNavigation(view)
                                             // A stale / recycled card must never navigate.
                                             if (watchers[list] !== this@Watcher ||
@@ -906,7 +906,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                                             val currentPage = hostFragment.arguments
                                                 ?.getString("url").orEmpty()
                                             val target = YoutubeProvider.channelForUrl(currentPage)
-                                            if (target?.url != link.url || target.name != link.name) return
+                                            if (target == null || target.url != link.url || target.name != link.name) return
                                             hostFragment.activity?.loadResult(
                                                 link.url, "YouTube", link.name
                                             )
