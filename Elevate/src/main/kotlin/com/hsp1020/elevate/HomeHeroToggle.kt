@@ -20,6 +20,8 @@ internal class HomeHeroToggle(private val app: Application) :
     private var home: Fragment? = null
     private var list: RecyclerView? = null
     private var binding: Hero? = null
+    private var loadingBanner: View? = null
+    private var loadingBannerVisibility = View.VISIBLE
     private var hideHero = false
     private val layout = ViewTreeObserver.OnGlobalLayoutListener { scan() }
     private val childListener = object : RecyclerView.OnChildAttachStateChangeListener {
@@ -57,6 +59,10 @@ internal class HomeHeroToggle(private val app: Application) :
     fun setHidden(value: Boolean) {
         if (hideHero == value) return
         hideHero = value
+        loadingBanner?.let { banner ->
+            val visibility = if (value) View.GONE else loadingBannerVisibility
+            if (banner.visibility != visibility) banner.visibility = visibility
+        }
         binding?.apply(!value)
         scan()
     }
@@ -82,6 +88,15 @@ internal class HomeHeroToggle(private val app: Application) :
         unbindHome()
         home = fragment
         list = next
+        // Native phone/TV loading layouts have the hero placeholder followed by
+        // three loading_list rows. Collapse only that first placeholder.
+        val shimmerContent = (root.findViewById<ViewGroup>(R.id.home_loading_shimmer)
+            ?.getChildAt(0) as? ViewGroup)
+        loadingBanner = shimmerContent
+            ?.takeIf { it.childCount == 2 && it.getChildAt(1) is ViewGroup }
+            ?.getChildAt(0)
+        loadingBannerVisibility = loadingBanner?.visibility ?: View.VISIBLE
+        if (hideHero) loadingBanner?.visibility = View.GONE
         next.addOnChildAttachStateChangeListener(childListener)
         next.viewTreeObserver.takeIf { it.isAlive }?.addOnGlobalLayoutListener(layout)
         scan()
@@ -90,6 +105,10 @@ internal class HomeHeroToggle(private val app: Application) :
     private fun unbindHome() {
         binding?.release()
         binding = null
+        loadingBanner?.let { banner ->
+            if (banner.visibility != loadingBannerVisibility) banner.visibility = loadingBannerVisibility
+        }
+        loadingBanner = null
         list?.removeOnChildAttachStateChangeListener(childListener)
         list?.viewTreeObserver?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(layout)
         list = null
