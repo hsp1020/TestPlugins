@@ -47,7 +47,7 @@ import java.util.LinkedHashMap
 @OptIn(UnstableApi::class)
 internal object StremioSubtitleRefreshRegistry {
     data class TimedCues(val startTimeMs: Long, val endTimeMs: Long, val cues: List<Cue>)
-    data class Prepared(val cues: List<TimedCues>, val timeline: SubtitleTimeline)
+    data class Prepared(val cues: List<TimedCues>, val timeline: SubtitleTimeline, val preserveAssLayout: Boolean = false)
 
     data class Entry(
         val originalUrl: String,
@@ -187,10 +187,14 @@ internal object StremioSubtitleRefreshRegistry {
         check(bytes.isNotEmpty()) { "Empty subtitle" }
         val preview = bytes.copyOfRange(0, minOf(bytes.size, 256)).toString(Charsets.UTF_8)
         check(!preview.contains("<html", true)) { "Unexpected HTML" }
-        check(!preview.trimStart().startsWith("[Script Info]", true) &&
-            !preview.trimStart().startsWith("Title:", true)) { "Unsupported ASS/SSA subtitle" }
-        val type = if (preview.trimStart('\uFEFF', ' ', '\n', '\r', '\t')
-                .startsWith("WEBVTT", true)) MimeTypes.TEXT_VTT else MimeTypes.APPLICATION_SUBRIP
+        val trimmed = preview.trimStart('\uFEFF', ' ', '\n', '\r', '\t')
+        val isAss = trimmed.startsWith("[Script Info]", true) ||
+            trimmed.startsWith("Title:", true) || trimmed.startsWith("[V4+ Styles]", true)
+        val type = when {
+            isAss -> MimeTypes.TEXT_SSA
+            trimmed.startsWith("WEBVTT", true) -> MimeTypes.TEXT_VTT
+            else -> MimeTypes.APPLICATION_SUBRIP
+        }
         stage = "parse"
         val prepared = withContext(Dispatchers.Default) {
             val decoder = CustomDecoder(Format.Builder().setSampleMimeType(type).build())
@@ -209,9 +213,9 @@ internal object StremioSubtitleRefreshRegistry {
             val timeline = SubtitleTimeline(
                 cues.map { it.startTimeMs }.toLongArray(), cues.map { it.endTimeMs }.toLongArray()
             )
-            Prepared(cues, timeline)
+            Prepared(cues, timeline, isAss)
         }
-        check(prepared.cues.isNotEmpty()) { "No valid SRT/VTT cues" }
+        check(prepared.cues.isNotEmpty()) { "No valid subtitle cues" }
         ensureActive()
         update(entry, url)
         prepared
@@ -238,6 +242,7 @@ internal class StremioRefreshedSubtitleOverlay {
     private var targetUrl: String? = null
     private var cues: List<StremioSubtitleRefreshRegistry.TimedCues> = emptyList()
     private var timeline: SubtitleTimeline? = null
+    private var preserveAssLayout = false
     private var rendered: List<Int>? = null
     private var lastOffset = Long.MIN_VALUE
     private val tick = Runnable { synchronize() }
@@ -275,6 +280,7 @@ internal class StremioRefreshedSubtitleOverlay {
             if (cues !== parsed) {
                 cues = parsed
                 timeline = prepared.timeline
+                preserveAssLayout = prepared.preserveAssLayout
                 rendered = null
                 synchronize()
             }
@@ -288,6 +294,7 @@ internal class StremioRefreshedSubtitleOverlay {
         targetUrl = subtitleUrl
         cues = parsed
         timeline = prepared.timeline
+        preserveAssLayout = prepared.preserveAssLayout
         val view = SubtitleView(native.context).apply {
             isClickable = false
             isFocusable = false
@@ -339,7 +346,15 @@ internal class StremioRefreshedSubtitleOverlay {
             val style = SubtitlesFragment.getCurrentSavedStyle()
             view.setCues(indexes.flatMap { index ->
                 cues[index].cues.map { cue ->
-                    cue.buildUpon().fixSubtitleAlignment().applyStyle(style).build()
+                    cue.buildUpon().fixSubtitleAlignment().applyStyle(style).apply {
+                        if (preserveAssLayout) {
+                            setLine(cue.line, cue.lineType)
+                            setLineAnchor(cue.lineAnchor)
+                            setPosition(cue.position)
+                            setPositionAnchor(cue.positionAnchor)
+                            setTextAlignment(cue.textAlignment)
+                        }
+                    }.build()
                 }
             })
             rendered = indexes
@@ -366,6 +381,7 @@ internal class StremioRefreshedSubtitleOverlay {
         targetUrl = null
         cues = emptyList()
         timeline = null
+        preserveAssLayout = false
         rendered = null
         lastOffset = Long.MIN_VALUE
     }
