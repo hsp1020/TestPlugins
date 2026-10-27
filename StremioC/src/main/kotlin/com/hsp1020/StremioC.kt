@@ -3352,7 +3352,7 @@ open class StremioC(
             if (animeIdRequest) Log.i("StremioC-Subtitles",
                 "anime request host=$subtitleHost path=/subtitles/$requestType/$subId.json encodedId=${subId.urlEncode()}")
             runSuspendCatching {
-                val response = customSession.get(subtitleRequestUrl, timeout = 15L)
+                val response = customSession.get(subtitleRequestUrl, timeout = if (animeIdRequest) 50L else 15L)
                 val text = response.text
                 val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
                 if (animeIdRequest) Log.i("StremioC-Subtitles",
