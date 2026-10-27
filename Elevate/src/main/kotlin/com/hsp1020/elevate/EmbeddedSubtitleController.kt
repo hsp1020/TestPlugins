@@ -273,14 +273,16 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             }
         }
         if (available.isEmpty()) return
-        val embedded = subtitles.filterTo(mutableSetOf()) {
-            it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it.url in available
+        val linked = subtitles.filterTo(mutableSetOf()) {
+            if (it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) it.url in available
+            else it.getId() in available
         }
-        if (embedded.isEmpty()) return
+        if (linked.isEmpty()) return
 
         trackDialog(f)
-        if (!markActive(f, embedded)) return
-        if (manualOverride || selectionDialog?.isShowing == true) return
+        if (!markActive(f, linked)) return
+        val embedded = linked.filter { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
+        if (embedded.isEmpty() || manualOverride || selectionDialog?.isShowing == true) return
         val language = preferredLanguage?.takeIf { it.isNotEmpty() } ?: return
         val match = embedded.firstNotNullOfOrNull { subtitle ->
             if (!subtitle.matchesLanguageCode(language)) return@firstNotNullOfOrNull null
