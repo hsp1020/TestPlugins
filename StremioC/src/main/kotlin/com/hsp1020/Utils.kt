@@ -592,7 +592,10 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                 text.setPadding(text.paddingLeft, text.paddingTop, right, text.paddingBottom)
             }
             button.visibility = if (entry == null) View.GONE else View.VISIBLE
-            button.isEnabled = true
+            val selected = entry != null &&
+                fragment?.player?.getCurrentPreferredSubtitle()?.url == entry.originalUrl
+            button.isEnabled = selected && refreshJob?.isActive != true
+            button.alpha = if (selected) 1f else 0.35f
             if (entry != null) {
                 button.imageTintList = ColorStateList.valueOf(text.currentTextColor)
                 button.setOnClickListener { requestSubtitleRefresh(entry, button) }
@@ -614,6 +617,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
     private fun requestSubtitleRefresh(entry: StremioSubtitleRefreshRegistry.Entry, button: ImageButton) {
         val target = fragment ?: return
         val instance = model?.state?.instance ?: return
+        if (target.player.getCurrentPreferredSubtitle()?.url != entry.originalUrl) return
         if (refreshJob?.isActive == true) return
         bindPlayer()
         val mediaPlayer = observedPlayer ?: return
@@ -644,7 +648,10 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                     ).show()
                 }
             } finally {
-                button.isEnabled = true
+                val selected = fragment === target && model?.state?.instance == instance &&
+                    target.player.getCurrentPreferredSubtitle()?.url == entry.originalUrl
+                button.isEnabled = selected
+                button.alpha = if (selected) 1f else 0.35f
             }
         }
     }

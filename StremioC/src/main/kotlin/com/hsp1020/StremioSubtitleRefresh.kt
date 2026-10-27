@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.os.Build
+import android.util.Log
 import android.util.TypedValue
 import android.view.View
 import android.widget.FrameLayout
@@ -26,6 +27,7 @@ import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment
 import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment.Companion.applyStyle
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -151,25 +153,36 @@ internal object StremioSubtitleRefreshRegistry {
      * original URL; ambiguous or missing identities fail without replacing cues.
      */
     suspend fun refresh(entry: Entry): Prepared = withContext(Dispatchers.IO) {
+        var stage = "provenance"
+        try {
         check(find(entry.originalUrl)?.let {
             it.addonUrl == entry.addonUrl && it.id == entry.id && it.listUrl == entry.listUrl
         } == true) { "Subtitle provenance changed" }
         var url = entry.latestUrl
         if (entry.listUrl != null) {
-            val response = JSONObject(readBytes(entry.listUrl, emptyMap(), MAX_LIST_BYTES).toString(Charsets.UTF_8))
-            val subtitles = response.optJSONArray("subtitles") ?: error("Missing subtitles")
-            val candidates = (0 until subtitles.length()).mapNotNull { index ->
-                subtitles.optJSONObject(index)?.let { candidate ->
-                    SubtitleRefreshCandidate(
-                        candidate.optString("id").takeIf { it.isNotBlank() },
-                        candidate.optString("lang", candidate.optString("lang_code")).takeIf { it.isNotBlank() },
-                        candidate.optString("url")
-                    )
+            // Translation addons can temporarily fail to list tracks. Only
+            // the exact known URL is safe as fallback, not language/position.
+            val updated = try {
+                val response = JSONObject(readBytes(entry.listUrl, emptyMap(), MAX_LIST_BYTES).toString(Charsets.UTF_8))
+                val subtitles = response.optJSONArray("subtitles") ?: error("Missing subtitles")
+                val candidates = (0 until subtitles.length()).mapNotNull { index ->
+                    subtitles.optJSONObject(index)?.let { candidate ->
+                        SubtitleRefreshCandidate(
+                            candidate.optString("id").takeIf { it.isNotBlank() },
+                            candidate.optString("lang", candidate.optString("lang_code")).takeIf { it.isNotBlank() },
+                            candidate.optString("url")
+                        )
+                    }
                 }
+                selectRefreshedSubtitleUrl(entry.id, entry.lang, entry.originalUrl, entry.latestUrl, candidates)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
             }
-            url = selectRefreshedSubtitleUrl(entry.id, entry.lang, entry.originalUrl, entry.latestUrl, candidates)
-                ?: error("Subtitle missing or ambiguous")
+            if (updated != null) url = updated
         }
+        stage = "download"
         val bytes = readBytes(url, entry.headers, MAX_SUB_BYTES)
         check(bytes.isNotEmpty()) { "Empty subtitle" }
         val preview = bytes.copyOfRange(0, minOf(bytes.size, 256)).toString(Charsets.UTF_8)
@@ -178,6 +191,7 @@ internal object StremioSubtitleRefreshRegistry {
             !preview.trimStart().startsWith("Title:", true)) { "Unsupported ASS/SSA subtitle" }
         val type = if (preview.trimStart('\uFEFF', ' ', '\n', '\r', '\t')
                 .startsWith("WEBVTT", true)) MimeTypes.TEXT_VTT else MimeTypes.APPLICATION_SUBRIP
+        stage = "parse"
         val prepared = withContext(Dispatchers.Default) {
             val decoder = CustomDecoder(Format.Builder().setSampleMimeType(type).build())
             val parsed = ArrayList<TimedCues>()
@@ -201,6 +215,13 @@ internal object StremioSubtitleRefreshRegistry {
         ensureActive()
         update(entry, url)
         prepared
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Single failure diagnostic; never log signed URLs or subtitle contents.
+            Log.w("StremioC-SubtitleRefresh", "Refresh failed at $stage (${e.javaClass.simpleName})")
+            throw e
+        }
     }
 }
 
