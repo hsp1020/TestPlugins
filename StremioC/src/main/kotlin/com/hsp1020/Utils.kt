@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 
 import androidx.appcompat.content.res.AppCompatResources
 import android.util.TypedValue
+import android.util.Log
 import android.content.SharedPreferences
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.R
@@ -286,6 +287,7 @@ internal fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
     }
 }
 
+@OptIn(UnstableApi::class)
 internal class StremioSubtitleController(private val pluginResources: Resources) {
     private var fragment: GeneratorPlayer? = null
     private var model: PlayerGeneratorViewModel? = null
@@ -304,6 +306,76 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
     private var refreshGeneration = 0L
     private var observedPlayer: Player? = null
     private var selectedUrl: String? = null
+    private val traceTrackPrefix = Regex("^\\d+:")
+    private var traceSelectedId: String? = null
+    private var traceSelectionSeen = false
+    private var traceTrackState: String? = null
+    private var traceEmptySeen = false
+    private var traceNonEmptySeen = false
+    private var traceMultipleSeen = false
+    private fun traceId(id: String?): String = id?.hashCode()?.let(java.lang.Integer::toHexString) ?: "none"
+
+    private fun traceSelection() {
+        if (!isStremio) return
+        val selected = fragment?.player?.getCurrentPreferredSubtitle()
+        val id = selected?.getId()
+        if (traceSelectionSeen && traceSelectedId == id) return
+        traceSelectionSeen = true
+        traceSelectedId = id
+        traceEmptySeen = false
+        traceNonEmptySeen = false
+        traceMultipleSeen = false
+        Log.i("StremioC-SubtitleTrace",
+            "selection id=${traceId(id)} mime=${selected?.mimeType ?: "none"} origin=${selected?.origin ?: "none"} " +
+                refreshedOverlay.traceState())
+        traceTracks("selection")
+    }
+
+    private fun traceTracks(reason: String) {
+        if (!isStremio) return
+        val current = observedPlayer ?: return
+        val selected = fragment?.player?.getCurrentPreferredSubtitle()?.getId()
+        val textTracks = current.currentTracks.groups
+            .filter { it.type == C.TRACK_TYPE_TEXT }
+            .flatMap { group ->
+                (0 until group.length).map { index ->
+                    val format = group.getTrackFormat(index)
+                    val id = format.id?.replace(traceTrackPrefix, "")
+                    Triple(id, format.sampleMimeType ?: "unknown", group.isTrackSelected(index))
+                }
+            }
+        val active = textTracks.filter { it.third }
+        val signature = active.joinToString("|") { "${traceId(it.first)}:${it.second}" } +
+            ":${textTracks.size}:${textTracks.any { it.first == selected }}"
+        if (reason != "selection" && signature == traceTrackState) return
+        traceTrackState = signature
+        Log.i("StremioC-SubtitleTrace",
+            "tracks reason=$reason expected=${traceId(selected)} present=${textTracks.any { it.first == selected }} " +
+                "selected=${active.joinToString(",") { "${traceId(it.first)}/${it.second}" }} " +
+                "selectedCount=${active.size} total=${textTracks.size} " + refreshedOverlay.traceState())
+    }
+
+    private fun traceCues(args: Array<out Any?>?) {
+        val payload = args?.getOrNull(0)
+        val count = when (payload) {
+            is androidx.media3.common.text.CueGroup -> payload.cues.size
+            is List<*> -> payload.size
+            else -> return
+        }
+        val kind = when {
+            count == 0 && !traceEmptySeen -> "empty".also { traceEmptySeen = true }
+            count > 1 && !traceMultipleSeen -> "multiple".also {
+                traceMultipleSeen = true
+                traceNonEmptySeen = true
+            }
+            count > 0 && !traceNonEmptySeen -> "nonempty".also { traceNonEmptySeen = true }
+            else -> return
+        }
+        Log.i("StremioC-SubtitleTrace",
+            "native-cues event=$kind count=$count expected=${traceId(traceSelectedId)} " +
+                "positionMs=${observedPlayer?.currentPosition ?: -1} " + refreshedOverlay.traceState())
+    }
+
     private var iconSelectionUrl: String? = null
     private var refreshedOffsetDialog: Dialog? = null
     private var removeStateObserver: (() -> Unit)? = null
@@ -314,6 +386,17 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         when (method.name) {
             "onEvents" -> {
                 updateRefreshedSubtitle()
+                traceSelection()
+                null
+            }
+            "onTracksChanged" -> {
+                traceSelection()
+                traceTracks("track-event")
+                null
+            }
+            "onCues" -> {
+                traceSelection()
+                if (isStremio) traceCues(args)
                 null
             }
             "onMediaItemTransition" -> {
@@ -344,7 +427,10 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         clearRefreshState()
         observedPlayer = current
         selectedUrl = fragment?.player?.getCurrentPreferredSubtitle()?.url
+        traceSelectionSeen = false
+        traceTrackState = null
         current?.addListener(playerListener)
+        traceSelection()
     }
 
     private fun refreshPickerIcons(url: String?) {
@@ -741,6 +827,8 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         observedPlayer?.removeListener(playerListener)
         observedPlayer = null
         selectedUrl = null
+        traceSelectionSeen = false
+        traceTrackState = null
         clearRefreshState()
         fragment = null
         model = null
