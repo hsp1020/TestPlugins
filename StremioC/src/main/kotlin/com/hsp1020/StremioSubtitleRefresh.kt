@@ -244,12 +244,19 @@ internal class StremioRefreshedSubtitleOverlay {
     private var timeline: SubtitleTimeline? = null
     private var preserveAssLayout = false
     private var rendered: List<Int>? = null
+    private var traceEmptySeen = false
+    private var traceNonEmptySeen = false
+    private var traceMultipleSeen = false
     private var lastOffset = Long.MIN_VALUE
     private val tick = Runnable { synchronize() }
     private val pipListener = Consumer<PictureInPictureModeChangedInfo> { applyAppearance() }
     private val styleListener: (com.lagradost.cloudstream3.ui.subtitles.SaveCaptionStyle) -> Unit = {
         overlay?.post { if (overlay != null) { applyAppearance(); rendered = null; synchronize() } }
     }
+
+    fun traceState(): String =
+        "overlay=${overlay != null} nativeAlpha=${original?.alpha ?: -1f} " +
+            "overlayAlpha=${overlay?.alpha ?: -1f} segments=${rendered?.size ?: 0}"
 
     fun onPlayerEvent() {
         if (overlay != null) synchronize()
@@ -282,6 +289,9 @@ internal class StremioRefreshedSubtitleOverlay {
                 timeline = prepared.timeline
                 preserveAssLayout = prepared.preserveAssLayout
                 rendered = null
+                traceEmptySeen = false
+                traceNonEmptySeen = false
+                traceMultipleSeen = false
                 synchronize()
             }
             return
@@ -304,6 +314,11 @@ internal class StremioRefreshedSubtitleOverlay {
         overlay = view
         originalAlpha = native.alpha
         native.alpha = 0f
+        traceEmptySeen = false
+        traceNonEmptySeen = false
+        traceMultipleSeen = false
+        Log.i("StremioC-SubtitleTrace",
+            "overlay-attach ass=$preserveAssLayout preparedSegments=${parsed.size} " + traceState())
         host = candidate.activity as? FragmentActivity
         host?.addOnPictureInPictureModeChangedListener(pipListener)
         SubtitlesFragment.applyStyleEvent += styleListener
@@ -344,7 +359,7 @@ internal class StremioRefreshedSubtitleOverlay {
         val indexes = timeline?.activeAt(time) ?: emptyList()
         if (indexes != rendered) {
             val style = SubtitlesFragment.getCurrentSavedStyle()
-            view.setCues(indexes.flatMap { index ->
+            val visible = indexes.flatMap { index ->
                 cues[index].cues.map { cue ->
                     cue.buildUpon().fixSubtitleAlignment().applyStyle(style).apply {
                         if (preserveAssLayout) {
@@ -356,7 +371,23 @@ internal class StremioRefreshedSubtitleOverlay {
                         }
                     }.build()
                 }
-            })
+            }
+            view.setCues(visible)
+            val kind = when {
+                visible.isEmpty() && !traceEmptySeen -> "empty".also { traceEmptySeen = true }
+                visible.size > 1 && !traceMultipleSeen -> "multiple".also {
+                    traceMultipleSeen = true
+                    traceNonEmptySeen = true
+                }
+                visible.isNotEmpty() && !traceNonEmptySeen -> "nonempty".also { traceNonEmptySeen = true }
+                else -> null
+            }
+            if (kind != null) {
+                val positioned = visible.count { it.position != Cue.DIMEN_UNSET }
+                Log.i("StremioC-SubtitleTrace",
+                    "overlay-cues event=$kind count=${visible.size} positioned=$positioned " +
+                        "timeMs=$time " + traceState())
+            }
             rendered = indexes
         }
         if (!player.isPlaying) return
@@ -367,6 +398,7 @@ internal class StremioRefreshedSubtitleOverlay {
     }
 
     fun detach() {
+        if (overlay != null) Log.i("StremioC-SubtitleTrace", "overlay-detach " + traceState())
         main.removeCallbacks(tick)
         host?.removeOnPictureInPictureModeChangedListener(pipListener)
         if (overlay != null) SubtitlesFragment.applyStyleEvent -= styleListener
