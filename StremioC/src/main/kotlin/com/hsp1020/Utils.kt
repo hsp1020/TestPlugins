@@ -300,15 +300,25 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
     private var observedPlayer: Player? = null
     private var selectedUrl: String? = null
     private var removeStateObserver: (() -> Unit)? = null
-    private val playerListener = object : Player.Listener {
-        override fun onEvents(player: Player, events: Player.Events) {
-            updateRefreshedSubtitle()
+    private val playerListener = java.lang.reflect.Proxy.newProxyInstance(
+        Player.Listener::class.java.classLoader,
+        arrayOf(Player.Listener::class.java)
+    ) { proxy, method, args ->
+        when (method.name) {
+            "onEvents" -> {
+                updateRefreshedSubtitle()
+                null
+            }
+            "onMediaItemTransition" -> {
+                clearRefreshState()
+                null
+            }
+            "equals" -> proxy === args?.getOrNull(0)
+            "hashCode" -> System.identityHashCode(proxy)
+            "toString" -> "StremioSubtitlePlayerListener"
+            else -> null
         }
-
-        override fun onMediaItemTransition(item: androidx.media3.common.MediaItem?, reason: Int) {
-            clearRefreshState()
-        }
-    }
+    } as Player.Listener
 
     private fun clearRefreshState() {
         refreshGeneration++
