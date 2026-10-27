@@ -693,7 +693,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         button.imageTintList = ColorStateList.valueOf(android.graphics.Color.WHITE)
         button.animate().cancel()
         button.rotation = 0f
-        button.animate().rotation(360f).setDuration(420L)
+        button.animate().rotation(360f).setDuration(800L)
             .setInterpolator(android.view.animation.DecelerateInterpolator())
             .withEndAction { button.rotation = 0f }
             .start()
