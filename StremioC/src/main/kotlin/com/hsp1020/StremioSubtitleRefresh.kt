@@ -386,3 +386,64 @@ internal class StremioRefreshedSubtitleOverlay {
         lastOffset = Long.MIN_VALUE
     }
 }
+
+internal data class SubtitleRefreshCandidate(val id: String?, val language: String?, val url: String)
+
+/** Candidates must come from the originating addon request, never a merged subtitle list. */
+internal fun selectRefreshedSubtitleUrl(
+    id: String?, language: String?, originalUrl: String, latestUrl: String,
+    candidates: List<SubtitleRefreshCandidate>
+): String? {
+    val matching = candidates.filter {
+        it.url.isNotBlank() && (id == null || it.id == id) &&
+            (language == null || language.equals(it.language, true))
+    }
+    val exactUrls = matching.filter { it.url == latestUrl || it.url == originalUrl }
+        .map { it.url }.distinct()
+    if (exactUrls.size == 1) return exactUrls.single()
+    if (exactUrls.size > 1) return null
+    // A language or array position alone must never identify a changed URL.
+    return if (id != null) matching.singleOrNull()?.url else null
+}
+
+/** Immutable index built off the UI thread. Intervals are start-inclusive, end-exclusive. */
+internal class SubtitleTimeline(private val starts: LongArray, private val ends: LongArray) {
+    val boundaries = (starts.asSequence() + ends.asSequence()).distinct().sorted().toList().toLongArray()
+    private val prefixEnds = LongArray(ends.size)
+
+    init {
+        require(starts.size == ends.size)
+        var end = Long.MIN_VALUE
+        for (index in starts.indices) {
+            require(ends[index] > starts[index])
+            require(index == 0 || starts[index - 1] <= starts[index])
+            end = maxOf(end, ends[index])
+            prefixEnds[index] = end
+        }
+    }
+
+    fun activeAt(time: Long): List<Int> {
+        var low = 0
+        var high = prefixEnds.size
+        while (low < high) {
+            val middle = (low + high) ushr 1
+            if (prefixEnds[middle] <= time) low = middle + 1 else high = middle
+        }
+        val active = ArrayList<Int>(2)
+        for (index in low until starts.size) {
+            if (starts[index] > time) break
+            if (time < ends[index]) active.add(index)
+        }
+        return active
+    }
+
+    fun nextAfter(time: Long): Long? {
+        var low = 0
+        var high = boundaries.size
+        while (low < high) {
+            val middle = (low + high) ushr 1
+            if (boundaries[middle] <= time) low = middle + 1 else high = middle
+        }
+        return boundaries.getOrNull(low)
+    }
+}
