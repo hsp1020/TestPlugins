@@ -13,9 +13,6 @@ import androidx.core.util.Consumer
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
-import androidx.media3.common.PlaybackParameters
-import androidx.media3.common.Tracks
-import androidx.media3.common.MediaItem
 import androidx.media3.common.text.Cue
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.SubtitleView
@@ -228,15 +225,8 @@ internal class StremioRefreshedSubtitleOverlay {
         overlay?.post { if (overlay != null) { applyAppearance(); rendered = null; synchronize() } }
     }
 
-    private val playerListener = object : Player.Listener {
-        override fun onPositionDiscontinuity(
-            oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int
-        ) = synchronize()
-        override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) = synchronize()
-        override fun onIsPlayingChanged(isPlaying: Boolean) = synchronize()
-        override fun onPlaybackStateChanged(playbackState: Int) = synchronize()
-        override fun onTracksChanged(tracks: Tracks) = synchronize()
-        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) = detach()
+    fun onPlayerEvent() {
+        if (overlay != null) synchronize()
     }
 
     fun bind(candidate: GeneratorPlayer) {
@@ -289,7 +279,6 @@ internal class StremioRefreshedSubtitleOverlay {
         host = candidate.activity as? FragmentActivity
         host?.addOnPictureInPictureModeChangedListener(pipListener)
         SubtitlesFragment.applyStyleEvent += styleListener
-        player.addListener(playerListener)
         applyAppearance()
         synchronize()
     }
@@ -343,7 +332,6 @@ internal class StremioRefreshedSubtitleOverlay {
 
     fun detach() {
         main.removeCallbacks(tick)
-        mediaPlayer?.removeListener(playerListener)
         host?.removeOnPictureInPictureModeChangedListener(pipListener)
         if (overlay != null) SubtitlesFragment.applyStyleEvent -= styleListener
         original?.alpha = originalAlpha

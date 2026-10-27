@@ -356,6 +356,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         currentUrl?.let { url ->
             refreshedCues[url]?.let { refreshedOverlay.attach(target, url, it) }
         }
+        refreshedOverlay.onPlayerEvent()
     }
     private val dialogField = runCatching {
         FullScreenPlayer::class.java.getDeclaredField("selectSourceDialog")
@@ -528,6 +529,8 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         override fun toggle() = setChecked(!checked)
         override fun setChecked(value: Boolean) {
             checked = value
+            isActivated = value
+            getChildAt(0)?.isActivated = value
             (getChildAt(0) as? Checkable)?.isChecked = value
         }
     }
@@ -557,6 +560,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                 if (oldText != null) row.removeView(oldText)
                 row.addView(text, 0, FrameLayout.LayoutParams(-1, -2))
             }
+            text.isActivated = row.isChecked
             (text as? Checkable)?.isChecked = row.isChecked
             // A focusable refresh button must not consume the native name action.
             text.setOnClickListener {
