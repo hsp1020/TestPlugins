@@ -6,10 +6,12 @@ import android.app.Dialog
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Bundle
+import android.util.Log
 import android.text.Spanned
 import android.text.SpannedString
 import android.text.SpannableStringBuilder
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.ArrayAdapter
 import android.widget.HeaderViewListAdapter
@@ -72,22 +74,34 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private var preferredLanguage: String? = null
     private val trackIdPrefix = Regex("^\\d+:")
     private val extraCaptionRegex = Regex(
-        """（[^（）]*）[ \t]*|^[ \t]*[♬♪~～]+[ \t]*(?:\r?\n|$)|[⸨⸩≪≫➡⚟]""",
+        """（[^（）]*）[ \t]*|^[ \t]*[♬♪♫~～]+[ \t]*(?:\r?\n|$)|[⸨⸩≪≫➡⚟]""",
         RegexOption.MULTILINE
     )
     private val captionOutputField = runCatching {
         SubtitleView::class.java.getDeclaredField("output").apply { isAccessible = true }
-    }.getOrNull()
+    }.onFailure { Log.w("Elevate-Captions", "Cannot access subtitle output", it) }.getOrNull()
     private val captionCuesField = runCatching {
         SubtitleView::class.java.getDeclaredField("cues").apply { isAccessible = true }
-    }.getOrNull()
+    }.onFailure { Log.w("Elevate-Captions", "Cannot access subtitle cues", it) }.getOrNull()
     private var captionView: SubtitleView? = null
     private var captionNativeOutput: Any? = null
     private var captionWrappedOutput: Any? = null
+    private var captionFailedView: SubtitleView? = null
+    private var captionLayoutTree: ViewTreeObserver? = null
+    private val captionLayoutListener = ViewTreeObserver.OnGlobalLayoutListener {
+        if (cleanExtraCaptions) fragment?.let(::attachCaptionOutput)
+    }
     private var cleanExtraCaptions = false
     private val captionStyleListener: (SaveCaptionStyle) -> Unit = { style ->
         cleanExtraCaptions = style.removeCaptions
-        refreshCaptionOutput()
+        monitorCaptionLayouts()
+        if (cleanExtraCaptions) {
+            fragment?.let(::attachCaptionOutput)
+            refreshCaptionOutput()
+        } else {
+            restoreCaptionOutput()
+            captionFailedView = null
+        }
     }
 
     private val dialogField = runCatching {
@@ -222,16 +236,50 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         return cleaned ?: cues
     }
 
-    /** SubtitleView.Output receives updates only when native cues or styles change. */
+    /** Only monitor layouts when both caption removal and Embedded Subtitle Management are on. */
+    private fun monitorCaptionLayouts() {
+        val next = if (cleanExtraCaptions) {
+            host?.window?.decorView?.viewTreeObserver?.takeIf { it.isAlive }
+        } else null
+        if (next === captionLayoutTree) return
+        captionLayoutTree?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(captionLayoutListener)
+        captionLayoutTree = next
+        next?.addOnGlobalLayoutListener(captionLayoutListener)
+    }
+
+    private fun captionHookFailed(view: SubtitleView, step: String, error: Throwable) {
+        if (captionFailedView !== view) {
+            Log.w("Elevate-Captions", "Subtitle filter unavailable at $step", error)
+        }
+        captionFailedView = view
+    }
+
+    /** Intercept Media3's existing subtitle output; never add a renderer or modify playback. */
     private fun attachCaptionOutput(f: GeneratorPlayer) {
-        val view = f.subView ?: return
+        if (!cleanExtraCaptions) return
+        val nativeView = f.subView ?: return
+        val holder = nativeView.parent as? ViewGroup
+        // A refreshed subtitle is drawn by a sibling SubtitleView, not the hidden native view.
+        val view = (holder?.let { parent ->
+            (parent.childCount - 1 downTo 0).firstNotNullOfOrNull { index ->
+                (parent.getChildAt(index) as? SubtitleView)
+                    ?.takeIf { it !== nativeView && it.alpha > 0f }
+            }
+        }) ?: nativeView
+        if (captionFailedView === view) return
         val field = captionOutputField ?: return
-        val native = runCatching { field.get(view) }.getOrNull() ?: return
-        if (captionView === view && native === captionWrappedOutput) return
+        val currentOutput = runCatching { field.get(view) }.getOrElse {
+            captionHookFailed(view, "read", it)
+            return
+        } ?: return
+        if (captionView === view && currentOutput === captionWrappedOutput) return
         restoreCaptionOutput()
         val update = runCatching {
             field.type.declaredMethods.first { it.name == "update" }.apply { isAccessible = true }
-        }.getOrNull() ?: return
+        }.getOrElse {
+            captionHookFailed(view, "method", it)
+            return
+        }
         val wrapper = runCatching {
             Proxy.newProxyInstance(field.type.classLoader, arrayOf(field.type)) { proxy, method, args ->
                 when (method.name) {
@@ -241,21 +289,30 @@ internal class EmbeddedSubtitleController(private val application: Application) 
                             @Suppress("UNCHECKED_CAST")
                             val cues = parameters.getOrNull(0) as? List<Cue>
                             if (cues != null) {
-                                runCatching { cleanCaptionCues(cues) }.getOrNull()?.let { parameters[0] = it }
+                                parameters[0] = cleanCaptionCues(cues)
                             }
                         }
-                        update.invoke(native, *parameters)
+                        runCatching { update.invoke(currentOutput, *parameters) }.getOrElse {
+                            captionHookFailed(view, "update", it)
+                            view.post { if (captionView === view) restoreCaptionOutput() }
+                            null
+                        }
                     }
                     "equals" -> proxy === args?.getOrNull(0)
                     "hashCode" -> System.identityHashCode(proxy)
                     "toString" -> "ElevateCaptionOutput"
-                    else -> method.invoke(native, *(args ?: emptyArray()))
+                    else -> method.invoke(currentOutput, *(args ?: emptyArray()))
                 }
             }
-        }.getOrNull() ?: return
-        if (runCatching { field.set(view, wrapper) }.isFailure) return
+        }.getOrElse {
+            captionHookFailed(view, "proxy", it)
+            return
+        }
+        if (runCatching { field.set(view, wrapper) }.onFailure {
+                captionHookFailed(view, "install", it)
+            }.isFailure) return
         captionView = view
-        captionNativeOutput = native
+        captionNativeOutput = currentOutput
         captionWrappedOutput = wrapper
         refreshCaptionOutput()
     }
@@ -263,8 +320,13 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private fun refreshCaptionOutput() {
         val view = captionView ?: return
         @Suppress("UNCHECKED_CAST")
-        val cues = runCatching { captionCuesField?.get(view) as? List<Cue> }.getOrNull() ?: return
-        runCatching { view.setCues(cues) }
+        val cues = runCatching { captionCuesField?.get(view) as? List<Cue> }.getOrElse {
+            captionHookFailed(view, "cues", it)
+            return
+        } ?: return
+        if (runCatching { view.setCues(cues) }.onFailure {
+                captionHookFailed(view, "refresh", it)
+            }.isFailure) restoreCaptionOutput()
     }
 
     private fun restoreCaptionOutput() {
@@ -283,7 +345,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
                     val cues = captionCuesField?.get(view) as? List<Cue>
                     if (cues != null) view.setCues(cues)
                 }
-            }
+            }.onFailure { captionHookFailed(view, "restore", it) }
         }
     }
 
@@ -497,12 +559,16 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             it.addOnWindowFocusChangeListener(focusListener)
         }
         synchronizeSource()
+        monitorCaptionLayouts()
         candidate.view?.post { inspectDialogs() }
     }
 
     private fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
+        captionLayoutTree?.takeIf { it.isAlive }?.removeOnGlobalLayoutListener(captionLayoutListener)
+        captionLayoutTree = null
         restoreCaptionOutput()
+        captionFailedView = null
         focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
         focusTree = null
         player?.removeListener(listener)
