@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.os.Build
+import android.text.SpannableStringBuilder
 import android.util.Log
 import android.util.TypedValue
 import android.view.View
@@ -359,8 +360,19 @@ internal class StremioRefreshedSubtitleOverlay {
         val indexes = timeline?.activeAt(time) ?: emptyList()
         if (indexes != rendered) {
             val style = SubtitlesFragment.getCurrentSavedStyle()
-            val visible = indexes.flatMap { index ->
-                cues[index].cues.map { cue ->
+            val active = indexes.flatMap { index -> cues[index].cues }
+            val visible = if (!preserveAssLayout && active.size > 1 &&
+                active.all { !it.text.isNullOrBlank() && it.bitmap == null }) {
+                // SRT has no ASS layout coordinates: stack overlapping dialogue in one cue.
+                val text = SpannableStringBuilder()
+                active.forEachIndexed { index, cue ->
+                    if (index > 0) text.append('\n')
+                    text.append(cue.text)
+                }
+                listOf(active.first().buildUpon().setText(text)
+                    .fixSubtitleAlignment().applyStyle(style).build())
+            } else {
+                active.map { cue ->
                     cue.buildUpon().fixSubtitleAlignment().applyStyle(style).apply {
                         if (preserveAssLayout) {
                             setLine(cue.line, cue.lineType)
