@@ -563,14 +563,19 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                 (parent as? ListView)?.performItemClick(row, position, getItemId(position))
             }
             val button = (row.getChildAt(1) as? ImageButton) ?: ImageButton(parent.context).apply {
-                setImageDrawable(pluginResources.getDrawable(
-                    com.hsp1020.R.drawable.stremioc_subtitle_refresh, null
-                ))
+                val iconId = pluginResources.getIdentifier(
+                    "stremioc_subtitle_refresh", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME
+                )
+                setImageDrawable(
+                    runCatching {
+                        if (iconId != 0) pluginResources.getDrawable(iconId, null) else null
+                    }.getOrNull() ?: parent.context.getDrawable(android.R.drawable.ic_popup_sync)
+                )
                 background = themedPressedForeground(this)
                 scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
                 isFocusable = true
-                contentDescription = pluginResources.getString(
-                    com.hsp1020.R.string.stremioc_refresh_subtitle
+                contentDescription = getPluginSubtitleString(
+                    "stremioc_refresh_subtitle", "Refresh subtitle"
                 )
                 row.addView(this, FrameLayout.LayoutParams(
                     (40 * resources.displayMetrics.density).toInt(), -1, Gravity.END or Gravity.CENTER_VERTICAL
@@ -592,6 +597,14 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             }
             return row
         }
+    }
+
+    private fun getPluginSubtitleString(name: String, fallback: String): String {
+        val id = pluginResources.getIdentifier(
+            name, "string", BuildConfig.LIBRARY_PACKAGE_NAME
+        )
+        return if (id != 0) runCatching { pluginResources.getString(id) }.getOrDefault(fallback)
+        else fallback
     }
 
     private fun requestSubtitleRefresh(entry: StremioSubtitleRefreshRegistry.Entry, button: ImageButton) {
@@ -621,8 +634,8 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             } catch (e: Exception) {
                 if (generation == refreshGeneration && fragment === target && model?.state?.instance == instance) {
                     android.widget.Toast.makeText(
-                        target.context, pluginResources.getString(
-                            com.hsp1020.R.string.stremioc_refresh_failed
+                        target.context, getPluginSubtitleString(
+                            "stremioc_refresh_failed", "Subtitle refresh failed"
                         ), android.widget.Toast.LENGTH_SHORT
                     ).show()
                 }
