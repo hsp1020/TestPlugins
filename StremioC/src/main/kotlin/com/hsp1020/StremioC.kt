@@ -3122,6 +3122,9 @@ open class StremioC(
                 parsed != null && (parsed.scheme == "http" || parsed.scheme == "https")
             }.filterNot { stremioManifestUrl(it.url) == stremioManifestUrl(currentMainUrl) }
         } else emptyList()
+        if (loadData.isAnime || loadData.anilistId != null) {
+            Log.i("StremioC-Subtitles", "anime addons enabledSync=$streamSyncEnabled configured=${syncSettings.streamSubtitleUrls.size} active=${extraUrls.size}")
+        }
 
         val customHosts = withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
@@ -3251,7 +3254,10 @@ open class StremioC(
             fun cached(): Pair<String?, Long>? = synchronized(subtitleAnimeManifestCache) {
                 stremioCacheMemoryRead(subtitleAnimeManifestCache[manifestUrl], 3_600_000L)
             }
-            cached()?.let { return it.first }
+            cached()?.let {
+                Log.i("StremioC-Subtitles", "anime manifest cached host=${manifestUrl.toHttpUrlOrNull()?.host} type=${it.first ?: "unsupported"}")
+                return it.first
+            }
             val mutex = subtitleAnimeManifestLocks.getOrPut(manifestUrl) { Mutex() }
             mutex.lock()
             try {
@@ -3290,6 +3296,8 @@ open class StremioC(
                     if (types != null && (0 until types.length()).any { types.optString(it) == "series" })
                         "series" else "anime"
                 } else null
+                Log.i("StremioC-Subtitles",
+                    "anime manifest host=${manifestUrl.toHttpUrlOrNull()?.host} loaded=${manifest != null} subtitles=$supportsSubtitles anime=$supportsAnime anilistPrefix=$supportsAniList type=${type ?: "unsupported"}")
                 synchronized(subtitleAnimeManifestCache) {
                     subtitleAnimeManifestCache[manifestUrl] = type to System.currentTimeMillis()
                 }
@@ -3334,13 +3342,21 @@ open class StremioC(
             val subtitleRequestUrl =
                 "$cleanSubtitleBase/subtitles/$requestType/${subId.urlEncode()}.json$subtitleSuffix"
 
+            val animeIdRequest = subId.startsWith("anilist:", ignoreCase = true)
+            val subtitleHost = if (animeIdRequest) cleanSubtitleBase.toHttpUrlOrNull()?.host else null
             if (!requestedSubtitleUrls.add(subtitleRequestUrl)) {
+                if (animeIdRequest) Log.i("StremioC-Subtitles",
+                    "anime dedup host=$subtitleHost path=/subtitles/$requestType/$subId.json")
                 return
             }
+            if (animeIdRequest) Log.i("StremioC-Subtitles",
+                "anime request host=$subtitleHost path=/subtitles/$requestType/$subId.json encodedId=${subId.urlEncode()}")
             runSuspendCatching {
                 val response = customSession.get(subtitleRequestUrl, timeout = 15L)
                 val text = response.text
                 val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
+                if (animeIdRequest) Log.i("StremioC-Subtitles",
+                    "anime response host=$subtitleHost code=${response.code} count=${res?.subtitles?.size ?: 0}")
                 val addonSource = preferredName?.takeIf { it.isNotBlank() }
                     ?: getActualStremioAddonName(addonUrl)
                     ?: name.takeIf { addonUrl == currentMainUrl && !it.equals("StremioC", true) }
@@ -3353,6 +3369,10 @@ open class StremioC(
                         stremioSubtitleFrom(addonUrl, group)(file)
                     }
                 }
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                if (animeIdRequest) Log.w("StremioC-Subtitles",
+                    "anime failed host=$subtitleHost reason=${error.javaClass.simpleName} message=${error.message?.take(100)}")
             }
 
         }
@@ -3375,7 +3395,11 @@ open class StremioC(
                 ?: loadData.originalAnimeId?.takeIf { it.startsWith("anilist:") }
                     ?.substringAfter(':')?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
                 ?: loadData.anilistId?.takeIf { it > 0 }
-                ?: return
+                ?: run {
+                    Log.i("StremioC-Subtitles",
+                        "anime skip reason=missing_anilist_id mapping=${mapped != null} loadId=${loadData.anilistId != null}")
+                    return
+                }
             val animeEpisode = loadData.imdbEpisode?.takeIf { it > 0 }
                 ?: loadData.episode?.takeIf { it > 0 }?.let { episode ->
                     val from = mapped?.tmdbFromEpisode
@@ -3383,8 +3407,17 @@ open class StremioC(
                     if (from != null && mapped?.tmdbSeason == loadData.season &&
                         mappedSeason != null && mappedSeason != loadData.season &&
                         episode >= from) episode - from + 1 else episode
-                } ?: return
-            val animeType = animeSubtitleRequestType(addonUrl) ?: return
+                } ?: run {
+                    Log.i("StremioC-Subtitles", "anime skip reason=missing_episode id=$aniListId")
+                    return
+                }
+            val animeType = animeSubtitleRequestType(addonUrl) ?: run {
+                Log.i("StremioC-Subtitles",
+                    "anime skip reason=unsupported_manifest host=${stremioManifestUrl(addonUrl).toHttpUrlOrNull()?.host} id=$aniListId episode=$animeEpisode")
+                return
+            }
+            Log.i("StremioC-Subtitles",
+                "anime selected id=$aniListId episode=$animeEpisode mapping=${mapped != null} type=$animeType")
             fetchStremioSubtitles(
                 addonUrl, "anilist:$aniListId:$animeEpisode", null, null, animeType, preferredName, group
             )

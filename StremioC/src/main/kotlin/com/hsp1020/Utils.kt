@@ -663,7 +663,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             button.isEnabled = selected && refreshJob?.isActive != true
             button.alpha = if (button.isEnabled) 1f else 0.35f
             if (entry != null) {
-                button.imageTintList = ColorStateList.valueOf(text.currentTextColor)
+                button.imageTintList = ColorStateList.valueOf(android.graphics.Color.WHITE)
                 button.setOnClickListener { requestSubtitleRefresh(entry, button) }
             } else {
                 button.setOnClickListener(null)
