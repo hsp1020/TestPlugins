@@ -8,6 +8,7 @@ import android.content.SharedPreferences
 import android.os.Bundle
 import android.text.Spanned
 import android.text.SpannedString
+import android.text.SpannableStringBuilder
 import android.view.View
 import android.view.ViewTreeObserver
 import android.widget.ArrayAdapter
@@ -23,7 +24,9 @@ import androidx.media3.common.C
 import androidx.media3.common.Player as Media3Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
+import androidx.media3.common.text.Cue
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.ui.SubtitleView
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
@@ -36,9 +39,12 @@ import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
 import com.lagradost.cloudstream3.ui.player.VideoLive
 import com.lagradost.cloudstream3.ui.subtitles.SUBTITLE_AUTO_SELECT_KEY
+import com.lagradost.cloudstream3.ui.subtitles.SaveCaptionStyle
+import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.PREFERENCES_NAME
 import com.lagradost.cloudstream3.utils.AppContextUtils.sortSubs
+import java.lang.reflect.Proxy
 
 @OptIn(UnstableApi::class)
 internal class EmbeddedSubtitleController(private val application: Application) :
@@ -65,6 +71,24 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private var settings: SharedPreferences? = null
     private var preferredLanguage: String? = null
     private val trackIdPrefix = Regex("^\\d+:")
+    private val extraCaptionRegex = Regex(
+        """（[^（）]*）[ \\t]*|^[ \\t]*[♬♪~～]+[ \\t]*(?:\\r?\\n|$)|[⸨⸩≪≫➡⚟]""",
+        RegexOption.MULTILINE
+    )
+    private val captionOutputField = runCatching {
+        SubtitleView::class.java.getDeclaredField("output").apply { isAccessible = true }
+    }.getOrNull()
+    private val captionCuesField = runCatching {
+        SubtitleView::class.java.getDeclaredField("cues").apply { isAccessible = true }
+    }.getOrNull()
+    private var captionView: SubtitleView? = null
+    private var captionNativeOutput: Any? = null
+    private var captionWrappedOutput: Any? = null
+    private var cleanExtraCaptions = false
+    private val captionStyleListener: (SaveCaptionStyle) -> Unit = { style ->
+        cleanExtraCaptions = style.removeCaptions
+        refreshCaptionOutput()
+    }
 
     private val dialogField = runCatching {
         FullScreenPlayer::class.java.getDeclaredField("selectSourceDialog")
@@ -172,6 +196,97 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         }
     }
 
+
+    /** Run once per emitted cue batch, after CloudStream's native ASCII caption filtering. */
+    private fun cleanCaptionCues(cues: List<Cue>): List<Cue> {
+        var cleaned: ArrayList<Cue>? = null
+        cues.forEachIndexed { index, cue ->
+            val original = cue.text
+            val matches = if (cue.bitmap == null && original != null) {
+                extraCaptionRegex.findAll(original).toList()
+            } else emptyList()
+            if (matches.isEmpty()) {
+                cleaned?.add(cue)
+                return@forEachIndexed
+            }
+            val result = SpannableStringBuilder(original)
+            for (match in matches.asReversed()) {
+                result.delete(match.range.first, match.range.last + 1)
+            }
+            val output = cleaned ?: ArrayList<Cue>(cues.size).also {
+                it.addAll(cues.subList(0, index))
+                cleaned = it
+            }
+            if (result.isNotBlank()) output.add(cue.buildUpon().setText(result).build())
+        }
+        return cleaned ?: cues
+    }
+
+    /** SubtitleView.Output receives updates only when native cues or styles change. */
+    private fun attachCaptionOutput(f: GeneratorPlayer) {
+        val view = f.subView ?: return
+        val field = captionOutputField ?: return
+        val native = runCatching { field.get(view) }.getOrNull() ?: return
+        if (captionView === view && native === captionWrappedOutput) return
+        restoreCaptionOutput()
+        val update = runCatching {
+            field.type.declaredMethods.first { it.name == "update" }.apply { isAccessible = true }
+        }.getOrNull() ?: return
+        val wrapper = runCatching {
+            Proxy.newProxyInstance(field.type.classLoader, arrayOf(field.type)) { proxy, method, args ->
+                when (method.name) {
+                    "update" -> {
+                        val parameters = args ?: return@newProxyInstance null
+                        if (cleanExtraCaptions) {
+                            @Suppress("UNCHECKED_CAST")
+                            val cues = parameters.getOrNull(0) as? List<Cue>
+                            if (cues != null) {
+                                runCatching { cleanCaptionCues(cues) }.getOrNull()?.let { parameters[0] = it }
+                            }
+                        }
+                        update.invoke(native, *parameters)
+                    }
+                    "equals" -> proxy === args?.getOrNull(0)
+                    "hashCode" -> System.identityHashCode(proxy)
+                    "toString" -> "ElevateCaptionOutput"
+                    else -> method.invoke(native, *(args ?: emptyArray()))
+                }
+            }
+        }.getOrNull() ?: return
+        if (runCatching { field.set(view, wrapper) }.isFailure) return
+        captionView = view
+        captionNativeOutput = native
+        captionWrappedOutput = wrapper
+        refreshCaptionOutput()
+    }
+
+    private fun refreshCaptionOutput() {
+        val view = captionView ?: return
+        @Suppress("UNCHECKED_CAST")
+        val cues = runCatching { captionCuesField?.get(view) as? List<Cue> }.getOrNull() ?: return
+        runCatching { view.setCues(cues) }
+    }
+
+    private fun restoreCaptionOutput() {
+        val view = captionView
+        val native = captionNativeOutput
+        val wrapper = captionWrappedOutput
+        captionView = null
+        captionNativeOutput = null
+        captionWrappedOutput = null
+        if (view != null && native != null && wrapper != null) {
+            runCatching {
+                val field = captionOutputField ?: return@runCatching
+                if (field.get(view) === wrapper) {
+                    field.set(view, native)
+                    @Suppress("UNCHECKED_CAST")
+                    val cues = captionCuesField?.get(view) as? List<Cue>
+                    if (cues != null) view.setCues(cues)
+                }
+            }
+        }
+    }
+
     private fun synchronizeSource() {
         val f = fragment ?: return
         val nextInstance = model?.state?.instance ?: return
@@ -199,6 +314,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             current?.addListener(listener)
         }
         if ((changedSource || changedPlayer) && current != null) selectEmbedded(current.currentTracks)
+        attachCaptionOutput(f)
     }
 
 
@@ -233,6 +349,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private fun inspectDialogs() {
         val f = fragment ?: return
         if (f.playerView?.player?.let { it !== player } == true) synchronizeSource()
+        attachCaptionOutput(f)
         trackDialog(f)
         val popup = selectionDialog
         if (popup != null && popup !== labeledDialog && popup !== pendingDialog) {
@@ -307,11 +424,14 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     }
 
     fun start() {
+        cleanExtraCaptions = SubtitlesFragment.getCurrentSavedStyle().removeCaptions
+        SubtitlesFragment.applyStyleEvent += captionStyleListener
         application.registerActivityLifecycleCallbacks(this)
         (CommonActivity.activity as? MainActivity)?.let(::use)
     }
 
     fun stop() {
+        SubtitlesFragment.applyStyleEvent -= captionStyleListener
         application.unregisterActivityLifecycleCallbacks(this)
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(callbacks)
         detach()
@@ -382,6 +502,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
 
     private fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
+        restoreCaptionOutput()
         focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
         focusTree = null
         player?.removeListener(listener)
