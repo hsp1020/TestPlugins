@@ -3360,15 +3360,15 @@ open class StremioC(
                 val addonSource = preferredName?.takeIf { it.isNotBlank() }
                     ?: getActualStremioAddonName(addonUrl)
                     ?: name.takeIf { addonUrl == currentMainUrl && !it.equals("StremioC", true) }
-                res?.subtitles?.forEachIndexed { position, sub ->
-                    sub.toCloudStreamSubtitle(addonSource, preferredName)?.let { file ->
+                res?.subtitles?.let { entries -> entries.forEachIndexed { position, sub ->
+                    sub.toCloudStreamSubtitle(addonSource, preferredName, sub.translationSourceLanguage(entries))?.let { file ->
                         StremioSubtitleRefreshRegistry.remember(
                             file.url, addonUrl, sub.id, sub.lang ?: sub.lang_code,
                             subtitleRequestUrl, position, file.headers ?: emptyMap()
                         )
                         stremioSubtitleFrom(addonUrl, group)(file)
                     }
-                }
+                } }
             }.onFailure { error ->
                 if (error is CancellationException) throw error
                 if (animeIdRequest) Log.w("StremioC-Subtitles",
@@ -5529,10 +5529,41 @@ open class StremioC(
         return cleaned.takeIf { it.isNotBlank() }
     }
 
-    private suspend fun Subtitle.toCloudStreamSubtitle(addonName: String?, preferredName: String? = null): SubtitleFile? {
+    private fun Subtitle.translationSourceLanguage(entries: List<Subtitle>): String? {
+        val derivedId = id ?: return null
+        val separator = derivedId.lastIndexOf("_to_")
+        if (separator <= 0) return null
+        val target = SubtitleHelper.fromCodeToLangTagIETF(derivedId.substring(separator + 4))
+            ?: return null
+        val reported = lang_code ?: lang
+        val reportedTag = SubtitleHelper.fromCodeToLangTagIETF(reported)
+            ?: SubtitleHelper.fromLanguageToTagIETF(reported, true)
+        if (reportedTag != target) return null
+
+        // Match a source ID within this response, without assuming an addon or language name.
+        val sourcePrefix = derivedId.substring(0, separator)
+        val source = entries.singleOrNull { candidate ->
+            val sourceId = candidate.id ?: return@singleOrNull false
+            val start = sourcePrefix.length - sourceId.length
+            start >= 0 && sourcePrefix.endsWith(sourceId) &&
+                (start == 0 || sourcePrefix[start - 1] == '_')
+        } ?: return null
+        val sourceCode = source.lang_code ?: source.lang
+        val sourceTag = SubtitleHelper.fromCodeToLangTagIETF(sourceCode)
+            ?: SubtitleHelper.fromLanguageToTagIETF(sourceCode, true)
+            ?: return null
+        if (sourceTag == target) return null
+        return SubtitleHelper.fromCodeToOpenSubtitlesTag(sourceTag)
+            ?.uppercase(java.util.Locale.ROOT)
+    }
+
+    private suspend fun Subtitle.toCloudStreamSubtitle(
+        addonName: String?, preferredName: String? = null, sourceLanguage: String? = null
+    ): SubtitleFile? {
         val subtitleUrl = url ?: return null
         val rawLang = lang ?: lang_code ?: "Unknown"
         val language = SubtitleHelper.fromTagToEnglishLanguageName(rawLang) ?: rawLang
+        val displayLanguage = if (sourceLanguage != null) "$language ($sourceLanguage)" else language
         val mainLabel = label.textOrNull()?.let { cleanSubtitleDisplayLabel(it, language) }
         val responseSource = name.textOrNull()?.trim()?.takeIf {
             it.isNotBlank() && !it.equals("StremioC", true) && !it.startsWith("http", true) &&
@@ -5544,10 +5575,10 @@ open class StremioC(
                     !it.equals(mainLabel, true) && !it.equals(language, true)
             }
         if (mainLabel == null && sourceLabel == null) {
-            return newSubtitleFile(language, subtitleUrl)
+            return newSubtitleFile(displayLanguage, subtitleUrl)
         }
         val displayName = buildString {
-            append(language)
+            append(displayLanguage)
             if (mainLabel != null && !mainLabel.equals(language, true)) { append(" · "); append(mainLabel) }
             if (sourceLabel != null) { append(" — "); append(sourceLabel) }
         }
@@ -5625,7 +5656,9 @@ open class StremioC(
             val hasPlayableTarget = url != null || ytId != null || externalUrl != null || infoHash != null
             if (hasPlayableTarget) {
                 subtitles.forEachIndexed { position, sub ->
-                    provider.run { sub.toCloudStreamSubtitle(sourceName, preferredName) }?.let { file ->
+                    provider.run {
+                        sub.toCloudStreamSubtitle(sourceName, preferredName, sub.translationSourceLanguage(subtitles))
+                    }?.let { file ->
                         if (addonUrl != null) {
                             StremioSubtitleRefreshRegistry.remember(
                                 file.url, addonUrl, sub.id, sub.lang ?: sub.lang_code,
