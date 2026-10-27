@@ -639,7 +639,9 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                         if (iconId != 0) pluginResources.getDrawable(iconId, null) else null
                     }.getOrNull() ?: parent.context.getDrawable(android.R.drawable.ic_popup_sync)
                 )
-                background = themedPressedForeground(this)
+                background = null
+                foreground = null
+                stateListAnimator = null
                 scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
                 isFocusable = true
                 contentDescription = getPluginSubtitleString(
@@ -687,6 +689,14 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         val mediaPlayer = observedPlayer ?: return
         val generation = ++refreshGeneration
         button.isEnabled = false
+        val originalTint = button.imageTintList
+        button.imageTintList = ColorStateList.valueOf(android.graphics.Color.WHITE)
+        button.animate().cancel()
+        button.rotation = 0f
+        button.animate().rotation(360f).setDuration(420L)
+            .setInterpolator(android.view.animation.DecelerateInterpolator())
+            .withEndAction { button.rotation = 0f }
+            .start()
         refreshJob = refreshScope.launch {
             try {
                 val result = StremioSubtitleRefreshRegistry.refresh(entry)
@@ -717,6 +727,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                 button.visibility = if (selected) View.VISIBLE else View.GONE
                 button.isEnabled = selected
                 button.alpha = if (selected) 1f else 0.35f
+                button.imageTintList = originalTint
             }
         }
     }

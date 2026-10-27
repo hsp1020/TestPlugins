@@ -1247,6 +1247,8 @@ open class StremioC(
         private val animeCastCache = lruCacheMap<Int, Pair<List<ActorData>, Long>>(24)
         private val animeCastFlights = mutableMapOf<Int, Deferred<List<ActorData>?>>()
         private val animeCastScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val subtitleAnimeManifestCache = lruCacheMap<String, Pair<String?, Long>>(80)
+        private val subtitleAnimeManifestLocks = ConcurrentHashMap<String, Mutex>()
 
         internal fun cachedAnimeCast(id: Int): List<ActorData>? {
             if (id <= 0) return null
@@ -3243,6 +3245,60 @@ open class StremioC(
         }
 
         val requestedSubtitleUrls = Collections.synchronizedSet(mutableSetOf<String>())
+        val requestedSubtitleIds = Collections.synchronizedSet(mutableSetOf<Triple<String, String, String>>())
+
+        suspend fun animeSubtitleRequestType(addonUrl: String): String? {
+            val manifestUrl = stremioManifestUrl(addonUrl)
+            fun cached(): Pair<String?, Long>? = synchronized(subtitleAnimeManifestCache) {
+                stremioCacheMemoryRead(subtitleAnimeManifestCache[manifestUrl], 3_600_000L)
+            }
+            cached()?.let { return it.first }
+            val mutex = subtitleAnimeManifestLocks.getOrPut(manifestUrl) { Mutex() }
+            mutex.lock()
+            try {
+                cached()?.let { return it.first }
+                val prefs = CloudStreamApp.context
+                    ?.getSharedPreferences("StremioC_Manifest", Context.MODE_PRIVATE)
+                val raw = prefs?.let { stremioReadManifest(it, addonUrl, requireFresh = true) }
+                    ?: runSuspendCatching {
+                        val response = customSession.get(manifestUrl, timeout = 5L)
+                        val text = response.text
+                        val policy = stremioManifestCachePolicy(response.headers.toList())
+                        if (text.isNotBlank() && !policy.noStore && policy.ttlMs > 0L) {
+                            prefs?.edit()
+                                ?.putString(stremioCatalogKey(addonUrl), text)
+                                ?.putLong("manifest_saved_at_" + stremioCatalogKey(addonUrl), System.currentTimeMillis())
+                                ?.putLong("manifest_ttl_ms_" + stremioCatalogKey(addonUrl), policy.ttlMs)
+                                ?.apply()
+                        }
+                        text
+                    }.getOrNull()
+                val manifest = raw?.let { runCatching { org.json.JSONObject(it) }.getOrNull() }
+                val types = manifest?.optJSONArray("types")
+                val resources = manifest?.optJSONArray("resources")
+                val supportsAnime = types != null && (0 until types.length()).any {
+                    types.optString(it).equals("anime", true)
+                }
+                val supportsSubtitles = resources != null && (0 until resources.length()).any {
+                    val entry = resources.opt(it)
+                    entry == "subtitles" || (entry as? org.json.JSONObject)?.optString("name") == "subtitles"
+                }
+                val prefixes = manifest?.optJSONArray("idPrefixes")
+                val supportsAniList = prefixes == null || (0 until prefixes.length()).any {
+                    "anilist:".startsWith(prefixes.optString(it), true)
+                }
+                val type = if (supportsAnime && supportsSubtitles && supportsAniList) {
+                    if (types != null && (0 until types.length()).any { types.optString(it) == "series" })
+                        "series" else "anime"
+                } else null
+                synchronized(subtitleAnimeManifestCache) {
+                    subtitleAnimeManifestCache[manifestUrl] = type to System.currentTimeMillis()
+                }
+                return type
+            } finally {
+                mutex.unlock()
+            }
+        }
 
         suspend fun fetchStremioSubtitles(
             addonUrl: String,
@@ -3289,6 +3345,10 @@ open class StremioC(
                     ?: getActualStremioAddonName(addonUrl)
                     ?: name.takeIf { addonUrl == currentMainUrl && !it.equals("StremioC", true) }
                 res?.subtitles?.forEachIndexed { position, sub ->
+                    val subtitleId = sub.id?.takeIf { it.isNotBlank() }?.let {
+                        Triple(cleanSubtitleBase, it, sub.lang ?: sub.lang_code ?: "")
+                    }
+                    if (subtitleId != null && !requestedSubtitleIds.add(subtitleId)) return@forEachIndexed
                     sub.toCloudStreamSubtitle(addonSource, preferredName)?.let { file ->
                         StremioSubtitleRefreshRegistry.remember(
                             file.url, addonUrl, sub.id, sub.lang ?: sub.lang_code,
@@ -3305,6 +3365,30 @@ open class StremioC(
         val mappingDeferred = async(Dispatchers.IO, start = CoroutineStart.LAZY) {
             val mapped = if (!actualIsMovie) fetchAnimeSeasonMapping(loadData) else null
             mapped
+        }
+
+        suspend fun fetchAnimeAwareSubtitles(
+            addonUrl: String, id: String?, season: Int?, episode: Int?,
+            type: String = targetType, preferredName: String? = null
+        ) = coroutineScope {
+            launch { fetchStremioSubtitles(addonUrl, id, season, episode, type, preferredName) }
+            if (!actualIsMovie && (loadData.isAnime || loadData.originalAnimeId != null ||
+                    loadData.anilistId != null || loadData.malId != null || loadData.kitsuId != null ||
+                    isLibraryAnimeId(loadData.id) || (loadData.isCartoon && loadData.isAsian))) {
+                launch {
+                    val animeEpisode = loadData.episode?.takeIf { it > 0 } ?: return@launch
+                    val mapped = mappingDeferred.await()
+                    val aniListId = mapped?.aniListId
+                        ?: loadData.originalAnimeId?.takeIf { it.startsWith("anilist:") }
+                            ?.substringAfter(':')?.substringBefore(':')?.toIntOrNull()
+                        ?: loadData.anilistId?.takeIf { (loadData.season ?: 1) <= 1 }
+                        ?: return@launch
+                    val animeType = animeSubtitleRequestType(addonUrl) ?: return@launch
+                    fetchStremioSubtitles(
+                        addonUrl, "anilist:$aniListId:$animeEpisode", null, null, animeType, preferredName
+                    )
+                }
+            }
         }
 
         suspend fun mappedAnimeStremioId(): String? {
@@ -3406,14 +3490,14 @@ open class StremioC(
 
                 val mappedId = mappedAnimeStremioId()
                 if (mappedId != null) {
-                    fetchStremioSubtitles(currentMainUrl, mappedId, null, null, "series")
+                    fetchAnimeAwareSubtitles(currentMainUrl, mappedId, null, null, "series")
                 } else if (!isLibraryAnimeId(primaryId) || actualIsMovie) {
-                    fetchStremioSubtitles(currentMainUrl, primaryId, loadData.season, loadData.episode)
+                    fetchAnimeAwareSubtitles(currentMainUrl, primaryId, loadData.season, loadData.episode)
                 }
             },
             {
                 if (isHistorySyncEnabled && syncUrl.isNotBlank()) {
-                    fetchStremioSubtitles(
+                    fetchAnimeAwareSubtitles(
                         syncUrl,
                         globalId ?: primaryId,
                         globalSeason,
@@ -3458,9 +3542,9 @@ open class StremioC(
                                 }, {
                                     val mappedId = mappedAnimeStremioId()
                                     if (mappedId != null) {
-                                        fetchStremioSubtitles(addonUrl, mappedId, null, null, "series", addon.name)
+                                        fetchAnimeAwareSubtitles(addonUrl, mappedId, null, null, "series", addon.name)
                                     } else if (!isLibraryAnimeId(reqId) || actualIsMovie) {
-                                        fetchStremioSubtitles(addonUrl, reqId, season, episode, extraType, addon.name)
+                                        fetchAnimeAwareSubtitles(addonUrl, reqId, season, episode, extraType, addon.name)
                                     }
                                 })
                             }
