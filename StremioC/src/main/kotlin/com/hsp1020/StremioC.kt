@@ -3372,7 +3372,7 @@ open class StremioC(
             }.onFailure { error ->
                 if (error is CancellationException) throw error
                 if (animeIdRequest) Log.w("StremioC-Subtitles",
-                    "anime failed host=$subtitleHost reason=${error.javaClass.simpleName} message=${error.message?.take(100)}")
+                    "anime failed host=$subtitleHost reason=${error.javaClass.simpleName}")
             }
 
         }
