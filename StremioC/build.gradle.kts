@@ -2,7 +2,7 @@
 
 import java.util.Properties
 
-version = 17
+version = 18
 
 android {
     namespace = "com.hsp1020" 

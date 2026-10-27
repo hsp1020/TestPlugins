@@ -92,6 +92,11 @@ import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.HeaderViewListAdapter
 import android.widget.ListView
+import android.widget.BaseAdapter
+import android.widget.ImageButton
+import android.database.DataSetObserver
+import android.view.MotionEvent
+import java.util.WeakHashMap
 import com.lagradost.cloudstream3.ui.player.FullScreenPlayer
 import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
@@ -277,7 +282,7 @@ internal fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
     }
 }
 
-internal class StremioSubtitleController {
+internal class StremioSubtitleController(private val pluginResources: Resources) {
     private var fragment: GeneratorPlayer? = null
     private var model: PlayerGeneratorViewModel? = null
     private val dialogHandler = Handler(Looper.getMainLooper())
@@ -285,6 +290,10 @@ internal class StremioSubtitleController {
     private var sortedDialog: Dialog? = null
     private var pendingDialog: Dialog? = null
     private var isStremio = false
+    private val refreshedOverlay = StremioRefreshedSubtitleOverlay()
+    private val refreshedCues = mutableMapOf<String, StremioSubtitleRefreshRegistry.Prepared>()
+    private val refreshScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var refreshJob: Job? = null
     private val dialogField = runCatching {
         FullScreenPlayer::class.java.getDeclaredField("selectSourceDialog")
             .apply { isAccessible = true }
@@ -306,9 +315,21 @@ internal class StremioSubtitleController {
             if (lastInstance != state.instance) {
                 lastInstance = state.instance
                 sortedDialog = null
+                refreshJob?.cancel()
+                refreshJob = null
+                refreshedCues.clear()
+                refreshedOverlay.detach()
                 isStremio = checkStremio()
             }
             if (isStremio) {
+                if (refreshedCues.isNotEmpty()) {
+                    refreshedOverlay.bind(f)
+                    val selectedUrl = f.player.getCurrentPreferredSubtitle()?.url
+                    val prepared = selectedUrl?.let(refreshedCues::get)
+                    if (selectedUrl != null && prepared != null) {
+                        refreshedOverlay.attach(f, selectedUrl, prepared)
+                    }
+                }
                 val popup = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
                 if (popup != null && popup.isShowing &&
                     popup !== sortedDialog && popup !== pendingDialog) {
@@ -316,6 +337,7 @@ internal class StremioSubtitleController {
                     f.view?.post {
                         pendingDialog = null
                         if (popup.isShowing && fragment === f && sortPopup(popup)) {
+                            installRefreshIcons(popup)
                             sortedDialog = popup
                         }
                     }
@@ -384,9 +406,149 @@ internal class StremioSubtitleController {
         return true
     }
 
+
+    /**
+     * Decorates only the native rows. Underlying ArrayAdapters, indices, selection
+     * listeners and the StremioC order mapping remain unchanged.
+     */
+    private fun installRefreshIcons(dialog: Dialog) {
+        val current = model?.state ?: return
+        val list = dialog.findViewById<ListView>(R.id.sort_subtitles) ?: return
+        val options = dialog.findViewById<ListView>(R.id.sort_subtitles_options) ?: return
+        val groups = sortSubs(current.subtitles).groupBy { it.originalName }.values.toList()
+        val order = (list.getTag(R.id.sort_subtitles) as? IntArray)
+            ?.takeIf { it.size == groups.size && it.toSet().size == groups.size }
+            ?: groups.indices.toList().toIntArray()
+
+        fun groupAt(position: Int): List<SubtitleData>? {
+            if (position !in 1..groups.size) return null
+            return groups.getOrNull(order[position - 1])
+        }
+
+        val parent = (list.adapter as? HeaderViewListAdapter)?.wrappedAdapter
+            ?: list.adapter
+        val adapter = parent as? ArrayAdapter<*> ?: return
+        if (adapter.count != groups.size + 1) return
+        val selected = list.checkedItemPosition
+        list.adapter = RefreshRowAdapter(adapter) { position ->
+            groupAt(position)?.singleOrNull()?.let { StremioSubtitleRefreshRegistry.find(it.url) }
+        }
+        if (selected >= 0) list.setItemChecked(selected, true)
+
+        val optionsParent = (options.adapter as? HeaderViewListAdapter)?.wrappedAdapter
+            ?: options.adapter
+        val optionsAdapter = optionsParent as? ArrayAdapter<*> ?: return
+        val optionSelected = options.checkedItemPosition
+        options.adapter = RefreshRowAdapter(optionsAdapter) { position ->
+            val siblings = groupAt(list.checkedItemPosition) ?: return@RefreshRowAdapter null
+            if (siblings.size < 2) return@RefreshRowAdapter null
+            val ordered = siblings.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }
+            ordered.getOrNull(position)?.let { StremioSubtitleRefreshRegistry.find(it.url) }
+        }
+        if (optionSelected >= 0) options.setItemChecked(optionSelected, true)
+
+        // The native group listener updates options before StremioC's visual
+        // reorder mapping updates the checked index. Rebind icons afterwards.
+        val nativeClick = list.onItemClickListener
+        list.onItemClickListener = AdapterView.OnItemClickListener { parentView, row, position, id ->
+            nativeClick?.onItemClick(parentView, row, position, id)
+            (options.adapter as? BaseAdapter)?.notifyDataSetChanged()
+        }
+    }
+
+    private inner class RefreshRowAdapter(
+        private val source: ArrayAdapter<*>,
+        private val sourceAt: (Int) -> StremioSubtitleRefreshRegistry.Entry?
+    ) : BaseAdapter() {
+        private val originalEndPadding = WeakHashMap<TextView, Int>()
+        private val observer = object : DataSetObserver() {
+            override fun onChanged() = notifyDataSetChanged()
+            override fun onInvalidated() = notifyDataSetInvalidated()
+        }
+        init { source.registerDataSetObserver(observer) }
+        override fun getCount(): Int = source.count
+        override fun getItem(position: Int): Any? = source.getItem(position)
+        override fun getItemId(position: Int): Long = source.getItemId(position)
+        override fun hasStableIds(): Boolean = source.hasStableIds()
+        override fun isEnabled(position: Int): Boolean = source.isEnabled(position)
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val row = (convertView as? FrameLayout) ?: FrameLayout(parent.context)
+            val oldText = row.getChildAt(0) as? TextView
+            val text = source.getView(position, oldText, parent) as TextView
+            if (text !== oldText) {
+                (text.parent as? ViewGroup)?.removeView(text)
+                if (oldText != null) row.removeView(oldText)
+                row.addView(text, 0, FrameLayout.LayoutParams(-1, -2))
+            }
+            val button = (row.getChildAt(1) as? ImageButton) ?: ImageButton(parent.context).apply {
+                setImageDrawable(pluginResources.getDrawable(
+                    com.hsp1020.R.drawable.stremioc_subtitle_refresh, null
+                ))
+                background = themedPressedForeground(this)
+                scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
+                isFocusable = true
+                contentDescription = pluginResources.getString(
+                    com.hsp1020.R.string.stremioc_refresh_subtitle
+                )
+                row.addView(this, FrameLayout.LayoutParams(
+                    (40 * resources.displayMetrics.density).toInt(), -1, Gravity.END or Gravity.CENTER_VERTICAL
+                ))
+            }
+            val entry = sourceAt(position)
+            val original = originalEndPadding.getOrPut(text) { text.paddingRight }
+            val right = original + if (entry != null) (40 * text.resources.displayMetrics.density).toInt() else 0
+            if (text.paddingRight != right) {
+                text.setPadding(text.paddingLeft, text.paddingTop, right, text.paddingBottom)
+            }
+            button.visibility = if (entry == null) View.GONE else View.VISIBLE
+            if (entry != null) {
+                button.imageTintList = ColorStateList.valueOf(text.currentTextColor)
+                button.setOnClickListener { requestSubtitleRefresh(entry, button) }
+            } else {
+                button.setOnClickListener(null)
+            }
+            return row
+        }
+    }
+
+    private fun requestSubtitleRefresh(entry: StremioSubtitleRefreshRegistry.Entry, button: ImageButton) {
+        val target = fragment ?: return
+        val instance = model?.state?.instance ?: return
+        if (refreshJob?.isActive == true) return
+        button.isEnabled = false
+        refreshJob = refreshScope.launch {
+            try {
+                val result = StremioSubtitleRefreshRegistry.refresh(entry)
+                if (fragment === target && model?.state?.instance == instance) {
+                    refreshedCues[entry.originalUrl] = result
+                    if (target.player.getCurrentPreferredSubtitle()?.url == entry.originalUrl) {
+                        refreshedOverlay.attach(target, entry.originalUrl, result)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (fragment === target) {
+                    android.widget.Toast.makeText(
+                        target.context, pluginResources.getString(
+                            com.hsp1020.R.string.stremioc_refresh_failed
+                        ), android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } finally {
+                button.isEnabled = true
+            }
+        }
+    }
+
     fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
         dialogHandler.removeCallbacks(dialogTick)
+        refreshJob?.cancel()
+        refreshJob = null
+        refreshedCues.clear()
+        refreshedOverlay.detach()
         fragment = null
         model = null
         lastInstance = -1
@@ -405,7 +567,7 @@ internal class RatingPlotImageHook(
     private val main = Handler(Looper.getMainLooper())
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
-    private val subtitleController = StremioSubtitleController()
+    private val subtitleController = StremioSubtitleController(resources)
     private val scrobble = StremioScrobble(context)
     private val mdbUpdate: (String) -> Unit = { cacheKey ->
         val matched = watchers.values.filter { it.matchesMdbKey(cacheKey) }
