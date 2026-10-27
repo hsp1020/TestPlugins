@@ -3379,7 +3379,7 @@ open class StremioC(
             val animeEpisode = loadData.imdbEpisode?.takeIf { it > 0 }
                 ?: loadData.episode?.takeIf { it > 0 }?.let { episode ->
                     val from = mapped?.tmdbFromEpisode
-                    if (from != null && mapped.tmdbSeason == loadData.season &&
+                    if (from != null && mapped?.tmdbSeason == loadData.season &&
                         mapped.imdbSeason != null && mapped.imdbSeason != loadData.season &&
                         episode >= from) episode - from + 1 else episode
                 } ?: return
