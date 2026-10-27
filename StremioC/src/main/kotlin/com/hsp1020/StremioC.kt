@@ -3245,7 +3245,6 @@ open class StremioC(
         }
 
         val requestedSubtitleUrls = Collections.synchronizedSet(mutableSetOf<String>())
-        val requestedSubtitleIds = Collections.synchronizedSet(mutableSetOf<Triple<String, String, String>>())
 
         suspend fun animeSubtitleRequestType(addonUrl: String): String? {
             val manifestUrl = stremioManifestUrl(addonUrl)
@@ -3306,7 +3305,8 @@ open class StremioC(
             season: Int?,
             episode: Int?,
             requestType: String = targetType,
-            preferredName: String? = null
+            preferredName: String? = null,
+            group: Int = 0
         ) {
             if (addonUrl.isBlank() || id.isNullOrBlank()) {
                 return
@@ -3345,16 +3345,12 @@ open class StremioC(
                     ?: getActualStremioAddonName(addonUrl)
                     ?: name.takeIf { addonUrl == currentMainUrl && !it.equals("StremioC", true) }
                 res?.subtitles?.forEachIndexed { position, sub ->
-                    val subtitleId = sub.id?.takeIf { it.isNotBlank() }?.let {
-                        Triple(cleanSubtitleBase, it, sub.lang ?: sub.lang_code ?: "")
-                    }
-                    if (subtitleId != null && !requestedSubtitleIds.add(subtitleId)) return@forEachIndexed
                     sub.toCloudStreamSubtitle(addonSource, preferredName)?.let { file ->
                         StremioSubtitleRefreshRegistry.remember(
                             file.url, addonUrl, sub.id, sub.lang ?: sub.lang_code,
                             subtitleRequestUrl, position, file.headers ?: emptyMap()
                         )
-                        stremioSubtitleFrom(addonUrl)(file)
+                        stremioSubtitleFrom(addonUrl, group)(file)
                     }
                 }
             }
@@ -3367,28 +3363,38 @@ open class StremioC(
             mapped
         }
 
+        suspend fun fetchAniListSubtitles(
+            addonUrl: String, preferredName: String? = null, group: Int = 0
+        ) {
+            if (actualIsMovie || !(loadData.isAnime || loadData.originalAnimeId != null ||
+                    loadData.anilistId != null || loadData.malId != null || loadData.kitsuId != null ||
+                    isLibraryAnimeId(loadData.id) || (loadData.isCartoon && loadData.isAsian))) return
+
+            val mapped = mappingDeferred.await()
+            val aniListId = mapped?.aniListId?.takeIf { it > 0 }
+                ?: loadData.originalAnimeId?.takeIf { it.startsWith("anilist:") }
+                    ?.substringAfter(':')?.substringBefore(':')?.toIntOrNull()?.takeIf { it > 0 }
+                ?: loadData.anilistId?.takeIf { it > 0 }
+                ?: return
+            val animeEpisode = loadData.imdbEpisode?.takeIf { it > 0 }
+                ?: loadData.episode?.takeIf { it > 0 }?.let { episode ->
+                    val from = mapped?.tmdbFromEpisode
+                    if (from != null && mapped.tmdbSeason == loadData.season &&
+                        mapped.imdbSeason != null && mapped.imdbSeason != loadData.season &&
+                        episode >= from) episode - from + 1 else episode
+                } ?: return
+            val animeType = animeSubtitleRequestType(addonUrl) ?: return
+            fetchStremioSubtitles(
+                addonUrl, "anilist:$aniListId:$animeEpisode", null, null, animeType, preferredName, group
+            )
+        }
+
         suspend fun fetchAnimeAwareSubtitles(
             addonUrl: String, id: String?, season: Int?, episode: Int?,
             type: String = targetType, preferredName: String? = null
         ) = coroutineScope {
             launch { fetchStremioSubtitles(addonUrl, id, season, episode, type, preferredName) }
-            if (!actualIsMovie && (loadData.isAnime || loadData.originalAnimeId != null ||
-                    loadData.anilistId != null || loadData.malId != null || loadData.kitsuId != null ||
-                    isLibraryAnimeId(loadData.id) || (loadData.isCartoon && loadData.isAsian))) {
-                launch {
-                    val animeEpisode = loadData.episode?.takeIf { it > 0 } ?: return@launch
-                    val mapped = mappingDeferred.await()
-                    val aniListId = mapped?.aniListId
-                        ?: loadData.originalAnimeId?.takeIf { it.startsWith("anilist:") }
-                            ?.substringAfter(':')?.substringBefore(':')?.toIntOrNull()
-                        ?: loadData.anilistId?.takeIf { (loadData.season ?: 1) <= 1 }
-                        ?: return@launch
-                    val animeType = animeSubtitleRequestType(addonUrl) ?: return@launch
-                    fetchStremioSubtitles(
-                        addonUrl, "anilist:$aniListId:$animeEpisode", null, null, animeType, preferredName
-                    )
-                }
-            }
+            launch { fetchAniListSubtitles(addonUrl, preferredName) }
         }
 
         suspend fun mappedAnimeStremioId(): String? {
@@ -3553,6 +3559,18 @@ open class StremioC(
                 }
             },
             {
+                if (!actualIsMovie) coroutineScope {
+                    val limiter = Semaphore(4)
+                    integrationAddons.filter { it.subtitleOnly }.map { addon -> async(Dispatchers.IO) {
+                        limiter.withPermit {
+                            fetchAniListSubtitles(
+                                addon.url, addon.name, if (addon.fromCineStream) 1 else 2
+                            )
+                        }
+                    } }.awaitAll()
+                }
+            },
+            {
                 invokeCineStream(loadData, integrationTargetType, globalId, globalSeason, globalEpisode, isCasting, integratedSubtitleFrom(1), wrappedCallback, mappingDeferred)
             },
             {
@@ -3586,7 +3604,7 @@ open class StremioC(
         val simklId: Int? = null, val tvdbId: Int? = null,
         val tmdbSeason: Int?, val tmdbEpisode: Int?, val title: String?,
         val imdbId: String?, val tvdbSeason: Int?, val imdbSeason: Int?,
-        val traktSeason: Int?
+        val traktSeason: Int?, val tmdbFromEpisode: Int? = null
     )
 
     internal suspend fun seasonTrackerIds(imdbId: String, season: Int): SeasonTrackerIds? {
@@ -3761,7 +3779,8 @@ open class StremioC(
                 imdbId = resolvedImdb?.takeIf { IMDB_ID_REGEX.matches(it) },
                 tvdbSeason = data.get("tvdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 },
                 imdbSeason = data.get("imdb")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 },
-                traktSeason = data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 }
+                traktSeason = data.get("trakt")?.get("seasonNumber").intOrNull()?.takeIf { it > 0 },
+                tmdbFromEpisode = first
             )
             }
             val mapping = outcome.getOrNull()
