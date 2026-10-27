@@ -100,6 +100,8 @@ import android.database.DataSetObserver
 import android.view.MotionEvent
 import java.util.WeakHashMap
 import com.lagradost.cloudstream3.ui.player.FullScreenPlayer
+import com.lagradost.cloudstream3.ui.player.SubtitleCue
+import com.lagradost.cloudstream3.ui.player.SubtitleOffsetItemAdapter
 import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
 import com.lagradost.cloudstream3.utils.AppContextUtils.sortSubs
@@ -299,6 +301,8 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
     private var refreshGeneration = 0L
     private var observedPlayer: Player? = null
     private var selectedUrl: String? = null
+    private var iconSelectionUrl: String? = null
+    private var refreshedOffsetDialog: Dialog? = null
     private var removeStateObserver: (() -> Unit)? = null
     private val playerListener = java.lang.reflect.Proxy.newProxyInstance(
         Player.Listener::class.java.classLoader,
@@ -326,6 +330,8 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         refreshJob = null
         refreshedCues.clear()
         refreshedOverlay.detach()
+        refreshedOffsetDialog = null
+        iconSelectionUrl = null
     }
 
     private fun bindPlayer() {
@@ -362,6 +368,32 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         FullScreenPlayer::class.java.getDeclaredField("selectSourceDialog")
             .apply { isAccessible = true }
     }.getOrNull()
+    private val offsetDialogField = runCatching {
+        FullScreenPlayer::class.java.getDeclaredField("selectSubtitlesDialog")
+            .apply { isAccessible = true }
+    }.getOrNull()
+
+    // Reuse the native offset adapter so its seek/offset and progress behavior stays intact.
+    private fun showRefreshedCuesInOffsetDialog(dialog: Dialog) {
+        val target = fragment ?: return
+        val url = target.player.getCurrentPreferredSubtitle()?.url ?: return
+        val prepared = refreshedCues[url] ?: return
+        val list = dialog.findViewById<RecyclerView>(R.id.subtitle_offset_recyclerview) ?: return
+        val adapter = list.adapter as? SubtitleOffsetItemAdapter ?: return
+        val items = prepared.cues.mapNotNull { segment ->
+            val lines = segment.cues.mapNotNull { it.text?.toString()?.takeIf(String::isNotBlank) }
+            if (lines.isEmpty()) null else SubtitleCue(
+                segment.startTimeMs, (segment.endTimeMs - segment.startTimeMs).coerceAtLeast(1L), lines
+            )
+        }
+        if (items.isEmpty()) return
+        adapter.submitList(items)
+        list.visibility = View.VISIBLE
+        dialog.findViewById<View>(R.id.no_subtitles_loaded_notice)?.visibility = View.GONE
+        val position = (target.player.getPosition() ?: 0L) + target.player.getSubtitleOffset()
+        val index = items.indexOfLast { it.startTimeMs <= position }.coerceAtLeast(0)
+        list.post { if (dialog.isShowing && list.adapter === adapter) list.scrollToPosition(index) }
+    }
 
     private fun checkStremio(): Boolean {
         val response = model?.state?.generatorState?.response ?: return false
@@ -396,6 +428,22 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                             sortedDialog = popup
                         }
                     }
+                }
+                if (popup != null && popup.isShowing && popup === sortedDialog) {
+                    val currentUrl = f.player.getCurrentPreferredSubtitle()?.url
+                    if (iconSelectionUrl != currentUrl) {
+                        iconSelectionUrl = currentUrl
+                        (popup.findViewById<ListView>(R.id.sort_subtitles)?.adapter as? BaseAdapter)
+                            ?.notifyDataSetChanged()
+                        (popup.findViewById<ListView>(R.id.sort_subtitles_options)?.adapter as? BaseAdapter)
+                            ?.notifyDataSetChanged()
+                    }
+                }
+                val offsetDialog = runCatching { offsetDialogField?.get(f) as? Dialog }.getOrNull()
+                if (offsetDialog != null && offsetDialog.isShowing &&
+                    offsetDialog !== refreshedOffsetDialog) {
+                    refreshedOffsetDialog = offsetDialog
+                    showRefreshedCuesInOffsetDialog(offsetDialog)
                 }
             }
         }
@@ -513,12 +561,20 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             ordered.getOrNull(position)?.let { StremioSubtitleRefreshRegistry.find(it.url) }
         }
         if (optionSelected >= 0) options.setItemChecked(optionSelected, true)
+        iconSelectionUrl = fragment?.player?.getCurrentPreferredSubtitle()?.url
 
         // The native group listener updates options before StremioC's visual
         // reorder mapping updates the checked index. Rebind icons afterwards.
         val nativeClick = list.onItemClickListener
         list.onItemClickListener = AdapterView.OnItemClickListener { parentView, row, position, id ->
             nativeClick?.onItemClick(parentView, row, position, id)
+            (list.adapter as? BaseAdapter)?.notifyDataSetChanged()
+            (options.adapter as? BaseAdapter)?.notifyDataSetChanged()
+        }
+        val nativeOptionClick = options.onItemClickListener
+        options.onItemClickListener = AdapterView.OnItemClickListener { parentView, row, position, id ->
+            nativeOptionClick?.onItemClick(parentView, row, position, id)
+            (list.adapter as? BaseAdapter)?.notifyDataSetChanged()
             (options.adapter as? BaseAdapter)?.notifyDataSetChanged()
         }
     }
@@ -586,16 +642,16 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                 ))
             }
             val entry = sourceAt(position)
+            val selected = entry != null &&
+                fragment?.player?.getCurrentPreferredSubtitle()?.url == entry.originalUrl
             val original = originalEndPadding.getOrPut(text) { text.paddingRight }
-            val right = original + if (entry != null) (40 * text.resources.displayMetrics.density).toInt() else 0
+            val right = original + if (selected) (40 * text.resources.displayMetrics.density).toInt() else 0
             if (text.paddingRight != right) {
                 text.setPadding(text.paddingLeft, text.paddingTop, right, text.paddingBottom)
             }
-            button.visibility = if (entry == null) View.GONE else View.VISIBLE
-            val selected = entry != null &&
-                fragment?.player?.getCurrentPreferredSubtitle()?.url == entry.originalUrl
+            button.visibility = if (selected) View.VISIBLE else View.GONE
             button.isEnabled = selected && refreshJob?.isActive != true
-            button.alpha = if (selected) 1f else 0.35f
+            button.alpha = if (button.isEnabled) 1f else 0.35f
             if (entry != null) {
                 button.imageTintList = ColorStateList.valueOf(text.currentTextColor)
                 button.setOnClickListener { requestSubtitleRefresh(entry, button) }
@@ -650,6 +706,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             } finally {
                 val selected = fragment === target && model?.state?.instance == instance &&
                     target.player.getCurrentPreferredSubtitle()?.url == entry.originalUrl
+                button.visibility = if (selected) View.VISIBLE else View.GONE
                 button.isEnabled = selected
                 button.alpha = if (selected) 1f else 0.35f
             }
