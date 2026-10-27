@@ -72,7 +72,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private var preferredLanguage: String? = null
     private val trackIdPrefix = Regex("^\\d+:")
     private val extraCaptionRegex = Regex(
-        """（[^（）]*）[ \\t]*|^[ \\t]*[♬♪~～]+[ \\t]*(?:\\r?\\n|$)|[⸨⸩≪≫➡⚟]""",
+        """（[^（）]*）[ \t]*|^[ \t]*[♬♪~～]+[ \t]*(?:\r?\n|$)|[⸨⸩≪≫➡⚟]""",
         RegexOption.MULTILINE
     )
     private val captionOutputField = runCatching {
@@ -209,7 +209,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
                 cleaned?.add(cue)
                 return@forEachIndexed
             }
-            val result = SpannableStringBuilder(original)
+            val result = SpannableStringBuilder(original ?: return@forEachIndexed)
             for (match in matches.asReversed()) {
                 result.delete(match.range.first, match.range.last + 1)
             }
