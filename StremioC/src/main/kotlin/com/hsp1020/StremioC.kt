@@ -5553,7 +5553,8 @@ open class StremioC(
             ?: SubtitleHelper.fromLanguageToTagIETF(sourceCode, true)
             ?: return null
         if (sourceTag == target) return null
-        return SubtitleHelper.fromCodeToOpenSubtitlesTag(sourceTag)
+        return SubtitleHelper.languages.firstOrNull { it.IETF_tag == sourceTag }
+            ?.ISO_639_3?.takeIf { it.isNotBlank() }
             ?.uppercase(java.util.Locale.ROOT)
     }
 
