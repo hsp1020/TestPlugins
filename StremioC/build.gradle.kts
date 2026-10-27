@@ -33,6 +33,7 @@ dependencies {
     compileOnly("androidx.navigation:navigation-fragment:2.9.8")
 
     compileOnly("androidx.media3:media3-ui:1.9.3")
+    compileOnly("androidx.media3:media3-extractor:1.9.3")
     compileOnly("org.jetbrains.kotlinx:kotlinx-collections-immutable-jvm:0.4.0")
 
     compileOnly("com.facebook.shimmer:shimmer:0.5.0")
