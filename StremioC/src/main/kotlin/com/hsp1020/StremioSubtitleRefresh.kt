@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.Build
+import android.util.TypedValue
 import android.view.View
 import android.widget.FrameLayout
 import androidx.core.app.PictureInPictureModeChangedInfo
@@ -17,17 +19,25 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.text.Cue
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.SubtitleView
+import androidx.media3.extractor.text.SubtitleParser
 import androidx.annotation.OptIn
 import androidx.fragment.app.FragmentActivity
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.ui.player.CustomDecoder
 import com.lagradost.cloudstream3.ui.player.CustomDecoder.Companion.fixSubtitleAlignment
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
-import com.lagradost.cloudstream3.ui.player.SubtitleCue
 import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment
 import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment.Companion.applyStyle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Response
+import java.io.IOException
 import okhttp3.CacheControl
 import okhttp3.Request
 import org.json.JSONObject
@@ -37,7 +47,8 @@ import java.util.LinkedHashMap
 /** Stremio provenance is intentionally kept outside CloudStream's SubtitleFile/SubtitleData. */
 @OptIn(UnstableApi::class)
 internal object StremioSubtitleRefreshRegistry {
-    data class Prepared(val cues: List<SubtitleCue>, val boundaries: LongArray)
+    data class TimedCues(val startTimeMs: Long, val endTimeMs: Long, val cues: List<Cue>)
+    data class Prepared(val cues: List<TimedCues>, val timeline: SubtitleTimeline)
 
     data class Entry(
         val originalUrl: String,
@@ -47,7 +58,8 @@ internal object StremioSubtitleRefreshRegistry {
         val listUrl: String?,
         val position: Int,
         val headers: Map<String, String>,
-        val latestUrl: String = originalUrl
+        val latestUrl: String = originalUrl,
+        val ambiguous: Boolean = false
     )
 
     private val entries = object : LinkedHashMap<String, Entry>(32, 0.75f, true) {
@@ -63,8 +75,15 @@ internal object StremioSubtitleRefreshRegistry {
         // The native player de-duplicates by URL. Prefer exact list provenance
         // if an inline stream entry for the same addon was recorded first.
         val previous = entries[url]
+        if (previous != null && (previous.addonUrl != addonUrl ||
+                (previous.id != null && id != null && previous.id != id))) {
+            // CloudStream collapses equal URLs. Never guess which addon owns that row.
+            entries[url] = previous.copy(ambiguous = true)
+            return
+        }
+        if (previous?.ambiguous == true) return
         if (previous == null || (previous.addonUrl == addonUrl &&
-            previous.listUrl == null && listUrl != null &&
+            listUrl != null &&
             (previous.id == null || previous.id == id))) {
             entries[url] = Entry(
                 url, addonUrl, id?.takeIf { it.isNotBlank() }, lang, listUrl, position, headers
@@ -73,7 +92,7 @@ internal object StremioSubtitleRefreshRegistry {
     }
 
     @Synchronized
-    fun find(url: String): Entry? = entries[url]
+    fun find(url: String): Entry? = entries[url]?.takeUnless { it.ambiguous }
 
     @Synchronized
     private fun update(entry: Entry, url: String) {
@@ -88,73 +107,71 @@ internal object StremioSubtitleRefreshRegistry {
     private const val MAX_SUB_BYTES = 4 * 1024 * 1024
     private const val MAX_LIST_BYTES = 512 * 1024
 
-    private fun readBytes(url: String, headers: Map<String, String>, max: Int): ByteArray {
+    private suspend fun readBytes(url: String, headers: Map<String, String>, max: Int): ByteArray {
         require(url.startsWith("https://", true) || url.startsWith("http://", true))
         val request = Request.Builder().url(url).cacheControl(cacheControl).apply {
             app.defaultHeaders.forEach { (name, value) -> header(name, value) }
             headers.forEach { (name, value) -> header(name, value) }
         }.build()
-        noCacheClient.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "HTTP " + response.code }
-            val body = response.body ?: error("Empty subtitle response")
-            require(body.contentLength() <= max || body.contentLength() < 0)
-            body.byteStream().use { stream ->
-                val out = ByteArrayOutputStream()
-                val buffer = ByteArray(8192)
-                while (true) {
-                    val count = stream.read(buffer)
-                    if (count < 0) break
-                    check(out.size() + count <= max) { "Subtitle response exceeds limit" }
-                    out.write(buffer, 0, count)
+        return suspendCancellableCoroutine { continuation ->
+            val call = noCacheClient.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    continuation.resumeWithException(e)
                 }
-                return out.toByteArray()
-            }
+                override fun onResponse(call: Call, response: Response) {
+                    try {
+                        val bytes = response.use {
+                            check(response.isSuccessful) { "HTTP " + response.code }
+                            val body = response.body ?: error("Empty subtitle response")
+                            require(body.contentLength() <= max || body.contentLength() < 0)
+                            body.byteStream().use { stream ->
+                                val out = ByteArrayOutputStream()
+                                val buffer = ByteArray(8192)
+                                while (true) {
+                                    if (!continuation.isActive) throw IOException("Cancelled")
+                                    val count = stream.read(buffer)
+                                    if (count < 0) break
+                                    check(out.size() + count <= max) { "Subtitle response exceeds limit" }
+                                    out.write(buffer, 0, count)
+                                }
+                                out.toByteArray()
+                            }
+                        }
+                        continuation.resume(bytes)
+                    } catch (e: Exception) {
+                        continuation.resumeWithException(e)
+                    }
+                }
+            })
         }
     }
 
     /**
      * Refresh only the originating addon request and selected subtitle body.
      * A changed URL is matched by id; if id is absent we only accept the
-     * original URL or the same position AND language, never an unrelated row.
+     * original URL; ambiguous or missing identities fail without replacing cues.
      */
     suspend fun refresh(entry: Entry): Prepared = withContext(Dispatchers.IO) {
+        check(find(entry.originalUrl)?.let {
+            it.addonUrl == entry.addonUrl && it.id == entry.id && it.listUrl == entry.listUrl
+        } == true) { "Subtitle provenance changed" }
         var url = entry.latestUrl
         if (entry.listUrl != null) {
             val response = JSONObject(readBytes(entry.listUrl, emptyMap(), MAX_LIST_BYTES).toString(Charsets.UTF_8))
             val subtitles = response.optJSONArray("subtitles") ?: error("Missing subtitles")
-            var selected: JSONObject? = null
-            if (entry.id != null) {
-                for (index in 0 until subtitles.length()) {
-                    val candidate = subtitles.optJSONObject(index) ?: continue
-                    if (candidate.optString("id") == entry.id &&
-                        (entry.lang == null || entry.lang.equals(
-                            candidate.optString("lang", candidate.optString("lang_code")), true))) {
-                        selected = candidate
-                        break
-                    }
-                }
-            } else {
-                for (index in 0 until subtitles.length()) {
-                    val candidate = subtitles.optJSONObject(index) ?: continue
-                    if (candidate.optString("url") == entry.latestUrl ||
-                        candidate.optString("url") == entry.originalUrl) {
-                        selected = candidate
-                        break
-                    }
-                }
-                // No ID or matching URL: only accept a unique language candidate.
-                // Reusing an index would silently swap to another same-language subtitle.
-                if (selected == null && entry.lang != null) {
-                    val matches = (0 until subtitles.length()).mapNotNull { index ->
-                        subtitles.optJSONObject(index)?.takeIf { candidate ->
-                            entry.lang.equals(candidate.optString("lang", candidate.optString("lang_code")), true)
-                        }
-                    }
-                    selected = matches.singleOrNull()
+            val candidates = (0 until subtitles.length()).mapNotNull { index ->
+                subtitles.optJSONObject(index)?.let { candidate ->
+                    SubtitleRefreshCandidate(
+                        candidate.optString("id").takeIf { it.isNotBlank() },
+                        candidate.optString("lang", candidate.optString("lang_code")).takeIf { it.isNotBlank() },
+                        candidate.optString("url")
+                    )
                 }
             }
-            url = selected?.optString("url")?.takeIf { it.isNotBlank() }
-                ?: error("Subtitle no longer available")
+            url = selectRefreshedSubtitleUrl(entry.id, entry.lang, entry.originalUrl, entry.latestUrl, candidates)
+                ?: error("Subtitle missing or ambiguous")
         }
         val bytes = readBytes(url, entry.headers, MAX_SUB_BYTES)
         check(bytes.isNotEmpty()) { "Empty subtitle" }
@@ -166,16 +183,25 @@ internal object StremioSubtitleRefreshRegistry {
                 .startsWith("WEBVTT", true)) MimeTypes.TEXT_VTT else MimeTypes.APPLICATION_SUBRIP
         val prepared = withContext(Dispatchers.Default) {
             val decoder = CustomDecoder(Format.Builder().setSampleMimeType(type).build())
-            decoder.parseToLegacySubtitle(bytes, 0, bytes.size)
-            val cues = decoder.currentSubtitleCues.filter {
-                it.durationMs > 0 && it.text.any { text -> text.isNotBlank() }
-            }.sortedBy { it.startTimeMs }
-            val boundaries = cues.asSequence().flatMap {
-                sequenceOf(it.startTimeMs, it.endTimeMs)
-            }.distinct().sorted().toList().toLongArray()
-            Prepared(cues, boundaries)
+            val parsed = ArrayList<TimedCues>()
+            decoder.parse(bytes, 0, bytes.size, SubtitleParser.OutputOptions.allCues()) { output ->
+                // CustomDecoder records unshifted timing before invoking this callback.
+                // Keep Media3's styled cues, without changing its global subtitle offset.
+                val timing = decoder.currentSubtitleCues.lastOrNull()
+                if (timing != null && timing.durationMs > 0 &&
+                    output.cues.any { !it.text.isNullOrBlank() }) {
+                    parsed.add(TimedCues(timing.startTimeMs, timing.endTimeMs, output.cues.toList()))
+                }
+            }
+            ensureActive()
+            val cues = parsed.sortedBy { it.startTimeMs }
+            val timeline = SubtitleTimeline(
+                cues.map { it.startTimeMs }.toLongArray(), cues.map { it.endTimeMs }.toLongArray()
+            )
+            Prepared(cues, timeline)
         }
         check(prepared.cues.isNotEmpty()) { "No valid SRT/VTT cues" }
+        ensureActive()
         update(entry, url)
         prepared
     }
@@ -192,14 +218,14 @@ internal class StremioRefreshedSubtitleOverlay {
     private var overlay: SubtitleView? = null
     private var host: FragmentActivity? = null
     private var targetUrl: String? = null
-    private var cues: List<SubtitleCue> = emptyList()
-    private var boundaries: LongArray = longArrayOf()
-    private var rendered: List<Int> = emptyList()
+    private var cues: List<StremioSubtitleRefreshRegistry.TimedCues> = emptyList()
+    private var timeline: SubtitleTimeline? = null
+    private var rendered: List<Int>? = null
     private var lastOffset = Long.MIN_VALUE
     private val tick = Runnable { synchronize() }
     private val pipListener = Consumer<PictureInPictureModeChangedInfo> { applyAppearance() }
     private val styleListener: (com.lagradost.cloudstream3.ui.subtitles.SaveCaptionStyle) -> Unit = {
-        overlay?.post { if (overlay != null) { applyAppearance(); rendered = emptyList(); synchronize() } }
+        overlay?.post { if (overlay != null) { applyAppearance(); rendered = null; synchronize() } }
     }
 
     private val playerListener = object : Player.Listener {
@@ -220,9 +246,8 @@ internal class StremioRefreshedSubtitleOverlay {
             targetUrl != selected || candidate.subView !== original) {
             detach()
         } else if (candidate.player.getSubtitleOffset() != lastOffset) {
-            // Reuse the existing native-dialog controller tick for a change check.
-            // No new recurring timer is introduced for offset settings.
-            rendered = emptyList()
+            // Native offset apply/reset emits a seek event, including while paused.
+            rendered = null
             synchronize()
         }
     }
@@ -238,8 +263,8 @@ internal class StremioRefreshedSubtitleOverlay {
             original === native && targetUrl == subtitleUrl && overlay != null) {
             if (cues !== parsed) {
                 cues = parsed
-                boundaries = prepared.boundaries
-                rendered = emptyList()
+                timeline = prepared.timeline
+                rendered = null
                 synchronize()
             }
             return
@@ -251,7 +276,7 @@ internal class StremioRefreshedSubtitleOverlay {
         originalAlpha = native.alpha
         targetUrl = subtitleUrl
         cues = parsed
-        boundaries = prepared.boundaries
+        timeline = prepared.timeline
         val view = SubtitleView(native.context).apply {
             isClickable = false
             isFocusable = false
@@ -274,13 +299,15 @@ internal class StremioRefreshedSubtitleOverlay {
         val native = original ?: return
         val saved = SubtitlesFragment.getCurrentSavedStyle()
         SubtitlesFragment.setSubtitleViewStyle(view, saved, true)
-        if (host?.isInPictureInPictureMode == true) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && host?.isInPictureInPictureMode == true) {
             view.setPadding(view.paddingLeft, 0, view.paddingRight, view.paddingBottom)
             view.translationY = 0f
             view.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * 1.5f)
             view.setBottomPaddingFraction(SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
         } else {
-            view.translationY = native.translationY
+            view.translationY = -TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_DIP, saved.elevation.toFloat(), view.resources.displayMetrics
+            )
         }
     }
 
@@ -297,24 +324,20 @@ internal class StremioRefreshedSubtitleOverlay {
         val offset = candidate.player.getSubtitleOffset()
         lastOffset = offset
         val time = player.currentPosition + offset
-        val indexes = ArrayList<Int>(2)
-        for (index in cues.indices) {
-            val cue = cues[index]
-            if (cue.startTimeMs <= time && time < cue.endTimeMs) indexes.add(index)
-        }
+        val indexes = timeline?.activeAt(time) ?: emptyList()
         if (indexes != rendered) {
             val style = SubtitlesFragment.getCurrentSavedStyle()
-            view.setCues(indexes.map { index ->
-                Cue.Builder().setText(cues[index].text.joinToString("\n"))
-                    .fixSubtitleAlignment().applyStyle(style).build()
+            view.setCues(indexes.flatMap { index ->
+                cues[index].cues.map { cue ->
+                    cue.buildUpon().fixSubtitleAlignment().applyStyle(style).build()
+                }
             })
             rendered = indexes
         }
         if (!player.isPlaying) return
-        val next = boundaries.binarySearch(time + 1).let { if (it < 0) -it - 1 else it }
-        if (next >= boundaries.size) return
+        val next = timeline?.nextAfter(time) ?: return
         val speed = player.playbackParameters.speed.coerceAtLeast(0.1f)
-        val wait = ((boundaries[next] - time) / speed).toLong().coerceAtLeast(1L)
+        val wait = ((next - time) / speed).toLong().coerceAtLeast(1L)
         main.postDelayed(tick, wait)
     }
 
@@ -333,8 +356,8 @@ internal class StremioRefreshedSubtitleOverlay {
         host = null
         targetUrl = null
         cues = emptyList()
-        boundaries = longArrayOf()
-        rendered = emptyList()
+        timeline = null
+        rendered = null
         lastOffset = Long.MIN_VALUE
     }
 }
