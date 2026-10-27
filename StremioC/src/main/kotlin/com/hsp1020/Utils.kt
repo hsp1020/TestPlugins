@@ -59,6 +59,8 @@ import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.TextView
 import android.widget.FrameLayout
+import android.widget.Checkable
+import androidx.media3.common.Player
 import com.google.android.material.chip.ChipGroup
 import androidx.core.content.ContextCompat
 import androidx.appcompat.widget.AppCompatSpinner
@@ -291,9 +293,60 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
     private var pendingDialog: Dialog? = null
     private var isStremio = false
     private val refreshedOverlay = StremioRefreshedSubtitleOverlay()
-    private val refreshedCues = mutableMapOf<String, StremioSubtitleRefreshRegistry.Prepared>()
+    private val refreshedCues = linkedMapOf<String, StremioSubtitleRefreshRegistry.Prepared>()
     private val refreshScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var refreshJob: Job? = null
+    private var refreshGeneration = 0L
+    private var observedPlayer: Player? = null
+    private var selectedUrl: String? = null
+    private var removeStateObserver: (() -> Unit)? = null
+    private val playerListener = object : Player.Listener {
+        override fun onEvents(player: Player, events: Player.Events) {
+            updateRefreshedSubtitle()
+        }
+
+        override fun onMediaItemTransition(item: androidx.media3.common.MediaItem?, reason: Int) {
+            clearRefreshState()
+        }
+    }
+
+    private fun clearRefreshState() {
+        refreshGeneration++
+        refreshJob?.cancel()
+        refreshJob = null
+        refreshedCues.clear()
+        refreshedOverlay.detach()
+    }
+
+    private fun bindPlayer() {
+        val current = fragment?.playerView?.player
+        if (current === observedPlayer) return
+        observedPlayer?.removeListener(playerListener)
+        clearRefreshState()
+        observedPlayer = current
+        selectedUrl = fragment?.player?.getCurrentPreferredSubtitle()?.url
+        current?.addListener(playerListener)
+    }
+
+    private fun updateRefreshedSubtitle() {
+        val target = fragment ?: return
+        if (model?.state?.instance != lastInstance) {
+            clearRefreshState()
+            return
+        }
+        val currentUrl = target.player.getCurrentPreferredSubtitle()?.url
+        if (selectedUrl != currentUrl) {
+            refreshGeneration++
+            refreshJob?.cancel()
+            refreshJob = null
+            refreshedOverlay.detach()
+            selectedUrl = currentUrl
+        }
+        refreshedOverlay.bind(target)
+        currentUrl?.let { url ->
+            refreshedCues[url]?.let { refreshedOverlay.attach(target, url, it) }
+        }
+    }
     private val dialogField = runCatching {
         FullScreenPlayer::class.java.getDeclaredField("selectSourceDialog")
             .apply { isAccessible = true }
@@ -315,21 +368,12 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             if (lastInstance != state.instance) {
                 lastInstance = state.instance
                 sortedDialog = null
-                refreshJob?.cancel()
-                refreshJob = null
-                refreshedCues.clear()
-                refreshedOverlay.detach()
+                clearRefreshState()
                 isStremio = checkStremio()
             }
             if (isStremio) {
-                if (refreshedCues.isNotEmpty()) {
-                    refreshedOverlay.bind(f)
-                    val selectedUrl = f.player.getCurrentPreferredSubtitle()?.url
-                    val prepared = selectedUrl?.let(refreshedCues::get)
-                    if (selectedUrl != null && prepared != null) {
-                        refreshedOverlay.attach(f, selectedUrl, prepared)
-                    }
-                }
+                // Discover player replacement only; cue/selection/offset updates are events.
+                bindPlayer()
                 val popup = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
                 if (popup != null && popup.isShowing &&
                     popup !== sortedDialog && popup !== pendingDialog) {
@@ -353,6 +397,18 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         detach()
         fragment = candidate
         model = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
+        val currentModel = model ?: return
+        val observer = Observer<com.lagradost.cloudstream3.ui.player.VideoLive<Resource<Unit>>> {
+            if (lastInstance != currentModel.state.instance) {
+                clearRefreshState()
+                lastInstance = currentModel.state.instance
+                isStremio = checkStremio()
+                sortedDialog = null
+            }
+            if (isStremio) bindPlayer()
+        }
+        currentModel.loadingLinks.observe(candidate.viewLifecycleOwner, observer)
+        removeStateObserver = { currentModel.loadingLinks.removeObserver(observer) }
         dialogHandler.post(dialogTick)
     }
 
@@ -456,6 +512,16 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         }
     }
 
+    private class RefreshRow(context: Context) : FrameLayout(context), Checkable {
+        private var checked = false
+        override fun isChecked() = checked
+        override fun toggle() = setChecked(!checked)
+        override fun setChecked(value: Boolean) {
+            checked = value
+            (getChildAt(0) as? Checkable)?.isChecked = value
+        }
+    }
+
     private inner class RefreshRowAdapter(
         private val source: ArrayAdapter<*>,
         private val sourceAt: (Int) -> StremioSubtitleRefreshRegistry.Entry?
@@ -473,13 +539,18 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         override fun isEnabled(position: Int): Boolean = source.isEnabled(position)
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-            val row = (convertView as? FrameLayout) ?: FrameLayout(parent.context)
+            val row = (convertView as? RefreshRow) ?: RefreshRow(parent.context)
             val oldText = row.getChildAt(0) as? TextView
             val text = source.getView(position, oldText, parent) as TextView
             if (text !== oldText) {
                 (text.parent as? ViewGroup)?.removeView(text)
                 if (oldText != null) row.removeView(oldText)
                 row.addView(text, 0, FrameLayout.LayoutParams(-1, -2))
+            }
+            (text as? Checkable)?.isChecked = row.isChecked
+            // A focusable refresh button must not consume the native name action.
+            text.setOnClickListener {
+                (parent as? ListView)?.performItemClick(row, position, getItemId(position))
             }
             val button = (row.getChildAt(1) as? ImageButton) ?: ImageButton(parent.context).apply {
                 setImageDrawable(pluginResources.getDrawable(
@@ -502,6 +573,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                 text.setPadding(text.paddingLeft, text.paddingTop, right, text.paddingBottom)
             }
             button.visibility = if (entry == null) View.GONE else View.VISIBLE
+            button.isEnabled = true
             if (entry != null) {
                 button.imageTintList = ColorStateList.valueOf(text.currentTextColor)
                 button.setOnClickListener { requestSubtitleRefresh(entry, button) }
@@ -516,11 +588,19 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         val target = fragment ?: return
         val instance = model?.state?.instance ?: return
         if (refreshJob?.isActive == true) return
+        bindPlayer()
+        val mediaPlayer = observedPlayer ?: return
+        val generation = ++refreshGeneration
         button.isEnabled = false
         refreshJob = refreshScope.launch {
             try {
                 val result = StremioSubtitleRefreshRegistry.refresh(entry)
-                if (fragment === target && model?.state?.instance == instance) {
+                if (generation == refreshGeneration && fragment === target &&
+                    model?.state?.instance == instance && target.playerView?.player === mediaPlayer) {
+                    // Bound retained parsed subtitles for long playback sessions.
+                    if (entry.originalUrl !in refreshedCues && refreshedCues.size >= 4) {
+                        refreshedCues.keys.firstOrNull { it != selectedUrl }?.let(refreshedCues::remove)
+                    }
                     refreshedCues[entry.originalUrl] = result
                     if (target.player.getCurrentPreferredSubtitle()?.url == entry.originalUrl) {
                         refreshedOverlay.attach(target, entry.originalUrl, result)
@@ -529,7 +609,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (fragment === target) {
+                if (generation == refreshGeneration && fragment === target && model?.state?.instance == instance) {
                     android.widget.Toast.makeText(
                         target.context, pluginResources.getString(
                             com.hsp1020.R.string.stremioc_refresh_failed
@@ -545,10 +625,12 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
     fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
         dialogHandler.removeCallbacks(dialogTick)
-        refreshJob?.cancel()
-        refreshJob = null
-        refreshedCues.clear()
-        refreshedOverlay.detach()
+        removeStateObserver?.invoke()
+        removeStateObserver = null
+        observedPlayer?.removeListener(playerListener)
+        observedPlayer = null
+        selectedUrl = null
+        clearRefreshState()
         fragment = null
         model = null
         lastInstance = -1
