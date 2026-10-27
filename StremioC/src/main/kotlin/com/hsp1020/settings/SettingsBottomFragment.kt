@@ -272,7 +272,8 @@ class SettingsBottomFragment(
         val key: String,
         val displayName: String,
         var isChecked: Boolean = true,
-        var showOnHome: Boolean = true
+        var showOnHome: Boolean = true,
+        val homeSelectable: Boolean = true
     )
 
     private var searchJob: Job? = null 
@@ -2404,12 +2405,14 @@ private fun showLanguageSelectDialog() {
                         val type = cat.type ?: "movie"
                         val name = cat.name ?: id
                         val displayType = type.replaceFirstChar { it.uppercase() }
+                        val homeSelectable = !cat.requiresExtra("search")
 
                         flatTabs.add(ConfigFlatTab(
                             key = "${id}_${type}_default", 
                             displayName = "$name - $displayType",
                             isChecked = sharedPref.getBoolean("tab_enabled_${uniqueId}_${id}_${type}_default", true),
-                            showOnHome = sharedPref.getBoolean("tab_home_${uniqueId}_${id}_${type}_default", true)
+                            showOnHome = homeSelectable && sharedPref.getBoolean("tab_home_${uniqueId}_${id}_${type}_default", true),
+                            homeSelectable = homeSelectable
                         ))
                     }
                 }
@@ -2596,14 +2599,16 @@ private fun showLanguageSelectDialog() {
                 val tab = visibleTabs[position]
 
                 fun updateHomeIcon() {
-                    holder.homeIcon.isEnabled = tab.isChecked
-                    holder.homeIcon.isClickable = tab.isChecked
-                    holder.homeIcon.isFocusable = tab.isChecked
+                    val canToggleHome = tab.isChecked && tab.homeSelectable
+                    holder.homeIcon.isEnabled = canToggleHome
+                    holder.homeIcon.isClickable = canToggleHome
+                    holder.homeIcon.isFocusable = canToggleHome
                     holder.homeIcon.imageTintList = ColorStateList.valueOf(
-                        if (tab.isChecked && tab.showOnHome)
+                        if (canToggleHome && tab.showOnHome)
                             hostContext.colorFromAttribute(HostR.attr.colorPrimary)
                         else Color.GRAY)
                     holder.homeIcon.contentDescription = when {
+                        !tab.homeSelectable -> "${tab.displayName}: Search-only catalog, unavailable on Home"
                         !tab.isChecked -> "${tab.displayName}: Enable catalog to change Home visibility"
                         tab.showOnHome -> "${tab.displayName}: Shown on Home"
                         else -> "${tab.displayName}: Hidden from Home"
@@ -2611,7 +2616,7 @@ private fun showLanguageSelectDialog() {
                 }
                 updateHomeIcon()
                 holder.homeIcon.setOnClickListener {
-                    if (!tab.isChecked) return@setOnClickListener
+                    if (!tab.isChecked || !tab.homeSelectable) return@setOnClickListener
                     tab.showOnHome = !tab.showOnHome
                     updateHomeIcon()
                 }
