@@ -86,6 +86,11 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private var captionView: SubtitleView? = null
     private var captionNativeOutput: Any? = null
     private var captionWrappedOutput: Any? = null
+    private var traceSubtitleId: String? = null
+    private var traceSelectionSeen = false
+    private var traceEmptySeen = false
+    private var traceNonEmptySeen = false
+    private var traceMultipleSeen = false
     private var captionFailedView: SubtitleView? = null
     private var captionLayoutTree: ViewTreeObserver? = null
     private val captionLayoutListener = ViewTreeObserver.OnGlobalLayoutListener {
@@ -102,6 +107,21 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             restoreCaptionOutput()
             captionFailedView = null
         }
+    }
+
+    private fun traceCaptionSelection(f: GeneratorPlayer) {
+        if (!cleanExtraCaptions) return
+        val id = f.player.getCurrentPreferredSubtitle()?.getId()
+        if (traceSelectionSeen && traceSubtitleId == id) return
+        traceSelectionSeen = true
+        traceSubtitleId = id
+        traceEmptySeen = false
+        traceNonEmptySeen = false
+        traceMultipleSeen = false
+        Log.i("Elevate-SubtitleTrace",
+            "selection=${id?.hashCode()?.let(java.lang.Integer::toHexString) ?: "none"} " +
+                "renderer=${if (captionView == null) "none" else if (captionView === f.subView) "native" else "overlay"} " +
+                "alpha=${captionView?.alpha ?: -1f} filter=$cleanExtraCaptions")
     }
 
     private val dialogField = runCatching {
@@ -133,6 +153,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             "onTracksChanged" -> {
                 synchronizeSource()
                 (args?.getOrNull(0) as? Tracks)?.let(::selectEmbedded)
+                fragment?.let(::traceCaptionSelection)
                 null
             }
             "equals" -> proxy === args?.getOrNull(0)
@@ -289,7 +310,27 @@ internal class EmbeddedSubtitleController(private val application: Application) 
                             @Suppress("UNCHECKED_CAST")
                             val cues = parameters.getOrNull(0) as? List<Cue>
                             if (cues != null) {
-                                parameters[0] = cleanCaptionCues(cues)
+                                traceCaptionSelection(f)
+                                val cleaned = cleanCaptionCues(cues)
+                                parameters[0] = cleaned
+                                val kind = when {
+                                    cues.isEmpty() && !traceEmptySeen -> "empty".also { traceEmptySeen = true }
+                                    cues.size > 1 && !traceMultipleSeen -> "multiple".also {
+                                        traceMultipleSeen = true
+                                        traceNonEmptySeen = true
+                                    }
+                                    cues.isNotEmpty() && !traceNonEmptySeen -> "nonempty".also {
+                                        traceNonEmptySeen = true
+                                    }
+                                    else -> null
+                                }
+                                if (kind != null) {
+                                    Log.i("Elevate-SubtitleTrace",
+                                        "output event=$kind view=${if (view === f.subView) "native" else "overlay"} " +
+                                            "raw=${cues.size} filtered=${cleaned.size} alpha=${view.alpha} " +
+                                            "nativeAlpha=${f.subView?.alpha ?: -1f} " +
+                                            "selection=${traceSubtitleId?.hashCode()?.let(java.lang.Integer::toHexString) ?: "none"}")
+                                }
                             }
                         }
                         runCatching { update.invoke(currentOutput, *parameters) }.getOrElse {
@@ -314,6 +355,12 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         captionView = view
         captionNativeOutput = currentOutput
         captionWrappedOutput = wrapper
+        traceEmptySeen = false
+        traceNonEmptySeen = false
+        traceMultipleSeen = false
+        Log.i("Elevate-SubtitleTrace",
+            "attach view=${if (view === nativeView) "native" else "overlay"} " +
+                "alpha=${view.alpha} nativeAlpha=${nativeView.alpha} siblingViews=${holder?.childCount ?: 0}")
         refreshCaptionOutput()
     }
 
@@ -337,6 +384,8 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         captionNativeOutput = null
         captionWrappedOutput = null
         if (view != null && native != null && wrapper != null) {
+            Log.i("Elevate-SubtitleTrace",
+                "detach view=${if (view === fragment?.subView) "native" else "overlay"} alpha=${view.alpha}")
             runCatching {
                 val field = captionOutputField ?: return@runCatching
                 if (field.get(view) === wrapper) {
@@ -412,6 +461,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         val f = fragment ?: return
         if (f.playerView?.player?.let { it !== player } == true) synchronizeSource()
         attachCaptionOutput(f)
+        traceCaptionSelection(f)
         trackDialog(f)
         val popup = selectionDialog
         if (popup != null && popup !== labeledDialog && popup !== pendingDialog) {
@@ -569,6 +619,8 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         captionLayoutTree = null
         restoreCaptionOutput()
         captionFailedView = null
+        traceSelectionSeen = false
+        traceSubtitleId = null
         focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
         focusTree = null
         player?.removeListener(listener)
