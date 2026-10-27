@@ -289,7 +289,10 @@ internal fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
 internal class StremioSubtitleController(private val pluginResources: Resources) {
     private var fragment: GeneratorPlayer? = null
     private var model: PlayerGeneratorViewModel? = null
-    private val dialogHandler = Handler(Looper.getMainLooper())
+    private var focusTree: ViewTreeObserver? = null
+    private val focusListener = ViewTreeObserver.OnWindowFocusChangeListener {
+        fragment?.view?.post { inspectDialogs() }
+    }
     private var lastInstance = -1
     private var sortedDialog: Dialog? = null
     private var pendingDialog: Dialog? = null
@@ -344,6 +347,16 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         current?.addListener(playerListener)
     }
 
+    private fun refreshPickerIcons(url: String?) {
+        if (iconSelectionUrl == url) return
+        iconSelectionUrl = url
+        val dialog = sortedDialog?.takeIf { it.isShowing } ?: return
+        (dialog.findViewById<ListView>(R.id.sort_subtitles)?.adapter as? BaseAdapter)
+            ?.notifyDataSetChanged()
+        (dialog.findViewById<ListView>(R.id.sort_subtitles_options)?.adapter as? BaseAdapter)
+            ?.notifyDataSetChanged()
+    }
+
     private fun updateRefreshedSubtitle() {
         val target = fragment ?: return
         if (model?.state?.instance != lastInstance) {
@@ -351,6 +364,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             return
         }
         val currentUrl = target.player.getCurrentPreferredSubtitle()?.url
+        refreshPickerIcons(currentUrl)
         if (selectedUrl != currentUrl) {
             refreshGeneration++
             refreshJob?.cancel()
@@ -401,54 +415,37 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             APIHolder.allProviders.any { it is StremioC && it.name.equals(response.apiName, true) }
     }
 
-    // A native dialog lives in another window: inspect it occasionally, not
-    // on every player draw. All dialog UI changes still run on the main thread.
-    private val dialogTick = object : Runnable {
-      override fun run() {
-        val f = fragment
-        val state = model?.state
-        if (f != null && state != null) {
-            if (lastInstance != state.instance) {
-                lastInstance = state.instance
-                sortedDialog = null
-                clearRefreshState()
-                isStremio = checkStremio()
-            }
-            if (isStremio) {
-                // Discover player replacement only; cue/selection/offset updates are events.
-                bindPlayer()
-                val popup = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
-                if (popup != null && popup.isShowing &&
-                    popup !== sortedDialog && popup !== pendingDialog) {
-                    pendingDialog = popup
-                    f.view?.post {
-                        pendingDialog = null
-                        if (popup.isShowing && fragment === f && sortPopup(popup)) {
-                            installRefreshIcons(popup)
-                            sortedDialog = popup
-                        }
-                    }
-                }
-                if (popup != null && popup.isShowing && popup === sortedDialog) {
-                    val currentUrl = f.player.getCurrentPreferredSubtitle()?.url
-                    if (iconSelectionUrl != currentUrl) {
-                        iconSelectionUrl = currentUrl
-                        (popup.findViewById<ListView>(R.id.sort_subtitles)?.adapter as? BaseAdapter)
-                            ?.notifyDataSetChanged()
-                        (popup.findViewById<ListView>(R.id.sort_subtitles_options)?.adapter as? BaseAdapter)
-                            ?.notifyDataSetChanged()
-                    }
-                }
-                val offsetDialog = runCatching { offsetDialogField?.get(f) as? Dialog }.getOrNull()
-                if (offsetDialog != null && offsetDialog.isShowing &&
-                    offsetDialog !== refreshedOffsetDialog) {
-                    refreshedOffsetDialog = offsetDialog
-                    showRefreshedCuesInOffsetDialog(offsetDialog)
+    // Run only when a dialog changes window focus or player state changes.
+    private fun inspectDialogs() {
+        val f = fragment ?: return
+        val state = model?.state ?: return
+        if (lastInstance != state.instance) {
+            lastInstance = state.instance
+            sortedDialog = null
+            clearRefreshState()
+            isStremio = checkStremio()
+        }
+        if (!isStremio) return
+        bindPlayer()
+        val popup = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
+        if (popup != null && popup.isShowing &&
+            popup !== sortedDialog && popup !== pendingDialog) {
+            pendingDialog = popup
+            f.view?.post {
+                pendingDialog = null
+                if (popup.isShowing && fragment === f && sortPopup(popup)) {
+                    installRefreshIcons(popup)
+                    sortedDialog = popup
                 }
             }
         }
-        if (fragment != null) dialogHandler.postDelayed(this, 200L)
-      }
+        refreshPickerIcons(f.player.getCurrentPreferredSubtitle()?.url)
+        val offsetDialog = runCatching { offsetDialogField?.get(f) as? Dialog }.getOrNull()
+        if (offsetDialog != null && offsetDialog.isShowing &&
+            offsetDialog !== refreshedOffsetDialog) {
+            refreshedOffsetDialog = offsetDialog
+            showRefreshedCuesInOffsetDialog(offsetDialog)
+        }
     }
 
     fun watch(candidate: Fragment) {
@@ -467,8 +464,19 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             if (isStremio) bindPlayer()
         }
         currentModel.loadingLinks.observe(candidate.viewLifecycleOwner, observer)
-        removeStateObserver = { currentModel.loadingLinks.removeObserver(observer) }
-        dialogHandler.post(dialogTick)
+        val linksObserver = Observer<com.lagradost.cloudstream3.ui.player.VideoLive<Set<com.lagradost.cloudstream3.ui.player.VideoLink>>> {
+            if (isStremio) bindPlayer()
+        }
+        currentModel.currentLinks.observe(candidate.viewLifecycleOwner, linksObserver)
+        removeStateObserver = {
+            currentModel.loadingLinks.removeObserver(observer)
+            currentModel.currentLinks.removeObserver(linksObserver)
+        }
+        candidate.activity?.window?.decorView?.viewTreeObserver?.takeIf { it.isAlive }?.let {
+            focusTree = it
+            it.addOnWindowFocusChangeListener(focusListener)
+        }
+        inspectDialogs()
     }
 
     private fun sortPopup(dialog: Dialog): Boolean {
@@ -715,7 +723,8 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
 
     fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
-        dialogHandler.removeCallbacks(dialogTick)
+        focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
+        focusTree = null
         removeStateObserver?.invoke()
         removeStateObserver = null
         observedPlayer?.removeListener(playerListener)
