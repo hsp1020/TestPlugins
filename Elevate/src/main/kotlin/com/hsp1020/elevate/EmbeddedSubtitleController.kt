@@ -6,7 +6,6 @@ import android.app.Dialog
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Bundle
-import android.util.Log
 import android.text.Spanned
 import android.text.SpannedString
 import android.text.SpannableStringBuilder
@@ -79,18 +78,13 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     )
     private val captionOutputField = runCatching {
         SubtitleView::class.java.getDeclaredField("output").apply { isAccessible = true }
-    }.onFailure { Log.w("Elevate-Captions", "Cannot access subtitle output", it) }.getOrNull()
+    }.getOrNull()
     private val captionCuesField = runCatching {
         SubtitleView::class.java.getDeclaredField("cues").apply { isAccessible = true }
-    }.onFailure { Log.w("Elevate-Captions", "Cannot access subtitle cues", it) }.getOrNull()
+    }.getOrNull()
     private var captionView: SubtitleView? = null
     private var captionNativeOutput: Any? = null
     private var captionWrappedOutput: Any? = null
-    private var traceSubtitleId: String? = null
-    private var traceSelectionSeen = false
-    private var traceEmptySeen = false
-    private var traceNonEmptySeen = false
-    private var traceMultipleSeen = false
     private var captionFailedView: SubtitleView? = null
     private var captionLayoutTree: ViewTreeObserver? = null
     private val captionLayoutListener = ViewTreeObserver.OnGlobalLayoutListener {
@@ -107,21 +101,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             restoreCaptionOutput()
             captionFailedView = null
         }
-    }
-
-    private fun traceCaptionSelection(f: GeneratorPlayer) {
-        if (!cleanExtraCaptions) return
-        val id = f.player.getCurrentPreferredSubtitle()?.getId()
-        if (traceSelectionSeen && traceSubtitleId == id) return
-        traceSelectionSeen = true
-        traceSubtitleId = id
-        traceEmptySeen = false
-        traceNonEmptySeen = false
-        traceMultipleSeen = false
-        Log.i("Elevate-SubtitleTrace",
-            "selection=${id?.hashCode()?.let(java.lang.Integer::toHexString) ?: "none"} " +
-                "renderer=${if (captionView == null) "none" else if (captionView === f.subView) "native" else "overlay"} " +
-                "alpha=${captionView?.alpha ?: -1f} filter=$cleanExtraCaptions")
     }
 
     private val dialogField = runCatching {
@@ -153,7 +132,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             "onTracksChanged" -> {
                 synchronizeSource()
                 (args?.getOrNull(0) as? Tracks)?.let(::selectEmbedded)
-                fragment?.let(::traceCaptionSelection)
                 null
             }
             "equals" -> proxy === args?.getOrNull(0)
@@ -268,10 +246,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         next?.addOnGlobalLayoutListener(captionLayoutListener)
     }
 
-    private fun captionHookFailed(view: SubtitleView, step: String, error: Throwable) {
-        if (captionFailedView !== view) {
-            Log.w("Elevate-Captions", "Subtitle filter unavailable at $step", error)
-        }
+    private fun captionHookFailed(view: SubtitleView) {
         captionFailedView = view
     }
 
@@ -290,7 +265,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         if (captionFailedView === view) return
         val field = captionOutputField ?: return
         val currentOutput = runCatching { field.get(view) }.getOrElse {
-            captionHookFailed(view, "read", it)
+            captionHookFailed(view)
             return
         } ?: return
         if (captionView === view && currentOutput === captionWrappedOutput) return
@@ -298,7 +273,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         val update = runCatching {
             field.type.declaredMethods.first { it.name == "update" }.apply { isAccessible = true }
         }.getOrElse {
-            captionHookFailed(view, "method", it)
+            captionHookFailed(view)
             return
         }
         val wrapper = runCatching {
@@ -310,31 +285,11 @@ internal class EmbeddedSubtitleController(private val application: Application) 
                             @Suppress("UNCHECKED_CAST")
                             val cues = parameters.getOrNull(0) as? List<Cue>
                             if (cues != null) {
-                                traceCaptionSelection(f)
-                                val cleaned = cleanCaptionCues(cues)
-                                parameters[0] = cleaned
-                                val kind = when {
-                                    cues.isEmpty() && !traceEmptySeen -> "empty".also { traceEmptySeen = true }
-                                    cues.size > 1 && !traceMultipleSeen -> "multiple".also {
-                                        traceMultipleSeen = true
-                                        traceNonEmptySeen = true
-                                    }
-                                    cues.isNotEmpty() && !traceNonEmptySeen -> "nonempty".also {
-                                        traceNonEmptySeen = true
-                                    }
-                                    else -> null
-                                }
-                                if (kind != null) {
-                                    Log.i("Elevate-SubtitleTrace",
-                                        "output event=$kind view=${if (view === f.subView) "native" else "overlay"} " +
-                                            "raw=${cues.size} filtered=${cleaned.size} alpha=${view.alpha} " +
-                                            "nativeAlpha=${f.subView?.alpha ?: -1f} " +
-                                            "selection=${traceSubtitleId?.hashCode()?.let(java.lang.Integer::toHexString) ?: "none"}")
-                                }
+                                parameters[0] = cleanCaptionCues(cues)
                             }
                         }
                         runCatching { update.invoke(currentOutput, *parameters) }.getOrElse {
-                            captionHookFailed(view, "update", it)
+                            captionHookFailed(view)
                             view.post { if (captionView === view) restoreCaptionOutput() }
                             null
                         }
@@ -346,21 +301,15 @@ internal class EmbeddedSubtitleController(private val application: Application) 
                 }
             }
         }.getOrElse {
-            captionHookFailed(view, "proxy", it)
+            captionHookFailed(view)
             return
         }
         if (runCatching { field.set(view, wrapper) }.onFailure {
-                captionHookFailed(view, "install", it)
+                captionHookFailed(view)
             }.isFailure) return
         captionView = view
         captionNativeOutput = currentOutput
         captionWrappedOutput = wrapper
-        traceEmptySeen = false
-        traceNonEmptySeen = false
-        traceMultipleSeen = false
-        Log.i("Elevate-SubtitleTrace",
-            "attach view=${if (view === nativeView) "native" else "overlay"} " +
-                "alpha=${view.alpha} nativeAlpha=${nativeView.alpha} siblingViews=${holder?.childCount ?: 0}")
         refreshCaptionOutput()
     }
 
@@ -368,11 +317,11 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         val view = captionView ?: return
         @Suppress("UNCHECKED_CAST")
         val cues = runCatching { captionCuesField?.get(view) as? List<Cue> }.getOrElse {
-            captionHookFailed(view, "cues", it)
+            captionHookFailed(view)
             return
         } ?: return
         if (runCatching { view.setCues(cues) }.onFailure {
-                captionHookFailed(view, "refresh", it)
+                captionHookFailed(view)
             }.isFailure) restoreCaptionOutput()
     }
 
@@ -384,8 +333,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         captionNativeOutput = null
         captionWrappedOutput = null
         if (view != null && native != null && wrapper != null) {
-            Log.i("Elevate-SubtitleTrace",
-                "detach view=${if (view === fragment?.subView) "native" else "overlay"} alpha=${view.alpha}")
             runCatching {
                 val field = captionOutputField ?: return@runCatching
                 if (field.get(view) === wrapper) {
@@ -394,7 +341,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
                     val cues = captionCuesField?.get(view) as? List<Cue>
                     if (cues != null) view.setCues(cues)
                 }
-            }.onFailure { captionHookFailed(view, "restore", it) }
+            }.onFailure { captionHookFailed(view) }
         }
     }
 
@@ -461,7 +408,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         val f = fragment ?: return
         if (f.playerView?.player?.let { it !== player } == true) synchronizeSource()
         attachCaptionOutput(f)
-        traceCaptionSelection(f)
         trackDialog(f)
         val popup = selectionDialog
         if (popup != null && popup !== labeledDialog && popup !== pendingDialog) {
@@ -502,16 +448,14 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             }
         }
         if (available.isEmpty()) return
-        val linked = subtitles.filterTo(mutableSetOf()) {
-            if (it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) it.url in available
-            else it.getId() in available
+        val embedded = subtitles.filterTo(mutableSetOf()) {
+            it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it.url in available
         }
-        if (linked.isEmpty()) return
+        if (embedded.isEmpty()) return
 
         trackDialog(f)
-        if (!markActive(f, linked)) return
-        val embedded = linked.filter { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
-        if (embedded.isEmpty() || manualOverride || selectionDialog?.isShowing == true) return
+        if (!markActive(f, embedded)) return
+        if (manualOverride || selectionDialog?.isShowing == true) return
         val language = preferredLanguage?.takeIf { it.isNotEmpty() } ?: return
         val match = embedded.firstNotNullOfOrNull { subtitle ->
             if (!subtitle.matchesLanguageCode(language)) return@firstNotNullOfOrNull null
@@ -619,8 +563,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         captionLayoutTree = null
         restoreCaptionOutput()
         captionFailedView = null
-        traceSelectionSeen = false
-        traceSubtitleId = null
         focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
         focusTree = null
         player?.removeListener(listener)
