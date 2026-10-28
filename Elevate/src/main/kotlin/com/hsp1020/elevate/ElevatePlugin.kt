@@ -103,7 +103,6 @@ class ElevatePlugin : Plugin() {
             if (generation.get() != token) return@post
             stopAll()
             app = application
-            httpResponseGuard = ElevateHttpResponseGuard(application).also { it.start() }
             try {
                 val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
                 // Preserve the user's previous visible/hidden choice when changing to "ON = hide".
@@ -147,6 +146,14 @@ class ElevatePlugin : Plugin() {
     private fun syncFeatures() {
         val application = app ?: run {
             return
+        }
+        if (enabled(ElevateFeature.HTTP_RESPONSE_CLEANUP)) {
+            if (httpResponseGuard == null) {
+                httpResponseGuard = ElevateHttpResponseGuard(application).also { it.start() }
+            }
+        } else {
+            httpResponseGuard?.stop()
+            httpResponseGuard = null
         }
         if (enabled(ElevateFeature.NATIVE_LISTENER_CLEANUP)) {
             if (nativeRecyclerGuard == null) {
