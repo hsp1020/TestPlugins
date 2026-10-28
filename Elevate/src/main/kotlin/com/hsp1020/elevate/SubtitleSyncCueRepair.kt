@@ -12,7 +12,6 @@ import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.media3.common.Format
 import androidx.media3.common.Player
-import androidx.media3.common.text.CueGroup
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.text.TextRenderer
@@ -53,11 +52,21 @@ internal class SubtitleSyncCueRepair(private val application: Application) : App
     private val focusListener = ViewTreeObserver.OnWindowFocusChangeListener {
         fragment?.view?.post { inspectDialog() }
     }
-    private val cueListener = object : Player.Listener {
-        override fun onCues(cueGroup: CueGroup) {
-            if (offsetDialog?.isShowing == true && repairedDialog !== offsetDialog) inspectDialog()
+    private val cueListener = java.lang.reflect.Proxy.newProxyInstance(
+        Player.Listener::class.java.classLoader,
+        arrayOf(Player.Listener::class.java)
+    ) { proxy, method, args ->
+        when (method.name) {
+            "onCues" -> {
+                if (offsetDialog?.isShowing == true && repairedDialog !== offsetDialog) inspectDialog()
+                null
+            }
+            "equals" -> proxy === args?.getOrNull(0)
+            "hashCode" -> System.identityHashCode(proxy)
+            "toString" -> "ElevateSubtitleSyncCueRepairListener"
+            else -> null
         }
-    }
+    } as Player.Listener
     private val callbacks = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
             fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?
