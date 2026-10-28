@@ -538,9 +538,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             as? ArrayAdapter<*> ?: return false
 
         val grouped = sortSubs(state.subtitles).groupBy { it.originalName }.values.toList()
-        // Subtitle results can arrive after the native dialog captured its rows.
-        // Keep the native order when the live model has a different group count.
-        if (adapter.count != grouped.size + 1) return true
+        if (adapter.count != grouped.size + 1) return false
         val texts = (0 until adapter.count).map { adapter.getItem(it) as? Spanned ?: return false }
         val langs = grouped.map { it.first().getIETF_tag() ?: it.first().originalName }
         val starts = langs.withIndex().groupBy({ it.value }, { it.index })
@@ -591,18 +589,20 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         val current = model?.state ?: return
         val list = dialog.findViewById<ListView>(R.id.sort_subtitles) ?: return
         val options = dialog.findViewById<ListView>(R.id.sort_subtitles_options) ?: return
-        val byLabel = sortSubs(current.subtitles).groupBy { it.originalName }
-            .mapKeys { (name, _) -> name.html().toString() }
+        val groups = sortSubs(current.subtitles).groupBy { it.originalName }.values.toList()
+        val order = (list.getTag(R.id.sort_subtitles) as? IntArray)
+            ?.takeIf { it.size == groups.size && it.toSet().size == groups.size }
+            ?: groups.indices.toList().toIntArray()
+
+        fun groupAt(position: Int): List<SubtitleData>? {
+            if (position !in 1..groups.size) return null
+            return groups.getOrNull(order[position - 1])
+        }
+
         val parent = (list.adapter as? HeaderViewListAdapter)?.wrappedAdapter
             ?: list.adapter
         val adapter = parent as? ArrayAdapter<*> ?: return
-        // Map the rows actually shown by CloudStream, not a newly loaded list.
-        val groups = (1 until adapter.count).map { position ->
-            byLabel[adapter.getItem(position)?.toString()].orEmpty()
-        }
-        fun groupAt(position: Int): List<SubtitleData>? =
-            groups.getOrNull(position - 1)?.takeIf { it.isNotEmpty() }
-
+        if (adapter.count != groups.size + 1) return
         val selected = list.checkedItemPosition
         list.adapter = RefreshRowAdapter(adapter) { position ->
             groupAt(position)?.singleOrNull()?.let { StremioSubtitleRefreshRegistry.find(it.url) }

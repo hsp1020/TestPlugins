@@ -61,7 +61,8 @@ internal object StremioSubtitleRefreshRegistry {
         val listUrl: String?,
         val position: Int,
         val headers: Map<String, String>,
-        val latestUrl: String = originalUrl
+        val latestUrl: String = originalUrl,
+        val ambiguous: Boolean = false
     )
 
     private val entries = object : LinkedHashMap<String, Entry>(32, 0.75f, true) {
@@ -79,9 +80,11 @@ internal object StremioSubtitleRefreshRegistry {
         val previous = entries[url]
         if (previous != null && (previous.addonUrl != addonUrl ||
                 (previous.id != null && id != null && previous.id != id))) {
-            // CloudStream emits a URL once. Retain its first registered provenance.
+            // CloudStream collapses equal URLs. Never guess which addon owns that row.
+            entries[url] = previous.copy(ambiguous = true)
             return
         }
+        if (previous?.ambiguous == true) return
         if (previous == null || (previous.addonUrl == addonUrl &&
             listUrl != null &&
             (previous.id == null || previous.id == id))) {
@@ -92,7 +95,7 @@ internal object StremioSubtitleRefreshRegistry {
     }
 
     @Synchronized
-    fun find(url: String): Entry? = entries[url]
+    fun find(url: String): Entry? = entries[url]?.takeUnless { it.ambiguous }
 
     @Synchronized
     private fun update(entry: Entry, url: String) {
