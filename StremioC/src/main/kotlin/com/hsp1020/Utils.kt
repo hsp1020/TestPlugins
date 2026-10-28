@@ -553,7 +553,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         val ranks = grouped.map { sameName ->
             sameName.minOf { sub ->
                 StremioC.subtitleOrderByUrl[sub.url] ?: when {
-                    sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO -> 30_000
+                    sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO -> -1
                     SubtitleHelper.fromLanguageToTagIETF(sub.originalName)?.let {
                         SubtitleHelper.fromTagToEnglishLanguageName(it)
                     }?.equals(sub.originalName, true) == true -> 0
