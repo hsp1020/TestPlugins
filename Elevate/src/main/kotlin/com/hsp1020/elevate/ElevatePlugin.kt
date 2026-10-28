@@ -104,8 +104,6 @@ class ElevatePlugin : Plugin() {
             stopAll()
             app = application
             httpResponseGuard = ElevateHttpResponseGuard(application).also { it.start() }
-            nativeRecyclerGuard = NativeRecyclerListenerGuard(application).also { it.start() }
-            subtitleSyncRepair = SubtitleSyncCueRepair(application).also { it.start() }
             try {
                 val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
                 // Preserve the user's previous visible/hidden choice when changing to "ON = hide".
@@ -149,6 +147,22 @@ class ElevatePlugin : Plugin() {
     private fun syncFeatures() {
         val application = app ?: run {
             return
+        }
+        if (enabled(ElevateFeature.NATIVE_LISTENER_CLEANUP)) {
+            if (nativeRecyclerGuard == null) {
+                nativeRecyclerGuard = NativeRecyclerListenerGuard(application).also { it.start() }
+            }
+        } else {
+            nativeRecyclerGuard?.stop()
+            nativeRecyclerGuard = null
+        }
+        if (enabled(ElevateFeature.SUBTITLE_SYNC_REPAIR)) {
+            if (subtitleSyncRepair == null) {
+                subtitleSyncRepair = SubtitleSyncCueRepair(application).also { it.start() }
+            }
+        } else {
+            subtitleSyncRepair?.stop()
+            subtitleSyncRepair = null
         }
         if (enabled(ElevateFeature.DETAIL_SEARCH)) {
             if (hook == null) hook = NativeDetailSearchHook(application).also { it.start() }
