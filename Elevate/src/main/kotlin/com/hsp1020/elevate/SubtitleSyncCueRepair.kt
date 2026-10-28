@@ -168,16 +168,16 @@ internal class SubtitleSyncCueRepair(private val application: Application) : App
             f.player.getCurrentPreferredSubtitle()?.url != selected.url) return
 
         repairedDialog = dialog
-        adapter.submitList(cues)
+        adapter.submitList(cues, Runnable {
+            if (dialog.isShowing && fragment === f && list.adapter === adapter &&
+                f.playerView?.player === active &&
+                f.player.getCurrentPreferredSubtitle()?.url == selected.url) {
+                val position = (f.player.getPosition() ?: 0L) + f.player.getSubtitleOffset()
+                list.scrollToPosition(adapter.getLatestActiveItem(position))
+            }
+        })
         list.visibility = View.VISIBLE
         notice.visibility = View.GONE
-        val position = (f.player.getPosition() ?: 0L) + f.player.getSubtitleOffset()
-        val index = cues.indexOfLast { it.startTimeMs <= position }.coerceAtLeast(0)
-        list.post {
-            if (dialog.isShowing && fragment === f && list.adapter === adapter) {
-                list.scrollToPosition(index)
-            }
-        }
     }
 
     private fun detach(candidate: Fragment? = null) {
