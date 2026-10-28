@@ -10,6 +10,7 @@ import androidx.annotation.OptIn
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
+import androidx.media3.common.Format
 import androidx.media3.common.Player
 import androidx.media3.common.text.CueGroup
 import androidx.media3.common.util.UnstableApi
@@ -43,6 +44,11 @@ internal class SubtitleSyncCueRepair(private val application: Application) : App
         TextRenderer::class.java.getDeclaredField("subtitleDecoderFactory")
             .apply { isAccessible = true }
     }.getOrNull()
+    private val formatField = runCatching {
+        TextRenderer::class.java.getDeclaredField("streamFormat")
+            .apply { isAccessible = true }
+    }.getOrNull()
+    private val trackIdPrefix = Regex("^\\d+:")
 
     private val focusListener = ViewTreeObserver.OnWindowFocusChangeListener {
         fragment?.view?.post { inspectDialog() }
@@ -110,11 +116,13 @@ internal class SubtitleSyncCueRepair(private val application: Application) : App
         next?.addListener(cueListener)
     }
 
-    private fun rendererCues(exo: ExoPlayer): List<SubtitleCue> {
+    private fun rendererCues(exo: ExoPlayer, selectedId: String): List<SubtitleCue> {
         val field = decoderField ?: return emptyList()
         return runCatching {
             for (index in 0 until exo.rendererCount) {
                 val renderer = exo.getRenderer(index) as? TextRenderer ?: continue
+                val format = formatField?.get(renderer) as? Format
+                if (format?.id?.replace(trackIdPrefix, "")?.let { it != selectedId } == true) continue
                 val factory = field.get(renderer) as? CustomSubtitleDecoderFactory ?: continue
                 val cues = factory.getSubtitleCues()?.toList().orEmpty()
                 if (cues.isNotEmpty()) return@runCatching cues
@@ -146,7 +154,7 @@ internal class SubtitleSyncCueRepair(private val application: Application) : App
         val selected = f.player.getCurrentPreferredSubtitle() ?: return
         val active = f.playerView?.player as? ExoPlayer ?: return
         val cues = runCatching { f.player.getSubtitleCues().toList() }.getOrNull()
-            ?.takeIf { it.isNotEmpty() } ?: rendererCues(active)
+            ?.takeIf { it.isNotEmpty() } ?: rendererCues(active, selected.getId())
         if (cues.isEmpty() || fragment !== f || f.playerView?.player !== active ||
             f.player.getCurrentPreferredSubtitle()?.url != selected.url) return
 
