@@ -6,7 +6,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Build
 import android.text.SpannableStringBuilder
-import android.util.Log
 import android.util.TypedValue
 import android.view.View
 import android.widget.FrameLayout
@@ -154,8 +153,6 @@ internal object StremioSubtitleRefreshRegistry {
      * original URL; ambiguous or missing identities fail without replacing cues.
      */
     suspend fun refresh(entry: Entry): Prepared = withContext(Dispatchers.IO) {
-        var stage = "provenance"
-        try {
         check(find(entry.originalUrl)?.let {
             it.addonUrl == entry.addonUrl && it.id == entry.id && it.listUrl == entry.listUrl
         } == true) { "Subtitle provenance changed" }
@@ -183,7 +180,6 @@ internal object StremioSubtitleRefreshRegistry {
             }
             if (updated != null) url = updated
         }
-        stage = "download"
         val bytes = readBytes(url, entry.headers, MAX_SUB_BYTES)
         check(bytes.isNotEmpty()) { "Empty subtitle" }
         val preview = bytes.copyOfRange(0, minOf(bytes.size, 256)).toString(Charsets.UTF_8)
@@ -196,7 +192,6 @@ internal object StremioSubtitleRefreshRegistry {
             trimmed.startsWith("WEBVTT", true) -> MimeTypes.TEXT_VTT
             else -> MimeTypes.APPLICATION_SUBRIP
         }
-        stage = "parse"
         val prepared = withContext(Dispatchers.Default) {
             val decoder = CustomDecoder(Format.Builder().setSampleMimeType(type).build())
             val parsed = ArrayList<TimedCues>()
@@ -220,13 +215,6 @@ internal object StremioSubtitleRefreshRegistry {
         ensureActive()
         update(entry, url)
         prepared
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // Single failure diagnostic; never log signed URLs or subtitle contents.
-            Log.w("StremioC-SubtitleRefresh", "Refresh failed at $stage (${e.javaClass.simpleName})")
-            throw e
-        }
     }
 }
 
@@ -245,19 +233,12 @@ internal class StremioRefreshedSubtitleOverlay {
     private var timeline: SubtitleTimeline? = null
     private var preserveAssLayout = false
     private var rendered: List<Int>? = null
-    private var traceEmptySeen = false
-    private var traceNonEmptySeen = false
-    private var traceMultipleSeen = false
     private var lastOffset = Long.MIN_VALUE
     private val tick = Runnable { synchronize() }
     private val pipListener = Consumer<PictureInPictureModeChangedInfo> { applyAppearance() }
     private val styleListener: (com.lagradost.cloudstream3.ui.subtitles.SaveCaptionStyle) -> Unit = {
         overlay?.post { if (overlay != null) { applyAppearance(); rendered = null; synchronize() } }
     }
-
-    fun traceState(): String =
-        "overlay=${overlay != null} nativeAlpha=${original?.alpha ?: -1f} " +
-            "overlayAlpha=${overlay?.alpha ?: -1f} segments=${rendered?.size ?: 0}"
 
     fun onPlayerEvent() {
         if (overlay != null) synchronize()
@@ -290,9 +271,6 @@ internal class StremioRefreshedSubtitleOverlay {
                 timeline = prepared.timeline
                 preserveAssLayout = prepared.preserveAssLayout
                 rendered = null
-                traceEmptySeen = false
-                traceNonEmptySeen = false
-                traceMultipleSeen = false
                 synchronize()
             }
             return
@@ -315,11 +293,6 @@ internal class StremioRefreshedSubtitleOverlay {
         overlay = view
         originalAlpha = native.alpha
         native.alpha = 0f
-        traceEmptySeen = false
-        traceNonEmptySeen = false
-        traceMultipleSeen = false
-        Log.i("StremioC-SubtitleTrace",
-            "overlay-attach ass=$preserveAssLayout preparedSegments=${parsed.size} " + traceState())
         host = candidate.activity as? FragmentActivity
         host?.addOnPictureInPictureModeChangedListener(pipListener)
         SubtitlesFragment.applyStyleEvent += styleListener
@@ -385,21 +358,6 @@ internal class StremioRefreshedSubtitleOverlay {
                 }
             }
             view.setCues(visible)
-            val kind = when {
-                visible.isEmpty() && !traceEmptySeen -> "empty".also { traceEmptySeen = true }
-                visible.size > 1 && !traceMultipleSeen -> "multiple".also {
-                    traceMultipleSeen = true
-                    traceNonEmptySeen = true
-                }
-                visible.isNotEmpty() && !traceNonEmptySeen -> "nonempty".also { traceNonEmptySeen = true }
-                else -> null
-            }
-            if (kind != null) {
-                val positioned = visible.count { it.position != Cue.DIMEN_UNSET }
-                Log.i("StremioC-SubtitleTrace",
-                    "overlay-cues event=$kind count=${visible.size} positioned=$positioned " +
-                        "timeMs=$time " + traceState())
-            }
             rendered = indexes
         }
         if (!player.isPlaying) return
@@ -410,7 +368,6 @@ internal class StremioRefreshedSubtitleOverlay {
     }
 
     fun detach() {
-        if (overlay != null) Log.i("StremioC-SubtitleTrace", "overlay-detach " + traceState())
         main.removeCallbacks(tick)
         host?.removeOnPictureInPictureModeChangedListener(pipListener)
         if (overlay != null) SubtitlesFragment.applyStyleEvent -= styleListener
