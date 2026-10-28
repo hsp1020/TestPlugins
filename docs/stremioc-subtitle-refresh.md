@@ -3,8 +3,8 @@
 The native name action still selects a subtitle. The refresh icon fetches only
 that row's originating addon list (when available) and subtitle body. It does
 not select the row, modify Media3 track selection, rebuild the subtitle list,
-or reload the video. Rows collapsed by CloudStream to a shared URL with
-conflicting addon provenance are not offered a refresh action.
+or reload the video. When CloudStream collapses identical subtitle URLs, the first recorded
+addon provenance is retained for that URL instead of disabling refresh.
 
 Successful SRT/VTT parsing prepares a separate SubtitleView. Only a selected,
 successfully refreshed subtitle hides the native SubtitleView. Failure keeps

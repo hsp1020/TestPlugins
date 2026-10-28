@@ -538,7 +538,9 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             as? ArrayAdapter<*> ?: return false
 
         val grouped = sortSubs(state.subtitles).groupBy { it.originalName }.values.toList()
-        if (adapter.count != grouped.size + 1) return false
+        // Subtitle results can arrive after the native dialog captured its rows.
+        // Keep the native order when the live model has a different group count.
+        if (adapter.count != grouped.size + 1) return true
         val texts = (0 until adapter.count).map { adapter.getItem(it) as? Spanned ?: return false }
         val langs = grouped.map { it.first().getIETF_tag() ?: it.first().originalName }
         val starts = langs.withIndex().groupBy({ it.value }, { it.index })
@@ -589,20 +591,18 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         val current = model?.state ?: return
         val list = dialog.findViewById<ListView>(R.id.sort_subtitles) ?: return
         val options = dialog.findViewById<ListView>(R.id.sort_subtitles_options) ?: return
-        val groups = sortSubs(current.subtitles).groupBy { it.originalName }.values.toList()
-        val order = (list.getTag(R.id.sort_subtitles) as? IntArray)
-            ?.takeIf { it.size == groups.size && it.toSet().size == groups.size }
-            ?: groups.indices.toList().toIntArray()
-
-        fun groupAt(position: Int): List<SubtitleData>? {
-            if (position !in 1..groups.size) return null
-            return groups.getOrNull(order[position - 1])
-        }
-
+        val byLabel = sortSubs(current.subtitles).groupBy { it.originalName }
+            .mapKeys { (name, _) -> name.html().toString() }
         val parent = (list.adapter as? HeaderViewListAdapter)?.wrappedAdapter
             ?: list.adapter
         val adapter = parent as? ArrayAdapter<*> ?: return
-        if (adapter.count != groups.size + 1) return
+        // Map the rows actually shown by CloudStream, not a newly loaded list.
+        val groups = (1 until adapter.count).map { position ->
+            byLabel[adapter.getItem(position)?.toString()].orEmpty()
+        }
+        fun groupAt(position: Int): List<SubtitleData>? =
+            groups.getOrNull(position - 1)?.takeIf { it.isNotEmpty() }
+
         val selected = list.checkedItemPosition
         list.adapter = RefreshRowAdapter(adapter) { position ->
             groupAt(position)?.singleOrNull()?.let { StremioSubtitleRefreshRegistry.find(it.url) }
@@ -681,6 +681,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         val nativeClick = list.onItemClickListener
         list.onItemClickListener = AdapterView.OnItemClickListener { parentView, row, position, id ->
             nativeClick?.onItemClick(parentView, row, position, id)
+            if (position in 0..groups.size) list.setItemChecked(position, true)
             if (queuedRefresh?.entry?.originalUrl != checkedEntry()?.originalUrl) queuedRefresh = null
             (list.adapter as? BaseAdapter)?.notifyDataSetChanged()
             (options.adapter as? BaseAdapter)?.notifyDataSetChanged()
@@ -688,6 +689,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         val nativeOptionClick = options.onItemClickListener
         options.onItemClickListener = AdapterView.OnItemClickListener { parentView, row, position, id ->
             nativeOptionClick?.onItemClick(parentView, row, position, id)
+            if (position in 0 until optionsAdapter.count) options.setItemChecked(position, true)
             if (queuedRefresh?.entry?.originalUrl != checkedEntry()?.originalUrl) queuedRefresh = null
             (list.adapter as? BaseAdapter)?.notifyDataSetChanged()
             (options.adapter as? BaseAdapter)?.notifyDataSetChanged()
