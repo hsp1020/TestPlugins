@@ -22,6 +22,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 import com.lagradost.cloudstream3.Score
 import com.lagradost.cloudstream3.syncproviders.providers.SimklApi
@@ -35,6 +37,10 @@ import kotlin.math.round
 import android.app.Activity
 import android.app.Application
 import android.app.Dialog
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
+import android.os.SystemClock
+import android.view.animation.LinearInterpolator
 import android.os.Build
 import android.content.Context
 import android.content.res.Resources
@@ -284,6 +290,11 @@ internal fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
 }
 
 internal class StremioSubtitleController(private val pluginResources: Resources) {
+    private companion object {
+        const val AUTO_REFRESH_INTERVAL_MS = 10_000L
+        const val AUTO_REFRESH_DURATION_MS = 300_000L
+        const val AUTO_REFRESH_MAX_REQUESTS = 30
+    }
     private var fragment: GeneratorPlayer? = null
     private var model: PlayerGeneratorViewModel? = null
     private var focusTree: ViewTreeObserver? = null
@@ -299,6 +310,9 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
     private val refreshScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var refreshJob: Job? = null
     private var refreshGeneration = 0L
+    private var autoRefreshUrl: String? = null
+    private var autoSpinView: ImageButton? = null
+    private var autoSpinAnimator: ObjectAnimator? = null
     private var observedPlayer: Player? = null
     private var selectedUrl: String? = null
     private var iconSelectionUrl: String? = null
@@ -328,6 +342,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         refreshGeneration++
         refreshJob?.cancel()
         refreshJob = null
+        endAutoRefresh()
         refreshedCues.clear()
         refreshedOverlay.detach()
         refreshedOffsetDialog = null
@@ -366,6 +381,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             refreshGeneration++
             refreshJob?.cancel()
             refreshJob = null
+            endAutoRefresh()
             refreshedOverlay.detach()
             selectedUrl = currentUrl
         }
@@ -568,6 +584,32 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         if (optionSelected >= 0) options.setItemChecked(optionSelected, true)
         iconSelectionUrl = fragment?.player?.getCurrentPreferredSubtitle()?.url
 
+        // TV remotes long-press the focused ListView item, not necessarily its child button.
+        val groupLongClick = list.onItemLongClickListener
+        list.onItemLongClickListener = AdapterView.OnItemLongClickListener { parentView, row, position, id ->
+            val selectedUrl = fragment?.player?.getCurrentPreferredSubtitle()?.url
+            val entry = groupAt(position)?.firstOrNull { it.url == selectedUrl }
+                ?.let { StremioSubtitleRefreshRegistry.find(it.url) }
+            val button = (row as? RefreshRow)?.getChildAt(1) as? ImageButton
+            if (entry != null && button != null) {
+                requestSubtitleRefresh(entry, button, automatic = true)
+                true
+            } else groupLongClick?.onItemLongClick(parentView, row, position, id) ?: false
+        }
+        val optionLongClick = options.onItemLongClickListener
+        options.onItemLongClickListener = AdapterView.OnItemLongClickListener { parentView, row, position, id ->
+            val selectedUrl = fragment?.player?.getCurrentPreferredSubtitle()?.url
+            val item = groupAt(list.checkedItemPosition)
+                ?.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }?.getOrNull(position)
+            val entry = item?.takeIf { it.url == selectedUrl }
+                ?.let { StremioSubtitleRefreshRegistry.find(it.url) }
+            val button = (row as? RefreshRow)?.getChildAt(1) as? ImageButton
+            if (entry != null && button != null) {
+                requestSubtitleRefresh(entry, button, automatic = true)
+                true
+            } else optionLongClick?.onItemLongClick(parentView, row, position, id) ?: false
+        }
+
         // The native group listener updates options before StremioC's visual
         // reorder mapping updates the checked index. Rebind icons afterwards.
         val nativeClick = list.onItemClickListener
@@ -644,6 +686,15 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                 contentDescription = getPluginSubtitleString(
                     "stremioc_refresh_subtitle", "Refresh subtitle"
                 )
+                addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                    override fun onViewAttachedToWindow(view: View) {
+                        if (autoRefreshUrl != null && view.tag == autoRefreshUrl &&
+                            view.visibility == View.VISIBLE) startAutoSpin(view as ImageButton)
+                    }
+                    override fun onViewDetachedFromWindow(view: View) {
+                        if (autoSpinView === view) stopAutoSpin()
+                    }
+                })
                 row.addView(this, FrameLayout.LayoutParams(
                     (40 * resources.displayMetrics.density).toInt(), -1, Gravity.END or Gravity.CENTER_VERTICAL
                 ))
@@ -656,14 +707,26 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             if (text.paddingRight != right) {
                 text.setPadding(text.paddingLeft, text.paddingTop, right, text.paddingBottom)
             }
+            button.tag = entry?.originalUrl
             button.visibility = if (selected) View.VISIBLE else View.GONE
-            button.isEnabled = selected && refreshJob?.isActive != true
+            button.isEnabled = selected && (autoRefreshUrl == entry?.originalUrl || refreshJob?.isActive != true)
             button.alpha = if (button.isEnabled) 1f else 0.35f
+            if (autoSpinView === button && (!selected || autoRefreshUrl != entry?.originalUrl)) {
+                stopAutoSpin()
+            }
+            if (selected && autoRefreshUrl == entry?.originalUrl && button.isAttachedToWindow) {
+                startAutoSpin(button)
+            }
             if (entry != null) {
                 button.imageTintList = ColorStateList.valueOf(android.graphics.Color.WHITE)
                 button.setOnClickListener { requestSubtitleRefresh(entry, button) }
+                button.setOnLongClickListener {
+                    requestSubtitleRefresh(entry, button, automatic = true)
+                    true
+                }
             } else {
                 button.setOnClickListener(null)
+                button.setOnLongClickListener(null)
             }
             return row
         }
@@ -677,41 +740,101 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         else fallback
     }
 
-    private fun requestSubtitleRefresh(entry: StremioSubtitleRefreshRegistry.Entry, button: ImageButton) {
+    private fun stopAutoSpin() {
+        autoSpinAnimator?.cancel()
+        autoSpinAnimator = null
+        autoSpinView?.rotation = 0f
+        autoSpinView = null
+    }
+
+    private fun startAutoSpin(button: ImageButton) {
+        if (autoSpinView === button && autoSpinAnimator?.isRunning == true) return
+        stopAutoSpin()
+        button.animate().cancel()
+        button.rotation = 0f
+        autoSpinView = button
+        autoSpinAnimator = ObjectAnimator.ofFloat(button, View.ROTATION, 0f, 360f).apply {
+            duration = 800L
+            interpolator = LinearInterpolator()
+            repeatCount = ValueAnimator.INFINITE
+            start()
+        }
+    }
+
+    private fun endAutoRefresh() {
+        autoRefreshUrl = null
+        stopAutoSpin()
+    }
+
+    private fun requestSubtitleRefresh(
+        entry: StremioSubtitleRefreshRegistry.Entry, button: ImageButton, automatic: Boolean = false
+    ) {
         val target = fragment ?: return
         val instance = model?.state?.instance ?: return
         if (target.player.getCurrentPreferredSubtitle()?.url != entry.originalUrl) return
-        if (refreshJob?.isActive == true) return
         bindPlayer()
+        if (automatic && autoRefreshUrl == entry.originalUrl) {
+            refreshGeneration++
+            refreshJob?.cancel()
+            refreshJob = null
+            endAutoRefresh()
+            button.isEnabled = true
+            button.alpha = 1f
+            return
+        }
+        if (refreshJob?.isActive == true) return
         val mediaPlayer = observedPlayer ?: return
         val generation = ++refreshGeneration
-        button.isEnabled = false
         val originalTint = button.imageTintList
         button.imageTintList = ColorStateList.valueOf(android.graphics.Color.WHITE)
-        button.animate().cancel()
-        button.rotation = 0f
-        button.animate().rotation(360f).setDuration(800L)
-            .setInterpolator(android.view.animation.DecelerateInterpolator())
-            .withEndAction { button.rotation = 0f }
-            .start()
+        if (automatic) {
+            autoRefreshUrl = entry.originalUrl
+            if (button.isAttachedToWindow && button.visibility == View.VISIBLE) startAutoSpin(button)
+        } else {
+            button.isEnabled = false
+            button.animate().cancel()
+            button.rotation = 0f
+            button.animate().rotation(360f).setDuration(800L)
+                .setInterpolator(android.view.animation.DecelerateInterpolator())
+                .withEndAction { button.rotation = 0f }
+                .start()
+        }
         refreshJob = refreshScope.launch {
+            fun current(): Boolean = generation == refreshGeneration && fragment === target &&
+                model?.state?.instance == instance && target.playerView?.player === mediaPlayer &&
+                target.player.getCurrentPreferredSubtitle()?.url == entry.originalUrl
             try {
-                val result = StremioSubtitleRefreshRegistry.refresh(entry)
-                if (generation == refreshGeneration && fragment === target &&
-                    model?.state?.instance == instance && target.playerView?.player === mediaPlayer) {
-                    // Bound retained parsed subtitles for long playback sessions.
-                    if (entry.originalUrl !in refreshedCues && refreshedCues.size >= 4) {
-                        refreshedCues.keys.firstOrNull { it != selectedUrl }?.let(refreshedCues::remove)
-                    }
-                    refreshedCues[entry.originalUrl] = result
-                    if (target.player.getCurrentPreferredSubtitle()?.url == entry.originalUrl) {
+                val deadline = SystemClock.elapsedRealtime() + AUTO_REFRESH_DURATION_MS
+                val attempts = if (automatic) AUTO_REFRESH_MAX_REQUESTS else 1
+                for (attempt in 0 until attempts) {
+                    if (!current()) break
+                    val previous = refreshedCues[entry.originalUrl]
+                    val result = if (automatic) {
+                        val remaining = deadline - SystemClock.elapsedRealtime()
+                        if (remaining <= 0L) break
+                        withTimeout(minOf(30_000L, remaining)) {
+                            StremioSubtitleRefreshRegistry.refresh(
+                                entry, previous, checkList = attempt % 3 == 0
+                            )
+                        }
+                    } else StremioSubtitleRefreshRegistry.refresh(entry, previous)
+                    if (!current()) break
+                    if (result !== previous) {
+                        // Only rebuild the overlay when the subtitle body changed.
+                        if (entry.originalUrl !in refreshedCues && refreshedCues.size >= 4) {
+                            refreshedCues.keys.firstOrNull { it != selectedUrl }?.let(refreshedCues::remove)
+                        }
+                        refreshedCues[entry.originalUrl] = result
                         refreshedOverlay.attach(target, entry.originalUrl, result)
                     }
+                    if (!automatic || attempt + 1 >= attempts ||
+                        SystemClock.elapsedRealtime() + AUTO_REFRESH_INTERVAL_MS >= deadline) break
+                    delay(AUTO_REFRESH_INTERVAL_MS)
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (generation == refreshGeneration && fragment === target && model?.state?.instance == instance) {
+                if (current()) {
                     android.widget.Toast.makeText(
                         target.context, getPluginSubtitleString(
                             "stremioc_refresh_failed", "Subtitle refresh failed"
@@ -719,12 +842,18 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                     ).show()
                 }
             } finally {
-                val selected = fragment === target && model?.state?.instance == instance &&
-                    target.player.getCurrentPreferredSubtitle()?.url == entry.originalUrl
-                button.visibility = if (selected) View.VISIBLE else View.GONE
-                button.isEnabled = selected
-                button.alpha = if (selected) 1f else 0.35f
-                button.imageTintList = originalTint
+                if (generation == refreshGeneration) {
+                    if (automatic) endAutoRefresh()
+                    refreshJob = null
+                    if (button.tag == entry.originalUrl) {
+                        val selected = fragment === target && model?.state?.instance == instance &&
+                            target.player.getCurrentPreferredSubtitle()?.url == entry.originalUrl
+                        button.visibility = if (selected) View.VISIBLE else View.GONE
+                        button.isEnabled = selected
+                        button.alpha = if (selected) 1f else 0.35f
+                        button.imageTintList = originalTint
+                    }
+                }
             }
         }
     }
