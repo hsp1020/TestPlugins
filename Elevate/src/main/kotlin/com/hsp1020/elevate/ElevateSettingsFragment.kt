@@ -46,6 +46,8 @@ internal enum class ElevateFeature(
         "Adjust subtitle scale and placement while in Picture-in-Picture."),
     SUBTITLE_RETRY("Playback & Subtitles", "Subtitle Referer Retry",
         "Retry blocked subtitle downloads using the current video's source information when needed."),
+    HTTP_RESPONSE_CLEANUP("Stability & Repairs", "HTTP Response Cleanup",
+        "Release unused network responses from StreamPlay/CineStream and header-only requests to help prevent connection leaks."),
     NATIVE_LISTENER_CLEANUP("Stability & Repairs", "List Scroll Listener Cleanup",
         "Remove duplicate, outdated scroll listeners from Home and the player episode list while keeping current listeners active."),
     SUBTITLE_SYNC_REPAIR("Stability & Repairs", "Subtitle Sync List Recovery",
