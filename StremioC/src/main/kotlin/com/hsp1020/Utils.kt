@@ -680,16 +680,24 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         // reorder mapping updates the checked index. Rebind icons afterwards.
         val nativeClick = list.onItemClickListener
         list.onItemClickListener = AdapterView.OnItemClickListener { parentView, row, position, id ->
+            val previous = list.checkedItemPosition
             nativeClick?.onItemClick(parentView, row, position, id)
             if (position in 0..groups.size) list.setItemChecked(position, true)
+            (list.getChildAt(previous - list.firstVisiblePosition) as? RefreshRow)
+                ?.setChecked(list.isItemChecked(previous))
+            (row as? RefreshRow)?.setChecked(list.isItemChecked(position))
             if (queuedRefresh?.entry?.originalUrl != checkedEntry()?.originalUrl) queuedRefresh = null
             (list.adapter as? BaseAdapter)?.notifyDataSetChanged()
             (options.adapter as? BaseAdapter)?.notifyDataSetChanged()
         }
         val nativeOptionClick = options.onItemClickListener
         options.onItemClickListener = AdapterView.OnItemClickListener { parentView, row, position, id ->
+            val previous = options.checkedItemPosition
             nativeOptionClick?.onItemClick(parentView, row, position, id)
             if (position in 0 until optionsAdapter.count) options.setItemChecked(position, true)
+            (options.getChildAt(previous - options.firstVisiblePosition) as? RefreshRow)
+                ?.setChecked(options.isItemChecked(previous))
+            (row as? RefreshRow)?.setChecked(options.isItemChecked(position))
             if (queuedRefresh?.entry?.originalUrl != checkedEntry()?.originalUrl) queuedRefresh = null
             (list.adapter as? BaseAdapter)?.notifyDataSetChanged()
             (options.adapter as? BaseAdapter)?.notifyDataSetChanged()
@@ -698,6 +706,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
 
     private class RefreshRow(context: Context) : FrameLayout(context), Checkable {
         private var checked = false
+        var onCheckedChanged: (() -> Unit)? = null
         override fun isChecked() = checked
         override fun toggle() = setChecked(!checked)
         override fun setChecked(value: Boolean) {
@@ -705,6 +714,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             isActivated = value
             getChildAt(0)?.isActivated = value
             (getChildAt(0) as? Checkable)?.isChecked = value
+            onCheckedChanged?.invoke()
         }
     }
 
@@ -726,6 +736,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
             val row = (convertView as? RefreshRow) ?: RefreshRow(parent.context)
+            row.onCheckedChanged = null
             val oldText = row.getChildAt(0) as? TextView
             val text = source.getView(position, oldText, parent) as TextView
             if (text !== oldText) {
@@ -775,33 +786,39 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                 ))
             }
             val entry = sourceAt(position)
-            val selected = entry != null && (parent as? ListView)?.isItemChecked(position) == true
-            val queued = queuedRefresh?.takeIf {
-                selected && it.instance == model?.state?.instance && it.entry.originalUrl == entry?.originalUrl
-            }
-            val spinning = selected &&
-                (autoRefreshUrl == entry?.originalUrl || queued?.automatic == true)
             val original = originalEndPadding.getOrPut(text) { text.paddingRight }
-            val right = original + if (selected) (48 * text.resources.displayMetrics.density).toInt() else 0
-            if (text.paddingRight != right) {
-                text.setPadding(text.paddingLeft, text.paddingTop, right, text.paddingBottom)
-            }
             if (button.tag != entry?.originalUrl) {
                 button.animate().cancel()
                 if (autoSpinView === button) stopAutoSpin()
             }
             button.tag = entry?.originalUrl
-            button.visibility = if (selected) View.VISIBLE else View.GONE
-            val playing = fragment?.player?.getCurrentPreferredSubtitle()?.url == entry?.originalUrl
-            button.isEnabled = selected && (!playing ||
-                autoRefreshUrl == entry?.originalUrl || refreshJob?.isActive != true)
-            button.alpha = if (button.isEnabled) 1f else 0.35f
-            if (autoSpinView === button && !spinning) stopAutoSpin()
-            if (spinning) {
-                if (button.isAttachedToWindow) startAutoSpin(button)
-            } else if (autoSpinView !== button) {
-                button.rotation = if (queued != null) 90f else 0f
+            // ListView can update Checkable rows without rebinding the adapter.
+            // Update the refresh action on the same event as the native checkmark.
+            row.onCheckedChanged = {
+                val selected = row.isChecked && entry != null
+                val queued = queuedRefresh?.takeIf {
+                    selected && it.instance == model?.state?.instance &&
+                        it.entry.originalUrl == entry?.originalUrl
+                }
+                val spinning = selected &&
+                    (autoRefreshUrl == entry?.originalUrl || queued?.automatic == true)
+                val right = original + if (selected) (48 * text.resources.displayMetrics.density).toInt() else 0
+                if (text.paddingRight != right) {
+                    text.setPadding(text.paddingLeft, text.paddingTop, right, text.paddingBottom)
+                }
+                button.visibility = if (selected) View.VISIBLE else View.GONE
+                val playing = fragment?.player?.getCurrentPreferredSubtitle()?.url == entry?.originalUrl
+                button.isEnabled = selected && (!playing ||
+                    autoRefreshUrl == entry?.originalUrl || refreshJob?.isActive != true)
+                button.alpha = if (button.isEnabled) 1f else 0.35f
+                if (autoSpinView === button && !spinning) stopAutoSpin()
+                if (spinning) {
+                    if (button.isAttachedToWindow) startAutoSpin(button)
+                } else if (autoSpinView !== button) {
+                    button.rotation = if (queued != null) 90f else 0f
+                }
             }
+            row.onCheckedChanged?.invoke()
             if (entry != null) {
                 button.imageTintList = ColorStateList.valueOf(android.graphics.Color.WHITE)
                 button.setOnClickListener { requestOrQueueRefresh(entry, button) }
