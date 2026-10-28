@@ -543,8 +543,9 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         // Use only the displayed main language, never fuzzy-match the full filename.
         val langs = grouped.map { group ->
             val label = group.first().originalName.substringBefore(" · ").substringBefore(" — ").trim()
-            val language = label.removePrefix("Make ").substringBefore(" (").substringBefore(" [").trim()
-            SubtitleHelper.fromLanguageToTagIETF(language) ?: label
+            SubtitleHelper.fromLanguageToTagIETF(label)
+                ?: SubtitleHelper.fromLanguageToTagIETF(label, halfMatch = true)
+                ?: label
         }
         val starts = langs.withIndex().groupBy({ it.value }, { it.index })
             .mapValues { (_, positions) -> positions.first() }
