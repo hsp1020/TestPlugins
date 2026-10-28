@@ -42,12 +42,16 @@ import okhttp3.Request
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.LinkedHashMap
+import java.security.MessageDigest
 
 /** Stremio provenance is intentionally kept outside CloudStream's SubtitleFile/SubtitleData. */
 @OptIn(UnstableApi::class)
 internal object StremioSubtitleRefreshRegistry {
     data class TimedCues(val startTimeMs: Long, val endTimeMs: Long, val cues: List<Cue>)
-    data class Prepared(val cues: List<TimedCues>, val timeline: SubtitleTimeline, val preserveAssLayout: Boolean = false)
+    data class Prepared(
+        val cues: List<TimedCues>, val timeline: SubtitleTimeline,
+        val preserveAssLayout: Boolean = false, val fingerprint: ByteArray = byteArrayOf()
+    )
 
     data class Entry(
         val originalUrl: String,
@@ -152,12 +156,15 @@ internal object StremioSubtitleRefreshRegistry {
      * A changed URL is matched by id; if id is absent we only accept the
      * original URL; ambiguous or missing identities fail without replacing cues.
      */
-    suspend fun refresh(entry: Entry): Prepared = withContext(Dispatchers.IO) {
-        check(find(entry.originalUrl)?.let {
+    suspend fun refresh(
+        entry: Entry, previous: Prepared? = null, checkList: Boolean = true
+    ): Prepared = withContext(Dispatchers.IO) {
+        val current = find(entry.originalUrl)
+        check(current?.let {
             it.addonUrl == entry.addonUrl && it.id == entry.id && it.listUrl == entry.listUrl
         } == true) { "Subtitle provenance changed" }
-        var url = entry.latestUrl
-        if (entry.listUrl != null) {
+        var url = current.latestUrl
+        if (checkList && entry.listUrl != null) {
             // Translation addons can temporarily fail to list tracks. Only
             // the exact known URL is safe as fallback, not language/position.
             val updated = try {
@@ -172,7 +179,7 @@ internal object StremioSubtitleRefreshRegistry {
                         )
                     }
                 }
-                selectRefreshedSubtitleUrl(entry.id, entry.lang, entry.originalUrl, entry.latestUrl, candidates)
+                selectRefreshedSubtitleUrl(entry.id, entry.lang, entry.originalUrl, current.latestUrl, candidates)
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -182,6 +189,11 @@ internal object StremioSubtitleRefreshRegistry {
         }
         val bytes = readBytes(url, entry.headers, MAX_SUB_BYTES)
         check(bytes.isNotEmpty()) { "Empty subtitle" }
+        val fingerprint = MessageDigest.getInstance("SHA-256").digest(bytes)
+        if (previous != null && previous.fingerprint.contentEquals(fingerprint)) {
+            update(entry, url)
+            return@withContext previous
+        }
         val preview = bytes.copyOfRange(0, minOf(bytes.size, 256)).toString(Charsets.UTF_8)
         check(!preview.contains("<html", true)) { "Unexpected HTML" }
         val trimmed = preview.trimStart('\uFEFF', ' ', '\n', '\r', '\t')
@@ -209,7 +221,7 @@ internal object StremioSubtitleRefreshRegistry {
             val timeline = SubtitleTimeline(
                 cues.map { it.startTimeMs }.toLongArray(), cues.map { it.endTimeMs }.toLongArray()
             )
-            Prepared(cues, timeline, isAss)
+            Prepared(cues, timeline, isAss, fingerprint)
         }
         check(prepared.cues.isNotEmpty()) { "No valid subtitle cues" }
         ensureActive()
