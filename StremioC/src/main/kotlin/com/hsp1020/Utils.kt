@@ -540,10 +540,11 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         val grouped = sortSubs(state.subtitles).groupBy { it.originalName }.values.toList()
         if (adapter.count != grouped.size + 1) return false
         val texts = (0 until adapter.count).map { adapter.getItem(it) as? Spanned ?: return false }
-        // Use only the displayed main language, never fuzzy-match the full filename.
+        // Prefer the native language code for embedded tracks; online labels may contain filenames.
         val langs = grouped.map { group ->
             val label = group.first().originalName.substringBefore(" · ").substringBefore(" — ").trim()
-            SubtitleHelper.fromLanguageToTagIETF(label)
+            group.firstOrNull { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }?.getIETF_tag()
+                ?: SubtitleHelper.fromLanguageToTagIETF(label)
                 ?: SubtitleHelper.fromLanguageToTagIETF(label, halfMatch = true)
                 ?: label
         }
