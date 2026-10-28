@@ -73,7 +73,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private var preferredLanguage: String? = null
     private val trackIdPrefix = Regex("^\\d+:")
     private val extraCaptionRegex = Regex(
-        """（[^（）]*）[ \t]*|^[ \t]*[♬♪♫~～]+[ \t]*(?:\r?\n|$)|[⸨⸩≪≫➡⚟]""",
+        """（[^（）]*）[ \t]*|^[ \t]*[♬♪♫~～]+[ \t]*(?:\r?\n|$)|[⸨⸩≪≫➡⚟《》＜＞｟｠📱🔊]""",
         RegexOption.MULTILINE
     )
     private val captionOutputField = runCatching {
