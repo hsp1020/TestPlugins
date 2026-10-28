@@ -78,6 +78,7 @@ class ElevatePlugin : Plugin() {
     private var audioSelector: ElevateAudioTrackSelector? = null
     private var skipController: ElevateSkipController? = null
     private var embeddedSubtitles: EmbeddedSubtitleController? = null
+    private var subtitleSyncRepair: SubtitleSyncCueRepair? = null
     private var homeHero: HomeHeroToggle? = null
     private var libraryPosters: LibraryPosterHook? = null
     private var httpResponseGuard: ElevateHttpResponseGuard? = null
@@ -104,6 +105,7 @@ class ElevatePlugin : Plugin() {
             app = application
             httpResponseGuard = ElevateHttpResponseGuard(application).also { it.start() }
             nativeRecyclerGuard = NativeRecyclerListenerGuard(application).also { it.start() }
+            subtitleSyncRepair = SubtitleSyncCueRepair(application).also { it.start() }
             try {
                 val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
                 // Preserve the user's previous visible/hidden choice when changing to "ON = hide".
@@ -280,6 +282,8 @@ class ElevatePlugin : Plugin() {
         skipController = null
         embeddedSubtitles?.stop()
         embeddedSubtitles = null
+        subtitleSyncRepair?.stop()
+        subtitleSyncRepair = null
         homeHero?.stop()
         homeHero = null
         libraryPosters?.stop()
