@@ -255,8 +255,11 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         if (!cleanExtraCaptions) return
         val nativeView = f.subView ?: return
         val holder = nativeView.parent as? ViewGroup
-        // A refreshed subtitle is drawn by a sibling SubtitleView, not the hidden native view.
-        val view = (holder?.let { parent ->
+        // The refreshed subtitle inherits native motion as a nested SubtitleView.
+        val nested = (nativeView.childCount - 1 downTo 0).firstNotNullOfOrNull { index ->
+            (nativeView.getChildAt(index) as? SubtitleView)?.takeIf { it.alpha > 0f }
+        }
+        val view = nested ?: (holder?.let { parent ->
             (parent.childCount - 1 downTo 0).firstNotNullOfOrNull { index ->
                 (parent.getChildAt(index) as? SubtitleView)
                     ?.takeIf { it !== nativeView && it.alpha > 0f }

@@ -6,7 +6,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Build
 import android.text.SpannableStringBuilder
-import android.util.TypedValue
 import android.view.View
 import android.widget.FrameLayout
 import androidx.core.app.PictureInPictureModeChangedInfo
@@ -236,7 +235,8 @@ internal class StremioRefreshedSubtitleOverlay {
     private var fragment: GeneratorPlayer? = null
     private var mediaPlayer: Player? = null
     private var original: SubtitleView? = null
-    private var originalAlpha = 1f
+    private var originalOutput: View? = null
+    private var originalOutputAlpha = 1f
     private var overlay: SubtitleView? = null
     private var host: FragmentActivity? = null
     private var targetUrl: String? = null
@@ -273,7 +273,7 @@ internal class StremioRefreshedSubtitleOverlay {
         val parsed = prepared.cues
         val player = candidate.playerView?.player ?: return
         val native = candidate.subView ?: return
-        val container = native.parent as? FrameLayout ?: return
+        val nativeOutput = native.getChildAt(0) ?: return
         if (candidate.player.getCurrentPreferredSubtitle()?.url != subtitleUrl) return
         if (fragment === candidate && mediaPlayer === player &&
             original === native && targetUrl == subtitleUrl && overlay != null) {
@@ -290,7 +290,8 @@ internal class StremioRefreshedSubtitleOverlay {
         fragment = candidate
         mediaPlayer = player
         original = native
-        originalAlpha = native.alpha
+        originalOutput = nativeOutput
+        originalOutputAlpha = nativeOutput.alpha
         targetUrl = subtitleUrl
         cues = parsed
         timeline = prepared.timeline
@@ -300,10 +301,10 @@ internal class StremioRefreshedSubtitleOverlay {
             isFocusable = false
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
-        container.addView(view, FrameLayout.LayoutParams(-1, -1))
+        // Inherit CloudStream's control-avoidance translation from the native subtitle view.
+        native.addView(view, FrameLayout.LayoutParams(-1, -1))
         overlay = view
-        originalAlpha = native.alpha
-        native.alpha = 0f
+        nativeOutput.alpha = 0f
         host = candidate.activity as? FragmentActivity
         host?.addOnPictureInPictureModeChangedListener(pipListener)
         SubtitlesFragment.applyStyleEvent += styleListener
@@ -313,7 +314,6 @@ internal class StremioRefreshedSubtitleOverlay {
 
     private fun applyAppearance() {
         val view = overlay ?: return
-        val native = original ?: return
         val saved = SubtitlesFragment.getCurrentSavedStyle()
         SubtitlesFragment.setSubtitleViewStyle(view, saved, true)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && host?.isInPictureInPictureMode == true) {
@@ -322,9 +322,8 @@ internal class StremioRefreshedSubtitleOverlay {
             view.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * 1.5f)
             view.setBottomPaddingFraction(SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
         } else {
-            view.translationY = -TypedValue.applyDimension(
-                TypedValue.COMPLEX_UNIT_DIP, saved.elevation.toFloat(), view.resources.displayMetrics
-            )
+            // Parent subView already applies subtitle elevation and control avoidance.
+            view.translationY = 0f
         }
     }
 
@@ -382,9 +381,10 @@ internal class StremioRefreshedSubtitleOverlay {
         main.removeCallbacks(tick)
         host?.removeOnPictureInPictureModeChangedListener(pipListener)
         if (overlay != null) SubtitlesFragment.applyStyleEvent -= styleListener
-        original?.alpha = originalAlpha
         val view = overlay
         (view?.parent as? FrameLayout)?.removeView(view)
+        originalOutput?.alpha = originalOutputAlpha
+        originalOutput = null
         overlay = null
         original = null
         fragment = null
