@@ -3446,6 +3446,52 @@ open class StremioC(
             emitted
         }
 
+        // CineStream's user HTTPS/DEBRID loader does not forward stream.subtitles.
+        // Mirror its exact payload route, but emit only subtitles, never duplicate links.
+        val cineSubtitleRequests = Collections.synchronizedSet(mutableSetOf<String>())
+        val cineSubtitleLimiter = Semaphore(4)
+        suspend fun fetchCineInlineSubtitles(payload: Map<String, Any?>): Unit = coroutineScope {
+            val imdb = (payload["imdb_id"] as? String)?.takeIf { IMDB_ID_REGEX.matches(it) }
+                ?: return@coroutineScope
+            val animeRoute = payload["isKitsu"] == true
+            val season = payload[if (animeRoute) "imdbSeason" else "season"] as? Int
+            val episode = payload[if (animeRoute) "imdbEpisode" else "episode"] as? Int
+            if (!actualIsMovie && (season == null || episode == null)) return@coroutineScope
+            val type = if (actualIsMovie) "movie" else "series"
+            val id = if (actualIsMovie) imdb else "$imdb:$season:$episode"
+            integrationAddons.filter { it.fromCineStream && it.cineInlineSubtitles }.map { addon ->
+                async(Dispatchers.IO) {
+                    cineSubtitleLimiter.withPermit {
+                        val base = addon.url.fixSourceUrl().cleanBaseUrl()
+                        if (base.isBlank()) return@withPermit
+                        val suffix = addon.url.substringAfter("?", "").takeIf { it.isNotEmpty() }
+                            ?.let { "?$it" } ?: ""
+                        val requestUrl = "$base/stream/$type/${id.urlEncode()}.json$suffix"
+                        if (!cineSubtitleRequests.add(requestUrl)) return@withPermit
+                        runSuspendCatching {
+                            val text = customSession.get(requestUrl, timeout = 25L).text
+                            val response = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
+                            response?.streams.orEmpty().forEach { stream ->
+                                if (stream.url == null && stream.infoHash == null &&
+                                    stream.externalUrl == null && stream.ytId == null) return@forEach
+                                stream.subtitles.forEachIndexed { position, sub ->
+                                    sub.toCloudStreamSubtitle(addon.name, addon.name,
+                                        sub.translationSourceLanguage(stream.subtitles))?.let { file ->
+                                        StremioSubtitleRefreshRegistry.remember(
+                                            file.url, addon.url, sub.id, sub.lang ?: sub.lang_code,
+                                            null, position, file.headers ?: emptyMap()
+                                        )
+                                        stremioSubtitleFrom(addon.url, 1)(file)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }.awaitAll()
+            Unit
+        }
+
         runAllAsync(
             {
 
@@ -3525,23 +3571,31 @@ open class StremioC(
                                 val season = if (loadData.originalAnimeId != null || integrationImdbId == null) loadData.season else globalSeason
                                 val episode = if (loadData.originalAnimeId != null || integrationImdbId == null) loadData.episode else globalEpisode
                                 val extraType = if (loadData.originalAnimeId != null) targetType else integrationTargetType
-                                val streamRequest = streamRequest(extraType, reqId, season, episode)
+                                val request = streamRequest(extraType, reqId, season, episode)
                                 val source = addon.name.takeIf { it.isNotBlank() }
                                     ?: getActualStremioAddonName(addonUrl)
                                     ?: base.toHttpUrlOrNull()?.host.orEmpty()
                                 if (source.isNotBlank()) stremioSourceNames.add(source.lowercase())
                                 runAllAsync({
-                                    if (streamRequest != null && base.isNotBlank()) {
-                                        runSuspendCatching {
-                                            val requestUrl = "$base/stream/${streamRequest.first}/${streamRequest.second.urlEncode()}.json$suffix"
+                                    if (request != null && base.isNotBlank()) {
+                                        suspend fun fetchExtraStreams(route: Pair<String, String>): Int = runSuspendCatching {
+                                            val requestUrl = "$base/stream/${route.first}/${route.second.urlEncode()}.json$suffix"
                                             val response = customSession.get(requestUrl, timeout = 25L)
                                             val text = response.text
                                             val streams = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
                                             emitOrderedAddonStreams(streams?.streams, source,
                                                 stremioSubtitleFrom(addonUrl), extractorSubtitleFrom(addonUrl),
                                                 "extra", addon.name, addonUrl)
+                                        }.getOrDefault(0)
+                                        val originalLinks = fetchExtraStreams(request)
+                                        if (extraType != "movie" && extraType != "series" && originalLinks == 0) {
+                                            val fallback = if (actualIsMovie) {
+                                                integrationImdbId?.let { "movie" to it }
+                                            } else {
+                                                mappedAnimeStremioId()?.let { "series" to it }
+                                            }
+                                            if (fallback != null && fallback != request) fetchExtraStreams(fallback)
                                         }
-
                                     }
                                 }, {
                                     val mappedId = mappedAnimeStremioId()
@@ -3569,7 +3623,7 @@ open class StremioC(
                 }
             },
             {
-                invokeCineStream(loadData, integrationTargetType, globalId, globalSeason, globalEpisode, isCasting, integratedSubtitleFrom(1), wrappedCallback, mappingDeferred)
+                invokeCineStream(loadData, integrationTargetType, globalId, globalSeason, globalEpisode, isCasting, integratedSubtitleFrom(1), wrappedCallback, mappingDeferred, ::fetchCineInlineSubtitles)
             },
             {
                 invokeTmdbStremioIntegrationFallback(
@@ -3967,7 +4021,8 @@ open class StremioC(
         val name: String,
         val url: String,
         val subtitleOnly: Boolean,
-        val fromCineStream: Boolean
+        val fromCineStream: Boolean,
+        val cineInlineSubtitles: Boolean = false
     )
 
     private fun getActualStremioAddonName(addonUrl: String): String? {
@@ -4012,7 +4067,8 @@ open class StremioC(
                     val subtitleOnly = parts[2].equals("SUBTITLE", ignoreCase = true)
                     addons.putIfAbsent(
                         url to subtitleOnly,
-                        IntegrationStremioAddon(parts[0].trim().ifBlank { url }, url, subtitleOnly, true)
+                        IntegrationStremioAddon(parts[0].trim().ifBlank { url }, url, subtitleOnly, true,
+                            parts[2].trim().uppercase() in setOf("HTTPS", "DEBRID"))
                     )
                 }
         }
@@ -4135,7 +4191,8 @@ open class StremioC(
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
-        mappingDeferred: Deferred<AnimeSeasonMapping?>?
+        mappingDeferred: Deferred<AnimeSeasonMapping?>?,
+        inlineSubtitleLoader: suspend (Map<String, Any?>) -> Unit
     ) {
         if (!isIntegrationEnabled("cinestream_integration_enabled")) {
             return
@@ -4159,11 +4216,14 @@ open class StremioC(
                 standardImdbRoute: Boolean = false
             ) {
                 try {
-                    withIntegratedSource("cine") { cineStreamProvider.loadLinks(
-                        cinePayload(loadData, targetType, media, animeRoute,
-                            japaneseTitle, standardImdbRoute).toJson(),
-                        isCasting, subtitleCallback, trackedCallback
-                    ) }
+                    val payload = cinePayload(loadData, targetType, media, animeRoute,
+                        japaneseTitle, standardImdbRoute)
+                    supervisorScope {
+                        launch { inlineSubtitleLoader(payload) }
+                        withIntegratedSource("cine") { cineStreamProvider.loadLinks(
+                            payload.toJson(), isCasting, subtitleCallback, trackedCallback
+                        ) }
+                    }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
