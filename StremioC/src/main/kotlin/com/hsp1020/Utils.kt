@@ -769,7 +769,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                     }
                 })
                 row.addView(this, FrameLayout.LayoutParams(
-                    (40 * resources.displayMetrics.density).toInt(), -1, Gravity.END or Gravity.CENTER_VERTICAL
+                    (48 * resources.displayMetrics.density).toInt(), -1, Gravity.END or Gravity.CENTER_VERTICAL
                 ))
             }
             val entry = sourceAt(position)
@@ -780,7 +780,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             val spinning = selected &&
                 (autoRefreshUrl == entry?.originalUrl || queued?.automatic == true)
             val original = originalEndPadding.getOrPut(text) { text.paddingRight }
-            val right = original + if (selected) (40 * text.resources.displayMetrics.density).toInt() else 0
+            val right = original + if (selected) (48 * text.resources.displayMetrics.density).toInt() else 0
             if (text.paddingRight != right) {
                 text.setPadding(text.paddingLeft, text.paddingTop, right, text.paddingBottom)
             }
