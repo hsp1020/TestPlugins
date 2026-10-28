@@ -159,10 +159,9 @@ internal object StremioSubtitleRefreshRegistry {
     suspend fun refresh(
         entry: Entry, previous: Prepared? = null, checkList: Boolean = true
     ): Prepared = withContext(Dispatchers.IO) {
-        val current = find(entry.originalUrl)
-        check(current?.let {
-            it.addonUrl == entry.addonUrl && it.id == entry.id && it.listUrl == entry.listUrl
-        } == true) { "Subtitle provenance changed" }
+        val current = find(entry.originalUrl) ?: error("Subtitle provenance changed")
+        check(current.addonUrl == entry.addonUrl && current.id == entry.id &&
+            current.listUrl == entry.listUrl) { "Subtitle provenance changed" }
         var url = current.latestUrl
         if (checkList && entry.listUrl != null) {
             // Translation addons can temporarily fail to list tracks. Only
