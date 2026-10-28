@@ -35,17 +35,21 @@ internal enum class ElevateFeature(
     EPISODE_OVERLAY("Playback & Subtitles", "Player Episode List",
         "Keep playback running when browsing episodes, with a season dropdown and translucent cards."),
     EMBEDDED_SUBTITLES("Playback & Subtitles", "Embedded Subtitle Management",
-        "Prefer matching embedded subtitles and discard stale tracks when videos change."),
+        "Prefer embedded subtitles matching CloudStream's subtitle auto-select language and remove stale tracks when videos change."),
     AUDIO_TRACKS("Playback & Subtitles", "Automatic Audio Language",
         "Select app-language audio, then Japanese for anime or English for other titles."),
     SKIP("Playback & Subtitles", "Unified Skip Intervals",
-        "Combine native timestamps with AniSkip, Anime Skip, IntroDb and TheIntroDB."),
+        "Provide skip segments using native timestamps, AniSkip, Anime Skip, IntroDb and TheIntroDB. Configure automatic skipping separately below."),
     PIP_BUTTON("Playback & Subtitles", "Picture-in-Picture Button",
         "Show a native-style PiP player button when PiP is enabled in CloudStream."),
     PIP_SUBTITLES("Playback & Subtitles", "PiP Subtitle Styling",
         "Adjust subtitle scale and placement while in Picture-in-Picture."),
     SUBTITLE_RETRY("Playback & Subtitles", "Subtitle Referer Retry",
-        "Retry blocked subtitle requests with the current video's Referer when needed.")
+        "Retry blocked subtitle downloads using the current video's source information when needed."),
+    NATIVE_LISTENER_CLEANUP("Stability & Repairs", "List Scroll Listener Cleanup",
+        "Remove duplicate, outdated scroll listeners from Home and the player episode list while keeping current listeners active."),
+    SUBTITLE_SYNC_REPAIR("Stability & Repairs", "Subtitle Sync List Recovery",
+        "Restore the subtitle sync list from the active subtitle renderer if CloudStream loses its decoder reference.")
 }
 
 internal object ElevateFeaturePrefs {
@@ -206,7 +210,7 @@ class ElevateSettingsFragment : DialogFragment() {
         return AlertDialog.Builder(ctx)
             .setTitle("Elevate Settings")
             .setView(scroll)
-            .setPositiveButton("Save & Close") { _, _ -> savePosterSettings?.invoke() }
+            .setPositiveButton("Save") { _, _ -> savePosterSettings?.invoke() }
             .create()
     }
 }
