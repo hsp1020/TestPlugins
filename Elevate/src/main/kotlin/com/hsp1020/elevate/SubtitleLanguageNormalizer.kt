@@ -114,7 +114,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             else sub.languageCode
         if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) {
             val label = SubtitleHelper.fromTagToLanguageName(code)
-                ?: sub.originalName.substringBefore(" (").ifBlank { "Unknown" }
+                ?: sub.originalName.substringBefore(" (")
             return if (sub.originalName == label && sub.languageCode == code) sub
                 else sub.copy(originalName = label, languageCode = code)
         }
@@ -130,9 +130,6 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             sub.originalName.contains(" — ")) return sub
 
         val sourceName = sub.originalName.trim()
-        if (sourceName.isEmpty() && code.isNullOrBlank()) {
-            return sub.copy(originalName = "Unknown")
-        }
         val stremio = sourceName.endsWith(" (Stremio)", ignoreCase = true)
         val languageName = if (stremio)
             sourceName.dropLast(" (Stremio)".length).trim() else sourceName
@@ -141,7 +138,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             ?: SubtitleHelper.fromCodeToLangTagIETF(languageName)
             ?: SubtitleHelper.fromLanguageToTagIETF(languageName)
             ?: SubtitleHelper.fromLanguageToTagIETF(languageName, halfMatch = true)
-            ?: return if (sourceName.isEmpty()) sub.copy(originalName = "Unknown") else sub
+            ?: return sub
         val displayLanguage = SubtitleHelper.fromTagToLanguageName(tag) ?: return sub
         val displayed = displayLanguage + if (stremio) " (Stremio)" else ""
         if (displayed == sub.originalName && code == sub.languageCode) return sub
@@ -156,11 +153,6 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         return sub.copy(originalName = displayed, nameSuffix = details, languageCode = tag)
     }
 
-    private fun isPreviewVtt(sub: SubtitleData): Boolean =
-        sub.origin == SubtitleOrigin.URL &&
-            sub.url.substringBefore('?').substringBefore('#').lowercase()
-                .endsWith("/preview/thumbnails.vtt")
-
     private fun normalize(vm: PlayerGeneratorViewModel) {
         val f = fragment ?: return
         if (runCatching { (dialogField?.get(f) as? Dialog)?.isShowing == true }
@@ -169,8 +161,8 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         if (state.subtitles.isEmpty()) return
         val ranks = stremioRanks()
         val embeddedLabel = f.getString(R.string.subtitles_from_embedded)
-        val normalized = state.subtitles.filterNot(::isPreviewVtt)
-            .map { localized(it, ranks) }
+        val normalized = state.subtitles.map { localized(it, ranks) }
+            .filter { it.originalName.isNotBlank() }
 
         // Only groups containing embedded tracks need explicit option numbers.
         // The native picker orders by nameSuffix.toIntOrNull() ?: 0, so the
