@@ -1,6 +1,7 @@
 package com.hsp1020.elevate
 
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import android.os.SystemClock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -14,7 +15,8 @@ import kotlin.math.min
 /** HTTP Range MKV text-subtitle extractor. No fallback to whole-video downloads.
  * The EBML/Cues traversal follows cryguy/mkv-subtitle-extractor (MIT).
  */
-internal class MkvSubtitleRangeExtractor(private val link: ExtractorLink) {
+internal class MkvSubtitleRangeExtractor(private val link: ExtractorLink,
+    private val report:(String)->Unit = {}) {
     private val client = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(25, TimeUnit.SECONDS).build()
     private val headers = link.headers.filterKeys { !it.equals("Range", true) }.toMutableMap().apply {
@@ -26,6 +28,12 @@ internal class MkvSubtitleRangeExtractor(private val link: ExtractorLink) {
     private var requests = 0
     private var lastOffset = -1L
     private var lastData = byteArrayOf()
+    private var phase = "init"
+    private val began=SystemClock.elapsedRealtime()
+    private fun step(name:String,details:String="") {
+        phase=name
+        report("extract-$name requests=$requests bytes=$totalRead elapsedMs=${SystemClock.elapsedRealtime()-began} $details")
+    }
     private data class Element(val id: Long, val data: Int, val length: Long) {
         val end: Long get() = data.toLong() + length
     }
@@ -95,8 +103,15 @@ internal class MkvSubtitleRangeExtractor(private val link: ExtractorLink) {
             header("Range","bytes="+at+"-"+(at+bytes-1))
         }.get().build()
         requests++
+        val start=SystemClock.elapsedRealtime()
+        val sampled=requests==1 || requests%25==0
+        if(sampled) report("range-start phase=$phase request=$requests offset=$at bytes=$bytes")
+        try {
         client.newCall(request).execute().use { res ->
-            if (res.code != 206) throw IOException("Server ignored HTTP Range")
+            if (res.code != 206) {
+                report("range-http-error phase=$phase request=$requests status=${res.code} offset=$at")
+                throw IOException("Server ignored HTTP Range")
+            }
             val m = Regex("""bytes\s+(\d+)-(\d+)/(\d+)""")
                 .matchEntire(res.header("Content-Range").orEmpty().trim())
                 ?: throw IOException("Invalid Content-Range")
@@ -118,7 +133,15 @@ internal class MkvSubtitleRangeExtractor(private val link: ExtractorLink) {
             totalRead+=bytes
             lastOffset=at
             lastData=data
+            val elapsed=SystemClock.elapsedRealtime()-start
+            if(sampled || elapsed>2000)
+                report("range-ok phase=$phase request=$requests status=${res.code} offset=$at bytes=$bytes elapsedMs=$elapsed totalBytes=$totalRead")
             return data.copyOfRange(0,n)
+        }
+        } catch(e:Exception) {
+            val reason=e.message.orEmpty().replace(Regex("""https?://\S+"""),"[redacted-url]").take(160)
+            report("range-failed phase=$phase request=$requests offset=$at bytes=$bytes type=${e.javaClass.simpleName} reason=$reason")
+            throw e
         }
     }
     private fun readElement(at: Long): ByteArray {
@@ -242,10 +265,13 @@ internal class MkvSubtitleRangeExtractor(private val link: ExtractorLink) {
     }
 
     suspend fun extract(trackId:String,language:String?):String = withContext(Dispatchers.IO) {
+        step("start","track=$trackId language=$language")
         if(!link.url.startsWith("https://",true) && !link.url.startsWith("http://",true))
             throw IOException("Only HTTP MKV streams supported")
+        step("header-range")
         read(0,256*1024)
         val init=read(0,min(size,256*1024).toInt())
+        step("header-read","fileBytes=$size")
         val ebml=element(init,0)
         if(ebml.id!=0x1A45DFA3L || ebml.length<0) throw IOException("Not an EBML/MKV stream")
         val seg=element(init,ebml.end.toInt())
@@ -256,12 +282,16 @@ internal class MkvSubtitleRangeExtractor(private val link: ExtractorLink) {
             if(e.id==0x114D9B74L) positions.putAll(seek(init,e))
             if(e.id==0x1F43B675L) break
         }
+        step("seekhead-parsed","entries=${positions.size}")
         val tracksAt=positions[0x1654AE6BL] ?: throw IOException("MKV SeekHead lacks tracks")
+        step("tracks-read","offset=${base+tracksAt}")
         val codecs=setOf("S_TEXT/UTF8","S_TEXT/ASS","S_TEXT/SSA","S_TEXT/WEBVTT")
         val supported=readTracks(readElement(base+tracksAt)).filter { it.codec in codecs }
+        step("tracks-parsed","textTracks=${supported.size}")
         val track=supported.firstOrNull { it.id.toString()==trackId }
             ?: supported.singleOrNull { it.language.equals(language,true) }
             ?: throw IOException("Selected MKV text track not found")
+        step("track-selected","id=${track.id} codec=${track.codec}")
         var scale=1.0
         positions[0x1549A966L]?.let { loc ->
             val bytes=readElement(base+loc);val root=element(bytes,0)
@@ -270,8 +300,11 @@ internal class MkvSubtitleRangeExtractor(private val link: ExtractorLink) {
         val cuesAt=positions[0x1C53BB6BL]
         val cues=if(cuesAt!=null) readCues(readElement(base+cuesAt),track.id)
             else emptyList()
+        step("cues-parsed","count=${cues.size} indexed=${cuesAt!=null}")
         val found=ArrayList<Line>()
         val seenClusters=HashSet<Long>()
+        var scanned=0
+        step("scan-start","mode=${if(cues.isEmpty()) "clusters" else "cues"}")
         if(cues.isEmpty()) {
             // Without subtitle Cues, read only segment/cluster headers and selected blocks.
             var offset=base
@@ -282,6 +315,7 @@ internal class MkvSubtitleRangeExtractor(private val link: ExtractorLink) {
                 if(head.length<0 || offset+head.end>end) break
                 if(head.id==0x1F43B675L)
                     found.addAll(scanCluster(offset,track.id,scale,track.codec))
+                if(++scanned%50==0) step("scan-progress","items=$scanned lines=${found.size}")
                 offset+=head.end
             }
         } else for(cue in cues) {
@@ -294,7 +328,9 @@ internal class MkvSubtitleRangeExtractor(private val link: ExtractorLink) {
             } else if(seenClusters.add(cue.cluster)) {
                 found.addAll(scanCluster(cluster,track.id,scale,track.codec))
             }
+            if(++scanned%50==0) step("scan-progress","items=$scanned lines=${found.size}")
         }
+        step("scan-complete","items=$scanned lines=${found.size}")
         val clean=found.filter { it.time>=0 }.distinctBy { it.time to it.text }.sortedBy { it.time }
         if(clean.isEmpty()) throw IOException("No MKV text cues extracted")
         val srt=buildString {
@@ -310,6 +346,7 @@ internal class MkvSubtitleRangeExtractor(private val link: ExtractorLink) {
         }
         if(srt.toByteArray().size>5*1024*1024)
             throw IOException("SubMaker accepts at most 5 MB")
+        step("srt-ready","cues=${clean.size} chars=${srt.length}")
         srt
     }
     private fun stamp(ms:Long):String {

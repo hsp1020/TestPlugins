@@ -7,6 +7,7 @@ import android.content.Context
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
@@ -71,6 +72,8 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
     private var decorated: Dialog? = null
     private var action: TextView? = null
     private var task: Job? = null
+    private var nextAttempt = 0
+    private var taskAttempt = 0
     private var overlay: TranslatedOverlay? = null
     private val sourceDialogField = runCatching {
         FullScreenPlayer::class.java.getDeclaredField("selectSourceDialog")
@@ -151,15 +154,26 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
     private fun currentLink(f:GeneratorPlayer):ExtractorLink? =
         runCatching { linkField?.get(f.player) as? ExtractorLink }.getOrNull()
     private fun chooseTrack(f:GeneratorPlayer,dialog:Dialog) {
-        val link=currentLink(f) ?: return toast(f,"No active stream")
-        if(!link.url.startsWith("http://",true) && !link.url.startsWith("https://",true))
+        val link=currentLink(f) ?: run {
+            Log.w("Elevate-MkvTranslate","selection-skipped reason=no-active-stream")
+            return toast(f,"No active stream")
+        }
+        if(!link.url.startsWith("http://",true) && !link.url.startsWith("https://",true)) {
+            Log.w("Elevate-MkvTranslate","selection-skipped reason=non-http-stream")
             return toast(f,"Only HTTP MKV streams are supported")
+        }
         val candidates=vm?.state?.subtitles.orEmpty()
             .filter { it.origin==SubtitleOrigin.EMBEDDED_IN_VIDEO }
             .distinctBy { it.url }
             .sortedWith(compareBy({it.url.toIntOrNull() ?: Int.MAX_VALUE},{it.url}))
-        if(candidates.isEmpty()) return
-        val provider=subMaker() ?: return toast(f,"Register SubMaker in StremioC before translating")
+        if(candidates.isEmpty()) {
+            Log.w("Elevate-MkvTranslate","selection-skipped reason=no-embedded-tracks")
+            return
+        }
+        val provider=subMaker() ?: run {
+            Log.w("Elevate-MkvTranslate","selection-skipped reason=no-submaker-config")
+            return toast(f,"Register SubMaker in StremioC before translating")
+        }
         AlertDialog.Builder(f.requireContext())
             .setTitle(if(f.resources.configuration.locale.language=="ko") "번역할 내장자막 선택" else "Select embedded subtitles")
             .setItems(candidates.map { it.originalName+" · "+it.url }.toTypedArray()) { _,pos ->
@@ -204,31 +218,48 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
         .take(20).joinToString("") { "%02x".format(it) }
     private fun translate(f:GeneratorPlayer,viewModel:PlayerGeneratorViewModel,
                           link:ExtractorLink,sub:SubtitleData,maker:SubMaker) {
-        task?.cancel()
-        overlay?.detach()
+        if(task?.isActive==true) Log.w("Elevate-MkvTranslate","job=$taskAttempt cancel-request reason=superseded")
+        task?.cancel(CancellationException("superseded"))
+        overlay?.detach("superseded")
         overlay=null
+        val attempt=++nextAttempt
+        taskAttempt=attempt
+        val started=SystemClock.elapsedRealtime()
         val instance=viewModel.state.instance
         val mediaPlayer=f.playerView?.player
         val originalSelected=f.player.getCurrentPreferredSubtitle()?.url
         val trackId=sub.url.takeIf { it.matches(Regex("[a-zA-Z0-9._-]{1,120}")) }
-            ?: return toast(f,"Unsupported embedded track ID")
+            ?: run {
+                Log.w("Elevate-MkvTranslate","job=$attempt selection-skipped reason=invalid-track-id")
+                return toast(f,"Unsupported embedded track ID")
+            }
+        Log.i("Elevate-MkvTranslate","job=$attempt started track=$trackId language=${sub.languageCode} playerPresent=${mediaPlayer!=null}")
         toast(f,if(f.resources.configuration.locale.language=="ko") "내장자막 번역 시작" else "Translating embedded subtitles")
         task=scope.launch {
-            var stage="extract"
+            var stage="extract-start"
             try {
                 val videoHash=hash(link.url)
                 val translated=withContext(Dispatchers.IO) {
-                    val srt=MkvSubtitleRangeExtractor(link).extract(trackId,sub.languageCode)
-                    Log.i("Elevate-MkvTranslate","extract-complete track=$trackId chars=${srt.length}")
+                    val srt=MkvSubtitleRangeExtractor(link) { event ->
+                        stage=event.substringBefore(' ')
+                        Log.i("Elevate-MkvTranslate","job=$attempt $event")
+                    }.extract(trackId,sub.languageCode)
+                    Log.i("Elevate-MkvTranslate","job=$attempt extract-complete track=$trackId chars=${srt.length}")
                     stage="api-request"
-                    requestTranslation(maker,videoHash,trackId,sub.languageCode,srt) {
+                    requestTranslation(maker,videoHash,trackId,sub.languageCode,srt,attempt) {
                         stage="api-response"
                     }
                 }
                 stage="register"
-                if(fragment!==f || vm!==viewModel ||
-                    viewModel.state.instance!=instance || f.playerView?.player!==mediaPlayer ||
-                    currentLink(f)?.url!=link.url) return@launch
+                val sameFragment=fragment===f
+                val sameModel=vm===viewModel
+                val sameInstance=viewModel.state.instance==instance
+                val samePlayer=f.playerView?.player===mediaPlayer
+                val sameLink=currentLink(f)?.url==link.url
+                if(!sameFragment || !sameModel || !sameInstance || !samePlayer || !sameLink) {
+                    Log.w("Elevate-MkvTranslate","job=$attempt result-discarded fragment=$sameFragment model=$sameModel instance=$sameInstance player=$samePlayer link=$sameLink elapsedMs=${SystemClock.elapsedRealtime()-started}")
+                    return@launch
+                }
                 val url=maker.base+"/addon/"+maker.config+
                     "/xembedded/"+videoHash+"/kor/"+trackId
                 val korean=f.resources.configuration.locale.language=="ko"
@@ -242,11 +273,13 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
                     null
                 )
                 viewModel.addSubtitles(setOf(entry))
-                Log.i("Elevate-MkvTranslate","subtitle-registered track=$trackId")
-                overlay=TranslatedOverlay(f,mediaPlayer,originalSelected,translated).also { it.attach() }
+                Log.i("Elevate-MkvTranslate","job=$attempt subtitle-registered track=$trackId")
+                overlay=TranslatedOverlay(f,mediaPlayer,originalSelected,translated,attempt).also { it.attach() }
+                Log.i("Elevate-MkvTranslate","job=$attempt completed overlayAttached=${overlay?.isAttached==true} elapsedMs=${SystemClock.elapsedRealtime()-started}")
                 toast(f,if(f.resources.configuration.locale.language=="ko")
                     "한국어 번역 완료" else "Korean subtitles translated")
             } catch(e:CancellationException) {
+                Log.w("Elevate-MkvTranslate","job=$attempt cancelled stage=$stage reason=${e.message.orEmpty().take(80)} elapsedMs=${SystemClock.elapsedRealtime()-started}")
                 throw e
             } catch(e:Exception) {
                 val fromPlugin = e.stackTrace.firstOrNull {
@@ -259,7 +292,7 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
                     .replace(Regex("""https?://\S+"""), "[redacted-url]")
                     .take(200)
                 Log.e("Elevate-MkvTranslate",
-                    "failed stage=$stage type=${e.javaClass.simpleName} at=$location reason=$detail")
+                    "job=$attempt failed stage=$stage elapsedMs=${SystemClock.elapsedRealtime()-started} type=${e.javaClass.simpleName} at=$location reason=$detail")
                 if(fragment===f && vm===viewModel) toast(f,
                     if(f.resources.configuration.locale.language=="ko")
                         "자막 추출·번역 실패: "+(e.message ?: "오류")
@@ -268,7 +301,7 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
         }
     }
     private fun requestTranslation(maker:SubMaker,hash:String,track:String,
-                                   language:String?,srt:String,onResponse:()->Unit):String {
+                                   language:String?,srt:String,attempt:Int,onResponse:()->Unit):String {
         val source=when(language?.lowercase()) {
             "ja","jp","jpn" -> "jpn"
             "en","eng" -> "eng"
@@ -289,16 +322,17 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
         val request=Request.Builder().url(maker.base+"/api/translate-embedded")
             .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
-        Log.i("Elevate-MkvTranslate","api-request track=$track chars=${srt.length}")
+        Log.i("Elevate-MkvTranslate","job=$attempt api-request track=$track chars=${srt.length}")
         client.newCall(request).execute().use { res ->
             onResponse()
+            Log.i("Elevate-MkvTranslate","job=$attempt api-http-response status=${res.code}")
             if(!res.isSuccessful) throw IOException("SubMaker HTTP "+res.code)
             val response=res.body?.string() ?: throw IOException("Empty SubMaker response")
             val json=JSONObject(response)
             val translated=json.optString("translatedContent")
             if(translated.isBlank() || !translated.contains("-->"))
                 throw IOException("SubMaker returned no SRT content")
-            Log.i("Elevate-MkvTranslate","api-response track=$track status=${res.code} chars=${translated.length}")
+            Log.i("Elevate-MkvTranslate","job=$attempt api-response track=$track status=${res.code} chars=${translated.length}")
             return translated
         }
     }
@@ -309,7 +343,8 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
         private val fragment:GeneratorPlayer,
         private val player:Player?,
         private val sourceUrl:String?,
-        content:String
+        content:String,
+        private val attempt:Int
     ) : Player.Listener {
         private val main=Handler(Looper.getMainLooper())
         private val lines=content.trim().split(Regex("""\r?\n\s*\r?\n""")).mapNotNull { piece ->
@@ -327,12 +362,14 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
         private var priorAlpha=1f
         private var view:SubtitleView?=null
         private var lastText:String?=null
+        private var firstCueLogged=false
+        val isAttached:Boolean get()=view!=null
         private val advance=Runnable { update() }
         fun attach() {
-            val parent=fragment.subView ?: return
-            val currentPlayer=player ?: return
-            val nativeOutput=parent.getChildAt(0) ?: return
-            if(lines.isEmpty()) return
+            val parent=fragment.subView ?: return skipped("missing-subtitle-view")
+            val currentPlayer=player ?: return skipped("missing-player")
+            val nativeOutput=parent.getChildAt(0) ?: return skipped("missing-native-output")
+            if(lines.isEmpty()) return skipped("empty-srt-cues")
             native=parent
             output=nativeOutput
             priorAlpha=nativeOutput.alpha
@@ -345,13 +382,17 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
             currentPlayer.addListener(this)
             update()
             if(view===subtitleView)
-                Log.i("Elevate-MkvTranslate","overlay-attached cues=${lines.size}")
+                Log.i("Elevate-MkvTranslate","job=$attempt overlay-attached cues=${lines.size}")
+            else skipped("detached-during-attach")
+        }
+        private fun skipped(reason:String) {
+            Log.w("Elevate-MkvTranslate","job=$attempt overlay-skipped reason=$reason cues=${lines.size}")
         }
         override fun onEvents(player:Player,events:Player.Events) { update() }
         fun syncOrDetach(current:GeneratorPlayer) {
             if(current!==fragment || current.playerView?.player!==player ||
                 current.player.getCurrentPreferredSubtitle()?.url!=sourceUrl) {
-                detach()
+                detach("player-or-selection-changed")
             } else update()
         }
         private fun update() {
@@ -360,7 +401,7 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
             val v=view ?: return
             if(fragment.playerView?.player!==media ||
                 fragment.player.getCurrentPreferredSubtitle()?.url!=sourceUrl) {
-                detach()
+                detach("player-or-selection-changed")
                 return
             }
             val pos=media.currentPosition+fragment.player.getSubtitleOffset()
@@ -370,6 +411,10 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
                 v.setCues(if(text.isEmpty()) emptyList()
                     else listOf(Cue.Builder().setText(text).build()))
                 lastText=text
+                if(text.isNotEmpty() && !firstCueLogged) {
+                    firstCueLogged=true
+                    Log.i("Elevate-MkvTranslate","job=$attempt first-cue-submitted positionMs=$pos")
+                }
             }
             if(!media.isPlaying) return
             val next=lines.asSequence().flatMap { sequenceOf(it.start,it.end) }
@@ -378,7 +423,8 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
                 .toLong().coerceAtLeast(1)
             main.postDelayed(advance,delay)
         }
-        fun detach() {
+        fun detach(reason:String="reset") {
+            if(view!=null) Log.i("Elevate-MkvTranslate","job=$attempt overlay-detached reason=$reason")
             main.removeCallbacks(advance)
             player?.removeListener(this)
             view?.let { (it.parent as? ViewGroup)?.removeView(it) }
@@ -401,8 +447,9 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
         if(f!=null && f!==fragment) return
         focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
         focusTree=null
-        task?.cancel();task=null
-        overlay?.detach();overlay=null
+        if(task?.isActive==true) Log.w("Elevate-MkvTranslate","job=$taskAttempt cancel-request reason=fragment-detached")
+        task?.cancel(CancellationException("fragment-detached"));task=null
+        overlay?.detach("fragment-detached");overlay=null
         decorated=null;action=null
         fragment=null;vm=null
     }
