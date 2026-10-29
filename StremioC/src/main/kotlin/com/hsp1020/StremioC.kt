@@ -1116,7 +1116,8 @@ open class StremioC(
             val streamSubtitleMap: Map<String, Boolean>,
             val streamSubtitleUrls: List<StreamSubtitleAddon>,
             val disabledCatalogUrls: Set<String> = emptySet(),
-            val catalogEnabledIds: Map<Long, Boolean> = emptyMap()
+            val catalogEnabledIds: Map<Long, Boolean> = emptyMap(),
+            val catalogAddons: List<StreamSubtitleAddon> = emptyList()
         )
         @Volatile private var cachedSyncSettings: SyncSettings? = null
         @Volatile private var cachedSyncSettingsTime: Long = 0
@@ -1154,6 +1155,7 @@ open class StremioC(
                 val extraMap = mutableMapOf<String, Boolean>()
                 val catalogEnabled = mutableMapOf<String, Boolean>()
                 val catalogEnabledIds = mutableMapOf<Long, Boolean>()
+                val catalogAddons = mutableListOf<StreamSubtitleAddon>()
                 if (json != null) {
                     try {
                         val arr = org.json.JSONArray(json)
@@ -1167,6 +1169,9 @@ open class StremioC(
                                 catalogEnabled[key] = catalogEnabled[key] == true || enabled
                             }
                             if (!enabled) continue
+                            if (rawLink.isNotBlank()) catalogAddons.add(
+                                StreamSubtitleAddon(obj.optString("name").trim(), rawLink)
+                            )
                             val link = obj.optString("link", "").cleanBaseUrl().lowercase()
                             if (link.isNotBlank()) {
                                 map[link] = obj.optBoolean("isSyncEnabled", true)
@@ -1190,7 +1195,7 @@ open class StremioC(
                 }.onFailure { error ->
                 }.getOrDefault(emptyList()).distinctBy { stremioManifestUrl(it.url) }
                 val result = SyncSettings(syncUrl, map, historyMap, extraMap, extraUrls,
-                    catalogEnabled.filterValues { !it }.keys.toSet(), catalogEnabledIds)
+                    catalogEnabled.filterValues { !it }.keys.toSet(), catalogEnabledIds, catalogAddons)
                 cachedSyncSettings = result
                 cachedSyncSettingsTime = System.currentTimeMillis()
                 return result
@@ -1287,6 +1292,21 @@ open class StremioC(
 
         internal val seasonEpisodeCountsByUrl = lruCacheMap<String, Map<Int, Int>>(200)
         internal val subtitleOrderByUrl = Collections.synchronizedMap(lruCacheMap<String, Int>(1200))
+        internal val subtitleDetailByUrl = Collections.synchronizedMap(lruCacheMap<String, String>(2400))
+        internal val subtitleSourceByUrl = Collections.synchronizedMap(lruCacheMap<String, String>(2400))
+
+        // Numeric-only group keys cannot be guessed as a spoken language by
+        // CloudStream's fuzzy getIETF_tag() auto-selection fallback.
+        internal fun translationGroupId(label: String): String =
+            "0" + label.map { it.code.toString().padStart(5, '0') }.joinToString("")
+
+        internal fun translationGroupTitle(id: String): String? {
+            if (!id.startsWith("0") || id.length < 6 || (id.length - 1) % 5 != 0 ||
+                id.drop(1).any { !it.isDigit() }) return null
+            return runCatching {
+                id.drop(1).chunked(5).map { it.toInt().toChar() }.joinToString("")
+            }.getOrNull()?.takeIf { it.isNotBlank() }
+        }
         internal val trailerChoicesByUrl = lruCacheMap<String, List<TrailerChoice>>(200)
 
         private data class AddonMetaEntry(val bytes: ByteArray, val at: Long, val ttlMs: Long)
@@ -3117,16 +3137,19 @@ open class StremioC(
                 parsed != null && (parsed.scheme == "http" || parsed.scheme == "https")
             }.filterNot { stremioManifestUrl(it.url) == stremioManifestUrl(currentMainUrl) }
         } else emptyList()
-        val stremioAddons = syncSettings.streamSubtitleUrls
+        val stremioAddons = (syncSettings.catalogAddons + syncSettings.streamSubtitleUrls)
+            .distinctBy { stremioManifestUrl(it.url) }
         val integrationAddons = getIntegrationStremioAddons()
         val cineAddons = integrationAddons.filter { it.fromCineStream }
         val streamPlayAddons = integrationAddons.filterNot { it.fromCineStream }
         fun rankSubtitle(sub: SubtitleFile, group: Int, addonUrl: String? = null) {
             if (sub.url.isBlank()) return
-            val code = SubtitleHelper.fromLanguageToTagIETF(sub.lang.trim())
-            val plain = code != null &&
-                SubtitleHelper.fromTagToEnglishLanguageName(code)?.equals(sub.lang.trim(), true) == true
-            val source = sub.lang.substringAfterLast(" — ", "").trim()
+            // Retain details from direct integration callbacks as well as Stremio API responses.
+            val originalDetail = sub.lang.substringAfter(" · ", "").trim()
+            if (originalDetail.isNotEmpty()) synchronized(subtitleDetailByUrl) {
+                if (subtitleDetailByUrl[sub.url] == null) subtitleDetailByUrl[sub.url] = originalDetail
+            }
+            val source = subtitleSourceByUrl[sub.url] ?: sub.lang.substringAfterLast(" — ", "").trim()
             val addons = when (group) {
                 0 -> stremioAddons.map { it.name to it.url }
                 1 -> cineAddons.map { it.name to it.url }
@@ -3138,10 +3161,9 @@ open class StremioC(
                     (addonUrl == null && addonName.isNotBlank() && addonName.equals(source, true))
             }
             val priority = when {
-                plain -> 0
-                group == 0 -> 1_000 + if (index >= 0) index else addons.size
-                group == 1 -> 10_000 + if (index >= 0) index else addons.size
-                group == 2 -> 20_000 + if (index >= 0) index else addons.size
+                group == 0 && index >= 0 -> 1_000 + index
+                group == 1 && index >= 0 -> 10_000 + index
+                group == 2 && index >= 0 -> 20_000 + index
                 else -> 30_000
             }
             synchronized(subtitleOrderByUrl) {
@@ -5524,15 +5546,25 @@ open class StremioC(
                 it.isNotBlank() && !it.equals("StremioC", true) && !it.startsWith("http", true) &&
                     !it.equals(mainLabel, true) && !it.equals(language, true)
             }
-        if (mainLabel == null && sourceLabel == null) {
-            return newSubtitleFile(displayLanguage, subtitleUrl)
+        val detail = buildString {
+            if (mainLabel != null && !mainLabel.equals(language, true)) append(mainLabel)
+            if (sourceLabel != null) {
+                if (isNotEmpty()) append(" — ")
+                append(sourceLabel)
+            }
         }
-        val displayName = buildString {
-            append(displayLanguage)
-            if (mainLabel != null && !mainLabel.equals(language, true)) { append(" · "); append(mainLabel) }
-            if (sourceLabel != null) { append(" — "); append(sourceLabel) }
+        synchronized(subtitleDetailByUrl) {
+            if (detail.isBlank()) subtitleDetailByUrl.remove(subtitleUrl)
+            else subtitleDetailByUrl[subtitleUrl] = detail
         }
-        return newSubtitleFile(displayName, subtitleUrl)
+        synchronized(subtitleSourceByUrl) {
+            if (sourceLabel == null) subtitleSourceByUrl.remove(subtitleUrl)
+            else subtitleSourceByUrl[subtitleUrl] = sourceLabel
+        }
+        // Keep the translated group distinct from the actual target language.
+        // It is rendered using displayLanguage in the StremioC native picker adapter.
+        val groupKey = if (sourceLanguage != null) translationGroupId(displayLanguage) else language
+        return newSubtitleFile(groupKey, subtitleUrl)
     }
     private data class ProxyHeaders(@JsonProperty("request") val request: Map<String, String>?)   
     private data class BehaviorHints(@JsonProperty("proxyHeaders") val proxyHeaders: ProxyHeaders?, @JsonProperty("headers") val headers: Map<String, String>?)

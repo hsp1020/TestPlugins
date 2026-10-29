@@ -120,37 +120,31 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         }
         if (sub.origin != SubtitleOrigin.URL) return sub
 
-        // StremioC's own stream/subtitle and catalog addon labels stay detailed.
-        // Group 0 is ranked 1000..9999; CineStream/StreamPlay integrations are >=10000.
+        // StremioC preserves subtitle detail metadata separately from the language group.
+        // Rank ranges 1000/10000/20000 refer to registered StremioC/CineStream/StreamPlay addons.
         val rank = (ranks?.get(sub.url) as? Number)?.toInt()
         val integrationSubtitle = rank != null && rank >= 10_000
-        if (rank != null && rank in 1000..9999) return sub
-        // Direct Stremio addon labels may also be ranked in integration groups.
-        // Never erase their descriptive label/name, even when a rank exists.
-        if (!integrationSubtitle && (sub.originalName.contains(" · ") ||
-                sub.originalName.contains(" — "))) return sub
+        // Both StremioC and integrated addons are grouped by their real language.
+        // Opaque numeric-only translation group identifiers are kept intact.
 
         val sourceName = sub.originalName.trim()
         val stremio = sourceName.endsWith(" (Stremio)", ignoreCase = true)
-        val languageName = if (stremio)
-            sourceName.dropLast(" (Stremio)".length).trim() else sourceName
-        val tag = SubtitleHelper.fromCodeToLangTagIETF(code)
-            ?: SubtitleHelper.fromLanguageToTagIETF(code)
-            ?: SubtitleHelper.fromCodeToLangTagIETF(languageName)
-            ?: SubtitleHelper.fromLanguageToTagIETF(languageName)
-            ?: SubtitleHelper.fromLanguageToTagIETF(languageName, halfMatch = true)
+        val languageName = (if (stremio)
+            sourceName.dropLast(" (Stremio)".length).trim() else sourceName)
+            .substringBefore(" · ").substringBefore(" — ").trim()
+        val exactLanguage = languageName.substringBefore(" (").trim()
+        val tag = SubtitleHelper.fromCodeToLangTagIETF(exactLanguage)
+            ?: SubtitleHelper.fromLanguageToTagIETF(exactLanguage)
+            ?: (if (languageName == sourceName)
+                SubtitleHelper.fromCodeToLangTagIETF(code)
+                    ?: SubtitleHelper.fromLanguageToTagIETF(code) else null)
             ?: return sub
         val displayLanguage = SubtitleHelper.fromTagToLanguageName(tag) ?: return sub
         val displayed = displayLanguage + if (stremio && !integrationSubtitle) " (Stremio)" else ""
         if (displayed == sub.originalName && code == sub.languageCode) return sub
 
         // Native right-hand options keep the original track label when it held detail.
-        val genericName = SubtitleHelper.fromTagToEnglishLanguageName(tag)
-        val rawPlain = languageName.equals(genericName, true) ||
-            languageName.equals(displayLanguage, true) ||
-            languageName.equals(tag, true)
-        val details = if (rawPlain) sub.nameSuffix else
-            languageName + if (sub.nameSuffix.isBlank()) "" else " · " + sub.nameSuffix
+        val details = sourceName.substringAfter(" · ", "").ifBlank { sub.nameSuffix }
         return sub.copy(originalName = displayed, nameSuffix = details, languageCode = tag)
     }
 
@@ -176,7 +170,9 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
                     .thenBy { it.url })
             // Renumber previously numbered online options when embedded tracks disappear.
             // Preserve descriptive labels in groups that were never numbered here.
-            if (embedded.isEmpty() && group.any {
+            if (embedded.isEmpty() &&
+                group.none { it.origin == SubtitleOrigin.URL && ranks?.containsKey(it.url) == true } &&
+                group.any {
                     it.origin != SubtitleOrigin.URL || it.nameSuffix.toIntOrNull() == null
                 }) return@forEach
             embedded.forEachIndexed { index, sub ->
@@ -190,8 +186,9 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
                 if (sub.nameSuffix != suffix) replacements[sub] = sub.copy(nameSuffix = suffix)
             }
             group.filter { it.origin == SubtitleOrigin.URL }
-                .sortedWith(compareBy<SubtitleData> { it.nameSuffix.toIntOrNull() ?: Int.MAX_VALUE }
-                    .thenBy { it.nameSuffix }.thenBy { it.url })
+                .sortedWith(compareBy<SubtitleData> {
+                    (ranks?.get(it.url) as? Number)?.toInt() ?: Int.MAX_VALUE
+                }.thenBy { it.nameSuffix.toIntOrNull() ?: Int.MAX_VALUE })
                 .forEachIndexed { index, sub ->
                     val suffix = (embedded.size + index + 1).toString()
                     if (sub.nameSuffix != suffix) replacements[sub] = sub.copy(nameSuffix = suffix)
