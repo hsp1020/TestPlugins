@@ -237,8 +237,6 @@ internal class StremioRefreshedSubtitleOverlay {
     private var original: SubtitleView? = null
     private var originalOutput: View? = null
     private var originalOutputAlpha = 1f
-    private var shadowedElevate: View? = null
-    private var shadowedElevateAlpha = 1f
     private var overlay: SubtitleView? = null
     private var host: FragmentActivity? = null
     private var targetUrl: String? = null
@@ -294,10 +292,6 @@ internal class StremioRefreshedSubtitleOverlay {
         original = native
         originalOutput = nativeOutput
         originalOutputAlpha = nativeOutput.alpha
-        shadowedElevate = (0 until native.childCount).map { native.getChildAt(it) }
-            .firstOrNull { it.tag == "ElevateLateSubtitleOverlay" }
-        shadowedElevateAlpha = shadowedElevate?.alpha ?: 1f
-        shadowedElevate?.alpha = 0f
         targetUrl = subtitleUrl
         cues = parsed
         timeline = prepared.timeline
@@ -390,8 +384,6 @@ internal class StremioRefreshedSubtitleOverlay {
         val view = overlay
         (view?.parent as? FrameLayout)?.removeView(view)
         originalOutput?.alpha = originalOutputAlpha
-        shadowedElevate?.alpha = shadowedElevateAlpha
-        shadowedElevate = null
         originalOutput = null
         overlay = null
         original = null

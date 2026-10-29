@@ -80,7 +80,6 @@ class ElevatePlugin : Plugin() {
     private var embeddedSubtitles: EmbeddedSubtitleController? = null
     private var subtitleLanguageNormalizer: SubtitleLanguageNormalizer? = null
     private var subtitleSyncRepair: SubtitleSyncCueRepair? = null
-    private var lateSubtitleHook: LateSubtitleNoReloadHook? = null
     private var homeHero: HomeHeroToggle? = null
     private var libraryPosters: LibraryPosterHook? = null
     private var httpResponseGuard: ElevateHttpResponseGuard? = null
@@ -148,9 +147,6 @@ class ElevatePlugin : Plugin() {
     private fun syncFeatures() {
         val application = app ?: run {
             return
-        }
-        if (lateSubtitleHook == null) {
-            lateSubtitleHook = LateSubtitleNoReloadHook(application).also { it.start() }
         }
         if (enabled(ElevateFeature.HTTP_RESPONSE_CLEANUP)) {
             if (httpResponseGuard == null) {
@@ -320,8 +316,6 @@ class ElevatePlugin : Plugin() {
         subtitleLanguageNormalizer = null
         subtitleSyncRepair?.stop()
         subtitleSyncRepair = null
-        lateSubtitleHook?.stop()
-        lateSubtitleHook = null
         homeHero?.stop()
         homeHero = null
         libraryPosters?.stop()
