@@ -140,8 +140,6 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         // Rank ranges 1000/10000/20000 refer to registered StremioC/CineStream/StreamPlay addons.
         val rank = (ranks?.get(sub.url) as? Number)?.toInt()
         val integrationSubtitle = rank != null && rank >= 10_000
-        // Both StremioC and integrated addons are grouped by their real language.
-        // Opaque numeric-only translation group identifiers are kept intact.
 
         val sourceName = sub.originalName.trim()
         val stremio = sourceName.endsWith(" (Stremio)", ignoreCase = true)

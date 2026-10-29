@@ -1295,23 +1295,15 @@ open class StremioC(
         internal val subtitleDetailByUrl = Collections.synchronizedMap(lruCacheMap<String, String>(2400))
         internal val subtitleSourceByUrl = Collections.synchronizedMap(lruCacheMap<String, String>(2400))
 
-        // The native subtitle picker renders names with html(); encode the visible label
-        // so its first frame is readable without triggering fuzzy language auto-selection.
+        // CloudStream decodes subtitle names once on registration and once in the picker.
+        // Keep translation labels opaque to language auto-selection until the picker.
         internal fun translationGroupId(label: String): String = buildString {
             var i = 0
             while (i < label.length) {
                 val codePoint = Character.codePointAt(label, i)
-                append("&#").append(codePoint).append(';')
+                append("&amp;#").append(codePoint).append(';')
                 i += Character.charCount(codePoint)
             }
-        }
-
-        internal fun translationGroupTitle(id: String): String? {
-            if (!id.startsWith("0") || id.length < 6 || (id.length - 1) % 5 != 0 ||
-                id.drop(1).any { !it.isDigit() }) return null
-            return runCatching {
-                id.drop(1).chunked(5).map { it.toInt().toChar() }.joinToString("")
-            }.getOrNull()?.takeIf { it.isNotBlank() }
         }
         internal val trailerChoicesByUrl = lruCacheMap<String, List<TrailerChoice>>(200)
 
@@ -5569,8 +5561,7 @@ open class StremioC(
             if (sourceLabel == null) subtitleSourceByUrl.remove(subtitleUrl)
             else subtitleSourceByUrl[subtitleUrl] = sourceLabel
         }
-        // Keep the translated group distinct from the actual target language.
-        // It is rendered using displayLanguage in the StremioC native picker adapter.
+        // Keep translated choices distinct from actual target-language subtitles.
         val groupKey = if (sourceLanguage != null) translationGroupId(displayLanguage) else language
         return newSubtitleFile(groupKey, subtitleUrl)
     }

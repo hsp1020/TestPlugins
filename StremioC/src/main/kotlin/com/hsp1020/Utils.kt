@@ -540,14 +540,6 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         val grouped = sortSubs(state.subtitles).groupBy { it.originalName }.values.toList()
         if (adapter.count != grouped.size + 1) return false
         val texts = (0 until adapter.count).map { adapter.getItem(it) as? Spanned ?: return false }
-        val displayTexts = texts.mapIndexed { index, text ->
-            if (index == 0) text else
-                StremioC.translationGroupTitle(grouped[index - 1].first().originalName)
-                    ?.html() ?: text
-        }
-        val hasTranslationGroups = grouped.any {
-            StremioC.translationGroupTitle(it.first().originalName) != null
-        }
         // Prefer the native language code for embedded tracks; online labels may contain filenames.
         val langs = grouped.map { group ->
             val label = group.first().originalName.substringBefore(" · ").substringBefore(" — ").trim()
@@ -570,21 +562,18 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             compareBy<Int> { starts[langs[it]] ?: it }.thenBy { ranks[it] }.thenBy { it }
         )
 
-        val reordered = order.indices.any { order[it] != it }
-        if (!reordered && !hasTranslationGroups) return true
+        if (order.indices.all { order[it] == it }) return true
         val originalClick = list.onItemClickListener ?: return false
         val previouslySelected = list.checkedItemPosition
         @Suppress("UNCHECKED_CAST")
         val editable = adapter as ArrayAdapter<Spanned>
         editable.clear()
-        editable.addAll(listOf(displayTexts.first()) + order.map { displayTexts[it + 1] })
+        editable.addAll(listOf(texts.first()) + order.map { texts[it + 1] })
         list.setTag(R.id.sort_subtitles, order.toIntArray())
-        if (reordered) {
-            list.onItemClickListener = AdapterView.OnItemClickListener { parent, view, position, id ->
-                val originalPosition = if (position in 1..order.size) order[position - 1] + 1 else position
-                originalClick.onItemClick(parent, view, originalPosition, id)
-                list.setItemChecked(position, true)
-            }
+        list.onItemClickListener = AdapterView.OnItemClickListener { parent, view, position, id ->
+            val originalPosition = if (position in 1..order.size) order[position - 1] + 1 else position
+            originalClick.onItemClick(parent, view, originalPosition, id)
+            list.setItemChecked(position, true)
         }
         val selected = if (previouslySelected in 1..order.size)
             order.indexOf(previouslySelected - 1) + 1 else previouslySelected
