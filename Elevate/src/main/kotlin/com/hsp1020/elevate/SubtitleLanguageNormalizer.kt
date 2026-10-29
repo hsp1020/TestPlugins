@@ -141,7 +141,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             ?: SubtitleHelper.fromCodeToLangTagIETF(languageName)
             ?: SubtitleHelper.fromLanguageToTagIETF(languageName)
             ?: SubtitleHelper.fromLanguageToTagIETF(languageName, halfMatch = true)
-            ?: return sub
+            ?: return if (sourceName.isEmpty()) sub.copy(originalName = "Unknown") else sub
         val displayLanguage = SubtitleHelper.fromTagToLanguageName(tag) ?: return sub
         val displayed = displayLanguage + if (stremio) " (Stremio)" else ""
         if (displayed == sub.originalName && code == sub.languageCode) return sub

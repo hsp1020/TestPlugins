@@ -354,7 +354,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         instance = nextInstance
         if (nextUrl != null) linkUrl = nextUrl
         if (changedSource) {
-            labeledDialog = null
             manualOverride = false
             selectionDialog = null
             selectionBeforeDialog = null
