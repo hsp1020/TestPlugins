@@ -177,7 +177,7 @@ internal class MkvSubtitleRangeExtractor(private val link: ExtractorLink) {
                 if(p<0) return null
                 p++
             }
-            raw.substring(p).replace(Regex("""\{[^}]*}"""),"")
+            raw.substring(p).replace(Regex("""\{[^}]*\}"""),"")
                 .replace("\\N","\n").replace("\\n","\n").replace("\\h"," ")
         } else raw
         val valueTrimmed=value.trim()
