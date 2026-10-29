@@ -248,8 +248,13 @@ class ElevatePlugin : Plugin() {
             skipController?.stop()
             skipController = null
         }
-        if (subtitleLanguageNormalizer == null) {
-            subtitleLanguageNormalizer = SubtitleLanguageNormalizer(application).also { it.start() }
+        if (enabled(ElevateFeature.SUBTITLE_LANGUAGE_NAMES)) {
+            if (subtitleLanguageNormalizer == null) {
+                subtitleLanguageNormalizer = SubtitleLanguageNormalizer(application).also { it.start() }
+            }
+        } else {
+            subtitleLanguageNormalizer?.stop()
+            subtitleLanguageNormalizer = null
         }
         if (enabled(ElevateFeature.EMBEDDED_SUBTITLES)) {
             if (embeddedSubtitles == null) {
