@@ -31,6 +31,20 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
     private var fragment: GeneratorPlayer? = null
     private var model: PlayerGeneratorViewModel? = null
     private var removeObserver: (() -> Unit)? = null
+    private var pendingDialogView: android.view.View? = null
+    private val onDialogDetached = object : android.view.View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(view: android.view.View) = Unit
+        override fun onViewDetachedFromWindow(view: android.view.View) {
+            if (pendingDialogView !== view) return
+            view.removeOnAttachStateChangeListener(this)
+            pendingDialogView = null
+            val f = fragment ?: return
+            val vm = model ?: return
+            f.view?.post {
+                if (fragment === f && model === vm) normalize(vm)
+            }
+        }
+    }
     private val dialogField = runCatching {
         FullScreenPlayer::class.java.getDeclaredField("selectSourceDialog")
             .apply { isAccessible = true }
@@ -90,6 +104,8 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
 
     private fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
+        pendingDialogView?.removeOnAttachStateChangeListener(onDialogDetached)
+        pendingDialogView = null
         removeObserver?.invoke()
         removeObserver = null
         fragment = null
@@ -150,14 +166,28 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
 
     private fun normalize(vm: PlayerGeneratorViewModel) {
         val f = fragment ?: return
-        if (runCatching { (dialogField?.get(f) as? Dialog)?.isShowing == true }
-                .getOrDefault(false)) return
+        val dialog = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
+        if (dialog?.isShowing == true) {
+            dialog.window?.decorView?.let { decor ->
+                if (pendingDialogView !== decor) {
+                    pendingDialogView?.removeOnAttachStateChangeListener(onDialogDetached)
+                    pendingDialogView = decor
+                    decor.addOnAttachStateChangeListener(onDialogDetached)
+                }
+            }
+            return
+        }
+        pendingDialogView?.removeOnAttachStateChangeListener(onDialogDetached)
+        pendingDialogView = null
         val state = vm.state
         if (state.subtitles.isEmpty()) return
         val ranks = stremioRanks()
         val embeddedLabel = f.getString(R.string.subtitles_from_embedded)
         val normalized = state.subtitles.map { localized(it, ranks) }
-            .filter { it.originalName.isNotBlank() }
+            .filter {
+                val language = it.originalName.substringBefore(" · ").substringBefore(" — ").trim()
+                language.isNotEmpty() && !language.equals("Unknown", ignoreCase = true)
+            }
             .distinctBy { if (it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) it.origin to it.url else it }
 
         // Only groups containing embedded tracks need explicit option numbers.

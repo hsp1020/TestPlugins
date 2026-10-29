@@ -5533,7 +5533,9 @@ open class StremioC(
         addonName: String?, preferredName: String? = null, sourceLanguage: String? = null
     ): SubtitleFile? {
         val subtitleUrl = url ?: return null
-        val rawLang = lang ?: lang_code ?: "Unknown"
+        val rawLang = lang?.trim()?.takeUnless { it.isBlank() || it.equals("Unknown", true) }
+            ?: lang_code?.trim()?.takeUnless { it.isBlank() || it.equals("Unknown", true) }
+            ?: return null
         val language = SubtitleHelper.fromTagToEnglishLanguageName(rawLang) ?: rawLang
         val displayLanguage = if (sourceLanguage != null) "$language ($sourceLanguage)" else language
         val mainLabel = label.textOrNull()?.let { cleanSubtitleDisplayLabel(it, language) }
