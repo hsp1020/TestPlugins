@@ -107,15 +107,16 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         field.get(null) as? Map<*, *>
     }.getOrNull()
 
-    private fun localized(sub: SubtitleData, ranks: Map<*, *>?, embeddedLabel: String): SubtitleData {
+    private fun localized(sub: SubtitleData, ranks: Map<*, *>?): SubtitleData {
+        // ms-ind is used for Indonesian next to a separate ms (Malay) track.
+        // Do not treat unrecognized language tags as generic Malay.
+        val code = if (sub.languageCode.equals("ms-ind", ignoreCase = true)) "id"
+            else sub.languageCode
         if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) {
-            // Separate native embedded tracks from external tracks sharing the same language.
-            // Embedded track identity is its URL/track ID, not the displayed name.
-            val suffix = " (" + embeddedLabel + ")"
-            if (sub.originalName.endsWith(suffix)) return sub
-            val label = SubtitleHelper.fromTagToLanguageName(sub.languageCode)
-                ?: sub.originalName
-            return sub.copy(originalName = label + suffix)
+            val label = SubtitleHelper.fromTagToLanguageName(code)
+                ?: sub.originalName.substringBefore(" (").ifBlank { "Unknown" }
+            return if (sub.originalName == label && sub.languageCode == code) sub
+                else sub.copy(originalName = label, languageCode = code)
         }
         if (sub.origin != SubtitleOrigin.URL) return sub
 
@@ -127,18 +128,21 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
                 sub.originalName.contains(" — "))) return sub
 
         val sourceName = sub.originalName.trim()
+        if (sourceName.isEmpty() && code.isNullOrBlank()) {
+            return sub.copy(originalName = "Unknown")
+        }
         val stremio = sourceName.endsWith(" (Stremio)", ignoreCase = true)
         val languageName = if (stremio)
             sourceName.dropLast(" (Stremio)".length).trim() else sourceName
-        val tag = SubtitleHelper.fromCodeToLangTagIETF(sub.languageCode)
-            ?: SubtitleHelper.fromLanguageToTagIETF(sub.languageCode)
+        val tag = SubtitleHelper.fromCodeToLangTagIETF(code)
+            ?: SubtitleHelper.fromLanguageToTagIETF(code)
             ?: SubtitleHelper.fromCodeToLangTagIETF(languageName)
             ?: SubtitleHelper.fromLanguageToTagIETF(languageName)
             ?: SubtitleHelper.fromLanguageToTagIETF(languageName, halfMatch = true)
             ?: return sub
         val displayLanguage = SubtitleHelper.fromTagToLanguageName(tag) ?: return sub
         val displayed = displayLanguage + if (stremio) " (Stremio)" else ""
-        if (displayed == sub.originalName) return sub
+        if (displayed == sub.originalName && code == sub.languageCode) return sub
 
         // Native right-hand options keep the original track label when it held detail.
         val genericName = SubtitleHelper.fromTagToEnglishLanguageName(tag)
@@ -150,6 +154,11 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         return sub.copy(originalName = displayed, nameSuffix = details, languageCode = tag)
     }
 
+    private fun isPreviewVtt(sub: SubtitleData): Boolean =
+        sub.origin == SubtitleOrigin.URL &&
+            sub.url.substringBefore('?').substringBefore('#').lowercase()
+                .endsWith("/preview/thumbnails.vtt")
+
     private fun normalize(vm: PlayerGeneratorViewModel) {
         val f = fragment ?: return
         if (runCatching { (dialogField?.get(f) as? Dialog)?.isShowing == true }
@@ -158,7 +167,35 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         if (state.subtitles.isEmpty()) return
         val ranks = stremioRanks()
         val embeddedLabel = f.getString(R.string.subtitles_from_embedded)
-        val changed = state.subtitles.map { localized(it, ranks, embeddedLabel) }
+        val normalized = state.subtitles.filterNot(::isPreviewVtt)
+            .map { localized(it, ranks) }
+
+        // Only groups containing embedded tracks need explicit option numbers.
+        // The native picker orders by nameSuffix.toIntOrNull() ?: 0, so the
+        // embedded "1 (내장 자막)" option comes before numeric online options.
+        val replacements = HashMap<SubtitleData, SubtitleData>()
+        normalized.groupBy { it.originalName }.values.forEach { group ->
+            val embedded = group.filter { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
+                .sortedBy { it.url }
+            if (embedded.isEmpty()) return@forEach
+            embedded.forEachIndexed { index, sub ->
+                val originalSuffix = sub.nameSuffix
+                val markedSuffix = Regex("""^\\d+ \\([^)]*\\)$""").matches(originalSuffix)
+                val detail = if (markedSuffix) {
+                    originalSuffix.substringAfter(" · ", "").removeSuffix(")")
+                } else originalSuffix
+                val suffix = "${index + 1} ($embeddedLabel" +
+                    if (detail.isNotBlank()) " · $detail)" else ")"
+                if (sub.nameSuffix != suffix) replacements[sub] = sub.copy(nameSuffix = suffix)
+            }
+            group.filter { it.origin == SubtitleOrigin.URL }
+                .sortedWith(compareBy<SubtitleData> { it.nameSuffix }.thenBy { it.url })
+                .forEachIndexed { index, sub ->
+                    val suffix = (embedded.size + index + 1).toString()
+                    if (sub.nameSuffix != suffix) replacements[sub] = sub.copy(nameSuffix = suffix)
+                }
+        }
+        val changed = normalized.map { replacements[it] ?: it }
         if (changed.toSet() == state.subtitles) return
         vm.modifyState {
             if (instance != state.instance) this else set(changed)

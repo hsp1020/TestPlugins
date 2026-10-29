@@ -6,15 +6,10 @@ import android.app.Dialog
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Bundle
-import android.text.Spanned
-import android.text.SpannedString
 import android.text.SpannableStringBuilder
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
-import android.widget.ArrayAdapter
-import android.widget.HeaderViewListAdapter
-import android.widget.ListView
 import androidx.annotation.OptIn
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
@@ -30,7 +25,6 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.SubtitleView
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
-import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.ui.player.CS3IPlayer
 import com.lagradost.cloudstream3.ui.player.FullScreenPlayer
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
@@ -44,7 +38,6 @@ import com.lagradost.cloudstream3.ui.subtitles.SaveCaptionStyle
 import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.PREFERENCES_NAME
-import com.lagradost.cloudstream3.utils.AppContextUtils.sortSubs
 import java.lang.reflect.Proxy
 
 @OptIn(UnstableApi::class)
@@ -67,8 +60,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private var manualOverride = false
     private var selectionDialog: Dialog? = null
     private var selectionBeforeDialog: SubtitleData? = null
-    private var labeledDialog: Dialog? = null
-    private var pendingDialog: Dialog? = null
     private var settings: SharedPreferences? = null
     private var preferredLanguage: String? = null
     private val trackIdPrefix = Regex("^\\d+:")
@@ -379,50 +370,11 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     }
 
 
-    private fun labelEmbeddedPopup(dialog: Dialog): Boolean {
-        val state = model?.state ?: return false
-        val list = dialog.findViewById<ListView>(R.id.sort_subtitles) ?: return false
-        val wrapper = list.adapter
-        val adapter = (if (wrapper is HeaderViewListAdapter) wrapper.wrappedAdapter else wrapper)
-            as? ArrayAdapter<*> ?: return false
-        val grouped = sortSubs(state.subtitles).groupBy { it.originalName }.values.toList()
-        if (adapter.count != grouped.size + 1) return false
-        val texts = (0 until adapter.count).map { adapter.getItem(it) as? Spanned ?: return false }
-        val order = (list.getTag(R.id.sort_subtitles) as? IntArray)
-            ?.takeIf { it.size == grouped.size && it.toSet().size == grouped.size &&
-                it.all { index -> index in grouped.indices } }
-        val embeddedName = fragment?.context?.getString(R.string.subtitles_from_embedded)
-            ?: return false
-        val names = grouped.indices.map { row ->
-            val group = grouped[order?.get(row) ?: row]
-            if (group.isNotEmpty() && group.all { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }) {
-                val originalName = group.first().originalName
-                SpannedString(if (originalName.endsWith(" ($embeddedName)")) originalName else "$originalName ($embeddedName)")
-            } else texts[row + 1]
-        }
-        if (names.indices.all { names[it] == texts[it + 1] }) return true
-        @Suppress("UNCHECKED_CAST")
-        val editable = adapter as ArrayAdapter<Spanned>
-        editable.clear()
-        editable.addAll(listOf(texts.first()) + names)
-        return true
-    }
-
     private fun inspectDialogs() {
         val f = fragment ?: return
         if (f.playerView?.player?.let { it !== player } == true) synchronizeSource()
         attachCaptionOutput(f)
         trackDialog(f)
-        val popup = selectionDialog
-        if (popup != null && popup !== labeledDialog && popup !== pendingDialog) {
-            pendingDialog = popup
-            f.view?.post {
-                pendingDialog = null
-                if (popup.isShowing && fragment === f && labelEmbeddedPopup(popup)) {
-                    labeledDialog = popup
-                }
-            }
-        }
     }
 
     private fun markActive(f: GeneratorPlayer, embedded: Set<SubtitleData>): Boolean =
@@ -527,7 +479,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
                         lastHandledSubtitles == event.value)) return@Observer
                 lastHandledInstance = event.instance
                 lastHandledSubtitles = event.value
-                labeledDialog = null
                 previousEmbedded = model?.state?.subtitles
                     ?.filterTo(mutableSetOf()) { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
                     ?: emptySet()
@@ -585,8 +536,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         manualOverride = false
         selectionDialog = null
         selectionBeforeDialog = null
-        labeledDialog = null
-        pendingDialog = null
     }
 
     override fun onActivityResumed(activity: Activity) {
