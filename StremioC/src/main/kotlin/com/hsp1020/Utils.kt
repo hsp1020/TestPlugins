@@ -619,9 +619,9 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         val adapter = parent as? ArrayAdapter<*> ?: return
         if (adapter.count != groups.size + 1) return
         val selected = list.checkedItemPosition
-        list.adapter = RefreshRowAdapter(adapter) { position ->
+        list.adapter = RefreshRowAdapter(adapter, sourceAt = { position ->
             groupAt(position)?.singleOrNull()?.let { StremioSubtitleRefreshRegistry.find(it.url) }
-        }
+        })
         if (selected >= 0) list.setItemChecked(selected, true)
 
         val optionsParent = (options.adapter as? HeaderViewListAdapter)?.wrappedAdapter
