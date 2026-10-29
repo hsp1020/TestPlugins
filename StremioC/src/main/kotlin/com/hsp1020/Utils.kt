@@ -299,11 +299,21 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
     private var model: PlayerGeneratorViewModel? = null
     private var focusTree: ViewTreeObserver? = null
     private val focusListener = ViewTreeObserver.OnWindowFocusChangeListener {
-        fragment?.view?.post { inspectDialogs() }
+        inspectDialogs()
     }
     private var lastInstance = -1
     private var sortedDialog: Dialog? = null
     private var pendingDialog: Dialog? = null
+    private var pendingDrawTree: ViewTreeObserver? = null
+    private var pendingDrawListener: ViewTreeObserver.OnPreDrawListener? = null
+    private fun clearPendingDialog() {
+        pendingDrawTree?.takeIf { it.isAlive }?.let { tree ->
+            pendingDrawListener?.let { tree.removeOnPreDrawListener(it) }
+        }
+        pendingDrawTree = null
+        pendingDrawListener = null
+        pendingDialog = null
+    }
     private var isStremio = false
     private val refreshedOverlay = StremioRefreshedSubtitleOverlay()
     private val refreshedCues = linkedMapOf<String, StremioSubtitleRefreshRegistry.Prepared>()
@@ -473,6 +483,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         if (lastInstance != state.instance) {
             lastInstance = state.instance
             sortedDialog = null
+            clearPendingDialog()
             clearRefreshState()
             isStremio = checkStremio()
         }
@@ -481,13 +492,23 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         val popup = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
         if (popup != null && popup.isShowing &&
             popup !== sortedDialog && popup !== pendingDialog) {
-            pendingDialog = popup
-            f.view?.post {
-                pendingDialog = null
-                if (popup.isShowing && fragment === f && sortPopup(popup)) {
-                    installRefreshIcons(popup)
-                    sortedDialog = popup
+            clearPendingDialog()
+            val tree = popup.window?.decorView?.viewTreeObserver?.takeIf { it.isAlive }
+            if (tree != null) {
+                pendingDialog = popup
+                val listener = object : ViewTreeObserver.OnPreDrawListener {
+                    override fun onPreDraw(): Boolean {
+                        clearPendingDialog()
+                        if (!popup.isShowing || fragment !== f || !sortPopup(popup)) return true
+                        installRefreshIcons(popup)
+                        sortedDialog = popup
+                        // The native adapter contained encoded group IDs; redraw only after replacement.
+                        return false
+                    }
                 }
+                pendingDrawTree = tree
+                pendingDrawListener = listener
+                tree.addOnPreDrawListener(listener)
             }
         }
         refreshPickerIcons(f.player.getCurrentPreferredSubtitle()?.url)
@@ -511,6 +532,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                 lastInstance = currentModel.state.instance
                 isStremio = checkStremio()
                 sortedDialog = null
+                clearPendingDialog()
             }
             if (isStremio) bindPlayer()
         }
@@ -1033,7 +1055,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         model = null
         lastInstance = -1
         sortedDialog = null
-        pendingDialog = null
+        clearPendingDialog()
         isStremio = false
     }
 }
