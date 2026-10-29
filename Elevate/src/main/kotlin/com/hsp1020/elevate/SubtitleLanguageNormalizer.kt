@@ -97,9 +97,11 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
     }
 
     private fun stremioRanks(): Map<*, *>? = runCatching {
-        val provider = APIHolder.getSafeAllProviders()
-            .firstOrNull { it.javaClass.name == "com.hsp1020.StremioC" }
-            ?: return@runCatching null
+        val method = APIHolder::class.java.methods.firstOrNull { it.name == "getAllProviders" }
+        val providers = method?.invoke(APIHolder) as? Iterable<*>
+        val provider = providers?.firstOrNull {
+            it?.javaClass?.name == "com.hsp1020.StremioC"
+        } ?: return@runCatching null
         val field = provider.javaClass.getDeclaredField("subtitleOrderByUrl")
             .apply { isAccessible = true }
         field.get(null) as? Map<*, *>
