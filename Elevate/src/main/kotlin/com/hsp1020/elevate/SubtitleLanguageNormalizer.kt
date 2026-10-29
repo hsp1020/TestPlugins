@@ -124,8 +124,10 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         // Group 0 is ranked 1000..9999; CineStream/StreamPlay integrations are >=10000.
         val rank = (ranks?.get(sub.url) as? Number)?.toInt()
         if (rank != null && rank in 1000..9999) return sub
-        if (rank == null && (sub.originalName.contains(" · ") ||
-                sub.originalName.contains(" — "))) return sub
+        // Direct Stremio addon labels may also be ranked in integration groups.
+        // Never erase their descriptive label/name, even when a rank exists.
+        if (sub.originalName.contains(" · ") ||
+            sub.originalName.contains(" — ")) return sub
 
         val sourceName = sub.originalName.trim()
         if (sourceName.isEmpty() && code.isNullOrBlank()) {
