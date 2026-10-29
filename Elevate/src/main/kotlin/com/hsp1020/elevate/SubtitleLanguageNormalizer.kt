@@ -174,7 +174,11 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             val embedded = group.filter { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
                 .sortedWith(compareBy<SubtitleData> { it.url.toIntOrNull() ?: Int.MAX_VALUE }
                     .thenBy { it.url })
-            if (embedded.isEmpty()) return@forEach
+            // Renumber previously numbered online options when embedded tracks disappear.
+            // Preserve descriptive labels in groups that were never numbered here.
+            if (embedded.isEmpty() && group.any {
+                    it.origin != SubtitleOrigin.URL || it.nameSuffix.toIntOrNull() == null
+                }) return@forEach
             embedded.forEachIndexed { index, sub ->
                 val originalSuffix = sub.nameSuffix
                 val markedSuffix = Regex("""^\d+ \([^)]*\)$""").matches(originalSuffix)
