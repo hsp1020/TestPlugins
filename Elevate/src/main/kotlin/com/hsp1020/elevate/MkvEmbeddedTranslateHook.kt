@@ -7,6 +7,7 @@ import android.content.Context
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -213,12 +214,17 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
             ?: return toast(f,"Unsupported embedded track ID")
         toast(f,if(f.resources.configuration.locale.language=="ko") "내장자막 번역 시작" else "Translating embedded subtitles")
         task=scope.launch {
+            var stage="extract"
             try {
                 val videoHash=hash(link.url)
                 val translated=withContext(Dispatchers.IO) {
                     val srt=MkvSubtitleRangeExtractor(link).extract(trackId,sub.languageCode)
-                    requestTranslation(maker,videoHash,trackId,sub.languageCode,srt)
+                    stage="api-request"
+                    requestTranslation(maker,videoHash,trackId,sub.languageCode,srt) {
+                        stage="api-response"
+                    }
                 }
+                stage="register"
                 if(fragment!==f || vm!==viewModel ||
                     viewModel.state.instance!=instance || f.playerView?.player!==mediaPlayer ||
                     currentLink(f)?.url!=link.url) return@launch
@@ -241,6 +247,17 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
             } catch(e:CancellationException) {
                 throw e
             } catch(e:Exception) {
+                val fromPlugin = e.stackTrace.firstOrNull {
+                    it.className.startsWith("com.hsp1020.elevate.")
+                }
+                val location = fromPlugin?.let {
+                    "${it.className.substringAfterLast('.') }.${it.methodName}:${it.lineNumber}"
+                } ?: "unknown"
+                val detail = e.message.orEmpty()
+                    .replace(Regex("""https?://\S+"""), "[redacted-url]")
+                    .take(200)
+                Log.e("Elevate-MkvTranslate",
+                    "failed stage=$stage type=${e.javaClass.simpleName} at=$location reason=$detail")
                 if(fragment===f && vm===viewModel) toast(f,
                     if(f.resources.configuration.locale.language=="ko")
                         "자막 추출·번역 실패: "+(e.message ?: "오류")
@@ -249,7 +266,7 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
         }
     }
     private fun requestTranslation(maker:SubMaker,hash:String,track:String,
-                                   language:String?,srt:String):String {
+                                   language:String?,srt:String,onResponse:()->Unit):String {
         val source=when(language?.lowercase()) {
             "ja","jp","jpn" -> "jpn"
             "en","eng" -> "eng"
@@ -271,6 +288,7 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
             .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
         client.newCall(request).execute().use { res ->
+            onResponse()
             if(!res.isSuccessful) throw IOException("SubMaker HTTP "+res.code)
             val response=res.body?.string() ?: throw IOException("Empty SubMaker response")
             val json=JSONObject(response)

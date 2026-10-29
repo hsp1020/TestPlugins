@@ -206,11 +206,32 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
                     it.origin != SubtitleOrigin.URL || it.nameSuffix.toIntOrNull() == null
                 }) return@forEach
             embedded.forEachIndexed { index, sub ->
-                val originalSuffix = sub.nameSuffix
-                val markedSuffix = Regex("""^\d+ \([^)]*\)$""").matches(originalSuffix)
-                val detail = if (markedSuffix) {
-                    originalSuffix.substringAfter(" · ", "").removeSuffix(")")
-                } else originalSuffix
+                // Previously numbered labels can contain nested parentheses, e.g.
+                // "1 (내장 자막 · Portuguese (Brazil))". Unwrap by indices to
+                // restore even older repeatedly-wrapped labels without O(n²) copies.
+                val original = sub.nameSuffix
+                val marker = " ($embeddedLabel"
+                var start = 0
+                var end = original.length
+                while (end > start && original[end - 1] == ')') {
+                    val at = original.indexOf(marker, start)
+                    if (at <= start || original.substring(start, at).toIntOrNull() == null)
+                        break
+                    val contentStart = at + marker.length
+                    when {
+                        contentStart == end - 1 -> {
+                            start = contentStart
+                            end--
+                        }
+                        contentStart + 3 <= end - 1 &&
+                            original.regionMatches(contentStart, " · ", 0, 3) -> {
+                            start = contentStart + 3
+                            end--
+                        }
+                        else -> break
+                    }
+                }
+                val detail = original.substring(start, end)
                 val suffix = "${index + 1} ($embeddedLabel" +
                     if (detail.isNotBlank()) " · $detail)" else ")"
                 if (sub.nameSuffix != suffix) replacements[sub] = sub.copy(nameSuffix = suffix)
