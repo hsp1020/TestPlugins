@@ -396,7 +396,8 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         val names = grouped.indices.map { row ->
             val group = grouped[order?.get(row) ?: row]
             if (group.isNotEmpty() && group.all { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }) {
-                SpannedString("${group.first().originalName} ($embeddedName)")
+                val originalName = group.first().originalName
+                SpannedString(if (originalName.endsWith(" ($embeddedName)")) originalName else "$originalName ($embeddedName)")
             } else texts[row + 1]
         }
         if (names.indices.all { names[it] == texts[it + 1] }) return true

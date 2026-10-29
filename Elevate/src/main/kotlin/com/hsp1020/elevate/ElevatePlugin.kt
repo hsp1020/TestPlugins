@@ -78,6 +78,7 @@ class ElevatePlugin : Plugin() {
     private var audioSelector: ElevateAudioTrackSelector? = null
     private var skipController: ElevateSkipController? = null
     private var embeddedSubtitles: EmbeddedSubtitleController? = null
+    private var subtitleLanguageNormalizer: SubtitleLanguageNormalizer? = null
     private var subtitleSyncRepair: SubtitleSyncCueRepair? = null
     private var homeHero: HomeHeroToggle? = null
     private var libraryPosters: LibraryPosterHook? = null
@@ -247,6 +248,9 @@ class ElevatePlugin : Plugin() {
             skipController?.stop()
             skipController = null
         }
+        if (subtitleLanguageNormalizer == null) {
+            subtitleLanguageNormalizer = SubtitleLanguageNormalizer(application).also { it.start() }
+        }
         if (enabled(ElevateFeature.EMBEDDED_SUBTITLES)) {
             if (embeddedSubtitles == null) {
                 embeddedSubtitles = EmbeddedSubtitleController(application).also { it.start() }
@@ -303,6 +307,8 @@ class ElevatePlugin : Plugin() {
         skipController = null
         embeddedSubtitles?.stop()
         embeddedSubtitles = null
+        subtitleLanguageNormalizer?.stop()
+        subtitleLanguageNormalizer = null
         subtitleSyncRepair?.stop()
         subtitleSyncRepair = null
         homeHero?.stop()
