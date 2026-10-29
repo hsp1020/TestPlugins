@@ -219,6 +219,7 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
                 val videoHash=hash(link.url)
                 val translated=withContext(Dispatchers.IO) {
                     val srt=MkvSubtitleRangeExtractor(link).extract(trackId,sub.languageCode)
+                    Log.i("Elevate-MkvTranslate","extract-complete track=$trackId chars=${srt.length}")
                     stage="api-request"
                     requestTranslation(maker,videoHash,trackId,sub.languageCode,srt) {
                         stage="api-response"
@@ -241,6 +242,7 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
                     null
                 )
                 viewModel.addSubtitles(setOf(entry))
+                Log.i("Elevate-MkvTranslate","subtitle-registered track=$trackId")
                 overlay=TranslatedOverlay(f,mediaPlayer,originalSelected,translated).also { it.attach() }
                 toast(f,if(f.resources.configuration.locale.language=="ko")
                     "한국어 번역 완료" else "Korean subtitles translated")
@@ -287,6 +289,7 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
         val request=Request.Builder().url(maker.base+"/api/translate-embedded")
             .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
+        Log.i("Elevate-MkvTranslate","api-request track=$track chars=${srt.length}")
         client.newCall(request).execute().use { res ->
             onResponse()
             if(!res.isSuccessful) throw IOException("SubMaker HTTP "+res.code)
@@ -295,6 +298,7 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
             val translated=json.optString("translatedContent")
             if(translated.isBlank() || !translated.contains("-->"))
                 throw IOException("SubMaker returned no SRT content")
+            Log.i("Elevate-MkvTranslate","api-response track=$track status=${res.code} chars=${translated.length}")
             return translated
         }
     }
@@ -340,6 +344,8 @@ internal class MkvEmbeddedTranslateHook(private val app: Application) :
             nativeOutput.alpha=0f
             currentPlayer.addListener(this)
             update()
+            if(view===subtitleView)
+                Log.i("Elevate-MkvTranslate","overlay-attached cues=${lines.size}")
         }
         override fun onEvents(player:Player,events:Player.Events) { update() }
         fun syncOrDetach(current:GeneratorPlayer) {
