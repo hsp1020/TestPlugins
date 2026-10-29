@@ -3216,7 +3216,7 @@ open class StremioC(
 
                 if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
                     val newLang = "${sub.lang} (Stremio)"
-                    emitUniqueSubtitle(SubtitleFile(newLang, subtitleUrl))
+                    emitUniqueSubtitle(sub.copy(lang = newLang))
                 } else {
                     emitUniqueSubtitle(sub)
                 }
