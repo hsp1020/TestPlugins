@@ -180,7 +180,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             if (embedded.isEmpty()) return@forEach
             embedded.forEachIndexed { index, sub ->
                 val originalSuffix = sub.nameSuffix
-                val markedSuffix = Regex("""^\\d+ \\([^)]*\\)$""").matches(originalSuffix)
+                val markedSuffix = Regex("""^\d+ \([^)]*\)$""").matches(originalSuffix)
                 val detail = if (markedSuffix) {
                     originalSuffix.substringAfter(" · ", "").removeSuffix(")")
                 } else originalSuffix
@@ -189,7 +189,8 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
                 if (sub.nameSuffix != suffix) replacements[sub] = sub.copy(nameSuffix = suffix)
             }
             group.filter { it.origin == SubtitleOrigin.URL }
-                .sortedWith(compareBy<SubtitleData> { it.nameSuffix }.thenBy { it.url })
+                .sortedWith(compareBy<SubtitleData> { it.nameSuffix.toIntOrNull() ?: Int.MAX_VALUE }
+                    .thenBy { it.nameSuffix }.thenBy { it.url })
                 .forEachIndexed { index, sub ->
                     val suffix = (embedded.size + index + 1).toString()
                     if (sub.nameSuffix != suffix) replacements[sub] = sub.copy(nameSuffix = suffix)
