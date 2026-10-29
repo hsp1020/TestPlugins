@@ -135,8 +135,6 @@ internal class SearchProviderOrderHook(private val app: Application) :
         if (target != pinned) DataStoreHelper.pinnedProviders = target.toTypedArray()
     }
 
-    private fun restoreSearchPins() = restoreManagedPins(app)
-
     private data class Row(val name: String, val nativeIndex: Int)
 
     init {
@@ -172,7 +170,6 @@ internal class SearchProviderOrderHook(private val app: Application) :
             MainActivity.afterPluginsLoadedEvent -= pluginListener
             app.unregisterActivityLifecycleCallbacks(this)
             detachActivity()
-            restoreSearchPins()
         }
     }
 
@@ -757,20 +754,8 @@ internal class SearchProviderOrderHook(private val app: Application) :
     override fun onActivityStopped(activity: Activity) = Unit
     override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
 
-    companion object {
-        internal fun restoreManagedPins(app: Application) {
-            val prefs = app.getSharedPreferences("ElevateSearchOrder", Context.MODE_PRIVATE)
-            if (!prefs.contains("managed_search_pins")) return
-            val managed = prefs.getStringSet("managed_search_pins", emptySet())?.toSet().orEmpty()
-            if (managed.isNotEmpty()) {
-                val pinned = DataStoreHelper.pinnedProviders.toList()
-                val restored = pinned.filterNot { it in managed }
-                if (restored != pinned) DataStoreHelper.pinnedProviders = restored.toTypedArray()
-            }
-            prefs.edit().remove("managed_search_pins").apply()
-        }
-
-        private const val HOME_CLASS = "com.lagradost.cloudstream3.ui.home.HomeFragment"
-        private const val SEARCH_CLASS = "com.lagradost.cloudstream3.ui.search.SearchFragment"
+    private companion object {
+        const val HOME_CLASS = "com.lagradost.cloudstream3.ui.home.HomeFragment"
+        const val SEARCH_CLASS = "com.lagradost.cloudstream3.ui.search.SearchFragment"
     }
 }

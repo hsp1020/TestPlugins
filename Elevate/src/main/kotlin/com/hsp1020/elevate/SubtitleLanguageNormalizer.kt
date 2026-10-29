@@ -32,9 +32,6 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
     private var model: PlayerGeneratorViewModel? = null
     private var removeObserver: (() -> Unit)? = null
     private var pendingDialogView: android.view.View? = null
-    private var trackedInstance: Int? = null
-    private val originalByReplacement = HashMap<SubtitleData, SubtitleData>()
-    private val filteredSubtitles = LinkedHashMap<Pair<SubtitleOrigin, String>, SubtitleData>()
     private val onDialogDetached = object : android.view.View.OnAttachStateChangeListener {
         override fun onViewAttachedToWindow(view: android.view.View) = Unit
         override fun onViewDetachedFromWindow(view: android.view.View) {
@@ -70,9 +67,6 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
     fun stop() {
         application.unregisterActivityLifecycleCallbacks(this)
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(callbacks)
-        removeObserver?.invoke()
-        removeObserver = null
-        restoreSubtitles()
         detach()
         host = null
     }
@@ -108,22 +102,6 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         normalize(vm)
     }
 
-    private fun restoreSubtitles() {
-        val vm = model ?: return
-        val state = vm.state
-        if (trackedInstance != state.instance) return
-        if (originalByReplacement.isEmpty() && filteredSubtitles.isEmpty()) return
-        val current = state.subtitles
-        val keys = current.mapTo(HashSet()) { it.origin to it.url }
-        val restored = current.mapTo(LinkedHashSet()) { originalByReplacement[it] ?: it }
-        filteredSubtitles.forEach { (key, subtitle) ->
-            if (key !in keys) restored.add(subtitle)
-        }
-        if (restored != current) vm.modifyState {
-            if (instance == state.instance) set(restored) else this
-        }
-    }
-
     private fun detach(candidate: Fragment? = null) {
         if (candidate != null && candidate !== fragment) return
         pendingDialogView?.removeOnAttachStateChangeListener(onDialogDetached)
@@ -132,9 +110,6 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         removeObserver = null
         fragment = null
         model = null
-        trackedInstance = null
-        originalByReplacement.clear()
-        filteredSubtitles.clear()
     }
 
     private fun stremioRanks(): Map<*, *>? = runCatching {
@@ -203,16 +178,10 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         pendingDialogView?.removeOnAttachStateChangeListener(onDialogDetached)
         pendingDialogView = null
         val state = vm.state
-        if (trackedInstance != state.instance) {
-            trackedInstance = state.instance
-            originalByReplacement.clear()
-            filteredSubtitles.clear()
-        }
         if (state.subtitles.isEmpty()) return
         val ranks = stremioRanks()
         val embeddedLabel = f.getString(R.string.subtitles_from_embedded)
-        val inputs = state.subtitles.toList()
-        val normalized = inputs.map { localized(it, ranks) }
+        val normalized = state.subtitles.map { localized(it, ranks) }
             .filter {
                 val language = it.originalName.substringBefore(" · ").substringBefore(" — ").trim()
                 language.isNotEmpty() && !language.equals("Unknown", ignoreCase = true) &&
@@ -258,16 +227,6 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         }
         val changed = normalized.map { replacements[it] ?: it }
         if (changed.toSet() == state.subtitles) return
-        inputs.forEach { input ->
-            val localized = localized(input, ranks)
-            val replacement = replacements[localized] ?: localized
-            val original = originalByReplacement[input] ?: input
-            if (replacement in changed) {
-                if (replacement != original) originalByReplacement[replacement] = original
-            } else {
-                filteredSubtitles[input.origin to input.url] = original
-            }
-        }
         vm.modifyState {
             if (instance != state.instance) this else set(changed)
         }
