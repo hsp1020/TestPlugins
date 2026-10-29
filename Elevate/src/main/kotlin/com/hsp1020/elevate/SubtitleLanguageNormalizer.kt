@@ -170,7 +170,8 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         val replacements = HashMap<SubtitleData, SubtitleData>()
         normalized.groupBy { it.originalName }.values.forEach { group ->
             val embedded = group.filter { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
-                .sortedBy { it.url }
+                .sortedWith(compareBy<SubtitleData> { it.url.toIntOrNull() ?: Int.MAX_VALUE }
+                    .thenBy { it.url })
             if (embedded.isEmpty()) return@forEach
             embedded.forEachIndexed { index, sub ->
                 val originalSuffix = sub.nameSuffix
