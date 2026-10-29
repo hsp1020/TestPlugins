@@ -383,8 +383,11 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             @Suppress("UNCHECKED_CAST")
             val existing = activeField?.get(helper) as? Set<SubtitleData>
                 ?: return@runCatching false
-            val missing = embedded.filterNot { it in existing }
-            if (missing.isNotEmpty()) helper.setActiveSubtitles(existing + missing)
+            val trackIds = embedded.mapTo(mutableSetOf<String>()) { it.url }
+            val updated = existing.filterNot {
+                it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it.url in trackIds
+            }.toSet() + embedded
+            if (updated != existing) helper.setActiveSubtitles(updated)
             true
         }.getOrDefault(false)
 
@@ -403,9 +406,9 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             }
         }
         if (available.isEmpty()) return
-        val embedded = subtitles.filterTo(mutableSetOf()) {
+        val embedded = subtitles.filter {
             it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO && it.url in available
-        }
+        }.distinctBy { it.url }.toSet()
         if (embedded.isEmpty()) return
 
         trackDialog(f)

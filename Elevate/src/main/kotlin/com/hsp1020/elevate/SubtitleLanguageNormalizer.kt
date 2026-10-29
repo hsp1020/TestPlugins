@@ -123,11 +123,12 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         // StremioC's own stream/subtitle and catalog addon labels stay detailed.
         // Group 0 is ranked 1000..9999; CineStream/StreamPlay integrations are >=10000.
         val rank = (ranks?.get(sub.url) as? Number)?.toInt()
+        val integrationSubtitle = rank != null && rank >= 10_000
         if (rank != null && rank in 1000..9999) return sub
         // Direct Stremio addon labels may also be ranked in integration groups.
         // Never erase their descriptive label/name, even when a rank exists.
-        if (sub.originalName.contains(" · ") ||
-            sub.originalName.contains(" — ")) return sub
+        if (!integrationSubtitle && (sub.originalName.contains(" · ") ||
+                sub.originalName.contains(" — "))) return sub
 
         val sourceName = sub.originalName.trim()
         val stremio = sourceName.endsWith(" (Stremio)", ignoreCase = true)
@@ -140,7 +141,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             ?: SubtitleHelper.fromLanguageToTagIETF(languageName, halfMatch = true)
             ?: return sub
         val displayLanguage = SubtitleHelper.fromTagToLanguageName(tag) ?: return sub
-        val displayed = displayLanguage + if (stremio) " (Stremio)" else ""
+        val displayed = displayLanguage + if (stremio && !integrationSubtitle) " (Stremio)" else ""
         if (displayed == sub.originalName && code == sub.languageCode) return sub
 
         // Native right-hand options keep the original track label when it held detail.
@@ -163,6 +164,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         val embeddedLabel = f.getString(R.string.subtitles_from_embedded)
         val normalized = state.subtitles.map { localized(it, ranks) }
             .filter { it.originalName.isNotBlank() }
+            .distinctBy { if (it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) it.origin to it.url else it }
 
         // Only groups containing embedded tracks need explicit option numbers.
         // The native picker orders by nameSuffix.toIntOrNull() ?: 0, so the

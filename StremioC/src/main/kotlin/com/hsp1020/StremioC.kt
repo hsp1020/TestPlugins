@@ -1108,10 +1108,6 @@ open class StremioC(
 
         private val settingsCache = ConcurrentHashMap<String, Pair<Boolean, Long>>()
 
-        @Volatile private var cachedCustomHosts: Set<String>? = null
-        @Volatile private var cachedCustomHostsTime: Long = 0
-        private const val SETTINGS_CACHE_TTL = 60_000L
-
         private data class StreamSubtitleAddon(val name: String, val url: String)
         private data class SyncSettings(
             val syncUrl: String,
@@ -3121,48 +3117,6 @@ open class StremioC(
                 parsed != null && (parsed.scheme == "http" || parsed.scheme == "https")
             }.filterNot { stremioManifestUrl(it.url) == stremioManifestUrl(currentMainUrl) }
         } else emptyList()
-        val customHosts = withContext(Dispatchers.IO) {
-            val now = System.currentTimeMillis()
-            if (cachedCustomHosts != null && now - cachedCustomHostsTime < SETTINGS_CACHE_TTL) {
-                return@withContext cachedCustomHosts!!
-            }
-            val context = CloudStreamApp.context
-
-            val raw = try { 
-                val rebuildPrefs = context?.getSharedPreferences("rebuild_preference", Context.MODE_PRIVATE)
-                var rawValue = rebuildPrefs?.getString("stremio_addons", "") ?: ""
-
-                if (rawValue.isBlank()) {
-                    val rebuildPrefsBackup = context?.getSharedPreferences("rebuild_key", Context.MODE_PRIVATE)
-                    rawValue = rebuildPrefsBackup?.getString("stremio_addons", "") ?: ""
-                }
-
-                if (rawValue.startsWith("\"") && rawValue.endsWith("\"") && rawValue.length >= 2) {
-                    rawValue.substring(1, rawValue.length - 1)
-                } else {
-                    rawValue
-                }
-            } catch (t: Throwable) {
-                try {
-                    val prefs = CloudStreamApp.context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
-                    val v = prefs?.getString("stremio_addons", "") ?: ""
-                    if (v.startsWith("\"") && v.endsWith("\"") && v.length >= 2) v.substring(1, v.length - 1) else v
-                } catch (e: Exception) {
-                    ""
-                }
-            }
-
-            val hosts = raw.lines()
-                .filter { it.isNotBlank() }
-                .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.getOrNull() }
-                .toSet() 
-
-            cachedCustomHosts = hosts
-            cachedCustomHostsTime = now
-            hosts
-        }
-        val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
-
         val stremioAddons = syncSettings.streamSubtitleUrls
         val integrationAddons = getIntegrationStremioAddons()
         val cineAddons = integrationAddons.filter { it.fromCineStream }
@@ -3196,35 +3150,6 @@ open class StremioC(
             }
         }
 
-        val integrationSubtitleCallback: (SubtitleFile) -> Unit = { sub ->
-            val subtitleUrl = sub.url
-            try {
-                val start = subtitleUrl.indexOf("://")
-                val host = if (start != -1) {
-                    val hostStart = start + 3
-                    val end = subtitleUrl.indexOf('/', hostStart)
-                    val hostPort = if (end == -1) subtitleUrl.substring(hostStart) else subtitleUrl.substring(hostStart, end)
-                    val portIdx = hostPort.indexOf(':')
-                    if (portIdx == -1) hostPort else hostPort.substring(0, portIdx)
-                } else ""
-
-                val isCustom = customHosts.contains(host)
-                val isBuiltIn = builtInHosts.contains(host)
-                val isContainsStrem = host.contains("strem", ignoreCase = true)
-
-                val isStremio = isCustom || isBuiltIn || isContainsStrem
-
-                if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
-                    val newLang = "${sub.lang} (Stremio)"
-                    emitUniqueSubtitle(sub.copy(lang = newLang))
-                } else {
-                    emitUniqueSubtitle(sub)
-                }
-            } catch (e: Exception) {
-                emitUniqueSubtitle(sub)
-            }
-        }
-
         val stremioSubtitleCallback: (SubtitleFile) -> Unit = { sub ->
             emitUniqueSubtitle(sub)
         }
@@ -3235,7 +3160,7 @@ open class StremioC(
         }
         fun integratedSubtitleFrom(group: Int): (SubtitleFile) -> Unit = { sub ->
             rankSubtitle(sub, group)
-            integrationSubtitleCallback(sub)
+            emitUniqueSubtitle(sub)
         }
         fun extractorSubtitleFrom(addonUrl: String, group: Int = 0): (SubtitleFile) -> Unit = { sub ->
             rankSubtitle(sub, group, addonUrl)
