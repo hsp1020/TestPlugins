@@ -36,8 +36,6 @@ internal enum class ElevateFeature(
         "Keep playback running when browsing episodes, with a season dropdown and translucent cards."),
     EMBEDDED_SUBTITLES("Playback & Subtitles", "Embedded Subtitle Management",
         "Prefer embedded subtitles matching CloudStream's subtitle auto-select language and remove stale tracks when videos change."),
-    MKV_SUBTITLE_TRANSLATION("Playback & Subtitles", "Translate MKV Embedded Subtitles",
-        "Translate selected MKV text tracks through the configured SubMaker addon using byte-range extraction."),
     SUBTITLE_LANGUAGE_NAMES("Playback & Subtitles", "Subtitle Language Names",
         "Localize online subtitle languages and group matching tracks using CloudStream's native language names."),
     AUDIO_TRACKS("Playback & Subtitles", "Automatic Audio Language",
