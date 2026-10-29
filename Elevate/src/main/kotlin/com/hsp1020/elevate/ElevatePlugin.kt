@@ -78,6 +78,7 @@ class ElevatePlugin : Plugin() {
     private var audioSelector: ElevateAudioTrackSelector? = null
     private var skipController: ElevateSkipController? = null
     private var embeddedSubtitles: EmbeddedSubtitleController? = null
+    private var mkvTranslation: MkvEmbeddedTranslateHook? = null
     private var subtitleLanguageNormalizer: SubtitleLanguageNormalizer? = null
     private var subtitleSyncRepair: SubtitleSyncCueRepair? = null
     private var homeHero: HomeHeroToggle? = null
@@ -264,6 +265,14 @@ class ElevatePlugin : Plugin() {
             embeddedSubtitles?.stop()
             embeddedSubtitles = null
         }
+        if (enabled(ElevateFeature.MKV_SUBTITLE_TRANSLATION)) {
+            if (mkvTranslation == null) {
+                mkvTranslation = MkvEmbeddedTranslateHook(application).also { it.start() }
+            }
+        } else {
+            mkvTranslation?.stop()
+            mkvTranslation = null
+        }
         if (enabled(ElevateFeature.PIP_BUTTON) || enabled(ElevateFeature.PIP_SUBTITLES)) {
             if (pipSubtitles == null) {
                 pipSubtitles = PipSubtitleLifecycle(
@@ -312,6 +321,8 @@ class ElevatePlugin : Plugin() {
         skipController = null
         embeddedSubtitles?.stop()
         embeddedSubtitles = null
+        mkvTranslation?.stop()
+        mkvTranslation = null
         subtitleLanguageNormalizer?.stop()
         subtitleLanguageNormalizer = null
         subtitleSyncRepair?.stop()
