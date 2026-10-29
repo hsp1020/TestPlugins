@@ -58,10 +58,7 @@ internal enum class ElevateFeature(
 
 internal object ElevateFeaturePrefs {
     const val FILE = "ElevateFeatures"
-    fun defaultEnabled(feature: ElevateFeature): Boolean =
-        feature != ElevateFeature.HERO_CAROUSEL &&
-            feature != ElevateFeature.LIBRARY_POSTERS &&
-            feature != ElevateFeature.LIVE_HOME_AUTOPLAY
+    fun defaultEnabled(@Suppress("UNUSED_PARAMETER") feature: ElevateFeature): Boolean = false
     fun enabled(context: Context, feature: ElevateFeature): Boolean =
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
             .getBoolean(feature.name, defaultEnabled(feature))

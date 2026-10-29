@@ -183,8 +183,12 @@ class ElevatePlugin : Plugin() {
                 searchProviderOrder = SearchProviderOrderHook(application).also { it.start() }
             }
         } else {
-            searchProviderOrder?.stop()
-            searchProviderOrder = null
+            if (searchProviderOrder == null) {
+                SearchProviderOrderHook.restoreManagedPins(application)
+            } else {
+                searchProviderOrder?.stop()
+                searchProviderOrder = null
+            }
         }
         if (enabled(ElevateFeature.HERO_CAROUSEL)) {
             if (homeHero == null) homeHero = HomeHeroToggle(application).also { it.start() }
@@ -347,6 +351,21 @@ private class NativeDetailSearchHook(private val app: Application) : Application
     private var homeMenuOwner: Fragment? = null
     private var homeMenuItems = emptyList<MenuItem>()
     private var detailRevealEnd: (() -> Unit)? = null
+    private val listenerInfoField by lazy {
+        runCatching {
+            View::class.java.getDeclaredField("mListenerInfo").apply { isAccessible = true }
+        }.getOrNull()
+    }
+    private val clickListenerField by lazy {
+        runCatching {
+            Class.forName("android.view.View" + "$" + "ListenerInfo")
+                .getDeclaredField("mOnClickListener").apply { isAccessible = true }
+        }.getOrNull()
+    }
+    private fun currentDetailClick(button: View): View.OnClickListener? = runCatching {
+        val info = listenerInfoField?.get(button) ?: return@runCatching null
+        clickListenerField?.get(info) as? View.OnClickListener
+    }.getOrNull()
 
     fun start() {
         app.registerActivityLifecycleCallbacks(this)
@@ -421,27 +440,35 @@ private class NativeDetailSearchHook(private val app: Application) : Application
             openSearch(fragment, root, title)
         }
         private val tree = root.viewTreeObserver
+        private var originalClick: View.OnClickListener? = null
+        private fun install() {
+            val current = currentDetailClick(button)
+            if (current != null && current !== click) originalClick = current
+            if (current !== click) button.setOnClickListener(click)
+        }
         private val preDraw = ViewTreeObserver.OnPreDrawListener {
-            if (fragment.isAdded && fragment.view === root && button.isShown) {
-                button.setOnClickListener(click)
-            }
+            if (fragment.isAdded && fragment.view === root && button.isShown) install()
             true
         }
 
         fun attach() {
-            button.setOnClickListener(click)
+            install()
             if (tree.isAlive) tree.addOnPreDrawListener(preDraw)
         }
 
         fun detach() {
             if (tree.isAlive) tree.removeOnPreDrawListener(preDraw)
             if (fragment.view === root && root.isAttachedToWindow) {
-                button.setOnClickListener {
-                    fragment.activity?.let { activity ->
-                        val title = titleView?.text?.toString()?.trim().orEmpty()
-                            .ifEmpty { fragment.arguments?.getString("name").orEmpty() }
-                        QuickSearchFragment.pushSearch(activity, title)
-                    }
+                val current = currentDetailClick(button)
+                if (current == null || current === click) {
+                    // Keep native QuickSearch behavior when Android blocks listener reflection.
+                    button.setOnClickListener(originalClick ?: View.OnClickListener {
+                        fragment.activity?.let { activity ->
+                            val title = titleView?.text?.toString()?.trim().orEmpty()
+                                .ifEmpty { fragment.arguments?.getString("name").orEmpty() }
+                            QuickSearchFragment.pushSearch(activity, title)
+                        }
+                    })
                 }
             }
         }

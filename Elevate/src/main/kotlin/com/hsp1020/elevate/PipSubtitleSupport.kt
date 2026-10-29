@@ -339,18 +339,18 @@ private class PipControlButton {
 
 class PipSubtitleLifecycle(
     private val application: Application,
-    acceptsProvider: (String) -> Boolean,
+    private val stylingEnabled: () -> Boolean,
     private val controlsEnabled: () -> Boolean
 ) : Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
-    private val scaler = PipSubtitleScaler(acceptsProvider)
+    private val scaler = PipSubtitleScaler { stylingEnabled() }
     private val controls = PipControlButton()
     private var host: FragmentActivity? = null
     private var running = false
 
     private fun watch(fragment: Fragment) {
         if (fragment !is GeneratorPlayer || fragment.view == null) return
-        scaler.watch(fragment)
+        if (stylingEnabled()) scaler.watch(fragment) else scaler.detach(fragment)
         if (controlsEnabled()) controls.watch(fragment) else controls.detach(fragment)
     }
 
@@ -393,6 +393,7 @@ class PipSubtitleLifecycle(
             if (!running) return@post
             val activity = host ?: return@post
             if (!controlsEnabled()) controls.detach()
+            if (!stylingEnabled()) scaler.detach()
             fun scan(fm: FragmentManager) {
                 fm.fragments.forEach { fragment ->
                     if (fragment.view != null) watch(fragment)
