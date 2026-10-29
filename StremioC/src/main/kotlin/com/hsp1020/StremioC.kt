@@ -3092,7 +3092,9 @@ open class StremioC(
 
         val seenStremioSubtitles = Collections.synchronizedSet(mutableSetOf<String>())
         fun emitUniqueSubtitle(sub: SubtitleFile) {
-            if (sub.url.isBlank()) return
+            if (sub.url.isBlank() || sub.lang.trim().let {
+                    it.isBlank() || it.equals("und", true)
+                }) return
             if (seenStremioSubtitles.add(sub.url)) subtitleCallback(sub)
         }
         val stremioSourceNames = Collections.synchronizedSet(mutableSetOf<String>()).apply {

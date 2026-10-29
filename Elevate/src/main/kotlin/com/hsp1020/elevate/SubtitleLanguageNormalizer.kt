@@ -184,7 +184,8 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         val normalized = state.subtitles.map { localized(it, ranks) }
             .filter {
                 val language = it.originalName.substringBefore(" · ").substringBefore(" — ").trim()
-                language.isNotEmpty() && !language.equals("Unknown", ignoreCase = true)
+                language.isNotEmpty() && !language.equals("Unknown", ignoreCase = true) &&
+                    !language.equals("und", ignoreCase = true)
             }
             .distinctBy { if (it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) it.origin to it.url else it }
 
@@ -192,6 +193,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         // The native picker orders by nameSuffix.toIntOrNull() ?: 0, so the
         // embedded "1 (내장 자막)" option comes before numeric online options.
         val replacements = HashMap<SubtitleData, SubtitleData>()
+        val embeddedPrefix = Regex("""^\d+ \(${Regex.escape(embeddedLabel)}(?: · )?""")
         normalized.groupBy { it.originalName }.values.forEach { group ->
             val embedded = group.filter { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
                 .sortedWith(compareBy<SubtitleData> { it.url.toIntOrNull() ?: Int.MAX_VALUE }
@@ -204,11 +206,12 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
                     it.origin != SubtitleOrigin.URL || it.nameSuffix.toIntOrNull() == null
                 }) return@forEach
             embedded.forEachIndexed { index, sub ->
-                val originalSuffix = sub.nameSuffix
-                val markedSuffix = Regex("""^\d+ \([^)]*\)$""").matches(originalSuffix)
-                val detail = if (markedSuffix) {
-                    originalSuffix.substringAfter(" · ", "").removeSuffix(")")
-                } else originalSuffix
+                var detail = sub.nameSuffix
+                // Unwrap previously generated labels, including names with nested parentheses.
+                while (true) {
+                    val prefix = embeddedPrefix.find(detail) ?: break
+                    detail = detail.substring(prefix.value.length).removeSuffix(")")
+                }
                 val suffix = "${index + 1} ($embeddedLabel" +
                     if (detail.isNotBlank()) " · $detail)" else ")"
                 if (sub.nameSuffix != suffix) replacements[sub] = sub.copy(nameSuffix = suffix)
