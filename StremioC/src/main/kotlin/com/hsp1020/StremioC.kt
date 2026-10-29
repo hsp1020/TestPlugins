@@ -1295,10 +1295,16 @@ open class StremioC(
         internal val subtitleDetailByUrl = Collections.synchronizedMap(lruCacheMap<String, String>(2400))
         internal val subtitleSourceByUrl = Collections.synchronizedMap(lruCacheMap<String, String>(2400))
 
-        // Numeric-only group keys cannot be guessed as a spoken language by
-        // CloudStream's fuzzy getIETF_tag() auto-selection fallback.
-        internal fun translationGroupId(label: String): String =
-            "0" + label.map { it.code.toString().padStart(5, '0') }.joinToString("")
+        // The native subtitle picker renders names with html(); encode the visible label
+        // so its first frame is readable without triggering fuzzy language auto-selection.
+        internal fun translationGroupId(label: String): String = buildString {
+            var i = 0
+            while (i < label.length) {
+                val codePoint = Character.codePointAt(label, i)
+                append("&#").append(codePoint).append(';')
+                i += Character.charCount(codePoint)
+            }
+        }
 
         internal fun translationGroupTitle(id: String): String? {
             if (!id.startsWith("0") || id.length < 6 || (id.length - 1) % 5 != 0 ||
