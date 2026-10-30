@@ -585,9 +585,10 @@ internal fun catalogStyledAdapter(
 ): ArrayAdapter<String> {
     fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
     fun TextView.styleCatalogText(color: Int) {
+        val originalSize = textSize
         if (nativeHeaderStyle) setTextAppearance(R.style.WatchHeaderText)
         else typeface = fontTypeface
-        setTextSize(TypedValue.COMPLEX_UNIT_PX, textSize)
+        setTextSize(TypedValue.COMPLEX_UNIT_PX, originalSize)
         setTextColor(color)
     }
         return object : ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, labels) {
