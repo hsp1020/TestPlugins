@@ -768,21 +768,22 @@ internal class ElevatePlayerPanel(
         updateSyncHeader(true)
         offsetBeforeSync = fragment.player.getSubtitleOffset()
         panelContent(nativeSync)
-        // Reserve only the player bar's vertical space outside the sync content.
-        // Padding the native layout itself left the control buttons floating halfway up.
+        // The bottom_player_bar includes a large (invisible) preview area.
+        // Anchor the buttons to the actual seek line instead of that container's top.
         body.post {
-            val bar = root.findViewById<View>(R.id.bottom_player_bar)
-            if (inSync && bar != null && bar.isShown && body.height > 0) {
+            val progress = root.findViewById<View>(R.id.exo_progress)
+            if (inSync && progress != null && progress.isShown && body.height > 0) {
                 val panelPos = IntArray(2)
-                val barPos = IntArray(2)
+                val progressPos = IntArray(2)
                 body.getLocationOnScreen(panelPos)
-                bar.getLocationOnScreen(barPos)
+                progress.getLocationOnScreen(progressPos)
                 val bottom = panelPos[1] + body.height
-                val inset = (bottom - barPos[1]).coerceIn(0, body.height / 3) + dp(2)
+                val seekLine = progressPos[1] + progress.height / 2
+                val inset = (bottom - seekLine + dp(4)).coerceIn(0, body.height / 2)
                 if (body.paddingBottom != inset) body.setPadding(0, 0, 0, inset)
-                android.util.Log.d("ElevatePanelSync", "layout panelBottom=$bottom barTop=${barPos[1]} reserved=$inset cueHeight=${syncList.height} controlsHeight=${nativeSync.getChildAt(1).height}")
+                android.util.Log.d("ElevatePanelSync", "layout panelBottom=$bottom progressY=$seekLine reserved=$inset cueHeight=${syncList.height} controlsHeight=${nativeSync.getChildAt(1).height}")
             } else {
-                android.util.Log.d("ElevatePanelSync", "layout pending inSync=$inSync barVisible=${bar?.isShown} bodyHeight=${body.height}")
+                android.util.Log.d("ElevatePanelSync", "layout pending inSync=$inSync progressVisible=${progress?.isShown} bodyHeight=${body.height}")
             }
         }
         offsetInput.setText(fragment.player.getSubtitleOffset().toString())

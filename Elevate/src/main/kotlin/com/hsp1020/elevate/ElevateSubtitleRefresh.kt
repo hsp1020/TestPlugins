@@ -300,7 +300,41 @@ internal class ElevateRefreshedSubtitleOverlay {
     }
 
     fun onPlayerEvent() {
-        if (overlay != null) synchronize()
+        if (overlay != null) {
+            ensureOutputVisible(false)
+            synchronize()
+        }
+    }
+
+    fun onSubtitleOffsetChanged() {
+        if (overlay == null) return
+        // Core setSubtitleOffset() resets TextRenderer's position and native cues.
+        // Retain the refreshed layer above the native output without reloading it.
+        ensureOutputVisible(true)
+        rendered = null
+        synchronize()
+    }
+
+    private fun ensureOutputVisible(logState: Boolean) {
+        val native = original ?: return
+        val view = overlay ?: return
+        val output = native.getChildAt(0)
+        val reordered = view.parent === native &&
+            native.indexOfChild(view) != native.childCount - 1
+        val repaired = output != null && output !== view && output.alpha != 0f
+        if (repaired) output?.alpha = 0f
+        if (reordered) view.bringToFront()
+        if (view.visibility != View.VISIBLE) view.visibility = View.VISIBLE
+        if (view.alpha != 1f) view.alpha = 1f
+        if (logState || reordered || repaired) {
+            android.util.Log.d("ElevateSubtitleOverlay",
+                "visibility nativeShown=${native.isShown} nativeAlpha=${native.alpha} " +
+                    "overlayShown=${view.isShown} overlayAlpha=${view.alpha} " +
+                    "outputAlpha=${output?.alpha} childCount=${native.childCount} " +
+                    "overlaySize=${view.width}x${view.height} innerAlpha=${view.getChildAt(0)?.alpha} " +
+                    "nativeTranslation=${native.translationY} front=${native.indexOfChild(view) == native.childCount - 1} " +
+                    "reordered=$reordered restoredOutput=$repaired offset=${fragment?.player?.getSubtitleOffset()}")
+        }
     }
 
     fun bind(candidate: GeneratorPlayer) {
@@ -422,7 +456,7 @@ internal class ElevateRefreshedSubtitleOverlay {
             }
             view.setCues(visible)
             rendered = indexes
-            android.util.Log.d("ElevateSubtitleOverlay", "render time=$time activeSegments=${indexes.size} visibleCues=${visible.size} offset=$offset playing=${player.isPlaying}")
+            android.util.Log.d("ElevateSubtitleOverlay", "render time=$time activeSegments=${indexes.size} visibleCues=${visible.size} cueChars=${visible.sumOf { it.text?.length ?: 0 }} shown=${view.isShown} size=${view.width}x${view.height} offset=$offset playing=${player.isPlaying}")
         }
         if (!player.isPlaying) return
         val next = timeline?.nextAfter(time) ?: return
@@ -439,6 +473,10 @@ internal class ElevateRefreshedSubtitleOverlay {
         val view = overlay
         (view?.parent as? FrameLayout)?.removeView(view)
         originalOutput?.alpha = originalOutputAlpha
+        // TextRenderer can replace its output when the subtitle offset changes.
+        // Restore the current native output too if it is no longer the original view.
+        original?.getChildAt(0)?.takeIf { it !== originalOutput && it !== view }
+            ?.alpha = originalOutputAlpha
         originalOutput = null
         overlay = null
         original = null

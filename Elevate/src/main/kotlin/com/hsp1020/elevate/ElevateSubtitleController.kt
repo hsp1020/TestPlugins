@@ -914,7 +914,7 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         panelListener = listener
     }
 
-    fun refreshAppearance() = refreshedOverlay.onPlayerEvent()
+    fun refreshAppearance() = refreshedOverlay.onSubtitleOffsetChanged()
 
     /** Called directly from the integrated panel, never through a fake Dialog. */
     fun refreshSelected(automatic: Boolean = false, button: ImageButton? = null): Boolean {
