@@ -4,14 +4,17 @@ import android.app.Activity
 import android.app.Application
 import android.app.Dialog
 import android.os.Bundle
+import android.text.Spanned
 import android.view.View
 import android.view.ViewTreeObserver
 import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.HeaderViewListAdapter
 import android.widget.ListView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.lagradost.cloudstream3.utils.AppContextUtils.sortSubs
+import com.lagradost.cloudstream3.utils.AppContextUtils.html
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
@@ -46,7 +49,8 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
     private var singleDialog: Dialog? = null
     private var singleGroups: ListView? = null
     private var singleOptions: ListView? = null
-    private var singleFooter: View? = null
+    private var singleOptionAdapter: ArrayAdapter<Spanned>? = null
+    private var singleOptionItem: Spanned? = null
     private var originalColumns: Pair<LinearLayout.LayoutParams, LinearLayout.LayoutParams>? = null
     private var originalGroupClick: AdapterView.OnItemClickListener? = null
     private var singleGroupClick: AdapterView.OnItemClickListener? = null
@@ -70,7 +74,15 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             .apply { isAccessible = true }
     }.getOrNull()
 
+    private fun clearSingleOption() {
+        val adapter = singleOptionAdapter
+        if (adapter?.count == 1 && adapter.getItem(0) === singleOptionItem) adapter.clear()
+        singleOptionAdapter = null
+        singleOptionItem = null
+    }
+
     private fun clearSingleOptionDialog() {
+        clearSingleOption()
         originalColumns?.let { (language, subtitles) ->
             singleGroups?.layoutParams = language
             singleOptions?.layoutParams = subtitles
@@ -80,11 +92,9 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         if (list?.onItemClickListener === singleGroupClick) {
             list?.onItemClickListener = originalGroupClick
         }
-        singleFooter?.let { singleOptions?.removeFooterView(it) }
         singleDialog = null
         singleGroups = null
         singleOptions = null
-        singleFooter = null
         originalGroupClick = null
         singleGroupClick = null
     }
@@ -159,22 +169,27 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         } else null
 
         if (item == null) {
-            singleFooter?.let { options.removeFooterView(it) }
-            singleFooter = null
+            clearSingleOption()
             return
         }
-        if (singleFooter == null) {
-            if (options.adapter?.count != 0) return
-            val footer = android.view.LayoutInflater.from(dialog.context)
-                .inflate(R.layout.sort_bottom_single_choice, options, false) as? TextView ?: return
-            options.addFooterView(footer, null, true)
-            singleFooter = footer
-        }
+        @Suppress("UNCHECKED_CAST")
+        val source = (options.getTag(R.id.sort_subtitles_options) as? ArrayAdapter<Spanned>)
+            ?: (options.adapter as? ArrayAdapter<Spanned>) ?: return
         val detail = stremioSubtitleDetail(item.url)?.takeIf { it.isNotBlank() }
         val label = item.nameSuffix.ifBlank { "1" }
-        (singleFooter as? TextView)?.text = if (detail != null) "$label($detail)" else label
+        val text = if (detail != null) "$label($detail)" else label
+        if (source.count != 1 || source.getItem(0) !== singleOptionItem ||
+            singleOptionItem.toString() != text) {
+            clearSingleOption()
+            if (source.count != 0) return
+            val entry = text.html()
+            source.add(entry)
+            singleOptionAdapter = source
+            singleOptionItem = entry
+        }
         options.visibility = View.VISIBLE
         options.setItemChecked(0, true)
+        (list.adapter as? android.widget.BaseAdapter)?.notifyDataSetChanged()
     }
 
     private val callbacks = object : FragmentManager.FragmentLifecycleCallbacks() {

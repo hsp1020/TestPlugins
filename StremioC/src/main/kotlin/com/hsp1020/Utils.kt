@@ -628,17 +628,19 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         if (adapter.count != groups.size + 1) return
         val selected = list.checkedItemPosition
         list.adapter = RefreshRowAdapter(adapter, sourceAt = { position ->
-            groupAt(position)?.singleOrNull()?.let { StremioSubtitleRefreshRegistry.find(it.url) }
+            groupAt(position)?.singleOrNull()
+                ?.takeUnless { options.visibility == View.VISIBLE && options.adapter?.count == 1 }
+                ?.let { StremioSubtitleRefreshRegistry.find(it.url) }
         })
         if (selected >= 0) list.setItemChecked(selected, true)
 
         val optionsParent = (options.adapter as? HeaderViewListAdapter)?.wrappedAdapter
             ?: options.adapter
         val optionsAdapter = optionsParent as? ArrayAdapter<*> ?: return
+        options.setTag(R.id.sort_subtitles_options, optionsAdapter)
         val optionSelected = options.checkedItemPosition
         options.adapter = RefreshRowAdapter(optionsAdapter, { position ->
             val siblings = groupAt(list.checkedItemPosition) ?: return@RefreshRowAdapter null
-            if (siblings.size < 2) return@RefreshRowAdapter null
             val ordered = siblings.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }
             ordered.getOrNull(position)?.let { StremioSubtitleRefreshRegistry.find(it.url) }
         }, { position ->
@@ -683,7 +685,8 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         // TV remotes long-press the focused ListView item, not necessarily its child button.
         val groupLongClick = list.onItemLongClickListener
         list.onItemLongClickListener = AdapterView.OnItemLongClickListener { parentView, row, position, id ->
-            val entry = if (list.checkedItemPosition == position)
+            val entry = if (list.checkedItemPosition == position &&
+                !(options.visibility == View.VISIBLE && options.adapter?.count == 1))
                 groupAt(position)?.singleOrNull()?.let { StremioSubtitleRefreshRegistry.find(it.url) }
             else null
             val button = (row as? RefreshRow)?.getChildAt(1) as? ImageButton
