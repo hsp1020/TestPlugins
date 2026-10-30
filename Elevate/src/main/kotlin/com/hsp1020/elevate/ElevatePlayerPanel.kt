@@ -388,10 +388,18 @@ internal class ElevatePlayerPanel(
         android.util.Log.d("ElevatePanelSync", "cueListener enabled=$enabled attached=${next != null}")
     }
     private val touches = ArrayList<View>()
-    private val linksChanged = Observer<VideoLive<Set<VideoLink>>> {
+    private val linksChanged = Observer<VideoLive<Set<VideoLink>>> { update ->
+        android.util.Log.d("ElevatePanelData",
+            "sourceEvent instance=${update?.instance} currentInstance=${vm.state.instance} " +
+                "eventCount=${update?.value?.size} stateCount=${vm.state.links.size} " +
+                "tab=$tab visible=${body.isShown} filter=$filter")
         if (tab == Tab.SOURCES) showTabContents()
     }
-    private val subtitlesChanged = Observer<VideoLive<Set<SubtitleData>>> {
+    private val subtitlesChanged = Observer<VideoLive<Set<SubtitleData>>> { update ->
+        android.util.Log.d("ElevatePanelData",
+            "subtitleEvent instance=${update?.instance} currentInstance=${vm.state.instance} " +
+                "eventCount=${update?.value?.size} stateCount=${vm.state.subtitles.size} " +
+                "tab=$tab inSync=$inSync selectedHash=${fragment.player.getCurrentPreferredSubtitle()?.url?.hashCode()}")
         if (tab == Tab.SUBTITLES) {
             if (inSync) updateSyncCues("subtitle-list")
             else showTabContents()
@@ -494,6 +502,19 @@ internal class ElevatePlayerPanel(
         rows.clear()
         rows.addAll(values)
         adapter.notifyDataSetChanged()
+        if (tab == Tab.SOURCES || (tab == Tab.SUBTITLES && !inSync)) {
+            val renderedTab = tab
+            val expected = values.size
+            android.util.Log.d("ElevatePanelData",
+                "adapterNotify tab=$renderedTab rowCount=$expected adapterCount=${adapter.count} " +
+                    "attached=${list.isAttachedToWindow} shown=${list.isShown}")
+            list.post {
+                if (tab == renderedTab) android.util.Log.d("ElevatePanelData",
+                    "adapterPosted tab=$renderedTab expected=$expected adapterCount=${adapter.count} " +
+                        "childCount=${list.childCount} firstVisible=${list.firstVisiblePosition} " +
+                        "lastVisible=${list.lastVisiblePosition} shown=${list.isShown}")
+            }
+        }
     }
 
     private fun panelContent(view: View) {
@@ -614,6 +635,11 @@ internal class ElevatePlayerPanel(
                 }.onFailure { android.util.Log.w("Elevate", "Source switch failed", it) }
             }, selected = link == selected)
         })
+        android.util.Log.d("ElevatePanelData",
+            "sourcesRendered instance=${vm.state.instance} modelCount=${vm.state.links.size} " +
+                "sortedCount=${vm.state.sortLinks(qualityProfile()).size} usableCount=${entries.size} " +
+                "filter=$filter rowCount=${rows.size} adapterCount=${adapter.count} " +
+                "selectedHash=${selected?.hashCode()} groupCount=${groups.size}")
     }
 
     private fun renderTracks() {
@@ -706,6 +732,11 @@ internal class ElevatePlayerPanel(
         selectedGroup = subtitleGroups.indexOfFirst { (name, _) ->
             name == current?.originalName
         }.let { if (it < 0) 0 else it + 1 }
+        android.util.Log.d("ElevatePanelData",
+            "subtitlesRender instance=${vm.state.instance} modelCount=${vm.state.subtitles.size} " +
+                "groupCount=${subtitleGroups.size} selectedGroup=$selectedGroup " +
+                "selectedHash=${current?.url?.hashCode()} " +
+                "visibleGroupCount=${subtitleGroups.getOrNull(selectedGroup - 1)?.second?.size ?: 0}")
         languageAdapter.clear()
         languageAdapter.add(ctx.getString(R.string.no_subtitles).html())
         subtitleGroups.forEach { (language, _) -> languageAdapter.add(language.html()) }
@@ -748,6 +779,10 @@ internal class ElevatePlayerPanel(
                 }) else null,
                 richText = true, selected = sub.url == current, refreshUrl = sub.url)
         })
+        android.util.Log.d("ElevatePanelData",
+            "subtitlesRendered modelCount=${vm.state.subtitles.size} " +
+                "selectedGroup=$selectedGroup optionRows=${rows.size} adapterCount=${adapter.count} " +
+                "languageRows=${languageAdapter.count} selectedHash=${current?.hashCode()}")
         // Both lists now start at the same top edge with identical 48dp rows.
     }
 
