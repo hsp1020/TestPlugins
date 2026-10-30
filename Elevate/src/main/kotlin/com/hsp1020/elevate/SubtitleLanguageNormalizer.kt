@@ -71,7 +71,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
     private fun clearSingleOptionDialog() {
         val list = singleGroups
         if (list?.onItemClickListener === singleGroupClick) {
-            list.onItemClickListener = originalGroupClick
+            list?.onItemClickListener = originalGroupClick
         }
         singleFooter?.let { singleOptions?.removeFooterView(it) }
         singleDialog = null
