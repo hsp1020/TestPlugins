@@ -695,7 +695,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                     " live=${live.size} nativeHashes=" +
                     native.joinToString(",") { Integer.toHexString(it.url.hashCode()) } +
                     " liveHashes=" +
-                    live.joinToString(",") { Integer.toHexString(it.url.hashCode()) }")
+                    live.joinToString(",") { Integer.toHexString(it.url.hashCode()) })
             visibleOptions[index].take(40).forEachIndexed { display, sourceIndex ->
                 val sub = native[sourceIndex]
                 val adapterText = if (sourceIndex in 0 until optionsAdapter.count)
