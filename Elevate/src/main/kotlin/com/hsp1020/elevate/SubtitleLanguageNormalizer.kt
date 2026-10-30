@@ -386,7 +386,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         vm.modifyState {
             if (instance != state.instance || subtitles.isEmpty()) return@modifyState this
             val before = subtitles
-            val mapped = before.map { sub ->
+            val normalized = before.map { sub ->
                 val localized = localized(sub, ranks)
                 if (details != null && sub.origin == SubtitleOrigin.URL &&
                     localized.originalName != sub.originalName) {
@@ -399,8 +399,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
                     }
                 }
                 localized
-            }
-            val normalized = mapped.filter {
+            }.filter {
                 val language = it.originalName.substringBefore(" · ").substringBefore(" — ").trim()
                 language.isNotEmpty() && !language.equals("Unknown", ignoreCase = true) &&
                     !language.equals("und", ignoreCase = true)
@@ -433,41 +432,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
                 normalized.map { replacements[it] ?: it }
             }
 
-            val result = changed.toSet()
-            if (result.size < before.size) {
-                // Only diagnose actual item-count reduction; no per-subtitle tracing
-                // during normal registration or picker interactions.
-                fun dropped(sub: SubtitleData, reason: String) {
-                    android.util.Log.w("Elevate-SubtitleDrop",
-                        "before=${before.size} normalized=${normalized.size} after=${result.size}" +
-                            " reason=$reason origin=${sub.origin}" +
-                            " urlHash=${Integer.toHexString(sub.url.hashCode())}" +
-                            " language=${sub.originalName.take(100)}" +
-                            " suffix=${sub.nameSuffix.take(60)} code=${sub.languageCode}")
-                }
-                val retained = normalized.toMutableList()
-                mapped.forEach { sub ->
-                    if (!retained.remove(sub)) {
-                        val language = sub.originalName.substringBefore(" · ")
-                            .substringBefore(" — ").trim()
-                        val reason = when {
-                            language.isEmpty() -> "empty_language"
-                            language.equals("Unknown", true) -> "unknown_language"
-                            language.equals("und", true) -> "und_language"
-                            sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO -> "duplicate_embedded"
-                            else -> "normalized_collision"
-                        }
-                        dropped(sub, reason)
-                    }
-                }
-                if (result.size < normalized.size) {
-                    val seen = HashSet<SubtitleData>()
-                    changed.forEach { sub ->
-                        if (!seen.add(sub)) dropped(sub, "numbering_collision")
-                    }
-                }
-            }
-            if (result == before) this else set(changed)
+            if (changed.toSet() == before) this else set(changed)
         }
     }
 
