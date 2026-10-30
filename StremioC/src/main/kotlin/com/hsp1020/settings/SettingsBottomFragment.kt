@@ -2401,13 +2401,14 @@ private fun showLanguageSelectDialog() {
                         val type = cat.type ?: "movie"
                         val name = cat.name ?: id
                         val displayType = type.replaceFirstChar { it.uppercase() }
-                        val homeSelectable = !cat.requiresExtra("search")
+                        val homeSelectable = cat.supportsHome() &&
+                            (!cat.requiresExtra("skip") || cat.supportsExtra("skip"))
 
                         flatTabs.add(ConfigFlatTab(
                             key = "${id}_${type}_default", 
                             displayName = "$name - $displayType",
                             isChecked = sharedPref.getBoolean("tab_enabled_${uniqueId}_${id}_${type}_default", true),
-                            showOnHome = homeSelectable && sharedPref.getBoolean("tab_home_${uniqueId}_${id}_${type}_default", true),
+                            showOnHome = sharedPref.getBoolean("tab_home_${uniqueId}_${id}_${type}_default", true),
                             homeSelectable = homeSelectable
                         ))
                     }
@@ -2604,7 +2605,7 @@ private fun showLanguageSelectDialog() {
                             hostContext.colorFromAttribute(HostR.attr.colorPrimary)
                         else Color.GRAY)
                     holder.homeIcon.contentDescription = when {
-                        !tab.homeSelectable -> "${tab.displayName}: Search-only catalog, unavailable on Home"
+                        !tab.homeSelectable -> "${tab.displayName}: Unavailable on Home"
                         !tab.isChecked -> "${tab.displayName}: Enable catalog to change Home visibility"
                         tab.showOnHome -> "${tab.displayName}: Shown on Home"
                         else -> "${tab.displayName}: Hidden from Home"

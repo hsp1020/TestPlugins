@@ -2345,18 +2345,22 @@ open class StremioC(
 
         val flatTabs = mutableListOf<FlatTab>()
         rawCatalogs.forEach { catalog ->
-            if (!catalog.supportsHome() || catalog.requiresExtra("genre") ||
+            if (!catalog.supportsHome() ||
                 (catalog.requiresExtra("skip") && !catalog.supportsExtra("skip"))) return@forEach
             val catalogId = catalog.id ?: ""
             val catalogType = catalog.type ?: "movie"
             val catalogName = catalog.name ?: catalogId
             val displayType = catalogType.replaceFirstChar { it.uppercase() }
+            val extras = listOfNotNull(
+                catalog.homeGenre()?.let { "genre=${it.urlEncodeLocal()}" },
+                if (catalog.supportsExtra("skip")) "skip=###" else null
+            ).joinToString("&")
 
             flatTabs.add(FlatTab(
                 key = "${catalogId}_${catalogType}_default",
                 displayName = "$catalogName - $displayType",
                 urlPath = "/catalog/${catalogType.urlEncodeLocal()}/${catalogId.urlEncodeLocal()}" +
-                    (if (catalog.supportsExtra("skip")) "/skip=###" else "") + ".json"
+                    (if (extras.isNotEmpty()) "/$extras" else "") + ".json"
             ))
         }
 
@@ -4434,11 +4438,17 @@ open class StremioC(
             extra?.any { it.name == name && it.isRequired == true } == true ||
                 extraRequired?.contains(name) == true
 
+        fun homeGenre(): String? = if (requiresExtra("genre")) {
+            val options = browseGenres()
+            options.firstOrNull { it.equals("None", ignoreCase = true) }
+                ?: options.firstOrNull { it.equals("All", ignoreCase = true) }
+        } else null
+
         fun supportsHome(): Boolean {
             val required = extra.orEmpty().filter { it.isRequired == true }.mapNotNull { it.name } +
                 extraRequired.orEmpty()
             return !id.isNullOrBlank() && required.all { it == "genre" || it == "skip" } &&
-                (!requiresExtra("genre") || getGenresList().isNotEmpty())
+                (!requiresExtra("genre") || homeGenre() != null)
         }
 
         val activeTypes: List<String> get() = if (!parsedTypes.isNullOrEmpty()) parsedTypes else listOfNotNull(type)
