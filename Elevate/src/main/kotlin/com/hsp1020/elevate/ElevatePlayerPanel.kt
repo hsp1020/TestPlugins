@@ -4,8 +4,10 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.AbsListView
 import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.Button
@@ -14,19 +16,28 @@ import android.widget.HorizontalScrollView
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.text.TextWatcher
+import android.text.Editable
 import android.widget.TextView
 import android.util.TypedValue
 import androidx.appcompat.content.res.AppCompatResources
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.LinearLayoutManager
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.SubtitleHelper.fromTagToLanguageName
+import com.lagradost.cloudstream3.utils.AppContextUtils.html
 import com.lagradost.cloudstream3.ui.player.FullScreenPlayer
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.player.VideoLink
 import com.lagradost.cloudstream3.ui.player.VideoLive
 import com.lagradost.cloudstream3.ui.player.SubtitleData
+import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
+import com.lagradost.cloudstream3.ui.player.SubtitleOffsetItemAdapter
 import com.lagradost.cloudstream3.ui.player.source_priority.QualityDataHelper
 import com.lagradost.cloudstream3.utils.AppContextUtils.sortSubs
 import java.text.Normalizer
@@ -48,6 +59,7 @@ internal class ElevatePlayerPanel(
     private val ctx = overlay.context
     private val dp: (Int) -> Int = { (it * ctx.resources.displayMetrics.density + .5f).toInt() }
     private val textColor = episodeTitle?.currentTextColor ?: Color.WHITE
+    private var nativeWidth = overlay.layoutParams?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT
     private val vm = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
     private val tabs = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
     private val buttons = LinkedHashMap<Tab, TextView>()
@@ -64,6 +76,16 @@ internal class ElevatePlayerPanel(
     private val adapter = object : ArrayAdapter<Row>(ctx, android.R.layout.simple_list_item_1, rows) {
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
             val value = getItem(position) ?: return TextView(ctx)
+            if (value.subtitleLanguage == null && value.refresh == null) {
+                val text = (convertView as? TextView)
+                    ?: (LayoutInflater.from(ctx).inflate(
+                        R.layout.sort_bottom_single_choice, parent, false
+                    ) as TextView)
+                text.text = value.label
+                text.maxLines = Int.MAX_VALUE
+                text.ellipsize = null
+                return text
+            }
             val holder = (convertView as? LinearLayout) ?: LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -76,14 +98,14 @@ internal class ElevatePlayerPanel(
                     setTextColor(textColor)
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                     gravity = Gravity.CENTER_VERTICAL
-                    maxLines = 2
+                    maxLines = 12
                     applyElevateNativeFont()
                 }, LinearLayout.LayoutParams(0, -2, 1f))
                 addView(TextView(ctx).apply {
                     setTextColor(textColor)
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                     gravity = Gravity.CENTER_VERTICAL
-                    maxLines = 2
+                    maxLines = 6
                     applyElevateNativeFont()
                 }, LinearLayout.LayoutParams(0, -2, .65f))
                 addView(ImageButton(ctx).apply {
@@ -95,13 +117,13 @@ internal class ElevatePlayerPanel(
                 }, LinearLayout.LayoutParams(dp(48), dp(48)))
             }
             (holder.getChildAt(0) as TextView).apply {
-                text = value.subtitleLanguage ?: value.label
+                text = if (value.subtitleLanguage != null) value.subtitleLanguage.html() else value.label
                 layoutParams = LinearLayout.LayoutParams(0, -2,
-                    if (value.subtitleLanguage != null) .35f else 1f)
+                    if (value.subtitleDetails != null) .35f else 1f)
             }
             (holder.getChildAt(1) as TextView).apply {
-                text = value.subtitleDetails.orEmpty()
-                visibility = if (value.subtitleLanguage != null) View.VISIBLE else View.GONE
+                text = value.subtitleDetails?.let { it.html() } ?: ""
+                visibility = if (value.subtitleDetails != null) View.VISIBLE else View.GONE
             }
             (holder.getChildAt(2) as ImageButton).apply {
                 visibility = if (value.refresh != null) View.VISIBLE else View.GONE
@@ -116,10 +138,47 @@ internal class ElevatePlayerPanel(
             return holder
         }
     }
+    private val languageAdapter = ArrayAdapter<CharSequence>(
+        ctx, R.layout.sort_bottom_single_choice, ArrayList()
+    )
+    private var subtitleGroups = emptyList<Pair<String, List<SubtitleData>>>()
+    private var selectedGroup = 0
+    private val languageList = ListView(ctx).apply {
+        choiceMode = AbsListView.CHOICE_MODE_SINGLE
+        divider = null
+        adapter = languageAdapter
+        setOnItemClickListener { _, _, position, _ ->
+            selectedGroup = position
+            setItemChecked(position, true)
+            if (position == 0) setSubtitle(null)
+            else {
+                val group = subtitleGroups.getOrNull(position - 1)?.second
+                if (group?.size == 1) setSubtitle(group.first())
+                else renderSubtitleOptions()
+            }
+        }
+    }
+    private val subtitlePane = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        addView(languageList, LinearLayout.LayoutParams(0, -1, .35f))
+    }
+    private var inSync = false
+    private val syncButton = TextView(ctx).apply {
+        text = ctx.getString(R.string.subtitle_offset_title)
+        setTextColor(textColor)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(12), 0, dp(12), 0)
+        minimumHeight = dp(44)
+        applyElevateNativeFont(bold = true)
+        setOnClickListener { if (inSync) showTabContents() else showSync() }
+        visibility = View.GONE
+    }
     private val body = LinearLayout(ctx).apply {
         orientation = LinearLayout.VERTICAL
         visibility = View.GONE
         addView(groupScroll, LinearLayout.LayoutParams(-1, dp(42)))
+        addView(syncButton, LinearLayout.LayoutParams(-1, dp(44)))
         addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
     }
     private var tab = Tab.EPISODES
@@ -131,19 +190,72 @@ internal class ElevatePlayerPanel(
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
         hint = "ms"
     }
-    private val offsetEditor = LinearLayout(ctx).apply {
-        gravity = Gravity.CENTER_VERTICAL
-        addView(offsetInput, LinearLayout.LayoutParams(0, dp(48), 1f))
-        addView(Button(ctx).apply {
-            text = "Apply"
+    private val syncList = RecyclerView(ctx).apply {
+        layoutManager = LinearLayoutManager(ctx)
+        (itemAnimator as? androidx.recyclerview.widget.SimpleItemAnimator)
+            ?.supportsChangeAnimations = false
+    }
+    private val syncAdapter = SubtitleOffsetItemAdapter(0L) { cue ->
+        offsetInput.setText((cue.startTimeMs - (fragment.player.getPosition() ?: 0L)).toString())
+    }
+    private val syncOffsetWatcher = object : TextWatcher {
+        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+            val offset = s?.toString()?.toLongOrNull() ?: return
+            val time = (fragment.player.getPosition() ?: 0L) + offset
+            syncAdapter.updateTime(time)
+            syncList.scrollToPosition(syncAdapter.getLatestActiveItem(time))
+        }
+        override fun afterTextChanged(s: Editable?) = Unit
+    }
+    private val syncView = LinearLayout(ctx).apply {
+        orientation = LinearLayout.VERTICAL
+        fun step(delta: Long, icon: Int): ImageButton = ImageButton(ctx).apply {
+            setImageResource(icon)
+            imageTintList = android.content.res.ColorStateList.valueOf(textColor)
+            val attr = TypedValue()
+            if (ctx.theme.resolveAttribute(android.R.attr.selectableItemBackground, attr, true) &&
+                attr.resourceId != 0) background = AppCompatResources.getDrawable(ctx, attr.resourceId)
             setOnClickListener {
-                offsetInput.text.toString().toLongOrNull()?.let { amount ->
-                    fragment.player.setSubtitleOffset(amount)
+                offsetInput.setText(((offsetInput.text.toString().toLongOrNull() ?: 0L) + delta).toString())
+            }
+        }
+        val control = LinearLayout(ctx).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(step(-1000L, R.drawable.ic_baseline_keyboard_arrow_left_24),
+                LinearLayout.LayoutParams(dp(44), dp(48)))
+            addView(step(-100L, R.drawable.baseline_remove_24),
+                LinearLayout.LayoutParams(dp(44), dp(48)))
+            addView(offsetInput, LinearLayout.LayoutParams(0, dp(48), 1f))
+            addView(step(100L, R.drawable.ic_baseline_add_24),
+                LinearLayout.LayoutParams(dp(44), dp(48)))
+            addView(step(1000L, R.drawable.ic_baseline_keyboard_arrow_right_24),
+                LinearLayout.LayoutParams(dp(44), dp(48)))
+        }
+        addView(control, LinearLayout.LayoutParams(-1, dp(48)))
+        addView(LinearLayout(ctx).apply {
+            gravity = Gravity.END
+            fun action(title: String, onTap: () -> Unit) {
+                addView(Button(ctx).apply {
+                    text = title
+                    setOnClickListener { onTap() }
+                }, LinearLayout.LayoutParams(-2, dp(48)))
+            }
+            action(ctx.getString(R.string.sort_apply)) {
+                offsetInput.text.toString().toLongOrNull()?.let { offset ->
+                    fragment.player.setSubtitleOffset(offset)
                     ElevateSubtitleRefreshHook.active()?.refreshAppearance()
                     showSync()
                 }
             }
-        }, LinearLayout.LayoutParams(dp(96), dp(48)))
+            action(ctx.getString(R.string.reset_btn)) {
+                fragment.player.setSubtitleOffset(0L)
+                ElevateSubtitleRefreshHook.active()?.refreshAppearance()
+                showSync()
+            }
+            action(ctx.getString(R.string.sort_cancel)) { showTabContents() }
+        }, LinearLayout.LayoutParams(-1, dp(48)))
+        addView(syncList, LinearLayout.LayoutParams(-1, 0, 1f))
     }
     private val touches = ArrayList<View>()
     private val linksChanged = Observer<VideoLive<Set<VideoLink>>> {
@@ -154,15 +266,16 @@ internal class ElevatePlayerPanel(
     }
 
     init {
+        offsetInput.addTextChangedListener(syncOffsetWatcher)
         list.adapter = adapter
         list.setOnItemClickListener { _, _, position, _ -> rows.getOrNull(position)?.action?.invoke() }
         for (entry in Tab.entries) {
             val button = TextView(ctx).apply {
                 text = when (entry) {
-                    Tab.SOURCES -> "Sources"
-                    Tab.AUDIO -> "Audio"
-                    Tab.SUBTITLES -> "Subtitles"
-                    Tab.EPISODES -> "Episodes"
+                    Tab.SOURCES -> ctx.getString(R.string.video_source)
+                    Tab.AUDIO -> ctx.getString(R.string.audio_tracks)
+                    Tab.SUBTITLES -> ctx.getString(R.string.pick_subtitle)
+                    Tab.EPISODES -> ctx.getString(R.string.episodes)
                 }
                 gravity = Gravity.CENTER
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
@@ -177,6 +290,8 @@ internal class ElevatePlayerPanel(
     }
 
     fun attach() {
+        nativeWidth = overlay.layoutParams.width
+        overlay.layoutParams = overlay.layoutParams.apply { width = dp(360) }
         overlay.addView(tabs, 0, LinearLayout.LayoutParams(-1, dp(48)))
         overlay.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
         vm.currentLinks.observe(fragment.viewLifecycleOwner, linksChanged)
@@ -204,7 +319,7 @@ internal class ElevatePlayerPanel(
         vm.currentSubtitles.removeObserver(subtitlesChanged)
         touches.forEach { it.setOnTouchListener(null) }
         touches.clear()
-        body.removeView(offsetEditor)
+        overlay.layoutParams = overlay.layoutParams.apply { width = nativeWidth }
         overlay.removeView(tabs)
         overlay.removeView(body)
         episodeTitle?.visibility = View.VISIBLE
@@ -227,8 +342,19 @@ internal class ElevatePlayerPanel(
         adapter.notifyDataSetChanged()
     }
 
+    private fun panelContent(view: View) {
+        if (body.getChildAt(body.childCount - 1) === view) return
+        (list.parent as? ViewGroup)?.removeView(list)
+        (subtitlePane.parent as? ViewGroup)?.removeView(subtitlePane)
+        (syncView.parent as? ViewGroup)?.removeView(syncView)
+        if (view === subtitlePane) {
+            subtitlePane.addView(list, LinearLayout.LayoutParams(0, -1, .65f))
+        }
+        body.addView(view, LinearLayout.LayoutParams(-1, 0, 1f))
+    }
+
     private fun showTabContents() {
-        body.removeView(offsetEditor)
+        inSync = false
         buttons.forEach { (key, button) -> button.alpha = if (key == tab) 1f else .55f }
         val episode = tab == Tab.EPISODES
         body.visibility = if (episode) View.GONE else View.VISIBLE
@@ -236,10 +362,12 @@ internal class ElevatePlayerPanel(
         episodeTitle?.visibility = if (episode && seasonSelector() == null) View.VISIBLE else View.GONE
         seasonSelector()?.visibility = if (episode) View.VISIBLE else View.GONE
         groupScroll.visibility = if (tab == Tab.SOURCES) View.VISIBLE else View.GONE
+        syncButton.visibility = if (tab == Tab.SUBTITLES) View.VISIBLE else View.GONE
+        syncButton.text = ctx.getString(R.string.subtitle_offset_title)
         when (tab) {
-            Tab.SOURCES -> renderSources()
-            Tab.AUDIO -> renderAudio()
-            Tab.SUBTITLES -> renderSubtitles()
+            Tab.SOURCES -> { panelContent(list); renderSources() }
+            Tab.AUDIO -> { panelContent(list); renderAudio() }
+            Tab.SUBTITLES -> { panelContent(subtitlePane); renderSubtitles() }
             Tab.EPISODES -> Unit
         }
     }
@@ -288,7 +416,7 @@ internal class ElevatePlayerPanel(
         filters.removeAllViews()
         fun addFilter(value: String?) {
             filters.addView(TextView(ctx).apply {
-                text = value ?: "All"
+                text = value ?: ctx.getString(R.string.all)
                 setTextColor(textColor)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                 applyElevateNativeFont(bold = value == filter)
@@ -303,7 +431,8 @@ internal class ElevatePlayerPanel(
         groups.forEach(::addFilter)
         replaceRows(entries.mapIndexedNotNull { index, link ->
             if (filter != null && keys[index] != filter) return@mapIndexedNotNull null
-            val title = link.first?.name ?: link.second?.name ?: "Source"
+            val name = link.first?.name ?: link.second?.name ?: "Source"
+            val title = "$name ${Qualities.getStringByInt(link.first?.quality)}"
             Row((if (link == selected) "✓ " else "") + title, {
                 if (link != selected) runCatching {
                     GeneratorPlayer::class.java.getDeclaredMethod(
@@ -318,12 +447,32 @@ internal class ElevatePlayerPanel(
         val tracks = fragment.player.getVideoTracks()
         val active = tracks.currentAudioTrack
         replaceRows(tracks.allAudioTracks.map { item ->
-            val name = listOfNotNull(item.label, item.language,
-                item.sampleMimeType?.substringAfterLast('/'),
-                item.channelCount?.let { "$it ch" }).filter { it.isNotBlank() }
-                .distinct().joinToString(" · ").ifBlank { "Audio" }
+            val language = item.language?.trim()?.let { raw ->
+                fromTagToLanguageName(raw)
+                    ?: fromTagToLanguageName(raw.replace('_', '-').substringBefore('-').lowercase())
+                    ?: raw
+            } ?: item.label ?: "Audio"
+            val channels = when (item.channelCount) {
+                1 -> "Mono"; 2 -> "Stereo"; 6 -> "5.1"; 8 -> "7.1"
+                null, 0 -> ""
+                else -> "${item.channelCount}ch"
+            }
+            val mime = item.sampleMimeType.orEmpty().lowercase()
+            val codec = when {
+                "eac3-joc" in mime -> "Dolby Atmos"
+                "truehd" in mime -> "TrueHD"
+                "eac3" in mime -> "E-AC3"
+                "ac-3" in mime || "ac3" in mime -> "AC3"
+                "aac" in mime || "mp4a" in mime -> "AAC"
+                "opus" in mime -> "Opus"
+                "vorbis" in mime -> "Vorbis"
+                "mp3" in mime -> "MP3"
+                else -> item.sampleMimeType?.substringAfter('/')?.uppercase().orEmpty()
+            }
+            val name = listOf(language.replaceFirstChar { it.uppercaseChar() }, channels, codec)
+                .filter { it.isNotBlank() }.joinToString(" • ")
             val checked = active?.id == item.id && active?.formatIndex == item.formatIndex
-            Row((if (checked) "✓ " else "") + name, {
+            Row((if (checked) "✓  " else "    ") + name, {
                 fragment.player.setPreferredAudioTrack(item.language, item.id, item.formatIndex)
                 renderAudio()
             })
@@ -348,74 +497,83 @@ internal class ElevatePlayerPanel(
 
     private fun stremioDetails(url: String): String? = runCatching {
         val provider = APIHolder.allProviders.firstOrNull {
-            it.javaClass.name == "com.hsp1020.StremioC"
+            it.javaClass.name.contains("StremioC") ||
+                it.javaClass.superclass?.name == "com.hsp1020.StremioC"
         } ?: return@runCatching null
-        val field = provider.javaClass.getDeclaredField("subtitleDetailByUrl")
-            .apply { isAccessible = true }
-        @Suppress("UNCHECKED_CAST")
-        val details = field.get(null) as? Map<String, String>
-        details?.get(url)
+        var type: Class<*>? = provider.javaClass
+        while (type != null && type.name != "com.hsp1020.StremioC") {
+            type = type.superclass
+        }
+        val field = type?.getDeclaredField("subtitleDetailByUrl")
+            ?.apply { isAccessible = true } ?: return@runCatching null
+        (field.get(null) as? Map<*, *>)?.get(url) as? String
     }.getOrNull()
 
     private fun renderSubtitles() {
-        body.removeView(offsetEditor)
-        val current = fragment.player.getCurrentPreferredSubtitle()?.url
-        val output = mutableListOf(Row(if (current == null) "✓ Off" else "Off", { setSubtitle(null) }))
-        sortSubs(vm.state.subtitles).groupBy { it.originalName }.forEach { (lang, group) ->
-            group.sortedBy { it.nameSuffix.toIntOrNull() ?: Int.MAX_VALUE }.forEachIndexed { index, sub ->
-                val detail = stremioDetails(sub.url)
-                    ?: sub.nameSuffix.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
-                val enabled = ElevateSubtitleRefreshHook.active() != null &&
-                    ElevateSubtitleRefreshRegistry.entryFor(sub) != null && sub.url == current
-                val language = (if (sub.url == current) "✓ " else "") + lang
-                val detailLabel = (index + 1).toString() +
-                    (detail?.let { " ($it)" } ?: "")
-                output.add(Row(language + " · " + detailLabel, { setSubtitle(sub) },
-                    if (enabled) ({ ElevateSubtitleRefreshHook.active()?.refreshSelected(false); Unit }) else null,
-                    if (enabled) ({ ElevateSubtitleRefreshHook.active()?.refreshSelected(true); Unit }) else null,
-                    language, detailLabel))
+        val current = fragment.player.getCurrentPreferredSubtitle()
+        subtitleGroups = sortSubs(vm.state.subtitles)
+            .groupBy { it.originalName }
+            .map { (name, subtitles) ->
+                name to subtitles.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }
             }
-        }
-        output.add(Row("Subtitle sync", { showSync() }))
-        replaceRows(output)
+        selectedGroup = subtitleGroups.indexOfFirst { (name, _) ->
+            name == current?.originalName
+        }.let { if (it < 0) 0 else it + 1 }
+        languageAdapter.clear()
+        languageAdapter.add(ctx.getString(R.string.no_subtitles).html())
+        subtitleGroups.forEach { (language, _) -> languageAdapter.add(language.html()) }
+        languageList.setItemChecked(selectedGroup, true)
+        languageList.setSelection(selectedGroup)
+        renderSubtitleOptions()
+    }
+
+    private fun renderSubtitleOptions() {
+        val current = fragment.player.getCurrentPreferredSubtitle()?.url
+        val group = subtitleGroups.getOrNull(selectedGroup - 1)?.second
+        replaceRows(group.orEmpty().mapIndexed { index, sub ->
+            val raw = sub.nameSuffix.ifBlank {
+                when (sub.origin) {
+                    SubtitleOrigin.URL -> ctx.getString(R.string.subtitles_from_online)
+                    SubtitleOrigin.DOWNLOADED_FILE -> ctx.getString(R.string.downloaded)
+                    SubtitleOrigin.EMBEDDED_IN_VIDEO -> ctx.getString(R.string.subtitles_from_embedded)
+                }
+            }
+            val details = stremioDetails(sub.url)
+            val label = (if (sub.url == current) "✓ " else "    ") +
+                (raw.ifBlank { (index + 1).toString() }) +
+                (details?.let { " ($it)" } ?: "")
+            val refreshable = sub.url == current &&
+                ElevateSubtitleRefreshHook.active() != null &&
+                ElevateSubtitleRefreshRegistry.entryFor(sub) != null
+            Row(label, { setSubtitle(sub) },
+                if (refreshable) ({ ElevateSubtitleRefreshHook.active()?.refreshSelected(false); Unit }) else null,
+                if (refreshable) ({ ElevateSubtitleRefreshHook.active()?.refreshSelected(true); Unit }) else null,
+                label)
+        })
     }
 
     private fun showSync() {
-        if (offsetEditor.parent == null) body.addView(offsetEditor, 1,
-            LinearLayout.LayoutParams(-1, dp(48)))
-        offsetInput.setText(fragment.player.getSubtitleOffset().toString())
         tab = Tab.SUBTITLES
+        inSync = true
         buttons.forEach { (key, button) -> button.alpha = if (key == tab) 1f else .55f }
         body.visibility = View.VISIBLE
         episodeList?.visibility = View.GONE
         episodeTitle?.visibility = View.GONE
         seasonSelector()?.visibility = View.GONE
         groupScroll.visibility = View.GONE
-        val output = mutableListOf(Row("Back to subtitles", { renderSubtitles() }))
-        output.add(Row("Offset: " + fragment.player.getSubtitleOffset() + " ms", {}))
-        for (change in listOf(-1000L, -100L, 100L, 1000L)) {
-            output.add(Row((if (change > 0) "+" else "") + change + " ms", {
-                fragment.player.setSubtitleOffset(fragment.player.getSubtitleOffset() + change)
-                ElevateSubtitleRefreshHook.active()?.refreshAppearance()
-                showSync()
-            }))
-        }
-        output.add(Row("Reset offset", {
-            fragment.player.setSubtitleOffset(0L)
-            ElevateSubtitleRefreshHook.active()?.refreshAppearance()
-            showSync()
-        }))
+        syncButton.visibility = View.VISIBLE
+        syncButton.text = "‹ ${ctx.getString(R.string.pick_subtitle)}"
+        panelContent(syncView)
+        offsetInput.setText(fragment.player.getSubtitleOffset().toString())
+        if (syncList.adapter !== syncAdapter) syncList.adapter = syncAdapter
         val cues = ElevateSubtitleRefreshHook.active()?.refreshedCues()
             ?: fragment.player.getSubtitleCues()
-        cues.forEach { cue ->
-            output.add(Row((cue.startTimeMs / 1000).toString() + "s · " +
-                cue.text.joinToString(" ").take(160), {
-                fragment.player.setSubtitleOffset(cue.startTimeMs -
-                    (fragment.player.getPosition() ?: 0L))
-                ElevateSubtitleRefreshHook.active()?.refreshAppearance()
-                showSync()
-            }))
+        val target = (fragment.player.getPosition() ?: 0L) + fragment.player.getSubtitleOffset()
+        syncAdapter.submitList(cues)
+        syncList.post {
+            if (inSync) syncList.scrollToPosition(syncAdapter.getLatestActiveItem(target))
         }
-        replaceRows(output)
+        syncAdapter.updateTime(target)
     }
+
 }

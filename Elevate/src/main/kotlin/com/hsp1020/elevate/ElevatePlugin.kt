@@ -917,7 +917,7 @@ internal class NativeEpisodeOverlayHook(
             selector?.let { (it.parent as? ViewGroup)?.removeView(it) }
             selector = null
             title?.let {
-                if (it.parent !== overlay) overlay?.addView(it, titlePosition)
+                if (it.parent !== overlay) overlay?.addView(it, if (playerPanelEnabled) 1 else titlePosition)
                 it.isVisible = true
             }
             oldNextFocusUpId?.let { list?.nextFocusUpId = it }
@@ -945,8 +945,8 @@ internal class NativeEpisodeOverlayHook(
                 card.setCardBackgroundColor(color)
             }
             originalCardColors.clear()
-            playerPanel?.detach()
             removeSelector()
+            playerPanel?.detach()
             overlay?.background = oldBackground
             if (restoreNativeList) fragment.showEpisodesOverlay()
             filteredAdapter = null
@@ -1100,7 +1100,7 @@ internal class NativeEpisodeOverlayHook(
                 selectedSeason = seasonOf(fullEpisodes.getOrNull(state.index) ?: distinct.first())
                 selector = makeSeasonSpinner(context)
                 title?.let { overlay.removeView(it) }
-                overlay.addView(selector, titlePosition,
+                overlay.addView(selector, if (playerPanelEnabled) 1 else titlePosition,
                     LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, context.dp(44)))
             } else {
                 selectedSeason = seasonOf(fullEpisodes.getOrNull(state.index) ?: distinct.first())
