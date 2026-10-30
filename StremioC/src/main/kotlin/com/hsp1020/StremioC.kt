@@ -3295,10 +3295,6 @@ open class StremioC(
                     ?: name.takeIf { addonUrl == currentMainUrl && !it.equals("StremioC", true) }
                 res?.subtitles?.let { entries -> entries.forEachIndexed { position, sub ->
                     sub.toCloudStreamSubtitle(addonSource, preferredName, sub.translationSourceLanguage(entries))?.let { file ->
-                        StremioSubtitleRefreshRegistry.remember(
-                            file.url, addonUrl, sub.id, sub.lang ?: sub.lang_code,
-                            subtitleRequestUrl, position, file.headers ?: emptyMap()
-                        )
                         stremioSubtitleFrom(addonUrl, group)(file)
                     }
                 } }
@@ -3429,10 +3425,6 @@ open class StremioC(
                                 stream.subtitles.forEachIndexed { position, sub ->
                                     sub.toCloudStreamSubtitle(addon.name, addon.name,
                                         sub.translationSourceLanguage(stream.subtitles))?.let { file ->
-                                        StremioSubtitleRefreshRegistry.remember(
-                                            file.url, addon.url, sub.id, sub.lang ?: sub.lang_code,
-                                            null, position, file.headers ?: emptyMap()
-                                        )
                                         stremioSubtitleFrom(addon.url, 1)(file)
                                     }
                                 }
@@ -4099,10 +4091,6 @@ open class StremioC(
                             val res = if (text.isNotBlank()) parseJson<SubtitlesResponse>(text) else null
                             res?.subtitles?.forEachIndexed { position, sub ->
                                 sub.toCloudStreamSubtitle(addon.name)?.let { subFile ->
-                                    StremioSubtitleRefreshRegistry.remember(
-                                        subFile.url, addon.url, sub.id, sub.lang ?: sub.lang_code,
-                                        requestUrl, position, subFile.headers ?: emptyMap()
-                                    )
                                     stremioSubtitleCallback(subFile, addon.url, if (addon.fromCineStream) 1 else 2)
                                 }
                             }
@@ -5651,12 +5639,6 @@ open class StremioC(
                     provider.run {
                         sub.toCloudStreamSubtitle(sourceName, preferredName, sub.translationSourceLanguage(subtitles))
                     }?.let { file ->
-                        if (addonUrl != null) {
-                            StremioSubtitleRefreshRegistry.remember(
-                                file.url, addonUrl, sub.id, sub.lang ?: sub.lang_code,
-                                null, position, file.headers ?: emptyMap()
-                            )
-                        }
                         stremioSubtitleCallback(file)
                     }
                 }

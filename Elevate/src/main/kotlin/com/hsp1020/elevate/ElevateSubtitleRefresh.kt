@@ -1,4 +1,4 @@
-package com.hsp1020
+package com.hsp1020.elevate
 
 import android.app.Activity
 import android.content.Context
@@ -42,10 +42,14 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.LinkedHashMap
 import java.security.MessageDigest
+import android.net.Uri
+import com.lagradost.cloudstream3.CloudStreamApp
+import com.lagradost.cloudstream3.ui.player.SubtitleData
+import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
 
-/** Stremio provenance is intentionally kept outside CloudStream's SubtitleFile/SubtitleData. */
+/** Keep provenance outside CloudStream's SubtitleData and fall back to the exact subtitle URL. */
 @OptIn(UnstableApi::class)
-internal object StremioSubtitleRefreshRegistry {
+internal object ElevateSubtitleRefreshRegistry {
     data class TimedCues(val startTimeMs: Long, val endTimeMs: Long, val cues: List<Cue>)
     data class Prepared(
         val cues: List<TimedCues>, val timeline: SubtitleTimeline,
@@ -74,6 +78,8 @@ internal object StremioSubtitleRefreshRegistry {
         listUrl: String?, position: Int, headers: Map<String, String> = emptyMap()
     ) {
         if (url.isBlank()) return
+        // Direct-URL fallback may precede passive list observation.
+        if (addonUrl.isNotBlank() && entries[url]?.addonUrl == "") entries.remove(url)
         // The native player de-duplicates by URL. Prefer exact list provenance
         // if an inline stream entry for the same addon was recorded first.
         val previous = entries[url]
@@ -96,6 +102,27 @@ internal object StremioSubtitleRefreshRegistry {
     @Synchronized
     fun find(url: String): Entry? = entries[url]?.takeUnless { it.ambiguous }
 
+    /** No provider restriction: refresh independent text tracks using their exact URI. */
+    @Synchronized
+    fun entryFor(subtitle: SubtitleData): Entry? {
+        if (subtitle.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) return null
+        val url = subtitle.url
+        if (!(url.startsWith("https://", true) || url.startsWith("http://", true) ||
+                url.startsWith("content://", true) || url.startsWith("file://", true))) return null
+        entries[url]?.let { stored ->
+            if (stored.ambiguous) return null
+            if (!subtitle.headers.isNullOrEmpty()) {
+                val merged = stored.copy(headers = stored.headers + subtitle.headers.orEmpty())
+                entries[url] = merged
+                return merged
+            }
+            return stored
+        }
+        return Entry(url, "", null, subtitle.languageCode, null, 0,
+            subtitle.headers.orEmpty()).also { entries[url] = it }
+    }
+
+
     @Synchronized
     private fun update(entry: Entry, url: String) {
         val stored = entries[entry.originalUrl]
@@ -110,6 +137,27 @@ internal object StremioSubtitleRefreshRegistry {
     private const val MAX_LIST_BYTES = 512 * 1024
 
     private suspend fun readBytes(url: String, headers: Map<String, String>, max: Int): ByteArray {
+        if (url.startsWith("content://", true) || url.startsWith("file://", true)) {
+            return withContext(Dispatchers.IO) {
+                val source = if (url.startsWith("content://", true)) {
+                    CloudStreamApp.context?.contentResolver?.openInputStream(Uri.parse(url))
+                } else {
+                    java.io.File(java.net.URI(url)).inputStream()
+                } ?: error("Subtitle URI unavailable")
+                source.use { stream ->
+                    val out = ByteArrayOutputStream()
+                    val buffer = ByteArray(8192)
+                    while (true) {
+                        ensureActive()
+                        val count = stream.read(buffer)
+                        if (count < 0) break
+                        check(out.size() + count <= max) { "Subtitle exceeds limit" }
+                        out.write(buffer, 0, count)
+                    }
+                    out.toByteArray()
+                }
+            }
+        }
         require(url.startsWith("https://", true) || url.startsWith("http://", true))
         val request = Request.Builder().url(url).cacheControl(cacheControl).apply {
             app.defaultHeaders.forEach { (name, value) -> header(name, value) }
@@ -228,9 +276,9 @@ internal object StremioSubtitleRefreshRegistry {
     }
 }
 
-/** Only active after a manually refreshed Stremio subtitle has been selected. */
+/** Only active for the selected subtitle after an explicit successful refresh. */
 @OptIn(UnstableApi::class)
-internal class StremioRefreshedSubtitleOverlay {
+internal class ElevateRefreshedSubtitleOverlay {
     private val main = Handler(Looper.getMainLooper())
     private var fragment: GeneratorPlayer? = null
     private var mediaPlayer: Player? = null
@@ -240,7 +288,7 @@ internal class StremioRefreshedSubtitleOverlay {
     private var overlay: SubtitleView? = null
     private var host: FragmentActivity? = null
     private var targetUrl: String? = null
-    private var cues: List<StremioSubtitleRefreshRegistry.TimedCues> = emptyList()
+    private var cues: List<ElevateSubtitleRefreshRegistry.TimedCues> = emptyList()
     private var timeline: SubtitleTimeline? = null
     private var preserveAssLayout = false
     private var rendered: List<Int>? = null
@@ -269,7 +317,7 @@ internal class StremioRefreshedSubtitleOverlay {
     }
 
     fun attach(candidate: GeneratorPlayer, subtitleUrl: String,
-               prepared: StremioSubtitleRefreshRegistry.Prepared) {
+               prepared: ElevateSubtitleRefreshRegistry.Prepared) {
         val parsed = prepared.cues
         val player = candidate.playerView?.player ?: return
         val native = candidate.subView ?: return

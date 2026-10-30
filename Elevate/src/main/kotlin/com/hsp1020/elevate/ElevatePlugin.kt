@@ -83,6 +83,9 @@ class ElevatePlugin : Plugin() {
     private var libraryPosters: LibraryPosterHook? = null
     private var httpResponseGuard: ElevateHttpResponseGuard? = null
     private var nativeEpisodeOverlay: NativeEpisodeOverlayHook? = null
+    private var nativePanelEnabled = false
+    private var subtitleRefresh: ElevateSubtitleRefreshHook? = null
+    private var subtitleSourceObserver: ElevateSubtitleSourceObserver? = null
     private var featurePrefs: SharedPreferences? = null
     private var featureListener: SharedPreferences.OnSharedPreferenceChangeListener? = null
     private var app: Application? = null
@@ -228,13 +231,33 @@ class ElevatePlugin : Plugin() {
             episodeProgress?.stop()
             episodeProgress = null
         }
-        if (enabled(ElevateFeature.EPISODE_OVERLAY)) {
+        val panelEnabled = enabled(ElevateFeature.PLAYER_PANEL)
+        if (nativeEpisodeOverlay != null && nativePanelEnabled != panelEnabled) {
+            nativeEpisodeOverlay?.stop()
+            nativeEpisodeOverlay = null
+        }
+        nativePanelEnabled = panelEnabled
+        if (enabled(ElevateFeature.EPISODE_OVERLAY) || panelEnabled) {
             if (nativeEpisodeOverlay == null) {
-                nativeEpisodeOverlay = NativeEpisodeOverlayHook(application).also { it.start() }
+                nativeEpisodeOverlay = NativeEpisodeOverlayHook(application, panelEnabled).also { it.start() }
             }
         } else {
             nativeEpisodeOverlay?.stop()
             nativeEpisodeOverlay = null
+        }
+        if (enabled(ElevateFeature.SUBTITLE_REFRESH)) {
+            if (subtitleSourceObserver == null) {
+                subtitleSourceObserver = ElevateSubtitleSourceObserver().also { it.start() }
+            }
+            if (subtitleRefresh == null) {
+                subtitleRefresh = ElevateSubtitleRefreshHook(application,
+                    resources ?: application.resources).also { it.start() }
+            }
+        } else {
+            subtitleRefresh?.stop()
+            subtitleRefresh = null
+            subtitleSourceObserver?.stop()
+            subtitleSourceObserver = null
         }
         if (enabled(ElevateFeature.AUDIO_TRACKS)) {
             if (audioSelector == null) {
@@ -328,6 +351,11 @@ class ElevatePlugin : Plugin() {
         httpResponseGuard = null
         nativeEpisodeOverlay?.stop()
         nativeEpisodeOverlay = null
+        subtitleRefresh?.stop()
+        subtitleRefresh = null
+        subtitleSourceObserver?.stop()
+        subtitleSourceObserver = null
+        nativePanelEnabled = false
         app = null
     }
 
@@ -632,7 +660,10 @@ private class NativeDetailSearchHook(private val app: Application) : Application
  * Changes only the native episode overlay. The native player, episode loading,
  * overlay animation, and controls remain owned by CloudStream.
  */
-internal class NativeEpisodeOverlayHook(private val application: Application) :
+internal class NativeEpisodeOverlayHook(
+    private val application: Application,
+    private val playerPanelEnabled: Boolean = false
+) :
     Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
     private var activity: FragmentActivity? = null
@@ -734,6 +765,10 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         private var fullEpisodes = emptyList<ResultEpisode>()
         private var selectedSeason: Int? = null
         private var filteredAdapter: EpisodeAdapter? = null
+        private val playerPanel: ElevatePlayerPanel? =
+            if (playerPanelEnabled && overlay != null) ElevatePlayerPanel(
+                fragment, root, overlay, title, list, { selector }, { openWithoutPause() }
+            ) else null
         private var host: PlayerView? = null
         private var callbacks: PlayerView.Callbacks? = null
         private var guardedCallbacks: PlayerView.Callbacks? = null
@@ -785,7 +820,8 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
         // Only the native overlay toggle's Pause is avoided. The player object is
         // never replaced, so CS3IPlayer-only preview and compressor APIs still work.
         private fun openWithoutPause(): Boolean {
-            if (!fragment.isAdded || fragment.view !== root || !fragment.isThereEpisodes()) return false
+            if (!fragment.isAdded || fragment.view !== root ||
+                (!playerPanelEnabled && !fragment.isThereEpisodes())) return false
             val shown = overlayShownField ?: return false
             val previous = previousPlayStatusField ?: return false
             val animate = overlayAnimator ?: return false
@@ -839,7 +875,7 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
                 val opened = !input.second && event?.action == KeyEvent.ACTION_DOWN &&
                     (event.keyCode == KeyEvent.KEYCODE_MENU ||
                         event.keyCode == KeyEvent.KEYCODE_SETTINGS) &&
-                    fragment.player.isActive() && fragment.isThereEpisodes() &&
+                    fragment.player.isActive() && (playerPanelEnabled || fragment.isThereEpisodes()) &&
                     runCatching { lockedField?.getBoolean(fragment) == false }.getOrDefault(false) &&
                     openWithoutPause()
                 // Only bypass the native key callback if the overlay is already opened.
@@ -859,6 +895,7 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
 
         fun attach() {
             // Preserve concrete CS3IPlayer for preview scrubbing and compressor.
+            playerPanel?.attach()
             installButtonGuards()
             installRemoteGuard()
             if (tree.isAlive) tree.addOnGlobalLayoutListener(overlayLayout)
@@ -908,6 +945,7 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
                 card.setCardBackgroundColor(color)
             }
             originalCardColors.clear()
+            playerPanel?.detach()
             removeSelector()
             overlay?.background = oldBackground
             if (restoreNativeList) fragment.showEpisodesOverlay()
@@ -925,6 +963,7 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
                     overlay?.isVisible != true) return@post
                 guardAutoHide()
                 configureSeasons()
+                playerPanel?.onOpened()
             }
         }
 

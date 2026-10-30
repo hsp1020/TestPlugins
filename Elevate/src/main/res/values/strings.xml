@@ -1,0 +1,4 @@
+<resources>
+    <string name="elevate_refresh_subtitle">Refresh subtitle</string>
+    <string name="elevate_refresh_failed">Subtitle refresh failed</string>
+</resources>
