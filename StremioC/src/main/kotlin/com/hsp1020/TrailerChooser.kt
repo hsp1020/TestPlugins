@@ -281,21 +281,35 @@ internal class TrailerChooser(
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(12), dp(16), dp(12))
         }
-        val episodeHeading = find("result_episodes_text") as? TextView
-        list.addView(TextView(activity).apply {
-            text = "${activity.getString(R.string.trailer)} (${items.size})"
-            if (episodeHeading != null) {
-                setTextSize(TypedValue.COMPLEX_UNIT_PX, episodeHeading.textSize)
-                typeface = episodeHeading.typeface
-            } else {
-                textSize = 17f
-                typeface = Typeface.create(typeface, Typeface.NORMAL)
+        // Match CloudStream's home expanded header: WatchHeaderText and drag-down arrow.
+        val header = FrameLayout(activity).apply {
+            setPadding(dp(4), dp(12), dp(4), dp(12))
+            isClickable = true
+            isFocusable = true
+            val ripple = TypedValue()
+            if (activity.theme.resolveAttribute(
+                    android.R.attr.selectableItemBackgroundBorderless, ripple, true
+                ) && ripple.resourceId != 0) {
+                foreground = androidx.core.content.ContextCompat.getDrawable(activity, ripple.resourceId)
             }
-
-            fontFeatureSettings = "'liga' 0, 'clig' 0, 'calt' 0, 'dlig' 0"
-            setTextColor(foreground)
-            setPadding(dp(4), dp(8), 0, dp(4))
-        })
+            setOnClickListener { dialog?.dismiss() }
+        }
+        header.addView(TextView(activity, null, 0, R.style.WatchHeaderText).apply {
+            text = "${activity.getString(R.string.trailer)} (${items.size})"
+        }, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.CENTER_VERTICAL
+        ).apply { marginEnd = dp(50) })
+        header.addView(ImageView(activity).apply {
+            setImageResource(R.drawable.ic_baseline_keyboard_arrow_down_24)
+            imageTintList = ColorStateList.valueOf(foreground)
+            contentDescription = activity.getString(R.string.home_expanded_hide)
+        }, FrameLayout.LayoutParams(
+            dp(30), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END or Gravity.CENTER_VERTICAL
+        ).apply { marginEnd = dp(5) })
+        list.addView(header, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
         // Let rows grow for multiline titles. Limit only the total scroll viewport,
         // rather than assuming each row is 88dp and clipping taller rows.
         val maxListHeight = (activity.resources.displayMetrics.heightPixels * 0.6f).toInt()
