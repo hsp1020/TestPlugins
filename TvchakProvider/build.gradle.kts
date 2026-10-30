@@ -1,4 +1,4 @@
-version = 2
+version = 1
 
 cloudstream {
     description = "한국 드라마 및 TV 프로그램 다시보기 제공"

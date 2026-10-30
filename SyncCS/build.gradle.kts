@@ -1,4 +1,4 @@
-version = 10
+version = 1
 
 cloudstream {
     description = "Encrypt and synchronize CloudStream settings and watch history through a private GitHub repository"

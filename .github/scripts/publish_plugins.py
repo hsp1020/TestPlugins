@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 VERSION = re.compile(r"(?m)^(\s*version\s*=\s*)(\d+)(?=\s*(?://[^\n]*)?$)")
 REPOSITORY = "hsp1020/TestPlugins-build"
+RESET_MARKER = ".plugins-v1-reset"
 
 
 def read_index(path: Path) -> list[dict]:
@@ -32,13 +33,14 @@ def version_in(path: Path) -> tuple[int, str]:
 
 def prepare(src: Path, builds: Path) -> None:
     old = {p["internalName"]: int(p["version"]) for p in read_index(builds / "plugins.json")}
+    first_build_after_reset = not (builds / RESET_MARKER).exists()
     modules = sorted(src.glob("*/build.gradle.kts"))
     if not modules:
         raise ValueError("No plugin modules found")
     for gradle_file in modules:
         module = gradle_file.parent.name
         current, contents = version_in(gradle_file)
-        target = max(current, old.get(module, 0) + 1)
+        target = 1 if first_build_after_reset else max(current, old.get(module, 0) + 1)
         gradle_file.write_text(VERSION.sub(lambda m: m.group(1) + str(target), contents, count=1), encoding="utf-8")
         print(f"Version {module}: {current} -> {target}")
 
@@ -76,6 +78,7 @@ def publish(src: Path, builds: Path) -> None:
         if old.name not in published_files:
             old.unlink()
     (builds / "plugins.json").write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    (builds / RESET_MARKER).touch()
 
 
 if __name__ == "__main__":

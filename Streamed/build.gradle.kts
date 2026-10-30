@@ -1,4 +1,4 @@
-version = 27
+version = 1
 
 cloudstream {
     authors     = listOf("hsp1020")

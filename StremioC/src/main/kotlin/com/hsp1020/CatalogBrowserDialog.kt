@@ -731,8 +731,7 @@ internal class CatalogBrowserDialog(
     }
     private var showCatalogEnd = false
     private val catalogEndText = "No more results"
-    private val catalogEndPaint = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-        typeface = catalogEmpty.typeface
+    private val catalogEndPaint = android.text.TextPaint(catalogEmpty.paint).apply {
         color = activity.colorFromAttribute(R.attr.textColor)
         textSize = TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_SP, 18f, activity.resources.displayMetrics
