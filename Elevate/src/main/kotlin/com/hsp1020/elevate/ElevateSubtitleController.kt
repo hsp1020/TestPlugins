@@ -631,7 +631,7 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
             }
             val button = (row.getChildAt(1) as? ImageButton) ?: ImageButton(parent.context).apply {
                 val iconId = pluginResources.getIdentifier(
-                    "elevate_subtitle_refresh", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME
+                    "elevate_subtitle_refresh", "drawable", "com.example"
                 )
                 setImageDrawable(
                     runCatching {
@@ -714,7 +714,7 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
 
     private fun getPluginSubtitleString(name: String, fallback: String): String {
         val id = pluginResources.getIdentifier(
-            name, "string", BuildConfig.LIBRARY_PACKAGE_NAME
+            name, "string", "com.example"
         )
         return if (id != 0) runCatching { pluginResources.getString(id) }.getOrDefault(fallback)
         else fallback
