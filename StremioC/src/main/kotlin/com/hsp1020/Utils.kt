@@ -663,16 +663,43 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             optionAt(position)?.let { StremioSubtitleRefreshRegistry.find(it.url) }
         }, { position ->
             val sub = optionAt(position) ?: return@RefreshRowAdapter null
-            val detail = StremioC.subtitleDetailByUrl[sub.url]?.takeIf { it.isNotBlank() }
-                ?: StremioC.subtitleSourceByUrl[sub.url]?.takeIf { it.isNotBlank() }
-                ?: sub.nameSuffix.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
-            detail?.let { "${position + 1}($it)" }
+            val number = position + 1
+            if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) {
+                val embedded = dialog.context.getString(R.string.subtitles_from_embedded)
+                "$number ($embedded" +
+                    (if (sub.nameSuffix.isNotBlank()) " · ${sub.nameSuffix}" else "") + ")"
+            } else {
+                val detail = StremioC.subtitleDetailByUrl[sub.url]?.takeIf { it.isNotBlank() }
+                    ?: StremioC.subtitleSourceByUrl[sub.url]?.takeIf { it.isNotBlank() }
+                    ?: sub.nameSuffix.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
+                "$number" + (detail?.let { "($it)" } ?: "")
+            }
         }, { position -> optionOrder().getOrNull(position) ?: position })
         if (optionSelected >= 0) {
             val displayIndex = optionOrder().indexOf(optionSelected)
             options.setItemChecked(if (displayIndex >= 0) displayIndex else optionSelected, true)
         }
         iconSelectionUrl = fragment?.player?.getCurrentPreferredSubtitle()?.url
+
+        // Diagnostic only when the picker opens or the language group changes.
+        // Hash URLs to avoid printing signed subtitle links or addon tokens.
+        fun logOptionMapping() {
+            val index = order.getOrNull(list.checkedItemPosition - 1) ?: return
+            val native = nativeOptions[index]
+            android.util.Log.d("StremioC-SubtitlePicker",
+                "group=${groups[index].firstOrNull()?.originalName} native=${native.size} adapter=${optionsAdapter.count}")
+            visibleOptions[index].take(40).forEachIndexed { display, sourceIndex ->
+                val sub = native[sourceIndex]
+                android.util.Log.d("StremioC-SubtitlePicker",
+                    "display=${display + 1} native=${sourceIndex + 1} origin=${sub.origin}" +
+                        " urlHash=${Integer.toHexString(sub.url.hashCode())}" +
+                        " suffix=${sub.nameSuffix.take(70)}" +
+                        " detail=${StremioC.subtitleDetailByUrl[sub.url]?.take(100)}" +
+                        " source=${StremioC.subtitleSourceByUrl[sub.url]?.take(70)}" +
+                        " adapterText=${optionsAdapter.getItem(sourceIndex)?.toString()?.take(100)}")
+            }
+        }
+        logOptionMapping()
 
         fun checkedEntry(): StremioSubtitleRefreshRegistry.Entry? {
             return optionAt(options.checkedItemPosition)
@@ -737,6 +764,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                 ?.setChecked(list.isItemChecked(previous))
             (row as? RefreshRow)?.setChecked(list.isItemChecked(position))
             if (queuedRefresh?.entry?.originalUrl != checkedEntry()?.originalUrl) queuedRefresh = null
+            logOptionMapping()
             (list.adapter as? BaseAdapter)?.notifyDataSetChanged()
             (options.adapter as? BaseAdapter)?.notifyDataSetChanged()
         }

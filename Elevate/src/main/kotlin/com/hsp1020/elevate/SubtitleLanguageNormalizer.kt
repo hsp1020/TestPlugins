@@ -218,6 +218,9 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
     private fun updateOptionLabels(
         dialog: Dialog, group: List<SubtitleData>, options: ListView
     ) {
+        // StremioC decorates its reordered native option rows; avoid editing that adapter twice.
+        if (model?.state?.generatorState?.response?.apiName
+                ?.equals("StremioC", ignoreCase = true) == true) return
         val ordered = group.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }
         if (ordered.size < 2 || group.none { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }) return
         @Suppress("UNCHECKED_CAST")
@@ -377,9 +380,16 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             }
             .distinctBy { if (it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) it.origin to it.url else it }
 
-        // Native selection identifies choices by nameSuffix. Assign a unique
-        // number only to newly added addon subtitles; never renumber existing
-        // tracks, since nameSuffix is part of the Media3 track ID.
+        // StremioC numbers its final visible rows; retain online details in SubtitleData
+        // instead of permanently replacing the suffix (which also identifies the track).
+        if (state.generatorState.response?.apiName?.equals("StremioC", true) == true) {
+            if (normalized.toSet() != state.subtitles) vm.modifyState {
+                if (instance != state.instance) this else set(normalized)
+            }
+            return
+        }
+
+        // Keep the existing numbering behavior for other providers.
         val replacements = HashMap<SubtitleData, SubtitleData>()
         normalized.groupBy { it.originalName }.values.forEach { group ->
             val embeddedCount = group.count { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
