@@ -377,12 +377,33 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             }
             .distinctBy { if (it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) it.origin to it.url else it }
 
-        // Never renumber online subtitles in the playback state: nameSuffix is
-        // part of SubtitleData.name and therefore its Media3 track ID. Renumbering
-        // whenever another addon completes invalidates an already active subtitle.
-        if (normalized.toSet() == state.subtitles) return
+        // Native selection identifies choices by nameSuffix. Assign a unique
+        // number only to newly added addon subtitles; never renumber existing
+        // tracks, since nameSuffix is part of the Media3 track ID.
+        val replacements = HashMap<SubtitleData, SubtitleData>()
+        normalized.groupBy { it.originalName }.values.forEach { group ->
+            val embeddedCount = group.count { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
+            if (embeddedCount == 0 && group.none {
+                    it.origin == SubtitleOrigin.URL && ranks?.containsKey(it.url) == true
+                }) return@forEach
+            val used = group.filter { it.origin == SubtitleOrigin.URL }
+                .mapNotNull { it.nameSuffix.toIntOrNull()?.takeIf { number -> number > 0 } }
+                .toMutableSet()
+            var nextNumber = embeddedCount + 1
+            group.filter { it.origin == SubtitleOrigin.URL && it.nameSuffix.toIntOrNull() == null }
+                .sortedWith(compareBy<SubtitleData> {
+                    (ranks?.get(it.url) as? Number)?.toInt() ?: Int.MAX_VALUE
+                }.thenBy { it.url })
+                .forEach { sub ->
+                    while (nextNumber in used) nextNumber++
+                    replacements[sub] = sub.copy(nameSuffix = nextNumber.toString())
+                    used.add(nextNumber++)
+                }
+        }
+        val changed = normalized.map { replacements[it] ?: it }
+        if (changed.toSet() == state.subtitles) return
         vm.modifyState {
-            if (instance != state.instance) this else set(normalized)
+            if (instance != state.instance) this else set(changed)
         }
     }
 
