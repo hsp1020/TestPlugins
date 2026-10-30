@@ -171,7 +171,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
 
         if (item == null) {
             clearSingleOption()
-            if (group != null) updateEmbeddedOptionLabels(dialog, group, options)
+            if (group != null) updateOptionLabels(dialog, group, options)
             return
         }
         @Suppress("UNCHECKED_CAST")
@@ -215,11 +215,12 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         return "$position ($label" + if (detail.isNotBlank()) " · $detail)" else ")"
     }
 
-    private fun updateEmbeddedOptionLabels(
+    private fun updateOptionLabels(
         dialog: Dialog, group: List<SubtitleData>, options: ListView
     ) {
         val ordered = group.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }
-        if (ordered.size < 2 || ordered.none { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }) return
+        if (ordered.size < 2 || group.none { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO ||
+                (it.origin == SubtitleOrigin.URL && stremioRanks()?.containsKey(it.url) == true) }) return
         @Suppress("UNCHECKED_CAST")
         val source = (options.getTag(R.id.sort_subtitles_options) as? ArrayAdapter<Spanned>)
             ?: (options.adapter as? ArrayAdapter<Spanned>) ?: return
@@ -227,8 +228,11 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         val labels = ArrayList<Spanned>(ordered.size)
         ordered.forEachIndexed { index, sub ->
             val existing = source.getItem(index) ?: return
-            labels.add(if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO)
-                embeddedOptionLabel(dialog, sub, index + 1).html() else existing)
+            labels.add(when (sub.origin) {
+                SubtitleOrigin.EMBEDDED_IN_VIDEO -> embeddedOptionLabel(dialog, sub, index + 1).html()
+                SubtitleOrigin.URL -> (index + 1).toString().html()
+                else -> existing
+            })
         }
         if (labels.indices.all { labels[it].toString() == source.getItem(it)?.toString() }) return
         source.setNotifyOnChange(false)
@@ -373,31 +377,12 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             }
             .distinctBy { if (it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) it.origin to it.url else it }
 
-        // Keep embedded subtitles unchanged; apply their numbered labels only in the picker.
-        // Continue numbering online subtitles after the embedded entries.
-        val replacements = HashMap<SubtitleData, SubtitleData>()
-        normalized.groupBy { it.originalName }.values.forEach { group ->
-            val embeddedCount = group.count { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
-            // Renumber previously numbered online options when embedded tracks disappear.
-            // Preserve descriptive labels in groups that were never numbered here.
-            if (embeddedCount == 0 &&
-                group.none { it.origin == SubtitleOrigin.URL && ranks?.containsKey(it.url) == true } &&
-                group.any {
-                    it.origin != SubtitleOrigin.URL || it.nameSuffix.toIntOrNull() == null
-                }) return@forEach
-            group.filter { it.origin == SubtitleOrigin.URL }
-                .sortedWith(compareBy<SubtitleData> {
-                    (ranks?.get(it.url) as? Number)?.toInt() ?: Int.MAX_VALUE
-                }.thenBy { it.nameSuffix.toIntOrNull() ?: Int.MAX_VALUE })
-                .forEachIndexed { index, sub ->
-                    val suffix = (embeddedCount + index + 1).toString()
-                    if (sub.nameSuffix != suffix) replacements[sub] = sub.copy(nameSuffix = suffix)
-                }
-        }
-        val changed = normalized.map { replacements[it] ?: it }
-        if (changed.toSet() == state.subtitles) return
+        // Never renumber online subtitles in the playback state: nameSuffix is
+        // part of SubtitleData.name and therefore its Media3 track ID. Renumbering
+        // whenever another addon completes invalidates an already active subtitle.
+        if (normalized.toSet() == state.subtitles) return
         vm.modifyState {
-            if (instance != state.instance) this else set(changed)
+            if (instance != state.instance) this else set(normalized)
         }
     }
 

@@ -58,6 +58,8 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private var lastHandledSubtitles: Set<SubtitleData>? = null
     private var lastHandledInstance: Int? = null
     private var manualOverride = false
+    private var manualSubtitleUrl: String? = null
+    private var manualSubtitleOrigin: SubtitleOrigin? = null
     private var selectionDialog: Dialog? = null
     private var selectionBeforeDialog: SubtitleData? = null
     private var settings: SharedPreferences? = null
@@ -102,6 +104,10 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         GeneratorPlayer::class.java.getDeclaredField("currentSelectedSubtitles")
             .apply { isAccessible = true }
     }.getOrNull()
+    private val autoSelectField = runCatching {
+        GeneratorPlayer::class.java.getDeclaredField("preferredAutoSelectSubtitles")
+            .apply { isAccessible = true }
+    }.getOrNull()
     private val helperField = runCatching {
         CS3IPlayer::class.java.getDeclaredField("subtitleHelper")
             .apply { isAccessible = true }
@@ -140,6 +146,8 @@ internal class EmbeddedSubtitleController(private val application: Application) 
                 manualOverride = true
             } else {
                 manualOverride = false
+                manualSubtitleUrl = null
+                manualSubtitleOrigin = null
                 player?.currentTracks?.let(::selectEmbedded)
             }
         }
@@ -156,6 +164,14 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private fun selectedByHost(f: GeneratorPlayer): SubtitleData? =
         runCatching { selectedField?.get(f) as? SubtitleData }.getOrNull()
 
+    private fun rememberDialogSelection(f: GeneratorPlayer) {
+        val selected = selectedByHost(f)
+        if (selected == selectionBeforeDialog) return
+        manualOverride = true
+        manualSubtitleUrl = selected?.url
+        manualSubtitleOrigin = selected?.origin
+    }
+
     private fun trackDialog(f: GeneratorPlayer) {
         val shown = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
             ?.takeIf { it.isShowing }
@@ -163,13 +179,67 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             if (shown !== selectionDialog) {
                 selectionDialog = shown
                 selectionBeforeDialog = selectedByHost(f)
+                shown.window?.decorView?.addOnAttachStateChangeListener(
+                    object : View.OnAttachStateChangeListener {
+                        override fun onViewAttachedToWindow(view: View) = Unit
+                        override fun onViewDetachedFromWindow(view: View) {
+                            view.removeOnAttachStateChangeListener(this)
+                            if (selectionDialog !== shown || fragment !== f) return
+                            rememberDialogSelection(f)
+                            selectionDialog = null
+                            selectionBeforeDialog = null
+                        }
+                    }
+                )
             } else if (selectedByHost(f) != selectionBeforeDialog) {
-                manualOverride = true
+                rememberDialogSelection(f)
             }
         } else if (selectionDialog != null) {
-            if (selectedByHost(f) != selectionBeforeDialog) manualOverride = true
+            rememberDialogSelection(f)
             selectionDialog = null
             selectionBeforeDialog = null
+        }
+    }
+
+    // Native auto-select re-runs for every asynchronously added subtitle. Once
+    // video tracks are available, keep the current track instead of reloading
+    // for another same-language addon result. Do not change saved preferences.
+    private fun preventLateAutoReload(tracks: Tracks) {
+        if (tracks.groups.none { it.type == C.TRACK_TYPE_VIDEO ||
+                it.type == C.TRACK_TYPE_AUDIO }) return
+        val f = fragment ?: return
+        val field = autoSelectField ?: return
+        runCatching {
+            if ((field.get(f) as? String)?.isNotEmpty() == true) field.set(f, null)
+        }
+    }
+
+    private fun restoreManualSubtitle(tracks: Tracks) {
+        val url = manualSubtitleUrl ?: return
+        val origin = manualSubtitleOrigin ?: return
+        val f = fragment ?: return
+        val current = player ?: return
+        val target = model?.state?.subtitles?.firstOrNull {
+            it.url == url && it.origin == origin
+        } ?: return
+        val id = target.getId()
+        for (group in tracks.groups) {
+            if (group.type != C.TRACK_TYPE_TEXT) continue
+            for (index in 0 until group.length) {
+                if (group.getTrackFormat(index).id?.replace(trackIdPrefix, "") != id ||
+                    !group.isTrackSupported(index)) continue
+                if (!group.isTrackSelected(index)) {
+                    runCatching {
+                        current.trackSelectionParameters = current.trackSelectionParameters
+                            .buildUpon()
+                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                            .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, index))
+                            .build()
+                    }.onFailure { return }
+                }
+                if (selectedByHost(f) != target) runCatching { selectedField?.set(f, target) }
+                return
+            }
         }
     }
 
@@ -347,14 +417,15 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         val changedInstance = instance != null && instance != nextInstance
         val changedUrl = linkUrl != null && nextUrl != null && linkUrl != nextUrl
         val changedPlayer = current != null && current !== player
-        val changedUnknownSource = changedPlayer && player != null &&
-            (nextUrl == null || linkUrl == null)
-        val changedSource = changedInstance || changedUrl || changedUnknownSource
+        // ExoPlayer replacement on reload is not a change of video source.
+        val changedSource = changedInstance || changedUrl
 
         instance = nextInstance
         if (nextUrl != null) linkUrl = nextUrl
         if (changedSource) {
             manualOverride = false
+            manualSubtitleUrl = null
+            manualSubtitleOrigin = null
             selectionDialog = null
             selectionBeforeDialog = null
             discardPreviousEmbedded()
@@ -395,6 +466,9 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         val f = fragment ?: return
         val current = player ?: return
         if (current !== f.playerView?.player || instance != model?.state?.instance) return
+        trackDialog(f)
+        preventLateAutoReload(tracks)
+        restoreManualSubtitle(tracks)
         val subtitles = model?.state?.subtitles ?: return
 
         val available = LinkedHashMap<String, Pair<Tracks.Group, Int>>()
@@ -536,6 +610,8 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         lastHandledSubtitles = null
         lastHandledInstance = null
         manualOverride = false
+        manualSubtitleUrl = null
+        manualSubtitleOrigin = null
         selectionDialog = null
         selectionBeforeDialog = null
     }

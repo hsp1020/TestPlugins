@@ -648,7 +648,8 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             val sub = siblings.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }.getOrNull(position)
                 ?: return@RefreshRowAdapter null
             StremioC.subtitleDetailByUrl[sub.url]?.takeIf { it.isNotBlank() }?.let {
-                "${sub.nameSuffix}($it)"
+                val displayedNumber = optionsAdapter.getItem(position)?.toString()?.toIntOrNull()
+                "${displayedNumber ?: sub.nameSuffix}($it)"
             }
         })
         if (optionSelected >= 0) options.setItemChecked(optionSelected, true)
