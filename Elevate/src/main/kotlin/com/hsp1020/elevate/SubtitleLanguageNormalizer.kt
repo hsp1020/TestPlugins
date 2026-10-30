@@ -366,21 +366,6 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         return sub.copy(originalName = displayed, nameSuffix = details, languageCode = tag)
     }
 
-    // One-shot event trace correlated with StremioC callback and picker URL hashes.
-    private fun traceTranslation(stage: String, items: Collection<SubtitleData>) {
-        val translated = items.filter {
-            it.origin == SubtitleOrigin.URL &&
-                (it.originalName.contains("&#") || it.originalName.contains("Make Korean", true))
-        }
-        android.util.Log.d("Elevate-SubTrace",
-            "stage=$stage total=${items.size} translated=${translated.size}")
-        translated.groupBy { it.originalName }.forEach { (group, entries) ->
-            android.util.Log.d("Elevate-SubTrace",
-                "stage=$stage group=$group count=${entries.size} hashes=" +
-                    entries.joinToString(",") { Integer.toHexString(it.url.hashCode()) })
-        }
-    }
-
     private fun normalize(vm: PlayerGeneratorViewModel) {
         val f = fragment ?: return
         val dialog = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
@@ -401,7 +386,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         vm.modifyState {
             if (instance != state.instance || subtitles.isEmpty()) return@modifyState this
             val before = subtitles
-            val normalized = before.map { sub ->
+            val mapped = before.map { sub ->
                 val localized = localized(sub, ranks)
                 if (details != null && sub.origin == SubtitleOrigin.URL &&
                     localized.originalName != sub.originalName) {
@@ -414,7 +399,8 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
                     }
                 }
                 localized
-            }.filter {
+            }
+            val normalized = mapped.filter {
                 val language = it.originalName.substringBefore(" · ").substringBefore(" — ").trim()
                 language.isNotEmpty() && !language.equals("Unknown", ignoreCase = true) &&
                     !language.equals("und", ignoreCase = true)
@@ -447,15 +433,41 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
                 normalized.map { replacements[it] ?: it }
             }
 
-            if (stremio && (before.any {
-                    it.originalName.contains("&#") || it.originalName.contains("Make Korean", true)
-                } || changed.any {
-                    it.originalName.contains("&#") || it.originalName.contains("Make Korean", true)
-                })) {
-                traceTranslation("before", before)
-                traceTranslation("after", changed)
+            val result = changed.toSet()
+            if (result.size < before.size) {
+                // Only diagnose actual item-count reduction; no per-subtitle tracing
+                // during normal registration or picker interactions.
+                fun dropped(sub: SubtitleData, reason: String) {
+                    android.util.Log.w("Elevate-SubtitleDrop",
+                        "before=${before.size} normalized=${normalized.size} after=${result.size}" +
+                            " reason=$reason origin=${sub.origin}" +
+                            " urlHash=${Integer.toHexString(sub.url.hashCode())}" +
+                            " language=${sub.originalName.take(100)}" +
+                            " suffix=${sub.nameSuffix.take(60)} code=${sub.languageCode}")
+                }
+                val retained = normalized.toMutableList()
+                mapped.forEach { sub ->
+                    if (!retained.remove(sub)) {
+                        val language = sub.originalName.substringBefore(" · ")
+                            .substringBefore(" — ").trim()
+                        val reason = when {
+                            language.isEmpty() -> "empty_language"
+                            language.equals("Unknown", true) -> "unknown_language"
+                            language.equals("und", true) -> "und_language"
+                            sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO -> "duplicate_embedded"
+                            else -> "normalized_collision"
+                        }
+                        dropped(sub, reason)
+                    }
+                }
+                if (result.size < normalized.size) {
+                    val seen = HashSet<SubtitleData>()
+                    changed.forEach { sub ->
+                        if (!seen.add(sub)) dropped(sub, "numbering_collision")
+                    }
+                }
             }
-            if (changed.toSet() == before) this else set(changed)
+            if (result == before) this else set(changed)
         }
     }
 

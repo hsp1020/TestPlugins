@@ -682,36 +682,6 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         }
         iconSelectionUrl = fragment?.player?.getCurrentPreferredSubtitle()?.url
 
-        // Diagnostic only when the picker opens or the language group changes.
-        // Hash URLs to avoid printing signed subtitle links or addon tokens.
-        fun logOptionMapping() {
-            val index = order.getOrNull(list.checkedItemPosition - 1) ?: return
-            val native = nativeOptions[index]
-            val groupName = groups[index].firstOrNull()?.originalName
-            val live = model?.state?.subtitles?.filter { it.originalName == groupName }
-                ?: emptyList()
-            android.util.Log.d("StremioC-SubtitlePicker",
-                "stage=picker group=$groupName native=${native.size} adapter=${optionsAdapter.count}" +
-                    " live=${live.size} nativeHashes=" +
-                    native.joinToString(",") { Integer.toHexString(it.url.hashCode()) } +
-                    " liveHashes=" +
-                    live.joinToString(",") { Integer.toHexString(it.url.hashCode()) })
-            visibleOptions[index].take(40).forEachIndexed { display, sourceIndex ->
-                val sub = native[sourceIndex]
-                val adapterText = if (sourceIndex in 0 until optionsAdapter.count)
-                    optionsAdapter.getItem(sourceIndex)?.toString()?.take(100) else null
-                android.util.Log.d("StremioC-SubtitlePicker",
-                    "display=${display + 1} native=${sourceIndex + 1} origin=${sub.origin}" +
-                        " urlHash=${Integer.toHexString(sub.url.hashCode())}" +
-                        " suffix=${sub.nameSuffix.take(70)}" +
-                        " detail=${StremioC.subtitleDetailByUrl[sub.url]?.take(100)}" +
-                        " source=${StremioC.subtitleSourceByUrl[sub.url]?.take(70)}" +
-                        " adapterText=$adapterText" +
-                        " finalLabel=${optionLabel(display)?.take(100)}")
-            }
-        }
-        logOptionMapping()
-
         fun checkedEntry(): StremioSubtitleRefreshRegistry.Entry? {
             return optionAt(options.checkedItemPosition)
                 ?.let { StremioSubtitleRefreshRegistry.find(it.url) }
@@ -775,7 +745,6 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                 ?.setChecked(list.isItemChecked(previous))
             (row as? RefreshRow)?.setChecked(list.isItemChecked(position))
             if (queuedRefresh?.entry?.originalUrl != checkedEntry()?.originalUrl) queuedRefresh = null
-            logOptionMapping()
             (list.adapter as? BaseAdapter)?.notifyDataSetChanged()
             (options.adapter as? BaseAdapter)?.notifyDataSetChanged()
         }
