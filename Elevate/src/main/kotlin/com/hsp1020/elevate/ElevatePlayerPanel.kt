@@ -341,6 +341,9 @@ internal class ElevatePlayerPanel(
         increment(R.id.subtitle_offset_add, 100L)
         increment(R.id.subtitle_offset_add_more, 1000L)
         nativeSync.findViewById<View>(R.id.apply_btt)?.visibility = View.GONE
+        // The native row is bottom|end for three buttons. Center the two remaining buttons.
+        (nativeSync.findViewById<View>(R.id.reset_btt)?.parent as? LinearLayout)
+            ?.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
         nativeSync.findViewById<View>(R.id.reset_btt)?.setOnClickListener {
             offsetInput.setText("0")
             android.util.Log.d("ElevatePanelSync", "offsetReset instant=0")
