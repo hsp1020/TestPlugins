@@ -9,6 +9,7 @@ import android.view.ViewTreeObserver
 import android.widget.AdapterView
 import android.widget.HeaderViewListAdapter
 import android.widget.ListView
+import android.widget.LinearLayout
 import android.widget.TextView
 import com.lagradost.cloudstream3.utils.AppContextUtils.sortSubs
 import androidx.fragment.app.Fragment
@@ -46,6 +47,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
     private var singleGroups: ListView? = null
     private var singleOptions: ListView? = null
     private var singleFooter: View? = null
+    private var originalColumns: Pair<LinearLayout.LayoutParams, LinearLayout.LayoutParams>? = null
     private var originalGroupClick: AdapterView.OnItemClickListener? = null
     private var singleGroupClick: AdapterView.OnItemClickListener? = null
     private var pendingDialogView: android.view.View? = null
@@ -69,6 +71,11 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
     }.getOrNull()
 
     private fun clearSingleOptionDialog() {
+        originalColumns?.let { (language, subtitles) ->
+            singleGroups?.layoutParams = language
+            singleOptions?.layoutParams = subtitles
+        }
+        originalColumns = null
         val list = singleGroups
         if (list?.onItemClickListener === singleGroupClick) {
             list?.onItemClickListener = originalGroupClick
@@ -114,6 +121,19 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         singleGroups = list
         singleOptions = options
         originalGroupClick = originalClick
+        val languageParams = list.layoutParams as? LinearLayout.LayoutParams
+        val optionParams = options.layoutParams as? LinearLayout.LayoutParams
+        if (languageParams != null && optionParams != null) {
+            originalColumns = languageParams to optionParams
+            list.layoutParams = LinearLayout.LayoutParams(languageParams).apply {
+                width = 0
+                weight = 3.5f
+            }
+            options.layoutParams = LinearLayout.LayoutParams(optionParams).apply {
+                width = 0
+                weight = 6.5f
+            }
+        }
 
         val click = AdapterView.OnItemClickListener { parent, view, position, id ->
             originalClick.onItemClick(parent, view, position, id)
