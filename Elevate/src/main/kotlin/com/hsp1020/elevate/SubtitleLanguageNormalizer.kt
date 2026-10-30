@@ -219,8 +219,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         dialog: Dialog, group: List<SubtitleData>, options: ListView
     ) {
         val ordered = group.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }
-        if (ordered.size < 2 || group.none { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO ||
-                (it.origin == SubtitleOrigin.URL && stremioRanks()?.containsKey(it.url) == true) }) return
+        if (ordered.size < 2 || group.none { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }) return
         @Suppress("UNCHECKED_CAST")
         val source = (options.getTag(R.id.sort_subtitles_options) as? ArrayAdapter<Spanned>)
             ?: (options.adapter as? ArrayAdapter<Spanned>) ?: return
@@ -230,7 +229,8 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             val existing = source.getItem(index) ?: return
             labels.add(when (sub.origin) {
                 SubtitleOrigin.EMBEDDED_IN_VIDEO -> embeddedOptionLabel(dialog, sub, index + 1).html()
-                SubtitleOrigin.URL -> (index + 1).toString().html()
+                // Preserve native online detail; StremioC decorates its own URL rows.
+                SubtitleOrigin.URL -> existing
                 else -> existing
             })
         }

@@ -663,9 +663,10 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             optionAt(position)?.let { StremioSubtitleRefreshRegistry.find(it.url) }
         }, { position ->
             val sub = optionAt(position) ?: return@RefreshRowAdapter null
-            StremioC.subtitleDetailByUrl[sub.url]?.takeIf { it.isNotBlank() }?.let {
-                "${position + 1}($it)"
-            }
+            val detail = StremioC.subtitleDetailByUrl[sub.url]?.takeIf { it.isNotBlank() }
+                ?: StremioC.subtitleSourceByUrl[sub.url]?.takeIf { it.isNotBlank() }
+                ?: sub.nameSuffix.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
+            detail?.let { "${position + 1}($it)" }
         }, { position -> optionOrder().getOrNull(position) ?: position })
         if (optionSelected >= 0) {
             val displayIndex = optionOrder().indexOf(optionSelected)

@@ -104,10 +104,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         GeneratorPlayer::class.java.getDeclaredField("currentSelectedSubtitles")
             .apply { isAccessible = true }
     }.getOrNull()
-    private val autoSelectField = runCatching {
-        GeneratorPlayer::class.java.getDeclaredField("preferredAutoSelectSubtitles")
-            .apply { isAccessible = true }
-    }.getOrNull()
     private val helperField = runCatching {
         CS3IPlayer::class.java.getDeclaredField("subtitleHelper")
             .apply { isAccessible = true }
@@ -176,7 +172,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         val shown = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
             ?.takeIf { it.isShowing }
         if (shown != null) {
-            suppressSubtitleReloadForTest()
             if (shown !== selectionDialog) {
                 selectionDialog = shown
                 selectionBeforeDialog = selectedByHost(f)
@@ -199,21 +194,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
             rememberDialogSelection(f)
             selectionDialog = null
             selectionBeforeDialog = null
-        }
-    }
-
-    // Experimental: bypass REQUIRES_RELOAD without changing the CloudStream core.
-    // This makes unavailable subtitle sources appear active to the status check,
-    // but does NOT load them into Media3; selecting one may display no subtitles.
-    private fun suppressSubtitleReloadForTest() {
-        val f = fragment ?: return
-        val subtitles = model?.state?.subtitles ?: return
-        runCatching { autoSelectField?.set(f, null) }
-        if (subtitles.isEmpty()) return
-        runCatching {
-            val helper = helperField?.get(f.player) as? PlayerSubtitleHelper
-                ?: return@runCatching
-            if (activeField?.get(helper) != subtitles) helper.setActiveSubtitles(subtitles)
         }
     }
 
@@ -470,7 +450,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         val current = player ?: return
         if (current !== f.playerView?.player || instance != model?.state?.instance) return
         trackDialog(f)
-        suppressSubtitleReloadForTest()
         restoreManualSubtitle(tracks)
         val subtitles = model?.state?.subtitles ?: return
 
@@ -490,7 +469,6 @@ internal class EmbeddedSubtitleController(private val application: Application) 
 
         trackDialog(f)
         if (!markActive(f, embedded)) return
-        suppressSubtitleReloadForTest()
         if (manualOverride || selectionDialog?.isShowing == true) return
         val language = preferredLanguage?.takeIf { it.isNotEmpty() } ?: return
         val match = embedded.firstNotNullOfOrNull { subtitle ->
@@ -551,11 +529,9 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         detach()
         fragment = candidate
         model = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
-        suppressSubtitleReloadForTest()
         val subtitleObserver = Observer<VideoLive<Set<SubtitleData>>> { event ->
             if (event != null && event.instance == model?.state?.instance) {
                 synchronizeSource()
-                suppressSubtitleReloadForTest()
                 if (lastHandledInstance == event.instance &&
                     (lastHandledSubtitles === event.value ||
                         lastHandledSubtitles == event.value)) return@Observer
