@@ -324,6 +324,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
     private var appliedRefresh: DeferredRefresh? = null
     private var refreshedOffsetDialog: Dialog? = null
     private var removeStateObserver: (() -> Unit)? = null
+    private var removeLinksObserver: (() -> Unit)? = null
     private val playerListener = java.lang.reflect.Proxy.newProxyInstance(
         Player.Listener::class.java.classLoader,
         arrayOf(Player.Listener::class.java)
@@ -466,6 +467,33 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             APIHolder.allProviders.any { it is StremioC && it.name.equals(response.apiName, true) }
     }
 
+    private fun syncProviderObservers() {
+        val f = fragment ?: return
+        val vm = model ?: return
+        if (!isStremio) {
+            removeLinksObserver?.invoke()
+            removeLinksObserver = null
+            focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
+            focusTree = null
+            observedPlayer?.removeListener(playerListener)
+            observedPlayer = null
+            return
+        }
+        if (removeLinksObserver == null) {
+            val observer = Observer<com.lagradost.cloudstream3.ui.player.VideoLive<Set<com.lagradost.cloudstream3.ui.player.VideoLink>>> {
+                if (isStremio && vm.state.instance == lastInstance) bindPlayer()
+            }
+            vm.currentLinks.observe(f.viewLifecycleOwner, observer)
+            removeLinksObserver = { vm.currentLinks.removeObserver(observer) }
+        }
+        if (focusTree == null) {
+            f.activity?.window?.decorView?.viewTreeObserver?.takeIf { it.isAlive }?.let {
+                focusTree = it
+                it.addOnWindowFocusChangeListener(focusListener)
+            }
+        }
+    }
+
     // Run only when a dialog changes window focus or player state changes.
     private fun inspectDialogs() {
         val f = fragment ?: return
@@ -475,6 +503,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             sortedDialog = null
             clearRefreshState()
             isStremio = checkStremio()
+            syncProviderObservers()
         }
         if (!isStremio) return
         bindPlayer()
@@ -511,22 +540,12 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                 lastInstance = currentModel.state.instance
                 isStremio = checkStremio()
                 sortedDialog = null
+                syncProviderObservers()
             }
             if (isStremio) bindPlayer()
         }
         currentModel.loadingLinks.observe(candidate.viewLifecycleOwner, observer)
-        val linksObserver = Observer<com.lagradost.cloudstream3.ui.player.VideoLive<Set<com.lagradost.cloudstream3.ui.player.VideoLink>>> {
-            if (isStremio) bindPlayer()
-        }
-        currentModel.currentLinks.observe(candidate.viewLifecycleOwner, linksObserver)
-        removeStateObserver = {
-            currentModel.loadingLinks.removeObserver(observer)
-            currentModel.currentLinks.removeObserver(linksObserver)
-        }
-        candidate.activity?.window?.decorView?.viewTreeObserver?.takeIf { it.isAlive }?.let {
-            focusTree = it
-            it.addOnWindowFocusChangeListener(focusListener)
-        }
+        removeStateObserver = { currentModel.loadingLinks.removeObserver(observer) }
         inspectDialogs()
     }
 
@@ -1014,6 +1033,8 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         focusTree = null
         removeStateObserver?.invoke()
         removeStateObserver = null
+        removeLinksObserver?.invoke()
+        removeLinksObserver = null
         observedPlayer?.removeListener(playerListener)
         observedPlayer = null
         selectedUrl = null
