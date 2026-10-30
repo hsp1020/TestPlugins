@@ -1,7 +1,7 @@
 version = 1
 
 cloudstream {
-    description = "인핸스 클라우드스트림"
+    description = "Enhance CloudStream"
     authors = listOf("hsp1020")
     language = "en"
     status = 1
