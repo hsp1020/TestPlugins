@@ -52,7 +52,8 @@ internal class ElevatePlayerPanel(
     enum class Tab { SOURCES, AUDIO, SUBTITLES, EPISODES }
     private data class Row(val label: String, val action: () -> Unit,
         val refresh: (() -> Unit)? = null, val autoRefresh: (() -> Unit)? = null,
-        val richText: Boolean = false)
+        val richText: Boolean = false, val selected: Boolean = false,
+        val header: Boolean = false)
     private val ctx = overlay.context
     private val dp: (Int) -> Int = { (it * ctx.resources.displayMetrics.density + .5f).toInt() }
     private val textColor = episodeTitle?.currentTextColor ?: Color.WHITE
@@ -67,14 +68,16 @@ internal class ElevatePlayerPanel(
     }
     private val rows = ArrayList<Row>()
     private val list = ListView(ctx).apply {
-        choiceMode = AbsListView.CHOICE_MODE_SINGLE
+        choiceMode = AbsListView.CHOICE_MODE_NONE
         divider = null
         selector = ColorDrawable(Color.TRANSPARENT)
     }
     private val adapter = object : ArrayAdapter<Row>(ctx, android.R.layout.simple_list_item_1, rows) {
+        override fun isEnabled(position: Int): Boolean = getItem(position)?.header != true
+
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
             val value = getItem(position) ?: return TextView(ctx)
-            val selected = (parent as? ListView)?.isItemChecked(position) == true
+            val selected = value.selected
             // Native CheckLabel is the same row used by CloudStream's subtitle/source picker.
             if (value.refresh == null) {
                 val text = (convertView as? TextView)
@@ -82,9 +85,7 @@ internal class ElevatePlayerPanel(
                         R.layout.sort_bottom_single_choice, parent, false
                     ) as TextView)
                 text.text = if (value.richText) value.label.html() else value.label
-                text.maxLines = Int.MAX_VALUE
-                text.ellipsize = null
-                text.isActivated = selected
+                styleRow(text, selected, value.header)
                 return text
             }
             val row = (convertView as? LinearLayout) ?: LinearLayout(ctx).apply {
@@ -103,9 +104,7 @@ internal class ElevatePlayerPanel(
             }
             (row.getChildAt(0) as TextView).apply {
                 text = if (value.richText) value.label.html() else value.label
-                maxLines = Int.MAX_VALUE
-                ellipsize = null
-                isActivated = selected
+                styleRow(this, selected, value.header)
                 setOnClickListener {
                     (parent as? ListView)?.performItemClick(row, position, getItemId(position))
                 }
@@ -121,11 +120,34 @@ internal class ElevatePlayerPanel(
             return row
         }
     }
-    private val languageAdapter = ArrayAdapter<CharSequence>(
+    private fun styleRow(text: TextView, selected: Boolean, header: Boolean = false) {
+        text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        text.applyElevateNativeFont(reference = buttons.values.firstOrNull()?.typeface ?: text.typeface,
+            bold = header || text.typeface?.isBold == true)
+        text.setPadding(0, dp(if (header) 8 else 2), 0, dp(if (header) 4 else 2))
+        text.compoundDrawablePadding = 0
+        text.minHeight = dp(if (header) 34 else 28)
+        text.includeFontPadding = false
+        text.maxLines = Int.MAX_VALUE
+        text.ellipsize = null
+        text.isActivated = selected
+        text.isSelected = selected
+        if (header) text.setCompoundDrawablesRelativeWithIntrinsicBounds(null, null, null, null)
+    }
+
+    private val languageAdapter = object : ArrayAdapter<CharSequence>(
         ctx, R.layout.sort_bottom_single_choice, ArrayList()
-    )
+    ) {
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val text = super.getView(position, convertView, parent) as TextView
+            styleRow(text, position == selectedGroup)
+            return text
+        }
+    }
     private var subtitleGroups = emptyList<Pair<String, List<SubtitleData>>>()
     private var selectedGroup = 0
+    private var selectedSubtitle: SubtitleData? = null
+    private var selectionInitialized = false
     private val languageList = ListView(ctx).apply {
         choiceMode = AbsListView.CHOICE_MODE_SINGLE
         divider = null
@@ -135,9 +157,10 @@ internal class ElevatePlayerPanel(
             setItemChecked(position, true)
             if (position == 0) setSubtitle(null)
             else {
-                val group = subtitleGroups.getOrNull(position - 1)?.second
-                if (group?.size == 1) setSubtitle(group.first())
-                else renderSubtitleOptions()
+                val group = subtitleGroups.getOrNull(position - 1)?.second.orEmpty()
+                val preferred = group.firstOrNull { it.url == selectedSubtitle?.url }
+                val chosen = preferred ?: group.firstOrNull()
+                if (chosen != null) setSubtitle(chosen) else renderSubtitleOptions()
             }
         }
     }
@@ -149,9 +172,9 @@ internal class ElevatePlayerPanel(
     private val syncButton = TextView(ctx).apply {
         text = ctx.getString(R.string.subtitle_offset_title)
         setTextColor(textColor)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(12), 0, dp(12), 0)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        gravity = Gravity.CENTER
+        setPadding(0, 0, 0, 0)
         minimumHeight = dp(44)
         applyElevateNativeFont(bold = true)
         setOnClickListener { if (inSync) showTabContents() else showSync() }
@@ -160,7 +183,7 @@ internal class ElevatePlayerPanel(
     private val body = LinearLayout(ctx).apply {
         orientation = LinearLayout.VERTICAL
         visibility = View.GONE
-        addView(groupScroll, LinearLayout.LayoutParams(-1, dp(56)))
+        addView(groupScroll, LinearLayout.LayoutParams(-1, dp(42)))
         addView(syncButton, LinearLayout.LayoutParams(-1, dp(44)))
         addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
     }
@@ -200,10 +223,26 @@ internal class ElevatePlayerPanel(
         val controls = nativeSync.getChildAt(1) as LinearLayout
         nativeSync.removeAllViews()
         nativeSync.orientation = LinearLayout.VERTICAL
-        nativeSync.addView(controls, LinearLayout.LayoutParams(-1, -2))
         nativeSync.addView(cueContainer, LinearLayout.LayoutParams(-1, 0, 1f))
+        nativeSync.addView(controls, LinearLayout.LayoutParams(-1, -2))
         controls.layoutParams = LinearLayout.LayoutParams(-1, -2)
         controls.getChildAt(0).layoutParams = LinearLayout.LayoutParams(-1, -2)
+        controls.getChildAt(0).layoutParams = (controls.getChildAt(0).layoutParams
+            as LinearLayout.LayoutParams).apply { width = -1 }
+        fun matchTabTextSize(view: View) {
+            if (view is TextView) view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            if (view is ViewGroup && view !is RecyclerView) {
+                for (i in 0 until view.childCount) matchTabTextSize(view.getChildAt(i))
+            }
+        }
+        matchTabTextSize(controls)
+        syncList.addOnChildAttachStateChangeListener(object : RecyclerView.OnChildAttachStateChangeListener {
+            override fun onChildViewAttachedToWindow(view: View) {
+                view.findViewById<TextView>(R.id.subtitle_text)
+                    ?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            }
+            override fun onChildViewDetachedFromWindow(view: View) = Unit
+        })
         offsetInput.addTextChangedListener(syncOffsetWatcher)
         syncList.adapter = syncAdapter
         (syncList.itemAnimator as? androidx.recyclerview.widget.SimpleItemAnimator)
@@ -245,12 +284,14 @@ internal class ElevatePlayerPanel(
     init {
         configureNativeSync()
         list.adapter = adapter
-        list.setOnItemClickListener { _, _, position, _ -> rows.getOrNull(position)?.action?.invoke() }
+        list.setOnItemClickListener { _, _, position, _ ->
+            rows.getOrNull(position)?.takeUnless { it.header }?.action?.invoke()
+        }
         for (entry in Tab.entries) {
             val button = TextView(ctx).apply {
                 text = when (entry) {
                     Tab.SOURCES -> ctx.getString(R.string.video_source)
-                    Tab.AUDIO -> ctx.getString(R.string.audio_tracks)
+                    Tab.AUDIO -> ctx.getString(R.string.tracks)
                     Tab.SUBTITLES -> ctx.getString(R.string.pick_subtitle)
                     Tab.EPISODES -> ctx.getString(R.string.episodes)
                 }
@@ -343,7 +384,7 @@ internal class ElevatePlayerPanel(
         syncButton.text = ctx.getString(R.string.subtitle_offset_title)
         when (tab) {
             Tab.SOURCES -> { panelContent(list); renderSources() }
-            Tab.AUDIO -> { panelContent(list); renderAudio() }
+            Tab.AUDIO -> { panelContent(list); renderTracks() }
             Tab.SUBTITLES -> { panelContent(subtitlePane); renderSubtitles() }
             Tab.EPISODES -> Unit
         }
@@ -399,9 +440,13 @@ internal class ElevatePlayerPanel(
                 text = value ?: ctx.getString(R.string.all)
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                applyElevateNativeFont(reference = buttons.values.firstOrNull()?.typeface ?: typeface,
+                    bold = true)
                 maxWidth = dp(184)
-                setPadding(dp(12), dp(4), dp(12), dp(4))
-                minimumHeight = dp(52)
+                setPadding(0, dp(2), 0, dp(2))
+                compoundDrawablePadding = 0
+                minimumHeight = dp(36)
                 isActivated = (value == filter)
                 alpha = if (value == filter) 1f else .65f
                 setOnClickListener { filter = value; renderSources() }
@@ -414,25 +459,30 @@ internal class ElevatePlayerPanel(
             if (filter != null && keys[index] != filter) return@mapIndexedNotNull null
             val name = link.first?.name ?: link.second?.name ?: "Source"
             val title = "$name ${Qualities.getStringByInt(link.first?.quality)}"
-            Row((if (link == selected) "✓ " else "") + title, {
+            Row(title, {
                 if (link != selected) runCatching {
                     GeneratorPlayer::class.java.getDeclaredMethod(
                         "loadLink", Pair::class.java, Boolean::class.javaPrimitiveType!!
                     ).apply { isAccessible = true }.invoke(fragment, link, true)
                 }.onFailure { android.util.Log.w("Elevate", "Source switch failed", it) }
-            })
+            }, selected = link == selected)
         })
     }
 
-    private fun renderAudio() {
+    private fun renderTracks() {
         val tracks = fragment.player.getVideoTracks()
-        val active = tracks.currentAudioTrack
-        replaceRows(tracks.allAudioTracks.map { item ->
+        val activeAudio = tracks.currentAudioTrack
+        val activeVideo = tracks.currentVideoTrack
+        val audio = tracks.allAudioTracks
+        val video = tracks.allVideoTracks.sortedBy { it.height?.times(-1) }
+        val items = ArrayList<Row>()
+        items += Row(ctx.getString(R.string.audio_tracks), {}, header = true)
+        audio.forEach { item ->
             val language = item.language?.trim()?.let { raw ->
                 fromTagToLanguageName(raw)
                     ?: fromTagToLanguageName(raw.replace('_', '-').substringBefore('-').lowercase())
                     ?: raw
-            } ?: item.label ?: "Audio"
+            } ?: item.label ?: ctx.getString(R.string.audio_tracks)
             val channels = when (item.channelCount) {
                 1 -> "Mono"; 2 -> "Stereo"; 6 -> "5.1"; 8 -> "7.1"
                 null, 0 -> ""
@@ -450,14 +500,31 @@ internal class ElevatePlayerPanel(
                 "mp3" in mime -> "MP3"
                 else -> item.sampleMimeType?.substringAfter('/')?.uppercase().orEmpty()
             }
-            val name = listOf(language.replaceFirstChar { it.uppercaseChar() }, channels, codec)
+            val label = listOf(language.replaceFirstChar { it.uppercaseChar() }, channels, codec)
                 .filter { it.isNotBlank() }.joinToString(" • ")
-            val checked = active?.id == item.id && active?.formatIndex == item.formatIndex
-            Row((if (checked) "✓  " else "    ") + name, {
+            val checked = activeAudio?.id == item.id && activeAudio?.formatIndex == item.formatIndex
+            items += Row(label, {
                 fragment.player.setPreferredAudioTrack(item.language, item.id, item.formatIndex)
-                renderAudio()
-            })
-        })
+                renderTracks()
+            }, selected = checked)
+        }
+        items += Row(ctx.getString(R.string.video_tracks), {}, header = true)
+        video.forEachIndexed { index, item ->
+            val width = item.width ?: -1
+            val height = item.height ?: -1
+            val title = item.label ?: if (width > 0 && height > 0) "${width}x${height}"
+                else (index + 1).toString()
+            val checked = activeVideo == item ||
+                (activeVideo?.id == item.id && activeVideo?.width == item.width &&
+                    activeVideo?.height == item.height)
+            items += Row(title, {
+                if (width > 0 && height > 0) {
+                    fragment.player.setMaxVideoSize(width, height, item.id)
+                    renderTracks()
+                }
+            }, selected = checked)
+        }
+        replaceRows(items)
     }
 
     private fun setSubtitle(sub: SubtitleData?) {
@@ -465,6 +532,8 @@ internal class ElevatePlayerPanel(
             val requiresReload = GeneratorPlayer::class.java.getDeclaredMethod(
                 "setSubtitles", SubtitleData::class.java, Boolean::class.javaPrimitiveType!!
             ).apply { isAccessible = true }.invoke(fragment, sub, true) as? Boolean == true
+            selectedSubtitle = sub
+            selectionInitialized = true
             if (requiresReload) {
                 currentLink()?.let { link ->
                     GeneratorPlayer::class.java.getDeclaredMethod(
@@ -473,7 +542,7 @@ internal class ElevatePlayerPanel(
                 }
             }
         }.onFailure { android.util.Log.w("Elevate", "Subtitle selection failed", it) }
-        renderSubtitles()
+            .onSuccess { renderSubtitles() }
     }
 
     private fun orderedOptions(group: List<SubtitleData>): List<SubtitleData> =
@@ -485,7 +554,11 @@ internal class ElevatePlayerPanel(
             ).map { it.value }
 
     private fun renderSubtitles() {
-        val current = fragment.player.getCurrentPreferredSubtitle()
+        if (!selectionInitialized) {
+            selectedSubtitle = fragment.player.getCurrentPreferredSubtitle()
+            selectionInitialized = true
+        }
+        val current = selectedSubtitle
         subtitleGroups = sortSubs(vm.state.subtitles)
             .groupBy { it.originalName }
             .map { (name, subtitles) -> name to orderedOptions(subtitles) }
@@ -501,7 +574,7 @@ internal class ElevatePlayerPanel(
     }
 
     private fun renderSubtitleOptions() {
-        val current = fragment.player.getCurrentPreferredSubtitle()?.url
+        val current = selectedSubtitle?.url
         val group = subtitleGroups.getOrNull(selectedGroup - 1)?.second.orEmpty()
         replaceRows(group.mapIndexed { index, sub ->
             val number = index + 1 // Visual option index, not nameSuffix (native picker behavior).
@@ -521,13 +594,10 @@ internal class ElevatePlayerPanel(
             Row(label, { setSubtitle(sub) },
                 if (refreshable) ({ ElevateSubtitleRefreshHook.active()?.refreshSelected(false); Unit }) else null,
                 if (refreshable) ({ ElevateSubtitleRefreshHook.active()?.refreshSelected(true); Unit }) else null,
-                richText = true)
+                richText = true, selected = sub.url == current)
         })
         val selected = group.indexOfFirst { it.url == current }
-        if (selected >= 0) {
-            list.setItemChecked(selected, true)
-            list.setSelection(selected)
-        } else list.clearChoices()
+        if (selected >= 0) list.setSelection(selected)
     }
 
     private fun showSync() {
