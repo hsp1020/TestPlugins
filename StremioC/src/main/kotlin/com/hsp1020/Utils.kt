@@ -687,8 +687,15 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         fun logOptionMapping() {
             val index = order.getOrNull(list.checkedItemPosition - 1) ?: return
             val native = nativeOptions[index]
+            val groupName = groups[index].firstOrNull()?.originalName
+            val live = model?.state?.subtitles?.filter { it.originalName == groupName }
+                ?: emptyList()
             android.util.Log.d("StremioC-SubtitlePicker",
-                "group=${groups[index].firstOrNull()?.originalName} native=${native.size} adapter=${optionsAdapter.count}")
+                "stage=picker group=$groupName native=${native.size} adapter=${optionsAdapter.count}" +
+                    " live=${live.size} nativeHashes=" +
+                    native.joinToString(",") { Integer.toHexString(it.url.hashCode()) } +
+                    " liveHashes=" +
+                    live.joinToString(",") { Integer.toHexString(it.url.hashCode()) }")
             visibleOptions[index].take(40).forEachIndexed { display, sourceIndex ->
                 val sub = native[sourceIndex]
                 val adapterText = if (sourceIndex in 0 until optionsAdapter.count)

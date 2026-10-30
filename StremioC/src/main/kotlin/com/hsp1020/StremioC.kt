@@ -3092,10 +3092,25 @@ open class StremioC(
 
         val seenStremioSubtitles = Collections.synchronizedSet(mutableSetOf<String>())
         fun emitUniqueSubtitle(sub: SubtitleFile) {
+            val trace = sub.lang.contains("&#") || sub.lang.contains("Make Korean", true)
+            val hash = if (trace) Integer.toHexString(sub.url.hashCode()) else ""
             if (sub.url.isBlank() || sub.lang.trim().let {
                     it.isBlank() || it.equals("und", true)
-                }) return
-            if (seenStremioSubtitles.add(sub.url)) subtitleCallback(sub)
+                }) {
+                if (trace) android.util.Log.d("StremioC-SubTrace",
+                    "stage=filtered group=${sub.lang} urlHash=$hash")
+                return
+            }
+            if (!seenStremioSubtitles.add(sub.url)) {
+                if (trace) android.util.Log.d("StremioC-SubTrace",
+                    "stage=duplicate group=${sub.lang} urlHash=$hash")
+                return
+            }
+            if (trace) android.util.Log.d("StremioC-SubTrace",
+                "stage=before_callback group=${sub.lang} urlHash=$hash")
+            subtitleCallback(sub)
+            if (trace) android.util.Log.d("StremioC-SubTrace",
+                "stage=after_callback group=${sub.lang} urlHash=$hash")
         }
         val stremioSourceNames = Collections.synchronizedSet(mutableSetOf<String>()).apply {
             name.trim().takeIf { it.isNotEmpty() }?.let { add(it.lowercase()) }

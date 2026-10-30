@@ -366,6 +366,21 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         return sub.copy(originalName = displayed, nameSuffix = details, languageCode = tag)
     }
 
+    // One-shot event trace correlated with StremioC callback and picker URL hashes.
+    private fun traceTranslation(stage: String, items: Collection<SubtitleData>) {
+        val translated = items.filter {
+            it.origin == SubtitleOrigin.URL &&
+                (it.originalName.contains("&#") || it.originalName.contains("Make Korean", true))
+        }
+        android.util.Log.d("Elevate-SubTrace",
+            "stage=$stage total=${items.size} translated=${translated.size}")
+        translated.groupBy { it.originalName }.forEach { (group, entries) ->
+            android.util.Log.d("Elevate-SubTrace",
+                "stage=$stage group=$group count=${entries.size} hashes=" +
+                    entries.joinToString(",") { Integer.toHexString(it.url.hashCode()) })
+        }
+    }
+
     private fun normalize(vm: PlayerGeneratorViewModel) {
         val f = fragment ?: return
         val dialog = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
@@ -380,62 +395,67 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         val ranks = stremioRanks()
         val stremio = state.generatorState?.response?.apiName?.equals("StremioC", true) == true
         val details = if (stremio) stremioDetailCache() else null
-        val normalized = state.subtitles.map { sub ->
-            val localized = localized(sub, ranks)
-            if (details != null && sub.origin == SubtitleOrigin.URL &&
-                localized.originalName != sub.originalName) {
-                val original = sub.originalName.trim()
-                val language = SubtitleHelper.fromTagToEnglishLanguageName(sub.languageCode)
-                // Preserve source descriptors such as "Arabic (CR_Arabic) (ASS)"
-                // before the language group is localized; plain language names need no detail.
-                if (original.isNotBlank() && !original.equals(language, true)) {
-                    synchronized(details) {
-                        if (details[sub.url].isNullOrBlank()) details[sub.url] = original
+
+        // modifyState is synchronized in CloudStream. Normalize the latest collection
+        // inside the atomic update to avoid overwriting newly received subtitle URLs.
+        vm.modifyState {
+            if (instance != state.instance || subtitles.isEmpty()) return@modifyState this
+            val before = subtitles
+            val normalized = before.map { sub ->
+                val localized = localized(sub, ranks)
+                if (details != null && sub.origin == SubtitleOrigin.URL &&
+                    localized.originalName != sub.originalName) {
+                    val original = sub.originalName.trim()
+                    val language = SubtitleHelper.fromTagToEnglishLanguageName(sub.languageCode)
+                    if (original.isNotBlank() && !original.equals(language, true)) {
+                        synchronized(details) {
+                            if (details[sub.url].isNullOrBlank()) details[sub.url] = original
+                        }
                     }
                 }
-            }
-            localized
-        }.filter {
+                localized
+            }.filter {
                 val language = it.originalName.substringBefore(" · ").substringBefore(" — ").trim()
                 language.isNotEmpty() && !language.equals("Unknown", ignoreCase = true) &&
                     !language.equals("und", ignoreCase = true)
+            }.distinctBy {
+                if (it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) it.origin to it.url else it
             }
-            .distinctBy { if (it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) it.origin to it.url else it }
 
-        // StremioC numbers its final visible rows; retain online details in SubtitleData
-        // instead of permanently replacing the suffix (which also identifies the track).
-        if (stremio) {
-            if (normalized.toSet() != state.subtitles) vm.modifyState {
-                if (instance != state.instance) this else set(normalized)
-            }
-            return
-        }
-
-        // Keep the existing numbering behavior for other providers.
-        val replacements = HashMap<SubtitleData, SubtitleData>()
-        normalized.groupBy { it.originalName }.values.forEach { group ->
-            val embeddedCount = group.count { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
-            if (embeddedCount == 0 && group.none {
-                    it.origin == SubtitleOrigin.URL && ranks?.containsKey(it.url) == true
-                }) return@forEach
-            val used = group.filter { it.origin == SubtitleOrigin.URL }
-                .mapNotNull { it.nameSuffix.toIntOrNull()?.takeIf { number -> number > 0 } }
-                .toMutableSet()
-            var nextNumber = embeddedCount + 1
-            group.filter { it.origin == SubtitleOrigin.URL && it.nameSuffix.toIntOrNull() == null }
-                .sortedWith(compareBy<SubtitleData> {
-                    (ranks?.get(it.url) as? Number)?.toInt() ?: Int.MAX_VALUE
-                }.thenBy { it.url })
-                .forEach { sub ->
-                    while (nextNumber in used) nextNumber++
-                    replacements[sub] = sub.copy(nameSuffix = nextNumber.toString())
-                    used.add(nextNumber++)
+            val changed = if (stremio) normalized else {
+                // Preserve the existing Elevate-only and other-provider behavior.
+                val replacements = HashMap<SubtitleData, SubtitleData>()
+                normalized.groupBy { it.originalName }.values.forEach { group ->
+                    val embeddedCount = group.count { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
+                    if (embeddedCount == 0 && group.none {
+                            it.origin == SubtitleOrigin.URL && ranks?.containsKey(it.url) == true
+                        }) return@forEach
+                    val used = group.filter { it.origin == SubtitleOrigin.URL }
+                        .mapNotNull { it.nameSuffix.toIntOrNull()?.takeIf { number -> number > 0 } }
+                        .toMutableSet()
+                    var nextNumber = embeddedCount + 1
+                    group.filter {
+                        it.origin == SubtitleOrigin.URL && it.nameSuffix.toIntOrNull() == null
+                    }.sortedWith(compareBy<SubtitleData> {
+                        (ranks?.get(it.url) as? Number)?.toInt() ?: Int.MAX_VALUE
+                    }.thenBy { it.url }).forEach { sub ->
+                        while (nextNumber in used) nextNumber++
+                        replacements[sub] = sub.copy(nameSuffix = nextNumber.toString())
+                        used.add(nextNumber++)
+                    }
                 }
-        }
-        val changed = normalized.map { replacements[it] ?: it }
-        if (changed.toSet() == state.subtitles) return
-        vm.modifyState {
-            if (instance != state.instance) this else set(changed)
+                normalized.map { replacements[it] ?: it }
+            }
+
+            if (stremio && (before.any {
+                    it.originalName.contains("&#") || it.originalName.contains("Make Korean", true)
+                } || changed.any {
+                    it.originalName.contains("&#") || it.originalName.contains("Make Korean", true)
+                })) {
+                traceTranslation("before", before)
+                traceTranslation("after", changed)
+            }
+            if (changed.toSet() == before) this else set(changed)
         }
     }
 
