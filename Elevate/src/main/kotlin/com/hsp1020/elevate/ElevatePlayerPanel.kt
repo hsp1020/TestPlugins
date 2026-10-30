@@ -251,7 +251,7 @@ internal class ElevatePlayerPanel(
     private val body = LinearLayout(ctx).apply {
         orientation = LinearLayout.VERTICAL
         visibility = View.GONE
-        addView(groupScroll, LinearLayout.LayoutParams(-1, dp(42)))
+        addView(groupScroll, LinearLayout.LayoutParams(-1, dp(84)))
         addView(syncButton, LinearLayout.LayoutParams(-1, dp(44)))
         addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
     }
@@ -369,8 +369,21 @@ internal class ElevatePlayerPanel(
                 null
             }
             "onTracksChanged" -> {
+                val actual = fragment.player.getCurrentPreferredSubtitle()
+                android.util.Log.d("ElevatePanelSelect",
+                    "tracksChanged requestSeq=$subtitleSelectionLogSeq requestedHash=$lastSubtitleRequestHash " +
+                        "actualHash=${actual?.url?.hashCode()} actualOrigin=${actual?.origin} " +
+                        "tab=$tab inSync=$inSync modelCount=${vm.state.subtitles.size}")
                 if (tab == Tab.SUBTITLES && !inSync)
-                    root.post { if (tab == Tab.SUBTITLES && !inSync) renderSubtitles() }
+                    root.post {
+                        if (tab == Tab.SUBTITLES && !inSync) {
+                            val selected = fragment.player.getCurrentPreferredSubtitle()
+                            android.util.Log.d("ElevatePanelSelect",
+                                "tracksPosted seq=$subtitleSelectionLogSeq requestedHash=$lastSubtitleRequestHash " +
+                                    "actualHash=${selected?.url?.hashCode()} origin=${selected?.origin}")
+                            renderSubtitles()
+                        }
+                    }
                 null
             }
             "equals" -> proxy === args?.getOrNull(0)
@@ -387,6 +400,8 @@ internal class ElevatePlayerPanel(
         next?.addListener(cueListener)
         android.util.Log.d("ElevatePanelSync", "cueListener enabled=$enabled attached=${next != null}")
     }
+    private var subtitleSelectionLogSeq = 0
+    private var lastSubtitleRequestHash: Int? = null
     private val touches = ArrayList<View>()
     private val linksChanged = Observer<VideoLive<Set<VideoLink>>> { update ->
         android.util.Log.d("ElevatePanelData",
@@ -396,10 +411,20 @@ internal class ElevatePlayerPanel(
         if (tab == Tab.SOURCES) showTabContents()
     }
     private val subtitlesChanged = Observer<VideoLive<Set<SubtitleData>>> { update ->
+        val actual = fragment.player.getCurrentPreferredSubtitle()
         android.util.Log.d("ElevatePanelData",
             "subtitleEvent instance=${update?.instance} currentInstance=${vm.state.instance} " +
                 "eventCount=${update?.value?.size} stateCount=${vm.state.subtitles.size} " +
-                "tab=$tab inSync=$inSync selectedHash=${fragment.player.getCurrentPreferredSubtitle()?.url?.hashCode()}")
+                "tab=$tab inSync=$inSync selectedHash=${actual?.url?.hashCode()} " +
+                "selectedOrigin=${actual?.origin} requestSeq=$subtitleSelectionLogSeq " +
+                "requestedHash=$lastSubtitleRequestHash")
+        root.post {
+            val after = fragment.player.getCurrentPreferredSubtitle()
+            android.util.Log.d("ElevatePanelSelect",
+                "subtitleEventPosted requestSeq=$subtitleSelectionLogSeq requestedHash=$lastSubtitleRequestHash " +
+                    "actualHash=${after?.url?.hashCode()} actualOrigin=${after?.origin} " +
+                    "modelCount=${vm.state.subtitles.size} tab=$tab")
+        }
         if (tab == Tab.SUBTITLES) {
             if (inSync) updateSyncCues("subtitle-list")
             else showTabContents()
@@ -595,6 +620,7 @@ internal class ElevatePlayerPanel(
         val groups = keys.distinct()
         if (filter !in groups) filter = null
         filters.removeAllViews()
+        var filterButtonCount = 0
         fun addFilter(value: String?) {
             val item = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -609,7 +635,7 @@ internal class ElevatePlayerPanel(
                 ) as TextView).apply {
                     text = value ?: ctx.getString(R.string.all)
                     styleRow(this, value == filter)
-                    maxLines = 2
+                    maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
                     maxWidth = dp(164)
                 }, LinearLayout.LayoutParams(-2, -2))
@@ -617,7 +643,13 @@ internal class ElevatePlayerPanel(
                 alpha = if (value == filter) 1f else .65f
                 setOnClickListener { filter = value; renderSources() }
             }
-            filters.addView(item, LinearLayout.LayoutParams(-2, -2))
+            // Two actual button rows, filled top-to-bottom: 1/3 on top, 2/4 below.
+            val column = if (filterButtonCount++ % 2 == 0) {
+                LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }.also {
+                    filters.addView(it, LinearLayout.LayoutParams(-2, dp(84)))
+                }
+            } else filters.getChildAt(filters.childCount - 1) as LinearLayout
+            column.addView(item, LinearLayout.LayoutParams(-2, 0, 1f))
         }
         addFilter(null)
         groups.forEach(::addFilter)
@@ -701,19 +733,39 @@ internal class ElevatePlayerPanel(
     }
 
     private fun setSubtitle(sub: SubtitleData?) {
+        val seq = ++subtitleSelectionLogSeq
+        val before = fragment.player.getCurrentPreferredSubtitle()
+        lastSubtitleRequestHash = sub?.url?.hashCode()
+        android.util.Log.d("ElevatePanelSelect",
+            "tap seq=$seq requestedHash=$lastSubtitleRequestHash requestedOrigin=${sub?.origin} " +
+                "beforeHash=${before?.url?.hashCode()} beforeOrigin=${before?.origin} " +
+                "modelCount=${vm.state.subtitles.size}")
         runCatching {
             val requiresReload = GeneratorPlayer::class.java.getDeclaredMethod(
                 "setSubtitles", SubtitleData::class.java, Boolean::class.javaPrimitiveType!!
             ).apply { isAccessible = true }.invoke(fragment, sub, true) as? Boolean == true
+            val immediate = fragment.player.getCurrentPreferredSubtitle()
+            android.util.Log.d("ElevatePanelSelect",
+                "setReturned seq=$seq requiresReload=$requiresReload " +
+                    "actualHash=${immediate?.url?.hashCode()} actualOrigin=${immediate?.origin}")
             if (requiresReload) {
                 currentLink()?.let { link ->
+                    android.util.Log.d("ElevatePanelSelect",
+                        "reloadLink seq=$seq linkHash=${link.hashCode()}")
                     GeneratorPlayer::class.java.getDeclaredMethod(
                         "loadLink", Pair::class.java, Boolean::class.javaPrimitiveType!!
                     ).apply { isAccessible = true }.invoke(fragment, link, true)
                 }
             }
-        }.onFailure { android.util.Log.w("Elevate", "Subtitle selection failed", it) }
+        }.onFailure { android.util.Log.w("ElevatePanelSelect", "setFailed seq=$seq", it) }
             .onSuccess { renderSubtitles() }
+        root.post {
+            val actual = fragment.player.getCurrentPreferredSubtitle()
+            android.util.Log.d("ElevatePanelSelect",
+                "tapPosted seq=$seq latestSeq=$subtitleSelectionLogSeq " +
+                    "requestedHash=$lastSubtitleRequestHash actualHash=${actual?.url?.hashCode()} " +
+                    "actualOrigin=${actual?.origin} currentInstance=${vm.state.instance}")
+        }
     }
 
     private fun orderedOptions(group: List<SubtitleData>): List<SubtitleData> =
