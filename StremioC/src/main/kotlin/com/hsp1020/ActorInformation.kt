@@ -48,6 +48,7 @@ import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
 import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -189,38 +190,35 @@ internal object ActorInformation {
             }
         }
         val task = synchronized(flights) {
-            flights[cacheKey] ?: sharedScope.async {
-                request(personId, endpoint, lang, apiKey)
-            }.also {
-                flights[cacheKey] = it
-            }
-        }
-        try {
-            val result = task.await()
-            val bytes = result.toString().toByteArray(Charsets.UTF_8)
-            if (bytes.size.toLong() <= MAX_CACHE_BYTES) {
-                synchronized(cache) {
-                    cache.remove(cacheKey)?.let { cacheBytes -= it.bytes.size.toLong() }
-                    cache[cacheKey] = CacheEntry(bytes, System.currentTimeMillis())
-                    cacheBytes += bytes.size.toLong()
-                    val iterator = cache.entries.iterator()
-                    while ((cache.size > MAX_CACHE_ENTRIES || cacheBytes > MAX_CACHE_BYTES) &&
-                        iterator.hasNext()) {
-                        val evicted = iterator.next()
-                        cacheBytes -= evicted.value.bytes.size.toLong()
-                        iterator.remove()
+            flights[cacheKey] ?: sharedScope.async(start = CoroutineStart.LAZY) {
+                val result = request(personId, endpoint, lang, apiKey)
+                val bytes = result.toString().toByteArray(Charsets.UTF_8)
+                if (bytes.size.toLong() <= MAX_CACHE_BYTES) {
+                    synchronized(cache) {
+                        cache.remove(cacheKey)?.let { cacheBytes -= it.bytes.size.toLong() }
+                        cache[cacheKey] = CacheEntry(bytes, System.currentTimeMillis())
+                        cacheBytes += bytes.size.toLong()
+                        val iterator = cache.entries.iterator()
+                        while ((cache.size > MAX_CACHE_ENTRIES || cacheBytes > MAX_CACHE_BYTES) &&
+                            iterator.hasNext()) {
+                            val evicted = iterator.next()
+                            cacheBytes -= evicted.value.bytes.size.toLong()
+                            iterator.remove()
+                        }
                     }
                 }
-            } else {
-            }
-            return result
-        } catch (error: Throwable) {
-            throw error
-        } finally {
-            if (task.isCompleted) synchronized(flights) {
-                if (flights[cacheKey] === task) flights.remove(cacheKey)
+                result
+            }.also { flight ->
+                flights[cacheKey] = flight
+                flight.invokeOnCompletion {
+                    synchronized(flights) {
+                        if (flights[cacheKey] === flight) flights.remove(cacheKey)
+                    }
+                }
             }
         }
+        task.start()
+        return task.await()
     }
 
     private data class Credit(

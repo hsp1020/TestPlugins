@@ -793,7 +793,8 @@ open class StremioC(
             val type: String, val id: String, val tmdbId: Int?, val name: String,
             val poster: String?, val rank: Int
         )
-        private data class SimklSuggestionCache(val entries: List<SimklSuggestion>, val at: Long)
+        // Null means a failed request, distinct from a successful empty recommendation list.
+        private data class SimklSuggestionCache(val entries: List<SimklSuggestion>?, val at: Long)
         private val simklSuggestionCache = lruCacheMap<String, SimklSuggestionCache>(160)
         private val simklSuggestionFlights = mutableMapOf<String, Deferred<List<SimklSuggestion>>>()
         private val simklSuggestionLock = Any()
@@ -803,6 +804,7 @@ open class StremioC(
         private const val SIMKL_RECOMMENDATION_WAIT_MS = 1000L
         private const val SIMKL_RECOMMENDATION_TTL_MS = 24L * 60 * 60 * 1000
         private const val SIMKL_RECOMMENDATION_EMPTY_TTL_MS = 15L * 60 * 1000
+        private const val SIMKL_RECOMMENDATION_ERROR_TTL_MS = 30_000L
         private const val SIMKL_TITLE_INDEX_TTL_MS = 2L * 60 * 1000
         private data class SimklTitleIndex(
             val userId: String, val at: Long, val byExternalId: Map<String, Pair<String, String>>
@@ -892,7 +894,7 @@ open class StremioC(
         private suspend fun loadSimklSuggestions(
             userId: String, type: String, tmdbId: String, imdbId: String?, malId: Int?,
             headers: Map<String, String>, clientId: String, key: String
-        ): List<SimklSuggestion> {
+        ): List<SimklSuggestion>? {
             return simklSuggestionSemaphore.withPermit {
             
             val disk = MetadataDiskCache.read("simkl_recs", key)
@@ -919,6 +921,7 @@ open class StremioC(
                     "app-version" to "1.0"
                 )
                 val requestHeaders = headers + ("User-Agent" to "StremioC/1.0")
+                var lookupFailed = false
                 var resolved: Pair<String, String>? = null
                 for ((lookupKey, lookupValue) in lookups.distinct()) {
                     val params = paramsBase + (lookupKey to lookupValue) +
@@ -932,12 +935,12 @@ open class StremioC(
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
-                        
+                        lookupFailed = true
                         continue
                     }
-                    
+
                     if (response.code !in 200..299) {
-                        
+                        lookupFailed = true
                         // Invalid credentials and rate limits will affect every ID;
                         // avoid consuming extra requests in these cases.
                         if (response.code in listOf(401, 403, 412, 429)) break
@@ -946,12 +949,12 @@ open class StremioC(
                     val parsed = try {
                         parseJson<JsonNode>(response.text)
                     } catch (e: Exception) {
-                        
+                        lookupFailed = true
                         continue
                     }
-                    
+
                     if (!parsed.isArray) {
-                        
+                        lookupFailed = true
                         continue
                     }
                     val rows = parsed.toList()
@@ -997,8 +1000,7 @@ open class StremioC(
                     
                 }
                 if (resolved == null) {
-                    
-                    return@withPermit emptyList()
+                    return@withPermit if (lookupFailed) null else emptyList()
                 }
                 
                 resolved
@@ -1013,13 +1015,11 @@ open class StremioC(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                
-                return@withPermit emptyList()
+                return@withPermit null
             }
-            
+
             if (response.code !in 200..299 || response.text.isBlank()) {
-                
-                return@withPermit emptyList()
+                return@withPermit null
             }
             val result = simklSuggestionsFromDetail(response.text)
             
@@ -1066,9 +1066,12 @@ open class StremioC(
             val cached = simklSuggestionCache[key]
             val now = System.currentTimeMillis()
             if (cached != null && now >= cached.at &&
-                now - cached.at < if (cached.entries.isEmpty()) SIMKL_RECOMMENDATION_EMPTY_TTL_MS else SIMKL_RECOMMENDATION_TTL_MS) {
-                
-                return CompletableDeferred(cached.entries)
+                now - cached.at < when {
+                    cached.entries == null -> SIMKL_RECOMMENDATION_ERROR_TTL_MS
+                    cached.entries.isEmpty() -> SIMKL_RECOMMENDATION_EMPTY_TTL_MS
+                    else -> SIMKL_RECOMMENDATION_TTL_MS
+                }) {
+                return CompletableDeferred(cached.entries.orEmpty())
             }
             val userId = auth.user.id.toString()
             val task = synchronized(simklSuggestionLock) {
@@ -1080,13 +1083,11 @@ open class StremioC(
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
-                        
-                        emptyList()
+                        null
                     }
-                    val rows = result.orEmpty()
-                    
-                    simklSuggestionCache[key] = SimklSuggestionCache(rows, System.currentTimeMillis())
-                    rows
+                    // Failed requests use a brief passive cooldown, not the 15-minute empty-result TTL.
+                    simklSuggestionCache[key] = SimklSuggestionCache(result, System.currentTimeMillis())
+                    result.orEmpty()
                 }.also {
                     simklSuggestionFlights[key] = it
                 }
