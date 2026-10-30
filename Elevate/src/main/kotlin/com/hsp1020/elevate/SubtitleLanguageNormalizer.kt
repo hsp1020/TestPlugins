@@ -382,7 +382,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
 
         // StremioC numbers its final visible rows; retain online details in SubtitleData
         // instead of permanently replacing the suffix (which also identifies the track).
-        if (state.generatorState.response?.apiName?.equals("StremioC", true) == true) {
+        if (state.generatorState?.response?.apiName?.equals("StremioC", true) == true) {
             if (normalized.toSet() != state.subtitles) vm.modifyState {
                 if (instance != state.instance) this else set(normalized)
             }
