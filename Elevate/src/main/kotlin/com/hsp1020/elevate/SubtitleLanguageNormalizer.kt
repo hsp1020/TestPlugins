@@ -4,6 +4,13 @@ import android.app.Activity
 import android.app.Application
 import android.app.Dialog
 import android.os.Bundle
+import android.view.View
+import android.view.ViewTreeObserver
+import android.widget.AdapterView
+import android.widget.HeaderViewListAdapter
+import android.widget.ListView
+import android.widget.TextView
+import com.lagradost.cloudstream3.utils.AppContextUtils.sortSubs
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
@@ -31,6 +38,16 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
     private var fragment: GeneratorPlayer? = null
     private var model: PlayerGeneratorViewModel? = null
     private var removeObserver: (() -> Unit)? = null
+    private var focusTree: ViewTreeObserver? = null
+    private val focusListener = ViewTreeObserver.OnWindowFocusChangeListener {
+        fragment?.view?.post { inspectSingleOptionDialog() }
+    }
+    private var singleDialog: Dialog? = null
+    private var singleGroups: ListView? = null
+    private var singleOptions: ListView? = null
+    private var singleFooter: View? = null
+    private var originalGroupClick: AdapterView.OnItemClickListener? = null
+    private var singleGroupClick: AdapterView.OnItemClickListener? = null
     private var pendingDialogView: android.view.View? = null
     private val onDialogDetached = object : android.view.View.OnAttachStateChangeListener {
         override fun onViewAttachedToWindow(view: android.view.View) = Unit
@@ -38,6 +55,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             if (pendingDialogView !== view) return
             view.removeOnAttachStateChangeListener(this)
             pendingDialogView = null
+            clearSingleOptionDialog()
             val f = fragment ?: return
             val vm = model ?: return
             f.view?.post {
@@ -49,6 +67,95 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         FullScreenPlayer::class.java.getDeclaredField("selectSourceDialog")
             .apply { isAccessible = true }
     }.getOrNull()
+
+    private fun clearSingleOptionDialog() {
+        val list = singleGroups
+        if (list?.onItemClickListener === singleGroupClick) {
+            list.onItemClickListener = originalGroupClick
+        }
+        singleFooter?.let { singleOptions?.removeFooterView(it) }
+        singleDialog = null
+        singleGroups = null
+        singleOptions = null
+        singleFooter = null
+        originalGroupClick = null
+        singleGroupClick = null
+    }
+
+    private fun stremioSubtitleDetail(url: String): String? = runCatching {
+        val method = APIHolder::class.java.methods.firstOrNull { it.name == "getAllProviders" }
+        val provider = (method?.invoke(APIHolder) as? Iterable<*>)?.firstOrNull {
+            it?.javaClass?.name == "com.hsp1020.StremioC"
+        } ?: return@runCatching null
+        val field = provider.javaClass.getDeclaredField("subtitleDetailByUrl")
+            .apply { isAccessible = true }
+        (field.get(null) as? Map<*, *>)?.get(url) as? String
+    }.getOrNull()
+
+    private fun inspectSingleOptionDialog() {
+        val f = fragment ?: return
+        val dialog = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
+            ?.takeIf { it.isShowing } ?: return
+        dialog.window?.decorView?.let { decor ->
+            if (pendingDialogView !== decor) {
+                pendingDialogView?.removeOnAttachStateChangeListener(onDialogDetached)
+                pendingDialogView = decor
+                decor.addOnAttachStateChangeListener(onDialogDetached)
+            }
+        }
+        if (singleDialog === dialog) return
+        val vm = model ?: return
+        val list = dialog.findViewById<ListView>(R.id.sort_subtitles) ?: return
+        val options = dialog.findViewById<ListView>(R.id.sort_subtitles_options) ?: return
+        val originalClick = list.onItemClickListener ?: return
+        if (options.adapter == null) return
+        clearSingleOptionDialog()
+        singleDialog = dialog
+        singleGroups = list
+        singleOptions = options
+        originalGroupClick = originalClick
+
+        val click = AdapterView.OnItemClickListener { parent, view, position, id ->
+            originalClick.onItemClick(parent, view, position, id)
+            list.post { if (singleDialog === dialog && dialog.isShowing) updateSingleOption(vm) }
+        }
+        singleGroupClick = click
+        list.onItemClickListener = click
+        updateSingleOption(vm)
+    }
+
+    private fun updateSingleOption(vm: PlayerGeneratorViewModel) {
+        val dialog = singleDialog?.takeIf { it.isShowing } ?: return
+        val list = singleGroups ?: return
+        val options = singleOptions ?: return
+        val groups = sortSubs(vm.state.subtitles).groupBy { it.originalName }.values.toList()
+        val displayed = (list.adapter as? HeaderViewListAdapter)?.wrappedAdapter ?: list.adapter
+        val order = (list.getTag(R.id.sort_subtitles) as? IntArray)
+            ?.takeIf { it.size == groups.size && it.toSet().size == groups.size }
+        val position = list.checkedItemPosition - 1
+        val index = if (order != null && position in order.indices) order[position] else position
+        val item = if (displayed?.count == groups.size + 1) {
+            groups.getOrNull(index)?.singleOrNull()
+        } else null
+
+        if (item == null) {
+            singleFooter?.let { options.removeFooterView(it) }
+            singleFooter = null
+            return
+        }
+        if (singleFooter == null) {
+            if (options.adapter?.count != 0) return
+            val footer = android.view.LayoutInflater.from(dialog.context)
+                .inflate(R.layout.sort_bottom_single_choice, options, false) as? TextView ?: return
+            options.addFooterView(footer, null, true)
+            singleFooter = footer
+        }
+        val detail = stremioSubtitleDetail(item.url)?.takeIf { it.isNotBlank() }
+        val label = item.nameSuffix.ifBlank { "1" }
+        (singleFooter as? TextView)?.text = if (detail != null) "$label($detail)" else label
+        options.visibility = View.VISIBLE
+        options.setItemChecked(0, true)
+    }
 
     private val callbacks = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
@@ -99,6 +206,10 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         }
         vm.currentSubtitles.observe(candidate.viewLifecycleOwner, observer)
         removeObserver = { vm.currentSubtitles.removeObserver(observer) }
+        candidate.activity?.window?.decorView?.viewTreeObserver?.takeIf { it.isAlive }?.let {
+            focusTree = it
+            it.addOnWindowFocusChangeListener(focusListener)
+        }
         normalize(vm)
     }
 
@@ -106,6 +217,9 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         if (candidate != null && candidate !== fragment) return
         pendingDialogView?.removeOnAttachStateChangeListener(onDialogDetached)
         pendingDialogView = null
+        clearSingleOptionDialog()
+        focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
+        focusTree = null
         removeObserver?.invoke()
         removeObserver = null
         fragment = null
@@ -166,13 +280,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         val f = fragment ?: return
         val dialog = runCatching { dialogField?.get(f) as? Dialog }.getOrNull()
         if (dialog?.isShowing == true) {
-            dialog.window?.decorView?.let { decor ->
-                if (pendingDialogView !== decor) {
-                    pendingDialogView?.removeOnAttachStateChangeListener(onDialogDetached)
-                    pendingDialogView = decor
-                    decor.addOnAttachStateChangeListener(onDialogDetached)
-                }
-            }
+            inspectSingleOptionDialog()
             return
         }
         pendingDialogView?.removeOnAttachStateChangeListener(onDialogDetached)
