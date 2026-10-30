@@ -99,15 +99,21 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         singleGroupClick = null
     }
 
-    private fun stremioSubtitleDetail(url: String): String? = runCatching {
+    // Share original extractor descriptions through the existing URL metadata cache,
+    // without modifying nameSuffix, which is part of the native track identity.
+    private fun stremioDetailCache(): MutableMap<String, String>? = runCatching {
         val method = APIHolder::class.java.methods.firstOrNull { it.name == "getAllProviders" }
         val provider = (method?.invoke(APIHolder) as? Iterable<*>)?.firstOrNull {
             it?.javaClass?.name == "com.hsp1020.StremioC"
         } ?: return@runCatching null
         val field = provider.javaClass.getDeclaredField("subtitleDetailByUrl")
             .apply { isAccessible = true }
-        (field.get(null) as? Map<*, *>)?.get(url) as? String
+        @Suppress("UNCHECKED_CAST")
+        val cache = field.get(null) as? MutableMap<String, String>
+        cache
     }.getOrNull()
+
+    private fun stremioSubtitleDetail(url: String): String? = stremioDetailCache()?.get(url)
 
     private fun inspectSingleOptionDialog() {
         val f = fragment ?: return
@@ -372,8 +378,24 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         val state = vm.state
         if (state.subtitles.isEmpty()) return
         val ranks = stremioRanks()
-        val normalized = state.subtitles.map { localized(it, ranks) }
-            .filter {
+        val stremio = state.generatorState?.response?.apiName?.equals("StremioC", true) == true
+        val details = if (stremio) stremioDetailCache() else null
+        val normalized = state.subtitles.map { sub ->
+            val localized = localized(sub, ranks)
+            if (details != null && sub.origin == SubtitleOrigin.URL &&
+                localized.originalName != sub.originalName) {
+                val original = sub.originalName.trim()
+                val language = SubtitleHelper.fromTagToEnglishLanguageName(sub.languageCode)
+                // Preserve source descriptors such as "Arabic (CR_Arabic) (ASS)"
+                // before the language group is localized; plain language names need no detail.
+                if (original.isNotBlank() && !original.equals(language, true)) {
+                    synchronized(details) {
+                        if (details[sub.url].isNullOrBlank()) details[sub.url] = original
+                    }
+                }
+            }
+            localized
+        }.filter {
                 val language = it.originalName.substringBefore(" · ").substringBefore(" — ").trim()
                 language.isNotEmpty() && !language.equals("Unknown", ignoreCase = true) &&
                     !language.equals("und", ignoreCase = true)
@@ -382,7 +404,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
 
         // StremioC numbers its final visible rows; retain online details in SubtitleData
         // instead of permanently replacing the suffix (which also identifies the track).
-        if (state.generatorState?.response?.apiName?.equals("StremioC", true) == true) {
+        if (stremio) {
             if (normalized.toSet() != state.subtitles) vm.modifyState {
                 if (instance != state.instance) this else set(normalized)
             }

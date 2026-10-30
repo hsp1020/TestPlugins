@@ -5555,13 +5555,11 @@ open class StremioC(
                 append(sourceLabel)
             }
         }
-        synchronized(subtitleDetailByUrl) {
-            if (detail.isBlank()) subtitleDetailByUrl.remove(subtitleUrl)
-            else subtitleDetailByUrl[subtitleUrl] = detail
+        if (detail.isNotBlank()) synchronized(subtitleDetailByUrl) {
+            subtitleDetailByUrl[subtitleUrl] = detail
         }
-        synchronized(subtitleSourceByUrl) {
-            if (sourceLabel == null) subtitleSourceByUrl.remove(subtitleUrl)
-            else subtitleSourceByUrl[subtitleUrl] = sourceLabel
+        if (sourceLabel != null) synchronized(subtitleSourceByUrl) {
+            subtitleSourceByUrl[subtitleUrl] = sourceLabel
         }
         // Keep translated choices distinct from actual target-language subtitles.
         val groupKey = if (sourceLanguage != null) translationGroupId(displayLanguage) else language

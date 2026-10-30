@@ -659,22 +659,23 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         val optionsAdapter = optionsParent as? ArrayAdapter<*> ?: return
         options.setTag(R.id.sort_subtitles_options, optionsAdapter)
         val optionSelected = options.checkedItemPosition
-        options.adapter = RefreshRowAdapter(optionsAdapter, { position ->
-            optionAt(position)?.let { StremioSubtitleRefreshRegistry.find(it.url) }
-        }, { position ->
-            val sub = optionAt(position) ?: return@RefreshRowAdapter null
+        fun optionLabel(position: Int): String? {
+            val sub = optionAt(position) ?: return null
             val number = position + 1
             if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) {
                 val embedded = dialog.context.getString(R.string.subtitles_from_embedded)
-                "$number ($embedded" +
+                return "$number ($embedded" +
                     (if (sub.nameSuffix.isNotBlank()) " · ${sub.nameSuffix}" else "") + ")"
-            } else {
-                val detail = StremioC.subtitleDetailByUrl[sub.url]?.takeIf { it.isNotBlank() }
-                    ?: StremioC.subtitleSourceByUrl[sub.url]?.takeIf { it.isNotBlank() }
-                    ?: sub.nameSuffix.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
-                "$number" + (detail?.let { "($it)" } ?: "")
             }
-        }, { position -> optionOrder().getOrNull(position) ?: position })
+            val detail = StremioC.subtitleDetailByUrl[sub.url]?.takeIf { it.isNotBlank() }
+                ?: StremioC.subtitleSourceByUrl[sub.url]?.takeIf { it.isNotBlank() }
+                ?: sub.nameSuffix.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
+            return "$number" + (detail?.let { "($it)" } ?: "")
+        }
+        options.adapter = RefreshRowAdapter(optionsAdapter, { position ->
+            optionAt(position)?.let { StremioSubtitleRefreshRegistry.find(it.url) }
+        }, { position -> optionLabel(position) },
+            { position -> optionOrder().getOrNull(position) ?: position })
         if (optionSelected >= 0) {
             val displayIndex = optionOrder().indexOf(optionSelected)
             options.setItemChecked(if (displayIndex >= 0) displayIndex else optionSelected, true)
@@ -698,7 +699,8 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                         " suffix=${sub.nameSuffix.take(70)}" +
                         " detail=${StremioC.subtitleDetailByUrl[sub.url]?.take(100)}" +
                         " source=${StremioC.subtitleSourceByUrl[sub.url]?.take(70)}" +
-                        " adapterText=$adapterText")
+                        " adapterText=$adapterText" +
+                        " finalLabel=${optionLabel(display)?.take(100)}")
             }
         }
         logOptionMapping()
