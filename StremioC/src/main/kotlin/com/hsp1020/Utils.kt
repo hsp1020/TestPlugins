@@ -633,7 +633,8 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         }
         fun optionOrder(): List<Int> {
             val checked = list.checkedItemPosition
-            return visibleOptions.getOrNull(order.getOrNull(checked - 1)) ?: emptyList()
+            val index = order.getOrNull(checked - 1) ?: return emptyList()
+            return visibleOptions.getOrNull(index) ?: emptyList()
         }
         fun optionAt(position: Int): SubtitleData? {
             val checked = list.checkedItemPosition
