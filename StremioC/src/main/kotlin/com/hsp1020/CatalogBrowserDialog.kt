@@ -580,16 +580,21 @@ internal fun catalogStyledSelector(activity: FragmentActivity): AppCompatSpinner
 
 internal fun catalogStyledAdapter(
     activity: FragmentActivity, labels: List<String>, spinner: AppCompatSpinner,
-    fontTypeface: Typeface?, textSize: Float, checkDrawable: android.graphics.drawable.Drawable?
+    fontTypeface: Typeface?, textSize: Float, checkDrawable: android.graphics.drawable.Drawable?,
+    nativeHeaderStyle: Boolean = false
 ): ArrayAdapter<String> {
     fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
+    fun TextView.styleCatalogText(color: Int) {
+        if (nativeHeaderStyle) setTextAppearance(R.style.WatchHeaderText)
+        else typeface = fontTypeface
+        setTextSize(TypedValue.COMPLEX_UNIT_PX, textSize)
+        setTextColor(color)
+    }
         return object : ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, labels) {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup) =
                 super.getView(position, convertView, parent).also { row ->
                     ((row as? TextView) ?: row.findViewById<TextView>(android.R.id.text1))?.apply {
-                        typeface = fontTypeface
-                        setTextSize(TypedValue.COMPLEX_UNIT_PX, textSize)
-                        setTextColor(activity.colorFromAttribute(R.attr.textColor))
+                        styleCatalogText(activity.colorFromAttribute(R.attr.textColor))
                         setSingleLine(true)
                         ellipsize = TextUtils.TruncateAt.END
                         setPadding(paddingLeft, paddingTop, dp(40), paddingBottom)
@@ -655,9 +660,7 @@ internal fun catalogStyledAdapter(
                     setPadding(dp(16), 0, dp(12), 0)
                     addView(TextView(activity).apply {
                         text = labels[position]
-                        typeface = fontTypeface
-                        setTextSize(TypedValue.COMPLEX_UNIT_PX, textSize)
-                        setTextColor(color)
+                        styleCatalogText(color)
                         gravity = Gravity.CENTER_VERTICAL
                         setSingleLine(true)
                         ellipsize = TextUtils.TruncateAt.END
@@ -695,19 +698,7 @@ internal class CatalogBrowserDialog(
     private val genreArrow = selectorArrow()
     private val checkIconId = pluginResources.getIdentifier("addon_check_icon", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
     private val selectorLabelStyle = TextView(activity).apply {
-        if (isLayout(com.lagradost.cloudstream3.ui.settings.Globals.PHONE)) {
-            // On the phone use the exact native Home header text appearance.
-            // Keep the original selector size and leave tablet/TV typography unchanged.
-            val size = textSize
-            setTextAppearance(R.style.WatchHeaderText)
-            setTextSize(TypedValue.COMPLEX_UNIT_PX, size)
-            typeface = Typeface.create(
-                androidx.core.content.res.ResourcesCompat.getFont(activity, R.font.google_sans)
-                    ?: typeface, Typeface.BOLD
-            )
-        } else {
-            typeface = Typeface.create(typeface, Typeface.BOLD)
-        }
+        typeface = Typeface.create(typeface, Typeface.BOLD)
     }
     private val retry = button("Retry").apply { visibility = View.GONE }
     private var initialSkeleton = false
@@ -1267,7 +1258,13 @@ internal class CatalogBrowserDialog(
             gravity = Gravity.CENTER_VERTICAL
             addView(TextView(activity).apply {
                 text = title
-                typeface = selectorLabelStyle.typeface
+                if (isLayout(com.lagradost.cloudstream3.ui.settings.Globals.PHONE)) {
+                    val originalSize = textSize
+                    setTextAppearance(R.style.WatchHeaderText)
+                    setTextSize(TypedValue.COMPLEX_UNIT_PX, originalSize)
+                } else {
+                    typeface = selectorLabelStyle.typeface
+                }
                 gravity = Gravity.CENTER_VERTICAL
                 setTextColor(activity.colorFromAttribute(R.attr.textColor))
                 setSingleLine(true)
@@ -1292,7 +1289,8 @@ internal class CatalogBrowserDialog(
         }?.visibility = if (labels.size > 1) View.VISIBLE else View.GONE
         adapter = catalogStyledAdapter(activity, labels, this, selectorLabelStyle.typeface,
             selectorLabelStyle.textSize,
-            if (checkIconId != 0) pluginResources.getDrawable(checkIconId, null) else null)
+            if (checkIconId != 0) pluginResources.getDrawable(checkIconId, null) else null,
+            nativeHeaderStyle = isLayout(com.lagradost.cloudstream3.ui.settings.Globals.PHONE))
         if (selected in labels.indices) setSelection(selected)
         onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
