@@ -1,7 +1,7 @@
 version = 1
 
 cloudstream {
-    description = "Enhance CloudStream with native detail search and global PiP subtitles"
+    description = "인핸스 클라우드스트림"
     authors = listOf("hsp1020")
     language = "en"
     status = 1
