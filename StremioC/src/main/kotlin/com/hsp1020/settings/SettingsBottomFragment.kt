@@ -280,12 +280,8 @@ class SettingsBottomFragment(
 
     private fun dp(value: Int) = (value * hostContext.resources.displayMetrics.density + 0.5f).toInt()
 
-    private val hostTypeface by lazy { TextView(hostContext).typeface }
     private fun normalizeTypeface(view: View) {
-        if (view is TextView) {
-            val weight = if (view.typeface?.isBold == true) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL
-            view.typeface = android.graphics.Typeface.create(hostTypeface, weight)
-        }
+        if (view is TextView) view.applyStremioCNativeFont()
         if (view is ViewGroup) for (i in 0 until view.childCount) normalizeTypeface(view.getChildAt(i))
     }
     private fun getDarkThemeBg() = hostContext.getDrawable(HostR.drawable.dialog__window_background)!!.mutate()
@@ -894,7 +890,7 @@ class SettingsBottomFragment(
         setPadding(dp(20), dp(20), dp(20), dp(20))
         background = getDarkThemeBg()
         addView(TextView(hostContext).apply {
-            text = title; textSize = 18f; typeface = android.graphics.Typeface.DEFAULT_BOLD
+            text = title; textSize = 18f; applyStremioCNativeFont(bold = true)
             setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
             gravity = Gravity.CENTER; setPadding(0, 0, 0, dp(12))
         })
@@ -1155,7 +1151,7 @@ class SettingsBottomFragment(
     private fun dialogButton(ctx: Context, label: String, params: LinearLayout.LayoutParams) = TextView(ctx).apply {
         text = label
         textSize = 14f
-        typeface = android.graphics.Typeface.create(hostTypeface, android.graphics.Typeface.BOLD)
+        applyStremioCNativeFont(bold = true)
         setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
         gravity = Gravity.CENTER
         minHeight = dp(48)
@@ -1177,7 +1173,7 @@ class SettingsBottomFragment(
                 text = title
                 textSize = 18f
                 setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                applyStremioCNativeFont(bold = true)
                 setPadding(0, 0, 0, 20)
                 gravity = android.view.Gravity.CENTER
             })
@@ -1359,7 +1355,7 @@ class SettingsBottomFragment(
                             text = "Export Successful"
                             textSize = 18f
                             setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-                            typeface = android.graphics.Typeface.DEFAULT_BOLD
+                            applyStremioCNativeFont(bold = true)
                             setPadding(0, 0, 0, 20)
                             gravity = android.view.Gravity.CENTER
                         })
@@ -1435,7 +1431,7 @@ class SettingsBottomFragment(
                             text = "Backup Data Detected"
                             textSize = 18f
                             setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-                            typeface = android.graphics.Typeface.DEFAULT_BOLD
+                            applyStremioCNativeFont(bold = true)
                             setPadding(0, 0, 0, 20)
                             gravity = android.view.Gravity.CENTER
                         })
@@ -1480,7 +1476,7 @@ class SettingsBottomFragment(
                                 text = "Restoring Data"
                                 textSize = 18f
                                 setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-                                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                                applyStremioCNativeFont(bold = true)
                                 setPadding(0, 0, 0, 20)
                                 gravity = android.view.Gravity.CENTER
                             })
@@ -1830,7 +1826,7 @@ class SettingsBottomFragment(
                     text = "Save & Reload"
                     textSize = 18f
                     setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
-                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                    applyStremioCNativeFont(bold = true)
                     setPadding(0, 0, 0, 20)
                     gravity = android.view.Gravity.CENTER
                 })
@@ -2126,7 +2122,7 @@ private fun showLanguageSelectDialog() {
         container.addView(TextView(context).apply {
             text = "TMDB Language"
             textSize = 18f
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            applyStremioCNativeFont(bold = true)
             setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
             setPadding(0, 0, 0, dp(20))
             gravity = android.view.Gravity.START
@@ -2461,7 +2457,7 @@ private fun showLanguageSelectDialog() {
         val titleView = TextView(context).apply {
             text = "$addonName - Catalog Settings"
             textSize = 18f
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            applyStremioCNativeFont(bold = true)
             setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
             setPadding(0, 0, 0, 30)
             gravity = android.view.Gravity.START

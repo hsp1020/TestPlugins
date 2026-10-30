@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Color
-import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.text.Layout
 import android.text.StaticLayout
@@ -346,7 +345,7 @@ internal object ActorInformation {
                 this.text = text
                 textSize = size
                 setTextColor(fragment.requireContext().colorFromAttribute(R.attr.textColor))
-                if (strong) typeface = Typeface.DEFAULT_BOLD
+                if (strong) applyStremioCNativeFont(bold = true)
                 setPadding(dp(8), dp(6), dp(8), dp(6))
             }
 

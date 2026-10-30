@@ -61,6 +61,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.TextView
+import android.graphics.Typeface
+import androidx.core.content.res.ResourcesCompat
 import android.widget.FrameLayout
 import android.widget.Checkable
 import androidx.media3.common.Player
@@ -108,6 +110,26 @@ import com.lagradost.cloudstream3.ui.player.SubtitleOffsetItemAdapter
 import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
 import com.lagradost.cloudstream3.utils.AppContextUtils.sortSubs
+/** Reuse CloudStream's font family while preserving the view's original weight and size. */
+internal fun TextView.applyStremioCNativeFont(
+    bold: Boolean = typeface?.isBold == true,
+    header: Boolean = false
+) {
+    val originalSize = textSize
+    val original = typeface
+    if (header) setTextAppearance(R.style.WatchHeaderText)
+    val family = ResourcesCompat.getFont(context, R.font.google_sans)
+    if (family != null) {
+        typeface = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            Typeface.create(family, if (bold) 700 else original?.weight ?: 400, original?.isItalic == true)
+        } else {
+            val style = original?.style ?: Typeface.NORMAL
+            Typeface.create(family, if (bold) style or Typeface.BOLD else style)
+        }
+    }
+    if (header) setTextSize(TypedValue.COMPLEX_UNIT_PX, originalSize)
+}
+
 internal fun themedPressedForeground(view: View): Drawable? {
     val out = TypedValue()
     return if (view.context.theme.resolveAttribute(
@@ -2884,9 +2906,6 @@ internal class RatingPlotImageHook(
                     val checkId = pluginResources.getIdentifier(
                         "addon_check_icon", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
                     spinner.adapter = catalogStyledAdapter(activity, names, spinner,
-                        android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT,
-                            android.graphics.Typeface.BOLD),
-                        android.widget.TextView(activity).textSize,
                         if (checkId != 0) pluginResources.getDrawable(checkId, null) else null)
                     lastProviderOptions = names
                 }

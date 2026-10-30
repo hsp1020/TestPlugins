@@ -13,7 +13,6 @@ import android.content.res.Resources
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.Rect
-import android.graphics.Typeface
 import android.text.TextUtils
 import android.view.View
 import android.view.MotionEvent
@@ -580,15 +579,11 @@ internal fun catalogStyledSelector(activity: FragmentActivity): AppCompatSpinner
 
 internal fun catalogStyledAdapter(
     activity: FragmentActivity, labels: List<String>, spinner: AppCompatSpinner,
-    fontTypeface: Typeface?, textSize: Float, checkDrawable: android.graphics.drawable.Drawable?,
-    nativeHeaderStyle: Boolean = false
+    checkDrawable: android.graphics.drawable.Drawable?
 ): ArrayAdapter<String> {
     fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
     fun TextView.styleCatalogText(color: Int) {
-        val originalSize = textSize
-        if (nativeHeaderStyle) setTextAppearance(R.style.WatchHeaderText)
-        else typeface = fontTypeface
-        setTextSize(TypedValue.COMPLEX_UNIT_PX, originalSize)
+        applyStremioCNativeFont(bold = true, header = true)
         setTextColor(color)
     }
         return object : ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, labels) {
@@ -698,9 +693,6 @@ internal class CatalogBrowserDialog(
     private val catalogArrow = selectorArrow()
     private val genreArrow = selectorArrow()
     private val checkIconId = pluginResources.getIdentifier("addon_check_icon", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
-    private val selectorLabelStyle = TextView(activity).apply {
-        typeface = Typeface.create(typeface, Typeface.BOLD)
-    }
     private val retry = button("Retry").apply { visibility = View.GONE }
     private var initialSkeleton = false
 
@@ -732,14 +724,14 @@ internal class CatalogBrowserDialog(
     private val catalogEmpty = TextView(activity).apply {
         text = "No results."
         gravity = Gravity.CENTER
-        typeface = Typeface.create(typeface, Typeface.BOLD)
+        applyStremioCNativeFont(bold = true)
         setTextColor(activity.colorFromAttribute(R.attr.textColor))
         visibility = View.GONE
     }
     private var showCatalogEnd = false
     private val catalogEndText = "No more results."
     private val catalogEndPaint = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-        typeface = Typeface.create(catalogEmpty.typeface, Typeface.BOLD)
+        typeface = catalogEmpty.typeface
         color = activity.colorFromAttribute(R.attr.textColor)
         textSize = TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_SP, 14f, activity.resources.displayMetrics
@@ -1259,13 +1251,7 @@ internal class CatalogBrowserDialog(
             gravity = Gravity.CENTER_VERTICAL
             addView(TextView(activity).apply {
                 text = title
-                if (isLayout(com.lagradost.cloudstream3.ui.settings.Globals.PHONE)) {
-                    val originalSize = textSize
-                    setTextAppearance(R.style.WatchHeaderText)
-                    setTextSize(TypedValue.COMPLEX_UNIT_PX, originalSize)
-                } else {
-                    typeface = selectorLabelStyle.typeface
-                }
+                applyStremioCNativeFont(bold = true, header = true)
                 gravity = Gravity.CENTER_VERTICAL
                 setTextColor(activity.colorFromAttribute(R.attr.textColor))
                 setSingleLine(true)
@@ -1288,10 +1274,8 @@ internal class CatalogBrowserDialog(
             genreSelector -> genreArrow
             else -> null
         }?.visibility = if (labels.size > 1) View.VISIBLE else View.GONE
-        adapter = catalogStyledAdapter(activity, labels, this, selectorLabelStyle.typeface,
-            selectorLabelStyle.textSize,
-            if (checkIconId != 0) pluginResources.getDrawable(checkIconId, null) else null,
-            nativeHeaderStyle = isLayout(com.lagradost.cloudstream3.ui.settings.Globals.PHONE))
+        adapter = catalogStyledAdapter(activity, labels, this,
+            if (checkIconId != 0) pluginResources.getDrawable(checkIconId, null) else null)
         if (selected in labels.indices) setSelection(selected)
         onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit

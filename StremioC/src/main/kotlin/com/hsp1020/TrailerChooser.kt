@@ -2,7 +2,6 @@ package com.hsp1020
 
 import android.content.res.ColorStateList
 import android.graphics.Color
-import android.graphics.Typeface
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
@@ -17,7 +16,6 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.cardview.widget.CardView
-import androidx.core.content.res.ResourcesCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -237,8 +235,7 @@ internal class TrailerChooser(
                     androidx.core.content.ContextCompat.getColor(context, R.color.primaryGrayBackground))
                 setTextColor(androidx.core.content.ContextCompat.getColor(context, R.color.white))
                 applyEpisodeChipFeedback(this)
-                typeface = Typeface.create(ResourcesCompat.getFont(context, R.font.google_sans), Typeface.BOLD)
-                fontFeatureSettings = "'liga' 0, 'clig' 0, 'calt' 0, 'dlig' 0"
+                applyStremioCNativeFont(bold = true)
                 isCheckable = false
                 isClickable = true
                 isFocusable = true
@@ -296,6 +293,7 @@ internal class TrailerChooser(
         }
         header.addView(TextView(activity, null, 0, R.style.WatchHeaderText).apply {
             text = "${activity.getString(R.string.trailer)} (${items.size})"
+            applyStremioCNativeFont(bold = true)
         }, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             Gravity.CENTER_VERTICAL
@@ -368,7 +366,7 @@ internal class TrailerChooser(
             }
             labels.addView(TextView(activity).apply {
                 text = "${index + 1}. ${entry.title}"
-                setTypeface(typeface, Typeface.BOLD)
+                applyStremioCNativeFont(bold = true)
                 // Native episode_text has no maxLines/ellipsize restriction.
                 setTextColor(foreground)
             }, LinearLayout.LayoutParams(
