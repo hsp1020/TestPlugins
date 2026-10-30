@@ -141,8 +141,30 @@ internal class ElevatePlayerPanel(
         (row.getChildAt(2) as ImageButton).apply {
             visibility = if (refresh != null) View.VISIBLE else View.GONE
             tag = refreshUrl
-            setOnClickListener(if (refresh != null) View.OnClickListener { refresh(this) } else null)
+            isEnabled = refresh != null
+            isClickable = refresh != null
+            isLongClickable = longRefresh != null
+            setOnTouchListener(if (refresh != null) View.OnTouchListener { _, event ->
+                // ListView must not steal the first visible row's refresh touch.
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        parent.requestDisallowInterceptTouchEvent(true)
+                        android.util.Log.d("ElevatePanelRefresh",
+                            "touchDown row=$position urlHash=${refreshUrl?.hashCode()} size=${width}x${height}")
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                        parent.requestDisallowInterceptTouchEvent(false)
+                }
+                false // Preserve Android click, long-click and ripple dispatch.
+            } else null)
+            setOnClickListener(if (refresh != null) View.OnClickListener {
+                android.util.Log.d("ElevatePanelRefresh",
+                    "click row=$position urlHash=${refreshUrl?.hashCode()}")
+                refresh(this)
+            } else null)
             setOnLongClickListener(if (longRefresh != null) View.OnLongClickListener {
+                android.util.Log.d("ElevatePanelRefresh",
+                    "longClick row=$position urlHash=${refreshUrl?.hashCode()}")
                 longRefresh(this)
                 true
             } else null)
@@ -260,6 +282,13 @@ internal class ElevatePlayerPanel(
     private val syncAdapter = SubtitleOffsetItemAdapter(0L) { cue ->
         offsetInput.setText((cue.startTimeMs - (fragment.player.getPosition() ?: 0L)).toString())
     }
+    private fun refreshNativeSubtitleOutput(reason: String) {
+        // The native subtitle-sync Apply action nudges the position by 1ms
+        // to rebuild the text renderer's cues after changing the delay.
+        fragment.player.seekTime(1L)
+        android.util.Log.d("ElevatePanelSync", "nativeApplyRefresh reason=$reason")
+    }
+
     private val syncOffsetWatcher = object : TextWatcher {
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
         override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
@@ -267,6 +296,7 @@ internal class ElevatePlayerPanel(
             if (fragment.player.getSubtitleOffset() != amount) {
                 fragment.player.setSubtitleOffset(amount)
                 ElevateSubtitleRefreshHook.active()?.refreshAppearance()
+                refreshNativeSubtitleOutput("offset-change")
                 android.util.Log.d("ElevatePanelSync", "offsetChanged instant=$amount")
             }
             val time = (fragment.player.getPosition() ?: 0L) + amount
@@ -328,8 +358,11 @@ internal class ElevatePlayerPanel(
             android.util.Log.d("ElevatePanelSync", "offsetReset instant=0")
         }
         nativeSync.findViewById<View>(R.id.cancel_btt)?.setOnClickListener {
-            fragment.player.setSubtitleOffset(offsetBeforeSync)
-            ElevateSubtitleRefreshHook.active()?.refreshAppearance()
+            if (fragment.player.getSubtitleOffset() != offsetBeforeSync) {
+                fragment.player.setSubtitleOffset(offsetBeforeSync)
+                ElevateSubtitleRefreshHook.active()?.refreshAppearance()
+                refreshNativeSubtitleOutput("offset-cancel")
+            }
             android.util.Log.d("ElevatePanelSync", "offsetCancelled restored=$offsetBeforeSync")
             showTabContents()
         }
