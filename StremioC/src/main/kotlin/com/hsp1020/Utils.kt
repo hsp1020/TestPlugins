@@ -690,13 +690,15 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
                 "group=${groups[index].firstOrNull()?.originalName} native=${native.size} adapter=${optionsAdapter.count}")
             visibleOptions[index].take(40).forEachIndexed { display, sourceIndex ->
                 val sub = native[sourceIndex]
+                val adapterText = if (sourceIndex in 0 until optionsAdapter.count)
+                    optionsAdapter.getItem(sourceIndex)?.toString()?.take(100) else null
                 android.util.Log.d("StremioC-SubtitlePicker",
                     "display=${display + 1} native=${sourceIndex + 1} origin=${sub.origin}" +
                         " urlHash=${Integer.toHexString(sub.url.hashCode())}" +
                         " suffix=${sub.nameSuffix.take(70)}" +
                         " detail=${StremioC.subtitleDetailByUrl[sub.url]?.take(100)}" +
                         " source=${StremioC.subtitleSourceByUrl[sub.url]?.take(70)}" +
-                        " adapterText=${optionsAdapter.getItem(sourceIndex)?.toString()?.take(100)}")
+                        " adapterText=$adapterText")
             }
         }
         logOptionMapping()
