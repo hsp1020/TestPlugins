@@ -236,6 +236,7 @@ internal class TrailerChooser(
                 setTextColor(androidx.core.content.ContextCompat.getColor(context, R.color.white))
                 applyEpisodeChipFeedback(this)
                 applyStremioCNativeFont(bold = true)
+                fontFeatureSettings = "'liga' 0, 'clig' 0, 'calt' 0, 'dlig' 0"
                 isCheckable = false
                 isClickable = true
                 isFocusable = true
@@ -294,6 +295,7 @@ internal class TrailerChooser(
         header.addView(TextView(activity, null, 0, R.style.WatchHeaderText).apply {
             text = "${activity.getString(R.string.trailer)} (${items.size})"
             applyStremioCNativeFont(bold = true)
+            fontFeatureSettings = "'liga' 0, 'clig' 0, 'calt' 0, 'dlig' 0"
         }, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             Gravity.CENTER_VERTICAL
