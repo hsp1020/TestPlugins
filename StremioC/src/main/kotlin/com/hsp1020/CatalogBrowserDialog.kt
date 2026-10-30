@@ -583,15 +583,8 @@ internal fun catalogStyledAdapter(
 ): ArrayAdapter<String> {
     fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
     fun TextView.styleCatalogText(color: Int) {
-        val priorFont = typeface
-        val priorSize = textSize
         applyStremioCNativeFont(bold = true, header = true)
         setTextColor(color)
-        android.util.Log.i("StremioC-CatalogFont",
-            "spinner-bind text=${text.toString().take(70)} oldFont=$priorFont oldSize=$priorSize" +
-                " newFont=$typeface weight=${if (android.os.Build.VERSION.SDK_INT >= 28) typeface?.weight else "n/a"}" +
-                " bold=${typeface?.isBold} fakeBold=${paint.isFakeBoldText}" +
-                " sizePx=$textSize flags=${paint.flags} textColor=$currentTextColor")
     }
         return object : ArrayAdapter<String>(activity, android.R.layout.simple_spinner_item, labels) {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup) =
@@ -737,10 +730,6 @@ internal class CatalogBrowserDialog(
         visibility = View.GONE
     }
     private var showCatalogEnd = false
-    private var loggedCatalogEmptyFont = false
-    private var loggedCatalogEndFont = false
-    private var catalogEndDrawCount = 0
-    private var catalogEndOffsetCount = 0
     private val catalogEndLabel = TextView(activity).apply {
         text = "No more results"
         gravity = Gravity.CENTER
@@ -752,116 +741,27 @@ internal class CatalogBrowserDialog(
         override fun getItemOffsets(
             outRect: Rect, view: View, parent: RecyclerView, state: RecyclerView.State
         ) {
-            if (showCatalogEnd && parent.getChildAdapterPosition(view) == adapter.itemCount - 1) {
+            if (showCatalogEnd && parent.getChildAdapterPosition(view) == adapter.itemCount - 1)
                 outRect.bottom = dp(56)
-                if (catalogEndOffsetCount++ < 20) android.util.Log.i("StremioC-CatalogFont",
-                    "end-offset generation=$generation index=${parent.getChildAdapterPosition(view)}" +
-                        " count=${adapter.itemCount} bottom=${outRect.bottom}" +
-                        " parent=${parent.width}x${parent.height} child=${view.width}x${view.height}")
-            }
         }
 
         override fun onDrawOver(
             canvas: android.graphics.Canvas, parent: RecyclerView, state: RecyclerView.State
         ) {
             if (!showCatalogEnd || adapter.itemCount == 0) return
-            val frame = ++catalogEndDrawCount
-            val last = parent.layoutManager?.findViewByPosition(adapter.itemCount - 1)
-            if (frame <= 64 || frame % 120 == 0) android.util.Log.i("StremioC-CatalogFont",
-                "end-draw#$frame generation=$generation count=${adapter.itemCount}" +
-                    " last=${last?.left},${last?.top},${last?.right},${last?.bottom}" +
-                    " parent=${parent.width}x${parent.height} scrollY=${parent.scrollY}" +
-                    " padding=${parent.paddingTop},${parent.paddingBottom}" +
-                    " label=${catalogEndLabel.width}x${catalogEndLabel.height}" +
-                    " measured=${catalogEndLabel.measuredWidth}x${catalogEndLabel.measuredHeight}" +
-                    " visible=${catalogEndLabel.visibility} attached=${catalogEndLabel.isAttachedToWindow}" +
-                    " hw=${canvas.isHardwareAccelerated} clip=${canvas.clipBounds}")
-            if (last == null) return
+            val last = parent.layoutManager?.findViewByPosition(adapter.itemCount - 1) ?: return
             if (catalogEndLabel.width != parent.width) {
                 catalogEndLabel.measure(
                     View.MeasureSpec.makeMeasureSpec(parent.width, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
                 )
                 catalogEndLabel.layout(0, 0, parent.width, catalogEndLabel.measuredHeight)
-                android.util.Log.i("StremioC-CatalogFont",
-                    "end-layout frame=$frame width=${catalogEndLabel.width}" +
-                        " height=${catalogEndLabel.height} baseline=${catalogEndLabel.baseline}" +
-                        " textWidth=${catalogEndLabel.paint.measureText(catalogEndLabel.text.toString())}")
             }
             canvas.save()
             canvas.translate(0f, (last.bottom + dp(36) - catalogEndLabel.baseline).toFloat())
             catalogEndLabel.draw(canvas)
             canvas.restore()
-            if (!loggedCatalogEndFont) {
-                loggedCatalogEndFont = true
-                logCatalogFonts("end", "TextView.draw(canvas)", canvas.isHardwareAccelerated)
-                grid.post { if (!closed && showCatalogEnd) logCatalogFonts("end-post", "after draw") }
-            }
         }
-    }
-
-    private fun logCatalogFonts(state: String, path: String, hardwareCanvas: Boolean? = null) {
-        fun describe(view: TextView?): String {
-            if (view == null) return "null"
-            val font = view.typeface
-            val paint = view.paint
-            val fm = paint.fontMetrics
-            val value = view.text?.toString().orEmpty()
-            return "text=${value.take(80)} class=${view.javaClass.name} font=$font hash=${font?.hashCode()}" +
-                " style=${font?.style} weight=${if (android.os.Build.VERSION.SDK_INT >= 28) font?.weight else "n/a"}" +
-                " bold=${font?.isBold} fakeBold=${paint.isFakeBoldText}" +
-                " sizePx=${view.textSize} paintSizePx=${paint.textSize}" +
-                " scaleX=${paint.textScaleX} skewX=${paint.textSkewX}" +
-                " flags=${paint.flags} antialias=${paint.isAntiAlias} subpixel=${paint.isSubpixelText}" +
-                " letterSpacing=${view.letterSpacing} features=${view.fontFeatureSettings}" +
-                " variation=${if (android.os.Build.VERSION.SDK_INT >= 26) view.fontVariationSettings else "n/a"}" +
-                " color=${view.currentTextColor} alpha=${view.alpha}" +
-                " fontPadding=${view.includeFontPadding} gravity=${view.gravity}" +
-                " baseline=${view.baseline} textWidth=${paint.measureText(value)}" +
-                " fm=${fm.top},${fm.ascent},${fm.descent},${fm.bottom}" +
-                " view=${view.width}x${view.height} measured=${view.measuredWidth}x${view.measuredHeight}" +
-                " visible=${view.visibility} shown=${view.isShown} attached=${view.isAttachedToWindow}" +
-                " parent=${view.parent?.javaClass?.simpleName}"
-        }
-        val config = activity.resources.configuration
-        val display = activity.resources.displayMetrics
-        val reference = androidx.core.content.res.ResourcesCompat.getFont(activity, R.font.google_sans)
-        android.util.Log.i("StremioC-CatalogFont",
-            "state=$state path=$path generation=$generation" +
-                " device=${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL}" +
-                " sdk=${android.os.Build.VERSION.SDK_INT}" +
-                " phone=${isLayout(com.lagradost.cloudstream3.ui.settings.Globals.PHONE)} tv=${isLayout(TV)}" +
-                " orientation=${config.orientation} uiMode=${config.uiMode}" +
-                " screenDp=${config.screenWidthDp}x${config.screenHeightDp}" +
-                " density=${display.density} dpi=${display.densityDpi}" +
-                " scaledDensity=${display.scaledDensity} fontScale=${config.fontScale}" +
-                " hw=$hardwareCanvas nativeFont=$reference nativeHash=${reference?.hashCode()}" +
-                " catalog=${catalog?.id} type=${catalog?.type} genre=$genre chosen=$chosen" +
-                " loading=$loading next=$hasNext items=${items.size} adapter=${adapter.itemCount}" +
-                " inline=$inlineActive showEnd=$showCatalogEnd")
-        android.util.Log.i("StremioC-CatalogFont", "state=$state empty={${describe(catalogEmpty)}}")
-        android.util.Log.i("StremioC-CatalogFont", "state=$state end={${describe(catalogEndLabel)}}")
-        android.util.Log.i("StremioC-CatalogFont", "state=$state inlineEmpty={${describe(inlineEmpty)}}")
-        for ((name, spinner) in listOf(
-            "type" to typeSelector, "catalog" to catalogSelector, "genre" to genreSelector
-        )) {
-            val selected = spinner.selectedView
-            val label = (selected as? TextView)
-                ?: (selected as? ViewGroup)?.findViewById<TextView>(android.R.id.text1)
-            android.util.Log.i("StremioC-CatalogFont",
-                "state=$state spinner=$name index=${spinner.selectedItemPosition}" +
-                    " count=${spinner.count} enabled=${spinner.isEnabled}" +
-                    " selectedView=${selected?.javaClass?.name} {${describe(label)}}")
-        }
-        inlineSelectors.forEachIndexed { index, row ->
-            val label = (row as? ViewGroup)?.getChildAt(0) as? TextView
-            android.util.Log.i("StremioC-CatalogFont",
-                "state=$state header#$index {${describe(label)}}")
-        }
-        android.util.Log.i("StremioC-CatalogFont",
-            "state=$state grid=${grid.width}x${grid.height}" +
-                " scroll=${grid.computeVerticalScrollOffset()}/${grid.computeVerticalScrollRange()}" +
-                " nested=${grid.isNestedScrollingEnabled} drawCount=$catalogEndDrawCount")
     }
 
     private val inlineStore = ViewModelStore()
@@ -1034,20 +934,8 @@ internal class CatalogBrowserDialog(
     private fun updateCatalogResultState() {
         val finished = chosen && !loading && !hasNext && retry.visibility != View.VISIBLE
         val empty = !inlineActive && finished && items.isEmpty()
-        android.util.Log.i("StremioC-CatalogFont",
-            "result-state generation=$generation catalog=${catalog?.id} genre=$genre" +
-                " chosen=$chosen loading=$loading next=$hasNext retry=${retry.visibility}" +
-                " items=${items.size} inline=$inlineActive finished=$finished empty=$empty" +
-                " prevEmpty=${catalogEmpty.visibility == View.VISIBLE} end=$showCatalogEnd")
         val wasEmpty = catalogEmpty.visibility == View.VISIBLE
         catalogEmpty.visibility = if (empty) View.VISIBLE else View.GONE
-        if (empty && !loggedCatalogEmptyFont) {
-            loggedCatalogEmptyFont = true
-            logCatalogFonts("empty", "TextView in FrameLayout")
-            grid.post { if (!closed && catalogEmpty.visibility == View.VISIBLE)
-                logCatalogFonts("empty-post", "after layout")
-            }
-        }
         if (empty != wasEmpty) {
             grid.isNestedScrollingEnabled = !empty
             inlineHeader?.let { header ->
@@ -1060,10 +948,7 @@ internal class CatalogBrowserDialog(
         }
         val end = !inlineActive && finished && items.isNotEmpty()
         if (showCatalogEnd != end) {
-            android.util.Log.i("StremioC-CatalogFont",
-                "end-state generation=$generation old=$showCatalogEnd new=$end items=${items.size}")
             showCatalogEnd = end
-            if (end) logCatalogFonts("end-enabled", "before draw")
             if (grid.isComputingLayout) {
                 grid.post { if (!closed) grid.invalidateItemDecorations() }
             } else grid.invalidateItemDecorations()
@@ -1672,7 +1557,6 @@ internal class CatalogBrowserDialog(
         originEntryId = navigation?.currentBackStackEntry?.id
         dialog.setCanceledOnTouchOutside(false)
         dialog.show()
-        root.post { if (!closed) logCatalogFonts("browser-ready", "after show") }
         dialog.window?.let { WindowCompat.setDecorFitsSystemWindows(it, true) }
         ViewCompat.requestApplyInsets(root)
         dialog.window?.setBackgroundDrawable(ColorDrawable(activity.colorFromAttribute(R.attr.primaryBlackBackground)))
@@ -1731,10 +1615,6 @@ internal class CatalogBrowserDialog(
         items.clear()
         seen.clear()
         pageSignatures.clear()
-        loggedCatalogEmptyFont = false
-        loggedCatalogEndFont = false
-        catalogEndDrawCount = 0
-        catalogEndOffsetCount = 0
         adapter.submitList(emptyList())
         hasNext = false
         chosen = false
@@ -2068,9 +1948,6 @@ internal class CatalogBrowserDialog(
         val ticket = generation
         val selectedGenre = genre
         val requestedOffset = offset
-        android.util.Log.i("StremioC-CatalogFont",
-            "page-start generation=$ticket catalog=${selectedCatalog.id} genre=$selectedGenre" +
-                " offset=$requestedOffset currentItems=${items.size}")
         loading = true
         updateCatalogResultState()
         val firstPage = items.isEmpty()
@@ -2086,9 +1963,6 @@ internal class CatalogBrowserDialog(
                 }
                 val fresh = page.filter { seen.add(it.url) }
                 val repeated = !pageSignatures.add(page.map { it.url })
-                android.util.Log.i("StremioC-CatalogFont",
-                    "page-result generation=$ticket rawCount=$rawCount page=${page.size}" +
-                        " fresh=${fresh.size} repeated=$repeated offset=$requestedOffset")
                 items.addAll(fresh)
                 offset += rawCount 
                 hasNext = selectedCatalog.supportsExtra("skip") && rawCount > 0 && !repeated && fresh.isNotEmpty()
@@ -2110,16 +1984,11 @@ internal class CatalogBrowserDialog(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                android.util.Log.e("StremioC-CatalogFont",
-                    "page-error generation=$ticket catalog=${selectedCatalog.id} genre=$selectedGenre", e)
                 if (ticket == generation) {
                     Toast.makeText(activity, "Unable to load catalog. Please retry.", Toast.LENGTH_SHORT).show()
                     retry.visibility = View.VISIBLE
                 }
             } finally {
-                android.util.Log.i("StremioC-CatalogFont",
-                    "page-finish generation=$ticket currentGeneration=$generation" +
-                        " items=${items.size} hasNext=$hasNext")
                 if (ticket == generation) {
                     loading = false
                     if (firstPage && items.isEmpty()) initialProgress(false)
