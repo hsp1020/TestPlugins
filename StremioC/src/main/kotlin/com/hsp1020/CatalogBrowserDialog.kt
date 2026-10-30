@@ -722,19 +722,20 @@ internal class CatalogBrowserDialog(
         }
     }
     private val catalogEmpty = TextView(activity).apply {
-        text = "No results."
+        text = "No results"
         gravity = Gravity.CENTER
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
         applyStremioCNativeFont(bold = true)
         setTextColor(activity.colorFromAttribute(R.attr.textColor))
         visibility = View.GONE
     }
     private var showCatalogEnd = false
-    private val catalogEndText = "No more results."
+    private val catalogEndText = "No more results"
     private val catalogEndPaint = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
         typeface = catalogEmpty.typeface
         color = activity.colorFromAttribute(R.attr.textColor)
         textSize = TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_SP, 14f, activity.resources.displayMetrics
+            TypedValue.COMPLEX_UNIT_SP, 18f, activity.resources.displayMetrics
         )
         textAlign = android.graphics.Paint.Align.CENTER
     }
@@ -790,8 +791,10 @@ internal class CatalogBrowserDialog(
     )
     private val inlineLoading = ProgressBar(activity).apply { visibility = View.GONE }
     private val inlineEmpty = TextView(activity).apply {
-        text = "No results."
+        text = "No results"
         gravity = Gravity.CENTER
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+        applyStremioCNativeFont(bold = true)
         setTextColor(activity.colorFromAttribute(R.attr.textColor))
         visibility = View.GONE
     }
@@ -870,7 +873,7 @@ internal class CatalogBrowserDialog(
         retry.visibility = inlineRetryVisibility
         inlineHeader?.let { header ->
             (header.getChildAt(0).layoutParams as? AppBarLayout.LayoutParams)?.let { params ->
-                params.scrollFlags = inlineHeaderFlags
+                params.scrollFlags = if (catalogEmpty.visibility == View.VISIBLE) 0 else inlineHeaderFlags
                 header.getChildAt(0).layoutParams = params
             }
         }
@@ -922,8 +925,19 @@ internal class CatalogBrowserDialog(
     private val maxAutoFillPages = 12
     private fun updateCatalogResultState() {
         val finished = chosen && !loading && !hasNext && retry.visibility != View.VISIBLE
-        catalogEmpty.visibility = if (!inlineActive && finished && items.isEmpty())
-            View.VISIBLE else View.GONE
+        val empty = !inlineActive && finished && items.isEmpty()
+        val wasEmpty = catalogEmpty.visibility == View.VISIBLE
+        catalogEmpty.visibility = if (empty) View.VISIBLE else View.GONE
+        if (empty != wasEmpty) {
+            grid.isNestedScrollingEnabled = !empty
+            inlineHeader?.let { header ->
+                if (empty) header.setExpanded(true, false)
+                (header.getChildAt(0).layoutParams as? AppBarLayout.LayoutParams)?.let { params ->
+                    params.scrollFlags = if (empty || inlineActive) 0 else inlineHeaderFlags
+                    header.getChildAt(0).layoutParams = params
+                }
+            }
+        }
         val end = !inlineActive && finished && items.isNotEmpty()
         if (showCatalogEnd != end) {
             showCatalogEnd = end
