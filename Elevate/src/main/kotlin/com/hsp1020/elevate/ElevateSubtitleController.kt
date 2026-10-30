@@ -161,12 +161,42 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                 null
             }
             "onMediaItemTransition" -> {
+                diagnostic("mediaTransition",
+                    "instance=${model?.state?.instance} player=${observedPlayer?.let(System::identityHashCode)} " +
+                        "selectedHash=${fragment?.player?.getCurrentPreferredSubtitle()?.url?.hashCode()}")
+                ElevateSubtitleTrace.tracks("controllerMediaTransition",
+                    observedPlayer, model?.state?.subtitles ?: emptySet(),
+                    fragment?.player?.getCurrentPreferredSubtitle(), fragment = fragment)
                 val deferred = appliedRefresh?.takeIf {
                     it.instance == model?.state?.instance &&
                         it.videoId == model?.state?.generatorState?.id
                 }
                 clearRefreshState()
                 appliedRefresh = deferred
+                null
+            }
+            "onTracksChanged" -> {
+                ElevateSubtitleTrace.tracks("controllerTracks",
+                    observedPlayer, model?.state?.subtitles ?: emptySet(),
+                    fragment?.player?.getCurrentPreferredSubtitle(), fragment = fragment)
+                null
+            }
+            "onPlaybackStateChanged" -> {
+                diagnostic("playbackState",
+                    "state=${args?.getOrNull(0)} instance=${model?.state?.instance} " +
+                        "player=${observedPlayer?.let(System::identityHashCode)}")
+                null
+            }
+            "onRenderedFirstFrame" -> {
+                diagnostic("firstFrame", "instance=${model?.state?.instance} player=${observedPlayer?.let(System::identityHashCode)}")
+                ElevateSubtitleTrace.tracks("controllerFirstFrame", observedPlayer,
+                    model?.state?.subtitles ?: emptySet(),
+                    fragment?.player?.getCurrentPreferredSubtitle(), fragment = fragment)
+                null
+            }
+            "onPlayerError" -> {
+                diagnostic("playerError", "type=${args?.getOrNull(0)?.javaClass?.simpleName} " +
+                    "instance=${model?.state?.instance} player=${observedPlayer?.let(System::identityHashCode)}")
                 null
             }
             "equals" -> proxy === args?.getOrNull(0)
@@ -192,6 +222,11 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
     private fun bindPlayer() {
         val current = fragment?.playerView?.player
         if (current === observedPlayer) return
+        diagnostic("playerBinding",
+            "instance=${model?.state?.instance} previous=${observedPlayer?.let(System::identityHashCode)} " +
+                "next=${current?.let(System::identityHashCode)} " +
+                "selectedHash=${fragment?.player?.getCurrentPreferredSubtitle()?.url?.hashCode()} " +
+                "modelSubs=${model?.state?.subtitles?.size}")
         observedPlayer?.removeListener(playerListener)
         val deferred = appliedRefresh?.takeIf {
             it.instance == model?.state?.instance &&
@@ -202,6 +237,9 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         observedPlayer = current
         selectedUrl = fragment?.player?.getCurrentPreferredSubtitle()?.url
         current?.addListener(playerListener)
+        ElevateSubtitleTrace.tracks("controllerPlayerBound", current,
+            model?.state?.subtitles ?: emptySet(),
+            fragment?.player?.getCurrentPreferredSubtitle(), fragment = fragment)
         runAppliedRefresh()
     }
 
@@ -238,6 +276,9 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         val currentUrl = target.player.getCurrentPreferredSubtitle()?.url
         refreshPickerIcons(currentUrl)
         if (selectedUrl != currentUrl) {
+            diagnostic("preferredChanged",
+                "beforeHash=${selectedUrl?.hashCode()} afterHash=${currentUrl?.hashCode()} " +
+                    "instance=${model?.state?.instance} player=${observedPlayer?.let(System::identityHashCode)}")
             refreshGeneration++
             refreshJob?.cancel()
             refreshJob = null
@@ -356,7 +397,15 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         fragment = candidate
         model = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
         val currentModel = model ?: return
-        val observer = Observer<com.lagradost.cloudstream3.ui.player.VideoLive<Resource<Unit>>> {
+        val observer = Observer<com.lagradost.cloudstream3.ui.player.VideoLive<Resource<Unit>>> { event ->
+            diagnostic("loadingLinks",
+                "eventInstance=${event?.instance} stateInstance=${currentModel.state.instance} " +
+                    "loading=${event?.value?.javaClass?.simpleName} previousInstance=$lastInstance " +
+                    "subs=${currentModel.state.subtitles.size} links=${currentModel.state.links.size} " +
+                    "selectedHash=${candidate.player.getCurrentPreferredSubtitle()?.url?.hashCode()}")
+            ElevateSubtitleTrace.tracks("controllerLoading", candidate.playerView?.player,
+                currentModel.state.subtitles, candidate.player.getCurrentPreferredSubtitle(),
+                fragment = candidate)
             if (lastInstance != currentModel.state.instance) {
                 clearRefreshState()
                 lastInstance = currentModel.state.instance
@@ -1043,4 +1092,70 @@ internal class ElevateSubtitleRefreshHook(
     override fun onActivityPaused(activity: Activity) = Unit
     override fun onActivityStopped(activity: Activity) = Unit
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+}
+
+
+/** Event-only diagnostics: compare Media3's selected tracks with CloudStream's preferred lookup. */
+internal object ElevateSubtitleTrace {
+    private val nativeChoice = runCatching {
+        GeneratorPlayer::class.java.getDeclaredField("currentSelectedSubtitles")
+            .apply { isAccessible = true }
+    }.getOrNull()
+    private val autoLanguage = runCatching {
+        GeneratorPlayer::class.java.getDeclaredField("preferredAutoSelectSubtitles")
+            .apply { isAccessible = true }
+    }.getOrNull()
+
+    fun tracks(phase: String, player: Player?,
+               subtitles: Set<com.lagradost.cloudstream3.ui.player.SubtitleData>,
+               preferred: com.lagradost.cloudstream3.ui.player.SubtitleData?,
+               requestSeq: Int? = null, requestedHash: Int? = null,
+               fragment: GeneratorPlayer? = null) {
+        runCatching {
+            val native = fragment?.let { nativeChoice?.get(it) as? com.lagradost.cloudstream3.ui.player.SubtitleData }
+            val language = fragment?.let { autoLanguage?.get(it) as? String }
+            dump(phase, player, subtitles, preferred, native, language, requestSeq, requestedHash)
+        }.onFailure { android.util.Log.w("ElevateSubtitleTracks", "traceFailed phase=$phase", it) }
+    }
+
+    private fun dump(phase: String, player: Player?,
+                     subtitles: Set<com.lagradost.cloudstream3.ui.player.SubtitleData>,
+                     preferred: com.lagradost.cloudstream3.ui.player.SubtitleData?,
+                     native: com.lagradost.cloudstream3.ui.player.SubtitleData?,
+                     language: String?, requestSeq: Int?, requestedHash: Int?) {
+        val choice = "nativeHash=${native?.url?.hashCode()} nativeOrigin=${native?.origin} autoLang=$language"
+        if (player == null) {
+            android.util.Log.d("ElevateSubtitleTracks",
+                "phase=$phase player=null preferred=${preferred?.url?.hashCode()} seq=$requestSeq requested=$requestedHash $choice")
+            return
+        }
+        val selected = ArrayList<String>()
+        var textGroups = 0
+        player.currentTracks.groups.forEachIndexed { groupIndex, group ->
+            if (group.type != androidx.media3.common.C.TRACK_TYPE_TEXT) return@forEachIndexed
+            textGroups++
+            for (index in 0 until group.length) {
+                if (!group.isTrackSelected(index)) continue
+                val id = group.getTrackFormat(index).id
+                // CloudStream's media3 IDs have a numeric track prefix.
+                val normalized = id?.let {
+                    if (it.substringBefore(':').toIntOrNull() != null) it.substringAfter(':') else it
+                }
+                val match = subtitles.firstOrNull { it.getId() == normalized }
+                selected += "g$groupIndex/$index rawHash=${id?.hashCode()} " +
+                    "keyHash=${normalized?.hashCode()} matchOrigin=${match?.origin} " +
+                    "matchUrl=${match?.url?.hashCode()}"
+            }
+        }
+        val params = player.trackSelectionParameters
+        val overrides = params.overrides.entries
+            .filter { it.key.type == androidx.media3.common.C.TRACK_TYPE_TEXT }
+            .joinToString("|") { "${it.key.length}:${it.value.trackIndices.joinToString(",")}" }
+        android.util.Log.d("ElevateSubtitleTracks",
+            "phase=$phase player=${System.identityHashCode(player)} " +
+                "preferredHash=${preferred?.url?.hashCode()} preferredOrigin=${preferred?.origin} " +
+                "seq=$requestSeq requestedHash=$requestedHash $choice totalSubs=${subtitles.size} " +
+                "groups=$textGroups textDisabled=${androidx.media3.common.C.TRACK_TYPE_TEXT in params.disabledTrackTypes} " +
+                "overrides=[$overrides] selected=[${selected.joinToString("|")}]")
+    }
 }

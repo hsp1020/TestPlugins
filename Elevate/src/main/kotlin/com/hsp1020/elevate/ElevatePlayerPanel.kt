@@ -78,7 +78,34 @@ internal class ElevatePlayerPanel(
         addView(filters)
     }
     private val rows = ArrayList<Row>()
-    private val list = ListView(ctx).apply {
+    private fun logRefreshListTouch(stage: String, ev: MotionEvent, intercepted: Boolean? = null) {
+        if (tab != Tab.SUBTITLES || inSync || ev.actionMasked !in
+            arrayOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL)) return
+        val position = list.pointToPosition(ev.x.toInt(), ev.y.toInt())
+        val row = list.getChildAt(position - list.firstVisiblePosition) as? LinearLayout
+        val button = row?.getChildAt(2) as? ImageButton
+        val left = if (row != null && button != null) row.left + button.left else -1
+        val top = if (row != null && button != null) row.top + button.top else -1
+        val inside = button != null && ev.x >= left && ev.x < left + button.width &&
+            ev.y >= top && ev.y < top + button.height
+        if (position in 0..1 || inside) android.util.Log.d("ElevatePanelTouch",
+            "$stage action=${MotionEvent.actionToString(ev.actionMasked)} pos=$position " +
+                "x=${ev.x.toInt()} y=${ev.y.toInt()} iconRect=$left,$top,${button?.width},${button?.height} " +
+                "hitIcon=$inside visible=${button?.visibility} enabled=${button?.isEnabled} " +
+                "clickable=${button?.isClickable} intercepted=$intercepted " +
+                "rowCount=${adapter.count} first=${list.firstVisiblePosition}")
+    }
+    private val list = object : ListView(ctx) {
+        override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+            logRefreshListTouch("dispatch", event)
+            return super.dispatchTouchEvent(event)
+        }
+        override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
+            val intercepted = super.onInterceptTouchEvent(event)
+            logRefreshListTouch("intercept", event, intercepted)
+            return intercepted
+        }
+    }.apply {
         choiceMode = AbsListView.CHOICE_MODE_NONE
         divider = null
         selector = ColorDrawable(Color.TRANSPARENT)
@@ -145,6 +172,22 @@ internal class ElevatePlayerPanel(
             isEnabled = refresh != null
             isClickable = refresh != null
             isLongClickable = longRefresh != null
+            if (tab == Tab.SUBTITLES && position in 0..1)
+                android.util.Log.d("ElevatePanelTouch",
+                    "bind row=$position hash=${refreshUrl?.hashCode()} refresh=${refresh != null} " +
+                        "enabled=$isEnabled clickable=$isClickable attached=$isAttachedToWindow " +
+                        "width=$width height=$height")
+            setOnTouchListener(if (refresh != null) View.OnTouchListener { view, event ->
+                if (event.actionMasked == MotionEvent.ACTION_DOWN ||
+                    event.actionMasked == MotionEvent.ACTION_UP ||
+                    event.actionMasked == MotionEvent.ACTION_CANCEL)
+                    android.util.Log.d("ElevatePanelTouch",
+                        "button action=${MotionEvent.actionToString(event.actionMasked)} row=$position " +
+                            "hash=${refreshUrl?.hashCode()} x=${event.x.toInt()} y=${event.y.toInt()} " +
+                            "size=${view.width}x${view.height} pressed=${view.isPressed} " +
+                            "clickable=${view.isClickable} enabled=${view.isEnabled} attached=${view.isAttachedToWindow}")
+                false // Diagnostics only: preserve the existing click/long-click handling.
+            } else null)
             setOnClickListener(if (refresh != null) View.OnClickListener {
                 android.util.Log.d("ElevatePanelRefresh",
                     "click row=$position urlHash=${refreshUrl?.hashCode()}")
@@ -370,6 +413,8 @@ internal class ElevatePlayerPanel(
             }
             "onTracksChanged" -> {
                 val actual = fragment.player.getCurrentPreferredSubtitle()
+                ElevateSubtitleTrace.tracks("panelTracks", fragment.playerView?.player,
+                    vm.state.subtitles, actual, subtitleSelectionLogSeq, lastSubtitleRequestHash, fragment)
                 android.util.Log.d("ElevatePanelSelect",
                     "tracksChanged requestSeq=$subtitleSelectionLogSeq requestedHash=$lastSubtitleRequestHash " +
                         "actualHash=${actual?.url?.hashCode()} actualOrigin=${actual?.origin} " +
@@ -381,6 +426,9 @@ internal class ElevatePlayerPanel(
                             android.util.Log.d("ElevatePanelSelect",
                                 "tracksPosted seq=$subtitleSelectionLogSeq requestedHash=$lastSubtitleRequestHash " +
                                     "actualHash=${selected?.url?.hashCode()} origin=${selected?.origin}")
+                            ElevateSubtitleTrace.tracks("panelTracksPosted",
+                                fragment.playerView?.player, vm.state.subtitles,
+                                selected, subtitleSelectionLogSeq, lastSubtitleRequestHash, fragment)
                             renderSubtitles()
                         }
                     }
@@ -395,10 +443,15 @@ internal class ElevatePlayerPanel(
     private fun observeCuePlayer(enabled: Boolean) {
         val next = if (enabled) fragment.playerView?.player else null
         if (next === cuePlayer) return
-        cuePlayer?.removeListener(cueListener)
+        val previous = cuePlayer
+        previous?.removeListener(cueListener)
         cuePlayer = next
         next?.addListener(cueListener)
-        android.util.Log.d("ElevatePanelSync", "cueListener enabled=$enabled attached=${next != null}")
+        android.util.Log.d("ElevatePanelSync",
+            "cueListener enabled=$enabled attached=${next != null} " +
+                "oldPlayer=${previous?.let(System::identityHashCode)} newPlayer=${next?.let(System::identityHashCode)}")
+        if (enabled) ElevateSubtitleTrace.tracks("panelBind", next, vm.state.subtitles,
+            fragment.player.getCurrentPreferredSubtitle(), subtitleSelectionLogSeq, lastSubtitleRequestHash, fragment)
     }
     private var subtitleSelectionLogSeq = 0
     private var lastSubtitleRequestHash: Int? = null
@@ -424,6 +477,8 @@ internal class ElevatePlayerPanel(
                 "subtitleEventPosted requestSeq=$subtitleSelectionLogSeq requestedHash=$lastSubtitleRequestHash " +
                     "actualHash=${after?.url?.hashCode()} actualOrigin=${after?.origin} " +
                     "modelCount=${vm.state.subtitles.size} tab=$tab")
+            ElevateSubtitleTrace.tracks("subtitleEventPosted", fragment.playerView?.player,
+                vm.state.subtitles, after, subtitleSelectionLogSeq, lastSubtitleRequestHash, fragment)
         }
         if (tab == Tab.SUBTITLES) {
             if (inSync) updateSyncCues("subtitle-list")
@@ -740,6 +795,8 @@ internal class ElevatePlayerPanel(
             "tap seq=$seq requestedHash=$lastSubtitleRequestHash requestedOrigin=${sub?.origin} " +
                 "beforeHash=${before?.url?.hashCode()} beforeOrigin=${before?.origin} " +
                 "modelCount=${vm.state.subtitles.size}")
+        ElevateSubtitleTrace.tracks("tapBefore", fragment.playerView?.player,
+            vm.state.subtitles, before, seq, lastSubtitleRequestHash, fragment)
         runCatching {
             val requiresReload = GeneratorPlayer::class.java.getDeclaredMethod(
                 "setSubtitles", SubtitleData::class.java, Boolean::class.javaPrimitiveType!!
@@ -748,6 +805,8 @@ internal class ElevatePlayerPanel(
             android.util.Log.d("ElevatePanelSelect",
                 "setReturned seq=$seq requiresReload=$requiresReload " +
                     "actualHash=${immediate?.url?.hashCode()} actualOrigin=${immediate?.origin}")
+            ElevateSubtitleTrace.tracks("tapReturned", fragment.playerView?.player,
+                vm.state.subtitles, immediate, seq, lastSubtitleRequestHash, fragment)
             if (requiresReload) {
                 currentLink()?.let { link ->
                     android.util.Log.d("ElevatePanelSelect",
@@ -765,6 +824,8 @@ internal class ElevatePlayerPanel(
                 "tapPosted seq=$seq latestSeq=$subtitleSelectionLogSeq " +
                     "requestedHash=$lastSubtitleRequestHash actualHash=${actual?.url?.hashCode()} " +
                     "actualOrigin=${actual?.origin} currentInstance=${vm.state.instance}")
+            ElevateSubtitleTrace.tracks("tapPosted", fragment.playerView?.player,
+                vm.state.subtitles, actual, seq, lastSubtitleRequestHash, fragment)
         }
     }
 
