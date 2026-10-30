@@ -26,6 +26,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.NEXT_WATCH_EPISODE_PERCENTAGE
 import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
 import com.lagradost.cloudstream3.ui.result.VideoWatchState
@@ -97,7 +98,7 @@ internal class EpisodeProgressHook(
 
     private fun bind(fragment: Fragment, root: View) {
         val type = fragment.javaClass.name
-        if (type !in DETAIL_CLASSES) return
+        if (type !in DETAIL_CLASSES && fragment !is GeneratorPlayer) return
         val previous = screens[fragment]
         if (previous != null && previous.root === root) return
         previous?.stop()
@@ -109,6 +110,11 @@ internal class EpisodeProgressHook(
         val root: View
     ) {
         private val tree = root.viewTreeObserver
+        private val isPlayer = fragment is GeneratorPlayer
+        private val playerOverlay =
+            if (isPlayer) root.findViewById<View>(R.id.player_episode_overlay) else null
+        private var overlayWasVisible = false
+        private fun listVisible() = !isPlayer || playerOverlay?.isShown == true
         private var list: RecyclerView? = null
         private var adapter: RecyclerView.Adapter<*>? = null
         private var refreshTree: ViewTreeObserver? = null
@@ -152,12 +158,19 @@ internal class EpisodeProgressHook(
             if (left != oldLeft || top != oldTop || right != oldRight || bottom != oldBottom)
                 scheduleRefresh()
         }
-        private val globalLayout = ViewTreeObserver.OnGlobalLayoutListener { syncList() }
+        private val globalLayout = ViewTreeObserver.OnGlobalLayoutListener {
+            syncList()
+            if (isPlayer) {
+                val visible = listVisible()
+                if (visible && !overlayWasVisible) scheduleRefresh()
+                overlayWasVisible = visible
+            }
+        }
         // RecyclerView handles pending adapter changes during layout, before pre-draw.
         private val preDraw = ViewTreeObserver.OnPreDrawListener {
             cancelRefresh()
             val recycler = list
-            if (recycler != null && fragment.view === root && fragment.isResumed) {
+            if (recycler != null && fragment.view === root && fragment.isResumed && listVisible()) {
                 if (fullRefreshPending) {
                     fullRefreshPending = false
                     dirtyRows.clear()
@@ -193,7 +206,9 @@ internal class EpisodeProgressHook(
 
         private fun syncList() {
             if (!fragment.isAdded || fragment.view !== root) return
-            val target = root.findViewById<RecyclerView>(R.id.result_episodes)
+            val target = root.findViewById<RecyclerView>(
+                if (isPlayer) R.id.player_episode_list else R.id.result_episodes
+            )
             var changed = false
             if (target !== list) {
                 releaseList()
@@ -250,7 +265,7 @@ internal class EpisodeProgressHook(
         }
 
         private fun postRefresh() {
-            if (!fragment.isResumed) return // Deferred to onResume while the player is open.
+            if (!fragment.isResumed || !listVisible()) return // Update only visible episode lists.
             val observer = list?.viewTreeObserver ?: return
             if (!observer.isAlive) return
             if (refreshTree === observer) return
