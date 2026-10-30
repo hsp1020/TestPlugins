@@ -622,6 +622,25 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             return groups.getOrNull(order[position - 1])
         }
 
+        // Keep the native adapter and Apply button's option indices unchanged.
+        // Only reorder visible rows, and translate interactions back to native indices.
+        val nativeOptions = groups.map { it.sortedBy { sub -> sub.nameSuffix.toIntOrNull() ?: 0 } }
+        val visibleOptions = nativeOptions.map { items ->
+            items.indices.sortedWith(compareBy<Int> { index ->
+                val sub = items[index]
+                StremioC.subtitleOrderByUrl[sub.url] ?: if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) -1 else 40_000
+            }.thenBy { it })
+        }
+        fun optionOrder(): List<Int> {
+            val checked = list.checkedItemPosition
+            return visibleOptions.getOrNull(order.getOrNull(checked - 1)) ?: emptyList()
+        }
+        fun optionAt(position: Int): SubtitleData? {
+            val checked = list.checkedItemPosition
+            val index = order.getOrNull(checked - 1) ?: return null
+            return nativeOptions[index].getOrNull(optionOrder().getOrNull(position) ?: return null)
+        }
+
         val parent = (list.adapter as? HeaderViewListAdapter)?.wrappedAdapter
             ?: list.adapter
         val adapter = parent as? ArrayAdapter<*> ?: return
@@ -640,27 +659,22 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         options.setTag(R.id.sort_subtitles_options, optionsAdapter)
         val optionSelected = options.checkedItemPosition
         options.adapter = RefreshRowAdapter(optionsAdapter, { position ->
-            val siblings = groupAt(list.checkedItemPosition) ?: return@RefreshRowAdapter null
-            val ordered = siblings.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }
-            ordered.getOrNull(position)?.let { StremioSubtitleRefreshRegistry.find(it.url) }
+            optionAt(position)?.let { StremioSubtitleRefreshRegistry.find(it.url) }
         }, { position ->
-            val siblings = groupAt(list.checkedItemPosition) ?: return@RefreshRowAdapter null
-            val sub = siblings.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }.getOrNull(position)
-                ?: return@RefreshRowAdapter null
+            val sub = optionAt(position) ?: return@RefreshRowAdapter null
             StremioC.subtitleDetailByUrl[sub.url]?.takeIf { it.isNotBlank() }?.let {
-                val displayedNumber = optionsAdapter.getItem(position)?.toString()?.toIntOrNull()
-                "${displayedNumber ?: sub.nameSuffix}($it)"
+                "${position + 1}($it)"
             }
-        })
-        if (optionSelected >= 0) options.setItemChecked(optionSelected, true)
+        }, { position -> optionOrder().getOrNull(position) ?: position })
+        if (optionSelected >= 0) {
+            val displayIndex = optionOrder().indexOf(optionSelected)
+            options.setItemChecked(if (displayIndex >= 0) displayIndex else optionSelected, true)
+        }
         iconSelectionUrl = fragment?.player?.getCurrentPreferredSubtitle()?.url
 
         fun checkedEntry(): StremioSubtitleRefreshRegistry.Entry? {
-            val siblings = groupAt(list.checkedItemPosition) ?: return null
-            val selected = if (siblings.size == 1) siblings.first()
-                else siblings.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }
-                    .getOrNull(options.checkedItemPosition)
-            return selected?.let { StremioSubtitleRefreshRegistry.find(it.url) }
+            return optionAt(options.checkedItemPosition)
+                ?.let { StremioSubtitleRefreshRegistry.find(it.url) }
         }
 
         val target = fragment ?: return
@@ -698,10 +712,7 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         }
         val optionLongClick = options.onItemLongClickListener
         options.onItemLongClickListener = AdapterView.OnItemLongClickListener { parentView, row, position, id ->
-            val item = if (options.checkedItemPosition == position)
-                groupAt(list.checkedItemPosition)
-                    ?.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }?.getOrNull(position)
-            else null
+            val item = if (options.checkedItemPosition == position) optionAt(position) else null
             val entry = item?.let { StremioSubtitleRefreshRegistry.find(it.url) }
             val button = (row as? RefreshRow)?.getChildAt(1) as? ImageButton
             if (entry != null && button != null) {
@@ -717,6 +728,9 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
             val previous = list.checkedItemPosition
             nativeClick?.onItemClick(parentView, row, position, id)
             if (position in 0..groups.size) list.setItemChecked(position, true)
+            val nativeIndex = options.checkedItemPosition
+            val displayIndex = optionOrder().indexOf(nativeIndex)
+            if (displayIndex >= 0) options.setItemChecked(displayIndex, true)
             (list.getChildAt(previous - list.firstVisiblePosition) as? RefreshRow)
                 ?.setChecked(list.isItemChecked(previous))
             (row as? RefreshRow)?.setChecked(list.isItemChecked(position))
@@ -727,7 +741,8 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         val nativeOptionClick = options.onItemClickListener
         options.onItemClickListener = AdapterView.OnItemClickListener { parentView, row, position, id ->
             val previous = options.checkedItemPosition
-            nativeOptionClick?.onItemClick(parentView, row, position, id)
+            val nativeIndex = optionOrder().getOrNull(position) ?: position
+            nativeOptionClick?.onItemClick(parentView, row, nativeIndex, optionsAdapter.getItemId(nativeIndex))
             if (position in 0 until optionsAdapter.count) options.setItemChecked(position, true)
             (options.getChildAt(previous - options.firstVisiblePosition) as? RefreshRow)
                 ?.setChecked(options.isItemChecked(previous))
@@ -755,7 +770,8 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
     private inner class RefreshRowAdapter(
         private val source: ArrayAdapter<*>,
         private val sourceAt: (Int) -> StremioSubtitleRefreshRegistry.Entry?,
-        private val displayAt: (Int) -> String? = { null }
+        private val displayAt: (Int) -> String? = { null },
+        private val sourcePosition: (Int) -> Int = { it }
     ) : BaseAdapter() {
         private val originalEndPadding = WeakHashMap<TextView, Int>()
         private val observer = object : DataSetObserver() {
@@ -764,16 +780,16 @@ internal class StremioSubtitleController(private val pluginResources: Resources)
         }
         init { source.registerDataSetObserver(observer) }
         override fun getCount(): Int = source.count
-        override fun getItem(position: Int): Any? = source.getItem(position)
-        override fun getItemId(position: Int): Long = source.getItemId(position)
+        override fun getItem(position: Int): Any? = source.getItem(sourcePosition(position))
+        override fun getItemId(position: Int): Long = source.getItemId(sourcePosition(position))
         override fun hasStableIds(): Boolean = source.hasStableIds()
-        override fun isEnabled(position: Int): Boolean = source.isEnabled(position)
+        override fun isEnabled(position: Int): Boolean = source.isEnabled(sourcePosition(position))
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
             val row = (convertView as? RefreshRow) ?: RefreshRow(parent.context)
             row.onCheckedChanged = null
             val oldText = row.getChildAt(0) as? TextView
-            val text = source.getView(position, oldText, parent) as TextView
+            val text = source.getView(sourcePosition(position), oldText, parent) as TextView
             displayAt(position)?.let { text.text = it }
             if (text !== oldText) {
                 (text.parent as? ViewGroup)?.removeView(text)
