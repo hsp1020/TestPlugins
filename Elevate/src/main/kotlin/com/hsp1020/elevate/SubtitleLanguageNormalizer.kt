@@ -164,20 +164,27 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             ?.takeIf { it.size == groups.size && it.toSet().size == groups.size }
         val position = list.checkedItemPosition - 1
         val index = if (order != null && position in order.indices) order[position] else position
-        val item = if (displayed?.count == groups.size + 1) {
-            groups.getOrNull(index)?.singleOrNull()
+        val group = if (displayed?.count == groups.size + 1) {
+            groups.getOrNull(index)
         } else null
+        val item = group?.singleOrNull()
 
         if (item == null) {
             clearSingleOption()
+            if (group != null) updateEmbeddedOptionLabels(dialog, group, options)
             return
         }
         @Suppress("UNCHECKED_CAST")
         val source = (options.getTag(R.id.sort_subtitles_options) as? ArrayAdapter<Spanned>)
             ?: (options.adapter as? ArrayAdapter<Spanned>) ?: return
-        val detail = stremioSubtitleDetail(item.url)?.takeIf { it.isNotBlank() }
-        val label = item.nameSuffix.ifBlank { "1" }
-        val text = if (detail != null) "$label($detail)" else label
+        val detail = if (item.origin == SubtitleOrigin.URL)
+            stremioSubtitleDetail(item.url)?.takeIf { it.isNotBlank() } else null
+        val text = if (item.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) {
+            embeddedOptionLabel(dialog, item, 1)
+        } else {
+            val label = item.nameSuffix.ifBlank { "1" }
+            if (detail != null) "$label($detail)" else label
+        }
         if (source.count != 1 || source.getItem(0) !== singleOptionItem ||
             singleOptionItem.toString() != text) {
             clearSingleOption()
@@ -190,6 +197,44 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         options.visibility = View.VISIBLE
         options.setItemChecked(0, true)
         (list.adapter as? android.widget.BaseAdapter)?.notifyDataSetChanged()
+    }
+
+    /**
+     * The native picker owns subtitle selection. Number embedded options only in its
+     * display adapter: changing SubtitleData.nameSuffix breaks the player's active-track
+     * equality check and can trigger repeated player reloads.
+     */
+    private fun embeddedOptionLabel(dialog: Dialog, sub: SubtitleData, position: Int): String {
+        val label = dialog.context.getString(R.string.subtitles_from_embedded)
+        var detail = sub.nameSuffix
+        val prefix = Regex("^\\d+ \\(" + Regex.escape(label) + "(?: · )?")
+        while (true) {
+            val match = prefix.find(detail) ?: break
+            detail = detail.substring(match.value.length).removeSuffix(")")
+        }
+        return "$position ($label" + if (detail.isNotBlank()) " · $detail)" else ")"
+    }
+
+    private fun updateEmbeddedOptionLabels(
+        dialog: Dialog, group: List<SubtitleData>, options: ListView
+    ) {
+        val ordered = group.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }
+        if (ordered.size < 2 || ordered.none { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }) return
+        @Suppress("UNCHECKED_CAST")
+        val source = (options.getTag(R.id.sort_subtitles_options) as? ArrayAdapter<Spanned>)
+            ?: (options.adapter as? ArrayAdapter<Spanned>) ?: return
+        if (source.count != ordered.size) return
+        val labels = ArrayList<Spanned>(ordered.size)
+        ordered.forEachIndexed { index, sub ->
+            val existing = source.getItem(index) ?: return
+            labels.add(if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO)
+                embeddedOptionLabel(dialog, sub, index + 1).html() else existing)
+        }
+        if (labels.indices.all { labels[it].toString() == source.getItem(it)?.toString() }) return
+        source.setNotifyOnChange(false)
+        source.clear()
+        source.addAll(labels)
+        source.notifyDataSetChanged()
     }
 
     private val callbacks = object : FragmentManager.FragmentLifecycleCallbacks() {
@@ -273,16 +318,13 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
     }.getOrNull()
 
     private fun localized(sub: SubtitleData, ranks: Map<*, *>?): SubtitleData {
+        // Keep the player's original embedded track object (including its language code).
+        // Media3 reports the same track again after reload; copied data is not equal to it.
+        if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) return sub
         // ms-ind is used for Indonesian next to a separate ms (Malay) track.
         // Do not treat unrecognized language tags as generic Malay.
         val code = if (sub.languageCode.equals("ms-ind", ignoreCase = true)) "id"
             else sub.languageCode
-        if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) {
-            val label = SubtitleHelper.fromTagToLanguageName(code)
-                ?: sub.originalName.substringBefore(" (")
-            return if (sub.originalName == label && sub.languageCode == code) sub
-                else sub.copy(originalName = label, languageCode = code)
-        }
         if (sub.origin != SubtitleOrigin.URL) return sub
 
         // StremioC preserves subtitle detail metadata separately from the language group.
@@ -323,7 +365,6 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         val state = vm.state
         if (state.subtitles.isEmpty()) return
         val ranks = stremioRanks()
-        val embeddedLabel = f.getString(R.string.subtitles_from_embedded)
         val normalized = state.subtitles.map { localized(it, ranks) }
             .filter {
                 val language = it.originalName.substringBefore(" · ").substringBefore(" — ").trim()
@@ -332,39 +373,24 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             }
             .distinctBy { if (it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) it.origin to it.url else it }
 
-        // Only groups containing embedded tracks need explicit option numbers.
-        // The native picker orders by nameSuffix.toIntOrNull() ?: 0, so the
-        // embedded "1 (내장 자막)" option comes before numeric online options.
+        // Keep embedded subtitles unchanged; apply their numbered labels only in the picker.
+        // Continue numbering online subtitles after the embedded entries.
         val replacements = HashMap<SubtitleData, SubtitleData>()
-        val embeddedPrefix = Regex("""^\d+ \(${Regex.escape(embeddedLabel)}(?: · )?""")
         normalized.groupBy { it.originalName }.values.forEach { group ->
-            val embedded = group.filter { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
-                .sortedWith(compareBy<SubtitleData> { it.url.toIntOrNull() ?: Int.MAX_VALUE }
-                    .thenBy { it.url })
+            val embeddedCount = group.count { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO }
             // Renumber previously numbered online options when embedded tracks disappear.
             // Preserve descriptive labels in groups that were never numbered here.
-            if (embedded.isEmpty() &&
+            if (embeddedCount == 0 &&
                 group.none { it.origin == SubtitleOrigin.URL && ranks?.containsKey(it.url) == true } &&
                 group.any {
                     it.origin != SubtitleOrigin.URL || it.nameSuffix.toIntOrNull() == null
                 }) return@forEach
-            embedded.forEachIndexed { index, sub ->
-                var detail = sub.nameSuffix
-                // Unwrap previously generated labels, including names with nested parentheses.
-                while (true) {
-                    val prefix = embeddedPrefix.find(detail) ?: break
-                    detail = detail.substring(prefix.value.length).removeSuffix(")")
-                }
-                val suffix = "${index + 1} ($embeddedLabel" +
-                    if (detail.isNotBlank()) " · $detail)" else ")"
-                if (sub.nameSuffix != suffix) replacements[sub] = sub.copy(nameSuffix = suffix)
-            }
             group.filter { it.origin == SubtitleOrigin.URL }
                 .sortedWith(compareBy<SubtitleData> {
                     (ranks?.get(it.url) as? Number)?.toInt() ?: Int.MAX_VALUE
                 }.thenBy { it.nameSuffix.toIntOrNull() ?: Int.MAX_VALUE })
                 .forEachIndexed { index, sub ->
-                    val suffix = (embedded.size + index + 1).toString()
+                    val suffix = (embeddedCount + index + 1).toString()
                     if (sub.nameSuffix != suffix) replacements[sub] = sub.copy(nameSuffix = suffix)
                 }
         }
