@@ -734,7 +734,7 @@ internal class CatalogBrowserDialog(
         text = "No more results"
         gravity = Gravity.CENTER
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-        applyStremioCNativeFont(bold = true)
+        applyStremioCNativeFont(bold = true, header = true)
         setTextColor(activity.colorFromAttribute(R.attr.textColor))
     }
     private val catalogEndDecoration = object : RecyclerView.ItemDecoration() {
