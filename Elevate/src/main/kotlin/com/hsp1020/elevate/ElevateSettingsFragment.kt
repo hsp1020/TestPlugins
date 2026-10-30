@@ -85,7 +85,7 @@ class ElevateSettingsFragment : DialogFragment() {
             content.addView(TextView(ctx).apply {
                 text = section
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                applyElevateNativeFont(bold = true)
                 setPadding(0, dp(13), 0, dp(6))
             })
             features.forEach { feature ->
@@ -100,10 +100,12 @@ class ElevateSettingsFragment : DialogFragment() {
                 labels.addView(TextView(ctx).apply {
                     text = feature.label
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                    applyElevateNativeFont()
                 })
                 labels.addView(TextView(ctx).apply {
                     text = feature.description
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    applyElevateNativeFont()
                     alpha = 0.73f
                     setPadding(0, dp(3), 0, 0)
                 })
@@ -122,7 +124,7 @@ class ElevateSettingsFragment : DialogFragment() {
                         addView(TextView(ctx).apply {
                             text = "Automatic Skipping"
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                            setTypeface(typeface, android.graphics.Typeface.BOLD)
+                            applyElevateNativeFont(bold = true)
                             setPadding(0, dp(10), 0, dp(5))
                         })
                         // Keep existing preference keys, only match Nuvio's labels and descriptions.
@@ -160,10 +162,12 @@ class ElevateSettingsFragment : DialogFragment() {
                             itemLabels.addView(TextView(ctx).apply {
                                 text = title
                                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                                applyElevateNativeFont()
                             })
                             itemLabels.addView(TextView(ctx).apply {
                                 text = description
                                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                applyElevateNativeFont()
                                 alpha = 0.73f
                                 setPadding(0, dp(3), 0, 0)
                             })

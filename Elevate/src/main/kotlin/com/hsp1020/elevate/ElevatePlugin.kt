@@ -16,7 +16,6 @@ import android.view.MotionEvent
 import android.util.TypedValue
 import android.text.TextUtils
 import android.graphics.drawable.ColorDrawable
-import android.graphics.Typeface
 import android.graphics.Color
 import android.content.res.ColorStateList
 import android.graphics.drawable.Drawable
@@ -970,7 +969,8 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
                     text = labels[position]
                     setTextColor(normalTextColor)
                     setTextSize(TypedValue.COMPLEX_UNIT_PX, title?.textSize ?: context.dp(15).toFloat())
-                    typeface = title?.typeface ?: Typeface.DEFAULT_BOLD
+                    applyElevateNativeFont(reference = title?.typeface ?: typeface,
+                        bold = title?.typeface?.isBold ?: true)
                     gravity = Gravity.CENTER_VERTICAL
                     isSingleLine = true
                     ellipsize = TextUtils.TruncateAt.END
@@ -1004,7 +1004,8 @@ internal class NativeEpisodeOverlayHook(private val application: Application) :
                         text = labels[position]
                         setTextColor(normalTextColor)
                         setTextSize(TypedValue.COMPLEX_UNIT_PX, title?.textSize ?: context.dp(15).toFloat())
-                        typeface = title?.typeface ?: Typeface.DEFAULT_BOLD
+                        applyElevateNativeFont(reference = title?.typeface ?: typeface,
+                        bold = title?.typeface?.isBold ?: true)
                         gravity = Gravity.CENTER_VERTICAL
                         isSingleLine = true
                         ellipsize = TextUtils.TruncateAt.END

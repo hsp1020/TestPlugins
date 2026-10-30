@@ -643,6 +643,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
                     val handle = TextView(context).apply {
                         text = "≡"
                         textSize = 25f
+                        applyElevateNativeFont()
                         gravity = Gravity.CENTER
                         isFocusable = false
                         contentDescription = "Drag provider to reorder"
@@ -660,6 +661,7 @@ internal class SearchProviderOrderHook(private val app: Application) :
                         }
                         gravity = Gravity.CENTER
                         textSize = 14f
+                        applyElevateNativeFont()
                         setPadding(dp(2), paddingTop, dp(2), paddingBottom)
                         layoutParams = LinearLayout.LayoutParams(dp(32), dp(44))
                     }

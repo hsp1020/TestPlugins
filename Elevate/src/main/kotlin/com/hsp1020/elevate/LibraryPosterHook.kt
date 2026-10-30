@@ -872,6 +872,7 @@ internal object LibraryPosterPrefs {
             parent.addView(TextView(context).apply {
                 text = label
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, if (smaller) 12f else 15f)
+                applyElevateNativeFont()
                 if (smaller) alpha = 0.75f
                 setPadding(0, dp(8), 0, dp(4))
             })
@@ -883,6 +884,7 @@ internal object LibraryPosterPrefs {
                 inputType = if (secret) InputType.TYPE_CLASS_TEXT or
                     InputType.TYPE_TEXT_VARIATION_PASSWORD
                 else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                applyElevateNativeFont()
                 setText(value)
             }
         fun addField(parent: LinearLayout, field: EditText, secret: Boolean = false) {
@@ -931,8 +933,19 @@ internal object LibraryPosterPrefs {
 
         title(content, "Library Poster Service")
         val service = Spinner(context).apply {
-            adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item,
-                PosterService.entries.map { it.title })
+            adapter = object : ArrayAdapter<String>(
+                context, android.R.layout.simple_spinner_dropdown_item,
+                PosterService.entries.map { it.title }
+            ) {
+                override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
+                    super.getView(position, convertView, parent).also {
+                        (it as? TextView)?.applyElevateNativeFont()
+                    }
+                override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View =
+                    super.getDropDownView(position, convertView, parent).also {
+                        (it as? TextView)?.applyElevateNativeFont()
+                    }
+            }
             setSelection(saved.service.ordinal)
         }
         content.addView(service)
