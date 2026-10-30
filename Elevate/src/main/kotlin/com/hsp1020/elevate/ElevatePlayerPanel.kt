@@ -72,25 +72,34 @@ internal class ElevatePlayerPanel(
         divider = null
         selector = ColorDrawable(Color.TRANSPARENT)
     }
-    private val adapter = object : ArrayAdapter<Row>(ctx, android.R.layout.simple_list_item_1, rows) {
-        override fun isEnabled(position: Int): Boolean = getItem(position)?.header != true
+    private fun styleRow(text: TextView, selected: Boolean, header: Boolean = false) {
+        // CheckLabel defines drawableStartCompat (24dp) plus a drawable gap.
+        // Clear it and reserve the checkmark in an independent fixed-width view.
+        text.setCompoundDrawablesRelativeWithIntrinsicBounds(null, null, null, null)
+        text.compoundDrawablePadding = 0
+        text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        text.applyElevateNativeFont(reference = buttons.values.firstOrNull()?.typeface ?: text.typeface,
+            bold = true)
+        text.setPadding(0, dp(2), 0, dp(2))
+        text.minHeight = 0
+        text.includeFontPadding = false
+        text.gravity = if (header) Gravity.CENTER else Gravity.CENTER_VERTICAL
+        text.isActivated = selected
+        text.isSelected = false
+    }
 
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-            val value = getItem(position) ?: return TextView(ctx)
-            val selected = value.selected
-            // Native CheckLabel is the same row used by CloudStream's subtitle/source picker.
-            if (value.refresh == null) {
-                val text = (convertView as? TextView)
-                    ?: (LayoutInflater.from(ctx).inflate(
-                        R.layout.sort_bottom_single_choice, parent, false
-                    ) as TextView)
-                text.text = if (value.richText) value.label.html() else value.label
-                styleRow(text, selected, value.header)
-                return text
-            }
-            val row = (convertView as? LinearLayout) ?: LinearLayout(ctx).apply {
-                gravity = Gravity.CENTER_VERTICAL
+    private fun bindRow(
+        reuse: View?, parent: ViewGroup, position: Int, label: CharSequence, checked: Boolean,
+        compact: Boolean, refresh: (() -> Unit)? = null, longRefresh: (() -> Unit)? = null
+    ): View {
+        val row = (reuse as? LinearLayout)?.takeIf { it.childCount == 3 }
+            ?: LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(ImageView(ctx).apply {
+                    setImageResource(R.drawable.ic_baseline_check_24_listview)
+                    scaleType = ImageView.ScaleType.CENTER_INSIDE
+                }, LinearLayout.LayoutParams(dp(24), dp(24)))
                 addView(LayoutInflater.from(ctx).inflate(
                     R.layout.sort_bottom_single_choice, this, false
                 ), LinearLayout.LayoutParams(0, -2, 1f))
@@ -102,47 +111,55 @@ internal class ElevatePlayerPanel(
                     isFocusable = true
                 }, LinearLayout.LayoutParams(dp(48), dp(48)))
             }
-            (row.getChildAt(0) as TextView).apply {
-                text = if (value.richText) value.label.html() else value.label
-                styleRow(this, selected, value.header)
-                setOnClickListener {
-                    (parent as? ListView)?.performItemClick(row, position, getItemId(position))
-                }
+        row.layoutParams = AbsListView.LayoutParams(-1, if (compact) dp(48) else -2)
+        row.minimumHeight = if (compact) dp(48) else dp(28)
+        (row.getChildAt(0) as ImageView).visibility = if (checked) View.VISIBLE else View.INVISIBLE
+        (row.getChildAt(1) as TextView).apply {
+            text = label
+            styleRow(this, checked)
+            maxLines = if (compact) 2 else Int.MAX_VALUE
+            ellipsize = if (compact) TextUtils.TruncateAt.END else null
+            setOnClickListener {
+                (parent as? ListView)?.performItemClick(row, position, position.toLong())
             }
-            (row.getChildAt(1) as ImageButton).apply {
-                visibility = View.VISIBLE
-                setOnClickListener { value.refresh?.invoke() }
-                setOnLongClickListener {
-                    value.autoRefresh?.invoke()
-                    true
-                }
-            }
-            return row
         }
-    }
-    private fun styleRow(text: TextView, selected: Boolean, header: Boolean = false) {
-        text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-        text.applyElevateNativeFont(reference = buttons.values.firstOrNull()?.typeface ?: text.typeface,
-            bold = header || text.typeface?.isBold == true)
-        text.setPadding(0, dp(if (header) 8 else 2), 0, dp(if (header) 4 else 2))
-        text.compoundDrawablePadding = 0
-        text.minHeight = dp(if (header) 34 else 28)
-        text.includeFontPadding = false
-        text.maxLines = Int.MAX_VALUE
-        text.ellipsize = null
-        text.isActivated = selected
-        text.isSelected = selected
-        if (header) text.setCompoundDrawablesRelativeWithIntrinsicBounds(null, null, null, null)
+        (row.getChildAt(2) as ImageButton).apply {
+            visibility = if (refresh != null) View.VISIBLE else View.GONE
+            setOnClickListener(if (refresh != null) View.OnClickListener { refresh() } else null)
+            setOnLongClickListener(if (longRefresh != null) View.OnLongClickListener {
+                longRefresh()
+                true
+            } else null)
+        }
+        return row
     }
 
+    private val adapter = object : ArrayAdapter<Row>(ctx, android.R.layout.simple_list_item_1, rows) {
+        override fun isEnabled(position: Int): Boolean = getItem(position)?.header != true
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val value = getItem(position) ?: return View(ctx)
+            if (value.header) {
+                val text = (convertView as? TextView)
+                    ?: (LayoutInflater.from(ctx).inflate(
+                        R.layout.sort_bottom_single_choice, parent, false
+                    ) as TextView)
+                text.text = value.label
+                styleRow(text, false, true)
+                text.minHeight = dp(if (value.label.isEmpty()) 48 else 36)
+                return text
+            }
+            return bindRow(convertView, parent, position,
+                if (value.richText) value.label.html() else value.label,
+                value.selected, tab == Tab.SUBTITLES, value.refresh, value.autoRefresh)
+        }
+    }
     private val languageAdapter = object : ArrayAdapter<CharSequence>(
         ctx, R.layout.sort_bottom_single_choice, ArrayList()
     ) {
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-            val text = super.getView(position, convertView, parent) as TextView
-            styleRow(text, position == selectedGroup)
-            return text
-        }
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
+            bindRow(convertView, parent, position, getItem(position) ?: "",
+                position == selectedGroup, compact = true)
     }
     private var subtitleGroups = emptyList<Pair<String, List<SubtitleData>>>()
     private var selectedGroup = 0
@@ -381,7 +398,7 @@ internal class ElevatePlayerPanel(
         seasonSelector()?.visibility = if (episode) View.VISIBLE else View.GONE
         groupScroll.visibility = if (tab == Tab.SOURCES) View.VISIBLE else View.GONE
         syncButton.visibility = if (tab == Tab.SUBTITLES) View.VISIBLE else View.GONE
-        syncButton.text = ctx.getString(R.string.subtitle_offset_title)
+        syncButton.text = ctx.getString(R.string.subtitle_offset_title) + " >"
         when (tab) {
             Tab.SOURCES -> { panelContent(list); renderSources() }
             Tab.AUDIO -> { panelContent(list); renderTracks() }
@@ -433,25 +450,28 @@ internal class ElevatePlayerPanel(
         if (filter !in groups) filter = null
         filters.removeAllViews()
         fun addFilter(value: String?) {
-            val label = LayoutInflater.from(ctx).inflate(
-                R.layout.sort_bottom_single_choice, filters, false
-            ) as TextView
-            label.apply {
-                text = value ?: ctx.getString(R.string.all)
-                maxLines = 2
-                ellipsize = TextUtils.TruncateAt.END
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                applyElevateNativeFont(reference = buttons.values.firstOrNull()?.typeface ?: typeface,
-                    bold = true)
-                maxWidth = dp(184)
-                setPadding(0, dp(2), 0, dp(2))
-                compoundDrawablePadding = 0
+            val item = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(ImageView(ctx).apply {
+                    setImageResource(R.drawable.ic_baseline_check_24_listview)
+                    scaleType = ImageView.ScaleType.CENTER_INSIDE
+                    visibility = if (value == filter) View.VISIBLE else View.INVISIBLE
+                }, LinearLayout.LayoutParams(dp(20), dp(20)))
+                addView((LayoutInflater.from(ctx).inflate(
+                    R.layout.sort_bottom_single_choice, this, false
+                ) as TextView).apply {
+                    text = value ?: ctx.getString(R.string.all)
+                    styleRow(this, value == filter)
+                    maxLines = 2
+                    ellipsize = TextUtils.TruncateAt.END
+                    maxWidth = dp(164)
+                }, LinearLayout.LayoutParams(-2, -2))
                 minimumHeight = dp(36)
-                isActivated = (value == filter)
                 alpha = if (value == filter) 1f else .65f
                 setOnClickListener { filter = value; renderSources() }
             }
-            filters.addView(label, LinearLayout.LayoutParams(-2, -2))
+            filters.addView(item, LinearLayout.LayoutParams(-2, -2))
         }
         addFilter(null)
         groups.forEach(::addFilter)
@@ -569,14 +589,13 @@ internal class ElevatePlayerPanel(
         languageAdapter.add(ctx.getString(R.string.no_subtitles).html())
         subtitleGroups.forEach { (language, _) -> languageAdapter.add(language.html()) }
         languageList.setItemChecked(selectedGroup, true)
-        languageList.setSelection(selectedGroup)
         renderSubtitleOptions()
     }
 
     private fun renderSubtitleOptions() {
         val current = selectedSubtitle?.url
         val group = subtitleGroups.getOrNull(selectedGroup - 1)?.second.orEmpty()
-        replaceRows(group.mapIndexed { index, sub ->
+        replaceRows(listOf(Row("", {}, header = true)) + group.mapIndexed { index, sub ->
             val number = index + 1 // Visual option index, not nameSuffix (native picker behavior).
             val label = if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) {
                 val embedded = ctx.getString(R.string.subtitles_from_embedded)
@@ -596,8 +615,8 @@ internal class ElevatePlayerPanel(
                 if (refreshable) ({ ElevateSubtitleRefreshHook.active()?.refreshSelected(true); Unit }) else null,
                 richText = true, selected = sub.url == current)
         })
-        val selected = group.indexOfFirst { it.url == current }
-        if (selected >= 0) list.setSelection(selected)
+        // Both subtitle columns reserve the first 48dp for the "No subtitles" row.
+        // Keep independent scrolling, but give every subsequent row the same baseline.
     }
 
     private fun showSync() {
@@ -612,6 +631,22 @@ internal class ElevatePlayerPanel(
         syncButton.visibility = View.VISIBLE
         syncButton.text = "‹ ${ctx.getString(R.string.pick_subtitle)}"
         panelContent(nativeSync)
+        // Align the bottom edge of the native sync buttons just above the
+        // actual player bar, rather than pinning them to the screen bottom.
+        nativeSync.post {
+            val playerBar = root.findViewById<View>(R.id.bottom_player_bar)
+            if (inSync && playerBar != null && playerBar.isShown && nativeSync.height > 0) {
+                val syncOnScreen = IntArray(2)
+                val barOnScreen = IntArray(2)
+                nativeSync.getLocationOnScreen(syncOnScreen)
+                playerBar.getLocationOnScreen(barOnScreen)
+                val bottom = syncOnScreen[1] + nativeSync.height
+                val inset = (bottom - barOnScreen[1]).coerceAtLeast(0) + dp(4)
+                if (nativeSync.paddingBottom != inset) {
+                    nativeSync.setPadding(0, 0, 0, inset)
+                }
+            }
+        }
         offsetInput.setText(fragment.player.getSubtitleOffset().toString())
         val cues = ElevateSubtitleRefreshHook.active()?.refreshedCues()
             ?: fragment.player.getSubtitleCues()
