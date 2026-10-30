@@ -730,13 +730,12 @@ internal class CatalogBrowserDialog(
         visibility = View.GONE
     }
     private var showCatalogEnd = false
-    private val catalogEndText = "No more results"
-    private val catalogEndPaint = android.text.TextPaint(catalogEmpty.paint).apply {
-        color = activity.colorFromAttribute(R.attr.textColor)
-        textSize = TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_SP, 18f, activity.resources.displayMetrics
-        )
-        textAlign = android.graphics.Paint.Align.CENTER
+    private val catalogEndLabel = TextView(activity).apply {
+        text = "No more results"
+        gravity = Gravity.CENTER
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+        applyStremioCNativeFont(bold = true)
+        setTextColor(activity.colorFromAttribute(R.attr.textColor))
     }
     private val catalogEndDecoration = object : RecyclerView.ItemDecoration() {
         override fun getItemOffsets(
@@ -751,7 +750,17 @@ internal class CatalogBrowserDialog(
         ) {
             if (!showCatalogEnd || adapter.itemCount == 0) return
             val last = parent.layoutManager?.findViewByPosition(adapter.itemCount - 1) ?: return
-            canvas.drawText(catalogEndText, parent.width / 2f, last.bottom + dp(36).toFloat(), catalogEndPaint)
+            if (catalogEndLabel.width != parent.width) {
+                catalogEndLabel.measure(
+                    View.MeasureSpec.makeMeasureSpec(parent.width, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+                )
+                catalogEndLabel.layout(0, 0, parent.width, catalogEndLabel.measuredHeight)
+            }
+            canvas.save()
+            canvas.translate(0f, (last.bottom + dp(36) - catalogEndLabel.baseline).toFloat())
+            catalogEndLabel.draw(canvas)
+            canvas.restore()
         }
     }
 
