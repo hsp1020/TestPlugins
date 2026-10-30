@@ -6,6 +6,9 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Color
+import android.graphics.RenderEffect
+import android.graphics.Shader
+import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import android.os.Bundle
@@ -23,11 +26,27 @@ import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.ui.player.NEXT_WATCH_EPISODE_PERCENTAGE
+import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
+import com.lagradost.cloudstream3.ui.result.VideoWatchState
+import com.lagradost.cloudstream3.utils.DataStoreHelper.getVideoWatchState
+import com.lagradost.cloudstream3.utils.DataStoreHelper.getViewPos
 import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 
-internal class EpisodeProgressHook(private val application: Application) : Application.ActivityLifecycleCallbacks {
+internal class EpisodeProgressHook(
+    private val application: Application,
+    private var progressEnabled: Boolean,
+    private var blurEnabled: Boolean
+) : Application.ActivityLifecycleCallbacks {
     private var activity: FragmentActivity? = null
     private val screens = mutableMapOf<Fragment, Screen>()
+
+    fun setFeatures(progress: Boolean, blur: Boolean) {
+        if (progressEnabled == progress && blurEnabled == blur) return
+        progressEnabled = progress
+        blurEnabled = blur
+        screens.values.forEach(Screen::onResume)
+    }
 
     private val callback = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentViewCreated(
@@ -96,6 +115,11 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
         private var fullRefreshPending = false
         private val dirtyRows = LinkedHashSet<View>()
         private val rows = mutableMapOf<View, RowProgress>()
+        private val blurredPosters = mutableMapOf<View, ImageView>()
+        private val blurEffect by lazy {
+            val radius = 18f * root.resources.displayMetrics.density
+            RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP)
+        }
         private val primaryColor by lazy { root.context.colorFromAttribute(R.attr.colorPrimary) }
         private val rowHeight by lazy {
             (3f * root.resources.displayMetrics.density + 0.5f).toInt().coerceAtLeast(1)
@@ -120,6 +144,7 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
             override fun onChildViewDetachedFromWindow(view: View) {
                 dirtyRows.remove(view)
                 rows.remove(view)?.restore()
+                clearBlur(view)
             }
         }
         private val listLayout = View.OnLayoutChangeListener { _, left, top, right, bottom,
@@ -195,6 +220,7 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
             list?.removeOnLayoutChangeListener(listLayout)
             rows.values.toList().forEach(RowProgress::restore)
             rows.clear()
+            blurredPosters.keys.toList().forEach(::clearBlur)
             dirtyRows.clear()
             fullRefreshPending = false
             list = null
@@ -244,9 +270,49 @@ internal class EpisodeProgressHook(private val application: Application) : Appli
             }
         }
 
+        private fun clearBlur(row: View) {
+            val poster = blurredPosters.remove(row) ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) poster.setRenderEffect(null)
+        }
+
+        private fun updateBlur(row: View, poster: ImageView?) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || !blurEnabled || poster == null) {
+                clearBlur(row)
+                return
+            }
+            val recycler = list
+            val adapter = recycler?.adapter as? EpisodeAdapter
+            val adapterPosition = recycler?.getChildViewHolder(row)?.bindingAdapterPosition
+                ?: RecyclerView.NO_POSITION
+            val episode = if (adapter == null || adapterPosition == RecyclerView.NO_POSITION) null
+                else adapter.getItemOrNull(adapterPosition - adapter.headers)
+            val shouldBlur = episode != null && !episode.poster.isNullOrBlank() && run {
+                val saved = getViewPos(episode.id)
+                val duration = saved?.duration?.takeIf { it > 0L } ?: episode.duration
+                val position = saved?.position ?: episode.position
+                val watched = getVideoWatchState(episode.id) == VideoWatchState.Watched ||
+                    episode.videoWatchState == VideoWatchState.Watched ||
+                    (duration > 0L && position.toDouble() / duration >=
+                        NEXT_WATCH_EPISODE_PERCENTAGE / 100.0)
+                !watched
+            }
+            if (!shouldBlur) {
+                clearBlur(row)
+            } else if (blurredPosters[row] !== poster) {
+                clearBlur(row)
+                poster.setRenderEffect(blurEffect)
+                blurredPosters[row] = poster
+            }
+        }
+
         private fun refreshRow(row: View) {
             val nativeProgress = row.findViewById<ProgressBar>(R.id.episode_progress)
             val poster = row.findViewById<ImageView>(R.id.episode_poster)
+            updateBlur(row, poster)
+            if (!progressEnabled) {
+                rows.remove(row)?.restore()
+                return
+            }
             val originalOverlay = row.findViewById<View>(R.id.watch_progress_container)
             val frame = poster?.parent as? FrameLayout
             if (nativeProgress == null || poster == null || frame == null || originalOverlay == null) {

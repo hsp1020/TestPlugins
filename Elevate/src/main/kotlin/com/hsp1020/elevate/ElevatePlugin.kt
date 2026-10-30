@@ -216,9 +216,14 @@ class ElevatePlugin : Plugin() {
             libraryPosters?.stop()
             libraryPosters = null
         }
-        if (enabled(ElevateFeature.EPISODE_PROGRESS)) {
+        val showEpisodeProgress = enabled(ElevateFeature.EPISODE_PROGRESS)
+        val blurUnwatchedEpisodes = enabled(ElevateFeature.EPISODE_SPOILERS)
+        if (showEpisodeProgress || blurUnwatchedEpisodes) {
             if (episodeProgress == null) {
-                episodeProgress = EpisodeProgressHook(application).also { it.start() }
+                episodeProgress = EpisodeProgressHook(application, showEpisodeProgress, blurUnwatchedEpisodes)
+                    .also { it.start() }
+            } else {
+                episodeProgress?.setFeatures(showEpisodeProgress, blurUnwatchedEpisodes)
             }
         } else {
             episodeProgress?.stop()

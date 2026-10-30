@@ -32,6 +32,8 @@ internal enum class ElevateFeature(
         "Replace library covers via RPDB, XRDB, OPDB, AIORatings, TOP Posters or EasyRatingsDB."),
     EPISODE_PROGRESS("Home & Library", "Episode Progress Indicators",
         "Show watched progress on large episode thumbnails."),
+    EPISODE_SPOILERS("Home & Library", "Blur Unwatched Episodes",
+        "Blur episode thumbnails until 90% watched or manually marked watched."),
     EPISODE_OVERLAY("Playback & Subtitles", "Player Episode List",
         "Keep playback running when browsing episodes, with a season dropdown and translucent cards."),
     EMBEDDED_SUBTITLES("Playback & Subtitles", "Embedded Subtitle Management",
