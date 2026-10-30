@@ -695,7 +695,19 @@ internal class CatalogBrowserDialog(
     private val genreArrow = selectorArrow()
     private val checkIconId = pluginResources.getIdentifier("addon_check_icon", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
     private val selectorLabelStyle = TextView(activity).apply {
-        typeface = Typeface.create(typeface, Typeface.BOLD)
+        if (isLayout(com.lagradost.cloudstream3.ui.settings.Globals.PHONE)) {
+            // On the phone use the exact native Home header text appearance.
+            // Keep the original selector size and leave tablet/TV typography unchanged.
+            val size = textSize
+            setTextAppearance(R.style.WatchHeaderText)
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, size)
+            typeface = Typeface.create(
+                androidx.core.content.res.ResourcesCompat.getFont(activity, R.font.google_sans)
+                    ?: typeface, Typeface.BOLD
+            )
+        } else {
+            typeface = Typeface.create(typeface, Typeface.BOLD)
+        }
     }
     private val retry = button("Retry").apply { visibility = View.GONE }
     private var initialSkeleton = false

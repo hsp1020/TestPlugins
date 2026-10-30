@@ -290,7 +290,7 @@ internal class TrailerChooser(
             if (activity.theme.resolveAttribute(
                     android.R.attr.selectableItemBackgroundBorderless, ripple, true
                 ) && ripple.resourceId != 0) {
-                foreground = androidx.core.content.ContextCompat.getDrawable(activity, ripple.resourceId)
+                this.foreground = androidx.core.content.ContextCompat.getDrawable(activity, ripple.resourceId)
             }
             setOnClickListener { dialog?.dismiss() }
         }
