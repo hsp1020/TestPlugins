@@ -2,6 +2,7 @@ package com.hsp1020.elevate
 
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
+import android.content.res.ColorStateList
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.LayoutInflater
@@ -32,6 +33,8 @@ import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.player.VideoLink
 import com.lagradost.cloudstream3.ui.player.VideoLive
+import com.lagradost.cloudstream3.ui.player.AudioTrack
+import com.lagradost.cloudstream3.ui.player.VideoTrack
 import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.player.SubtitleOrigin
 import com.lagradost.cloudstream3.ui.player.SubtitleOffsetItemAdapter
@@ -51,12 +54,18 @@ internal class ElevatePlayerPanel(
 ) {
     enum class Tab { SOURCES, AUDIO, SUBTITLES, EPISODES }
     private data class Row(val label: String, val action: () -> Unit,
-        val refresh: (() -> Unit)? = null, val autoRefresh: (() -> Unit)? = null,
+        val refresh: ((ImageButton) -> Unit)? = null, val autoRefresh: ((ImageButton) -> Unit)? = null,
         val richText: Boolean = false, val selected: Boolean = false,
-        val header: Boolean = false)
+        val header: Boolean = false, val refreshUrl: String? = null)
     private val ctx = overlay.context
     private val dp: (Int) -> Int = { (it * ctx.resources.displayMetrics.density + .5f).toInt() }
     private val textColor = episodeTitle?.currentTextColor ?: Color.WHITE
+    private val standardTextColor by lazy {
+        (LayoutInflater.from(ctx).inflate(R.layout.sort_bottom_single_choice, null, false) as TextView).textColors
+    }
+    private var chosenLink: VideoLink? = null
+    private var chosenAudio: AudioTrack? = null
+    private var chosenVideo: VideoTrack? = null
     private var nativeWidth = overlay.layoutParams?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT
     private val vm = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
     private val tabs = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
@@ -84,13 +93,15 @@ internal class ElevatePlayerPanel(
         text.minHeight = 0
         text.includeFontPadding = false
         text.gravity = if (header) Gravity.CENTER else Gravity.CENTER_VERTICAL
+        text.setTextColor(if (selected) ColorStateList.valueOf(Color.WHITE) else standardTextColor)
         text.isActivated = selected
         text.isSelected = false
     }
 
     private fun bindRow(
         reuse: View?, parent: ViewGroup, position: Int, label: CharSequence, checked: Boolean,
-        compact: Boolean, refresh: (() -> Unit)? = null, longRefresh: (() -> Unit)? = null
+        compact: Boolean, refresh: ((ImageButton) -> Unit)? = null,
+        longRefresh: ((ImageButton) -> Unit)? = null, refreshUrl: String? = null
     ): View {
         val row = (reuse as? LinearLayout)?.takeIf { it.childCount == 3 }
             ?: LinearLayout(ctx).apply {
@@ -113,7 +124,10 @@ internal class ElevatePlayerPanel(
             }
         row.layoutParams = AbsListView.LayoutParams(-1, if (compact) dp(48) else -2)
         row.minimumHeight = if (compact) dp(48) else dp(28)
-        (row.getChildAt(0) as ImageView).visibility = if (checked) View.VISIBLE else View.INVISIBLE
+        (row.getChildAt(0) as ImageView).apply {
+            imageTintList = ColorStateList.valueOf(Color.WHITE)
+            visibility = if (checked) View.VISIBLE else View.INVISIBLE
+        }
         (row.getChildAt(1) as TextView).apply {
             text = label
             styleRow(this, checked)
@@ -125,9 +139,10 @@ internal class ElevatePlayerPanel(
         }
         (row.getChildAt(2) as ImageButton).apply {
             visibility = if (refresh != null) View.VISIBLE else View.GONE
-            setOnClickListener(if (refresh != null) View.OnClickListener { refresh() } else null)
+            tag = refreshUrl
+            setOnClickListener(if (refresh != null) View.OnClickListener { refresh(this) } else null)
             setOnLongClickListener(if (longRefresh != null) View.OnLongClickListener {
-                longRefresh()
+                longRefresh(this)
                 true
             } else null)
         }
@@ -151,7 +166,8 @@ internal class ElevatePlayerPanel(
             }
             return bindRow(convertView, parent, position,
                 if (value.richText) value.label.html() else value.label,
-                value.selected, tab == Tab.SUBTITLES, value.refresh, value.autoRefresh)
+                value.selected, tab == Tab.SUBTITLES, value.refresh, value.autoRefresh,
+                value.refreshUrl)
         }
     }
     private val languageAdapter = object : ArrayAdapter<CharSequence>(
@@ -166,12 +182,12 @@ internal class ElevatePlayerPanel(
     private var selectedSubtitle: SubtitleData? = null
     private var selectionInitialized = false
     private val languageList = ListView(ctx).apply {
-        choiceMode = AbsListView.CHOICE_MODE_SINGLE
+        choiceMode = AbsListView.CHOICE_MODE_NONE
         divider = null
         adapter = languageAdapter
         setOnItemClickListener { _, _, position, _ ->
             selectedGroup = position
-            setItemChecked(position, true)
+            languageAdapter.notifyDataSetChanged()
             if (position == 0) setSubtitle(null)
             else {
                 val group = subtitleGroups.getOrNull(position - 1)?.second.orEmpty()
@@ -186,16 +202,39 @@ internal class ElevatePlayerPanel(
         addView(languageList, LinearLayout.LayoutParams(0, -1, .35f))
     }
     private var inSync = false
-    private val syncButton = TextView(ctx).apply {
-        text = ctx.getString(R.string.subtitle_offset_title)
+    private fun arrow(reverse: Boolean) = ImageView(ctx).apply {
+        setImageResource(R.drawable.ic_baseline_arrow_back_ios_24)
+        imageTintList = ColorStateList.valueOf(textColor)
+        if (reverse) rotationY = 180f
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        visibility = View.GONE
+    }
+    private val syncBack = arrow(false)
+    private val syncForward = arrow(true)
+    private val syncLabel = TextView(ctx).apply {
         setTextColor(textColor)
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         gravity = Gravity.CENTER
-        setPadding(0, 0, 0, 0)
-        minimumHeight = dp(44)
         applyElevateNativeFont(bold = true)
+    }
+    private val syncButton = LinearLayout(ctx).apply {
+        gravity = Gravity.CENTER
+        orientation = LinearLayout.HORIZONTAL
+        minimumHeight = dp(44)
+        addView(syncBack, LinearLayout.LayoutParams(dp(14), dp(14)))
+        addView(syncLabel, LinearLayout.LayoutParams(-2, -1).apply {
+            marginStart = dp(4)
+            marginEnd = dp(4)
+        })
+        addView(syncForward, LinearLayout.LayoutParams(dp(14), dp(14)))
         setOnClickListener { if (inSync) showTabContents() else showSync() }
         visibility = View.GONE
+    }
+    private fun updateSyncHeader(back: Boolean) {
+        syncBack.visibility = if (back) View.VISIBLE else View.GONE
+        syncForward.visibility = if (back) View.GONE else View.VISIBLE
+        syncLabel.text = ctx.getString(if (back) R.string.pick_subtitle
+            else R.string.subtitle_offset_title)
     }
     private val body = LinearLayout(ctx).apply {
         orientation = LinearLayout.VERTICAL
@@ -365,6 +404,13 @@ internal class ElevatePlayerPanel(
     fun isEpisodeTab() = tab == Tab.EPISODES
     fun show(destination: Tab = tab, sync: Boolean = false): Boolean {
         if (!overlay.isShown && !openNative()) return false
+        if (destination != tab) {
+            if (destination == Tab.SOURCES) chosenLink = null
+            if (destination == Tab.AUDIO) {
+                chosenAudio = null
+                chosenVideo = null
+            }
+        }
         tab = destination
         if (sync) showSync() else showTabContents()
         return true
@@ -398,7 +444,7 @@ internal class ElevatePlayerPanel(
         seasonSelector()?.visibility = if (episode) View.VISIBLE else View.GONE
         groupScroll.visibility = if (tab == Tab.SOURCES) View.VISIBLE else View.GONE
         syncButton.visibility = if (tab == Tab.SUBTITLES) View.VISIBLE else View.GONE
-        syncButton.text = ctx.getString(R.string.subtitle_offset_title) + " >"
+        updateSyncHeader(false)
         when (tab) {
             Tab.SOURCES -> { panelContent(list); renderSources() }
             Tab.AUDIO -> { panelContent(list); renderTracks() }
@@ -442,7 +488,7 @@ internal class ElevatePlayerPanel(
 
     private fun renderSources() {
         val source = vm.state.generatorState?.response?.apiName.orEmpty()
-        val selected = currentLink()
+        val selected = chosenLink ?: currentLink()
         val entries = vm.state.sortLinks(qualityProfile())
             .filter { it.shouldUseLink || it.link == selected }.map { it.link }
         val keys = entries.map { sourceGroup(it, source) }
@@ -484,6 +530,8 @@ internal class ElevatePlayerPanel(
                     GeneratorPlayer::class.java.getDeclaredMethod(
                         "loadLink", Pair::class.java, Boolean::class.javaPrimitiveType!!
                     ).apply { isAccessible = true }.invoke(fragment, link, true)
+                    chosenLink = link
+                    renderSources()
                 }.onFailure { android.util.Log.w("Elevate", "Source switch failed", it) }
             }, selected = link == selected)
         })
@@ -491,8 +539,8 @@ internal class ElevatePlayerPanel(
 
     private fun renderTracks() {
         val tracks = fragment.player.getVideoTracks()
-        val activeAudio = tracks.currentAudioTrack
-        val activeVideo = tracks.currentVideoTrack
+        val activeAudio = chosenAudio ?: tracks.currentAudioTrack
+        val activeVideo = chosenVideo ?: tracks.currentVideoTrack
         val audio = tracks.allAudioTracks
         val video = tracks.allVideoTracks.sortedBy { it.height?.times(-1) }
         val items = ArrayList<Row>()
@@ -522,9 +570,10 @@ internal class ElevatePlayerPanel(
             }
             val label = listOf(language.replaceFirstChar { it.uppercaseChar() }, channels, codec)
                 .filter { it.isNotBlank() }.joinToString(" • ")
-            val checked = activeAudio?.id == item.id && activeAudio?.formatIndex == item.formatIndex
+            val checked = activeAudio == item
             items += Row(label, {
                 fragment.player.setPreferredAudioTrack(item.language, item.id, item.formatIndex)
+                chosenAudio = item
                 renderTracks()
             }, selected = checked)
         }
@@ -534,12 +583,11 @@ internal class ElevatePlayerPanel(
             val height = item.height ?: -1
             val title = item.label ?: if (width > 0 && height > 0) "${width}x${height}"
                 else (index + 1).toString()
-            val checked = activeVideo == item ||
-                (activeVideo?.id == item.id && activeVideo?.width == item.width &&
-                    activeVideo?.height == item.height)
+            val checked = activeVideo == item
             items += Row(title, {
                 if (width > 0 && height > 0) {
                     fragment.player.setMaxVideoSize(width, height, item.id)
+                    chosenVideo = item
                     renderTracks()
                 }
             }, selected = checked)
@@ -588,14 +636,14 @@ internal class ElevatePlayerPanel(
         languageAdapter.clear()
         languageAdapter.add(ctx.getString(R.string.no_subtitles).html())
         subtitleGroups.forEach { (language, _) -> languageAdapter.add(language.html()) }
-        languageList.setItemChecked(selectedGroup, true)
+        languageAdapter.notifyDataSetChanged()
         renderSubtitleOptions()
     }
 
     private fun renderSubtitleOptions() {
         val current = selectedSubtitle?.url
         val group = subtitleGroups.getOrNull(selectedGroup - 1)?.second.orEmpty()
-        replaceRows(listOf(Row("", {}, header = true)) + group.mapIndexed { index, sub ->
+        replaceRows(group.mapIndexed { index, sub ->
             val number = index + 1 // Visual option index, not nameSuffix (native picker behavior).
             val label = if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) {
                 val embedded = ctx.getString(R.string.subtitles_from_embedded)
@@ -611,12 +659,17 @@ internal class ElevatePlayerPanel(
                 ElevateSubtitleRefreshHook.active() != null &&
                 ElevateSubtitleRefreshRegistry.entryFor(sub) != null
             Row(label, { setSubtitle(sub) },
-                if (refreshable) ({ ElevateSubtitleRefreshHook.active()?.refreshSelected(false); Unit }) else null,
-                if (refreshable) ({ ElevateSubtitleRefreshHook.active()?.refreshSelected(true); Unit }) else null,
-                richText = true, selected = sub.url == current)
+                if (refreshable) ({ button: ImageButton ->
+                    ElevateSubtitleRefreshHook.active()?.refreshSelected(false, button)
+                    Unit
+                }) else null,
+                if (refreshable) ({ button: ImageButton ->
+                    ElevateSubtitleRefreshHook.active()?.refreshSelected(true, button)
+                    Unit
+                }) else null,
+                richText = true, selected = sub.url == current, refreshUrl = sub.url)
         })
-        // Both subtitle columns reserve the first 48dp for the "No subtitles" row.
-        // Keep independent scrolling, but give every subsequent row the same baseline.
+        // Both lists now start at the same top edge with identical 48dp rows.
     }
 
     private fun showSync() {
@@ -629,7 +682,7 @@ internal class ElevatePlayerPanel(
         seasonSelector()?.visibility = View.GONE
         groupScroll.visibility = View.GONE
         syncButton.visibility = View.VISIBLE
-        syncButton.text = "‹ ${ctx.getString(R.string.pick_subtitle)}"
+        updateSyncHeader(true)
         panelContent(nativeSync)
         // Align the bottom edge of the native sync buttons just above the
         // actual player bar, rather than pinning them to the screen bottom.

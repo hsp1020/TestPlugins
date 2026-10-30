@@ -876,12 +876,12 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
     fun refreshAppearance() = refreshedOverlay.onPlayerEvent()
 
     /** Called directly from the integrated panel, never through a fake Dialog. */
-    fun refreshSelected(automatic: Boolean = false): Boolean {
+    fun refreshSelected(automatic: Boolean = false, button: ImageButton? = null): Boolean {
         val target = fragment ?: return false
         val url = target.player.getCurrentPreferredSubtitle()?.url ?: return false
         val subtitle = model?.state?.subtitles?.firstOrNull { it.url == url } ?: return false
         val entry = ElevateSubtitleRefreshRegistry.entryFor(subtitle) ?: return false
-        requestSubtitleRefresh(entry, null, automatic)
+        requestSubtitleRefresh(entry, button, automatic)
         return true
     }
 
@@ -962,7 +962,8 @@ internal class ElevateSubtitleRefreshHook(
         application.unregisterActivityLifecycleCallbacks(this)
         unbind()
     }
-    fun refreshSelected(automatic: Boolean = false) = controller.refreshSelected(automatic)
+    fun refreshSelected(automatic: Boolean = false, button: ImageButton? = null) =
+        controller.refreshSelected(automatic, button)
     fun refreshedCues(): List<SubtitleCue>? = controller.refreshedCues()
     fun refreshAppearance() = controller.refreshAppearance()
     companion object {
