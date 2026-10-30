@@ -730,6 +730,8 @@ internal class CatalogBrowserDialog(
         visibility = View.GONE
     }
     private var showCatalogEnd = false
+    private var loggedCatalogEmptyFont = false
+    private var loggedCatalogEndFont = false
     private val catalogEndLabel = TextView(activity).apply {
         text = "No more results"
         gravity = Gravity.CENTER
@@ -761,7 +763,34 @@ internal class CatalogBrowserDialog(
             canvas.translate(0f, (last.bottom + dp(36) - catalogEndLabel.baseline).toFloat())
             catalogEndLabel.draw(canvas)
             canvas.restore()
+            if (!loggedCatalogEndFont) {
+                loggedCatalogEndFont = true
+                logCatalogFonts("end", "TextView.draw(canvas)", canvas.isHardwareAccelerated)
+            }
         }
+    }
+
+    private fun logCatalogFonts(state: String, path: String, hardwareCanvas: Boolean? = null) {
+        fun describe(view: TextView?): String {
+            if (view == null) return "null"
+            val font = view.typeface
+            val paint = view.paint
+            return "font=$font weight=${if (android.os.Build.VERSION.SDK_INT >= 28) font?.weight else "n/a"}" +
+                " bold=${font?.isBold} fakeBold=${paint.isFakeBoldText}" +
+                " sizePx=${view.textSize} scaleX=${paint.textScaleX} letterSpacing=${view.letterSpacing}" +
+                " fontFeatures=${view.fontFeatureSettings} fontVariation=${view.fontVariationSettings}" +
+                " measured=${view.measuredWidth}x${view.measuredHeight} attached=${view.isAttachedToWindow}"
+        }
+        val selected = catalogSelector.selectedView
+        val combo = (selected as? TextView)
+            ?: (selected as? ViewGroup)?.findViewById<TextView>(android.R.id.text1)
+        android.util.Log.i("StremioC-CatalogFont",
+            "state=$state path=$path phone=${isLayout(com.lagradost.cloudstream3.ui.settings.Globals.PHONE)}" +
+                " sdk=${android.os.Build.VERSION.SDK_INT} density=${activity.resources.displayMetrics.density}" +
+                " fontScale=${activity.resources.configuration.fontScale} hardware=$hardwareCanvas" +
+                " empty={${describe(catalogEmpty)}}" +
+                " end={${describe(catalogEndLabel)}}" +
+                " combo={${describe(combo)}}")
     }
 
     private val inlineStore = ViewModelStore()
@@ -936,6 +965,10 @@ internal class CatalogBrowserDialog(
         val empty = !inlineActive && finished && items.isEmpty()
         val wasEmpty = catalogEmpty.visibility == View.VISIBLE
         catalogEmpty.visibility = if (empty) View.VISIBLE else View.GONE
+        if (empty && !loggedCatalogEmptyFont) {
+            loggedCatalogEmptyFont = true
+            logCatalogFonts("empty", "TextView in FrameLayout")
+        }
         if (empty != wasEmpty) {
             grid.isNestedScrollingEnabled = !empty
             inlineHeader?.let { header ->
@@ -1615,6 +1648,8 @@ internal class CatalogBrowserDialog(
         items.clear()
         seen.clear()
         pageSignatures.clear()
+        loggedCatalogEmptyFont = false
+        loggedCatalogEndFont = false
         adapter.submitList(emptyList())
         hasNext = false
         chosen = false
