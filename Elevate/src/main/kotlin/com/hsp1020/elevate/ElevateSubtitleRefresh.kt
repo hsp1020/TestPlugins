@@ -319,10 +319,15 @@ internal class ElevateRefreshedSubtitleOverlay {
     fun attach(candidate: GeneratorPlayer, subtitleUrl: String,
                prepared: ElevateSubtitleRefreshRegistry.Prepared) {
         val parsed = prepared.cues
-        val player = candidate.playerView?.player ?: return
-        val native = candidate.subView ?: return
-        val nativeOutput = native.getChildAt(0) ?: return
-        if (candidate.player.getCurrentPreferredSubtitle()?.url != subtitleUrl) return
+        val player = candidate.playerView?.player
+        val native = candidate.subView
+        val nativeOutput = native?.getChildAt(0)
+        val selectedUrl = candidate.player.getCurrentPreferredSubtitle()?.url
+        if (player == null || native == null || nativeOutput == null || selectedUrl != subtitleUrl) {
+            android.util.Log.w("ElevateSubtitleOverlay", "attachSkipped player=${player != null} native=${native != null} nativeOutput=${nativeOutput != null} selectedMatches=${selectedUrl == subtitleUrl} urlHash=${subtitleUrl.hashCode()} cues=${parsed.size}")
+            return
+        }
+        android.util.Log.d("ElevateSubtitleOverlay", "attach urlHash=${subtitleUrl.hashCode()} cues=${parsed.size} reuse=${fragment === candidate && mediaPlayer === player && original === native && overlay != null}")
         if (fragment === candidate && mediaPlayer === player &&
             original === native && targetUrl == subtitleUrl && overlay != null) {
             if (cues !== parsed) {
@@ -417,6 +422,7 @@ internal class ElevateRefreshedSubtitleOverlay {
             }
             view.setCues(visible)
             rendered = indexes
+            android.util.Log.d("ElevateSubtitleOverlay", "render time=$time activeSegments=${indexes.size} visibleCues=${visible.size} offset=$offset playing=${player.isPlaying}")
         }
         if (!player.isPlaying) return
         val next = timeline?.nextAfter(time) ?: return
@@ -426,6 +432,7 @@ internal class ElevateRefreshedSubtitleOverlay {
     }
 
     fun detach() {
+        if (overlay != null) android.util.Log.d("ElevateSubtitleOverlay", "detach urlHash=${targetUrl?.hashCode()}")
         main.removeCallbacks(tick)
         host?.removeOnPictureInPictureModeChangedListener(pipListener)
         if (overlay != null) SubtitlesFragment.applyStyleEvent -= styleListener

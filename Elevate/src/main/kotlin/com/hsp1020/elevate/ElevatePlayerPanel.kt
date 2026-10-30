@@ -23,6 +23,7 @@ import android.util.TypedValue
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
+import androidx.media3.common.Player
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.utils.Qualities
@@ -202,6 +203,7 @@ internal class ElevatePlayerPanel(
         addView(languageList, LinearLayout.LayoutParams(0, -1, .35f))
     }
     private var inSync = false
+    private var offsetBeforeSync = 0L
     private fun arrow(reverse: Boolean) = ImageView(ctx).apply {
         setImageResource(R.drawable.ic_baseline_arrow_back_ios_24)
         imageTintList = ColorStateList.valueOf(textColor)
@@ -262,6 +264,11 @@ internal class ElevatePlayerPanel(
         override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
         override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
             val amount = s?.toString()?.toLongOrNull() ?: return
+            if (fragment.player.getSubtitleOffset() != amount) {
+                fragment.player.setSubtitleOffset(amount)
+                ElevateSubtitleRefreshHook.active()?.refreshAppearance()
+                android.util.Log.d("ElevatePanelSync", "offsetChanged instant=$amount")
+            }
             val time = (fragment.player.getPosition() ?: 0L) + amount
             offsetHint.text = when {
                 amount > 0 -> ctx.getString(R.string.subtitle_offset_extra_hint_before_format, amount)
@@ -282,9 +289,11 @@ internal class ElevatePlayerPanel(
         nativeSync.addView(cueContainer, LinearLayout.LayoutParams(-1, 0, 1f))
         nativeSync.addView(controls, LinearLayout.LayoutParams(-1, -2))
         controls.layoutParams = LinearLayout.LayoutParams(-1, -2)
-        controls.getChildAt(0).layoutParams = LinearLayout.LayoutParams(-1, -2)
-        controls.getChildAt(0).layoutParams = (controls.getChildAt(0).layoutParams
-            as LinearLayout.LayoutParams).apply { width = -1 }
+        // Native controls were weighted to fill the whole fullscreen dialog height.
+        // In the narrow panel they must wrap content; only the cue list grows.
+        controls.getChildAt(0).layoutParams = LinearLayout.LayoutParams(-1, -2).apply {
+            weight = 0f
+        }
         fun matchTabTextSize(view: View) {
             if (view is TextView) view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             if (view is ViewGroup && view !is RecyclerView) {
@@ -313,28 +322,51 @@ internal class ElevatePlayerPanel(
         increment(R.id.subtitle_offset_subtract_more, -1000L)
         increment(R.id.subtitle_offset_add, 100L)
         increment(R.id.subtitle_offset_add_more, 1000L)
-        nativeSync.findViewById<View>(R.id.apply_btt)?.setOnClickListener {
-            offsetInput.text.toString().toLongOrNull()?.let {
-                fragment.player.setSubtitleOffset(it)
-                ElevateSubtitleRefreshHook.active()?.refreshAppearance()
-                showTabContents()
-            }
-        }
+        nativeSync.findViewById<View>(R.id.apply_btt)?.visibility = View.GONE
         nativeSync.findViewById<View>(R.id.reset_btt)?.setOnClickListener {
-            fragment.player.setSubtitleOffset(0L)
-            ElevateSubtitleRefreshHook.active()?.refreshAppearance()
-            showTabContents()
+            offsetInput.setText("0")
+            android.util.Log.d("ElevatePanelSync", "offsetReset instant=0")
         }
         nativeSync.findViewById<View>(R.id.cancel_btt)?.setOnClickListener {
+            fragment.player.setSubtitleOffset(offsetBeforeSync)
+            ElevateSubtitleRefreshHook.active()?.refreshAppearance()
+            android.util.Log.d("ElevatePanelSync", "offsetCancelled restored=$offsetBeforeSync")
             showTabContents()
         }
+    }
+    // Only subtitle cue events update the sync list; no polling.
+    private var cuePlayer: Player? = null
+    private val cueListener = java.lang.reflect.Proxy.newProxyInstance(
+        Player.Listener::class.java.classLoader, arrayOf(Player.Listener::class.java)
+    ) { proxy, method, args ->
+        when (method.name) {
+            "onCues" -> {
+                if (inSync) root.post { updateSyncCues("player-cues") }
+                null
+            }
+            "equals" -> proxy === args?.getOrNull(0)
+            "hashCode" -> System.identityHashCode(proxy)
+            "toString" -> "ElevatePanelCueListener"
+            else -> null
+        }
+    } as Player.Listener
+    private fun observeCuePlayer(enabled: Boolean) {
+        val next = if (enabled) fragment.playerView?.player else null
+        if (next === cuePlayer) return
+        cuePlayer?.removeListener(cueListener)
+        cuePlayer = next
+        next?.addListener(cueListener)
+        android.util.Log.d("ElevatePanelSync", "cueListener enabled=$enabled attached=${next != null}")
     }
     private val touches = ArrayList<View>()
     private val linksChanged = Observer<VideoLive<Set<VideoLink>>> {
         if (tab == Tab.SOURCES) showTabContents()
     }
     private val subtitlesChanged = Observer<VideoLive<Set<SubtitleData>>> {
-        if (tab == Tab.SUBTITLES) showTabContents()
+        if (tab == Tab.SUBTITLES) {
+            if (inSync) updateSyncCues("subtitle-list")
+            else showTabContents()
+        }
     }
 
     init {
@@ -370,9 +402,19 @@ internal class ElevatePlayerPanel(
         overlay.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
         vm.currentLinks.observe(fragment.viewLifecycleOwner, linksChanged)
         vm.currentSubtitles.observe(fragment.viewLifecycleOwner, subtitlesChanged)
+        bindRefreshListener()
         intercept("player_sources_btt", Tab.SOURCES)
         intercept("player_tracks_btt", Tab.AUDIO)
         intercept("player_subtitle_offset_btt", Tab.SUBTITLES, true)
+    }
+
+    private fun bindRefreshListener() {
+        ElevateSubtitleRefreshHook.active()?.setPanelListener { target, url ->
+            if (target === fragment && tab == Tab.SUBTITLES) {
+                android.util.Log.d("ElevatePanelRefresh", "applied selected=${selectedSubtitle?.url?.hashCode()} actual=${fragment.player.getCurrentPreferredSubtitle()?.url?.hashCode()} refreshed=${url.hashCode()} sync=$inSync")
+                if (inSync) updateSyncCues("refresh-applied")
+            }
+        }
     }
 
     private fun intercept(name: String, destination: Tab, sync: Boolean = false) {
@@ -391,6 +433,8 @@ internal class ElevatePlayerPanel(
     fun detach() {
         vm.currentLinks.removeObserver(linksChanged)
         vm.currentSubtitles.removeObserver(subtitlesChanged)
+        ElevateSubtitleRefreshHook.active()?.setPanelListener(null)
+        observeCuePlayer(false)
         touches.forEach { it.setOnTouchListener(null) }
         touches.clear()
         overlay.layoutParams = overlay.layoutParams.apply { width = nativeWidth }
@@ -436,6 +480,8 @@ internal class ElevatePlayerPanel(
 
     private fun showTabContents() {
         inSync = false
+        observeCuePlayer(false)
+        if (body.paddingBottom != 0) body.setPadding(0, 0, 0, 0)
         buttons.forEach { (key, button) -> button.alpha = if (key == tab) 1f else .55f }
         val episode = tab == Tab.EPISODES
         body.visibility = if (episode) View.GONE else View.VISIBLE
@@ -448,7 +494,11 @@ internal class ElevatePlayerPanel(
         when (tab) {
             Tab.SOURCES -> { panelContent(list); renderSources() }
             Tab.AUDIO -> { panelContent(list); renderTracks() }
-            Tab.SUBTITLES -> { panelContent(subtitlePane); renderSubtitles() }
+            Tab.SUBTITLES -> {
+                bindRefreshListener()
+                panelContent(subtitlePane)
+                renderSubtitles()
+            }
             Tab.EPISODES -> Unit
         }
     }
@@ -640,6 +690,16 @@ internal class ElevatePlayerPanel(
         renderSubtitleOptions()
     }
 
+    private fun indicateRefreshRejected(button: ImageButton) {
+        // A rejected request still acknowledges the tap, without claiming any subtitles changed.
+        button.animate().cancel()
+        button.rotation = 0f
+        button.animate().rotation(360f).setDuration(800L)
+            .setInterpolator(android.view.animation.DecelerateInterpolator())
+            .withEndAction { button.rotation = 0f }
+            .start()
+    }
+
     private fun renderSubtitleOptions() {
         val current = selectedSubtitle?.url
         val group = subtitleGroups.getOrNull(selectedGroup - 1)?.second.orEmpty()
@@ -660,11 +720,17 @@ internal class ElevatePlayerPanel(
                 ElevateSubtitleRefreshRegistry.entryFor(sub) != null
             Row(label, { setSubtitle(sub) },
                 if (refreshable) ({ button: ImageButton ->
-                    ElevateSubtitleRefreshHook.active()?.refreshSelected(false, button)
+                    android.util.Log.d("ElevatePanelRefresh", "tap automatic=false urlHash=${sub.url.hashCode()} selectedHash=${fragment.player.getCurrentPreferredSubtitle()?.url?.hashCode()} enabled=${button.isEnabled} attached=${button.isAttachedToWindow}")
+                    val accepted = ElevateSubtitleRefreshHook.active()?.refreshSelected(false, button)
+                    if (accepted != true) indicateRefreshRejected(button)
+                    android.util.Log.d("ElevatePanelRefresh", "tap result accepted=$accepted rotation=${button.rotation}")
                     Unit
                 }) else null,
                 if (refreshable) ({ button: ImageButton ->
-                    ElevateSubtitleRefreshHook.active()?.refreshSelected(true, button)
+                    android.util.Log.d("ElevatePanelRefresh", "tap automatic=true urlHash=${sub.url.hashCode()} selectedHash=${fragment.player.getCurrentPreferredSubtitle()?.url?.hashCode()} attached=${button.isAttachedToWindow}")
+                    val accepted = ElevateSubtitleRefreshHook.active()?.refreshSelected(true, button)
+                    if (accepted != true) indicateRefreshRejected(button)
+                    android.util.Log.d("ElevatePanelRefresh", "tap automatic=true result accepted=$accepted")
                     Unit
                 }) else null,
                 richText = true, selected = sub.url == current, refreshUrl = sub.url)
@@ -672,9 +738,26 @@ internal class ElevatePlayerPanel(
         // Both lists now start at the same top edge with identical 48dp rows.
     }
 
+    private fun updateSyncCues(reason: String) {
+        if (!inSync) return
+        val refreshed = ElevateSubtitleRefreshHook.active()?.refreshedCues()
+        val cues = refreshed ?: fragment.player.getSubtitleCues()
+        syncList.visibility = if (cues.isEmpty()) View.GONE else View.VISIBLE
+        noCues.visibility = if (cues.isEmpty()) View.VISIBLE else View.GONE
+        val target = (fragment.player.getPosition() ?: 0L) + fragment.player.getSubtitleOffset()
+        syncAdapter.submitList(cues) {
+            if (inSync && cues.isNotEmpty())
+                syncList.scrollToPosition(syncAdapter.getLatestActiveItem(target))
+        }
+        syncAdapter.updateTime(target)
+        android.util.Log.d("ElevatePanelSync", "cues reason=$reason fromRefresh=${refreshed != null} count=${cues.size} active=${syncAdapter.getLatestActiveItem(target)} time=$target")
+    }
+
     private fun showSync() {
+        bindRefreshListener()
         tab = Tab.SUBTITLES
         inSync = true
+        observeCuePlayer(true)
         buttons.forEach { (key, button) -> button.alpha = if (key == tab) 1f else .55f }
         body.visibility = View.VISIBLE
         episodeList?.visibility = View.GONE
@@ -683,34 +766,27 @@ internal class ElevatePlayerPanel(
         groupScroll.visibility = View.GONE
         syncButton.visibility = View.VISIBLE
         updateSyncHeader(true)
+        offsetBeforeSync = fragment.player.getSubtitleOffset()
         panelContent(nativeSync)
-        // Align the bottom edge of the native sync buttons just above the
-        // actual player bar, rather than pinning them to the screen bottom.
-        nativeSync.post {
-            val playerBar = root.findViewById<View>(R.id.bottom_player_bar)
-            if (inSync && playerBar != null && playerBar.isShown && nativeSync.height > 0) {
-                val syncOnScreen = IntArray(2)
-                val barOnScreen = IntArray(2)
-                nativeSync.getLocationOnScreen(syncOnScreen)
-                playerBar.getLocationOnScreen(barOnScreen)
-                val bottom = syncOnScreen[1] + nativeSync.height
-                val inset = (bottom - barOnScreen[1]).coerceAtLeast(0) + dp(4)
-                if (nativeSync.paddingBottom != inset) {
-                    nativeSync.setPadding(0, 0, 0, inset)
-                }
+        // Reserve only the player bar's vertical space outside the sync content.
+        // Padding the native layout itself left the control buttons floating halfway up.
+        body.post {
+            val bar = root.findViewById<View>(R.id.bottom_player_bar)
+            if (inSync && bar != null && bar.isShown && body.height > 0) {
+                val panelPos = IntArray(2)
+                val barPos = IntArray(2)
+                body.getLocationOnScreen(panelPos)
+                bar.getLocationOnScreen(barPos)
+                val bottom = panelPos[1] + body.height
+                val inset = (bottom - barPos[1]).coerceIn(0, body.height / 3) + dp(2)
+                if (body.paddingBottom != inset) body.setPadding(0, 0, 0, inset)
+                android.util.Log.d("ElevatePanelSync", "layout panelBottom=$bottom barTop=${barPos[1]} reserved=$inset cueHeight=${syncList.height} controlsHeight=${nativeSync.getChildAt(1).height}")
+            } else {
+                android.util.Log.d("ElevatePanelSync", "layout pending inSync=$inSync barVisible=${bar?.isShown} bodyHeight=${body.height}")
             }
         }
         offsetInput.setText(fragment.player.getSubtitleOffset().toString())
-        val cues = ElevateSubtitleRefreshHook.active()?.refreshedCues()
-            ?: fragment.player.getSubtitleCues()
-        syncList.visibility = if (cues.isEmpty()) View.GONE else View.VISIBLE
-        noCues.visibility = if (cues.isEmpty()) View.VISIBLE else View.GONE
-        val target = (fragment.player.getPosition() ?: 0L) + fragment.player.getSubtitleOffset()
-        syncAdapter.submitList(cues)
-        syncList.post {
-            if (inSync) syncList.scrollToPosition(syncAdapter.getLatestActiveItem(target))
-        }
-        syncAdapter.updateTime(target)
+        updateSyncCues("sync-open")
     }
 
 }

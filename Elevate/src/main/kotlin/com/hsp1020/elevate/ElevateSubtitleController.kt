@@ -137,6 +137,10 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
     private var autoSpinAnimator: ObjectAnimator? = null
     private var observedPlayer: Player? = null
     private var selectedUrl: String? = null
+    private var panelListener: ((GeneratorPlayer, String) -> Unit)? = null
+    private fun diagnostic(stage: String, message: String) {
+        android.util.Log.d("ElevateSubtitleRefresh", "$stage $message")
+    }
     private var iconSelectionUrl: String? = null
     private data class DeferredRefresh(
         val entry: ElevateSubtitleRefreshRegistry.Entry, val automatic: Boolean,
@@ -779,10 +783,21 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
 
     private fun requestSubtitleRefresh(
         entry: ElevateSubtitleRefreshRegistry.Entry, button: ImageButton?, automatic: Boolean = false
-    ) {
-        val target = fragment ?: return
-        val instance = model?.state?.instance ?: return
-        if (target.player.getCurrentPreferredSubtitle()?.url != entry.originalUrl) return
+    ): Boolean {
+        val target = fragment ?: run {
+            diagnostic("reject", "fragment=null automatic=$automatic")
+            return false
+        }
+        val instance = model?.state?.instance ?: run {
+            diagnostic("reject", "model=null automatic=$automatic")
+            return false
+        }
+        val actual = target.player.getCurrentPreferredSubtitle()?.url
+        if (actual != entry.originalUrl) {
+            diagnostic("reject", "selectionMismatch expected=${entry.originalUrl.hashCode()} actual=${actual?.hashCode()} automatic=$automatic")
+            return false
+        }
+        diagnostic("request", "urlHash=${entry.originalUrl.hashCode()} automatic=$automatic button=${button != null} attached=${button?.isAttachedToWindow} instance=$instance")
         bindPlayer()
         if (automatic && autoRefreshUrl == entry.originalUrl) {
             refreshGeneration++
@@ -791,12 +806,20 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
             endAutoRefresh()
             button?.isEnabled = true
             button?.alpha = 1f
-            return
+            diagnostic("cancel", "auto urlHash=${entry.originalUrl.hashCode()}")
+            return false
         }
-        if (refreshJob?.isActive == true) return
-        val mediaPlayer = observedPlayer ?: return
+        if (refreshJob?.isActive == true) {
+            diagnostic("reject", "refreshJobAlreadyActive urlHash=${entry.originalUrl.hashCode()}")
+            return false
+        }
+        val mediaPlayer = observedPlayer ?: run {
+            diagnostic("reject", "playerNotBound urlHash=${entry.originalUrl.hashCode()}")
+            return false
+        }
         val generation = ++refreshGeneration
         val originalTint = button?.imageTintList
+        diagnostic("start", "automatic=$automatic generation=$generation urlHash=${entry.originalUrl.hashCode()}")
         button?.imageTintList = ColorStateList.valueOf(android.graphics.Color.WHITE)
         if (automatic) {
             autoRefreshUrl = entry.originalUrl
@@ -822,8 +845,12 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                 val deadline = SystemClock.elapsedRealtime() + AUTO_REFRESH_DURATION_MS
                 val attempts = if (automatic) AUTO_REFRESH_MAX_REQUESTS else 1
                 for (attempt in 0 until attempts) {
-                    if (!current()) break
+                    if (!current()) {
+                        diagnostic("stale", "beforeFetch attempt=$attempt generation=$generation")
+                        break
+                    }
                     val previous = refreshedCues[entry.originalUrl]
+                    diagnostic("fetch", "attempt=$attempt previousCues=${previous?.cues?.size ?: 0} addonMetadata=${entry.listUrl != null}")
                     val result = if (automatic) {
                         val remaining = deadline - SystemClock.elapsedRealtime()
                         if (remaining <= 0L) break
@@ -833,7 +860,11 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                             )
                         }
                     } else ElevateSubtitleRefreshRegistry.refresh(entry, previous)
-                    if (!current()) break
+                    if (!current()) {
+                        diagnostic("stale", "afterFetch attempt=$attempt generation=$generation")
+                        break
+                    }
+                    diagnostic("parsed", "attempt=$attempt changed=${result !== previous} cues=${result.cues.size} hash=${entry.originalUrl.hashCode()}")
                     if (result !== previous) {
                         // Only rebuild the overlay when the subtitle body changed.
                         if (entry.originalUrl !in refreshedCues && refreshedCues.size >= 4) {
@@ -842,13 +873,17 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                         refreshedCues[entry.originalUrl] = result
                         refreshedOverlay.attach(target, entry.originalUrl, result)
                     }
+                    panelListener?.invoke(target, entry.originalUrl)
+                    diagnostic("applied", "attempt=$attempt overlayAttempted=true notifyPanel=${panelListener != null}")
                     if (!automatic || attempt + 1 >= attempts ||
                         SystemClock.elapsedRealtime() + AUTO_REFRESH_INTERVAL_MS >= deadline) break
                     delay(AUTO_REFRESH_INTERVAL_MS)
                 }
             } catch (e: CancellationException) {
+                diagnostic("cancelled", "generation=$generation")
                 throw e
             } catch (e: Exception) {
+                android.util.Log.e("ElevateSubtitleRefresh", "failed stage=fetchOrParse generation=$generation urlHash=${entry.originalUrl.hashCode()} current=${current()}", e)
                 if (current()) {
                     android.widget.Toast.makeText(
                         target.context, getPluginSubtitleString(
@@ -868,21 +903,38 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                         button.alpha = if (selected) 1f else 0.35f
                         button.imageTintList = originalTint
                     }
+                    diagnostic("finish", "generation=$generation buttonBound=${button?.tag == entry.originalUrl} automatic=$automatic")
                 }
             }
         }
+        return true
+    }
+
+    fun setPanelListener(listener: ((GeneratorPlayer, String) -> Unit)?) {
+        panelListener = listener
     }
 
     fun refreshAppearance() = refreshedOverlay.onPlayerEvent()
 
     /** Called directly from the integrated panel, never through a fake Dialog. */
     fun refreshSelected(automatic: Boolean = false, button: ImageButton? = null): Boolean {
-        val target = fragment ?: return false
-        val url = target.player.getCurrentPreferredSubtitle()?.url ?: return false
-        val subtitle = model?.state?.subtitles?.firstOrNull { it.url == url } ?: return false
-        val entry = ElevateSubtitleRefreshRegistry.entryFor(subtitle) ?: return false
-        requestSubtitleRefresh(entry, button, automatic)
-        return true
+        val target = fragment ?: run {
+            diagnostic("reject", "noWatchedFragment automatic=$automatic")
+            return false
+        }
+        val url = target.player.getCurrentPreferredSubtitle()?.url ?: run {
+            diagnostic("reject", "noSelectedSubtitle automatic=$automatic")
+            return false
+        }
+        val subtitle = model?.state?.subtitles?.firstOrNull { it.url == url } ?: run {
+            diagnostic("reject", "selectedSubtitleNotInModel hash=${url.hashCode()} count=${model?.state?.subtitles?.size}")
+            return false
+        }
+        val entry = ElevateSubtitleRefreshRegistry.entryFor(subtitle) ?: run {
+            diagnostic("reject", "entryUnavailable hash=${url.hashCode()} origin=${subtitle.origin}")
+            return false
+        }
+        return requestSubtitleRefresh(entry, button, automatic)
     }
 
     fun refreshedCues(): List<SubtitleCue>? {
@@ -964,6 +1016,8 @@ internal class ElevateSubtitleRefreshHook(
     }
     fun refreshSelected(automatic: Boolean = false, button: ImageButton? = null) =
         controller.refreshSelected(automatic, button)
+    fun setPanelListener(listener: ((GeneratorPlayer, String) -> Unit)?) =
+        controller.setPanelListener(listener)
     fun refreshedCues(): List<SubtitleCue>? = controller.refreshedCues()
     fun refreshAppearance() = controller.refreshAppearance()
     companion object {
