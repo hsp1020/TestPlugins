@@ -1,14 +1,10 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "애니메이션 한글 자막 제공"
-    authors = listOf("hsp1020") // 본인 계정명으로 변경
+    authors = listOf("hsp1020")
     language = "ko"
-    
-    status = 1 // 0: Down, 1: Ok, 2: Slow, 3: Beta
-    tvTypes = listOf(
-        "Anime"
-    )
-    
-    iconUrl = "https://anilife.live/assets/img/animestream.png"
+    status = 1
+    tvTypes = listOf("Anime")
+    iconUrl = "https://anilife01.tv/favicon-32x32.png"
 }
