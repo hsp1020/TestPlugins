@@ -44,7 +44,7 @@ import com.lagradost.cloudstream3.ui.player.source_priority.QualityDataHelper
 import com.lagradost.cloudstream3.utils.AppContextUtils.sortSubs
 import java.text.Normalizer
 
-/** Four-tab extension of the existing native right-side episode overlay. */
+/** Context-aware tabs in the existing native right-side episode overlay. */
 internal class ElevatePlayerPanel(
     private val fragment: GeneratorPlayer,
     private val root: View,
@@ -71,7 +71,10 @@ internal class ElevatePlayerPanel(
     private var chosenVideo: VideoTrack? = null
     private var nativeWidth = overlay.layoutParams?.width ?: ViewGroup.LayoutParams.WRAP_CONTENT
     private val vm = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
-    private val tabs = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+    private val tabs = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+    }
     private val buttons = LinkedHashMap<Tab, TextView>()
     private val filters = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
     private val groupScroll = HorizontalScrollView(ctx).apply {
@@ -567,6 +570,7 @@ internal class ElevatePlayerPanel(
             ElevateSubtitleTrace.tracks("subtitleEventPosted", fragment.playerView?.player,
                 vm.state.subtitles, after, subtitleSelectionLogSeq, lastSubtitleRequestHash, fragment)
         }
+        onSubtitleOptionsChanged()
         if (tab == Tab.SUBTITLES) {
             if (inSync) updateSyncCues("subtitle-list")
             else showTabContents()
@@ -614,18 +618,45 @@ internal class ElevatePlayerPanel(
     private fun updateAvailableTabs() {
         val tracks = fragment.player.getVideoTracks()
         val hasTracks = tracks.allAudioTracks.size > 1 || tracks.allVideoTracks.size > 1
+        val hasSubtitles = vm.state.subtitles.isNotEmpty() ||
+            tracks.allTextTracks.isNotEmpty() ||
+            fragment.player.getCurrentPreferredSubtitle() != null
         buttons[Tab.AUDIO]?.visibility = if (hasTracks) View.VISIBLE else View.GONE
+        buttons[Tab.SUBTITLES]?.visibility = if (hasSubtitles) View.VISIBLE else View.GONE
         buttons[Tab.EPISODES]?.visibility =
             if (fragment.isThereEpisodes()) View.VISIBLE else View.GONE
-        // GONE buttons relinquish their equal weight, preserving the outer edges.
+
+        // Four buttons fill the original 360dp bar. One to three keep the
+        // original 90dp slot width and are centered together.
+        val allVisible = buttons.values.count { it.visibility == View.VISIBLE } == 4
+        buttons.values.forEach { button ->
+            val params = button.layoutParams as? LinearLayout.LayoutParams ?: return@forEach
+            val width = if (allVisible) 0 else dp(90)
+            val weight = if (allVisible) 1f else 0f
+            if (params.width != width || params.weight != weight) {
+                params.width = width
+                params.weight = weight
+                button.layoutParams = params
+            }
+        }
+    }
+
+    private fun fallbackFromHiddenTab() {
+        if (buttons[tab]?.visibility != View.VISIBLE) {
+            tab = Tab.SOURCES
+            if (overlay.isShown) showTabContents()
+        }
     }
 
     fun onTracksChanged() {
         updateAvailableTabs()
-        if (buttons[tab]?.visibility != View.VISIBLE) {
-            tab = Tab.SOURCES
-            if (overlay.isShown) showTabContents()
-        } else if (tab == Tab.AUDIO && overlay.isShown) renderTracks()
+        fallbackFromHiddenTab()
+        if (tab == Tab.AUDIO && overlay.isShown) renderTracks()
+    }
+
+    private fun onSubtitleOptionsChanged() {
+        updateAvailableTabs()
+        fallbackFromHiddenTab()
     }
 
     fun attach() {
