@@ -9,7 +9,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewTreeObserver
-import android.view.WindowInspector
+import android.view.inspector.WindowInspector
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.fragment.app.Fragment
