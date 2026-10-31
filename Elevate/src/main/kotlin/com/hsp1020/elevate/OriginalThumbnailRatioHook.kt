@@ -132,17 +132,22 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
             private var scheduled = false
             private var spanUpdatePosted = false
             private var spanChanged = false
-            private fun matchHomeLandscapeColumns() {
-                if (role != Role.EXPANDED || !fromSearch || spanUpdatePosted) return
+            private var hasLandscape = false
+            private var hasPortrait = false
+            private fun matchHomeColumns(landscape: Boolean) {
+                if (role != Role.EXPANDED || !fromSearch) return
+                if (landscape) hasLandscape = true else hasPortrait = true
+                if (spanUpdatePosted) return
                 val grid = recycler as? AutofitRecyclerView ?: return
-                if (grid.spanCount == grid.context.getSpanCount(true)) return
+                val target = grid.context.getSpanCount(hasLandscape && !hasPortrait)
+                if (grid.spanCount == target) return
                 spanUpdatePosted = true
                 grid.post {
                     spanUpdatePosted = false
                     if (watchers[grid] !== this@Watcher || !grid.isAttachedToWindow) return@post
-                    val target = grid.context.getSpanCount(true)
-                    if (grid.spanCount != target) {
-                        grid.spanCount = target
+                    val next = grid.context.getSpanCount(hasLandscape && !hasPortrait)
+                    if (grid.spanCount != next) {
+                        grid.spanCount = next
                         spanChanged = true
                         scan()
                     }
@@ -202,6 +207,8 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                 }
                 spanChanged = false
                 spanUpdatePosted = false
+                hasPortrait = false
+                hasLandscape = false
                 scheduled = false
             }
 
@@ -287,11 +294,15 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                 val imageResult = result as? SuccessResult ?: return
                 val width = imageResult.image.width
                 val height = imageResult.image.height
-                if (width <= 0 || height <= 0 || width <= height) {
+                if (width <= 0 || height <= 0) {
                     card.layout.restoreSize()
                     return
                 }
-                matchHomeLandscapeColumns()
+                matchHomeColumns(width > height)
+                if (width <= height) {
+                    card.layout.restoreSize()
+                    return
+                }
 
                 val cardWidth = when (role) {
                     Role.SEARCH_ROW -> HomeChildItemAdapter.maxPosterSize.takeIf { it > 0 }
