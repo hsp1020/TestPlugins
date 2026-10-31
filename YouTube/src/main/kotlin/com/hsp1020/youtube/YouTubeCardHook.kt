@@ -1020,13 +1020,14 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                         restoreCast(view)
                     } else {
                         directClicks.remove(view)
-                        restore(view)
+                        // Keep expanded grid sizes stable while items are temporarily detached.
+                        if (role != Role.DIALOG_GRID) restore(view)
                     }
                     if (role == Role.HOME_CARD) remeasureOnVisibleShortsChange()
                 }
             }
-            private val resized = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                schedule()
+            private val resized = View.OnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+                if (role != Role.DIALOG_GRID || right - left != oldRight - oldLeft) schedule()
             }
             private val isParent get() = role == Role.HOME_PARENT || role == Role.SEARCH_PARENT
 

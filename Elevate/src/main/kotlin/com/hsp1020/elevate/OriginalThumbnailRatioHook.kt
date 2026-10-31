@@ -256,6 +256,8 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                 val position = recycler.getChildViewHolder(view).bindingAdapterPosition
                 val item = if (position == RecyclerView.NO_POSITION) null
                     else adapter.getItemOrNull(position) as? SearchResponse
+                // YouTube's own hook owns expanded catalog sizing; keep search ratios unchanged.
+                if (role == Role.EXPANDED && item?.apiName == "YouTube") return restore(view)
                 if (item == null || item.posterUrl.isNullOrBlank()) {
                     restore(view)
                     return
