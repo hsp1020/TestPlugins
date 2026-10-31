@@ -728,6 +728,8 @@ internal class NativeEpisodeOverlayHook(
         private val oldBackground: Drawable? = overlay?.background
         private val oldNextFocusUpId = list?.nextFocusUpId
         private val episodeButton = root.findViewById<View>(R.id.player_episodes_button)
+        private val episodeButtonRoot = root.findViewById<View>(R.id.player_episodes_button_root)
+        private val nativeControls = root.findViewById<View>(R.id.player_top_holder)
         private var nativeFocusListener: View.OnFocusChangeListener? = null
         private var guardedFocusListener: View.OnFocusChangeListener? = null
         private var nativeKeyListener: ((Pair<KeyEvent?, Boolean>) -> Boolean)? = null
@@ -754,6 +756,13 @@ internal class NativeEpisodeOverlayHook(
                 overlayWasShown = false
                 return@Runnable
             }
+            if (playerPanel != null && !fragment.isThereEpisodes()) {
+                if (!overlayWasShown) {
+                    overlayWasShown = true
+                    playerPanel.onOpened()
+                }
+                return@Runnable
+            }
             val nativeAdapter = list?.adapter as? EpisodeAdapter ?: return@Runnable
             if (nativeAdapter === filteredAdapter || nativeAdapter === lastNativeAdapter)
                 return@Runnable
@@ -771,6 +780,7 @@ internal class NativeEpisodeOverlayHook(
         private val overlayLayout = ViewTreeObserver.OnGlobalLayoutListener {
             // CloudStream may reveal these buttons again on track/control changes.
             hideNativePanelButtons()
+            syncPanelArrow()
             val showing = overlay?.isShown == true
             val currentAdapter = list?.adapter
             val nativeChanged = currentAdapter is EpisodeAdapter &&
@@ -797,6 +807,15 @@ internal class NativeEpisodeOverlayHook(
             nativePanelButtons.forEach { (button, _) ->
                 if (button.visibility != View.GONE) button.visibility = View.GONE
             }
+        }
+
+        private fun syncPanelArrow() {
+            if (!playerPanelEnabled || fragment.isThereEpisodes()) return
+            // Mirror the native player's controls/lock visibility, not playback state.
+            val visible = nativeControls?.visibility == View.VISIBLE
+            val target = if (visible) View.VISIBLE else View.GONE
+            if (episodeButtonRoot?.visibility != target) episodeButtonRoot?.visibility = target
+            if (episodeButton?.visibility != target) episodeButton?.visibility = target
         }
 
         private var host: PlayerView? = null
@@ -864,7 +883,8 @@ internal class NativeEpisodeOverlayHook(
             if (alreadyShowing) return false
             val oldStatus = runCatching { previous.getBoolean(fragment) }.getOrNull() ?: return false
             return try {
-                fragment.showEpisodesOverlay()
+                // Standalone videos need the panel, not an unused EpisodeAdapter.
+                if (fragment.isThereEpisodes()) fragment.showEpisodesOverlay()
                 previous.setBoolean(fragment, false) // Native close must not issue a redundant Play.
                 shown.setBoolean(fragment, true)
                 animate.invoke(fragment, true)
@@ -936,6 +956,7 @@ internal class NativeEpisodeOverlayHook(
             if (tree.isAlive) tree.addOnGlobalLayoutListener(overlayLayout)
             scheduleOverlayCheck()
             hideNativePanelButtons()
+            syncPanelArrow()
 
             // Only the panel surface is translucent; text and images stay opaque.
             oldBackground?.constantState?.newDrawable(root.resources)?.mutate()?.let {
@@ -960,9 +981,12 @@ internal class NativeEpisodeOverlayHook(
         }
 
         fun detach() {
+            val standalone = playerPanelEnabled && !fragment.isThereEpisodes()
             val restoreNativeList = fragment.isAdded && fragment.view === root &&
                 overlay?.isShown == true && filteredAdapter != null &&
                 list?.adapter === filteredAdapter
+            // Stop a standalone-only overlay before releasing its panel.
+            if (standalone && overlay?.isShown == true) fragment.onTouchDown()
             removeRemoteGuard()
             episodeButton?.setOnTouchListener(null)
             if (episodeButton?.onFocusChangeListener === guardedFocusListener)
@@ -985,6 +1009,10 @@ internal class NativeEpisodeOverlayHook(
             playerPanel?.detach()
             nativePanelButtons.forEach { (button, visibility) ->
                 if (button.visibility != visibility) button.visibility = visibility
+            }
+            if (standalone) {
+                episodeButtonRoot?.visibility = View.GONE
+                episodeButton?.visibility = View.GONE
             }
             overlay?.background = oldBackground
             if (restoreNativeList) fragment.showEpisodesOverlay()

@@ -611,29 +611,25 @@ internal class ElevatePlayerPanel(
         }
     }
 
-    private fun updateTrackTab(): Boolean {
+    private fun updateAvailableTabs() {
         val tracks = fragment.player.getVideoTracks()
-        val available = tracks.allAudioTracks.size > 1 || tracks.allVideoTracks.size > 1
-        val button = buttons[Tab.AUDIO]
-        val desired = if (available) View.VISIBLE else View.GONE
-        if (button?.visibility != desired) button?.visibility = desired
-        // All four tabs have equal weight. GONE makes the other three fill
-        // the same full-width header, preserving both outer edges.
-        return available
+        val hasTracks = tracks.allAudioTracks.size > 1 || tracks.allVideoTracks.size > 1
+        buttons[Tab.AUDIO]?.visibility = if (hasTracks) View.VISIBLE else View.GONE
+        buttons[Tab.EPISODES]?.visibility =
+            if (fragment.isThereEpisodes()) View.VISIBLE else View.GONE
+        // GONE buttons relinquish their equal weight, preserving the outer edges.
     }
 
     fun onTracksChanged() {
-        val available = updateTrackTab()
-        if (tab == Tab.AUDIO) {
-            if (!available) {
-                tab = Tab.SOURCES
-                if (overlay.isShown) showTabContents()
-            } else if (overlay.isShown) renderTracks()
-        }
+        updateAvailableTabs()
+        if (buttons[tab]?.visibility != View.VISIBLE) {
+            tab = Tab.SOURCES
+            if (overlay.isShown) showTabContents()
+        } else if (tab == Tab.AUDIO && overlay.isShown) renderTracks()
     }
 
     fun attach() {
-        updateTrackTab()
+        updateAvailableTabs()
         nativeWidth = overlay.layoutParams.width
         overlay.layoutParams = overlay.layoutParams.apply { width = dp(360) }
         overlay.addView(tabs, 0, LinearLayout.LayoutParams(-1, dp(48)))
@@ -687,7 +683,8 @@ internal class ElevatePlayerPanel(
 
     fun isEpisodeTab() = tab == Tab.EPISODES
     fun show(destination: Tab = tab, sync: Boolean = false): Boolean {
-        if (destination == Tab.AUDIO && !updateTrackTab()) return false
+        updateAvailableTabs()
+        if (buttons[destination]?.visibility != View.VISIBLE) return false
         if (!overlay.isShown && !openNative()) return false
         if (destination != tab) {
             if (destination == Tab.SOURCES) chosenLink = null
@@ -702,7 +699,8 @@ internal class ElevatePlayerPanel(
         return true
     }
     fun onOpened() {
-        if (!updateTrackTab() && tab == Tab.AUDIO) tab = Tab.SOURCES
+        updateAvailableTabs()
+        if (buttons[tab]?.visibility != View.VISIBLE) tab = Tab.SOURCES
         showTabContents()
     }
 
