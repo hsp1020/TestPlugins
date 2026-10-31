@@ -13,6 +13,7 @@ import android.view.ViewTreeObserver
 import android.view.inspector.WindowInspector
 import android.widget.ImageView
 import android.widget.TextView
+import androidx.appcompat.widget.SearchView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
@@ -465,9 +466,20 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
             )
         }
         active.forEach { window ->
-            if (window !in dialogs) dialogs[window] = Screen(
-                window, popup = true, fromSearch = fromSearch
-            )
+            if (window !in dialogs) {
+                if (fromSearch) {
+                    // The native SearchView retains focus behind the BottomSheet.
+                    // Clear it on opening to avoid the IME reopening on dismiss.
+                    screens.entries.firstOrNull { (fragment, _) ->
+                        fragment.isResumed && fragment.javaClass.name in setOf(
+                            "com.lagradost.cloudstream3.ui.search.SearchFragment",
+                            "com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment"
+                        )
+                    }?.value?.root?.findViewById<SearchView>(R.id.main_search)
+                        ?.takeIf { it.hasFocus() }?.clearFocus()
+                }
+                dialogs[window] = Screen(window, popup = true, fromSearch = fromSearch)
+            }
         }
     }
 
