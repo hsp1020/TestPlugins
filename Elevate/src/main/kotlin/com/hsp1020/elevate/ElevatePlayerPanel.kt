@@ -182,9 +182,6 @@ internal class ElevatePlayerPanel(
             isEnabled = refresh != null
             // Let the attached ListView own click and long-click dispatch.
             // A detached recycled ImageButton can receive touch but cannot run posted clicks.
-            isFocusable = false
-            isClickable = false
-            isLongClickable = false
             if (tab == Tab.SUBTITLES && position in 0..1)
                 android.util.Log.d("ElevatePanelTouch",
                     "bind row=$position hash=${refreshUrl?.hashCode()} refresh=${refresh != null} " +
@@ -193,6 +190,10 @@ internal class ElevatePlayerPanel(
             setOnTouchListener(null)
             setOnClickListener(null)
             setOnLongClickListener(null)
+            // Listener removal can make a View clickable again; disable it last.
+            isFocusable = false
+            isClickable = false
+            isLongClickable = false
         }
         return row
     }
@@ -235,12 +236,17 @@ internal class ElevatePlayerPanel(
     private val languageAdapter = object : ArrayAdapter<CharSequence>(
         ctx, R.layout.sort_bottom_single_choice, ArrayList()
     ) {
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
-            bindRow(convertView, parent, position, getItem(position) ?: "",
-                position == selectedGroup, compact = true)
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val playingLanguage = fragment.player.getCurrentPreferredSubtitle()?.originalName
+            val checked = if (position == 0) playingLanguage == null
+                else subtitleGroups.getOrNull(position - 1)?.first == playingLanguage
+            return bindRow(convertView, parent, position, getItem(position) ?: "",
+                checked, compact = true)
+        }
     }
     private var subtitleGroups = emptyList<Pair<String, List<SubtitleData>>>()
     private var selectedGroup = 0
+    private var browsingSubtitleGroup = false
     private val languageList = ListView(ctx).apply {
         choiceMode = AbsListView.CHOICE_MODE_NONE
         divider = null
@@ -250,12 +256,8 @@ internal class ElevatePlayerPanel(
             languageAdapter.notifyDataSetChanged()
             if (position == 0) setSubtitle(null)
             else {
-                val group = subtitleGroups.getOrNull(position - 1)?.second.orEmpty()
-                val preferred = group.firstOrNull {
-                    it.url == fragment.player.getCurrentPreferredSubtitle()?.url
-                }
-                val chosen = preferred ?: group.firstOrNull()
-                if (chosen != null) setSubtitle(chosen) else renderSubtitleOptions()
+                browsingSubtitleGroup = true
+                renderSubtitleOptions()
             }
         }
     }
@@ -320,6 +322,16 @@ internal class ElevatePlayerPanel(
     private val noCues = nativeSync.findViewById<TextView>(R.id.no_subtitles_loaded_notice)
     private val syncAdapter = SubtitleOffsetItemAdapter(0L) { cue ->
         offsetInput.setText((cue.startTimeMs - (fragment.player.getPosition() ?: 0L)).toString())
+    }
+    private var syncCueRetryCount = 0
+    private var syncCueRetryUrl: String? = null
+    private var syncCueRetryPlayer: Player? = null
+    private val syncCueRetry = Runnable { if (inSync) updateSyncCues("decoder-ready") }
+    private fun cancelSyncCueRetry() {
+        syncList.removeCallbacks(syncCueRetry)
+        syncCueRetryCount = 0
+        syncCueRetryUrl = null
+        syncCueRetryPlayer = null
     }
     private fun refreshNativeSubtitleOutput(reason: String) {
         // The native subtitle-sync Apply action nudges the position by 1ms
@@ -427,6 +439,7 @@ internal class ElevatePlayerPanel(
                     "tracksChanged requestSeq=$subtitleSelectionLogSeq requestedHash=$lastSubtitleRequestHash " +
                         "actualHash=${actual?.url?.hashCode()} actualOrigin=${actual?.origin} " +
                         "tab=$tab inSync=$inSync modelCount=${vm.state.subtitles.size}")
+                if (inSync) root.post { if (inSync) updateSyncCues("tracks-changed") }
                 if (tab == Tab.SUBTITLES && !inSync)
                     root.post {
                         if (tab == Tab.SUBTITLES && !inSync) {
@@ -568,6 +581,7 @@ internal class ElevatePlayerPanel(
     }
 
     fun detach() {
+        cancelSyncCueRetry()
         vm.currentLinks.removeObserver(linksChanged)
         vm.currentSubtitles.removeObserver(subtitlesChanged)
         ElevateSubtitleRefreshHook.active()?.setPanelListener(null)
@@ -592,6 +606,7 @@ internal class ElevatePlayerPanel(
                 chosenVideo = null
             }
         }
+        if (destination != tab && destination == Tab.SUBTITLES) browsingSubtitleGroup = false
         tab = destination
         if (sync) showSync() else showTabContents()
         return true
@@ -629,6 +644,7 @@ internal class ElevatePlayerPanel(
     }
 
     private fun showTabContents() {
+        cancelSyncCueRetry()
         inSync = false
         observeCuePlayer(tab == Tab.SUBTITLES)
         if (body.paddingBottom != 0) body.setPadding(0, 0, 0, 0)
@@ -808,6 +824,7 @@ internal class ElevatePlayerPanel(
     }
 
     private fun setSubtitle(sub: SubtitleData?) {
+        browsingSubtitleGroup = false
         onManualSubtitle(sub)
         pendingSubtitleUrl = sub?.url
         pendingSubtitleInstance = vm.state.instance
@@ -869,7 +886,7 @@ internal class ElevatePlayerPanel(
             .map { (name, subtitles) -> name to orderedOptions(subtitles) }
         if (pendingSubtitleInstance != vm.state.instance ||
             pendingSubtitleUrl == current?.url) pendingSubtitleUrl = null
-        if (pendingSubtitleUrl == null) {
+        if (!browsingSubtitleGroup && pendingSubtitleUrl == null) {
             selectedGroup = subtitleGroups.indexOfFirst { (name, _) ->
                 name == current?.originalName
             }.let { if (it < 0) 0 else it + 1 }
@@ -956,7 +973,22 @@ internal class ElevatePlayerPanel(
     private fun updateSyncCues(reason: String) {
         if (!inSync) return
         val refreshed = ElevateSubtitleRefreshHook.active()?.refreshedCues()
-        val cues = refreshed ?: fragment.player.getSubtitleCues()
+        val selected = fragment.player.getCurrentPreferredSubtitle()
+        val activePlayer = fragment.playerView?.player
+        if (syncCueRetryUrl != selected?.url || syncCueRetryPlayer !== activePlayer) {
+            syncList.removeCallbacks(syncCueRetry)
+            syncCueRetryCount = 0
+            syncCueRetryUrl = selected?.url
+            syncCueRetryPlayer = activePlayer
+        }
+        // CloudStream's decoder fills cue data asynchronously after selection.
+        val cues = (refreshed ?: fragment.player.getSubtitleCues()).toList()
+        syncList.removeCallbacks(syncCueRetry)
+        if (refreshed == null && selected?.origin == SubtitleOrigin.URL &&
+            cues.size < 3 && syncCueRetryCount < 40) {
+            syncCueRetryCount++
+            syncList.postDelayed(syncCueRetry, 250L)
+        }
         syncList.visibility = if (cues.isEmpty()) View.GONE else View.VISIBLE
         noCues.visibility = if (cues.isEmpty()) View.VISIBLE else View.GONE
         val target = (fragment.player.getPosition() ?: 0L) + fragment.player.getSubtitleOffset()
@@ -969,6 +1001,7 @@ internal class ElevatePlayerPanel(
     }
 
     private fun showSync() {
+        cancelSyncCueRetry()
         bindRefreshListener()
         tab = Tab.SUBTITLES
         inSync = true
