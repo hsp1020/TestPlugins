@@ -144,8 +144,6 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                 val h = drawable.intrinsicHeight
                 if (w <= 0 || h <= 0) return state.restore()
                 val ratio = w.toFloat() / h
-                // Skip portrait images and atypical banners rather than inferring a format.
-                if (ratio !in 1.25f..2.5f) return state.restore()
                 val width = if (role == Role.RESUME)
                     HomeChildItemAdapter.maxPosterSize.takeIf { it > 0 }
                         ?: (180f * recycler.resources.displayMetrics.density).roundToInt()
