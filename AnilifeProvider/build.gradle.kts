@@ -1,4 +1,4 @@
-version = 5
+version = 6
 
 cloudstream {
     description = "애니메이션 한글 자막 제공"

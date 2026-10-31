@@ -34,11 +34,13 @@ class Anilife : MainAPI() {
     private val headers get() = mapOf("User-Agent" to userAgent, "Referer" to "$mainUrl/")
 
     override val mainPage = mainPageOf(
-        "/directory/format/TV?sort=popular" to "TV 애니메이션",
-        "/directory/format/OVA?sort=popular" to "OVA",
-        "/directory/format/ONA?sort=popular" to "ONA",
-        "/directory/format/SP?sort=popular" to "SP",
-        "/directory/format/Movie?sort=popular" to "극장판"
+        "/directory/format/TV?sort=popular" to "TV(인기순)",
+        "/directory/format/TV" to "TV(최신순)",
+        "/directory/format/Movie?sort=popular" to "극장판(인기순)",
+        "/directory/format/Movie" to "극장판(최신순)",
+        "/directory/format/OVA?sort=popular" to "OVA(인기순)",
+        "/directory/format/OVA" to "OVA(최신순)",
+        "/directory/format/ONA?sort=popular" to "ONA(인기순)"
     )
 
     private suspend fun checkAndUpdateDomain() {
@@ -124,7 +126,7 @@ class Anilife : MainAPI() {
             }
             val image = anime.optString("image").takeIf { it.isNotBlank() && it != "null" }
             val meta = JSONObject()
-            for (field in listOf("title", "image", "description", "episodeCount", "playableEpisode", "episode", "genres")) {
+            for (field in listOf("title", "image", "description", "episodeCount", "playableEpisode", "episode", "genres", "year")) {
                 meta.put(field, anime.opt(field))
             }
             val encoded = Base64.encodeToString(
@@ -143,8 +145,11 @@ class Anilife : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         checkAndUpdateDomain()
         val format = Regex("""/format/([^?&/]+)""").find(request.data)?.groupValues?.get(1) ?: "TV"
-        val pageUrl = "$mainUrl/directory/format/$format?sort=popular&page=$page"
-        val apiUrl = "$mainUrl/api/anime?page=$page&limit=24&sort=popular&format=$format&v=catalog-media-2"
+        val popular = request.data.contains("sort=popular")
+        val pageUrl = "$mainUrl/directory/format/$format?page=$page" +
+            if (popular) "&sort=popular" else ""
+        val apiUrl = "$mainUrl/api/anime?page=$page&limit=24" +
+            (if (popular) "&sort=popular" else "") + "&format=$format&v=catalog-media-2"
         return try {
             val result = catalogItems(pageUrl, apiUrl)
             println("$tag mainPage RESULT category=${request.name} page=$page count=${result.items.size} hasNext=${result.hasNext}")
@@ -211,6 +216,7 @@ class Anilife : MainAPI() {
                 val tags = genres?.let { (0 until it.length()).mapNotNull { index ->
                     it.optString(index).takeIf(String::isNotBlank)
                 } } ?: emptyList()
+                val year = meta.optInt("year", 0).takeIf { it in 1900..2100 }
                 val playable = meta.optInt("playableEpisode", 0)
                 val count = if (playable > 0) playable else maxOf(
                     meta.optInt("episodeCount", 0), meta.optInt("episode", 0)
@@ -227,35 +233,12 @@ class Anilife : MainAPI() {
                     this.posterHeaders = headers
                     this.plot = plot
                     this.tags = tags
+                    this.year = year
                     addEpisodes(DubStatus.Subbed, episodes)
                 }
             }
 
-            // Previously saved plain URLs have no catalog metadata.
-            println("$tag detail no catalog metadata; trying legacy HTML series=$seriesId")
-            val doc = app.get(cleanUrl, headers = headers).document
-            val title = doc.selectFirst(".tv-work-copy h1")?.text()?.trim()
-                ?: throw IllegalStateException("AniLife detail requires catalog metadata: $seriesId")
-            val image = doc.selectFirst("meta[property=og:image]")?.attr("content")
-            val plot = doc.selectFirst(".tv-work-copy > p")?.text()
-            val tags = doc.select(".tv-work-meta span").drop(1)
-                .flatMap { it.text().split("·") }.map { it.trim() }.filter { it.isNotEmpty() }
-            val episodes = doc.select(".tv-episode-grid button").mapNotNull { button ->
-                val n = Regex("""(\d+)\s*화""").find(button.selectFirst("strong")?.text().orEmpty())
-                    ?.groupValues?.get(1)?.toIntOrNull() ?: return@mapNotNull null
-                newEpisode("$mainUrl/content/$seriesId/$n") {
-                    this.episode = n
-                    this.name = n.toString() + "화"
-                }
-            }.sortedBy { it.episode }
-            println("$tag detail HTML RESULT series=$seriesId title=$title episodes=${episodes.size}")
-            return newAnimeLoadResponse(title, cleanUrl, TvType.Anime) {
-                this.posterUrl = image?.let(::absolute)
-                this.posterHeaders = headers
-                this.plot = plot
-                this.tags = tags
-                addEpisodes(DubStatus.Subbed, episodes)
-            }
+            throw IllegalStateException("AniLife catalog metadata missing for $seriesId; reopen the catalog item")
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             println("$tag detail FAILED url=$url exception=${e.stackTraceToString()}")
@@ -272,10 +255,22 @@ class Anilife : MainAPI() {
         println("$tag links START episode=$episodeUrl casting=$isCasting")
         return try {
             // ArtPlayer uses a blob: video element: capture its real signed HLS request.
-            val match = WebViewResolver(
+            val (match, subtitleRequests) = WebViewResolver(
                 Regex("""https?://[^\s]+\.m3u8(?:\?[^\s]*)?$""", RegexOption.IGNORE_CASE),
+                additionalUrls = listOf(Regex("""https?://[^\s]+\.(?:vtt|srt)(?:\?[^\s]*)?$""", RegexOption.IGNORE_CASE)),
                 userAgent = userAgent, useOkhttp = false, timeout = 18000L
-            ).resolveUsingWebView(episodeUrl, headers = headers).first ?: run {
+            ).resolveUsingWebView(episodeUrl, headers = headers)
+            println("$tag links captured subtitleRequests=${subtitleRequests.size} hls=${match != null}")
+            subtitleRequests.distinctBy { it.url.toString() }.forEach { request ->
+                if (request.url.encodedPath.endsWith(".vtt", true) || request.url.encodedPath.endsWith(".srt", true)) {
+                    println("$tag subtitle captured host=${request.url.host} path=${request.url.encodedPath} keys=${request.url.queryParameterNames}")
+                    subtitleCallback(newSubtitleFile("Korean", request.url.toString()) {
+                        headers = request.headers.toMap()
+                    })
+                    println("$tag subtitle delivered")
+                }
+            }
+            if (match == null) {
                 println("$tag links FAILED no HLS request observed episode=$episodeUrl")
                 return false
             }
