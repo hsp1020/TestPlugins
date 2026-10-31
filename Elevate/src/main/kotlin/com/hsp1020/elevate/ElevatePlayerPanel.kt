@@ -188,7 +188,7 @@ internal class ElevatePlayerPanel(
                 }, LinearLayout.LayoutParams(dp(48), dp(48)))
             }
         row.layoutParams = AbsListView.LayoutParams(-1, if (compact) dp(48) else -2)
-        row.minimumHeight = if (compact) dp(48) else dp(28)
+        row.minimumHeight = if (compact || tab == Tab.SUBTITLES) dp(48) else dp(28)
         (row.getChildAt(0) as ImageView).apply {
             imageTintList = ColorStateList.valueOf(Color.WHITE)
             visibility = if (checked) View.VISIBLE else View.INVISIBLE
@@ -256,7 +256,7 @@ internal class ElevatePlayerPanel(
             }
             return bindRow(convertView, parent, position,
                 if (value.richText) value.label.html() else value.label,
-                value.selected, tab == Tab.SUBTITLES, value.refresh, value.autoRefresh,
+                value.selected, false, value.refresh, value.autoRefresh,
                 value.refreshUrl)
         }
     }
