@@ -3,6 +3,7 @@ package com.hsp1020.elevate
 import android.graphics.Color
 import android.content.res.ColorStateList
 import android.view.Gravity
+import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.LayoutInflater
 import android.view.View
@@ -72,7 +73,7 @@ internal class ElevatePlayerPanel(
     private val vm = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
     private val tabs = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
     private val buttons = LinkedHashMap<Tab, TextView>()
-    private val filters = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+    private val filters = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
     private val groupScroll = HorizontalScrollView(ctx).apply {
         isHorizontalScrollBarEnabled = false
         addView(filters)
@@ -80,6 +81,20 @@ internal class ElevatePlayerPanel(
     private val rows = ArrayList<Row>()
     private var lastListTouchX = -1f
     private var lastListTouchY = -1f
+    private var refreshTouch: Pair<Row, ImageButton>? = null
+    private val refreshGesture = GestureDetector(ctx, object : GestureDetector.SimpleOnGestureListener() {
+        override fun onDown(e: MotionEvent): Boolean = true
+        override fun onSingleTapUp(e: MotionEvent): Boolean {
+            val (row, button) = refreshTouch ?: return false
+            if (button.isEnabled) row.refresh?.invoke(button)
+            return true
+        }
+        override fun onLongPress(e: MotionEvent) {
+            refreshTouch?.let { (row, button) ->
+                if (button.isEnabled) row.autoRefresh?.invoke(button)
+            }
+        }
+    })
     private var pendingSubtitleUrl: String? = null
     private var pendingSubtitleInstance = -1
     private fun logRefreshListTouch(stage: String, ev: MotionEvent, intercepted: Boolean? = null) {
@@ -104,6 +119,18 @@ internal class ElevatePlayerPanel(
             if (event.actionMasked == MotionEvent.ACTION_DOWN) {
                 lastListTouchX = event.x
                 lastListTouchY = event.y
+                val position = pointToPosition(event.x.toInt(), event.y.toInt())
+                val child = getChildAt(position - firstVisiblePosition)
+                val button = refreshButtonAt(position, child)
+                refreshTouch = if (button?.isEnabled == true)
+                    rows.getOrNull(position)?.let { it to button } else null
+            }
+            // The refresh icon has no row selection ripple; preserve native row feedback elsewhere.
+            if (refreshTouch != null) {
+                refreshGesture.onTouchEvent(event)
+                if (event.actionMasked == MotionEvent.ACTION_UP ||
+                    event.actionMasked == MotionEvent.ACTION_CANCEL) refreshTouch = null
+                return true
             }
             logRefreshListTouch("dispatch", event)
             return super.dispatchTouchEvent(event)
@@ -711,6 +738,11 @@ internal class ElevatePlayerPanel(
         val groups = keys.distinct()
         if (filter !in groups) filter = null
         filters.removeAllViews()
+        val filterRows = Array(2) {
+            LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }.also {
+                filters.addView(it, LinearLayout.LayoutParams(-2, dp(42)))
+            }
+        }
         var filterButtonCount = 0
         fun addFilter(value: String?) {
             val item = LinearLayout(ctx).apply {
@@ -734,13 +766,9 @@ internal class ElevatePlayerPanel(
                 alpha = if (value == filter) 1f else .65f
                 setOnClickListener { filter = value; renderSources() }
             }
-            // Two actual button rows, filled top-to-bottom: 1/3 on top, 2/4 below.
-            val column = if (filterButtonCount++ % 2 == 0) {
-                LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }.also {
-                    filters.addView(it, LinearLayout.LayoutParams(-2, dp(84)))
-                }
-            } else filters.getChildAt(filters.childCount - 1) as LinearLayout
-            column.addView(item, LinearLayout.LayoutParams(-2, 0, 1f))
+            // Keep the 1/3 and 2/4 row order, but size each row independently.
+            filterRows[filterButtonCount++ % 2]
+                .addView(item, LinearLayout.LayoutParams(-2, -1))
         }
         addFilter(null)
         groups.forEach(::addFilter)
