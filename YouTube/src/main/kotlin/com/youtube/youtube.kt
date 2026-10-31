@@ -34,9 +34,6 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
-import org.schabi.newpipe.extractor.ServiceList
-import org.schabi.newpipe.extractor.stream.StreamInfo
-import org.schabi.newpipe.extractor.localization.Localization
 
 fun String.stripWhitespace(): String {
     if (this.isEmpty()) return this
@@ -121,14 +118,6 @@ class YoutubeProvider(
         set(value) {}
         
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
-
-    private fun configureExtractorLocalization(extractor: org.schabi.newpipe.extractor.Extractor) {
-        try {
-            extractor.forceLocalization(Localization(lang))
-        } catch (e: Exception) {
-            logError(e)
-        }
-    }
 
     companion object {
         private val providerScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -2240,6 +2229,49 @@ class YoutubeProvider(
         return extractYtInitialDataInternal(html, null)
     }
 
+    /** Reuse the existing watch-page HTML; no additional metadata request. */
+    private fun extractVideoDetails(html: String): Map<*, *>? {
+        val match = Regex("""(?:var\s+)?ytInitialPlayerResponse\s*=\s*\{""").find(html) ?: return null
+        val start = match.range.last
+        val end = findBalancedJsonEndExclusive(html, start) ?: return null
+        val response = readJsonObjectFromRange(html, start, end, setOf("videoDetails"))
+        return response?.get("videoDetails") as? Map<*, *>
+    }
+
+    /** CloudStream renders plot as HTML; escape plain text before converting newlines. */
+    private fun descriptionAsHtml(text: String): String =
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace("\r\n", "\n").replace('\r', '\n').replace("\n", "<br>")
+
+    private fun channelDescriptionFromData(data: Map<String, Any>?): String =
+        ((safeGet(data, "metadata", "channelMetadataRenderer", "description") as? String)
+            ?.takeIf { it.isNotBlank() }
+            ?: (safeGet(data, "microformat", "microformatDataRenderer", "description") as? String))
+            .orEmpty()
+
+    /** New YouTube channel layouts can place the About text in nested view models. */
+    private fun aboutViewDescription(node: Any?, depth: Int = 0): String {
+        if (depth > 24) return ""
+        return when (node) {
+            is Map<*, *> -> {
+                val about = node["aboutChannelViewModel"] as? Map<*, *>
+                val description = getText(about?.get("description"))
+                if (description.isNotBlank()) description else
+                    node.values.firstNotNullOfOrNull { value ->
+                        if (value is Map<*, *> || value is List<*>) {
+                            aboutViewDescription(value, depth + 1).takeIf { it.isNotBlank() }
+                        } else null
+                    }.orEmpty()
+            }
+            is List<*> -> node.firstNotNullOfOrNull { value ->
+                if (value is Map<*, *> || value is List<*>) {
+                    aboutViewDescription(value, depth + 1).takeIf { it.isNotBlank() }
+                } else null
+            }.orEmpty()
+            else -> ""
+        }
+    }
+
     private fun extractHomeInitialData(html: String): Map<String, Any>? {
         return extractYtInitialDataInternal(html, setOf("contents"))
     }
@@ -3259,48 +3291,20 @@ class YoutubeProvider(
             var channelId = ""
             var channelAvatar = ""
             var subscriberCount = ""
-            var npPlot = ""
-            var npTags = emptyList<String>()
-            var npActor: ActorData? = null
-
-            val watchUrl = "https://www.youtube.com/watch?v=$videoId" 
-            
-            val pairResult = coroutineScope {
-                val npDeferred = async(Dispatchers.IO) {
-                    if (direct) null else try {
-                        val extractor = ServiceList.YouTube.getStreamExtractor(watchUrl)
-                        configureExtractorLocalization(extractor)
-                        extractor.fetchPage()
-                        StreamInfo.getInfo(extractor)
-                    } catch (e: Exception) {
-                        logError(e)
-                        null
-                    }
-                }
-
-                val htmlDeferred = async(Dispatchers.IO) {
-                    try {
-                        app.get(watchUrl, headers = mapOf("Referer" to "https://www.youtube.com/"), interceptor = ytInterceptor)
-                    } catch (e: Exception) {
-                        logError(e)
-                        null
-                    }
-                }
-                Pair(npDeferred.await(), htmlDeferred.await())
-            }
-
-            val info = pairResult.first
-            val response = pairResult.second
-            
-            if (info != null) {
-                npPlot = info.description.content.toString()
-                npTags = info.tags?.take(10)?.toList() ?: emptyList()
-                info.uploaderName?.takeIf { it.isNotBlank() }?.let { uploader ->
-                    npActor = ActorData(Actor(uploader, info.uploaderAvatars.lastOrNull()?.url ?: ""))
+            val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+            val response = withContext(Dispatchers.IO) {
+                try {
+                    app.get(watchUrl, headers = mapOf("Referer" to "https://www.youtube.com/"), interceptor = ytInterceptor)
+                } catch (e: Exception) {
+                    logError(e)
+                    null
                 }
             }
-
             val html = response?.text ?: ""
+            val videoDetails = extractVideoDetails(html)
+            val htmlTags = (videoDetails?.get("keywords") as? List<*>)
+                ?.mapNotNull { it as? String }?.filter { it.isNotBlank() }?.take(10).orEmpty()
+            val htmlUploader = (videoDetails?.get("author") as? String).orEmpty()
             val data = extractYtInitialData(html)
 
             val recs = mutableListOf<SearchResponse>()
@@ -3427,18 +3431,21 @@ class YoutubeProvider(
             
             finalRecs.addAll(episodeResponses)
 
+            Log.i("YouTubeMeta", "[HTML_META] type=shorts id=$videoId html=${response != null} " +
+                "player=${videoDetails != null} plot=hidden tags=${htmlTags.size} " +
+                "uploader=${if (channelName.isNotBlank()) "initialData" else if (htmlUploader.isNotBlank()) "player" else "none"} direct=$direct")
             return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
                 this.plot = finalPlot
                 this.recommendations = finalRecs
 
-                if (npTags.isNotEmpty()) this.tags = npTags
+                if (htmlTags.isNotEmpty()) this.tags = htmlTags
 
                 val actorList = mutableListOf<ActorData>()
                 if (channelName.isNotBlank()) {
                     actorList.add(ActorData(Actor(channelName, channelAvatar)))
-                } else if (npActor != null) {
-                    actorList.add(npActor!!)
+                } else if (htmlUploader.isNotBlank()) {
+                    actorList.add(ActorData(Actor(htmlUploader, channelAvatar)))
                 }
                 if (subscriberCount.isNotBlank()) {
                     actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/master/YouTube/Subscribe.jpg")))
@@ -3462,32 +3469,9 @@ class YoutubeProvider(
 
                 val channelUrl = "$cleanUrl/videos"
                 
-                val channelPairResult = coroutineScope {
-                    val htmlDeferred = async(Dispatchers.IO) {
-                        try {
-                            app.get(channelUrl, interceptor = ytInterceptor)
-                        } catch (e: Exception) {
-                            logError(e)
-                            null
-                        }
-                    }
-
-                    val extractorDeferred = async(Dispatchers.IO) {
-                        try {
-                            val channelExtractor = ServiceList.YouTube.getChannelExtractor(cleanUrl)
-                            configureExtractorLocalization(channelExtractor)
-                            channelExtractor.fetchPage()
-                            channelExtractor
-                        } catch (e: Exception) {
-                            logError(e)
-                            null
-                        }
-                    }
-                    Pair(htmlDeferred.await(), extractorDeferred.await())
+                val response = withContext(Dispatchers.IO) {
+                    app.get(channelUrl, interceptor = ytInterceptor)
                 }
-
-                val response = channelPairResult.first ?: throw ErrorLoadingException("Failed to load channel page")
-                val channelExtractor = channelPairResult.second
 
                 val html = response.text
                 val data = extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract channel data")
@@ -3497,13 +3481,40 @@ class YoutubeProvider(
                 val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
                 val maxPagesLimit = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
 
-                var channelDescription = ""
-                if (channelExtractor != null) {
-                    val rawDesc = (channelExtractor.description ?: "").replace("\n", "<br>")
-                    channelDescription = if (rawDesc.isNotBlank()) "$rawDesc" else "\u200b"
-                } else {
-                    channelDescription = "\u200b"
+                var channelDescription = channelDescriptionFromData(data)
+                var channelDescSource = if (channelDescription.isNotBlank()) "videos_metadata" else "none"
+                var aboutFetched = false
+                if (channelDescription.isBlank()) {
+                    aboutFetched = true
+                    try {
+                        val aboutResponse = withContext(Dispatchers.IO) {
+                            app.get("$cleanUrl/about", interceptor = ytInterceptor)
+                        }
+                        val aboutData = extractYtInitialData(aboutResponse.text)
+                        channelDescription = channelDescriptionFromData(aboutData)
+                        if (channelDescription.isNotBlank()) channelDescSource = "about_metadata"
+                        if (channelDescription.isBlank()) {
+                            channelDescription = aboutViewDescription(aboutData)
+                            if (channelDescription.isNotBlank()) channelDescSource = "about_view"
+                        }
+                        if (channelDescription.isBlank()) {
+                            channelDescription = aboutResponse.document
+                                .selectFirst("meta[property=og:description]")?.attr("content").orEmpty()
+                            if (channelDescription.isNotBlank()) channelDescSource = "about_og"
+                        }
+                    } catch (e: Exception) {
+                        Log.w("YouTubeMeta", "[HTML_META] type=channel id=$cleanUrl about_error=${e.javaClass.simpleName}")
+                        logError(e)
+                    }
                 }
+                if (channelDescription.isBlank()) {
+                    channelDescription = response.document
+                        .selectFirst("meta[property=og:description]")?.attr("content").orEmpty()
+                    if (channelDescription.isNotBlank()) channelDescSource = "videos_og"
+                }
+                Log.i("YouTubeMeta", "[HTML_META] type=channel id=$cleanUrl source=$channelDescSource " +
+                    "chars=${channelDescription.length} lines=${channelDescription.count { it == '\n' } + 1} " +
+                    "aboutFetched=$aboutFetched")
                 
                 val header = safeGet(data, "header", "c4TabbedHeaderRenderer")
                     ?: safeGet(data, "header", "pageHeaderRenderer")
@@ -3698,7 +3709,7 @@ class YoutubeProvider(
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, allEpisodes) {
                     this.posterUrl = poster
-                    this.plot = channelDescription.ifBlank { "\u200b" }
+                    this.plot = descriptionAsHtml(channelDescription).ifBlank { "\u200b" }
 
                     val actorList = mutableListOf<ActorData>()
                     actorList.add(ActorData(Actor(title, poster ?: "")))
@@ -3803,57 +3814,24 @@ class YoutubeProvider(
 
         epMetaMapCache.clear()
 
-        var npPlot = ""
-        var npTags = emptyList<String>()
-        var npActor: ActorData? = null
-
-        val pairResult = coroutineScope {
-            val npDeferred = async(Dispatchers.IO) {
-                if (direct) null else try {
-                    val extractor = ServiceList.YouTube.getStreamExtractor(url)
-                    configureExtractorLocalization(extractor)
-                    extractor.fetchPage()
-                    StreamInfo.getInfo(extractor)
-                } catch (e: Exception) {
-                    logError(e)
-                    null
-                }
-            }
-
-            val htmlDeferred = async(Dispatchers.IO) {
-                try {
-                    val headers = mapOf("Referer" to "https://www.youtube.com/")
-                    app.get(url, headers = headers, interceptor = ytInterceptor)
-                } catch (e: Exception) {
-                    logError(e)
-                    null
-                }
-            }
-            Pair(npDeferred.await(), htmlDeferred.await())
-        }
-
-        val info = pairResult.first
-        val response = pairResult.second
-
-        if (info != null) {
-            npPlot = info.description.content.toString()
-            npTags = info.tags?.take(10)?.toList() ?: emptyList()
-
-            info.uploaderName?.takeIf { it.isNotBlank() }?.let { uploader ->
-                npActor = ActorData(
-                    Actor(
-                        uploader,
-                        info.uploaderAvatars.lastOrNull()?.url ?: ""
-                    )
-                )
+        val response = withContext(Dispatchers.IO) {
+            try {
+                app.get(url, headers = mapOf("Referer" to "https://www.youtube.com/"), interceptor = ytInterceptor)
+            } catch (e: Exception) {
+                logError(e)
+                null
             }
         }
-
         val html = response?.text ?: ""
+        val videoDetails = extractVideoDetails(html)
+        val htmlTags = (videoDetails?.get("keywords") as? List<*>)
+            ?.mapNotNull { it as? String }?.filter { it.isNotBlank() }?.take(10).orEmpty()
+        val htmlUploader = (videoDetails?.get("author") as? String).orEmpty()
         val data = extractYtInitialData(html)
 
         var title = "YouTube Video"
-        var plot = npPlot 
+        var plot = (videoDetails?.get("shortDescription") as? String).orEmpty()
+        var plotSource = if (plot.isNotBlank()) "player" else "none"
         var poster = YoutubeUtils.buildThumbnailFromId(videoId)
 
         var channelName = ""
@@ -3900,7 +3878,8 @@ class YoutubeProvider(
                             ?: secondary["description"] as? Map<*, *>
                         val fullDesc = getText(descObj)
                         if (fullDesc.isNotBlank()) {
-                            plot = fullDesc.trimStart() 
+                            plot = fullDesc
+                            plotSource = "initialData"
                         }
                     }
                 }
@@ -3915,10 +3894,18 @@ class YoutubeProvider(
             val doc = response.document
             title = doc.selectFirst("meta[property=og:title]")?.attr("content") ?: title
             poster = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: poster
-            if (plot.isBlank()) {
-                plot = doc.selectFirst("meta[property=og:description]")?.attr("content") ?: plot
-            }
         }
+        if (plot.isBlank() && response != null) {
+            plot = response.document.selectFirst("meta[property=og:description]")
+                ?.attr("content").orEmpty()
+            if (plot.isNotBlank()) plotSource = "og"
+        }
+        if (channelName.isBlank()) channelName = htmlUploader
+        Log.i("YouTubeMeta", "[HTML_META] type=video id=$videoId html=${response != null} " +
+            "player=${videoDetails != null} source=$plotSource chars=${plot.length} " +
+            "lines=${plot.count { it == '\n' } + if (plot.isBlank()) 0 else 1} " +
+            "tags=${htmlTags.size} uploader=${if (channelName.isNotBlank()) "html" else "none"} " +
+            "avatar=${channelAvatar.isNotBlank()} direct=$direct")
 
         rememberChannel(url, channelName, channelId)
 
@@ -4008,18 +3995,16 @@ class YoutubeProvider(
         
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = poster
-            this.plot = plot.ifBlank { "\u200b" }
+            this.plot = descriptionAsHtml(plot).ifBlank { "\u200b" }
             this.recommendations = filteredRecs 
             
-            if (npTags.isNotEmpty()) {
-                this.tags = npTags
+            if (htmlTags.isNotEmpty()) {
+                this.tags = htmlTags
             }
 
             val actorList = mutableListOf<ActorData>()
             if (channelName.isNotBlank()) {
                 actorList.add(ActorData(Actor(channelName, channelAvatar)))
-            } else {
-                npActor?.let { actorList.add(it) }
             }
 
             if (subscriberCount.isNotBlank()) {
