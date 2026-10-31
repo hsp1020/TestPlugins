@@ -27,6 +27,10 @@ class KKTVProvider : MainAPI() {
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
+    private fun isBlockedMatch(league: String, title: String): Boolean =
+        league.contains("bigwin24", ignoreCase = true) ||
+            title.contains("bigwin24", ignoreCase = true)
+
     // 해독된 알고리즘을 기반으로 로컬에서 최신 auToken을 0.001초 만에 구워내는 자체 엔진
     private fun generateAuToken(): String {
         val basePlaintext = "https://fkwdsvop.com/KingKong/livescore/livescore/@${System.currentTimeMillis()}@"
@@ -130,7 +134,12 @@ class KKTVProvider : MainAPI() {
 
             if (dataArray != null && dataArray.isArray) {
                 
-                val matchList = dataArray.toList()
+                val matchList = dataArray.toList().filterNot { match ->
+                    isBlockedMatch(
+                        match.get("leagueName")?.asText().orEmpty(),
+                        match.get("title")?.asText().orEmpty()
+                    )
+                }
                 
                 val importantMatches = matchList.filter { 
                     val color = it.get("title_color")?.asText()
@@ -211,6 +220,7 @@ class KKTVProvider : MainAPI() {
         val posterParam = Regex("""&kktv_poster=([^&]+)""").find(url)?.groupValues?.get(1)
 
         val title = if (titleParam != null) URLDecoder.decode(titleParam, "UTF-8") else "스포츠 실시간 중계"
+        require(!isBlockedMatch("", title)) { "Filtered KKTV match" }
         val poster = if (posterParam != null) URLDecoder.decode(posterParam, "UTF-8") else ""
 
         val cleanUrl = url.substringBefore("&kktv_title=")

@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "스포츠 생중계 제공"
