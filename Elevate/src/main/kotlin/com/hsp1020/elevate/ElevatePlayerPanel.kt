@@ -133,23 +133,6 @@ internal class ElevatePlayerPanel(
     })
     private var pendingSubtitleUrl: String? = null
     private var pendingSubtitleInstance = -1
-    private fun logRefreshListTouch(stage: String, ev: MotionEvent, intercepted: Boolean? = null) {
-        if (tab != Tab.SUBTITLES || inSync || ev.actionMasked !in
-            arrayOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL)) return
-        val position = list.pointToPosition(ev.x.toInt(), ev.y.toInt())
-        val row = list.getChildAt(position - list.firstVisiblePosition) as? LinearLayout
-        val button = row?.getChildAt(2) as? ImageButton
-        val left = if (row != null && button != null) row.left + button.left else -1
-        val top = if (row != null && button != null) row.top + button.top else -1
-        val inside = button != null && ev.x >= left && ev.x < left + button.width &&
-            ev.y >= top && ev.y < top + button.height
-        if (position in 0..1 || inside) android.util.Log.d("ElevatePanelTouch",
-            "$stage action=${MotionEvent.actionToString(ev.actionMasked)} pos=$position " +
-                "x=${ev.x.toInt()} y=${ev.y.toInt()} iconRect=$left,$top,${button?.width},${button?.height} " +
-                "hitIcon=$inside visible=${button?.visibility} enabled=${button?.isEnabled} " +
-                "clickable=${button?.isClickable} intercepted=$intercepted " +
-                "rowCount=${adapter.count} first=${list.firstVisiblePosition}")
-    }
     private val list = object : ListView(ctx) {
         override fun dispatchTouchEvent(event: MotionEvent): Boolean {
             if (event.actionMasked == MotionEvent.ACTION_DOWN) {
@@ -168,13 +151,7 @@ internal class ElevatePlayerPanel(
                     event.actionMasked == MotionEvent.ACTION_CANCEL) refreshTouch = null
                 return true
             }
-            logRefreshListTouch("dispatch", event)
             return super.dispatchTouchEvent(event)
-        }
-        override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
-            val intercepted = super.onInterceptTouchEvent(event)
-            logRefreshListTouch("intercept", event, intercepted)
-            return intercepted
         }
     }.apply {
         choiceMode = AbsListView.CHOICE_MODE_NONE
@@ -245,11 +222,6 @@ internal class ElevatePlayerPanel(
             isEnabled = refresh != null
             // Let the attached ListView own click and long-click dispatch.
             // A detached recycled ImageButton can receive touch but cannot run posted clicks.
-            if (tab == Tab.SUBTITLES && position in 0..1)
-                android.util.Log.d("ElevatePanelTouch",
-                    "bind row=$position hash=${refreshUrl?.hashCode()} refresh=${refresh != null} " +
-                        "enabled=$isEnabled clickable=$isClickable attached=$isAttachedToWindow " +
-                        "width=$width height=$height")
             setOnTouchListener(null)
             setOnClickListener(null)
             setOnLongClickListener(null)
@@ -467,18 +439,17 @@ internal class ElevatePlayerPanel(
     private var syncCueRetryCount = 0
     private var syncCueRetryUrl: String? = null
     private var syncCueRetryPlayer: Player? = null
-    private val syncCueRetry = Runnable { if (inSync) updateSyncCues("decoder-ready") }
+    private val syncCueRetry = Runnable { if (inSync) updateSyncCues() }
     private fun cancelSyncCueRetry() {
         syncList.removeCallbacks(syncCueRetry)
         syncCueRetryCount = 0
         syncCueRetryUrl = null
         syncCueRetryPlayer = null
     }
-    private fun refreshNativeSubtitleOutput(reason: String) {
+    private fun refreshNativeSubtitleOutput() {
         // The native subtitle-sync Apply action nudges the position by 1ms
         // to rebuild the text renderer's cues after changing the delay.
         fragment.player.seekTime(1L, PlayerEventSource.UI)
-        android.util.Log.d("ElevatePanelSync", "nativeApplyRefresh reason=$reason")
     }
 
     private val syncOffsetWatcher = object : TextWatcher {
@@ -488,8 +459,7 @@ internal class ElevatePlayerPanel(
             if (fragment.player.getSubtitleOffset() != amount) {
                 fragment.player.setSubtitleOffset(amount)
                 ElevateSubtitleRefreshHook.active()?.refreshAppearance()
-                refreshNativeSubtitleOutput("offset-change")
-                android.util.Log.d("ElevatePanelSync", "offsetChanged instant=$amount")
+                refreshNativeSubtitleOutput()
             }
             val time = (fragment.player.getPosition() ?: 0L) + amount
             offsetHint.text = when {
@@ -550,15 +520,13 @@ internal class ElevatePlayerPanel(
             ?.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
         nativeSync.findViewById<View>(R.id.reset_btt)?.setOnClickListener {
             offsetInput.setText("0")
-            android.util.Log.d("ElevatePanelSync", "offsetReset instant=0")
         }
         nativeSync.findViewById<View>(R.id.cancel_btt)?.setOnClickListener {
             if (fragment.player.getSubtitleOffset() != offsetBeforeSync) {
                 fragment.player.setSubtitleOffset(offsetBeforeSync)
                 ElevateSubtitleRefreshHook.active()?.refreshAppearance()
-                refreshNativeSubtitleOutput("offset-cancel")
+                refreshNativeSubtitleOutput()
             }
-            android.util.Log.d("ElevatePanelSync", "offsetCancelled restored=$offsetBeforeSync")
             showTabContents()
         }
     }
@@ -569,7 +537,7 @@ internal class ElevatePlayerPanel(
     ) { proxy, method, args ->
         when (method.name) {
             "onCues" -> {
-                if (inSync) root.post { updateSyncCues("player-cues") }
+                if (inSync) root.post { updateSyncCues() }
                 null
             }
             "onIsPlayingChanged", "onPositionDiscontinuity" -> {
@@ -582,24 +550,10 @@ internal class ElevatePlayerPanel(
                 null
             }
             "onTracksChanged" -> {
-                val actual = fragment.player.getCurrentPreferredSubtitle()
-                ElevateSubtitleTrace.tracks("panelTracks", fragment.playerView?.player,
-                    vm.state.subtitles, actual, subtitleSelectionLogSeq, lastSubtitleRequestHash, fragment)
-                android.util.Log.d("ElevatePanelSelect",
-                    "tracksChanged requestSeq=$subtitleSelectionLogSeq requestedHash=$lastSubtitleRequestHash " +
-                        "actualHash=${actual?.url?.hashCode()} actualOrigin=${actual?.origin} " +
-                        "tab=$tab inSync=$inSync modelCount=${vm.state.subtitles.size}")
-                if (inSync) root.post { if (inSync) updateSyncCues("tracks-changed") }
+                if (inSync) root.post { if (inSync) updateSyncCues() }
                 if (tab == Tab.SUBTITLES && !inSync)
                     root.post {
                         if (tab == Tab.SUBTITLES && !inSync) {
-                            val selected = fragment.player.getCurrentPreferredSubtitle()
-                            android.util.Log.d("ElevatePanelSelect",
-                                "tracksPosted seq=$subtitleSelectionLogSeq requestedHash=$lastSubtitleRequestHash " +
-                                    "actualHash=${selected?.url?.hashCode()} origin=${selected?.origin}")
-                            ElevateSubtitleTrace.tracks("panelTracksPosted",
-                                fragment.playerView?.player, vm.state.subtitles,
-                                selected, subtitleSelectionLogSeq, lastSubtitleRequestHash, fragment)
                             renderSubtitles()
                         }
                     }
@@ -618,42 +572,16 @@ internal class ElevatePlayerPanel(
         previous?.removeListener(cueListener)
         cuePlayer = next
         next?.addListener(cueListener)
-        android.util.Log.d("ElevatePanelSync",
-            "cueListener enabled=$enabled attached=${next != null} " +
-                "oldPlayer=${previous?.let(System::identityHashCode)} newPlayer=${next?.let(System::identityHashCode)}")
-        if (enabled) ElevateSubtitleTrace.tracks("panelBind", next, vm.state.subtitles,
-            fragment.player.getCurrentPreferredSubtitle(), subtitleSelectionLogSeq, lastSubtitleRequestHash, fragment)
     }
-    private var subtitleSelectionLogSeq = 0
-    private var lastSubtitleRequestHash: Int? = null
     private val touches = ArrayList<View>()
     private val linksChanged = Observer<VideoLive<Set<VideoLink>>> { update ->
-        android.util.Log.d("ElevatePanelData",
-            "sourceEvent instance=${update?.instance} currentInstance=${vm.state.instance} " +
-                "eventCount=${update?.value?.size} stateCount=${vm.state.links.size} " +
-                "tab=$tab visible=${body.isShown} filter=$filter")
         if (tab == Tab.SOURCES) showTabContents()
     }
     private val subtitlesChanged = Observer<VideoLive<Set<SubtitleData>>> { update ->
         val actual = fragment.player.getCurrentPreferredSubtitle()
-        android.util.Log.d("ElevatePanelData",
-            "subtitleEvent instance=${update?.instance} currentInstance=${vm.state.instance} " +
-                "eventCount=${update?.value?.size} stateCount=${vm.state.subtitles.size} " +
-                "tab=$tab inSync=$inSync selectedHash=${actual?.url?.hashCode()} " +
-                "selectedOrigin=${actual?.origin} requestSeq=$subtitleSelectionLogSeq " +
-                "requestedHash=$lastSubtitleRequestHash")
-        root.post {
-            val after = fragment.player.getCurrentPreferredSubtitle()
-            android.util.Log.d("ElevatePanelSelect",
-                "subtitleEventPosted requestSeq=$subtitleSelectionLogSeq requestedHash=$lastSubtitleRequestHash " +
-                    "actualHash=${after?.url?.hashCode()} actualOrigin=${after?.origin} " +
-                    "modelCount=${vm.state.subtitles.size} tab=$tab")
-            ElevateSubtitleTrace.tracks("subtitleEventPosted", fragment.playerView?.player,
-                vm.state.subtitles, after, subtitleSelectionLogSeq, lastSubtitleRequestHash, fragment)
-        }
         onSubtitleOptionsChanged()
         if (tab == Tab.SUBTITLES) {
-            if (inSync) updateSyncCues("subtitle-list")
+            if (inSync) updateSyncCues()
             else showTabContents()
         }
     }
@@ -757,8 +685,7 @@ internal class ElevatePlayerPanel(
     private fun bindRefreshListener() {
         ElevateSubtitleRefreshHook.active()?.setPanelListener { target, url ->
             if (target === fragment && tab == Tab.SUBTITLES) {
-                android.util.Log.d("ElevatePanelRefresh", "applied actual=${fragment.player.getCurrentPreferredSubtitle()?.url?.hashCode()} refreshed=${url.hashCode()} sync=$inSync")
-                if (inSync) updateSyncCues("refresh-applied")
+                if (inSync) updateSyncCues()
             }
         }
     }
@@ -820,19 +747,6 @@ internal class ElevatePlayerPanel(
         rows.clear()
         rows.addAll(values)
         adapter.notifyDataSetChanged()
-        if (tab == Tab.SOURCES || (tab == Tab.SUBTITLES && !inSync)) {
-            val renderedTab = tab
-            val expected = values.size
-            android.util.Log.d("ElevatePanelData",
-                "adapterNotify tab=$renderedTab rowCount=$expected adapterCount=${adapter.count} " +
-                    "attached=${list.isAttachedToWindow} shown=${list.isShown}")
-            list.post {
-                if (tab == renderedTab) android.util.Log.d("ElevatePanelData",
-                    "adapterPosted tab=$renderedTab expected=$expected adapterCount=${adapter.count} " +
-                        "childCount=${list.childCount} firstVisible=${list.firstVisiblePosition} " +
-                        "lastVisible=${list.lastVisiblePosition} shown=${list.isShown}")
-            }
-        }
     }
 
     private fun panelContent(view: View) {
@@ -1011,11 +925,6 @@ internal class ElevatePlayerPanel(
                 }.onFailure { android.util.Log.w("Elevate", "Source switch failed", it) }
             }, selected = link == selected)
         })
-        android.util.Log.d("ElevatePanelData",
-            "sourcesRendered instance=${vm.state.instance} modelCount=${vm.state.links.size} " +
-                "sortedCount=${vm.state.sortLinks(qualityProfile()).size} usableCount=${entries.size} " +
-                "filter=$filter rowCount=${rows.size} adapterCount=${adapter.count} " +
-                "selectedHash=${selected?.hashCode()} groupCount=${groups.size}")
     }
 
     private fun renderTracks() {
@@ -1104,29 +1013,12 @@ internal class ElevatePlayerPanel(
         onManualSubtitle(sub)
         pendingSubtitleUrl = sub?.url
         pendingSubtitleInstance = vm.state.instance
-        val seq = ++subtitleSelectionLogSeq
-        val before = fragment.player.getCurrentPreferredSubtitle()
-        lastSubtitleRequestHash = sub?.url?.hashCode()
-        android.util.Log.d("ElevatePanelSelect",
-            "tap seq=$seq requestedHash=$lastSubtitleRequestHash requestedOrigin=${sub?.origin} " +
-                "beforeHash=${before?.url?.hashCode()} beforeOrigin=${before?.origin} " +
-                "modelCount=${vm.state.subtitles.size}")
-        ElevateSubtitleTrace.tracks("tapBefore", fragment.playerView?.player,
-            vm.state.subtitles, before, seq, lastSubtitleRequestHash, fragment)
         runCatching {
             val requiresReload = GeneratorPlayer::class.java.getDeclaredMethod(
                 "setSubtitles", SubtitleData::class.java, Boolean::class.javaPrimitiveType!!
             ).apply { isAccessible = true }.invoke(fragment, sub, true) as? Boolean == true
-            val immediate = fragment.player.getCurrentPreferredSubtitle()
-            android.util.Log.d("ElevatePanelSelect",
-                "setReturned seq=$seq requiresReload=$requiresReload " +
-                    "actualHash=${immediate?.url?.hashCode()} actualOrigin=${immediate?.origin}")
-            ElevateSubtitleTrace.tracks("tapReturned", fragment.playerView?.player,
-                vm.state.subtitles, immediate, seq, lastSubtitleRequestHash, fragment)
             if (requiresReload) {
                 currentLink()?.let { link ->
-                    android.util.Log.d("ElevatePanelSelect",
-                        "reloadLink seq=$seq linkHash=${link.hashCode()}")
                     GeneratorPlayer::class.java.getDeclaredMethod(
                         "loadLink", Pair::class.java, Boolean::class.javaPrimitiveType!!
                     ).apply { isAccessible = true }.invoke(fragment, link, true)
@@ -1134,16 +1026,7 @@ internal class ElevatePlayerPanel(
             }
         }.onFailure {
             pendingSubtitleUrl = null
-            android.util.Log.w("ElevatePanelSelect", "setFailed seq=$seq", it)
-        }
-        root.post {
-            val actual = fragment.player.getCurrentPreferredSubtitle()
-            android.util.Log.d("ElevatePanelSelect",
-                "tapPosted seq=$seq latestSeq=$subtitleSelectionLogSeq " +
-                    "requestedHash=$lastSubtitleRequestHash actualHash=${actual?.url?.hashCode()} " +
-                    "actualOrigin=${actual?.origin} currentInstance=${vm.state.instance}")
-            ElevateSubtitleTrace.tracks("tapPosted", fragment.playerView?.player,
-                vm.state.subtitles, actual, seq, lastSubtitleRequestHash, fragment)
+            android.util.Log.w("ElevatePanelSelect", "Subtitle selection failed", it)
         }
     }
 
@@ -1167,11 +1050,6 @@ internal class ElevatePlayerPanel(
                 name == current?.originalName
             }.let { if (it < 0) 0 else it + 1 }
         }
-        android.util.Log.d("ElevatePanelData",
-            "subtitlesRender instance=${vm.state.instance} modelCount=${vm.state.subtitles.size} " +
-                "groupCount=${subtitleGroups.size} selectedGroup=$selectedGroup " +
-                "selectedHash=${current?.url?.hashCode()} " +
-                "visibleGroupCount=${subtitleGroups.getOrNull(selectedGroup - 1)?.second?.size ?: 0}")
         languageAdapter.clear()
         languageAdapter.add(ctx.getString(R.string.no_subtitles).html())
         subtitleGroups.forEach { (language, _) -> languageAdapter.add(language.html()) }
@@ -1183,10 +1061,6 @@ internal class ElevatePlayerPanel(
         val current = fragment.player.getCurrentPreferredSubtitle()?.url
         val group = subtitleGroups.getOrNull(selectedGroup - 1)?.second.orEmpty()
         val detailCache = SubtitleLanguageNormalizer.stremioDetailCache()
-        android.util.Log.d("ElevatePanelTouch",
-            "optionsStart selectedGroup=$selectedGroup groupCount=${group.size} " +
-                "currentHash=${current?.hashCode()} listSize=${list.width}x${list.height} " +
-                "firstVisible=${list.firstVisiblePosition} tab=$tab shown=${list.isShown}")
         replaceRows(group.mapIndexed { index, sub ->
             val number = index + 1 // Visual option index, not nameSuffix (native picker behavior).
             val label = if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) {
@@ -1204,51 +1078,23 @@ internal class ElevatePlayerPanel(
             val refreshHook = ElevateSubtitleRefreshHook.active()
             val entry = if (selected) ElevateSubtitleRefreshRegistry.entryFor(sub) else null
             val refreshable = selected && refreshHook != null && entry != null
-            if (index < 2 || selected) android.util.Log.d("ElevatePanelTouch",
-                "option row=$index urlHash=${sub.url.hashCode()} origin=${sub.origin} " +
-                    "selected=$selected activeHash=${current?.hashCode()} refreshable=$refreshable " +
-                    "hook=${refreshHook != null} entry=${entry != null} " +
-                    "entryAddon=${entry?.addonUrl?.hashCode()} entryAmbiguous=${entry?.ambiguous} " +
-                    "mime=${sub.mimeType} labelHash=${label.hashCode()}")
             Row(label, { setSubtitle(sub) },
                 if (refreshable) ({ button: ImageButton ->
-                    android.util.Log.d("ElevatePanelRefresh", "tap automatic=false urlHash=${sub.url.hashCode()} selectedHash=${fragment.player.getCurrentPreferredSubtitle()?.url?.hashCode()} enabled=${button.isEnabled} attached=${button.isAttachedToWindow}")
                     val accepted = ElevateSubtitleRefreshHook.active()?.refreshSelected(false, button, sub.url)
                     if (accepted != true) renderSubtitles()
-                    android.util.Log.d("ElevatePanelRefresh", "tap result accepted=$accepted rotation=${button.rotation}")
                     Unit
                 }) else null,
                 if (refreshable) ({ button: ImageButton ->
-                    android.util.Log.d("ElevatePanelRefresh", "tap automatic=true urlHash=${sub.url.hashCode()} selectedHash=${fragment.player.getCurrentPreferredSubtitle()?.url?.hashCode()} attached=${button.isAttachedToWindow}")
                     val accepted = ElevateSubtitleRefreshHook.active()?.refreshSelected(true, button, sub.url)
                     if (accepted != true) renderSubtitles()
-                    android.util.Log.d("ElevatePanelRefresh", "tap automatic=true result accepted=$accepted")
                     Unit
                 }) else null,
                 richText = true, selected = sub.url == current, refreshUrl = sub.url)
         })
-        android.util.Log.d("ElevatePanelData",
-            "subtitlesRendered modelCount=${vm.state.subtitles.size} " +
-                "selectedGroup=$selectedGroup optionRows=${rows.size} adapterCount=${adapter.count} " +
-                "languageRows=${languageAdapter.count} selectedHash=${current?.hashCode()}")
-        list.post {
-            if (tab != Tab.SUBTITLES || inSync) return@post
-            (0..1).forEach { rowIndex ->
-                val child = list.getChildAt(rowIndex - list.firstVisiblePosition) as? LinearLayout
-                val button = child?.getChildAt(2) as? ImageButton
-                android.util.Log.d("ElevatePanelTouch",
-                    "postLayout row=$rowIndex visibleRange=${list.firstVisiblePosition}..${list.lastVisiblePosition} " +
-                        "listSize=${list.width}x${list.height} rowSize=${child?.width}x${child?.height} " +
-                        "buttonSize=${button?.width}x${button?.height} buttonRect=${button?.left},${button?.top} " +
-                        "visible=${button?.visibility} enabled=${button?.isEnabled} " +
-                        "clickable=${button?.isClickable} attached=${button?.isAttachedToWindow} " +
-                        "tagHash=${(button?.tag as? String)?.hashCode()} shown=${button?.isShown}")
-            }
-        }
         // Both lists now start at the same top edge with identical 48dp rows.
     }
 
-    private fun updateSyncCues(reason: String) {
+    private fun updateSyncCues() {
         if (!inSync) return
         val refreshed = ElevateSubtitleRefreshHook.active()?.refreshedCues()
         val selected = fragment.player.getCurrentPreferredSubtitle()
@@ -1279,7 +1125,6 @@ internal class ElevatePlayerPanel(
             }
         }
         syncAdapter.updateTime(target)
-        android.util.Log.d("ElevatePanelSync", "cues reason=$reason fromRefresh=${refreshed != null} count=${cues.size} active=${syncAdapter.getLatestActiveItem(target)} time=$target")
     }
 
     private fun showSync() {
@@ -1313,13 +1158,10 @@ internal class ElevatePlayerPanel(
                 val seekLine = progressPos[1] + progress.height / 2
                 val inset = (bottom - seekLine + dp(4)).coerceIn(0, body.height / 2)
                 if (body.paddingBottom != inset) body.setPadding(0, 0, 0, inset)
-                android.util.Log.d("ElevatePanelSync", "layout panelBottom=$bottom progressY=$seekLine reserved=$inset cueHeight=${syncList.height} controlsHeight=${nativeSync.getChildAt(1).height}")
-            } else {
-                android.util.Log.d("ElevatePanelSync", "layout pending inSync=$inSync progressVisible=${progress?.isShown} bodyHeight=${body.height}")
             }
         }
         offsetInput.setText(fragment.player.getSubtitleOffset().toString())
-        updateSyncCues("sync-open")
+        updateSyncCues()
     }
 
 }

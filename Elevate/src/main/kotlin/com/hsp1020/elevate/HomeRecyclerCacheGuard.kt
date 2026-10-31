@@ -54,7 +54,6 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     private var expectedRows: Map<String, RowStamp>? = null
     private var generation = 0
     private var queued = false
-    private val traced = HashSet<String>()
     private var observedParent: RecyclerView.Adapter<*>? = null
     private val observedChildren = LinkedHashMap<RecyclerView, ChildWatch>()
     private var watchingAttaches = false
@@ -62,12 +61,6 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
     // Weak keys: recycled holders are never retained by this feature.
     private val refreshed = WeakHashMap<View, CardStamp>()
     private val parentRepairs = HashSet<RecyclerView>()
-
-    private fun traceOnce(event: String, detail: String) {
-        if (traced.add("$generation:$event:$detail"))
-            Log.i(LOG_TAG, "generation=$generation event=$event provider=$provider " +
-                "pending=$pendingProvider $detail")
-    }
 
     private val apiObserver = Observer<String> { next ->
         if (provider != null && provider != next) {
@@ -79,8 +72,6 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
             loadingObserved = false
             expectedRows = null
             queued = false
-            traced.clear()
-            traceOnce("provider-switch", "from=$provider to=$next")
             arm()
         }
         provider = next
@@ -93,15 +84,12 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                 is Resource.Loading -> {
                     loadingObserved = true
                     expectedRows = null
-                    traceOnce("page-loading", "status=waiting")
                 }
                 is Resource.Failure -> {
-                    traceOnce("page-failure", "status=cancelled")
                     finish()
                 }
                 is Resource.Success -> {
                     if (!loadingObserved || model?.apiName?.value != pending) {
-                        traceOnce("page-ignored", "reason=no-current-loading")
                         return@Observer
                     }
                     val rows = LinkedHashMap<String, RowStamp>()
@@ -109,7 +97,6 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                         rows[entry.list.name] = stamp(entry.list)
                     }
                     expectedRows = rows
-                    traceOnce("page-ready", "catalogs=" + rows.size + " mode=any-provider")
                     arm()
                     queueRefresh()
                 }
@@ -261,8 +248,6 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                     // native list to the child; a stale row title needs full bind.
                     if (headerMismatch) parent.notifyItemChanged(parentPosition)
                     else parent.notifyItemChanged(parentPosition, refreshPayload)
-                    traceOnce("parent-refresh",
-                        "catalog=${rowModel.list.name} full=$headerMismatch")
                 }
                 continue
             }
@@ -291,7 +276,6 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
                     holder.itemView.findViewById<TextView>(R.id.imageText)?.text?.toString() == card.name
                 ) {
                     refreshed[holder.itemView] = stamp
-                    traceOnce("card-bound", "catalog=${rowModel.list.name} position=$position")
                 }
             }
         }
@@ -380,7 +364,6 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
         model = null
         activity = null
         provider = null
-        traced.clear()
     }
 
     override fun onActivityResumed(activity: Activity) {
@@ -397,6 +380,5 @@ internal class HomeRecyclerCacheGuard(private val app: Application) :
 
     private companion object {
         const val HOME_CLASS = "com.lagradost.cloudstream3.ui.home.HomeFragment"
-        const val LOG_TAG = "Elevate-HomePoster"
     }
 }
