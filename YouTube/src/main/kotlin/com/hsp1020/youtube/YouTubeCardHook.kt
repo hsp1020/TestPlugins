@@ -11,6 +11,19 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Bundle
+import android.net.Uri
+import android.graphics.Color
+import android.text.Editable
+import android.text.Spanned
+import android.text.SpannableStringBuilder
+import android.text.TextPaint
+import android.text.TextWatcher
+import android.text.method.LinkMovementMethod
+import android.text.style.ClickableSpan
+import android.util.Log
+import android.util.Patterns
+import com.google.android.material.chip.Chip
+import com.google.android.material.chip.ChipGroup
 import androidx.navigation.NavOptions
 import androidx.navigation.NavController
 import androidx.navigation.fragment.NavHostFragment
@@ -499,6 +512,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         active.forEach { window ->
             if (!dialogs.containsKey(window)) dialogs[window] = Screen(window, true)
         }
+        // Native expanded descriptions are separate AlertDialog text views.
+        windows.forEach { window ->
+            if (owner(window.context) === activity) {
+                screens.values.forEach { it.bindExpandedDescription(window) }
+            }
+        }
     }
 
     private fun owner(context: Context): Activity? {
@@ -519,6 +538,145 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }?.replace("https://www.youtube.com", "")?.replace("/", "")?.hashCode()
 
         private var requestedSeason: Int? = null
+
+        private val tagGroup = if (fragment?.arguments?.getString("apiName") == "YouTube")
+            root.findViewById<ChipGroup>(R.id.result_tag) else null
+        private val description = if (fragment?.arguments?.getString("apiName") == "YouTube")
+            root.findViewById<TextView>(R.id.result_description) else null
+        private var descriptionWatcher: TextWatcher? = null
+        private var nativeMovement: android.text.method.MovementMethod? = null
+        private var editingDescription = false
+
+        private fun openTagSearch(query: String) {
+            val active = fragment?.takeIf { it.isAdded } ?: return
+            val id = root.resources.getIdentifier("navigation_search", "id", root.context.packageName)
+            if (id == 0) return
+            val enter = root.resources.getIdentifier("enter_anim", "anim", root.context.packageName)
+            val exit = root.resources.getIdentifier("exit_anim", "anim", root.context.packageName)
+            active.activity?.navigate(id, Bundle().apply {
+                putString("search_query", query)
+                putBoolean("global_detail_search", true)
+            }, NavOptions.Builder()
+                .setEnterAnim(enter).setExitAnim(exit)
+                .setPopEnterAnim(enter).setPopExitAnim(exit).build())
+            Log.i("YouTubeMeta", "[DETAIL_LINK] action=tag_search query=$query")
+        }
+
+        private fun bindTagClicks() {
+            val group = tagGroup ?: return
+            for (index in 0 until group.childCount) {
+                val chip = group.getChildAt(index) as? Chip ?: continue
+                val keyword = chip.text?.toString()?.trim().orEmpty()
+                if (keyword.isBlank()) continue
+                chip.setOnClickListener { openTagSearch(keyword) }
+                chip.isFocusable = true
+            }
+        }
+
+        private fun openExternalLink(url: String, kind: String) {
+            val activity = fragment?.activity ?: return
+            val intent = if (kind == "email") {
+                Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:$url"))
+            } else {
+                Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE)
+            }
+            try {
+                activity.startActivity(intent)
+                Log.i("YouTubeMeta", "[DETAIL_LINK] action=$kind opened=true")
+            } catch (_: android.content.ActivityNotFoundException) {
+                Toast.makeText(activity, "No app to open link", Toast.LENGTH_SHORT).show()
+                Log.w("YouTubeMeta", "[DETAIL_LINK] action=$kind opened=false")
+            } catch (_: SecurityException) {
+                Log.w("YouTubeMeta", "[DETAIL_LINK] action=$kind blocked=true")
+            }
+        }
+
+        private fun decorateDescription(view: TextView) {
+            if (editingDescription) return
+            val original = view.text ?: return
+            if (original is Spanned &&
+                original.getSpans(0, original.length, DescriptionLink::class.java).isNotEmpty()) return
+            val text = original.toString()
+            val styled = SpannableStringBuilder(original)
+            var links = 0
+            fun add(start: Int, end: Int, color: Int, action: () -> Unit) {
+                if (start >= end || styled.getSpans(start, end, ClickableSpan::class.java).isNotEmpty()) return
+                styled.setSpan(DescriptionLink(color, action), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                links++
+            }
+            WEB_LINK.findAll(text).forEach { found ->
+                val start = found.range.first
+                var end = found.range.last + 1
+                while (end > start && text[end - 1] in ".,;:!?)]") end--
+                if (end > start) {
+                    val raw = text.substring(start, end)
+                    val target = if (raw.startsWith("www.", true)) "https://$raw" else raw
+                    add(start, end, LINK_RED) { openExternalLink(target, "url") }
+                }
+            }
+            val emails = Patterns.EMAIL_ADDRESS.matcher(text)
+            while (emails.find()) {
+                val mail = emails.group()
+                add(emails.start(), emails.end(), LINK_RED) { openExternalLink(mail, "email") }
+            }
+            val videoId = YoutubeUtils.extractYoutubeId(pageUrl)
+            if (videoId != null) {
+                TIME_LINK.findAll(text).forEach { found ->
+                    val parts = found.value.split(':').mapNotNull(String::toIntOrNull)
+                    if (parts.size !in 2..3 || parts.last() > 59 ||
+                        (parts.size == 3 && parts[1] > 59)) return@forEach
+                    val seconds = if (parts.size == 2) parts[0] * 60 + parts[1]
+                        else parts[0] * 3600 + parts[1] * 60 + parts[2]
+                    add(found.range.first, found.range.last + 1, LINK_BLUE) {
+                        openExternalLink("https://www.youtube.com/watch?v=$videoId&t=${seconds}s", "time")
+                    }
+                }
+            }
+            if (links == 0) return
+            editingDescription = true
+            try {
+                view.setText(styled, TextView.BufferType.SPANNABLE)
+                view.movementMethod = LinkMovementMethod.getInstance()
+            } finally {
+                editingDescription = false
+            }
+        }
+
+        fun bindExpandedDescription(window: View) {
+            val text = description?.text?.toString().orEmpty()
+            if (text.isBlank() || text == "\u200b") return
+            val message = window.findViewById<TextView>(android.R.id.message) ?: return
+            if (message !== description && message.text?.toString() == text) decorateDescription(message)
+        }
+
+        private fun bindDescription() {
+            val view = description ?: return
+            if (descriptionWatcher == null) {
+                nativeMovement = view.movementMethod
+                descriptionWatcher = object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                    override fun afterTextChanged(s: Editable?) {
+                        if (!editingDescription) decorateDescription(view)
+                    }
+                }.also(view::addTextChangedListener)
+            }
+            decorateDescription(view)
+        }
+
+        private fun observeDescriptionAndTags() {
+            val owner = fragment ?: return
+            if (description == null && tagGroup == null) return
+            val model = ViewModelProvider(owner)[ResultViewModel2::class.java]
+            model.page.observe(owner.viewLifecycleOwner) { page ->
+                if (page is Resource.Success) root.post {
+                    if (screens[owner] === this@Screen && root.isAttachedToWindow) {
+                        bindTagClicks()
+                        bindDescription()
+                    }
+                }
+            }
+        }
 
         /**
          * In CloudStream's postEpisodeRange(), selectedRangeIndex is posted
@@ -567,6 +725,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
         init {
             observeNativeRanges()
+            observeDescriptionAndTags()
             if (popup) root.findViewById<RecyclerView>(R.id.home_expanded_recycler)
                 ?.let { watch(it, Role.DIALOG_GRID) }
             root.findViewById<RecyclerView>(R.id.home_master_recycler)?.let { watch(it, Role.HOME_PARENT) }
@@ -579,6 +738,18 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
 
         fun close() {
+            descriptionWatcher?.let { listener -> description?.removeTextChangedListener(listener) }
+            descriptionWatcher = null
+            description?.movementMethod = nativeMovement
+            tagGroup?.let { group ->
+                for (index in 0 until group.childCount) {
+                    group.getChildAt(index)?.apply {
+                        setOnClickListener(null)
+                        isClickable = false
+                        isFocusable = false
+                    }
+                }
+            }
             watchers.values.toList().asReversed().forEach { it.close() }
             watchers.clear()
         }
@@ -1151,7 +1322,21 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
     private enum class Role { HOME_PARENT, HOME_CARD, DIALOG_GRID, DETAIL_RECOMMENDATIONS, DETAIL_EPISODE, DETAIL_CAST }
 
+    private class DescriptionLink(
+        private val color: Int, private val action: () -> Unit
+    ) : ClickableSpan() {
+        override fun onClick(widget: View) = action()
+        override fun updateDrawState(ds: TextPaint) {
+            ds.color = color
+            ds.isUnderlineText = true
+        }
+    }
+
     private companion object {
+        val WEB_LINK = Regex("""(?i)(?:https?://|www\.)[^\s<>"']+""")
+        val TIME_LINK = Regex("""(?<![\w/:])(?:\d{1,2}:)?\d{1,2}:\d{2}(?!\d)""")
+        val LINK_RED = Color.rgb(255, 80, 80)
+        val LINK_BLUE = Color.rgb(72, 157, 255)
         const val PLAYER_SCREEN = "com.lagradost.cloudstream3.ui.player.GeneratorPlayer"
         val DETAIL_SCREENS = setOf(
             "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",

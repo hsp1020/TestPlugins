@@ -2238,6 +2238,18 @@ class YoutubeProvider(
         return response?.get("videoDetails") as? Map<*, *>
     }
 
+    /** Only split hashtags grouped in one keyword; preserve regular multi-word keywords. */
+    private fun videoKeywords(details: Map<*, *>?): List<String> =
+        ((details?.get("keywords") as? List<*>) ?: emptyList<Any>()).flatMap { value ->
+            val keyword = (value as? String)?.trim().orEmpty()
+            if (keyword.isBlank()) emptyList() else {
+                val parts = keyword.split(Regex("\\s+"))
+                if (parts.all { it.startsWith("#") && it.length > 1 }) {
+                    parts.map { it.removePrefix("#") }
+                } else listOf(keyword)
+            }
+        }.filter { it.isNotBlank() }.distinct().take(10)
+
     /** CloudStream renders plot as HTML; escape plain text before converting newlines. */
     private fun descriptionAsHtml(text: String): String =
         text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -3302,8 +3314,7 @@ class YoutubeProvider(
             }
             val html = response?.text ?: ""
             val videoDetails = extractVideoDetails(html)
-            val htmlTags = (videoDetails?.get("keywords") as? List<*>)
-                ?.mapNotNull { it as? String }?.filter { it.isNotBlank() }?.take(10).orEmpty()
+            val htmlTags = videoKeywords(videoDetails)
             val htmlUploader = (videoDetails?.get("author") as? String).orEmpty()
             val data = extractYtInitialData(html)
 
@@ -3409,7 +3420,8 @@ class YoutubeProvider(
             }
 
             val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
-            val finalPlot = "\u200b"
+            val shortsDescription = (videoDetails?.get("shortDescription") as? String).orEmpty()
+            val finalPlot = descriptionAsHtml(shortsDescription).ifBlank { "\u200b" }
 
             rememberChannel(url, channelName, channelId)
             val finalRecs = mutableListOf<SearchResponse>()
@@ -3432,7 +3444,7 @@ class YoutubeProvider(
             finalRecs.addAll(episodeResponses)
 
             Log.i("YouTubeMeta", "[HTML_META] type=shorts id=$videoId html=${response != null} " +
-                "player=${videoDetails != null} plot=hidden tags=${htmlTags.size} " +
+                "player=${videoDetails != null} plotChars=${shortsDescription.length} tags=${htmlTags.size} " +
                 "uploader=${if (channelName.isNotBlank()) "initialData" else if (htmlUploader.isNotBlank()) "player" else "none"} direct=$direct")
             return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
@@ -3824,8 +3836,7 @@ class YoutubeProvider(
         }
         val html = response?.text ?: ""
         val videoDetails = extractVideoDetails(html)
-        val htmlTags = (videoDetails?.get("keywords") as? List<*>)
-            ?.mapNotNull { it as? String }?.filter { it.isNotBlank() }?.take(10).orEmpty()
+        val htmlTags = videoKeywords(videoDetails)
         val htmlUploader = (videoDetails?.get("author") as? String).orEmpty()
         val data = extractYtInitialData(html)
 
