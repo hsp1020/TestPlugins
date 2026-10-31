@@ -27,6 +27,7 @@ import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.ui.AutofitRecyclerView
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
+import com.lagradost.cloudstream3.utils.UIHelper.getSpanCount
 import java.util.IdentityHashMap
 import kotlin.math.roundToInt
 
@@ -44,14 +45,14 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
     private val focusListener = ViewTreeObserver.OnWindowFocusChangeListener {
         main.post { discoverDialogs() }
     }
-    private enum class Role { HOME_PARENT, SEARCH_PARENT, GRID, SEARCH_ROW, RESUME }
+    private enum class Role { HOME_PARENT, SEARCH_PARENT, GRID, EXPANDED, SEARCH_ROW, RESUME }
 
-    private inner class Screen(val root: View, popup: Boolean = false) {
+    private inner class Screen(val root: View, popup: Boolean = false, private val fromSearch: Boolean = false) {
         private val watchers = mutableMapOf<RecyclerView, Watcher>()
 
         init {
             if (popup) root.findViewById<RecyclerView>(R.id.home_expanded_recycler)
-                ?.let { watch(it, Role.GRID) }
+                ?.let { watch(it, Role.EXPANDED) }
             root.findViewById<RecyclerView>(R.id.home_master_recycler)
                 ?.let { watch(it, Role.HOME_PARENT) }
             root.findViewById<RecyclerView>(R.id.search_master_recycler)
@@ -129,6 +130,24 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
 
             private var observed: RecyclerView.Adapter<*>? = null
             private var scheduled = false
+            private var spanUpdatePosted = false
+            private var spanChanged = false
+            private fun matchHomeLandscapeColumns() {
+                if (role != Role.EXPANDED || !fromSearch || spanUpdatePosted) return
+                val grid = recycler as? AutofitRecyclerView ?: return
+                if (grid.spanCount == grid.context.getSpanCount(true)) return
+                spanUpdatePosted = true
+                grid.post {
+                    spanUpdatePosted = false
+                    if (watchers[grid] !== this@Watcher || !grid.isAttachedToWindow) return@post
+                    val target = grid.context.getSpanCount(true)
+                    if (grid.spanCount != target) {
+                        grid.spanCount = target
+                        spanChanged = true
+                        scan()
+                    }
+                }
+            }
             private val adapterChanges = object : RecyclerView.AdapterDataObserver() {
                 override fun onChanged() = schedule()
                 override fun onItemRangeChanged(start: Int, count: Int) = schedule()
@@ -176,6 +195,13 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                 pending.clear()
                 clearPreDraw()
                 cards.keys.toList().forEach(::restore)
+                if (spanChanged && recycler.isAttachedToWindow) {
+                    (recycler as? AutofitRecyclerView)?.let {
+                        it.spanCount = it.context.getSpanCount(false)
+                    }
+                }
+                spanChanged = false
+                spanUpdatePosted = false
                 scheduled = false
             }
 
@@ -265,6 +291,7 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                     card.layout.restoreSize()
                     return
                 }
+                matchHomeLandscapeColumns()
 
                 val cardWidth = when (role) {
                     Role.SEARCH_ROW -> HomeChildItemAdapter.maxPosterSize.takeIf { it > 0 }
@@ -420,8 +447,16 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
         dialogs.keys.toList().filter { it !in active }.forEach {
             dialogs.remove(it)?.close()
         }
+        val fromSearch = screens.keys.any { fragment ->
+            fragment.isResumed && fragment.javaClass.name in setOf(
+                "com.lagradost.cloudstream3.ui.search.SearchFragment",
+                "com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment"
+            )
+        }
         active.forEach { window ->
-            if (window !in dialogs) dialogs[window] = Screen(window, popup = true)
+            if (window !in dialogs) dialogs[window] = Screen(
+                window, popup = true, fromSearch = fromSearch
+            )
         }
     }
 
