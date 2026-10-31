@@ -604,7 +604,7 @@ internal class ElevatePlayerPanel(
                     Tab.EPISODES -> ctx.getString(R.string.episodes)
                 }
                 gravity = Gravity.CENTER
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
                 setTextColor(textColor)
                 minimumHeight = dp(48)
                 applyElevateNativeFont(bold = true)
