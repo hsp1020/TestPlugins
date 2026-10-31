@@ -756,7 +756,7 @@ internal class ElevatePlayerPanel(
                 addView((LayoutInflater.from(ctx).inflate(
                     R.layout.sort_bottom_single_choice, this, false
                 ) as TextView).apply {
-                    text = value ?: ctx.getString(R.string.all)
+                    text = value?.substringAfter(" · ") ?: ctx.getString(R.string.all)
                     styleRow(this, value == filter)
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
@@ -934,6 +934,7 @@ internal class ElevatePlayerPanel(
     private fun renderSubtitleOptions() {
         val current = fragment.player.getCurrentPreferredSubtitle()?.url
         val group = subtitleGroups.getOrNull(selectedGroup - 1)?.second.orEmpty()
+        val detailCache = SubtitleLanguageNormalizer.stremioDetailCache()
         android.util.Log.d("ElevatePanelTouch",
             "optionsStart selectedGroup=$selectedGroup groupCount=${group.size} " +
                 "currentHash=${current?.hashCode()} listSize=${list.width}x${list.height} " +
@@ -945,9 +946,10 @@ internal class ElevatePlayerPanel(
                 "$number ($embedded" +
                     (if (sub.nameSuffix.isNotBlank()) " · ${sub.nameSuffix}" else "") + ")"
             } else {
-                val detail = sub.nameSuffix.takeIf {
-                    it.isNotBlank() && it.toIntOrNull() == null
-                }
+                val detail = detailCache?.get(sub.url)?.takeIf { it.isNotBlank() }
+                    ?: sub.nameSuffix.takeIf {
+                        it.isNotBlank() && it.toIntOrNull() == null
+                    }
                 "$number" + (detail?.let { "($it)" } ?: "")
             }
             val selected = sub.url == current

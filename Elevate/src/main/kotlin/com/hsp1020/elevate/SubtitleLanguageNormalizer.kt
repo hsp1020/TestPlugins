@@ -101,17 +101,20 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
 
     // Share original extractor descriptions through the existing URL metadata cache,
     // without modifying nameSuffix, which is part of the native track identity.
-    private fun stremioDetailCache(): MutableMap<String, String>? = runCatching {
-        val method = APIHolder::class.java.methods.firstOrNull { it.name == "getAllProviders" }
-        val provider = (method?.invoke(APIHolder) as? Iterable<*>)?.firstOrNull {
-            it?.javaClass?.name == "com.hsp1020.StremioC"
-        } ?: return@runCatching null
-        val field = provider.javaClass.getDeclaredField("subtitleDetailByUrl")
-            .apply { isAccessible = true }
-        @Suppress("UNCHECKED_CAST")
-        val cache = field.get(null) as? MutableMap<String, String>
-        cache
-    }.getOrNull()
+    companion object {
+        /** Shared with the integrated player panel; details are indexed by subtitle URL. */
+        internal fun stremioDetailCache(): MutableMap<String, String>? = runCatching {
+            val method = APIHolder::class.java.methods.firstOrNull { it.name == "getAllProviders" }
+            val provider = (method?.invoke(APIHolder) as? Iterable<*>)?.firstOrNull {
+                it?.javaClass?.name == "com.hsp1020.StremioC"
+            } ?: return@runCatching null
+            val field = provider.javaClass.getDeclaredField("subtitleDetailByUrl")
+                .apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            val cache = field.get(null) as? MutableMap<String, String>
+            cache
+        }.getOrNull()
+    }
 
     private fun stremioSubtitleDetail(url: String): String? = stremioDetailCache()?.get(url)
 
