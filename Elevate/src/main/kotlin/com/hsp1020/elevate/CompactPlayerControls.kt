@@ -7,7 +7,6 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.View
-import android.view.ViewTreeObserver
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import androidx.fragment.app.Fragment
@@ -123,14 +122,15 @@ internal class CompactPlayerControls(private val application: Application) :
         private val originalTop = strip.paddingTop
         private val originalBottom = strip.paddingBottom
         private val saved = LinkedHashMap<MaterialButton, Size>()
-        private val tree = strip.viewTreeObserver
         private var adjustedPadding = false
-        // Layout events also catch the optional PiP button when it is added later.
-        private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener { apply() }
+        // PiP additions change this strip's bounds; unrelated player layouts are ignored.
+        private val layoutListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            apply()
+        }
         private fun dp(n: Int) = (n * strip.resources.displayMetrics.density + 0.5f).toInt()
 
         fun attach() {
-            if (tree.isAlive) tree.addOnGlobalLayoutListener(layoutListener)
+            strip.addOnLayoutChangeListener(layoutListener)
             apply()
         }
 
@@ -199,9 +199,8 @@ internal class CompactPlayerControls(private val application: Application) :
 
         private fun restore() {
             if (saved.isEmpty() && !adjustedPadding) return
-            saved.forEach { (button, size) ->
-                if (button.parent != null) resize(button, size)
-            }
+            // Restore detached panel controls too, before they return to the native row.
+            saved.forEach { (button, size) -> resize(button, size) }
             saved.clear()
             if (adjustedPadding) {
                 strip.setPadding(strip.paddingLeft, originalTop, strip.paddingRight, originalBottom)
@@ -210,7 +209,7 @@ internal class CompactPlayerControls(private val application: Application) :
         }
 
         fun detach() {
-            if (tree.isAlive) tree.removeOnGlobalLayoutListener(layoutListener)
+            strip.removeOnLayoutChangeListener(layoutListener)
             restore()
         }
     }

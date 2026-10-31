@@ -720,6 +720,12 @@ internal class NativeEpisodeOverlayHook(
         }.getOrNull()
     }
 
+    private data class NativePanelButton(
+        val view: View,
+        val parent: ViewGroup,
+        val next: View?
+    )
+
     private fun Context.dp(size: Int) = (size * resources.displayMetrics.density).toInt()
 
     private fun Context.themeColor(attribute: Int): Int {
@@ -789,8 +795,6 @@ internal class NativeEpisodeOverlayHook(
         }
 
         private val overlayLayout = ViewTreeObserver.OnGlobalLayoutListener {
-            // CloudStream may reveal these buttons again on track/control changes.
-            hideNativePanelButtons()
             syncPanelArrow()
             val showing = overlay?.isShown == true
             val currentAdapter = list?.adapter
@@ -811,12 +815,31 @@ internal class NativeEpisodeOverlayHook(
         private val nativePanelButtons = if (playerPanel != null) listOf(
             R.id.player_subtitle_offset_btt, R.id.player_sources_btt, R.id.player_tracks_btt
         ).mapNotNull { id ->
-            root.findViewById<View>(id)?.let { view -> view to view.visibility }
+            root.findViewById<View>(id)?.let { view ->
+                (view.parent as? ViewGroup)?.let { parent ->
+                    NativePanelButton(
+                        view, parent, parent.getChildAt(parent.indexOfChild(view) + 1)
+                    )
+                }
+            }
         } else emptyList()
 
-        private fun hideNativePanelButtons() {
-            nativePanelButtons.forEach { (button, _) ->
-                if (button.visibility != View.GONE) button.visibility = View.GONE
+        // Keep the native bound View instances alive, but outside the measured button row.
+        // Native visibility updates cannot shift the compact controls during playback.
+        private fun removeNativePanelButtons() {
+            nativePanelButtons.forEach { (view, parent) ->
+                if (view.parent === parent) parent.removeView(view)
+            }
+        }
+
+        private fun restoreNativePanelButtons() {
+            // Reinsert before the original next sibling; PiP may have been inserted meanwhile.
+            nativePanelButtons.asReversed().forEach { (view, parent, next) ->
+                if (view.parent == null) {
+                    val index = next?.takeIf { it.parent === parent }
+                        ?.let(parent::indexOfChild) ?: parent.childCount
+                    parent.addView(view, index)
+                }
             }
         }
 
@@ -966,7 +989,7 @@ internal class NativeEpisodeOverlayHook(
             installRemoteGuard()
             if (tree.isAlive) tree.addOnGlobalLayoutListener(overlayLayout)
             scheduleOverlayCheck()
-            hideNativePanelButtons()
+            removeNativePanelButtons()
             syncPanelArrow()
 
             // Only the panel surface is translucent; text and images stay opaque.
@@ -1018,9 +1041,7 @@ internal class NativeEpisodeOverlayHook(
             originalCardColors.clear()
             removeSelector()
             playerPanel?.detach()
-            nativePanelButtons.forEach { (button, visibility) ->
-                if (button.visibility != visibility) button.visibility = visibility
-            }
+            restoreNativePanelButtons()
             if (standalone) {
                 episodeButtonRoot?.visibility = View.GONE
                 episodeButton?.visibility = View.GONE
