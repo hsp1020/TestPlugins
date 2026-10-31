@@ -177,9 +177,10 @@ internal class CompactPlayerControls(private val application: Application) :
                 return
             }
 
-            val edge = dp(4)
-            val side = dp(48)
-            val compact = Size(side, side, side, side, side, side, edge, edge)
+            val edge = dp(6)
+            val width = dp(54)
+            val height = dp(48)
+            val compact = Size(width, height, width, width, height, height, edge, edge)
             for (button in buttons()) {
                 if (button !in saved) {
                     // PiP duplicates the resize button, which may already be compact.
