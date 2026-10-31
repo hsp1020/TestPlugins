@@ -767,7 +767,8 @@ internal class NativeEpisodeOverlayHook(
         private var filteredAdapter: EpisodeAdapter? = null
         private val playerPanel: ElevatePlayerPanel? =
             if (playerPanelEnabled && overlay != null) ElevatePlayerPanel(
-                fragment, root, overlay, title, list, { selector }, { openWithoutPause() }
+                fragment, root, overlay, title, list, { selector }, { openWithoutPause() },
+                { subtitle -> embeddedSubtitles?.onPanelSubtitleSelected(fragment, subtitle) }
             ) else null
         private var host: PlayerView? = null
         private var callbacks: PlayerView.Callbacks? = null

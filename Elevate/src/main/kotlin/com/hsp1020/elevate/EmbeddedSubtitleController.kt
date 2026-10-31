@@ -58,6 +58,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
     private var lastHandledSubtitles: Set<SubtitleData>? = null
     private var lastHandledInstance: Int? = null
     private var manualOverride = false
+    private var panelManualOverride = false
     private var manualSubtitleUrl: String? = null
     private var manualSubtitleOrigin: SubtitleOrigin? = null
     private var selectionDialog: Dialog? = null
@@ -138,7 +139,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         if (key == SUBTITLE_AUTO_SELECT_KEY) {
             preferredLanguage = readPreferredLanguage()
             val dialog = runCatching { dialogField?.get(fragment) as? Dialog }.getOrNull()
-            if (dialog?.isShowing == true) {
+            if (panelManualOverride || dialog?.isShowing == true) {
                 manualOverride = true
             } else {
                 manualOverride = false
@@ -159,6 +160,15 @@ internal class EmbeddedSubtitleController(private val application: Application) 
 
     private fun selectedByHost(f: GeneratorPlayer): SubtitleData? =
         runCatching { selectedField?.get(f) as? SubtitleData }.getOrNull()
+
+    /** The integrated panel is a native user selection even without the old dialog. */
+    fun onPanelSubtitleSelected(candidate: GeneratorPlayer, subtitle: SubtitleData?) {
+        if (candidate !== fragment) return
+        panelManualOverride = true
+        manualOverride = true
+        manualSubtitleUrl = subtitle?.url
+        manualSubtitleOrigin = subtitle?.origin
+    }
 
     private fun rememberDialogSelection(f: GeneratorPlayer) {
         val selected = selectedByHost(f)
@@ -406,6 +416,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         instance = nextInstance
         if (nextUrl != null) linkUrl = nextUrl
         if (changedSource) {
+            panelManualOverride = false
             manualOverride = false
             manualSubtitleUrl = null
             manualSubtitleOrigin = null
@@ -592,6 +603,7 @@ internal class EmbeddedSubtitleController(private val application: Application) 
         lastHandledSubtitles = null
         lastHandledInstance = null
         manualOverride = false
+        panelManualOverride = false
         manualSubtitleUrl = null
         manualSubtitleOrigin = null
         selectionDialog = null

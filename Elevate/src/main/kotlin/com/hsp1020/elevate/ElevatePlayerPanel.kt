@@ -52,7 +52,8 @@ internal class ElevatePlayerPanel(
     private val episodeTitle: TextView?,
     private val episodeList: RecyclerView?,
     private val seasonSelector: () -> View?,
-    private val openNative: () -> Boolean
+    private val openNative: () -> Boolean,
+    private val onManualSubtitle: (SubtitleData?) -> Unit
 ) {
     enum class Tab { SOURCES, AUDIO, SUBTITLES, EPISODES }
     private data class Row(val label: String, val action: () -> Unit,
@@ -78,6 +79,10 @@ internal class ElevatePlayerPanel(
         addView(filters)
     }
     private val rows = ArrayList<Row>()
+    private var lastListTouchX = -1f
+    private var lastListTouchY = -1f
+    private var pendingSubtitleUrl: String? = null
+    private var pendingSubtitleInstance = -1
     private fun logRefreshListTouch(stage: String, ev: MotionEvent, intercepted: Boolean? = null) {
         if (tab != Tab.SUBTITLES || inSync || ev.actionMasked !in
             arrayOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL)) return
@@ -97,6 +102,10 @@ internal class ElevatePlayerPanel(
     }
     private val list = object : ListView(ctx) {
         override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                lastListTouchX = event.x
+                lastListTouchY = event.y
+            }
             logRefreshListTouch("dispatch", event)
             return super.dispatchTouchEvent(event)
         }
@@ -148,7 +157,7 @@ internal class ElevatePlayerPanel(
                     contentDescription = "Refresh subtitle"
                     background = null
                     scaleType = ImageView.ScaleType.CENTER_INSIDE
-                    isFocusable = true
+                    isFocusable = false
                 }, LinearLayout.LayoutParams(dp(48), dp(48)))
             }
         row.layoutParams = AbsListView.LayoutParams(-1, if (compact) dp(48) else -2)
@@ -162,45 +171,44 @@ internal class ElevatePlayerPanel(
             styleRow(this, checked)
             maxLines = if (compact) 2 else Int.MAX_VALUE
             ellipsize = if (compact) TextUtils.TruncateAt.END else null
-            setOnClickListener {
-                (parent as? ListView)?.performItemClick(row, position, position.toLong())
-            }
+            // ListView handles selection; detached recycled child views cannot post clicks.
+            setOnClickListener(null)
+            isClickable = false
+            isFocusable = false
         }
         (row.getChildAt(2) as ImageButton).apply {
             visibility = if (refresh != null) View.VISIBLE else View.GONE
             tag = refreshUrl
             isEnabled = refresh != null
-            isClickable = refresh != null
-            isLongClickable = longRefresh != null
+            // Let the attached ListView own click and long-click dispatch.
+            // A detached recycled ImageButton can receive touch but cannot run posted clicks.
+            isFocusable = false
+            isClickable = false
+            isLongClickable = false
             if (tab == Tab.SUBTITLES && position in 0..1)
                 android.util.Log.d("ElevatePanelTouch",
                     "bind row=$position hash=${refreshUrl?.hashCode()} refresh=${refresh != null} " +
                         "enabled=$isEnabled clickable=$isClickable attached=$isAttachedToWindow " +
                         "width=$width height=$height")
-            setOnTouchListener(if (refresh != null) View.OnTouchListener { view, event ->
-                if (event.actionMasked == MotionEvent.ACTION_DOWN ||
-                    event.actionMasked == MotionEvent.ACTION_UP ||
-                    event.actionMasked == MotionEvent.ACTION_CANCEL)
-                    android.util.Log.d("ElevatePanelTouch",
-                        "button action=${MotionEvent.actionToString(event.actionMasked)} row=$position " +
-                            "hash=${refreshUrl?.hashCode()} x=${event.x.toInt()} y=${event.y.toInt()} " +
-                            "size=${view.width}x${view.height} pressed=${view.isPressed} " +
-                            "clickable=${view.isClickable} enabled=${view.isEnabled} attached=${view.isAttachedToWindow}")
-                false // Diagnostics only: preserve the existing click/long-click handling.
-            } else null)
-            setOnClickListener(if (refresh != null) View.OnClickListener {
-                android.util.Log.d("ElevatePanelRefresh",
-                    "click row=$position urlHash=${refreshUrl?.hashCode()}")
-                refresh(this)
-            } else null)
-            setOnLongClickListener(if (longRefresh != null) View.OnLongClickListener {
-                android.util.Log.d("ElevatePanelRefresh",
-                    "longClick row=$position urlHash=${refreshUrl?.hashCode()}")
-                longRefresh(this)
-                true
-            } else null)
+            setOnTouchListener(null)
+            setOnClickListener(null)
+            setOnLongClickListener(null)
         }
         return row
+    }
+
+    private fun refreshButtonAt(position: Int, rowView: View?): ImageButton? {
+        if (tab != Tab.SUBTITLES || inSync) return null
+        val row = rows.getOrNull(position) ?: return null
+        val button = (rowView as? LinearLayout)?.getChildAt(2) as? ImageButton ?: return null
+        if (row.refresh == null || button.visibility != View.VISIBLE ||
+            button.tag != row.refreshUrl) return null
+        val left = rowView.left + button.left
+        val top = rowView.top + button.top
+        return button.takeIf {
+            lastListTouchX >= left && lastListTouchX < left + it.width &&
+                lastListTouchY >= top && lastListTouchY < top + it.height
+        }
     }
 
     private val adapter = object : ArrayAdapter<Row>(ctx, android.R.layout.simple_list_item_1, rows) {
@@ -489,8 +497,20 @@ internal class ElevatePlayerPanel(
     init {
         configureNativeSync()
         list.adapter = adapter
-        list.setOnItemClickListener { _, _, position, _ ->
-            rows.getOrNull(position)?.takeUnless { it.header }?.action?.invoke()
+        list.setOnItemClickListener { _, view, position, _ ->
+            val row = rows.getOrNull(position)?.takeUnless { it.header } ?: return@setOnItemClickListener
+            val button = refreshButtonAt(position, view)
+            if (button != null) {
+                if (button.isEnabled) row.refresh?.invoke(button)
+            } else row.action()
+        }
+        list.setOnItemLongClickListener { _, view, position, _ ->
+            val row = rows.getOrNull(position) ?: return@setOnItemLongClickListener false
+            val button = refreshButtonAt(position, view)
+            if (button != null) {
+                if (button.isEnabled) row.autoRefresh?.invoke(button)
+                true
+            } else false
         }
         for (entry in Tab.entries) {
             val button = TextView(ctx).apply {
@@ -788,6 +808,9 @@ internal class ElevatePlayerPanel(
     }
 
     private fun setSubtitle(sub: SubtitleData?) {
+        onManualSubtitle(sub)
+        pendingSubtitleUrl = sub?.url
+        pendingSubtitleInstance = vm.state.instance
         val seq = ++subtitleSelectionLogSeq
         val before = fragment.player.getCurrentPreferredSubtitle()
         lastSubtitleRequestHash = sub?.url?.hashCode()
@@ -816,8 +839,10 @@ internal class ElevatePlayerPanel(
                     ).apply { isAccessible = true }.invoke(fragment, link, true)
                 }
             }
-        }.onFailure { android.util.Log.w("ElevatePanelSelect", "setFailed seq=$seq", it) }
-            .onSuccess { renderSubtitles() }
+        }.onFailure {
+            pendingSubtitleUrl = null
+            android.util.Log.w("ElevatePanelSelect", "setFailed seq=$seq", it)
+        }
         root.post {
             val actual = fragment.player.getCurrentPreferredSubtitle()
             android.util.Log.d("ElevatePanelSelect",
@@ -842,9 +867,13 @@ internal class ElevatePlayerPanel(
         subtitleGroups = sortSubs(vm.state.subtitles)
             .groupBy { it.originalName }
             .map { (name, subtitles) -> name to orderedOptions(subtitles) }
-        selectedGroup = subtitleGroups.indexOfFirst { (name, _) ->
-            name == current?.originalName
-        }.let { if (it < 0) 0 else it + 1 }
+        if (pendingSubtitleInstance != vm.state.instance ||
+            pendingSubtitleUrl == current?.url) pendingSubtitleUrl = null
+        if (pendingSubtitleUrl == null) {
+            selectedGroup = subtitleGroups.indexOfFirst { (name, _) ->
+                name == current?.originalName
+            }.let { if (it < 0) 0 else it + 1 }
+        }
         android.util.Log.d("ElevatePanelData",
             "subtitlesRender instance=${vm.state.instance} modelCount=${vm.state.subtitles.size} " +
                 "groupCount=${subtitleGroups.size} selectedGroup=$selectedGroup " +
