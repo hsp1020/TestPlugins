@@ -2250,6 +2250,22 @@ class YoutubeProvider(
             }
         }.filter { it.isNotBlank() }.distinct().take(10)
 
+    /** Move visible description hashtags to native keyword chips without altering other text. */
+    private fun extractDescriptionHashtags(text: String): Pair<String, List<String>> {
+        val tags = mutableListOf<String>()
+        val regex = Regex("""(?<!\S)#([\p{L}\p{N}_]+)""")
+        val clean = text.lineSequence().mapNotNull { line ->
+            var matched = false
+            val stripped = regex.replace(line) { match ->
+                tags.add(match.groupValues[1])
+                matched = true
+                ""
+            }.trimEnd()
+            if (matched && stripped.isBlank()) null else stripped
+        }.joinToString("\n").trimEnd()
+        return clean to tags.distinctBy { it.lowercase() }
+    }
+
     /** CloudStream renders plot as HTML; escape plain text before converting newlines. */
     private fun descriptionAsHtml(text: String): String =
         text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -3315,6 +3331,9 @@ class YoutubeProvider(
             val html = response?.text ?: ""
             val videoDetails = extractVideoDetails(html)
             val htmlTags = videoKeywords(videoDetails)
+            val shortsDescription = (videoDetails?.get("shortDescription") as? String).orEmpty()
+            val (cleanShortsDescription, descriptionTags) = extractDescriptionHashtags(shortsDescription)
+            val displayTags = (descriptionTags + htmlTags).distinctBy { it.lowercase() }.take(10)
             val htmlUploader = (videoDetails?.get("author") as? String).orEmpty()
             val data = extractYtInitialData(html)
 
@@ -3420,8 +3439,7 @@ class YoutubeProvider(
             }
 
             val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
-            val shortsDescription = (videoDetails?.get("shortDescription") as? String).orEmpty()
-            val finalPlot = descriptionAsHtml(shortsDescription).ifBlank { "\u200b" }
+            val finalPlot = descriptionAsHtml(cleanShortsDescription).ifBlank { "\u200b" }
 
             rememberChannel(url, channelName, channelId)
             val finalRecs = mutableListOf<SearchResponse>()
@@ -3444,14 +3462,14 @@ class YoutubeProvider(
             finalRecs.addAll(episodeResponses)
 
             Log.i("YouTubeMeta", "[HTML_META] type=shorts id=$videoId html=${response != null} " +
-                "player=${videoDetails != null} plotChars=${shortsDescription.length} tags=${htmlTags.size} " +
+                "player=${videoDetails != null} plotChars=${cleanShortsDescription.length} tags=${displayTags.size} movedHashtags=${descriptionTags.size} " +
                 "uploader=${if (channelName.isNotBlank()) "initialData" else if (htmlUploader.isNotBlank()) "player" else "none"} direct=$direct")
             return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
                 this.plot = finalPlot
                 this.recommendations = finalRecs
 
-                if (htmlTags.isNotEmpty()) this.tags = htmlTags
+                if (displayTags.isNotEmpty()) this.tags = displayTags
 
                 val actorList = mutableListOf<ActorData>()
                 if (channelName.isNotBlank()) {
@@ -3912,10 +3930,12 @@ class YoutubeProvider(
             if (plot.isNotBlank()) plotSource = "og"
         }
         if (channelName.isBlank()) channelName = htmlUploader
+        val (cleanPlot, descriptionTags) = extractDescriptionHashtags(plot)
+        val displayTags = (descriptionTags + htmlTags).distinctBy { it.lowercase() }.take(10)
         Log.i("YouTubeMeta", "[HTML_META] type=video id=$videoId html=${response != null} " +
             "player=${videoDetails != null} source=$plotSource chars=${plot.length} " +
             "lines=${plot.count { it == '\n' } + if (plot.isBlank()) 0 else 1} " +
-            "tags=${htmlTags.size} uploader=${if (channelName.isNotBlank()) "html" else "none"} " +
+            "tags=${displayTags.size} movedHashtags=${descriptionTags.size} uploader=${if (channelName.isNotBlank()) "html" else "none"} " +
             "avatar=${channelAvatar.isNotBlank()} direct=$direct")
 
         rememberChannel(url, channelName, channelId)
@@ -4006,11 +4026,11 @@ class YoutubeProvider(
         
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = poster
-            this.plot = descriptionAsHtml(plot).ifBlank { "\u200b" }
-            this.recommendations = filteredRecs 
-            
-            if (htmlTags.isNotEmpty()) {
-                this.tags = htmlTags
+            this.plot = descriptionAsHtml(cleanPlot).ifBlank { "\u200b" }
+            this.recommendations = filteredRecs
+
+            if (displayTags.isNotEmpty()) {
+                this.tags = displayTags
             }
 
             val actorList = mutableListOf<ActorData>()

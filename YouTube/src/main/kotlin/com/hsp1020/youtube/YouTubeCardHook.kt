@@ -630,6 +630,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         private var descriptionWatcher: TextWatcher? = null
         private var nativeMovement: android.text.method.MovementMethod? = null
         private var editingDescription = false
+        private val linkPadding = IdentityHashMap<TextView, Int>()
 
         private fun openTimestamp(seconds: Int) {
             val active = fragment?.takeIf { it.isAdded } ?: return
@@ -743,6 +744,14 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 }
             }
             if (links == 0) return
+            // A last-line native underline can be clipped by TextView's bottom edge.
+            if (!linkPadding.containsKey(view)) {
+                linkPadding[view] = view.paddingBottom
+                view.setPadding(
+                    view.paddingLeft, view.paddingTop, view.paddingRight,
+                    view.paddingBottom + dp(2)
+                )
+            }
             editingDescription = true
             try {
                 view.setText(styled, TextView.BufferType.SPANNABLE)
@@ -848,6 +857,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
 
         fun close() {
+            linkPadding.forEach { (view, bottom) ->
+                if (view.paddingBottom != bottom) {
+                    view.setPadding(view.paddingLeft, view.paddingTop, view.paddingRight, bottom)
+                }
+            }
+            linkPadding.clear()
             descriptionWatcher?.let { listener -> description?.removeTextChangedListener(listener) }
             descriptionWatcher = null
             description?.movementMethod = nativeMovement
@@ -1445,7 +1460,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private companion object {
         val WEB_LINK = Regex("""(?i)(?:https?://|www\.)[^\s<>"']+""")
         val TIME_LINK = Regex("""(?<![\w/:])(?:\d{1,2}:)?\d{1,2}:\d{2}(?!\d)""")
-        val LINK_RED = Color.rgb(255, 80, 80)
+        val LINK_RED = Color.rgb(229, 9, 20) // Netflix red #E50914
         val LINK_BLUE = Color.rgb(72, 157, 255)
         const val PLAYER_SCREEN = "com.lagradost.cloudstream3.ui.player.GeneratorPlayer"
         val DETAIL_SCREENS = setOf(
