@@ -23,6 +23,7 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.FragmentManager
 import androidx.recyclerview.widget.RecyclerView
+import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
@@ -41,6 +42,20 @@ internal class EpisodeProgressHook(
 ) : Application.ActivityLifecycleCallbacks {
     private var activity: FragmentActivity? = null
     private val screens = mutableMapOf<Fragment, Screen>()
+    private var knownProviderCount = -1
+    private var youtubeProviders = emptySet<String>()
+
+    private fun isYoutubeProvider(apiName: String): Boolean {
+        if (apiName.contains("youtube", ignoreCase = true)) return true
+        val providers = APIHolder.allProviders
+        if (knownProviderCount != providers.size) {
+            youtubeProviders = providers.asSequence()
+                .filter { it.sourcePlugin?.contains("youtube", ignoreCase = true) == true }
+                .map { it.name }.toSet()
+            knownProviderCount = providers.size
+        }
+        return apiName in youtubeProviders
+    }
 
     fun setFeatures(progress: Boolean, blur: Boolean) {
         if (progressEnabled == progress && blurEnabled == blur) return
@@ -301,7 +316,8 @@ internal class EpisodeProgressHook(
                 ?: RecyclerView.NO_POSITION
             val episode = if (adapter == null || adapterPosition == RecyclerView.NO_POSITION) null
                 else adapter.getItemOrNull(adapterPosition - adapter.headers)
-            val shouldBlur = episode != null && !episode.poster.isNullOrBlank() && run {
+            val shouldBlur = episode != null && !episode.poster.isNullOrBlank() &&
+                !isYoutubeProvider(episode.apiName) && run {
                 val saved = getViewPos(episode.id)
                 val duration = saved?.duration?.takeIf { it > 0L } ?: episode.duration
                 val position = saved?.position ?: episode.position
