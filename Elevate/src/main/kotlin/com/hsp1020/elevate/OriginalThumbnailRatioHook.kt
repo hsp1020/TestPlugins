@@ -14,7 +14,6 @@ import androidx.recyclerview.widget.RecyclerView
 import coil3.request.ErrorResult
 import coil3.request.SuccessResult
 import coil3.util.CoilUtils
-import com.hsp1020.shared.NativePosterCardState
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
@@ -209,8 +208,7 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                 val position = recycler.getChildViewHolder(view).bindingAdapterPosition
                 val item = if (position == RecyclerView.NO_POSITION) null
                     else adapter.getItemOrNull(position) as? SearchResponse
-                if (item == null || item.apiName == "YouTube" ||
-                    item.posterUrl.isNullOrBlank()) {
+                if (item == null || item.posterUrl.isNullOrBlank()) {
                     restore(view)
                     return
                 }
@@ -291,9 +289,40 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
         val holder: View,
         val image: ImageView
     ) {
-        val layout = NativePosterCardState(title, holder, image)
+        val layout = CardLayout(title, holder, image)
         var identity: String? = null
         var posterUrl: String = ""
+    }
+
+    /** Only the sizing fields touched by the search/continue-watching feature. */
+    private class CardLayout(
+        private val title: TextView,
+        private val holder: View,
+        private val image: ImageView
+    ) {
+        private val cardWidth = holder.layoutParams.width
+        private val cardHeight = holder.layoutParams.height
+        private val imageHeight = image.layoutParams.height
+        private val titleWidth = title.layoutParams.width
+        val originalCardWidth: Int get() = cardWidth
+
+        private fun size(view: View, width: Int, height: Int) {
+            val params = view.layoutParams
+            if (params.width == width && params.height == height) return
+            params.width = width
+            params.height = height
+            view.layoutParams = params
+        }
+
+        fun setCardSize(width: Int, height: Int) = size(holder, width, height)
+        fun setCardWidth(width: Int) = size(holder, width, holder.layoutParams.height)
+        fun setImageHeight(height: Int) = size(image, image.layoutParams.width, height)
+        fun setTitleWidth(width: Int) = size(title, width, title.layoutParams.height)
+        fun restoreSize() {
+            size(holder, cardWidth, cardHeight)
+            size(image, image.layoutParams.width, imageHeight)
+            size(title, titleWidth, title.layoutParams.height)
+        }
     }
 
     private fun View.contains(child: View): Boolean {
