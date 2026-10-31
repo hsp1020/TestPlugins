@@ -35,6 +35,18 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
+
+private fun ytProbe(event: String, detail: String = "") {
+    val context = CloudStreamApp.context ?: return
+    if (!context.getSharedPreferences("CSProbe", android.content.Context.MODE_PRIVATE)
+            .getBoolean("enabled", false)) return
+    val r = Runtime.getRuntime()
+    Log.i("CSProbe", "run=${android.os.Process.myPid()} module=YouTube event=$event $detail " +
+        "heapMiB=${(r.totalMemory() - r.freeMemory()) / 1048576L} " +
+        "nativeMiB=${android.os.Debug.getNativeHeapAllocatedSize() / 1048576L} " +
+        "gc=${android.os.Debug.getRuntimeStat("art.gc.gc-count") ?: "?"}")
+}
+
 fun String.stripWhitespace(): String {
     if (this.isEmpty()) return this
     val sb = java.lang.StringBuilder(this.length)
@@ -2497,16 +2509,33 @@ class YoutubeProvider(
             directMainPageCache[cacheKey]?.takeIf {
                 System.currentTimeMillis() - it.savedAt in 0L..PREPARED_HOME_REUSE_MS
             }?.result
-        }?.let { return it }
+        }?.let {
+            ytProbe("catalog_hit", "key=${Integer.toHexString(cacheKey.hashCode())}")
+            return it
+        }
+        ytProbe("catalog_miss", "key=${Integer.toHexString(cacheKey.hashCode())}")
         awaitStartupDirectRequestSettle()
         return youtubePayloadSemaphore.withPermit {
             currentCoroutineContext().ensureActive()
+            // A waiting request can reuse a result published by the previous owner.
+            synchronized(directMainPageLock) {
+                directMainPageCache[cacheKey]?.takeIf {
+                    System.currentTimeMillis() - it.savedAt in 0L..PREPARED_HOME_REUSE_MS
+                }?.result
+            }?.let {
+                ytProbe("catalog_hit_after_wait", "key=${Integer.toHexString(cacheKey.hashCode())}")
+                return@withPermit it
+            }
+            val fetchStarted = android.os.SystemClock.elapsedRealtime()
             val html = app.get(
                 targetUrl,
                 interceptor = ytInterceptor,
                 headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")
             ).textLarge
+            ytProbe("catalog_html", "key=${Integer.toHexString(cacheKey.hashCode())} chars=${html.length} " +
+                "fetchMs=${android.os.SystemClock.elapsedRealtime() - fetchStarted}")
             currentCoroutineContext().ensureActive()
+            val parseStarted = android.os.SystemClock.elapsedRealtime()
 
             savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
             savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
@@ -2558,6 +2587,8 @@ class YoutubeProvider(
             val next = findTokenRecursive(initialData)
 
             val result = DirectPageResult(directResults.toList(), next)
+            ytProbe("catalog_parsed", "items=${result.items.size} " +
+                "parseMs=${android.os.SystemClock.elapsedRealtime() - parseStarted}")
             if (result.items.isNotEmpty() && result.items.size <= 80) {
                 synchronized(directMainPageLock) {
                     directMainPageCache[cacheKey] = CachedDirectMainPage(result, System.currentTimeMillis())
@@ -2576,6 +2607,8 @@ class YoutubeProvider(
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val homeStarted = android.os.SystemClock.elapsedRealtime()
+        ytProbe("home_start", "page=$page key=${Integer.toHexString(request.data.hashCode())}")
         val rawRequestData = request.data
         val requestData = YoutubeUtils.urlDecode(rawRequestData)
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
@@ -2676,9 +2709,11 @@ class YoutubeProvider(
                         getFreshPreparedHomePage()
                     }
                     if (prepared != null) {
+                        ytProbe("prepared_home_hit", "items=${prepared.items.size}")
                         results.addAll(prepared.items)
                         nextContinuation = prepared.nextToken
                     } else {
+                        ytProbe("prepared_home_miss")
                         val direct = loadDirectPage1(requestData)
                         if (direct != null) {
                             results.addAll(direct.items)
@@ -2786,6 +2821,8 @@ class YoutubeProvider(
             results.addAll(sorted)
         }
 
+        ytProbe("home_end", "page=$page key=${Integer.toHexString(request.data.hashCode())} " +
+            "items=${results.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - homeStarted}")
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
 
@@ -3275,8 +3312,13 @@ class YoutubeProvider(
 
     /** One-shot detail cache, valid for the entire playback regardless of duration. */
     override suspend fun load(url: String): LoadResponse {
-        directPageCache.remove(url)?.let { return it }
-        return loadPage(url, direct = false)
+        val started = android.os.SystemClock.elapsedRealtime()
+        directPageCache.remove(url)?.let {
+            ytProbe("detail_cache_hit")
+            return it
+        }
+        return try { loadPage(url, direct = false) }
+            finally { ytProbe("detail_html_end", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}") }
     }
 
     /** Construct the initial player episode list from the home card, with no HTTP. */
@@ -3310,7 +3352,9 @@ class YoutubeProvider(
 
     /** Fetch HTML metadata only after stream links resolve; never block initial playback. */
     internal suspend fun prefetchDirectDetails(url: String): TvSeriesLoadResponse? {
-        val page = loadPage(url, direct = true)
+        val started = android.os.SystemClock.elapsedRealtime()
+        val page = try { loadPage(url, direct = true) }
+            finally { ytProbe("detail_prefetch_end", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}") }
             as? TvSeriesLoadResponse ?: return null
         if (directPageCache.size >= 16) directPageCache.clear()
         directPageCache[url] = page
@@ -3318,8 +3362,11 @@ class YoutubeProvider(
     }
 
     /** HTML-only detail path; initial playback uses quickPlaybackPage(). */
-    internal suspend fun loadForDirectPlayback(url: String): LoadResponse =
-        loadPage(url, direct = true)
+    internal suspend fun loadForDirectPlayback(url: String): LoadResponse {
+        val started = android.os.SystemClock.elapsedRealtime()
+        return try { loadPage(url, direct = true) }
+            finally { ytProbe("detail_direct_end", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}") }
+    }
 
     private suspend fun loadPage(url: String, direct: Boolean): LoadResponse {
         if (url.contains("/shorts/")) {
@@ -4073,6 +4120,8 @@ class YoutubeProvider(
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val linksStarted = android.os.SystemClock.elapsedRealtime()
+        ytProbe("links_start")
         val videoId = YoutubeUtils.extractYoutubeId(data) ?: data
         val isShort = data.contains("/shorts/")
 
@@ -4082,6 +4131,7 @@ class YoutubeProvider(
         try {
             val htmlUrl = if (isShort) "$mainUrl/shorts/$videoId" else fullUrl
             val htmlResponse = app.get(htmlUrl, interceptor = ytInterceptor).text
+            ytProbe("links_player_html", "chars=${htmlResponse.length} elapsedMs=${android.os.SystemClock.elapsedRealtime() - linksStarted}")
             
             val marker1 = "ytInitialPlayerResponse = "
             var startIdx = htmlResponse.indexOf(marker1)
@@ -4134,7 +4184,11 @@ class YoutubeProvider(
             }
         }
 
-        com.hsp1020.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
+        try {
+            com.hsp1020.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
+        } finally {
+            ytProbe("links_end", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - linksStarted}")
+        }
 
         return true
     }                                             

@@ -2,6 +2,7 @@ package com.hsp1020.elevate
 
 import android.app.Activity
 import android.app.Application
+import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -43,6 +44,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     private var enabled = false
     private var registered = false
     private var mainActivity: FragmentActivity? = null
+    private var homeTaskId = -1
     private var controller: NavController? = null
     private var playerActivity: DownloadedPlayerActivity? = null
     private var pending: Bundle? = null
@@ -127,6 +129,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             val previous = old.arguments?.getString("uuid")
             switching = true
             try {
+                ElevateDiagnostics.probe(app, "player_switch_release")
                 old.releasePlayer() // Stops the decoder before any replacement starts.
                 nextPipVideo = null
                 nav.navigate(
@@ -162,6 +165,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     private fun closePlayer(activity: DownloadedPlayerActivity) {
         if (closing || playerActivity !== activity) return
         closing = true
+        ElevateDiagnostics.probe(app, "player_close", "task=${activity.taskId} instance=${System.identityHashCode(activity)}")
         nextPipVideo?.getString("uuid")?.let(::forgetPlaceholder)
         nextPipVideo = null
         findPlayer(activity.supportFragmentManager)?.let { player ->
@@ -206,14 +210,27 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
 
     private val pipChanged = Consumer<PictureInPictureModeChangedInfo> { change ->
         val activity = playerActivity ?: return@Consumer
+        ElevateDiagnostics.probe(app, "pip_mode", "active=${change.isInPictureInPictureMode} playerTask=${activity.taskId}")
         if (!change.isInPictureInPictureMode) return@Consumer
         wasInPip = true
         activity.window.decorView.post {
             if (playerActivity !== activity || !activity.isInPictureInPictureMode) return@post
             runCatching {
-                activity.startActivity(Intent(activity, MainActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                })
+                // The player has its own task affinity. Bring the existing Home task
+                // forward instead of relaunching MainActivity on every PiP entry.
+                val home = mainActivity?.takeIf { !it.isFinishing && !it.isDestroyed }
+                val existing = if (home != null) {
+                    (app.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)
+                        ?.appTasks?.firstOrNull { it.taskInfo.id == homeTaskId }
+                } else null
+                if (existing != null && runCatching { existing.moveToFront() }.isSuccess) {
+                    ElevateDiagnostics.probe(app, "home_task_reuse", "task=$homeTaskId")
+                } else {
+                    ElevateDiagnostics.probe(app, "home_task_fallback", "task=$homeTaskId")
+                    activity.startActivity(Intent(activity, MainActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                    })
+                }
             }.onFailure { Log.e("ElevatePiP", "Cannot show library", it) }
         }
     }
@@ -257,6 +274,8 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         if (!enabled || mainActivity === activity) return
         controller?.removeOnDestinationChangedListener(destinations)
         mainActivity = activity
+        homeTaskId = activity.taskId
+        ElevateDiagnostics.probe(app, "home_watch", "task=${activity.taskId} instance=${System.identityHashCode(activity)}")
         controller = (activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)
             as? NavHostFragment)?.navController?.also {
             // Adding a listener immediately dispatches the current destination.
@@ -267,12 +286,15 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
 
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+        if (activity is MainActivity)
+            ElevateDiagnostics.probe(app, "home_created", "task=${activity.taskId} instance=${System.identityHashCode(activity)}")
         if (activity !is DownloadedPlayerActivity || pending == null) return
         playerActivity?.takeIf { it !== activity }?.let {
             it.supportFragmentManager.unregisterFragmentLifecycleCallbacks(playerFragments)
             it.removeOnPictureInPictureModeChangedListener(pipChanged)
         }
         playerActivity = activity
+        ElevateDiagnostics.probe(app, "player_created", "task=${activity.taskId} instance=${System.identityHashCode(activity)}")
         closing = false
         wasPlaying = false
         wasInPip = false
@@ -298,6 +320,8 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
 
     override fun onActivityStarted(activity: Activity) {
+        if (activity is MainActivity || activity === playerActivity)
+            ElevateDiagnostics.probe(app, "activity_start", "type=${activity.javaClass.simpleName} task=${activity.taskId} instance=${System.identityHashCode(activity)}")
         if (activity is MainActivity) watchMain(activity)
         if (activity === playerActivity) {
             bindPlayerExit(activity as DownloadedPlayerActivity)
@@ -305,6 +329,8 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         }
     }
     override fun onActivityResumed(activity: Activity) {
+        if (activity is MainActivity || activity === playerActivity)
+            ElevateDiagnostics.probe(app, "activity_resume", "type=${activity.javaClass.simpleName} task=${activity.taskId} instance=${System.identityHashCode(activity)}")
         if (activity is MainActivity) watchMain(activity)
         if (activity === playerActivity) {
             bindPlayerExit(activity as DownloadedPlayerActivity)
@@ -313,6 +339,8 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         }
     }
     override fun onActivityDestroyed(activity: Activity) {
+        if (activity === mainActivity || activity === playerActivity)
+            ElevateDiagnostics.probe(app, "activity_destroy", "type=${activity.javaClass.simpleName} task=${activity.taskId} instance=${System.identityHashCode(activity)}")
         if (activity === mainActivity) {
             controller?.removeOnDestinationChangedListener(destinations)
             controller = null
@@ -343,6 +371,8 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
     override fun onActivityPaused(activity: Activity) = Unit
     override fun onActivityStopped(activity: Activity) {
+        if (activity is MainActivity || activity === playerActivity)
+            ElevateDiagnostics.probe(app, "activity_stopped", "type=${activity.javaClass.simpleName} task=${activity.taskId} instance=${System.identityHashCode(activity)}")
         // Android can still report inPip=true while dismissing PiP.
         // A stopped PiP Activity is no longer presenting the video;
         // release it rather than leaving a paused task/session behind.

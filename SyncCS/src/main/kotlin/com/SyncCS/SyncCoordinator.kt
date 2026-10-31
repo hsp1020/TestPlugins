@@ -18,6 +18,16 @@ import kotlinx.coroutines.delay
 internal object SyncCoordinator {
     private val lock = Mutex()
 
+    private fun probe(context: Context, event: String, detail: String = "") {
+        if (!context.getSharedPreferences("CSProbe", Context.MODE_PRIVATE)
+                .getBoolean("enabled", false)) return
+        val r = Runtime.getRuntime()
+        Log.i("CSProbe", "run=${android.os.Process.myPid()} module=SyncCS event=$event $detail " +
+            "heapMiB=${(r.totalMemory() - r.freeMemory()) / 1048576L} " +
+            "nativeMiB=${android.os.Debug.getNativeHeapAllocatedSize() / 1048576L} " +
+            "gc=${android.os.Debug.getRuntimeStat("art.gc.gc-count") ?: "?"}")
+    }
+
     // A coroutine Mutex is not shared by separately loaded SyncCS classloaders.
     // Guard both the undo journal and plugin files across all instances in this process.
     private fun transactionLease(context: Context): Closeable? {
@@ -93,8 +103,9 @@ internal object SyncCoordinator {
     }
 
     suspend fun synchronize(context: Context, activity: Activity? = null): String = lock.withLock {
+        probe(context, "coordinator_begin")
         val lease = transactionLease(context) ?: run {
-
+            probe(context, "coordinator_lease_busy")
             return@withLock "Sync deferred: another SyncCS instance is updating local data."
         }
         try {
@@ -399,6 +410,8 @@ internal object SyncCoordinator {
         val dirtyBarrier = System.currentTimeMillis()
 
         var stage = "loading cloud state"
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        probe(context, "pass_begin")
         var undoStarted = false
         fun ensureUndo() {
             if (!undoStarted) {
@@ -448,7 +461,7 @@ internal object SyncCoordinator {
             val previousCursor = if (config.preferences.contains("remote_cursor"))
                 config.preferences.getLong("remote_cursor", 0L) else null
             val pull = backend.pull(previousCursor)
-
+            probe(context, "remote_pulled", "entries=${pull.entries.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - startedAt}")
 
             stage = "decrypting remote changes"
             val remoteValues = pull.entries.associate { item ->
@@ -456,6 +469,7 @@ internal object SyncCoordinator {
                     item.key, item.cipher ?: error("Missing encrypted value for " + item.key)
                 )
             }
+            probe(context, "remote_decrypted", "entries=${remoteValues.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - startedAt}")
             // On first link, an existing cloud account takes precedence over
             // unrelated settings and watch history already stored on this device.
             val firstRemoteRestore = SyncSafety.firstRemoteRestore(
@@ -488,6 +502,7 @@ internal object SyncCoordinator {
             (backend as GithubSyncAdapter).allowVerifiedDeletions(verifiedRemovals)
 
             stage = "reconciling CloudStream profiles"
+            probe(context, "sync_stage", "name=profiles elapsedMs=${android.os.SystemClock.elapsedRealtime() - startedAt}")
             fun protectedProfileValue(key: String): String? {
                 val stored = config.preferences.getString(key, null) ?: return null
                 // Accept a manifest briefly stored by the first v340 build.
@@ -645,6 +660,7 @@ internal object SyncCoordinator {
                 if (!merge.changedRemote) break
                 verifyAccount()
                 stage = "uploading plugin archives before manifest"
+                probe(context, "sync_stage", "name=plugin_upload elapsedMs=${android.os.SystemClock.elapsedRealtime() - startedAt}")
                 PluginInventory.uploadFiles(context, backend, pluginTarget)
                 stage = "publishing plugin manifest"
                 try {
@@ -740,11 +756,13 @@ internal object SyncCoordinator {
             // Commit local changes with the server CAS first. If a concurrent
             // write rejects this batch, do not overwrite local state before retry.
             stage = "uploading settings changes"
+            probe(context, "sync_stage", "name=settings_upload items=${upload.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - startedAt}")
             verifyAccount()
             backend.upload(upload, cipher, versions)
             for (key in upload.keys) versions[key] = (versions[key] ?: 0L) + 1L
 
             stage = "restoring preferences"
+            probe(context, "sync_stage", "name=preferences_apply items=${apply.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - startedAt}")
             verifyAccount()
             if (apply.isNotEmpty()) ensureUndo()
             val nativeApply = ProfileIdentity.toNative(apply, profileMerge.target)
