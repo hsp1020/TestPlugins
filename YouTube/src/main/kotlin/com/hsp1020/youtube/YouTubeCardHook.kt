@@ -24,6 +24,7 @@ import android.util.Log
 import android.util.Patterns
 import com.google.android.material.chip.Chip
 import com.google.android.material.chip.ChipGroup
+import androidx.core.view.doOnPreDraw
 import androidx.navigation.NavOptions
 import androidx.navigation.NavController
 import androidx.navigation.fragment.NavHostFragment
@@ -181,6 +182,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         attachToReadyPlayer()
     }
     private var expandedReturnDialog: Dialog? = null
+    private var popupAwaitingPlayer = false
+    private var popupReturnNav: NavController? = null
+    private var popupReturnListener: NavController.OnDestinationChangedListener? = null
     // One pending selection bridges player exit and the native detail ViewModel.
     private var pendingRange: Pair<Int, PlayedEpisode>? = null
     private var appliedRange: Pair<Int, PlayedEpisode>? = null
@@ -211,6 +215,40 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         playbackReturnListener = null
     }
 
+    private fun clearPopupReturnListener() {
+        popupReturnNav?.let { nav ->
+            popupReturnListener?.let(nav::removeOnDestinationChangedListener)
+        }
+        popupReturnNav = null
+        popupReturnListener = null
+    }
+
+    private fun registerPopupReturn(nav: NavController, originEntry: String, dialog: Dialog) {
+        clearPopupReturnListener()
+        val listener = NavController.OnDestinationChangedListener { controller, destination, _ ->
+            when {
+                controller.currentBackStackEntry?.id == originEntry -> {
+                    clearPopupReturnListener()
+                    if (expandedReturnDialog === dialog) {
+                        expandedReturnDialog = null
+                        if (dialog.window?.decorView?.isAttachedToWindow == true) {
+                            dialog.window?.setWindowAnimations(0)
+                            dialog.show()
+                        }
+                    }
+                }
+                destination.id != R.id.navigation_results_phone &&
+                    destination.id != R.id.navigation_results_tv -> {
+                    clearPopupReturnListener()
+                    if (expandedReturnDialog === dialog) expandedReturnDialog = null
+                }
+            }
+        }
+        popupReturnNav = nav
+        popupReturnListener = listener
+        nav.addOnDestinationChangedListener(listener)
+    }
+
     /**
      * The native player pops its current destination on back. Before the
      * previous Home destination can draw, replace that destination with the
@@ -223,11 +261,13 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     ) {
         clearPlaybackReturnListener()
         val origin = controller.currentDestination?.id ?: return
+        val originEntry = controller.currentBackStackEntry?.id
         var enteredPlayer = false
         val listener = NavController.OnDestinationChangedListener { nav, destination, _ ->
             if (destination.id == R.id.navigation_player) {
                 enteredPlayer = true
             } else if (enteredPlayer) {
+                popupAwaitingPlayer = false
                 clearPendingTimeSeek()
                 if (destination.id == origin) expandedReturnDialog?.hide()
                 clearPlaybackReturnListener()
@@ -247,25 +287,27 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                         val noTransition = NavOptions.Builder()
                             .setEnterAnim(0).setExitAnim(0)
                             .setPopEnterAnim(0).setPopExitAnim(0).build()
-                        // Prefer immediate transition within the destination
-                        // callback so Home is never drawn between player and detail.
-                        // If Navigation is still dispatching a pop, retry on the
-                        // next main-loop turn rather than crashing the player.
-                        try {
+                        val popup = expandedReturnDialog
+                        fun openDetail(): Boolean = try {
                             nav.navigate(target, ResultFragment.newInstance(session.card), noTransition)
+                            if (popup != null && originEntry != null)
+                                registerPopupReturn(nav, originEntry, popup)
+                            true
                         } catch (_: IllegalStateException) {
-                            main.post {
-                                if (playbackNav == null && host != null &&
-                                    nav.currentDestination?.id == origin) {
-                                    if (runCatching {
-                                        nav.navigate(target, ResultFragment.newInstance(session.card), noTransition)
-                                    }.isFailure) {
-                                        expandedReturnDialog?.show()
-                                        expandedReturnDialog = null
-                                    }
+                            false
+                        }
+                        // Retry once if the player pop is still being dispatched.
+                        if (!openDetail()) main.post {
+                            if (playbackNav == null && host != null &&
+                                nav.currentBackStackEntry?.id == originEntry && !openDetail()) {
+                                if (expandedReturnDialog === popup) {
+                                    expandedReturnDialog = null
+                                    popup?.show()
                                 }
                             }
                         }
+                    } else if (destination.id != origin) {
+                        expandedReturnDialog = null
                     }
                 }
             }
@@ -369,6 +411,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         returnToDetail: Boolean = false,
     ) {
         if (directLoading || directPlayback != null) return
+        clearPopupReturnListener()
+        expandedReturnDialog = null
         val activity = host ?: return
         val api = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
         val navHost = activity.supportFragmentManager
@@ -426,10 +470,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 pendingTimeSeek = PendingTimeSeek(videoId, startAtMs)
                 Log.i("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=pending positionMs=$startAtMs")
             }
-            if (popupDialog != null) {
-                popupDialog.hide()
-                expandedReturnDialog = popupDialog
-            }
+            expandedReturnDialog = popupDialog
+            popupAwaitingPlayer = popupDialog != null
             registerReturn(navHost.navController, session)
             navHost.navController.navigate(
                 R.id.global_to_navigation_player,
@@ -440,6 +482,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 ),
             )
         } catch (e: Exception) {
+            popupAwaitingPlayer = false
             clearPendingTimeSeek()
             clearPlaybackReturnListener()
             directPlayback = null
@@ -506,18 +549,25 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
             when (f.javaClass.name) {
-                "com.lagradost.cloudstream3.ui.home.HomeFragment" -> expandedReturnDialog?.hide()
-                in DETAIL_SCREENS -> expandedReturnDialog = null
+                in EXPANDED_ORIGINS -> if (!popupAwaitingPlayer) expandedReturnDialog?.hide()
+                in DETAIL_SCREENS -> if (popupReturnListener == null) expandedReturnDialog = null
             }
             screens[f]?.applyNativeRangeIfPending()
         }
 
         override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, view: View, state: Bundle?) {
-            if (f.javaClass.name == "com.lagradost.cloudstream3.ui.home.HomeFragment") {
+            if (f.javaClass.name in EXPANDED_ORIGINS && !popupAwaitingPlayer) {
                 expandedReturnDialog?.hide()
             }
             if (f.javaClass.name == PLAYER_SCREEN) {
                 playerFragment = f
+                val popup = expandedReturnDialog
+                if (popupAwaitingPlayer && popup != null) view.doOnPreDraw {
+                    if (popupAwaitingPlayer && expandedReturnDialog === popup) {
+                        popupAwaitingPlayer = false
+                        popup.hide()
+                    }
+                }
                 prefetchAfterLinks(f)
                 watchPendingTimeSeek(f)
             }
@@ -525,6 +575,15 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
+            if (popupAwaitingPlayer && f.javaClass.name in EXPANDED_ORIGINS) {
+                expandedReturnDialog?.let { popup ->
+                    val decor = popup.window?.decorView
+                    if (decor?.isAttachedToWindow == true && decor.visibility != View.VISIBLE) {
+                        popup.window?.setWindowAnimations(0)
+                        popup.show()
+                    }
+                }
+            }
             screens.remove(f)?.close()
         }
     }
@@ -542,6 +601,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private fun release() {
         clearPendingTimeSeek()
         clearPlaybackReturnListener()
+        clearPopupReturnListener()
+        popupAwaitingPlayer = false
         playerFragment = null
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
@@ -1483,6 +1544,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         val LINK_RED = Color.rgb(229, 9, 20) // Netflix red #E50914
         val LINK_BLUE = Color.rgb(72, 157, 255)
         const val PLAYER_SCREEN = "com.lagradost.cloudstream3.ui.player.GeneratorPlayer"
+        val EXPANDED_ORIGINS = setOf(
+            "com.lagradost.cloudstream3.ui.home.HomeFragment",
+            "com.lagradost.cloudstream3.ui.search.SearchFragment",
+            "com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment"
+        )
         val DETAIL_SCREENS = setOf(
             "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
             "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer",
