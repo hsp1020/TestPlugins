@@ -29,6 +29,7 @@ import com.lagradost.cloudstream3.ui.download.DownloadButtonSetup
 import com.lagradost.cloudstream3.ui.player.FullScreenPlayer
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
+import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.result.ACTION_CLICK_DEFAULT
 import com.lagradost.cloudstream3.ui.result.EpisodeAdapter
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
@@ -239,7 +240,9 @@ class ElevatePlugin : Plugin() {
         nativePanelEnabled = panelEnabled
         if (enabled(ElevateFeature.EPISODE_OVERLAY) || panelEnabled) {
             if (nativeEpisodeOverlay == null) {
-                nativeEpisodeOverlay = NativeEpisodeOverlayHook(application, panelEnabled).also { it.start() }
+                nativeEpisodeOverlay = NativeEpisodeOverlayHook(application, panelEnabled) { player, subtitle ->
+                    embeddedSubtitles?.onPanelSubtitleSelected(player, subtitle)
+                }.also { it.start() }
             }
         } else {
             nativeEpisodeOverlay?.stop()
@@ -662,7 +665,8 @@ private class NativeDetailSearchHook(private val app: Application) : Application
  */
 internal class NativeEpisodeOverlayHook(
     private val application: Application,
-    private val playerPanelEnabled: Boolean = false
+    private val playerPanelEnabled: Boolean = false,
+    private val onManualSubtitle: (GeneratorPlayer, SubtitleData?) -> Unit
 ) :
     Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
@@ -768,7 +772,7 @@ internal class NativeEpisodeOverlayHook(
         private val playerPanel: ElevatePlayerPanel? =
             if (playerPanelEnabled && overlay != null) ElevatePlayerPanel(
                 fragment, root, overlay, title, list, { selector }, { openWithoutPause() },
-                { subtitle -> embeddedSubtitles?.onPanelSubtitleSelected(fragment, subtitle) }
+                { subtitle -> onManualSubtitle(fragment, subtitle) }
             ) else null
         private var host: PlayerView? = null
         private var callbacks: PlayerView.Callbacks? = null
