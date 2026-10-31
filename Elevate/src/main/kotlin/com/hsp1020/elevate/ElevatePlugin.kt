@@ -85,6 +85,7 @@ class ElevatePlugin : Plugin() {
     private var thumbnailRatios: OriginalThumbnailRatioHook? = null
     private var httpResponseGuard: ElevateHttpResponseGuard? = null
     private var nativeEpisodeOverlay: NativeEpisodeOverlayHook? = null
+    private var compactPlayerControls: CompactPlayerControls? = null
     private var nativePanelEnabled = false
     private var subtitleRefresh: ElevateSubtitleRefreshHook? = null
     private var subtitleSourceObserver: ElevateSubtitleSourceObserver? = null
@@ -241,6 +242,14 @@ class ElevatePlugin : Plugin() {
             episodeProgress?.stop()
             episodeProgress = null
         }
+        if (enabled(ElevateFeature.COMPACT_PLAYER_CONTROLS)) {
+            if (compactPlayerControls == null) {
+                compactPlayerControls = CompactPlayerControls(application).also { it.start() }
+            }
+        } else {
+            compactPlayerControls?.stop()
+            compactPlayerControls = null
+        }
         val panelEnabled = enabled(ElevateFeature.PLAYER_PANEL)
         if (nativeEpisodeOverlay != null && nativePanelEnabled != panelEnabled) {
             nativeEpisodeOverlay?.stop()
@@ -365,6 +374,8 @@ class ElevatePlugin : Plugin() {
         httpResponseGuard = null
         nativeEpisodeOverlay?.stop()
         nativeEpisodeOverlay = null
+        compactPlayerControls?.stop()
+        compactPlayerControls = null
         subtitleRefresh?.stop()
         subtitleRefresh = null
         subtitleSourceObserver?.stop()
