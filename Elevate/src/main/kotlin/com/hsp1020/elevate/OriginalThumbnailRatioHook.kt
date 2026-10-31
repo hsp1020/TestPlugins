@@ -2,9 +2,15 @@ package com.hsp1020.elevate
 
 import android.app.Activity
 import android.app.Application
+import android.content.Context
+import android.content.ContextWrapper
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.view.ViewTreeObserver
+import android.view.inspector.WindowInspector
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.fragment.app.Fragment
@@ -32,12 +38,20 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
     Application.ActivityLifecycleCallbacks {
     private var host: FragmentActivity? = null
     private val screens = mutableMapOf<Fragment, Screen>()
+    private val dialogs = mutableMapOf<View, Screen>()
+    private val main = Handler(Looper.getMainLooper())
+    private var focusTree: ViewTreeObserver? = null
+    private val focusListener = ViewTreeObserver.OnWindowFocusChangeListener {
+        main.post { discoverDialogs() }
+    }
     private enum class Role { HOME_PARENT, SEARCH_PARENT, GRID, SEARCH_ROW, RESUME }
 
-    private inner class Screen(val root: View) {
+    private inner class Screen(val root: View, popup: Boolean = false) {
         private val watchers = mutableMapOf<RecyclerView, Watcher>()
 
         init {
+            if (popup) root.findViewById<RecyclerView>(R.id.home_expanded_recycler)
+                ?.let { watch(it, Role.GRID) }
             root.findViewById<RecyclerView>(R.id.home_master_recycler)
                 ?.let { watch(it, Role.HOME_PARENT) }
             root.findViewById<RecyclerView>(R.id.search_master_recycler)
@@ -255,8 +269,8 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                 val cardWidth = when (role) {
                     Role.SEARCH_ROW -> HomeChildItemAdapter.maxPosterSize.takeIf { it > 0 }
                         ?: dp(180)
-                    Role.RESUME -> card.layout.originalCardWidth.takeIf { it > 0 }
-                        ?: holder.width.takeIf { it > 0 } ?: return
+                    Role.RESUME -> HomeChildItemAdapter.maxPosterSize.takeIf { it > 0 }
+                        ?: dp(180)
                     else -> (recycler as? AutofitRecyclerView)?.itemWidth
                         ?.minus(dp(4))?.takeIf { it > 0 }
                         ?: holder.width.takeIf { it > 0 } ?: return
@@ -269,7 +283,7 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                 } else {
                     card.layout.setCardSize(cardWidth, cardHeight)
                 }
-                if (role != Role.RESUME && !holder.contains(title)) {
+                if (!holder.contains(title)) {
                     card.layout.setTitleWidth(cardWidth)
                 }
             }
@@ -359,6 +373,11 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
         release()
         host = activity
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
+        activity.window.decorView.viewTreeObserver.also {
+            focusTree = it
+            if (it.isAlive) it.addOnWindowFocusChangeListener(focusListener)
+        }
+        main.post { discoverDialogs() }
         fun scan(manager: FragmentManager) {
             manager.fragments.forEach { fragment ->
                 fragment.view?.let { watch(fragment, it) }
@@ -370,9 +389,49 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
 
     private fun release() {
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
+        focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
+        focusTree = null
+        dialogs.values.forEach { it.close() }
+        dialogs.clear()
         screens.values.forEach { it.close() }
         screens.clear()
         host = null
+    }
+
+    private fun discoverDialogs() {
+        val activity = host ?: return
+        val windows: List<View> = if (Build.VERSION.SDK_INT >= 29) {
+            WindowInspector.getGlobalWindowViews()
+        } else {
+            runCatching {
+                val type = Class.forName("android.view.WindowManagerGlobal")
+                val manager = type.getMethod("getInstance").invoke(null)
+                @Suppress("UNCHECKED_CAST")
+                type.getDeclaredField("mViews").apply { isAccessible = true }
+                    .get(manager) as List<View>
+            }.getOrDefault(emptyList())
+        }
+        val active = windows.filter { window ->
+            owner(window.context) === activity &&
+                window.isAttachedToWindow &&
+                window.findViewById<RecyclerView>(R.id.home_expanded_recycler)
+                    ?.adapter is SearchAdapter
+        }.toSet()
+        dialogs.keys.toList().filter { it !in active }.forEach {
+            dialogs.remove(it)?.close()
+        }
+        active.forEach { window ->
+            if (window !in dialogs) dialogs[window] = Screen(window, popup = true)
+        }
+    }
+
+    private fun owner(context: Context): Activity? {
+        var current = context
+        repeat(12) {
+            if (current is Activity) return current
+            current = (current as? ContextWrapper)?.baseContext ?: return null
+        }
+        return null
     }
 
     fun start() {
