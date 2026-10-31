@@ -188,7 +188,7 @@ internal class ElevatePlayerPanel(
                 }, LinearLayout.LayoutParams(dp(48), dp(48)))
             }
         row.layoutParams = AbsListView.LayoutParams(-1, if (compact) dp(48) else -2)
-        row.minimumHeight = if (compact || tab == Tab.SUBTITLES || tab == Tab.AUDIO) dp(48) else dp(28)
+        row.minimumHeight = if (compact || tab == Tab.SUBTITLES) dp(48) else dp(28)
         (row.getChildAt(0) as ImageView).apply {
             imageTintList = ColorStateList.valueOf(Color.WHITE)
             visibility = if (checked) View.VISIBLE else View.INVISIBLE
@@ -196,7 +196,6 @@ internal class ElevatePlayerPanel(
         (row.getChildAt(1) as TextView).apply {
             text = label
             styleRow(this, checked, highlighted = highlighted)
-            if (tab == Tab.AUDIO) setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
             maxLines = if (compact) 2 else Int.MAX_VALUE
             ellipsize = if (compact) TextUtils.TruncateAt.END else null
             // ListView handles selection; detached recycled child views cannot post clicks.
@@ -252,11 +251,6 @@ internal class ElevatePlayerPanel(
                     ) as TextView)
                 text.text = value.label
                 styleRow(text, false, true)
-                if (tab == Tab.AUDIO) {
-                    text.gravity = Gravity.CENTER_VERTICAL
-                    text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
-                    text.setPadding(dp(12), dp(10), dp(12), dp(10))
-                }
                 text.minHeight = dp(if (value.label.isEmpty()) 48 else 36)
                 return text
             }
@@ -617,7 +611,29 @@ internal class ElevatePlayerPanel(
         }
     }
 
+    private fun updateTrackTab(): Boolean {
+        val tracks = fragment.player.getVideoTracks()
+        val available = tracks.allAudioTracks.size > 1 || tracks.allVideoTracks.size > 1
+        val button = buttons[Tab.AUDIO]
+        val desired = if (available) View.VISIBLE else View.GONE
+        if (button?.visibility != desired) button?.visibility = desired
+        // All four tabs have equal weight. GONE makes the other three fill
+        // the same full-width header, preserving both outer edges.
+        return available
+    }
+
+    fun onTracksChanged() {
+        val available = updateTrackTab()
+        if (tab == Tab.AUDIO) {
+            if (!available) {
+                tab = Tab.SOURCES
+                if (overlay.isShown) showTabContents()
+            } else if (overlay.isShown) renderTracks()
+        }
+    }
+
     fun attach() {
+        updateTrackTab()
         nativeWidth = overlay.layoutParams.width
         overlay.layoutParams = overlay.layoutParams.apply { width = dp(360) }
         overlay.addView(tabs, 0, LinearLayout.LayoutParams(-1, dp(48)))
@@ -671,6 +687,7 @@ internal class ElevatePlayerPanel(
 
     fun isEpisodeTab() = tab == Tab.EPISODES
     fun show(destination: Tab = tab, sync: Boolean = false): Boolean {
+        if (destination == Tab.AUDIO && !updateTrackTab()) return false
         if (!overlay.isShown && !openNative()) return false
         if (destination != tab) {
             if (destination == Tab.SOURCES) chosenLink = null
@@ -684,7 +701,10 @@ internal class ElevatePlayerPanel(
         if (sync) showSync() else showTabContents()
         return true
     }
-    fun onOpened() = showTabContents()
+    fun onOpened() {
+        if (!updateTrackTab() && tab == Tab.AUDIO) tab = Tab.SOURCES
+        showTabContents()
+    }
 
     private fun replaceRows(values: List<Row>) {
         rows.clear()

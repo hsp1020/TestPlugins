@@ -839,6 +839,11 @@ internal class NativeEpisodeOverlayHook(
                 override fun onAutoHideUI() {
                     if (overlay?.isShown != true) original.onAutoHideUI()
                 }
+
+                override fun onTracksInfoChanged() {
+                    original.onTracksInfoChanged()
+                    playerPanel?.onTracksChanged()
+                }
             }
             if (host?.callbacks === guardedCallbacks) host?.callbacks = callbacks
             host = target
