@@ -1221,9 +1221,15 @@ open class StremioC(
             work: suspend () -> T
         ): T = integratedSourceLimiter.withPermit { work() }
 
-        const val HOME_FOREGROUND_CONCURRENCY = 10
-        const val HOME_FOREGROUND_PER_HOST_CONCURRENCY = 10
+        const val HOME_FOREGROUND_CONCURRENCY = 6
+        const val HOME_FOREGROUND_PER_HOST_CONCURRENCY = 6
         private val homeForegroundSemaphore = Semaphore(HOME_FOREGROUND_CONCURRENCY)
+        private const val HOME_RESULTS_REUSE_MS = 60_000L
+        private data class CachedHomeResult(val result: Pair<List<SearchResponse>, Int>, val savedAt: Long)
+        private val recentHomeResults = object : LinkedHashMap<String, CachedHomeResult>(24, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedHomeResult>?): Boolean =
+                size > 24
+        }
 
         private class CatalogHttpException(val statusCode: Int) :
             IllegalStateException("Catalog HTTP $statusCode")
@@ -2605,19 +2611,33 @@ open class StremioC(
     }
 
     private suspend fun fetchCatalogItems(path: String, fallbackType: String = "movie"): Pair<List<SearchResponse>, Int> {
-        val json = homeForegroundSemaphore.withPermit { fetchHomeJson(buildUrl(path)) }
-        val metas = parseJson<HomeCatalogResponse>(json).metas
-            ?: throw IllegalStateException("Catalog response is missing metas")
-        val items = metas.mapNotNull { meta ->
-            val type = meta.type ?: fallbackType
-            val id = meta.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            val title = meta.name?.takeIf { it.isNotBlank() }
-                ?: "[${type.replaceFirstChar { it.uppercase() }}] $id"
-            val metaUrl = getUnifiedMetaUrl(type, id)
-            rememberDetailLoadHint(metaUrl, type, id, meta.moviedb_id?.toString() ?: meta.tmdbIdExt)
-            newMovieSearchResponse(title, metaUrl, TvType.Others) { posterUrl = meta.poster }
+        val cacheKey = "$mainUrl|$fallbackType|$path"
+        synchronized(recentHomeResults) {
+            recentHomeResults[cacheKey]?.takeIf {
+                System.currentTimeMillis() - it.savedAt in 0L..HOME_RESULTS_REUSE_MS
+            }?.result
+        }?.let { return it }
+        return homeForegroundSemaphore.withPermit {
+            val json = fetchHomeJson(buildUrl(path))
+            val metas = parseJson<HomeCatalogResponse>(json).metas
+                ?: throw IllegalStateException("Catalog response is missing metas")
+            val items = metas.mapNotNull { meta ->
+                val type = meta.type ?: fallbackType
+                val id = meta.id?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val title = meta.name?.takeIf { it.isNotBlank() }
+                    ?: "[${type.replaceFirstChar { it.uppercase() }}] $id"
+                val metaUrl = getUnifiedMetaUrl(type, id)
+                rememberDetailLoadHint(metaUrl, type, id, meta.moviedb_id?.toString() ?: meta.tmdbIdExt)
+                newMovieSearchResponse(title, metaUrl, TvType.Others) { posterUrl = meta.poster }
+            }
+            val result = items to metas.size
+            if (items.isNotEmpty() && items.size <= 80) {
+                synchronized(recentHomeResults) {
+                    recentHomeResults[cacheKey] = CachedHomeResult(result, System.currentTimeMillis())
+                }
+            }
+            result
         }
-        return items to metas.size
     }
 
     internal suspend fun browseCatalogs(): List<Catalog> {

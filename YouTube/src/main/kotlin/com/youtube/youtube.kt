@@ -106,8 +106,8 @@ class YoutubeProvider(
     )
 
     private val chipCatalogSessions = ConcurrentHashMap<String, ChipCatalogSession>()
-    private val chipBootstrapTtlMs = 15_000L
-    private val chipBootstrapStaleFallbackMs = 60_000L
+    private val chipBootstrapTtlMs = 60_000L
+    private val chipBootstrapStaleFallbackMs = 120_000L
 
     override var mainUrl = "https://www.youtube.com"
     override var name = "YouTube"
@@ -125,7 +125,13 @@ class YoutubeProvider(
         private const val YOUTUBE_PAYLOAD_CONCURRENCY = 5
         private val youtubePayloadSemaphore = Semaphore(YOUTUBE_PAYLOAD_CONCURRENCY)
 
-        private const val PREPARED_HOME_REUSE_MS = 2_500L
+        private const val PREPARED_HOME_REUSE_MS = 60_000L
+        private data class CachedDirectMainPage(val result: DirectPageResult, val savedAt: Long)
+        private val directMainPageLock = Any()
+        private val directMainPageCache = object : LinkedHashMap<String, CachedDirectMainPage>(8, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedDirectMainPage>?): Boolean =
+                size > 8
+        }
 
         private const val STARTUP_DIRECT_REQUEST_SETTLE_MS = 200L
         private val startupGateLock = Any()
@@ -2485,10 +2491,16 @@ class YoutubeProvider(
     }
 
     private suspend fun loadDirectPage1(requestData: String): DirectPageResult? {
+        val targetUrl = if (requestData == "Home") mainUrl else requestData
+        val cacheKey = "$lang|$targetUrl"
+        synchronized(directMainPageLock) {
+            directMainPageCache[cacheKey]?.takeIf {
+                System.currentTimeMillis() - it.savedAt in 0L..PREPARED_HOME_REUSE_MS
+            }?.result
+        }?.let { return it }
         awaitStartupDirectRequestSettle()
         return youtubePayloadSemaphore.withPermit {
             currentCoroutineContext().ensureActive()
-            val targetUrl = if (requestData == "Home") mainUrl else requestData
             val html = app.get(
                 targetUrl,
                 interceptor = ytInterceptor,
@@ -2546,6 +2558,11 @@ class YoutubeProvider(
             val next = findTokenRecursive(initialData)
 
             val result = DirectPageResult(directResults.toList(), next)
+            if (result.items.isNotEmpty() && result.items.size <= 80) {
+                synchronized(directMainPageLock) {
+                    directMainPageCache[cacheKey] = CachedDirectMainPage(result, System.currentTimeMillis())
+                }
+            }
             if (requestData == "Home") {
                 sharedPreparedHomePage = PreparedHomePage(
                     language = lang,
@@ -2653,9 +2670,11 @@ class YoutubeProvider(
                 }
             } else if (page == 1) {
                 if (requestData == "Home") {
-                    ensureChipBootstrap()
-                    currentCoroutineContext().ensureActive()
-                    val prepared = getFreshPreparedHomePage()
+                    val prepared = getFreshPreparedHomePage() ?: run {
+                        ensureChipBootstrap()
+                        currentCoroutineContext().ensureActive()
+                        getFreshPreparedHomePage()
+                    }
                     if (prepared != null) {
                         results.addAll(prepared.items)
                         nextContinuation = prepared.nextToken
