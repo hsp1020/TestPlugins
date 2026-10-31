@@ -55,6 +55,8 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     private var wasInPip = false
     private var closing = false
     private var activeUuid: String? = null
+    private var playerNavigation: NavController? = null
+    private var exitBackBound = false
 
     private fun Activity.inPip(): Boolean =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode
@@ -275,25 +277,39 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         wasPlaying = false
         wasInPip = false
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(playerFragments, true)
-        // Native FullScreenPlayer back callbacks register later and retain priority.
-        activity.onBackPressedDispatcher.addCallback(activity, exitBack)
+        // Keep the pre-attach observer early, but bind Back/Nav only after
+        // DownloadedPlayerActivity.onCreate has registered its own back callback
+        // and inflated the NavHost.
         activity.addOnPictureInPictureModeChangedListener(pipChanged)
-        (activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)
-            as? NavHostFragment)?.navController
-            ?.addOnDestinationChangedListener(playerDestination)
+    }
+
+    private fun bindPlayerExit(activity: DownloadedPlayerActivity) {
+        if (!exitBackBound) {
+            // Registered after the core Activity back callback, and before
+            // FullScreenPlayer's later resume callback.
+            activity.onBackPressedDispatcher.addCallback(activity, exitBack)
+            exitBackBound = true
+        }
+        if (playerNavigation == null) {
+            playerNavigation = (activity.supportFragmentManager
+                .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)
+                ?.navController?.also { it.addOnDestinationChangedListener(playerDestination) }
+        }
     }
 
     override fun onActivityStarted(activity: Activity) {
         if (activity is MainActivity) watchMain(activity)
-        if (activity === playerActivity && nextPipVideo != null) {
-            schedulePipSwitch(activity as DownloadedPlayerActivity)
+        if (activity === playerActivity) {
+            bindPlayerExit(activity as DownloadedPlayerActivity)
+            if (nextPipVideo != null) schedulePipSwitch(activity)
         }
     }
     override fun onActivityResumed(activity: Activity) {
         if (activity is MainActivity) watchMain(activity)
         if (activity === playerActivity) {
+            bindPlayerExit(activity as DownloadedPlayerActivity)
             if (!activity.inPip()) wasInPip = false
-            if (nextPipVideo != null) schedulePipSwitch(activity as DownloadedPlayerActivity)
+            if (nextPipVideo != null) schedulePipSwitch(activity)
         }
     }
     override fun onActivityDestroyed(activity: Activity) {
@@ -304,13 +320,13 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         }
         if (activity === playerActivity) {
             (activity as DownloadedPlayerActivity).apply {
-                (supportFragmentManager.findFragmentById(R.id.nav_host_fragment)
-                    as? NavHostFragment)?.navController
-                    ?.removeOnDestinationChangedListener(playerDestination)
+                playerNavigation?.removeOnDestinationChangedListener(playerDestination)
                 supportFragmentManager.unregisterFragmentLifecycleCallbacks(playerFragments)
                 removeOnPictureInPictureModeChangedListener(pipChanged)
             }
+            playerNavigation = null
             exitBack.remove()
+            exitBackBound = false
             nextPipVideo?.getString("uuid")?.let(::forgetPlaceholder)
             nextPipVideo = null
             if (!activity.isChangingConfigurations) forgetPlaceholder(activeUuid)
@@ -327,10 +343,21 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
     override fun onActivityPaused(activity: Activity) = Unit
     override fun onActivityStopped(activity: Activity) {
-        // Closing PiP stops the Activity. Expanding it resumes instead.
-        if (activity === playerActivity && wasInPip &&
-            !activity.inPip() && !activity.isChangingConfigurations) {
+        // PiP X can still report inPip=true while the Activity is finishing.
+        if (activity === playerActivity && !activity.isChangingConfigurations &&
+            (activity.isFinishing || (wasInPip && !activity.inPip()))) {
             closePlayer(activity as DownloadedPlayerActivity)
+        }
+    }
+
+    override fun onActivityPreDestroyed(activity: Activity) {
+        if (activity === playerActivity && !closing && !activity.isChangingConfigurations) {
+            // Android's PiP X can destroy the Activity without dispatching a
+            // back press. Do not leave the native decoder waiting for onStop.
+            findPlayer(activity.supportFragmentManager)?.let { player ->
+                runCatching { player.releasePlayer() }
+                    .onFailure { Log.e("ElevatePiP", "PiP close release failed", it) }
+            }
         }
     }
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
