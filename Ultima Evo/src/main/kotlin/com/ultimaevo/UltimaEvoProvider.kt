@@ -82,8 +82,9 @@ object UltimaEvoSyncManager {
             getSafeAllProviders().filter { provider ->
                 !provider.mainUrl.startsWith("ultima_evo") && provider.hasMainPage &&
                 (1..instanceCount).any { instId ->
-                    prefs.getBoolean("ext_toggle_${instId}_${provider.name}", false) ||
-                    prefs.getBoolean("auto_add_${instId}_${provider.name}", false)
+                    prefs.getBoolean("provider_enabled_${instId}_${provider.name}", true) &&
+                        (prefs.getBoolean("ext_toggle_${instId}_${provider.name}", false) ||
+                            prefs.getBoolean("auto_add_${instId}_${provider.name}", false))
                 }
             }
         }
@@ -216,6 +217,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             val savedSet = savedConfigs.map { "${it.providerName}:::${it.originalCatalogName}" }.toSet()
 
             savedConfigs.forEach { config ->
+                if (!prefs.getBoolean("provider_enabled_${instanceId}_${config.providerName}", true)) return@forEach
                 val combinedData = config.toJson()
                 pages.add(Pair(MainPageData(config.customCatalogName, combinedData), config.orderIndex))
             }
@@ -225,7 +227,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
             for (p in targetProviders) {
                 val isAutoAdd = prefs.getBoolean("auto_add_${instanceId}_${p.name}", false)
-                if (isAutoAdd) {
+                if (isAutoAdd && prefs.getBoolean("provider_enabled_${instanceId}_${p.name}", true)) {
                     val staticCats = p.mainPage.map { it.name }
                     val dynamicCats = prefs.getString("dynamic_catalogs_${p.name}", "")?.split("|||") ?: emptyList()
                     val combinedCats = (staticCats + dynamicCats).filter { it.isNotBlank() }.distinct()
@@ -256,6 +258,9 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             try {
                 val config = parseJson<EvoCatalogConfig>(request.data)
                 if (config == null) return@withContext newHomePageResponse(emptyList(), false)
+                val prefs = UltimaEvoPlugin.pluginContext?.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
+                if (prefs?.getBoolean("provider_enabled_${instanceId}_${config.providerName}", true) == false)
+                    return@withContext newHomePageResponse(emptyList(), false)
 
                 val targetProvider = getSafeAllProviders().find { it.name == config.providerName } 
                     ?: return@withContext newHomePageResponse(emptyList(), false)
@@ -314,7 +319,9 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
         val providersToSearch = try {
             val configs: List<EvoCatalogConfig> = parseJson<List<EvoCatalogConfig>>(activeCatsJson)
-            configs.map { it.providerName }.distinct()
+            configs.map { it.providerName }
+                .filter { prefs.getBoolean("provider_enabled_${instanceId}_$it", true) }
+                .distinct()
         } catch (e: Exception) {
             e.printStackTrace()
             emptyList()
