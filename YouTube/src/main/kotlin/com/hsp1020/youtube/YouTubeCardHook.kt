@@ -571,6 +571,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 ?.let { watch(it, Role.DIALOG_GRID) }
             root.findViewById<RecyclerView>(R.id.home_master_recycler)?.let { watch(it, Role.HOME_PARENT) }
             if (fragment?.arguments?.getString("apiName") == "YouTube") {
+                root.findViewById<RecyclerView>(R.id.result_recommendations_list)
+                    ?.let { watch(it, Role.DETAIL_RECOMMENDATIONS) }
                 root.findViewById<RecyclerView>(R.id.result_episodes)?.let { watch(it, Role.DETAIL_EPISODE) }
                 root.findViewById<RecyclerView>(R.id.result_cast_items)?.let { watch(it, Role.DETAIL_CAST) }
             }
@@ -847,11 +849,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     return
                 }
 
-                if (role == Role.DIALOG_GRID) {
+                if (role == Role.DIALOG_GRID || role == Role.DETAIL_RECOMMENDATIONS) {
                     val baseWidth = (list as? AutofitRecyclerView)?.itemWidth
                         ?.minus(dp(4))?.takeIf { it > 0 }
                         ?: card.width.takeIf { it > 0 } ?: return
-                    val width = if (shorts && role == Role.DIALOG_GRID) {
+                    val width = if (shorts) {
                         minOf(baseWidth, (HomeChildItemAdapter.maxPosterSize * 1.4f).roundToInt()
                             .takeIf { it > 0 } ?: dp(252))
                     } else baseWidth
@@ -865,7 +867,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                         if (shorts) (narrow * 16f / 9f).roundToInt() else (wide * 9f / 16f).roundToInt()
                     )
                 }
-                if (expanded && role != Role.DIALOG_GRID) {
+                if (expanded && role == Role.HOME_CARD) {
                     val titleWidth = card.layoutParams.width.takeIf { it > 0 }
                         ?: card.width.takeIf { it > 0 }
                     if (titleWidth != null) state.setTitleWidth(titleWidth)
@@ -1147,7 +1149,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     override fun onActivityStopped(activity: Activity) = Unit
     override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
 
-    private enum class Role { HOME_PARENT, HOME_CARD, DIALOG_GRID, DETAIL_EPISODE, DETAIL_CAST }
+    private enum class Role { HOME_PARENT, HOME_CARD, DIALOG_GRID, DETAIL_RECOMMENDATIONS, DETAIL_EPISODE, DETAIL_CAST }
 
     private companion object {
         const val PLAYER_SCREEN = "com.lagradost.cloudstream3.ui.player.GeneratorPlayer"
