@@ -10,7 +10,6 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 
@@ -96,103 +95,40 @@ class Anilife : MainAPI() {
             url.replace(Regex("""^https?://anilife\d+\.tv"""), mainUrl)
         else url
 
-    private data class AnimeRecord(val id: String, val title: String?, val poster: String?)
+    private data class CatalogResult(val items: List<SearchResponse>, val hasNext: Boolean)
 
-    private fun parseRecords(body: String): List<AnimeRecord> {
-        val found = mutableListOf<AnimeRecord>()
-        val idKeys = listOf("id", "animeId", "anime_id", "contentId", "content_id", "animeIdx")
-        val titleKeys = listOf("title", "name", "animeTitle", "anime_title", "title_ko", "titleKo", "koreanTitle")
-        val posterKeys = listOf("poster", "posterUrl", "poster_url", "thumbnail", "thumbnailUrl", "thumbnail_url", "image", "imageUrl", "image_url", "cover")
-        fun titleOf(o: JSONObject): String? {
-            for (key in titleKeys) {
-                val v = o.opt(key)
-                val title = when (v) {
-                    is String -> v
-                    is JSONObject -> listOf("ko", "korean", "native", "english")
-                        .firstNotNullOfOrNull { v.optString(it).takeIf(String::isNotBlank) }
-                    else -> null
-                }
-                if (!title.isNullOrBlank()) return title.trim()
-            }
-            return null
-        }
-        fun visit(v: Any?, depth: Int = 0) {
-            if (depth > 8 || found.size >= 500) return
-            when (v) {
-                is JSONObject -> {
-                    val id = idKeys.firstNotNullOfOrNull { v.opt(it)?.toString()?.toLongOrNull()?.takeIf { n -> n > 0 }?.toString() }
-                    if (id != null) {
-                        if (found.size < 3) println("$tag api recordKeys=${v.keys().asSequence().toList()}")
-                        val poster = posterKeys.firstNotNullOfOrNull { v.optString(it).takeIf { x -> x.isNotBlank() && x != "null" } }
-                        found.add(AnimeRecord(id, titleOf(v), poster))
-                    }
-                    val keys = v.keys()
-                    while (keys.hasNext()) visit(v.opt(keys.next()), depth + 1)
-                }
-                is JSONArray -> for (i in 0 until v.length()) visit(v.opt(i), depth + 1)
-            }
-        }
-        when {
-            body.startsWith("{") -> JSONObject(body).also {
-                println("$tag api rootKeys=${it.keys().asSequence().toList()}")
-                visit(it)
-            }
-            body.startsWith("[") -> JSONArray(body).also {
-                println("$tag api rootArraySize=${it.length()}")
-                visit(it)
-            }
-            else -> println("$tag api NON_JSON prefix=${body.take(400)}")
-        }
-        val distinct = found.distinctBy { it.id }
-        println("$tag api candidates=${found.size} ids=${distinct.size} titles=${distinct.count { it.title != null }} posters=${distinct.count { it.poster != null }} first=${distinct.take(3)}")
-        return distinct
-    }
-
-    private suspend fun catalogItems(pageUrl: String, apiUrl: String): List<SearchResponse> {
+    private suspend fun catalogItems(pageUrl: String, apiUrl: String): CatalogResult {
         println("$tag catalog START page=$pageUrl api=$apiUrl")
         val response = app.get(apiUrl, headers = headers, timeout = 10L)
-        val body = response.text.trim()
-        println("$tag api response ok=${response.isSuccessful} final=${response.url} bytes=${body.length} sample=${body.take(1600).replace("\n", " ")}")
-        if (!response.isSuccessful) return emptyList()
-        val records = parseRecords(body)
-        val document = app.get(pageUrl, headers = headers).document
-        val cards = document.select(".anime-card")
-        println("$tag catalog htmlCards=${cards.size} apiRecords=${records.size} pageTitle=${document.title()}")
-        val titleMap = records.filter { !it.title.isNullOrBlank() }.associateBy { it.title!!.trim() }
-        val imageMap = records.filter { !it.poster.isNullOrBlank() }
-            .associateBy { it.poster!!.substringBefore("?").substringAfterLast("/") }
-        var byTitle = 0
-        var byImage = 0
-        var byOrder = 0
-        var missing = 0
-        val items = cards.mapIndexedNotNull { index, card ->
-            val title = card.selectFirst(".card-title span")?.text()?.trim()
-                ?: card.selectFirst(".poster-button")?.attr("aria-label")?.removeSuffix(" 상세 보기")?.trim()
-                ?: return@mapIndexedNotNull null
-            val poster = card.selectFirst(".poster-wrap img")?.attr("src")?.let(::absolute)
-            val titleMatch = titleMap[title]
-            val imageMatch = poster?.substringBefore("?")?.substringAfterLast("/")?.let(imageMap::get)
-            val orderMatch = records.getOrNull(index).takeIf { records.size == cards.size }
-            val record = when {
-                titleMatch != null -> { byTitle++; titleMatch }
-                imageMatch != null -> { byImage++; imageMatch }
-                orderMatch != null -> { byOrder++; orderMatch }
-                else -> { missing++; null }
+        println("$tag catalog HTTP ok=${response.isSuccessful} final=${response.url}")
+        if (!response.isSuccessful) return CatalogResult(emptyList(), false)
+
+        val root = JSONObject(response.text)
+        val data = root.optJSONArray("items") ?: run {
+            println("$tag catalog FAILED no items array; keys=${root.keys().asSequence().toList()} body=${response.text.take(800)}")
+            return CatalogResult(emptyList(), false)
+        }
+        val pagination = root.optJSONObject("pagination")
+        val page = pagination?.optInt("page") ?: 1
+        val pages = pagination?.optInt("pages") ?: 1
+        var invalid = 0
+        val items = (0 until data.length()).mapNotNull { index ->
+            val anime = data.optJSONObject(index) ?: return@mapNotNull null
+            val id = anime.optString("id")
+            val title = anime.optString("title").trim()
+            if (id.isBlank() || id == "null" || title.isBlank()) {
+                invalid++
+                println("$tag catalog SKIP index=$index id=$id title=$title keys=${anime.keys().asSequence().toList()}")
+                return@mapNotNull null
             }
-            if (record == null) {
-                println("$tag catalog UNMATCHED index=$index title=$title poster=$poster")
-                null
-            } else {
-                if (titleMatch == null && index < 8) println("$tag catalog FALLBACK index=$index htmlTitle=$title apiId=${record.id} apiTitle=${record.title}")
-                newAnimeSearchResponse(title, "$mainUrl/content/${record.id}/1", TvType.Anime) {
-                    this.posterUrl = poster ?: record.poster?.let(::absolute)
-                    this.posterHeaders = headers
-                }
+            val image = anime.optString("image").takeIf { it.isNotBlank() && it != "null" }
+            newAnimeSearchResponse(title, "$mainUrl/content/$id/1", TvType.Anime) {
+                this.posterUrl = image?.let(::absolute)
+                this.posterHeaders = headers
             }
         }
-        println("$tag catalog RESULT items=${items.size} title=$byTitle image=$byImage order=$byOrder missing=$missing")
-        if (items.isEmpty()) println("$tag catalog EMPTY apiIds=${records.size} htmlCards=${cards.size} firstHtml=${cards.firstOrNull()?.selectFirst(".card-title span")?.text()}")
-        return items
+        println("$tag catalog RESULT records=${data.length()} items=${items.size} invalid=$invalid page=$page pages=$pages total=${pagination?.optInt("total")} first=${items.firstOrNull()?.name}")
+        return CatalogResult(items, page < pages)
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -201,9 +137,9 @@ class Anilife : MainAPI() {
         val pageUrl = "$mainUrl/directory/format/$format?sort=popular&page=$page"
         val apiUrl = "$mainUrl/api/anime?page=$page&limit=24&sort=popular&format=$format&v=catalog-media-2"
         return try {
-            val items = catalogItems(pageUrl, apiUrl)
-            println("$tag mainPage RESULT category=${request.name} page=$page count=${items.size}")
-            newHomePageResponse(request.name, items, hasNext = items.size >= 24)
+            val result = catalogItems(pageUrl, apiUrl)
+            println("$tag mainPage RESULT category=${request.name} page=$page count=${result.items.size} hasNext=${result.hasNext}")
+            newHomePageResponse(request.name, result.items, hasNext = result.hasNext)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             println("$tag mainPage FAILED category=${request.name} exception=${e.stackTraceToString()}")
@@ -233,7 +169,7 @@ class Anilife : MainAPI() {
             ).resolveUsingWebView(url, headers = headers).first
             println("$tag search apiRequest=${req?.url} method=${req?.method}")
             if (req == null || req.method != "GET") emptyList()
-            else catalogItems(url, req.url.toString()).also { println("$tag search RESULT count=${it.size}") }
+            else catalogItems(url, req.url.toString()).items.also { println("$tag search RESULT count=${it.size}") }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             println("$tag search FAILED exception=${e.stackTraceToString()}")
