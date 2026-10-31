@@ -24,7 +24,7 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
     Application.ActivityLifecycleCallbacks {
     private var host: FragmentActivity? = null
     private val screens = mutableMapOf<Fragment, Screen>()
-    private enum class Role { HOME_PARENT, SEARCH_PARENT, GRID, RESUME }
+    private enum class Role { HOME_PARENT, SEARCH_PARENT, GRID, SEARCH_ROW, RESUME }
 
     private inner class Screen(val root: View) {
         private val watches = mutableMapOf<RecyclerView, Watch>()
@@ -108,7 +108,7 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                 if (parent) {
                     if (role == Role.SEARCH_PARENT)
                         view.findViewById<RecyclerView>(R.id.home_child_recyclerview)
-                            ?.let { watch(it, Role.GRID) }
+                            ?.let { watch(it, Role.SEARCH_ROW) }
                     else
                         view.findViewById<RecyclerView>(R.id.home_watch_child_recyclerview)
                             ?.let { watch(it, Role.RESUME) }
@@ -118,7 +118,8 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                 if (index == RecyclerView.NO_POSITION) return restore(view)
                 val item: SearchResponse = when (role) {
                     Role.GRID -> (recycler.adapter as? SearchAdapter)?.getItemOrNull(index)
-                    Role.RESUME -> (recycler.adapter as? HomeChildItemAdapter)?.getItemOrNull(index)
+                    Role.SEARCH_ROW, Role.RESUME ->
+                        (recycler.adapter as? HomeChildItemAdapter)?.getItemOrNull(index)
                     else -> null
                 } ?: return restore(view)
                 if (item.apiName == "YouTube" || item.posterUrl.isNullOrBlank()) return restore(view)
@@ -127,7 +128,7 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                 val state = cards[view]?.takeIf { it.image === image && it.holder === holder }
                     ?: run {
                         restore(view)
-                        Card(image, holder, role == Role.RESUME).also { card ->
+                        Card(image, holder, role == Role.RESUME || role == Role.SEARCH_ROW).also { card ->
                             cards[view] = card
                             card.listener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
                                 if (cards[view] === card) apply(view)
@@ -143,14 +144,18 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                 val w = drawable.intrinsicWidth
                 val h = drawable.intrinsicHeight
                 if (w <= 0 || h <= 0) return state.restore()
+                // Leave already-correct portrait and square posters untouched.
+                if (w <= h) return state.restore()
                 val ratio = w.toFloat() / h
-                val width = if (role == Role.RESUME)
-                    HomeChildItemAdapter.maxPosterSize.takeIf { it > 0 }
+                val width = when (role) {
+                    Role.RESUME -> state.originalWidth.takeIf { it > 0 } ?: holder.width
+                    Role.SEARCH_ROW -> HomeChildItemAdapter.maxPosterSize.takeIf { it > 0 }
                         ?: (180f * recycler.resources.displayMetrics.density).roundToInt()
-                else (recycler as? AutofitRecyclerView)?.itemWidth
-                    ?.minus((4f * recycler.resources.displayMetrics.density).roundToInt())
-                    ?.takeIf { it > 0 } ?: holder.width
-                if (width > 0) state.landscape(width, (width / ratio).roundToInt())
+                    else -> (recycler as? AutofitRecyclerView)?.itemWidth
+                        ?.minus((4f * recycler.resources.displayMetrics.density).roundToInt())
+                        ?.takeIf { it > 0 } ?: holder.width
+                }
+                if (width > 0) state.landscape(width, (width / ratio).roundToInt().coerceAtLeast(1))
             }
             private fun restore(view: View) {
                 cards.remove(view)?.let {
@@ -162,7 +167,7 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
     }
 
     private class Card(val image: ImageView, val holder: View, val resume: Boolean) {
-        private val originalWidth = holder.layoutParams.width
+        val originalWidth = holder.layoutParams.width
         private val originalHeight = holder.layoutParams.height
         private val originalImageHeight = image.layoutParams.height
         var identity: String? = null
