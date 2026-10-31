@@ -20,6 +20,7 @@ import android.text.Editable
 import android.text.TextUtils
 import android.widget.TextView
 import android.util.TypedValue
+import androidx.preference.PreferenceManager
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
@@ -27,10 +28,15 @@ import androidx.media3.common.Player
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showDialog
 import com.lagradost.cloudstream3.utils.SubtitleHelper.fromTagToLanguageName
 import com.lagradost.cloudstream3.utils.AppContextUtils.html
 import com.lagradost.cloudstream3.ui.player.FullScreenPlayer
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
+import com.lagradost.cloudstream3.ui.player.CustomDecoder.Companion.updateForcedEncoding
+import com.lagradost.cloudstream3.ui.player.source_priority.LinkSource
+import com.lagradost.cloudstream3.ui.player.source_priority.QualityProfileDialog
+import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragmentDialog2
 import com.lagradost.cloudstream3.ui.player.PlayerEventSource
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.player.VideoLink
@@ -80,6 +86,24 @@ internal class ElevatePlayerPanel(
     private val groupScroll = HorizontalScrollView(ctx).apply {
         isHorizontalScrollBarEnabled = false
         addView(filters)
+    }
+    // Match CloudStream's source profile label and settings icon; reuse its dialog.
+    private val sourceProfileButton = TextView(ctx).apply {
+        setTextColor(textColor)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        applyElevateNativeFont()
+        setCompoundDrawablesRelativeWithIntrinsicBounds(0, 0, R.drawable.ic_outline_settings_24, 0)
+        compoundDrawablePadding = dp(10)
+        gravity = Gravity.CENTER
+        setPadding(dp(10), 0, dp(10), 0)
+        minimumHeight = dp(44)
+        setOnClickListener { showQualityProfiles() }
+    }
+    private val sourceActions = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+        visibility = View.GONE
+        addView(sourceProfileButton, LinearLayout.LayoutParams(-2, dp(44)))
     }
     private val rows = ArrayList<Row>()
     private var lastListTouchX = -1f
@@ -323,7 +347,44 @@ internal class ElevatePlayerPanel(
         })
         addView(syncForward, LinearLayout.LayoutParams(dp(14), dp(14)))
         setOnClickListener { if (inSync) showTabContents() else showSync() }
+    }
+    private val encodingButton = TextView(ctx).apply {
+        setTextColor(textColor)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        applyElevateNativeFont()
+        gravity = Gravity.CENTER
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+        minimumHeight = dp(44)
+        setOnClickListener { showEncodingDialog() }
+    }
+    private val subtitleSettingsButton = ImageView(ctx).apply {
+        setImageResource(R.drawable.ic_outline_settings_24)
+        scaleType = ImageView.ScaleType.CENTER_INSIDE
+        setPadding(dp(10), dp(10), dp(10), dp(10))
+        foreground = androidx.appcompat.content.res.AppCompatResources.getDrawable(
+            ctx, R.drawable.outline_drawable_forced
+        )
+        contentDescription = ctx.getString(R.string.subtitles_settings)
+        setOnClickListener {
+            if (fragment.isAdded) runCatching {
+                SubtitlesFragmentDialog2().apply { systemBarsAddPadding = true }
+                    .show(fragment.parentFragmentManager, "SubtitleSettings")
+            }.onFailure { android.util.Log.w("Elevate", "Subtitle settings failed", it) }
+        }
+    }
+    private val subtitleTools = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+        addView(encodingButton, LinearLayout.LayoutParams(0, dp(44), 1f))
+        addView(subtitleSettingsButton, LinearLayout.LayoutParams(dp(44), dp(44)))
+    }
+    private val subtitleActions = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
         visibility = View.GONE
+        addView(syncButton, LinearLayout.LayoutParams(0, dp(44), 1f))
+        addView(subtitleTools, LinearLayout.LayoutParams(0, dp(44), 1f))
     }
     private fun updateSyncHeader(back: Boolean) {
         syncBack.visibility = if (back) View.VISIBLE else View.GONE
@@ -334,8 +395,9 @@ internal class ElevatePlayerPanel(
     private val body = LinearLayout(ctx).apply {
         orientation = LinearLayout.VERTICAL
         visibility = View.GONE
+        addView(sourceActions, LinearLayout.LayoutParams(-1, dp(44)))
         addView(groupScroll, LinearLayout.LayoutParams(-1, dp(84)))
-        addView(syncButton, LinearLayout.LayoutParams(-1, dp(44)))
+        addView(subtitleActions, LinearLayout.LayoutParams(-1, dp(44)))
         addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
     }
     private var tab = Tab.EPISODES
@@ -777,14 +839,17 @@ internal class ElevatePlayerPanel(
         episodeList?.visibility = if (episode) View.VISIBLE else View.GONE
         episodeTitle?.visibility = if (episode && seasonSelector() == null) View.VISIBLE else View.GONE
         seasonSelector()?.visibility = if (episode) View.VISIBLE else View.GONE
+        sourceActions.visibility = if (tab == Tab.SOURCES) View.VISIBLE else View.GONE
         groupScroll.visibility = if (tab == Tab.SOURCES) View.VISIBLE else View.GONE
-        syncButton.visibility = if (tab == Tab.SUBTITLES) View.VISIBLE else View.GONE
+        subtitleActions.visibility = if (tab == Tab.SUBTITLES) View.VISIBLE else View.GONE
+        subtitleTools.visibility = View.VISIBLE
         updateSyncHeader(false)
         when (tab) {
             Tab.SOURCES -> { panelContent(list); renderSources() }
             Tab.AUDIO -> { panelContent(list); renderTracks() }
             Tab.SUBTITLES -> {
                 bindRefreshListener()
+                updateEncodingLabel()
                 panelContent(subtitlePane)
                 renderSubtitles()
             }
@@ -799,6 +864,50 @@ internal class ElevatePlayerPanel(
             field?.isAccessible = true
             field?.get(fragment) as? Int
         }.getOrNull() ?: QualityDataHelper.getProfiles().firstOrNull()?.id ?: 0
+    }
+
+    private fun showQualityProfiles() {
+        val activity = fragment.activity ?: return
+        val dialog = QualityProfileDialog(
+            activity, R.style.DialogFullscreenPlayer,
+            vm.state.links.mapNotNull { it.first?.let(::LinkSource) }, qualityProfile()
+        ) { profile ->
+            runCatching {
+                FullScreenPlayer::class.java.getDeclaredField("currentQualityProfile").apply {
+                    isAccessible = true
+                }.setInt(fragment, profile.id)
+            }.onFailure { android.util.Log.w("Elevate", "Quality profile selection failed", it) }
+            sourceProfileButton.text = QualityDataHelper.getProfileName(qualityProfile()).asString(ctx)
+        }
+        dialog.setOnDismissListener {
+            vm.state.clearSortedLinksCache()
+            if (fragment.isAdded && fragment.view === root && tab == Tab.SOURCES) renderSources()
+        }
+        dialog.show()
+    }
+
+    private fun updateEncodingLabel() {
+        val preferences = PreferenceManager.getDefaultSharedPreferences(ctx)
+        val values = ctx.resources.getStringArray(R.array.subtitles_encoding_values)
+        val names = ctx.resources.getStringArray(R.array.subtitles_encoding_list)
+        val index = values.indexOf(preferences.getString(ctx.getString(R.string.subtitles_encoding_key), null))
+        encodingButton.text = names.getOrNull(if (index < 0) 0 else index).orEmpty()
+    }
+
+    private fun showEncodingDialog() {
+        val activity = fragment.activity ?: return
+        val preferences = PreferenceManager.getDefaultSharedPreferences(ctx)
+        val values = ctx.resources.getStringArray(R.array.subtitles_encoding_values)
+        val names = ctx.resources.getStringArray(R.array.subtitles_encoding_list)
+        val index = values.indexOf(preferences.getString(ctx.getString(R.string.subtitles_encoding_key), null))
+        activity.showDialog(names.toList(), if (index < 0) 0 else index,
+            ctx.getString(R.string.subtitles_encoding), true, {}) { selected ->
+            val value = values.getOrNull(selected) ?: return@showDialog
+            preferences.edit().putString(ctx.getString(R.string.subtitles_encoding_key), value).apply()
+            updateForcedEncoding(ctx)
+            updateEncodingLabel()
+            fragment.player.seekTime(-1)
+        }
     }
 
     private fun currentLink(): VideoLink? = runCatching {
@@ -826,6 +935,7 @@ internal class ElevatePlayerPanel(
     }
 
     private fun renderSources() {
+        sourceProfileButton.text = QualityDataHelper.getProfileName(qualityProfile()).asString(ctx)
         val source = vm.state.generatorState?.response?.apiName.orEmpty()
         val selected = chosenLink ?: currentLink()
         val entries = vm.state.sortLinks(qualityProfile())
@@ -1166,7 +1276,8 @@ internal class ElevatePlayerPanel(
         episodeTitle?.visibility = View.GONE
         seasonSelector()?.visibility = View.GONE
         groupScroll.visibility = View.GONE
-        syncButton.visibility = View.VISIBLE
+        subtitleActions.visibility = View.VISIBLE
+        subtitleTools.visibility = View.GONE
         updateSyncHeader(true)
         offsetBeforeSync = fragment.player.getSubtitleOffset()
         panelContent(nativeSync)
