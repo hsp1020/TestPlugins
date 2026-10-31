@@ -188,7 +188,7 @@ internal class ElevatePlayerPanel(
                 }, LinearLayout.LayoutParams(dp(48), dp(48)))
             }
         row.layoutParams = AbsListView.LayoutParams(-1, if (compact) dp(48) else -2)
-        row.minimumHeight = if (compact || tab == Tab.SUBTITLES) dp(48) else dp(28)
+        row.minimumHeight = if (compact || tab == Tab.SUBTITLES || tab == Tab.AUDIO) dp(48) else dp(28)
         (row.getChildAt(0) as ImageView).apply {
             imageTintList = ColorStateList.valueOf(Color.WHITE)
             visibility = if (checked) View.VISIBLE else View.INVISIBLE
@@ -196,6 +196,7 @@ internal class ElevatePlayerPanel(
         (row.getChildAt(1) as TextView).apply {
             text = label
             styleRow(this, checked, highlighted = highlighted)
+            if (tab == Tab.AUDIO) setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
             maxLines = if (compact) 2 else Int.MAX_VALUE
             ellipsize = if (compact) TextUtils.TruncateAt.END else null
             // ListView handles selection; detached recycled child views cannot post clicks.
@@ -251,6 +252,11 @@ internal class ElevatePlayerPanel(
                     ) as TextView)
                 text.text = value.label
                 styleRow(text, false, true)
+                if (tab == Tab.AUDIO) {
+                    text.gravity = Gravity.CENTER_VERTICAL
+                    text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+                    text.setPadding(dp(12), dp(10), dp(12), dp(10))
+                }
                 text.minHeight = dp(if (value.label.isEmpty()) 48 else 36)
                 return text
             }
@@ -841,53 +847,76 @@ internal class ElevatePlayerPanel(
         val audio = tracks.allAudioTracks
         val video = tracks.allVideoTracks.sortedBy { it.height?.times(-1) }
         val items = ArrayList<Row>()
-        items += Row(ctx.getString(R.string.audio_tracks), {}, header = true)
-        audio.forEach { item ->
-            val language = item.language?.trim()?.let { raw ->
-                fromTagToLanguageName(raw)
-                    ?: fromTagToLanguageName(raw.replace('_', '-').substringBefore('-').lowercase())
-                    ?: raw
-            } ?: item.label ?: ctx.getString(R.string.audio_tracks)
-            val channels = when (item.channelCount) {
-                1 -> "Mono"; 2 -> "Stereo"; 6 -> "5.1"; 8 -> "7.1"
-                null, 0 -> ""
-                else -> "${item.channelCount}ch"
-            }
-            val mime = item.sampleMimeType.orEmpty().lowercase()
-            val codec = when {
-                "eac3-joc" in mime -> "Dolby Atmos"
-                "truehd" in mime -> "TrueHD"
-                "eac3" in mime -> "E-AC3"
-                "ac-3" in mime || "ac3" in mime -> "AC3"
-                "aac" in mime || "mp4a" in mime -> "AAC"
-                "opus" in mime -> "Opus"
-                "vorbis" in mime -> "Vorbis"
-                "mp3" in mime -> "MP3"
-                else -> item.sampleMimeType?.substringAfter('/')?.uppercase().orEmpty()
-            }
-            val label = listOf(language.replaceFirstChar { it.uppercaseChar() }, channels, codec)
-                .filter { it.isNotBlank() }.joinToString(" • ")
-            val checked = activeAudio == item
-            items += Row(label, {
-                fragment.player.setPreferredAudioTrack(item.language, item.id, item.formatIndex)
-                chosenAudio = item
-                renderTracks()
-            }, selected = checked)
-        }
-        items += Row(ctx.getString(R.string.video_tracks), {}, header = true)
-        video.forEachIndexed { index, item ->
-            val width = item.width ?: -1
-            val height = item.height ?: -1
-            val title = item.label ?: if (width > 0 && height > 0) "${width}x${height}"
-                else (index + 1).toString()
-            val checked = activeVideo == item
-            items += Row(title, {
-                if (width > 0 && height > 0) {
-                    fragment.player.setMaxVideoSize(width, height, item.id)
-                    chosenVideo = item
-                    renderTracks()
+        if (audio.size > 1) {
+            items += Row(ctx.getString(R.string.audio_tracks), {}, header = true)
+            val selectedAudio = audio.indexOfFirst {
+                it.id == activeAudio?.id && it.formatIndex == activeAudio?.formatIndex
+            }.coerceAtLeast(0)
+            audio.forEachIndexed { index, item ->
+                val language = (
+                    item.language?.trim()?.let { raw ->
+                        fromTagToLanguageName(raw)
+                            ?: fromTagToLanguageName(raw.replace('_', '-').substringBefore('-').lowercase())
+                            ?: raw
+                    } ?: item.label ?: "Audio"
+                ).replaceFirstChar { it.uppercaseChar() }
+                val count = item.channelCount
+                val channels = when {
+                    count == null || count <= 0 -> ""
+                    count == 1 -> "Mono"
+                    count == 2 -> "Stereo"
+                    count == 6 -> "5.1"
+                    count == 8 -> "7.1"
+                    else -> "${count}ch"
                 }
-            }, selected = checked)
+                val mime = item.sampleMimeType?.lowercase()?.trim().orEmpty()
+                val codec = when {
+                    mime.isBlank() -> ""
+                    "eac3-joc" in mime -> "Dolby Atmos"
+                    "truehd" in mime -> "TrueHD"
+                    "eac3" in mime -> "E-AC3"
+                    "ac-3" in mime || "ac3" in mime -> "AC3"
+                    "aac" in mime || "mp4a" in mime -> "AAC"
+                    "opus" in mime -> "Opus"
+                    "vorbis" in mime -> "Vorbis"
+                    "mp3" in mime -> "MP3"
+                    "flac" in mime -> "FLAC"
+                    "dts" in mime -> "DTS"
+                    "pcm" in mime -> "PCM"
+                    "alac" in mime -> "ALAC"
+                    "amr" in mime -> "AMR"
+                    "/" in mime -> mime.substringAfter('/').uppercase().takeIf { it.isNotBlank() } ?: ""
+                    else -> ""
+                }
+                val label = listOfNotNull(
+                    language.takeIf { it.isNotBlank() }?.replaceFirstChar { it.uppercaseChar() },
+                    channels.takeIf { it.isNotBlank() },
+                    codec.takeIf { it.isNotBlank() }?.uppercase()
+                ).joinToString(" • ")
+                items += Row(label, {
+                    fragment.player.setPreferredAudioTrack(item.language, item.id, item.formatIndex)
+                    chosenAudio = item
+                    renderTracks()
+                }, selected = index == selectedAudio)
+            }
+        }
+        if (video.size > 1) {
+            items += Row(ctx.getString(R.string.video_tracks), {}, header = true)
+            val selectedVideo = video.indexOf(activeVideo).takeIf { it != -1 }
+                ?: video.indexOfFirst { it.id == activeVideo?.id }
+            video.forEachIndexed { index, item ->
+                val width = item.width ?: -1
+                val height = item.height ?: -1
+                val title = item.label ?: if (width > 0 && height > 0) "${width}x${height}"
+                    else index.toString()
+                items += Row(title, {
+                    if (width > 0 && height > 0) {
+                        fragment.player.setMaxVideoSize(width, height, item.id)
+                        chosenVideo = item
+                        renderTracks()
+                    }
+                }, selected = index == selectedVideo)
+            }
         }
         replaceRows(items)
     }
