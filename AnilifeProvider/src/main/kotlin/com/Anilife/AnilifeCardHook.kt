@@ -216,7 +216,10 @@ internal class AnilifeCardHook(private val app: Application) : Application.Activ
                         } else if (landscape) HomeChildItemAdapter.maxPosterSize
                         else HomeChildItemAdapter.minPosterSize
                         if (width <= 0) return true
-                        val height = (width / ratio).roundToInt().coerceAtLeast(1)
+                        val height = if (list is AutofitRecyclerView) {
+                            (width / (if (landscape) 1.8f else 0.68f)).roundToInt().coerceAtLeast(1)
+                        } else if (landscape) HomeChildItemAdapter.minPosterSize
+                        else HomeChildItemAdapter.maxPosterSize
                         if (list is AutofitRecyclerView) {
                             state.card.layoutParams = state.card.layoutParams.apply { this.width = width }
                             state.image.layoutParams = state.image.layoutParams.apply { this.height = height }
