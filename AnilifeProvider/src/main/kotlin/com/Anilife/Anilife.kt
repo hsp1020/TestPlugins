@@ -29,6 +29,7 @@ class Anilife : MainAPI() {
     override var lang = "ko"
     override val supportedTypes = setOf(TvType.Anime)
 
+    private val tag = "[Anilife DBG]"
     private val userAgent = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
     private val headers get() = mapOf("User-Agent" to userAgent, "Referer" to "$mainUrl/")
 
@@ -42,6 +43,7 @@ class Anilife : MainAPI() {
 
     private suspend fun checkAndUpdateDomain() {
         if (domainChecked) return
+        println("$tag domain START active=$mainUrl")
         domainMutex.withLock {
             if (domainChecked) return@withLock
             val prefs = CloudStreamApp.context?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -51,13 +53,17 @@ class Anilife : MainAPI() {
             suspend fun verify(domain: String): String? = try {
                 val res = app.get(domain + testPath, headers = mapOf("User-Agent" to userAgent, "Referer" to "$domain/"), timeout = 3L)
                 val host = Regex("""^https://anilife\d+\.tv""").find(res.url)?.value
-                if (res.isSuccessful && (res.text.contains("catalog-grid") && res.text.contains("anime-card") || res.text.contains("/assets/index-") && res.text.contains("애니라이프"))) host else null
+                val signature = res.text.contains("catalog-grid") && res.text.contains("anime-card") || res.text.contains("/assets/index-") && res.text.contains("애니라이프")
+                println("$tag domain probe=$domain ok=${res.isSuccessful} signature=$signature redirect=${res.url}")
+                if (res.isSuccessful && signature) host else null
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
+                println("$tag domain probe FAILED domain=$domain exception=${e.javaClass.simpleName}:${e.message}")
                 null
             }
 
             val start = cached ?: BASE
+            println("$tag domain cached=$cached start=$start")
             var found = verify(start)
             if (found == null && start != BASE) found = verify(BASE)
             if (found == null) {
@@ -69,10 +75,12 @@ class Anilife : MainAPI() {
                 }
             }
             if (found != null) {
+                println("$tag domain validated=$found")
                 currentDomain = found
                 mainUrl = found
                 prefs?.edit()?.putString("domain", found)?.apply()
             }
+            if (found == null) println("$tag domain FAILED retaining=$mainUrl")
             domainChecked = true
         }
     }
@@ -88,66 +96,117 @@ class Anilife : MainAPI() {
             url.replace(Regex("""^https?://anilife\d+\.tv"""), mainUrl)
         else url
 
-    // Catalog cards are buttons without href. Find the real numeric IDs in the
-    // site's own JSON requests; never fabricate a link from a card position.
-    private suspend fun catalogItems(url: String): List<SearchResponse> {
-        val doc = app.get(url, headers = headers).document
-        val cards = doc.select(".anime-card")
-        val ids = mutableMapOf<String, String>()
-        val apiRequests = WebViewResolver(
-            Regex("a^"), additionalUrls = listOf(Regex("""/api/""")),
-            useOkhttp = false, timeout = 6500L
-        ).resolveUsingWebView(url, headers = headers).second
+    private data class AnimeRecord(val id: String, val title: String?, val poster: String?)
 
-        fun collect(value: Any?, depth: Int = 0) {
-            if (depth > 8) return
-            when (value) {
-                is JSONObject -> {
-                    val id = listOf("id", "animeId", "anime_id", "contentId", "content_id")
-                        .firstNotNullOfOrNull { key -> value.opt(key)?.toString()?.toLongOrNull() }
-                    val title = listOf("title", "name", "animeTitle", "anime_title")
-                        .firstNotNullOfOrNull { key -> value.optString(key).takeIf { it.isNotBlank() } }
-                    if (id != null && id > 0 && !title.isNullOrBlank()) ids[title.trim()] = id.toString()
-                    val keys = value.keys()
-                    while (keys.hasNext()) collect(value.opt(keys.next()), depth + 1)
+    private fun parseRecords(body: String): List<AnimeRecord> {
+        val found = mutableListOf<AnimeRecord>()
+        val idKeys = listOf("id", "animeId", "anime_id", "contentId", "content_id", "animeIdx")
+        val titleKeys = listOf("title", "name", "animeTitle", "anime_title", "title_ko", "titleKo", "koreanTitle")
+        val posterKeys = listOf("poster", "posterUrl", "poster_url", "thumbnail", "thumbnailUrl", "thumbnail_url", "image", "imageUrl", "image_url", "cover")
+        fun titleOf(o: JSONObject): String? {
+            for (key in titleKeys) {
+                val v = o.opt(key)
+                val title = when (v) {
+                    is String -> v
+                    is JSONObject -> listOf("ko", "korean", "native", "english")
+                        .firstNotNullOfOrNull { v.optString(it).takeIf(String::isNotBlank) }
+                    else -> null
                 }
-                is JSONArray -> for (i in 0 until value.length()) collect(value.opt(i), depth + 1)
+                if (!title.isNullOrBlank()) return title.trim()
+            }
+            return null
+        }
+        fun visit(v: Any?, depth: Int = 0) {
+            if (depth > 8 || found.size >= 500) return
+            when (v) {
+                is JSONObject -> {
+                    val id = idKeys.firstNotNullOfOrNull { v.opt(it)?.toString()?.toLongOrNull()?.takeIf { n -> n > 0 }?.toString() }
+                    if (id != null) {
+                        if (found.size < 3) println("$tag api recordKeys=${v.keys().asSequence().toList()}")
+                        val poster = posterKeys.firstNotNullOfOrNull { v.optString(it).takeIf { x -> x.isNotBlank() && x != "null" } }
+                        found.add(AnimeRecord(id, titleOf(v), poster))
+                    }
+                    val keys = v.keys()
+                    while (keys.hasNext()) visit(v.opt(keys.next()), depth + 1)
+                }
+                is JSONArray -> for (i in 0 until v.length()) visit(v.opt(i), depth + 1)
             }
         }
-        for (req in apiRequests.distinctBy { it.url.toString() }.take(8)) {
-            if (req.method != "GET" || req.url.host != java.net.URI(mainUrl).host) continue
-            try {
-                val body = app.get(req.url.toString(), headers = headers).text.trim()
-                if (body.startsWith("{")) collect(JSONObject(body))
-                if (body.startsWith("[")) collect(JSONArray(body))
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
+        when {
+            body.startsWith("{") -> JSONObject(body).also {
+                println("$tag api rootKeys=${it.keys().asSequence().toList()}")
+                visit(it)
             }
+            body.startsWith("[") -> JSONArray(body).also {
+                println("$tag api rootArraySize=${it.length()}")
+                visit(it)
+            }
+            else -> println("$tag api NON_JSON prefix=${body.take(400)}")
         }
-        return cards.mapNotNull { card ->
+        val distinct = found.distinctBy { it.id }
+        println("$tag api candidates=${found.size} ids=${distinct.size} titles=${distinct.count { it.title != null }} posters=${distinct.count { it.poster != null }} first=${distinct.take(3)}")
+        return distinct
+    }
+
+    private suspend fun catalogItems(pageUrl: String, apiUrl: String): List<SearchResponse> {
+        println("$tag catalog START page=$pageUrl api=$apiUrl")
+        val response = app.get(apiUrl, headers = headers, timeout = 10L)
+        val body = response.text.trim()
+        println("$tag api response ok=${response.isSuccessful} final=${response.url} bytes=${body.length} sample=${body.take(1600).replace("\n", " ")}")
+        if (!response.isSuccessful) return emptyList()
+        val records = parseRecords(body)
+        val document = app.get(pageUrl, headers = headers).document
+        val cards = document.select(".anime-card")
+        println("$tag catalog htmlCards=${cards.size} apiRecords=${records.size} pageTitle=${document.title()}")
+        val titleMap = records.filter { !it.title.isNullOrBlank() }.associateBy { it.title!!.trim() }
+        val imageMap = records.filter { !it.poster.isNullOrBlank() }
+            .associateBy { it.poster!!.substringBefore("?").substringAfterLast("/") }
+        var byTitle = 0
+        var byImage = 0
+        var byOrder = 0
+        var missing = 0
+        val items = cards.mapIndexedNotNull { index, card ->
             val title = card.selectFirst(".card-title span")?.text()?.trim()
-                ?: card.selectFirst(".poster-button")?.attr("aria-label")?.removeSuffix(" 상세 보기")
-                ?: return@mapNotNull null
-            val href = card.selectFirst("a[href*='/content/']")?.attr("href")
-                ?: ids[title]?.let { "/content/$it/1" }
-                ?: return@mapNotNull null
+                ?: card.selectFirst(".poster-button")?.attr("aria-label")?.removeSuffix(" 상세 보기")?.trim()
+                ?: return@mapIndexedNotNull null
             val poster = card.selectFirst(".poster-wrap img")?.attr("src")?.let(::absolute)
-            newAnimeSearchResponse(title, absolute(href), TvType.Anime) {
-                this.posterUrl = poster
-                this.posterHeaders = headers
+            val titleMatch = titleMap[title]
+            val imageMatch = poster?.substringBefore("?")?.substringAfterLast("/")?.let(imageMap::get)
+            val orderMatch = records.getOrNull(index).takeIf { records.size == cards.size }
+            val record = when {
+                titleMatch != null -> { byTitle++; titleMatch }
+                imageMatch != null -> { byImage++; imageMatch }
+                orderMatch != null -> { byOrder++; orderMatch }
+                else -> { missing++; null }
+            }
+            if (record == null) {
+                println("$tag catalog UNMATCHED index=$index title=$title poster=$poster")
+                null
+            } else {
+                if (titleMatch == null && index < 8) println("$tag catalog FALLBACK index=$index htmlTitle=$title apiId=${record.id} apiTitle=${record.title}")
+                newAnimeSearchResponse(title, "$mainUrl/content/${record.id}/1", TvType.Anime) {
+                    this.posterUrl = poster ?: record.poster?.let(::absolute)
+                    this.posterHeaders = headers
+                }
             }
         }
+        println("$tag catalog RESULT items=${items.size} title=$byTitle image=$byImage order=$byOrder missing=$missing")
+        if (items.isEmpty()) println("$tag catalog EMPTY apiIds=${records.size} htmlCards=${cards.size} firstHtml=${cards.firstOrNull()?.selectFirst(".card-title span")?.text()}")
+        return items
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         checkAndUpdateDomain()
-        val separator = if (request.data.contains("?")) "&" else "?"
-        val url = mainUrl + request.data + separator + "page=" + page
+        val format = Regex("""/format/([^?&/]+)""").find(request.data)?.groupValues?.get(1) ?: "TV"
+        val pageUrl = "$mainUrl/directory/format/$format?sort=popular&page=$page"
+        val apiUrl = "$mainUrl/api/anime?page=$page&limit=24&sort=popular&format=$format&v=catalog-media-2"
         return try {
-            val items = catalogItems(url)
-            newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
+            val items = catalogItems(pageUrl, apiUrl)
+            println("$tag mainPage RESULT category=${request.name} page=$page count=${items.size}")
+            newHomePageResponse(request.name, items, hasNext = items.size >= 24)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+            println("$tag mainPage FAILED category=${request.name} exception=${e.stackTraceToString()}")
             newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
     }
@@ -166,17 +225,29 @@ class Anilife : MainAPI() {
             return emptyList()
         }
         return try {
-            catalogItems(mainUrl + "/search?q=" + URLEncoder.encode(query, "UTF-8"))
+            val url = "$mainUrl/search?q=${URLEncoder.encode(query, "UTF-8")}"
+            println("$tag search START query=$query url=$url")
+            val req = WebViewResolver(
+                Regex("""https?://anilife\d+\.tv/api/(?:anime|search)[^\s]*"""),
+                userAgent = userAgent, useOkhttp = false, timeout = 7000L
+            ).resolveUsingWebView(url, headers = headers).first
+            println("$tag search apiRequest=${req?.url} method=${req?.method}")
+            if (req == null || req.method != "GET") emptyList()
+            else catalogItems(url, req.url.toString()).also { println("$tag search RESULT count=${it.size}") }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+            println("$tag search FAILED exception=${e.stackTraceToString()}")
             emptyList()
         }
     }
 
     override suspend fun load(url: String): LoadResponse {
         checkAndUpdateDomain()
+        try {
         val cleanUrl = freshUrl(url.substringBefore("?poster="))
+        println("$tag detail START url=$cleanUrl")
         val doc = app.get(cleanUrl, headers = headers).document
+        println("$tag detail html title=${doc.title()} episodeButtons=${doc.select(".tv-episode-grid button").size}")
         val seriesId = Regex("""/content/(\d+)""").find(cleanUrl)?.groupValues?.get(1)
             ?: throw IllegalArgumentException("Invalid AniLife content URL: $cleanUrl")
         val title = doc.selectFirst(".tv-work-copy h1")?.text()?.trim()
@@ -196,12 +267,18 @@ class Anilife : MainAPI() {
                     (n.toString() + "화 - " + episodeName) else (n.toString() + "화")
             }
         }.sortedBy { it.episode }
+        println("$tag detail RESULT series=$seriesId title=$title episodes=${episodes.size} first=${episodes.firstOrNull()?.episode}")
         return newAnimeLoadResponse(title, cleanUrl, TvType.Anime) {
             this.posterUrl = image?.let(::absolute)
             this.posterHeaders = headers
             this.plot = plot
             this.tags = tags
             addEpisodes(DubStatus.Subbed, episodes)
+        }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            println("$tag detail FAILED url=$url exception=${e.stackTraceToString()}")
+            throw e
         }
     }
 
@@ -211,19 +288,26 @@ class Anilife : MainAPI() {
     ): Boolean {
         checkAndUpdateDomain()
         val episodeUrl = freshUrl(data.substringBefore("?ref="))
+        println("$tag links START episode=$episodeUrl casting=$isCasting")
         return try {
             // ArtPlayer uses a blob: video element: capture its real signed HLS request.
             val match = WebViewResolver(
                 Regex("""https?://[^\s]+\.m3u8(?:\?[^\s]*)?$""", RegexOption.IGNORE_CASE),
                 userAgent = userAgent, useOkhttp = false, timeout = 18000L
-            ).resolveUsingWebView(episodeUrl, headers = headers).first ?: return false
+            ).resolveUsingWebView(episodeUrl, headers = headers).first ?: run {
+                println("$tag links FAILED no HLS request observed episode=$episodeUrl")
+                return false
+            }
+            println("$tag links HLS host=${match.url.host} path=${match.url.encodedPath} queryKeys=${match.url.queryParameterNames} headers=${match.headers.names()}")
             callback(newExtractorLink(name, name, match.url.toString(), ExtractorLinkType.M3U8) {
                 this.referer = mainUrl + "/"
                 this.headers = match.headers.toMap() + ("Referer" to (mainUrl + "/"))
             })
+            println("$tag links callback RESULT delivered")
             true
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+            println("$tag links FAILED exception=${e.stackTraceToString()}")
             false
         }
     }
