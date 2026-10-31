@@ -36,7 +36,6 @@ import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.CustomDecoder.Companion.updateForcedEncoding
 import com.lagradost.cloudstream3.ui.player.source_priority.LinkSource
 import com.lagradost.cloudstream3.ui.player.source_priority.QualityProfileDialog
-import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragmentDialog2
 import com.lagradost.cloudstream3.ui.player.PlayerEventSource
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.player.VideoLink
@@ -368,8 +367,15 @@ internal class ElevatePlayerPanel(
         contentDescription = ctx.getString(R.string.subtitles_settings)
         setOnClickListener {
             if (fragment.isAdded) runCatching {
-                SubtitlesFragmentDialog2().apply { systemBarsAddPadding = true }
-                    .show(fragment.parentFragmentManager, "SubtitleSettings")
+                // The native dialog implements a Compose Screen unavailable on the plugin compile classpath.
+                // Instantiate it through DialogFragment without changing the native settings window.
+                val dialog = Class.forName(
+                    "com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragmentDialog2"
+                ).getDeclaredConstructor().newInstance() as androidx.fragment.app.DialogFragment
+                dialog.javaClass.getMethod(
+                    "setSystemBarsAddPadding", Boolean::class.javaPrimitiveType
+                ).invoke(dialog, true)
+                dialog.show(fragment.parentFragmentManager, "SubtitleSettings")
             }.onFailure { android.util.Log.w("Elevate", "Subtitle settings failed", it) }
         }
     }
