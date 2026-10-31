@@ -28,6 +28,8 @@ internal enum class ElevateFeature(
         "Play live streams directly when selecting a Home catalog card; keep native player back navigation."),
     HOME_REPAIR("Home & Library", "Home Poster Refresh",
         "Repair stale Home cards when switching providers."),
+    ORIGINAL_THUMBNAIL_RATIOS("Home & Library", "Original Thumbnail Ratios",
+        "Preserve landscape thumbnails in Search and Continue Watching; leave YouTube and portrait posters unchanged."),
     LIBRARY_POSTERS("Home & Library", "Custom Library Posters",
         "Replace library covers via RPDB, XRDB, OPDB, AIORatings, TOP Posters or EasyRatingsDB."),
     EPISODE_PROGRESS("Home & Library", "Episode Progress Indicators",

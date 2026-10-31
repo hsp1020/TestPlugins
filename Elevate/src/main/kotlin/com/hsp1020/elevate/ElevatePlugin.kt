@@ -82,6 +82,7 @@ class ElevatePlugin : Plugin() {
     private var subtitleSyncRepair: SubtitleSyncCueRepair? = null
     private var homeHero: HomeHeroToggle? = null
     private var libraryPosters: LibraryPosterHook? = null
+    private var thumbnailRatios: OriginalThumbnailRatioHook? = null
     private var httpResponseGuard: ElevateHttpResponseGuard? = null
     private var nativeEpisodeOverlay: NativeEpisodeOverlayHook? = null
     private var nativePanelEnabled = false
@@ -219,6 +220,14 @@ class ElevatePlugin : Plugin() {
             libraryPosters?.stop()
             libraryPosters = null
         }
+        if (enabled(ElevateFeature.ORIGINAL_THUMBNAIL_RATIOS)) {
+            if (thumbnailRatios == null) {
+                thumbnailRatios = OriginalThumbnailRatioHook(application).also { it.start() }
+            }
+        } else {
+            thumbnailRatios?.stop()
+            thumbnailRatios = null
+        }
         val showEpisodeProgress = enabled(ElevateFeature.EPISODE_PROGRESS)
         val blurUnwatchedEpisodes = enabled(ElevateFeature.EPISODE_SPOILERS)
         if (showEpisodeProgress || blurUnwatchedEpisodes) {
@@ -350,6 +359,8 @@ class ElevatePlugin : Plugin() {
         homeHero = null
         libraryPosters?.stop()
         libraryPosters = null
+        thumbnailRatios?.stop()
+        thumbnailRatios = null
         httpResponseGuard?.stop()
         httpResponseGuard = null
         nativeEpisodeOverlay?.stop()
