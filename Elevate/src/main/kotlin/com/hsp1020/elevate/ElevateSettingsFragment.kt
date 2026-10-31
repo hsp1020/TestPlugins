@@ -52,6 +52,8 @@ internal enum class ElevateFeature(
         "Select app-language audio, then Japanese for anime or English for other titles."),
     SKIP("Playback & Subtitles", "Unified Skip Intervals",
         "Provide skip segments using native timestamps, AniSkip, Anime Skip, IntroDb and TheIntroDB. Configure automatic skipping separately below."),
+    PIP_LIBRARY_BROWSE("Playback & Subtitles", "Browse Library in PiP",
+        "Keep native Android PiP playback while browsing CloudStream Home, Search and Library."),
     PIP_BUTTON("Playback & Subtitles", "Picture-in-Picture Button",
         "Show a native-style PiP player button when PiP is enabled in CloudStream."),
     PIP_SUBTITLES("Playback & Subtitles", "PiP Subtitle Styling",

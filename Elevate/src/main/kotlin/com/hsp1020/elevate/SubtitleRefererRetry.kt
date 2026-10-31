@@ -192,7 +192,7 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
             active = true
             worker = Executors.newSingleThreadExecutor()
             application.registerActivityLifecycleCallbacks(this)
-            (CommonActivity.activity as? MainActivity)?.let(::use)
+            PipLibraryNavigation.currentPlayerHost()?.let(::use)
         }
     }
 
@@ -332,7 +332,7 @@ internal class SubtitleRefererRetry(private val application: Application) : Appl
     }
 
     override fun onActivityResumed(activity: Activity) {
-        if (activity is MainActivity) use(activity)
+        PipLibraryNavigation.playerHost(activity)?.let(::use)
     }
 
     override fun onActivityDestroyed(activity: Activity) {

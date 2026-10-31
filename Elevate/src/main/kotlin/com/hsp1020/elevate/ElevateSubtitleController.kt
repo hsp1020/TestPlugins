@@ -1001,7 +1001,7 @@ internal class ElevateSubtitleRefreshHook(
     fun start() {
         current = this
         application.registerActivityLifecycleCallbacks(this)
-        (CommonActivity.activity as? MainActivity)?.let(::bind)
+        PipLibraryNavigation.currentPlayerHost()?.let(::bind)
     }
     fun stop() {
         if (current === this) current = null
@@ -1020,10 +1020,10 @@ internal class ElevateSubtitleRefreshHook(
         fun active(): ElevateSubtitleRefreshHook? = current
     }
     override fun onActivityStarted(activity: Activity) {
-        if (activity is MainActivity) bind(activity)
+        PipLibraryNavigation.playerHost(activity)?.let(::bind)
     }
     override fun onActivityResumed(activity: Activity) {
-        if (activity is MainActivity) bind(activity)
+        PipLibraryNavigation.playerHost(activity)?.let(::bind)
     }
     override fun onActivityDestroyed(activity: Activity) {
         if (this.activity === activity) unbind()

@@ -372,7 +372,7 @@ class PipSubtitleLifecycle(
             if (running) return@post
             running = true
             application.registerActivityLifecycleCallbacks(this)
-            (CommonActivity.activity as? MainActivity)?.let(::use)
+            PipLibraryNavigation.currentPlayerHost()?.let(::use)
         }
     }
 
@@ -415,7 +415,7 @@ class PipSubtitleLifecycle(
     }
 
     override fun onActivityResumed(activity: Activity) {
-        if (activity is MainActivity) use(activity)
+        PipLibraryNavigation.playerHost(activity)?.let(::use)
     }
 
     override fun onActivityDestroyed(activity: Activity) {

@@ -40,7 +40,7 @@ internal class EpisodeProgressHook(
     private var progressEnabled: Boolean,
     private var blurEnabled: Boolean
 ) : Application.ActivityLifecycleCallbacks {
-    private var activity: FragmentActivity? = null
+    private val activities = LinkedHashSet<FragmentActivity>()
     private val screens = mutableMapOf<Fragment, Screen>()
     private var knownProviderCount = -1
     private var youtubeProviders = emptySet<String>()
@@ -91,9 +91,7 @@ internal class EpisodeProgressHook(
     }
 
     private fun use(next: FragmentActivity) {
-        if (activity === next) return
-        release()
-        activity = next
+        if (!activities.add(next)) return
         next.supportFragmentManager.registerFragmentLifecycleCallbacks(callback, true)
         fun scan(fm: FragmentManager) {
             fm.fragments.forEach { fragment ->
@@ -104,11 +102,12 @@ internal class EpisodeProgressHook(
         scan(next.supportFragmentManager)
     }
 
-    private fun release() {
-        activity?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(callback)
-        screens.values.forEach(Screen::stop)
-        screens.clear()
-        activity = null
+    private fun release(activity: FragmentActivity? = null) {
+        val targets = activity?.let(::listOf) ?: activities.toList()
+        targets.forEach { it.supportFragmentManager.unregisterFragmentLifecycleCallbacks(callback) }
+        activities.removeAll(targets.toSet())
+        val removed = screens.filter { (_, screen) -> activity == null || screen.fragment.activity === activity }
+        removed.forEach { (fragment, screen) -> screen.stop(); screens.remove(fragment) }
     }
 
     private fun bind(fragment: Fragment, root: View) {
@@ -426,11 +425,13 @@ internal class EpisodeProgressHook(
     }
 
     override fun onActivityResumed(activity: Activity) {
-        if (activity is MainActivity) use(activity)
+        if (activity is MainActivity || PipLibraryNavigation.isPlayerActivity(activity)) {
+            (activity as? FragmentActivity)?.let(::use)
+        }
     }
 
     override fun onActivityDestroyed(activity: Activity) {
-        if (this.activity === activity) release()
+        if (activity is FragmentActivity && activity in activities) release(activity)
     }
 
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit

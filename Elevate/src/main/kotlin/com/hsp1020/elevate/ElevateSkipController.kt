@@ -230,7 +230,7 @@ internal class ElevateSkipController(private val application: Application) :
     fun start() {
         settings.registerOnSharedPreferenceChangeListener(preferenceListener)
         application.registerActivityLifecycleCallbacks(this)
-        (CommonActivity.activity as? MainActivity)?.let(::use)
+        PipLibraryNavigation.currentPlayerHost()?.let(::use)
     }
 
     fun stop() {
@@ -576,7 +576,7 @@ internal class ElevateSkipController(private val application: Application) :
     }
 
     override fun onActivityResumed(activity: Activity) {
-        if (activity is MainActivity) use(activity)
+        PipLibraryNavigation.playerHost(activity)?.let(::use)
     }
     override fun onActivityDestroyed(activity: Activity) {
         if (this.activity === activity) {

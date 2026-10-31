@@ -119,7 +119,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         if (started) return
         started = true
         application.registerActivityLifecycleCallbacks(this)
-        (CommonActivity.activity as? MainActivity)?.let { use(it) }
+        PipLibraryNavigation.currentPlayerHost()?.let { use(it) }
     }
 
     fun stop() {
@@ -264,10 +264,10 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
     }
 
     override fun onActivityResumed(activity: Activity) {
-        if (activity is MainActivity) use(activity)
+        PipLibraryNavigation.playerHost(activity)?.let(::use)
     }
     override fun onActivityStarted(activity: Activity) {
-        if (activity is MainActivity) use(activity)
+        PipLibraryNavigation.playerHost(activity)?.let(::use)
     }
     override fun onActivityDestroyed(activity: Activity) {
         if (this.activity === activity) {

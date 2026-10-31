@@ -69,6 +69,7 @@ import com.lagradost.cloudstream3.utils.UIHelper.navigate
 class ElevatePlugin : Plugin() {
     private var hook: NativeDetailSearchHook? = null
     private var pipSubtitles: PipSubtitleLifecycle? = null
+    private var pipLibrary: PipLibraryNavigation? = null
     private var episodeProgress: EpisodeProgressHook? = null
     private var subtitleRetry: SubtitleRefererRetry? = null
     private var homeRecyclerGuard: HomeRecyclerCacheGuard? = null
@@ -152,6 +153,12 @@ class ElevatePlugin : Plugin() {
     private fun syncFeatures() {
         val application = app ?: run {
             return
+        }
+        if (enabled(ElevateFeature.PIP_LIBRARY_BROWSE)) {
+            if (pipLibrary == null) pipLibrary = PipLibraryNavigation(application)
+            pipLibrary?.start()
+        } else {
+            pipLibrary?.stop()
         }
         if (enabled(ElevateFeature.HTTP_RESPONSE_CLEANUP)) {
             if (httpResponseGuard == null) {
@@ -340,6 +347,8 @@ class ElevatePlugin : Plugin() {
         featurePrefs = null
         hook?.stop()
         hook = null
+        pipLibrary?.stop()
+        pipLibrary = null
         pipSubtitles?.stop()
         pipSubtitles = null
         episodeProgress?.stop()
@@ -1298,7 +1307,7 @@ internal class NativeEpisodeOverlayHook(
 
     fun start() {
         application.registerActivityLifecycleCallbacks(this)
-        (CommonActivity.activity as? MainActivity)?.let(::use)
+        PipLibraryNavigation.currentPlayerHost()?.let(::use)
     }
 
     fun stop() {
@@ -1314,10 +1323,10 @@ internal class NativeEpisodeOverlayHook(
     }
 
     override fun onActivityStarted(activity: Activity) {
-        if (activity is MainActivity) use(activity)
+        PipLibraryNavigation.playerHost(activity)?.let(::use)
     }
     override fun onActivityResumed(activity: Activity) {
-        if (activity is MainActivity) use(activity)
+        PipLibraryNavigation.playerHost(activity)?.let(::use)
     }
     override fun onActivityDestroyed(activity: Activity) {
         if (this.activity === activity) unbind()

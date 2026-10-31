@@ -28,7 +28,7 @@ import com.lagradost.cloudstream3.R
 internal class NativeRecyclerListenerGuard(private val application: Application) :
     Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
-    private var activity: FragmentActivity? = null
+    private val activities = LinkedHashSet<FragmentActivity>()
     private val screens = LinkedHashMap<Fragment, Watch>()
 
     // Weak keys avoid retaining recycled RecyclerViews. A signature change
@@ -156,9 +156,7 @@ internal class NativeRecyclerListenerGuard(private val application: Application)
     }
 
     private fun use(next: FragmentActivity) {
-        if (activity === next) return
-        unbind()
-        activity = next
+        if (!activities.add(next)) return
         next.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
         fun scan(manager: FragmentManager) {
             manager.fragments.forEach { f ->
@@ -179,22 +177,27 @@ internal class NativeRecyclerListenerGuard(private val application: Application)
         unbind()
     }
 
-    private fun unbind() {
-        activity?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
-        screens.values.forEach { it.stop() }
-        screens.clear()
-        checked.clear()
-        activity = null
+    private fun unbind(activity: FragmentActivity? = null) {
+        val targets = activity?.let(::listOf) ?: activities.toList()
+        targets.forEach { it.supportFragmentManager.unregisterFragmentLifecycleCallbacks(fragments) }
+        activities.removeAll(targets.toSet())
+        val removed = screens.filter { (_, screen) -> activity == null || screen.fragment.activity === activity }
+        removed.forEach { (fragment, screen) -> screen.stop(); screens.remove(fragment) }
+        if (activities.isEmpty()) checked.clear()
     }
 
     override fun onActivityStarted(activity: Activity) {
-        if (activity is MainActivity) use(activity)
+        if (activity is MainActivity || PipLibraryNavigation.isPlayerActivity(activity)) {
+            (activity as? FragmentActivity)?.let(::use)
+        }
     }
     override fun onActivityResumed(activity: Activity) {
-        if (activity is MainActivity) use(activity)
+        if (activity is MainActivity || PipLibraryNavigation.isPlayerActivity(activity)) {
+            (activity as? FragmentActivity)?.let(::use)
+        }
     }
     override fun onActivityDestroyed(activity: Activity) {
-        if (this.activity === activity) unbind()
+        if (activity is FragmentActivity && activity in activities) unbind(activity)
     }
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
     override fun onActivityPaused(activity: Activity) = Unit

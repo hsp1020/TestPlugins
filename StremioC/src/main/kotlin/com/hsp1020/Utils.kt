@@ -322,6 +322,29 @@ internal class RatingPlotImageHook(
     private var host: FragmentActivity? = null
     private val watchers = mutableMapOf<Fragment, Watcher>()
     private val scrobble = StremioScrobble(context)
+    private var pipScrobbleHost: FragmentActivity? = null
+    private val pipScrobbleFragments = object : FragmentManager.FragmentLifecycleCallbacks() {
+        override fun onFragmentViewCreated(
+            fm: FragmentManager, f: Fragment, v: View, savedInstanceState: Bundle?
+        ) = scrobble.watch(f)
+        override fun onFragmentResumed(fm: FragmentManager, f: Fragment) = scrobble.watch(f)
+        override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) = scrobble.detach(f)
+    }
+
+    private fun watchPipScrobble(activity: FragmentActivity) {
+        if (pipScrobbleHost === activity) return
+        pipScrobbleHost?.supportFragmentManager
+            ?.unregisterFragmentLifecycleCallbacks(pipScrobbleFragments)
+        pipScrobbleHost = activity
+        activity.supportFragmentManager.registerFragmentLifecycleCallbacks(pipScrobbleFragments, true)
+        fun scan(manager: FragmentManager) {
+            manager.fragments.forEach { fragment ->
+                if (fragment is GeneratorPlayer) scrobble.watch(fragment)
+                if (fragment.isAdded) scan(fragment.childFragmentManager)
+            }
+        }
+        scan(activity.supportFragmentManager)
+    }
     private val mdbUpdate: (String) -> Unit = { cacheKey ->
         val matched = watchers.values.filter { it.matchesMdbKey(cacheKey) }
         val applied = matched.count { it.refreshLateMdb() }
@@ -580,6 +603,9 @@ internal class RatingPlotImageHook(
     }
 
     fun stop() {
+        pipScrobbleHost?.supportFragmentManager
+            ?.unregisterFragmentLifecycleCallbacks(pipScrobbleFragments)
+        pipScrobbleHost = null
         scrobble.stop()
         scrobble.detach()
         StremioCMdbUiBridge.listen(null)
@@ -2877,8 +2903,20 @@ internal class RatingPlotImageHook(
 
     override fun onActivityResumed(activity: Activity) {
         if (activity is MainActivity) runCatching { use(activity) }
+        else if (activity is com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity &&
+            app.getSharedPreferences("ElevateFeatures", Context.MODE_PRIVATE)
+                .getBoolean("PIP_LIBRARY_BROWSE", false)) {
+            watchPipScrobble(activity)
+        }
     }
-    override fun onActivityDestroyed(activity: Activity) { if (host === activity) {
+    override fun onActivityDestroyed(activity: Activity) {
+        if (activity === pipScrobbleHost) {
+            (activity as FragmentActivity).supportFragmentManager
+                .unregisterFragmentLifecycleCallbacks(pipScrobbleFragments)
+            pipScrobbleHost = null
+            scrobble.detach()
+        }
+        if (host === activity) {
         removeHomeProviderObserver?.invoke()
         removeHomeProviderObserver = null
         homeRoot = null
