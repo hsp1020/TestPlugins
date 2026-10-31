@@ -875,9 +875,14 @@ internal class ElevatePlayerPanel(
             .filter { it.shouldUseLink || it.link == selected }.map { it.link }
         val keys = entries.map { sourceGroup(it, source) }
         val groups = keys.distinct()
-        if (filter !in groups) filter = null
+        if (groups.size <= 1 || filter !in groups) filter = null
+        val filterRowCount = if (groups.size >= 6) 2 else 1
+        groupScroll.visibility = if (groups.size <= 1) View.GONE else View.VISIBLE
+        groupScroll.layoutParams = groupScroll.layoutParams.apply {
+            height = dp(42 * filterRowCount)
+        }
         filters.removeAllViews()
-        val filterRows = Array(2) {
+        val filterRows = Array(filterRowCount) {
             LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }.also {
                 filters.addView(it, LinearLayout.LayoutParams(-2, dp(42)))
             }
@@ -906,11 +911,13 @@ internal class ElevatePlayerPanel(
                 setOnClickListener { filter = value; renderSources() }
             }
             // Keep the 1/3 and 2/4 row order, but size each row independently.
-            filterRows[filterButtonCount++ % 2]
+            filterRows[filterButtonCount++ % filterRowCount]
                 .addView(item, LinearLayout.LayoutParams(-2, -1))
         }
-        addFilter(null)
-        groups.forEach(::addFilter)
+        if (groups.size > 1) {
+            addFilter(null)
+            groups.forEach(::addFilter)
+        }
         replaceRows(entries.mapIndexedNotNull { index, link ->
             if (filter != null && keys[index] != filter) return@mapIndexedNotNull null
             val name = link.first?.name ?: link.second?.name ?: "Source"
