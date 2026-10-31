@@ -60,6 +60,7 @@ import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.TvType
 import androidx.media3.common.Player as Media3Player
 import com.lagradost.cloudstream3.ui.AutofitRecyclerView
