@@ -10,6 +10,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.AbsListView
 import android.widget.ArrayAdapter
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.HorizontalScrollView
 import android.widget.ImageButton
@@ -86,23 +87,32 @@ internal class ElevatePlayerPanel(
         isHorizontalScrollBarEnabled = false
         addView(filters)
     }
-    // Match CloudStream's source profile label and settings icon; reuse its dialog.
+    // Keep the native profile selector while centering its label independently of the settings icon.
     private val sourceProfileButton = TextView(ctx).apply {
         setTextColor(textColor)
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         applyElevateNativeFont()
-        setCompoundDrawablesRelativeWithIntrinsicBounds(0, 0, R.drawable.ic_outline_settings_24, 0)
-        compoundDrawablePadding = dp(10)
         gravity = Gravity.CENTER
         setPadding(dp(10), 0, dp(10), 0)
         minimumHeight = dp(44)
         setOnClickListener { showQualityProfiles() }
     }
-    private val sourceActions = LinearLayout(ctx).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER
+    private val sourceSettingsButton = ImageView(ctx).apply {
+        setImageResource(R.drawable.ic_outline_settings_24)
+        scaleType = ImageView.ScaleType.CENTER_INSIDE
+        setPadding(dp(10), dp(10), dp(10), dp(10))
+        foreground = androidx.appcompat.content.res.AppCompatResources.getDrawable(
+            ctx, R.drawable.outline_drawable_forced
+        )
+        contentDescription = "Source profile settings"
+        setOnClickListener { showQualityProfiles() }
+    }
+    private val sourceActions = FrameLayout(ctx).apply {
         visibility = View.GONE
-        addView(sourceProfileButton, LinearLayout.LayoutParams(-2, dp(44)))
+        addView(sourceProfileButton, FrameLayout.LayoutParams(-2, dp(44), Gravity.CENTER))
+        addView(sourceSettingsButton, FrameLayout.LayoutParams(
+            dp(44), dp(44), Gravity.END or Gravity.CENTER_VERTICAL
+        ))
     }
     private val rows = ArrayList<Row>()
     private var lastListTouchX = -1f
@@ -352,6 +362,7 @@ internal class ElevatePlayerPanel(
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         applyElevateNativeFont()
         gravity = Gravity.CENTER
+        setPadding(dp(8), 0, dp(8), 0)
         maxLines = 1
         ellipsize = TextUtils.TruncateAt.END
         minimumHeight = dp(44)
@@ -381,16 +392,18 @@ internal class ElevatePlayerPanel(
     }
     private val subtitleTools = LinearLayout(ctx).apply {
         orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER
-        addView(encodingButton, LinearLayout.LayoutParams(0, dp(44), 1f))
+        gravity = Gravity.CENTER_VERTICAL
+        addView(encodingButton, LinearLayout.LayoutParams(-2, dp(44)).apply {
+            marginEnd = dp(4)
+        })
         addView(subtitleSettingsButton, LinearLayout.LayoutParams(dp(44), dp(44)))
     }
-    private val subtitleActions = LinearLayout(ctx).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
+    private val subtitleActions = FrameLayout(ctx).apply {
         visibility = View.GONE
-        addView(syncButton, LinearLayout.LayoutParams(0, dp(44), 1f))
-        addView(subtitleTools, LinearLayout.LayoutParams(0, dp(44), 1f))
+        addView(syncButton, FrameLayout.LayoutParams(-2, dp(44), Gravity.CENTER))
+        addView(subtitleTools, FrameLayout.LayoutParams(
+            -2, dp(44), Gravity.END or Gravity.CENTER_VERTICAL
+        ))
     }
     private fun updateSyncHeader(back: Boolean) {
         syncBack.visibility = if (back) View.VISIBLE else View.GONE
