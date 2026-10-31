@@ -32,3 +32,8 @@ dependencies {
 
 // Compile the shared extractor into this plugin's own classes.dex.
 
+
+// Compile common card sizing into YouTube itself; Elevate is not a runtime dependency.
+android {
+    sourceSets.getByName("main").java.srcDir("${rootProject.projectDir}/shared/src/main/kotlin")
+}

@@ -60,6 +60,7 @@ import com.lagradost.cloudstream3.TvSeriesLoadResponse
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
+import com.hsp1020.shared.NativePosterCardState
 import java.util.IdentityHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.math.roundToInt
@@ -601,7 +602,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
 
         private inner class Watcher(private val list: RecyclerView, private val role: Role) {
-            private val modified = IdentityHashMap<View, CardState>()
+            private val modified = IdentityHashMap<View, NativePosterCardState>()
             private val episodeSizes = IdentityHashMap<View, Pair<View, Pair<Int, Int>>>()
             private val directClicks = IdentityHashMap<View, View.OnClickListener>()
             private val castViews = IdentityHashMap<View, Boolean>()
@@ -825,7 +826,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 val title = view.findViewById<TextView>(R.id.imageText) ?: return
                 val card = view.findViewById<View>(R.id.background_card) ?: return
                 val image = view.findViewById<ImageView>(R.id.imageView) ?: return
-                val state = modified[view] ?: CardState(title, card, image).also { modified[view] = it }
+                val state = modified[view] ?: NativePosterCardState(title, card, image).also { modified[view] = it }
                 val expanded = !card.contains(title)
                 val lines = if (role == Role.RESUME_CARD) 2 else 4
                 if (Build.VERSION.SDK_INT >= 29 && title.isSingleLine) title.setSingleLine(false)
@@ -1052,95 +1053,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             private fun restore(view: View) {
                 modified.remove(view)?.restore()
             }
-        }
-    }
-
-    private class CardState(
-        private val title: TextView,
-        private val card: View,
-        private val image: ImageView
-    ) {
-        private val max = title.maxLines
-        private val min = title.minLines
-        private val cardWidth = card.layoutParams.width
-        private val cardHeight = card.layoutParams.height
-        private val imageHeight = image.layoutParams.height
-        private val titleWidth = title.layoutParams.width
-        private var changedTitleWidth = false
-        private val horizontal = Build.VERSION.SDK_INT >= 29 && title.isSingleLine
-        private var changedCard = false
-        private var changedImage = false
-
-        fun setTitleWidth(width: Int) {
-            val params = title.layoutParams
-            if (params.width != width) {
-                params.width = width
-                title.layoutParams = params
-            }
-            changedTitleWidth = true
-        }
-
-        fun setCardSize(width: Int, height: Int) {
-            val params = card.layoutParams
-            if (params.width != width || params.height != height) {
-                params.width = width
-                params.height = height
-                card.layoutParams = params
-            }
-            changedCard = true
-        }
-
-        fun setCardWidth(width: Int) {
-            val params = card.layoutParams
-            if (params.width != width) {
-                params.width = width
-                card.layoutParams = params
-            }
-            changedCard = true
-        }
-
-        fun setImageHeight(height: Int) {
-            val params = image.layoutParams
-            if (params.height != height) {
-                params.height = height
-                image.layoutParams = params
-            }
-            changedImage = true
-        }
-
-        fun restoreSize() {
-            if (changedTitleWidth) {
-                val params = title.layoutParams
-                if (params.width != titleWidth) {
-                    params.width = titleWidth
-                    title.layoutParams = params
-                }
-                changedTitleWidth = false
-            }
-            if (changedCard) {
-                val params = card.layoutParams
-                if (params.width != cardWidth || params.height != cardHeight) {
-                    params.width = cardWidth
-                    params.height = cardHeight
-                    card.layoutParams = params
-                }
-                changedCard = false
-            }
-            if (changedImage) {
-                val params = image.layoutParams
-                if (params.height != imageHeight) {
-                    params.height = imageHeight
-                    image.layoutParams = params
-                }
-                changedImage = false
-            }
-        }
-
-        fun restore() {
-            title.maxLines = max
-            title.minLines = min
-            if (horizontal) title.setSingleLine(true)
-            restoreSize()
         }
     }
 

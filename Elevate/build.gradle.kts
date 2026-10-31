@@ -17,3 +17,7 @@ dependencies {
     compileOnly("androidx.constraintlayout:constraintlayout:2.0.1")
     compileOnly("org.jetbrains.kotlinx:kotlinx-collections-immutable-jvm:0.4.0")
 }
+
+android {
+    sourceSets.getByName("main").java.srcDir("${rootProject.projectDir}/shared/src/main/kotlin")
+}
