@@ -350,6 +350,36 @@ internal class ElevatePlayerPanel(
     private val syncAdapter = SubtitleOffsetItemAdapter(0L) { cue ->
         offsetInput.setText((cue.startTimeMs - (fragment.player.getPosition() ?: 0L)).toString())
     }
+    private var syncActiveCue = -1
+    private val syncProgressTick = object : Runnable {
+        override fun run() {
+            if (!inSync || !syncList.isShown || fragment.view !== root ||
+                fragment.playerView?.player?.isPlaying != true) return
+            updateSyncPosition()
+            syncList.postDelayed(this, 500L)
+        }
+    }
+    private fun updateSyncPosition() {
+        if (!inSync || syncAdapter.itemCount == 0) return
+        val time = (fragment.player.getPosition() ?: 0L) + fragment.player.getSubtitleOffset()
+        syncAdapter.updateTime(time)
+        val active = syncAdapter.getLatestActiveItem(time)
+        if (active != syncActiveCue) {
+            syncActiveCue = active
+            syncList.scrollToPosition(active)
+        }
+    }
+    private fun scheduleSyncPosition() {
+        syncList.removeCallbacks(syncProgressTick)
+        if (inSync && syncList.isShown && fragment.view === root &&
+            fragment.playerView?.player?.isPlaying == true && syncAdapter.itemCount != 0) {
+            syncList.postDelayed(syncProgressTick, 500L)
+        }
+    }
+    private fun stopSyncPosition() {
+        syncList.removeCallbacks(syncProgressTick)
+        syncActiveCue = -1
+    }
     private var syncCueRetryCount = 0
     private var syncCueRetryUrl: String? = null
     private var syncCueRetryPlayer: Player? = null
@@ -456,6 +486,15 @@ internal class ElevatePlayerPanel(
         when (method.name) {
             "onCues" -> {
                 if (inSync) root.post { updateSyncCues("player-cues") }
+                null
+            }
+            "onIsPlayingChanged", "onPositionDiscontinuity" -> {
+                if (inSync) root.post {
+                    if (inSync) {
+                        updateSyncPosition()
+                        scheduleSyncPosition()
+                    }
+                }
                 null
             }
             "onTracksChanged" -> {
@@ -609,6 +648,7 @@ internal class ElevatePlayerPanel(
 
     fun detach() {
         cancelSyncCueRetry()
+        stopSyncPosition()
         vm.currentLinks.removeObserver(linksChanged)
         vm.currentSubtitles.removeObserver(subtitlesChanged)
         ElevateSubtitleRefreshHook.active()?.setPanelListener(null)
@@ -672,6 +712,7 @@ internal class ElevatePlayerPanel(
 
     private fun showTabContents() {
         cancelSyncCueRetry()
+        stopSyncPosition()
         inSync = false
         observeCuePlayer(tab == Tab.SUBTITLES)
         if (body.paddingBottom != 0) body.setPadding(0, 0, 0, 0)
@@ -1023,8 +1064,12 @@ internal class ElevatePlayerPanel(
         noCues.visibility = if (cues.isEmpty()) View.VISIBLE else View.GONE
         val target = (fragment.player.getPosition() ?: 0L) + fragment.player.getSubtitleOffset()
         syncAdapter.submitList(cues) {
-            if (inSync && cues.isNotEmpty())
-                syncList.scrollToPosition(syncAdapter.getLatestActiveItem(target))
+            if (inSync) {
+                syncActiveCue = if (cues.isNotEmpty())
+                    syncAdapter.getLatestActiveItem(target) else -1
+                if (syncActiveCue >= 0) syncList.scrollToPosition(syncActiveCue)
+                scheduleSyncPosition()
+            }
         }
         syncAdapter.updateTime(target)
         android.util.Log.d("ElevatePanelSync", "cues reason=$reason fromRefresh=${refreshed != null} count=${cues.size} active=${syncAdapter.getLatestActiveItem(target)} time=$target")
@@ -1032,6 +1077,7 @@ internal class ElevatePlayerPanel(
 
     private fun showSync() {
         cancelSyncCueRetry()
+        stopSyncPosition()
         bindRefreshListener()
         tab = Tab.SUBTITLES
         inSync = true

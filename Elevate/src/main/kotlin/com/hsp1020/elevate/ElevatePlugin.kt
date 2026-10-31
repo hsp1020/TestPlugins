@@ -758,6 +758,8 @@ internal class NativeEpisodeOverlayHook(
         }
 
         private val overlayLayout = ViewTreeObserver.OnGlobalLayoutListener {
+            // CloudStream may reveal these buttons again on track/control changes.
+            hideNativePanelButtons()
             val showing = overlay?.isShown == true
             val currentAdapter = list?.adapter
             val nativeChanged = currentAdapter is EpisodeAdapter &&
@@ -774,6 +776,18 @@ internal class NativeEpisodeOverlayHook(
                 fragment, root, overlay, title, list, { selector }, { openWithoutPause() },
                 { subtitle -> onManualSubtitle(fragment, subtitle) }
             ) else null
+        private val nativePanelButtons = if (playerPanel != null) listOf(
+            R.id.player_subtitle_offset_btt, R.id.player_sources_btt, R.id.player_tracks_btt
+        ).mapNotNull { id ->
+            root.findViewById<View>(id)?.let { view -> view to view.visibility }
+        } else emptyList()
+
+        private fun hideNativePanelButtons() {
+            nativePanelButtons.forEach { (button, _) ->
+                if (button.visibility != View.GONE) button.visibility = View.GONE
+            }
+        }
+
         private var host: PlayerView? = null
         private var callbacks: PlayerView.Callbacks? = null
         private var guardedCallbacks: PlayerView.Callbacks? = null
@@ -905,6 +919,7 @@ internal class NativeEpisodeOverlayHook(
             installRemoteGuard()
             if (tree.isAlive) tree.addOnGlobalLayoutListener(overlayLayout)
             scheduleOverlayCheck()
+            hideNativePanelButtons()
 
             // Only the panel surface is translucent; text and images stay opaque.
             oldBackground?.constantState?.newDrawable(root.resources)?.mutate()?.let {
@@ -952,6 +967,9 @@ internal class NativeEpisodeOverlayHook(
             originalCardColors.clear()
             removeSelector()
             playerPanel?.detach()
+            nativePanelButtons.forEach { (button, visibility) ->
+                if (button.visibility != visibility) button.visibility = visibility
+            }
             overlay?.background = oldBackground
             if (restoreNativeList) fragment.showEpisodesOverlay()
             filteredAdapter = null
