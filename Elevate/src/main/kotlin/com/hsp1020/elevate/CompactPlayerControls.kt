@@ -112,14 +112,14 @@ internal class CompactPlayerControls(private val application: Application) :
     override fun onActivityStopped(activity: Activity) = Unit
     override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
 
-    private inner class Panel(val root: View, private val strip: LinearLayout) {
-        private data class Size(
-            val width: Int, val height: Int,
-            val minWidth: Int, val minimumWidth: Int,
-            val minHeight: Int, val minimumHeight: Int,
-            val start: Int, val end: Int
-        )
+    private data class Size(
+        val width: Int, val height: Int,
+        val minWidth: Int, val minimumWidth: Int,
+        val minHeight: Int, val minimumHeight: Int,
+        val start: Int, val end: Int
+    )
 
+    private inner class Panel(val root: View, private val strip: LinearLayout) {
         private val originalTop = strip.paddingTop
         private val originalBottom = strip.paddingBottom
         private val saved = LinkedHashMap<MaterialButton, Size>()
@@ -184,7 +184,7 @@ internal class CompactPlayerControls(private val application: Application) :
                 if (button !in saved) {
                     // PiP duplicates the resize button, which may already be compact.
                     // Restore it from that button's original dimensions instead.
-                    val source = if (button.text?.toString() == "PIP") saved[sample] else null
+                    val source = if (button.text?.toString() == "PIP") sample?.let { saved[it] } else null
                     saved[button] = source ?: snapshot(button)
                 }
                 resize(button, compact)
