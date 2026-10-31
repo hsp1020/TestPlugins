@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.Application
 import android.os.Bundle
 import android.view.View
+import android.view.ViewTreeObserver
 import android.widget.ImageView
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentActivity
@@ -48,6 +49,44 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
         private inner class Watch(private val recycler: RecyclerView, val role: Role) {
             private val parent get() = role == Role.HOME_PARENT || role == Role.SEARCH_PARENT
             private val cards = IdentityHashMap<View, Card>()
+            private val pending = IdentityHashMap<View, Card>()
+            private var pendingTree: ViewTreeObserver? = null
+            private val imageReady = ViewTreeObserver.OnPreDrawListener {
+                val ready = ArrayList<View>()
+                val iterator = pending.entries.iterator()
+                while (iterator.hasNext()) {
+                    val (view, state) = iterator.next()
+                    val drawable = state.image.drawable
+                    if (cards[view] !== state || view.parent !== recycler) {
+                        iterator.remove()
+                    } else if (drawable != null &&
+                        drawable.intrinsicWidth > 0 && drawable.intrinsicHeight > 0) {
+                        iterator.remove()
+                        ready.add(view)
+                    }
+                }
+                if (pending.isEmpty()) clearImageWait()
+                ready.forEach(::apply)
+                true
+            }
+            private fun clearImageWait() {
+                pendingTree?.takeIf { it.isAlive }?.removeOnPreDrawListener(imageReady)
+                pendingTree = null
+            }
+            private fun awaitImage(view: View, state: Card) {
+                pending[view] = state
+                if (pendingTree == null) {
+                    val tree = recycler.viewTreeObserver
+                    if (tree.isAlive) {
+                        pendingTree = tree
+                        tree.addOnPreDrawListener(imageReady)
+                    }
+                }
+            }
+            private fun stopWaiting(view: View) {
+                pending.remove(view)
+                if (pending.isEmpty()) clearImageWait()
+            }
             private var adapter: RecyclerView.Adapter<*>? = null
             private var queued = false
             private val changes = object : RecyclerView.AdapterDataObserver() {
@@ -83,6 +122,8 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                 recycler.removeOnLayoutChangeListener(layout)
                 adapter?.unregisterAdapterDataObserver(changes)
                 adapter = null
+                pending.clear()
+                clearImageWait()
                 cards.keys.toList().forEach(::restore)
                 queued = false
             }
@@ -140,10 +181,16 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                     state.restore()
                     state.identity = identity
                 }
-                val drawable = image.drawable ?: return state.restore()
-                val w = drawable.intrinsicWidth
-                val h = drawable.intrinsicHeight
-                if (w <= 0 || h <= 0) return state.restore()
+                val drawable = image.drawable
+                val w = drawable?.intrinsicWidth ?: 0
+                val h = drawable?.intrinsicHeight ?: 0
+                if (w <= 0 || h <= 0) {
+                    // Coil completes asynchronously; watch the first drawable-ready draw.
+                    state.restore()
+                    awaitImage(view, state)
+                    return
+                }
+                stopWaiting(view)
                 // Leave already-correct portrait and square posters untouched.
                 if (w <= h) return state.restore()
                 val ratio = w.toFloat() / h
@@ -158,6 +205,7 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
                 if (width > 0) state.landscape(width, (width / ratio).roundToInt().coerceAtLeast(1))
             }
             private fun restore(view: View) {
+                stopWaiting(view)
                 cards.remove(view)?.let {
                     it.listener?.let(it.image::removeOnLayoutChangeListener)
                     it.restore()
@@ -172,15 +220,21 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
         private val originalImageHeight = image.layoutParams.height
         var identity: String? = null
         var listener: View.OnLayoutChangeListener? = null
-        fun landscape(width: Int, height: Int) = setSize(
-            if (resume) width else image.layoutParams.width, height
-        )
-        fun restore() = setSize(
-            if (resume) originalWidth else image.layoutParams.width,
-            if (resume) originalHeight else originalImageHeight
-        )
-        private fun setSize(width: Int, height: Int) {
-            val target = if (resume) holder else image
+        fun landscape(width: Int, height: Int) {
+            if (resume) {
+                setSize(holder, width, height)
+            } else {
+                // Match YouTube's search-grid correction: resize both card width
+                // and image height, not the image alone.
+                setSize(holder, width, holder.layoutParams.height)
+                setSize(image, image.layoutParams.width, height)
+            }
+        }
+        fun restore() {
+            setSize(holder, originalWidth, originalHeight)
+            setSize(image, image.layoutParams.width, originalImageHeight)
+        }
+        private fun setSize(target: View, width: Int, height: Int) {
             val params = target.layoutParams
             if (params.width == width && params.height == height) return
             params.width = width
