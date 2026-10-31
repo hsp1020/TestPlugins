@@ -141,7 +141,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             val target = if (duration > 0) current.positionMs.coerceAtMost(
                 (duration - 1_000L).coerceAtLeast(0L)
             ) else current.positionMs
-            playerFragment.player.seekTo(target)
+            mediaPlayer.seekTo(target)
             Log.i("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=applied positionMs=$target")
             clearPendingTimeSeek()
         }
@@ -660,7 +660,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 YoutubeUtils.extractYoutubeId(currentMeta.data) == videoId &&
                 media?.playbackState == Media3Player.STATE_READY &&
                 media.isCurrentMediaItemSeekable) {
-                currentPlayer.player.seekTo(seconds * 1000L)
+                media.seekTo(seconds * 1000L)
                 Log.i("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=active positionMs=${seconds * 1000L}")
                 return
             }
