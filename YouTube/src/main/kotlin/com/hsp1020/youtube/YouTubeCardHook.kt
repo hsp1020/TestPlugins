@@ -60,6 +60,8 @@ import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.TvType
+import androidx.media3.common.Player as Media3Player
 import com.lagradost.cloudstream3.ui.AutofitRecyclerView
 import com.lagradost.cloudstream3.ui.BaseAdapter
 import com.lagradost.cloudstream3.ui.ViewHolderState
@@ -94,10 +96,74 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         val startingSeason: Int?,
         val episodes: CopyOnWriteArrayList<ResultEpisode>,
         var prefetchStarted: Boolean = false,
+        val returnToDetail: Boolean = false,
     )
     private var lastPlayed: PlayedEpisode? = null
     private var directPlayback: DirectPlayback? = null
     private var directLoading = false
+    private data class PendingTimeSeek(val videoId: String, val positionMs: Long)
+    private var pendingTimeSeek: PendingTimeSeek? = null
+    private var seekPlayer: Media3Player? = null
+    private var seekListener: Media3Player.Listener? = null
+
+    private fun detachTimeSeekListener() {
+        seekListener?.let { listener -> seekPlayer?.removeListener(listener) }
+        seekListener = null
+        seekPlayer = null
+    }
+
+    private fun clearPendingTimeSeek() {
+        detachTimeSeekListener()
+        pendingTimeSeek = null
+    }
+
+    /** The existing player event path supplies the loaded media; no polling. */
+    private fun watchPendingTimeSeek(fragment: Fragment) {
+        if (pendingTimeSeek == null || fragment.javaClass.name != PLAYER_SCREEN) return
+        val playerFragment = fragment as? GeneratorPlayer ?: return
+        val model = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
+        fun attachToReadyPlayer() {
+            val pending = pendingTimeSeek ?: return
+            if (this.playerFragment !== fragment || !fragment.isAdded) return
+            val mediaPlayer = playerFragment.playerView?.player ?: return
+            if (seekPlayer !== mediaPlayer) {
+                detachTimeSeekListener()
+                seekPlayer = mediaPlayer
+                seekListener = object : Media3Player.Listener {
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        if (playbackState != Media3Player.STATE_READY) return
+                        val current = pendingTimeSeek ?: return
+                        val meta = model.state.generatorState?.meta as? ResultEpisode
+                        if (meta?.apiName != "YouTube" ||
+                            YoutubeUtils.extractYoutubeId(meta.data) != current.videoId) {
+                            Log.w("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=episode_mismatch")
+                            clearPendingTimeSeek()
+                            return
+                        }
+                        if (!mediaPlayer.isCurrentMediaItemSeekable) {
+                            Log.w("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=not_seekable")
+                            clearPendingTimeSeek()
+                            return
+                        }
+                        val duration = mediaPlayer.duration
+                        val target = if (duration > 0) current.positionMs.coerceAtMost(
+                            (duration - 1_000L).coerceAtLeast(0L)
+                        ) else current.positionMs
+                        playerFragment.player.seekTo(target)
+                        Log.i("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=applied positionMs=$target")
+                        clearPendingTimeSeek()
+                    }
+                }.also(mediaPlayer::addListener)
+            }
+            if (mediaPlayer.playbackState == Media3Player.STATE_READY) {
+                seekListener?.onPlaybackStateChanged(Media3Player.STATE_READY)
+            }
+        }
+        // Both are existing native state transitions; no synthetic timer.
+        model.loadingLinks.observe(fragment.viewLifecycleOwner) { attachToReadyPlayer() }
+        model.currentLinks.observe(fragment.viewLifecycleOwner) { attachToReadyPlayer() }
+        attachToReadyPlayer()
+    }
     private var expandedReturnDialog: Dialog? = null
     // One pending selection bridges player exit and the native detail ViewModel.
     private var pendingRange: Pair<Int, PlayedEpisode>? = null
@@ -147,6 +213,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             if (destination.id == R.id.navigation_player) {
                 enteredPlayer = true
             } else if (enteredPlayer) {
+                clearPendingTimeSeek()
                 if (destination.id == origin) expandedReturnDialog?.hide()
                 clearPlaybackReturnListener()
                 if (directPlayback === session) {
@@ -158,7 +225,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     lastPlayed = null
                     appliedRange = null
                     playerFragment = null
-                    if (destination.id == origin) {
+                    if (destination.id == origin && !session.returnToDetail) {
                         val target = if (Globals.isLayout(Globals.TV or Globals.EMULATOR)) {
                             R.id.global_to_navigation_results_tv
                         } else R.id.global_to_navigation_results_phone
@@ -280,7 +347,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
     }
 
-    private fun playHomeVideo(card: SearchResponse, popupRoot: View? = null) {
+    private fun playHomeVideo(
+        card: SearchResponse,
+        popupRoot: View? = null,
+        startAtMs: Long? = null,
+        returnToDetail: Boolean = false,
+    ) {
         if (directLoading || directPlayback != null) return
         val activity = host ?: return
         val api = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
@@ -328,11 +400,17 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             val session = DirectPlayback(
                 card, parentId, initial[selectedIndex].episode,
                 initial[selectedIndex].season, episodes,
+                returnToDetail = returnToDetail,
             )
             lastPlayed = null
             pendingRange = null
             appliedRange = null
             directPlayback = session
+            if (startAtMs != null) {
+                clearPendingTimeSeek()
+                pendingTimeSeek = PendingTimeSeek(videoId, startAtMs)
+                Log.i("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=pending positionMs=$startAtMs")
+            }
             if (popupDialog != null) {
                 popupDialog.hide()
                 expandedReturnDialog = popupDialog
@@ -347,6 +425,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 ),
             )
         } catch (e: Exception) {
+            clearPendingTimeSeek()
             clearPlaybackReturnListener()
             directPlayback = null
             if (expandedReturnDialog === popupDialog) {
@@ -397,7 +476,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         override fun onFragmentDestroyed(fm: FragmentManager, f: Fragment) {
             if (f.javaClass.name != PLAYER_SCREEN) return
             recordPlayerEpisode(f)
-            if (playerFragment === f) playerFragment = null
+            if (playerFragment === f) {
+                clearPendingTimeSeek()
+                playerFragment = null
+            }
             // Normally the destination listener already handled return.
             // Disarm a stale listener if the player was removed externally.
             if (directPlayback != null && playbackReturnListener == null) {
@@ -422,6 +504,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             if (f.javaClass.name == PLAYER_SCREEN) {
                 playerFragment = f
                 prefetchAfterLinks(f)
+                watchPendingTimeSeek(f)
             }
             attach(f, view)
         }
@@ -442,6 +525,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     }
 
     private fun release() {
+        clearPendingTimeSeek()
         clearPlaybackReturnListener()
         playerFragment = null
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
@@ -547,6 +631,32 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         private var nativeMovement: android.text.method.MovementMethod? = null
         private var editingDescription = false
 
+        private fun openTimestamp(seconds: Int) {
+            val active = fragment?.takeIf { it.isAdded } ?: return
+            val videoId = YoutubeUtils.extractYoutubeId(pageUrl) ?: return
+            val currentPlayer = playerFragment as? GeneratorPlayer
+            val currentMeta = currentPlayer?.let {
+                ViewModelProvider(it)[PlayerGeneratorViewModel::class.java]
+                    .state.generatorState?.meta as? ResultEpisode
+            }
+            val media = currentPlayer?.playerView?.player
+            if (currentMeta?.apiName == "YouTube" &&
+                YoutubeUtils.extractYoutubeId(currentMeta.data) == videoId &&
+                media?.playbackState == Media3Player.STATE_READY &&
+                media.isCurrentMediaItemSeekable) {
+                currentPlayer.player.seekTo(seconds * 1000L)
+                Log.i("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=active positionMs=${seconds * 1000L}")
+                return
+            }
+            if (directLoading || directPlayback != null) return
+            val api = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
+            val title = active.arguments?.getString("name").orEmpty().ifBlank { "YouTube Video" }
+            val card = api.newMovieSearchResponse(title, pageUrl, TvType.Movie) {
+                posterUrl = YoutubeUtils.buildThumbnailFromId(videoId)
+            }
+            playHomeVideo(card, startAtMs = seconds * 1000L, returnToDetail = true)
+        }
+
         private fun openTagSearch(query: String) {
             val active = fragment?.takeIf { it.isAdded } ?: return
             val id = root.resources.getIdentifier("navigation_search", "id", root.context.packageName)
@@ -628,7 +738,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     val seconds = if (parts.size == 2) parts[0] * 60 + parts[1]
                         else parts[0] * 3600 + parts[1] * 60 + parts[2]
                     add(found.range.first, found.range.last + 1, LINK_BLUE) {
-                        openExternalLink("https://www.youtube.com/watch?v=$videoId&t=${seconds}s", "time")
+                        openTimestamp(seconds)
                     }
                 }
             }
