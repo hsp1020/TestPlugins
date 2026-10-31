@@ -286,8 +286,9 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
 
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+        val taskId = activity.taskId // Read through Activity before MainActivity smart cast.
         if (activity is MainActivity)
-            ElevateDiagnostics.probe(app, "home_created", "task=${activity.taskId} instance=${System.identityHashCode(activity)}")
+            ElevateDiagnostics.probe(app, "home_created", "task=$taskId instance=${System.identityHashCode(activity)}")
         if (activity !is DownloadedPlayerActivity || pending == null) return
         playerActivity?.takeIf { it !== activity }?.let {
             it.supportFragmentManager.unregisterFragmentLifecycleCallbacks(playerFragments)
