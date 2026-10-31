@@ -832,7 +832,7 @@ open class StremioC(
                     else tmdb?.let { "tmdb:$it" }
                         ?: imdb ?: mal?.let { "mal:$it" } ?: return@mapIndexedNotNull null
                 val title = listOf("en_title", "title", "name")
-                    .firstNotNullOfOrNull { row.get(it)?.asText()?.trim()?.takeIf(String::isNotBlank) }
+                    .firstNotNullOfOrNull { row.get(it).textOrNull()?.trim()?.takeIf(String::isNotBlank) }
                     ?: return@mapIndexedNotNull null
                 val art = row.get("poster")?.asText()?.trim()
                     ?.takeIf { it.matches(Regex("[A-Za-z0-9_/-]{1,160}")) }
