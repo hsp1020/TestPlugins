@@ -1,7 +1,6 @@
 package com.hsp1020.elevate
 
 import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
 import android.content.res.ColorStateList
 import android.view.Gravity
 import android.view.MotionEvent
@@ -117,9 +116,9 @@ internal class ElevatePlayerPanel(
     }.apply {
         choiceMode = AbsListView.CHOICE_MODE_NONE
         divider = null
-        selector = ColorDrawable(Color.TRANSPARENT)
     }
-    private fun styleRow(text: TextView, selected: Boolean, header: Boolean = false) {
+    private fun styleRow(text: TextView, selected: Boolean, header: Boolean = false,
+                         highlighted: Boolean = false) {
         // CheckLabel defines drawableStartCompat (24dp) plus a drawable gap.
         // Clear it and reserve the checkmark in an independent fixed-width view.
         text.setCompoundDrawablesRelativeWithIntrinsicBounds(null, null, null, null)
@@ -132,14 +131,15 @@ internal class ElevatePlayerPanel(
         text.includeFontPadding = false
         text.gravity = if (header) Gravity.CENTER else Gravity.CENTER_VERTICAL
         text.setTextColor(if (selected) ColorStateList.valueOf(Color.WHITE) else standardTextColor)
-        text.isActivated = selected
+        text.isActivated = highlighted
         text.isSelected = false
     }
 
     private fun bindRow(
         reuse: View?, parent: ViewGroup, position: Int, label: CharSequence, checked: Boolean,
         compact: Boolean, refresh: ((ImageButton) -> Unit)? = null,
-        longRefresh: ((ImageButton) -> Unit)? = null, refreshUrl: String? = null
+        longRefresh: ((ImageButton) -> Unit)? = null, refreshUrl: String? = null,
+        highlighted: Boolean = false
     ): View {
         val row = (reuse as? LinearLayout)?.takeIf { it.childCount == 3 }
             ?: LinearLayout(ctx).apply {
@@ -168,7 +168,7 @@ internal class ElevatePlayerPanel(
         }
         (row.getChildAt(1) as TextView).apply {
             text = label
-            styleRow(this, checked)
+            styleRow(this, checked, highlighted = highlighted)
             maxLines = if (compact) 2 else Int.MAX_VALUE
             ellipsize = if (compact) TextUtils.TruncateAt.END else null
             // ListView handles selection; detached recycled child views cannot post clicks.
@@ -241,7 +241,7 @@ internal class ElevatePlayerPanel(
             val checked = if (position == 0) playingLanguage == null
                 else subtitleGroups.getOrNull(position - 1)?.first == playingLanguage
             return bindRow(convertView, parent, position, getItem(position) ?: "",
-                checked, compact = true)
+                checked, compact = true, highlighted = position == selectedGroup)
         }
     }
     private var subtitleGroups = emptyList<Pair<String, List<SubtitleData>>>()
@@ -982,7 +982,7 @@ internal class ElevatePlayerPanel(
             syncCueRetryPlayer = activePlayer
         }
         // CloudStream's decoder fills cue data asynchronously after selection.
-        val cues = (refreshed ?: fragment.player.getSubtitleCues()).toList()
+        val cues = (refreshed ?: SubtitleSyncCueRepair.cuesForPlayer(fragment)).toList()
         syncList.removeCallbacks(syncCueRetry)
         if (refreshed == null && selected?.origin == SubtitleOrigin.URL &&
             cues.size < 3 && syncCueRetryCount < 40) {
