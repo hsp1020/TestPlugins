@@ -61,8 +61,9 @@ internal class AnilifeCardHook(private val app: Application) : Application.Activ
         host = null
     }
     private fun closeAll() {
-        watchers.values.toList().asReversed().forEach { it.close() }
+        val closing = watchers.values.toList().asReversed()
         watchers.clear()
+        closing.forEach { it.close() }
     }
     private fun use(activity: FragmentActivity) {
         if (host === activity) return
@@ -111,6 +112,7 @@ internal class AnilifeCardHook(private val app: Application) : Application.Activ
         private val pending = IdentityHashMap<View, Pair<ViewTreeObserver, ViewTreeObserver.OnPreDrawListener>>()
         private var observed: RecyclerView.Adapter<*>? = null
         private var posted = false
+        private var closed = false
         private val changes = object : RecyclerView.AdapterDataObserver() {
             override fun onChanged() = schedule()
             override fun onItemRangeChanged(start: Int, count: Int) = schedule()
@@ -134,9 +136,12 @@ internal class AnilifeCardHook(private val app: Application) : Application.Activ
             scan()
         }
         fun close() {
+            if (closed) return
+            closed = true
             posted = false
             list.removeOnChildAttachStateChangeListener(children)
             observed?.unregisterAdapterDataObserver(changes)
+            observed = null
             pending.keys.toList().forEach(::disarm)
             states.keys.toList().forEach(::restore)
             if (parent) {
@@ -147,7 +152,7 @@ internal class AnilifeCardHook(private val app: Application) : Application.Activ
             }
         }
         private fun sync() {
-            if (observed === list.adapter) return
+            if (closed || observed === list.adapter) return
             observed?.unregisterAdapterDataObserver(changes)
             observed = list.adapter
             observed?.registerAdapterDataObserver(changes)
