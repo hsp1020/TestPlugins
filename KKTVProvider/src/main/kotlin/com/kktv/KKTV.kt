@@ -15,7 +15,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
 
 class KKTVProvider : MainAPI() {
-    override var mainUrl = "https://ifadetv.com"
+    override var mainUrl = "https://www.goli.tv"
     override var name = "KKTV"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "ko"
