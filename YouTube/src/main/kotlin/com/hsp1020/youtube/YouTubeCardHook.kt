@@ -123,41 +123,56 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         if (pendingTimeSeek == null || fragment.javaClass.name != PLAYER_SCREEN) return
         val playerFragment = fragment as? GeneratorPlayer ?: return
         val model = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
+        fun seekWhenReady(mediaPlayer: Media3Player) {
+            val current = pendingTimeSeek ?: return
+            val meta = model.state.generatorState?.meta as? ResultEpisode
+            if (meta?.apiName != "YouTube" ||
+                YoutubeUtils.extractYoutubeId(meta.data) != current.videoId) {
+                Log.w("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=episode_mismatch")
+                clearPendingTimeSeek()
+                return
+            }
+            if (!mediaPlayer.isCurrentMediaItemSeekable) {
+                Log.w("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=not_seekable")
+                clearPendingTimeSeek()
+                return
+            }
+            val duration = mediaPlayer.duration
+            val target = if (duration > 0) current.positionMs.coerceAtMost(
+                (duration - 1_000L).coerceAtLeast(0L)
+            ) else current.positionMs
+            playerFragment.player.seekTo(target)
+            Log.i("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=applied positionMs=$target")
+            clearPendingTimeSeek()
+        }
         fun attachToReadyPlayer() {
-            val pending = pendingTimeSeek ?: return
-            if (this.playerFragment !== fragment || !fragment.isAdded) return
+            if (pendingTimeSeek == null || this.playerFragment !== fragment || !fragment.isAdded) return
             val mediaPlayer = playerFragment.playerView?.player ?: return
             if (seekPlayer !== mediaPlayer) {
                 detachTimeSeekListener()
                 seekPlayer = mediaPlayer
-                seekListener = object : Media3Player.Listener {
-                    override fun onPlaybackStateChanged(playbackState: Int) {
-                        if (playbackState != Media3Player.STATE_READY) return
-                        val current = pendingTimeSeek ?: return
-                        val meta = model.state.generatorState?.meta as? ResultEpisode
-                        if (meta?.apiName != "YouTube" ||
-                            YoutubeUtils.extractYoutubeId(meta.data) != current.videoId) {
-                            Log.w("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=episode_mismatch")
-                            clearPendingTimeSeek()
-                            return
+                // Media3 listener defaults differ between plugin compile and app runtime.
+                // A runtime proxy handles all callbacks without missing abstract methods.
+                val listener = java.lang.reflect.Proxy.newProxyInstance(
+                    Media3Player.Listener::class.java.classLoader,
+                    arrayOf(Media3Player.Listener::class.java)
+                ) { proxy, method, args ->
+                    when (method.name) {
+                        "onPlaybackStateChanged" -> {
+                            if (args?.firstOrNull() == Media3Player.STATE_READY) seekWhenReady(mediaPlayer)
+                            null
                         }
-                        if (!mediaPlayer.isCurrentMediaItemSeekable) {
-                            Log.w("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=not_seekable")
-                            clearPendingTimeSeek()
-                            return
-                        }
-                        val duration = mediaPlayer.duration
-                        val target = if (duration > 0) current.positionMs.coerceAtMost(
-                            (duration - 1_000L).coerceAtLeast(0L)
-                        ) else current.positionMs
-                        playerFragment.player.seekTo(target)
-                        Log.i("YouTubeMeta", "[DETAIL_LINK] action=time_seek status=applied positionMs=$target")
-                        clearPendingTimeSeek()
+                        "hashCode" -> System.identityHashCode(proxy)
+                        "equals" -> proxy === args?.firstOrNull()
+                        "toString" -> "YouTubeTimeSeekListener"
+                        else -> null
                     }
-                }.also(mediaPlayer::addListener)
+                } as Media3Player.Listener
+                seekListener = listener
+                mediaPlayer.addListener(listener)
             }
             if (mediaPlayer.playbackState == Media3Player.STATE_READY) {
-                seekListener?.onPlaybackStateChanged(Media3Player.STATE_READY)
+                seekWhenReady(mediaPlayer)
             }
         }
         // Both are existing native state transitions; no synthetic timer.
