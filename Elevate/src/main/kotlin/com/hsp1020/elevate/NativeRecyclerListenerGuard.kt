@@ -181,7 +181,7 @@ internal class NativeRecyclerListenerGuard(private val application: Application)
         val targets = activity?.let(::listOf) ?: activities.toList()
         targets.forEach { it.supportFragmentManager.unregisterFragmentLifecycleCallbacks(fragments) }
         activities.removeAll(targets.toSet())
-        val removed = screens.filter { (_, screen) -> activity == null || screen.fragment.activity === activity }
+        val removed = screens.filter { (fragment, _) -> activity == null || fragment.activity === activity }
         removed.forEach { (fragment, screen) -> screen.stop(); screens.remove(fragment) }
         if (activities.isEmpty()) checked.clear()
     }

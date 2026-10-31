@@ -39,7 +39,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
 
     private var enabled = false
     private var registered = false
-    private var mainActivity: MainActivity? = null
+    private var mainActivity: FragmentActivity? = null
     private var controller: NavController? = null
     private var playerActivity: DownloadedPlayerActivity? = null
     private var pending: Bundle? = null
@@ -150,7 +150,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         if (current === this) current = null
     }
 
-    private fun watchMain(activity: MainActivity) {
+    private fun watchMain(activity: FragmentActivity) {
         if (!enabled || mainActivity === activity) return
         controller?.removeOnDestinationChangedListener(destinations)
         mainActivity = activity
