@@ -1,6 +1,7 @@
 package com.anilife
 
 import android.content.Context
+import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
@@ -122,7 +123,15 @@ class Anilife : MainAPI() {
                 return@mapNotNull null
             }
             val image = anime.optString("image").takeIf { it.isNotBlank() && it != "null" }
-            newAnimeSearchResponse(title, "$mainUrl/content/$id/1", TvType.Anime) {
+            val meta = JSONObject()
+            for (field in listOf("title", "image", "description", "episodeCount", "playableEpisode", "episode", "genres")) {
+                meta.put(field, anime.opt(field))
+            }
+            val encoded = Base64.encodeToString(
+                meta.toString().toByteArray(Charsets.UTF_8),
+                Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
+            )
+            newAnimeSearchResponse(title, "$mainUrl/content/$id/1?al=$encoded", TvType.Anime) {
                 this.posterUrl = image?.let(::absolute)
                 this.posterHeaders = headers
             }
@@ -180,37 +189,73 @@ class Anilife : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         checkAndUpdateDomain()
         try {
-        val cleanUrl = freshUrl(url.substringBefore("?poster="))
-        println("$tag detail START url=$cleanUrl")
-        val doc = app.get(cleanUrl, headers = headers).document
-        println("$tag detail html title=${doc.title()} episodeButtons=${doc.select(".tv-episode-grid button").size}")
-        val seriesId = Regex("""/content/(\d+)""").find(cleanUrl)?.groupValues?.get(1)
-            ?: throw IllegalArgumentException("Invalid AniLife content URL: $cleanUrl")
-        val title = doc.selectFirst(".tv-work-copy h1")?.text()?.trim()
-            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.substringBefore(" | ")
-            ?: "Unknown"
-        val image = doc.selectFirst("meta[property=og:image]")?.attr("content")
-        val plot = doc.selectFirst(".tv-work-copy > p")?.text()
-        val tags = doc.select(".tv-work-meta span").drop(1)
-            .flatMap { it.text().split("·") }.map { it.trim() }.filter { it.isNotEmpty() }
-        val episodes = doc.select(".tv-episode-grid button").mapNotNull { button ->
-            val n = Regex("""(\d+)\s*화""").find(button.selectFirst("strong")?.text().orEmpty())
-                ?.groupValues?.get(1)?.toIntOrNull() ?: return@mapNotNull null
-            val episodeName = button.selectFirst("span")?.text()?.trim().orEmpty()
-            newEpisode(mainUrl + "/content/" + seriesId + "/" + n) {
-                this.episode = n
-                this.name = if (episodeName.isNotBlank() && episodeName != (n.toString() + "화"))
-                    (n.toString() + "화 - " + episodeName) else (n.toString() + "화")
+            val cleanUrl = freshUrl(url.substringBefore("?"))
+            val seriesId = Regex("""/content/(\d+)""").find(cleanUrl)?.groupValues?.get(1)
+                ?: throw IllegalArgumentException("Invalid AniLife content URL: $cleanUrl")
+            println("$tag detail START series=$seriesId url=$cleanUrl")
+
+            val payload = url.substringAfter("?al=", "").substringBefore("&")
+            val meta = if (payload.isNotEmpty()) try {
+                JSONObject(String(Base64.decode(payload, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8))
+            } catch (e: Exception) {
+                println("$tag detail invalid metadata series=$seriesId exception=${e.message}")
+                null
+            } else null
+
+            if (meta != null) {
+                val title = meta.optString("title").takeIf { it.isNotBlank() && it != "null" }
+                    ?: throw IllegalArgumentException("Missing AniLife title: $seriesId")
+                val image = meta.optString("image").takeIf { it.isNotBlank() && it != "null" }
+                val plot = meta.optString("description").takeIf { it.isNotBlank() && it != "null" }
+                val genres = meta.optJSONArray("genres")
+                val tags = genres?.let { (0 until it.length()).mapNotNull { index ->
+                    it.optString(index).takeIf(String::isNotBlank)
+                } } ?: emptyList()
+                val playable = meta.optInt("playableEpisode", 0)
+                val count = if (playable > 0) playable else maxOf(
+                    meta.optInt("episodeCount", 0), meta.optInt("episode", 0)
+                )
+                val episodes = (1..count.coerceIn(0, 2000)).map { n ->
+                    newEpisode("$mainUrl/content/$seriesId/$n") {
+                        this.episode = n
+                        this.name = n.toString() + "화"
+                    }
+                }
+                println("$tag detail API RESULT series=$seriesId title=$title playable=$playable episodes=${episodes.size} plot=${plot?.length ?: 0} tags=${tags.size}")
+                return newAnimeLoadResponse(title, url, TvType.Anime) {
+                    this.posterUrl = image?.let(::absolute)
+                    this.posterHeaders = headers
+                    this.plot = plot
+                    this.tags = tags
+                    addEpisodes(DubStatus.Subbed, episodes)
+                }
             }
-        }.sortedBy { it.episode }
-        println("$tag detail RESULT series=$seriesId title=$title episodes=${episodes.size} first=${episodes.firstOrNull()?.episode}")
-        return newAnimeLoadResponse(title, cleanUrl, TvType.Anime) {
-            this.posterUrl = image?.let(::absolute)
-            this.posterHeaders = headers
-            this.plot = plot
-            this.tags = tags
-            addEpisodes(DubStatus.Subbed, episodes)
-        }
+
+            // Previously saved plain URLs have no catalog metadata.
+            println("$tag detail no catalog metadata; trying legacy HTML series=$seriesId")
+            val doc = app.get(cleanUrl, headers = headers).document
+            val title = doc.selectFirst(".tv-work-copy h1")?.text()?.trim()
+                ?: throw IllegalStateException("AniLife detail requires catalog metadata: $seriesId")
+            val image = doc.selectFirst("meta[property=og:image]")?.attr("content")
+            val plot = doc.selectFirst(".tv-work-copy > p")?.text()
+            val tags = doc.select(".tv-work-meta span").drop(1)
+                .flatMap { it.text().split("·") }.map { it.trim() }.filter { it.isNotEmpty() }
+            val episodes = doc.select(".tv-episode-grid button").mapNotNull { button ->
+                val n = Regex("""(\d+)\s*화""").find(button.selectFirst("strong")?.text().orEmpty())
+                    ?.groupValues?.get(1)?.toIntOrNull() ?: return@mapNotNull null
+                newEpisode("$mainUrl/content/$seriesId/$n") {
+                    this.episode = n
+                    this.name = n.toString() + "화"
+                }
+            }.sortedBy { it.episode }
+            println("$tag detail HTML RESULT series=$seriesId title=$title episodes=${episodes.size}")
+            return newAnimeLoadResponse(title, cleanUrl, TvType.Anime) {
+                this.posterUrl = image?.let(::absolute)
+                this.posterHeaders = headers
+                this.plot = plot
+                this.tags = tags
+                addEpisodes(DubStatus.Subbed, episodes)
+            }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             println("$tag detail FAILED url=$url exception=${e.stackTraceToString()}")
