@@ -22,6 +22,9 @@ import android.text.method.LinkMovementMethod
 import android.text.style.ClickableSpan
 import android.util.Log
 import android.util.Patterns
+import android.view.WindowManager
+import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.widget.SearchView
 import com.google.android.material.chip.Chip
 import com.google.android.material.chip.ChipGroup
 import androidx.core.view.doOnPreDraw
@@ -185,6 +188,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private var popupAwaitingPlayer = false
     private var popupReturnNav: NavController? = null
     private var popupReturnListener: NavController.OnDestinationChangedListener? = null
+    private var popupBackFragment: Fragment? = null
+    private var popupBackCallback: OnBackPressedCallback? = null
+    private var popupReturning = false
     // One pending selection bridges player exit and the native detail ViewModel.
     private var pendingRange: Pair<Int, PlayedEpisode>? = null
     private var appliedRange: Pair<Int, PlayedEpisode>? = null
@@ -215,7 +221,86 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         playbackReturnListener = null
     }
 
+    private fun clearPopupBackHandler() {
+        popupBackCallback?.remove()
+        popupBackCallback = null
+        popupBackFragment = null
+    }
+
+    private fun suppressReturnedSearchIme(fragment: Fragment) {
+        val root = fragment.view ?: return
+        val input = if (fragment.javaClass.name.endsWith(".QuickSearchFragment"))
+            R.id.quick_search else R.id.main_search
+        root.findViewById<SearchView>(input)?.clearFocus()
+        host?.window?.let { window ->
+            val adjust = window.attributes.softInputMode and
+                WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST
+            window.setSoftInputMode(adjust or
+                WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
+        }
+    }
+
+    private fun installPopupBackHandler(fragment: Fragment) {
+        if (popupBackFragment === fragment || popupReturnListener == null) return
+        val nav = popupReturnNav ?: return
+        val popup = expandedReturnDialog ?: return
+        val activity = host ?: return
+        clearPopupBackHandler()
+        val callback = object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                val isDetail = nav.currentDestination?.id in setOf(
+                    R.id.navigation_results_phone, R.id.navigation_results_tv)
+                // Keep the native detail-panel Back behavior when a panel is open.
+                val panelReady = if (fragment.javaClass.name !=
+                    "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone") true else {
+                    val panel = fragment.view?.findViewById<View>(R.id.result_overlapping_panels)
+                    runCatching {
+                        (panel?.javaClass?.getMethod("getSelectedPanel")
+                            ?.invoke(panel) as? Enum<*>)?.ordinal == 1
+                    }.getOrDefault(false)
+                }
+                if (popupReturnNav !== nav || expandedReturnDialog !== popup ||
+                    !fragment.isAdded || !isDetail || !panelReady) {
+                    isEnabled = false
+                    try {
+                        activity.onBackPressedDispatcher.onBackPressed()
+                    } finally {
+                        if (popupBackCallback === this && fragment.isAdded)
+                            isEnabled = true
+                    }
+                    return
+                }
+                // Cover the previous detail before popping it, so its underlying
+                // Home/Search fragment cannot draw ahead of the existing sheet.
+                isEnabled = false
+                popup.window?.setWindowAnimations(0)
+                popup.window?.setSoftInputMode(
+                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
+                popup.show()
+                val decor = popup.window?.decorView
+                if (decor == null) {
+                    popupReturning = true
+                    nav.popBackStack()
+                    return
+                }
+                decor.doOnPreDraw {
+                    decor.post {
+                        if (popupReturnNav === nav && expandedReturnDialog === popup &&
+                            popup.isShowing && fragment.isAdded) {
+                            popupReturning = true
+                            nav.popBackStack()
+                        }
+                    }
+                }
+            }
+        }
+        popupBackFragment = fragment
+        popupBackCallback = callback
+        activity.onBackPressedDispatcher.addCallback(fragment.viewLifecycleOwner, callback)
+    }
+
     private fun clearPopupReturnListener() {
+        clearPopupBackHandler()
         popupReturnNav?.let { nav ->
             popupReturnListener?.let(nav::removeOnDestinationChangedListener)
         }
@@ -233,7 +318,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                         expandedReturnDialog = null
                         if (dialog.window?.decorView?.isAttachedToWindow == true) {
                             dialog.window?.setWindowAnimations(0)
-                            dialog.show()
+                            if (!dialog.isShowing) dialog.show()
                         }
                     }
                 }
@@ -413,6 +498,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         if (directLoading || directPlayback != null) return
         clearPopupReturnListener()
         expandedReturnDialog = null
+        popupReturning = false
         val activity = host ?: return
         val api = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
         val navHost = activity.supportFragmentManager
@@ -549,8 +635,17 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
             when (f.javaClass.name) {
-                in EXPANDED_ORIGINS -> if (!popupAwaitingPlayer) expandedReturnDialog?.hide()
-                in DETAIL_SCREENS -> if (popupReturnListener == null) expandedReturnDialog = null
+                in EXPANDED_ORIGINS -> {
+                    if (!popupAwaitingPlayer) expandedReturnDialog?.hide()
+                    if (popupReturning) {
+                        if (f.javaClass.name in SEARCH_ORIGINS) suppressReturnedSearchIme(f)
+                        popupReturning = false
+                    }
+                }
+                in DETAIL_SCREENS -> {
+                    if (popupReturnListener == null) expandedReturnDialog = null
+                    else installPopupBackHandler(f)
+                }
             }
             screens[f]?.applyNativeRangeIfPending()
         }
@@ -558,6 +653,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, view: View, state: Bundle?) {
             if (f.javaClass.name in EXPANDED_ORIGINS && !popupAwaitingPlayer) {
                 expandedReturnDialog?.hide()
+            }
+            if (popupReturning && f.javaClass.name in SEARCH_ORIGINS) {
+                suppressReturnedSearchIme(f)
             }
             if (f.javaClass.name == PLAYER_SCREEN) {
                 playerFragment = f
@@ -575,6 +673,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
+            if (popupBackFragment === f) clearPopupBackHandler()
             if (popupAwaitingPlayer && f.javaClass.name in EXPANDED_ORIGINS) {
                 expandedReturnDialog?.let { popup ->
                     val decor = popup.window?.decorView
@@ -603,6 +702,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         clearPlaybackReturnListener()
         clearPopupReturnListener()
         popupAwaitingPlayer = false
+        popupReturning = false
         playerFragment = null
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
@@ -1546,6 +1646,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         const val PLAYER_SCREEN = "com.lagradost.cloudstream3.ui.player.GeneratorPlayer"
         val EXPANDED_ORIGINS = setOf(
             "com.lagradost.cloudstream3.ui.home.HomeFragment",
+            "com.lagradost.cloudstream3.ui.search.SearchFragment",
+            "com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment"
+        )
+        val SEARCH_ORIGINS = setOf(
             "com.lagradost.cloudstream3.ui.search.SearchFragment",
             "com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment"
         )
