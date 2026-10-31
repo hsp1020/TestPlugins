@@ -207,6 +207,11 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
     } as Player.Listener
 
     private fun clearRefreshState() {
+        diagnostic("clearState",
+            "generation=$refreshGeneration jobActive=${refreshJob?.isActive} " +
+                "autoHash=${autoRefreshUrl?.hashCode()} selectedHash=${selectedUrl?.hashCode()} " +
+                "overlayCount=${refreshedCues.size} queued=${queuedRefresh != null} " +
+                "applied=${appliedRefresh != null} player=${observedPlayer?.let(System::identityHashCode)}")
         refreshGeneration++
         refreshJob?.cancel()
         refreshJob = null
@@ -278,7 +283,9 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
         if (selectedUrl != currentUrl) {
             diagnostic("preferredChanged",
                 "beforeHash=${selectedUrl?.hashCode()} afterHash=${currentUrl?.hashCode()} " +
-                    "instance=${model?.state?.instance} player=${observedPlayer?.let(System::identityHashCode)}")
+                    "instance=${model?.state?.instance} player=${observedPlayer?.let(System::identityHashCode)} " +
+                    "generation=$refreshGeneration active=${refreshJob?.isActive} " +
+                    "overlayCount=${refreshedCues.size} autoHash=${autoRefreshUrl?.hashCode()}")
             refreshGeneration++
             refreshJob?.cancel()
             refreshJob = null
@@ -804,6 +811,10 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
     ) {
         val target = fragment ?: return
         val instance = model?.state?.instance ?: return
+        diagnostic("pickerClick",
+            "url=${entry.originalUrl.hashCode()} actual=${target.player.getCurrentPreferredSubtitle()?.url?.hashCode()} " +
+                "auto=$automatic dialog=${sortedDialog?.isShowing} buttonSize=${button.width}x${button.height} " +
+                "attached=${button.isAttachedToWindow} enabled=${button.isEnabled}")
         if (target.player.getCurrentPreferredSubtitle()?.url == entry.originalUrl) {
             queuedRefresh = null
             requestSubtitleRefresh(entry, button, automatic)
@@ -846,7 +857,14 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
             diagnostic("reject", "selectionMismatch expected=${entry.originalUrl.hashCode()} actual=${actual?.hashCode()} automatic=$automatic")
             return false
         }
-        diagnostic("request", "urlHash=${entry.originalUrl.hashCode()} automatic=$automatic button=${button != null} attached=${button?.isAttachedToWindow} instance=$instance")
+        diagnostic("request",
+            "urlHash=${entry.originalUrl.hashCode()} automatic=$automatic button=${button != null} " +
+                "attached=${button?.isAttachedToWindow} enabled=${button?.isEnabled} size=${button?.width}x${button?.height} " +
+                "tag=${(button?.tag as? String)?.hashCode()} instance=$instance " +
+                "player=${target.playerView?.player?.let(System::identityHashCode)} " +
+                "jobActive=${refreshJob?.isActive} autoHash=${autoRefreshUrl?.hashCode()} " +
+                "addon=${entry.addonUrl.hashCode()} id=${entry.id?.hashCode()} list=${entry.listUrl?.hashCode()} " +
+                "ambiguous=${entry.ambiguous} latestHash=${entry.latestUrl.hashCode()}")
         bindPlayer()
         if (automatic && autoRefreshUrl == entry.originalUrl) {
             refreshGeneration++
@@ -895,7 +913,11 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                 val attempts = if (automatic) AUTO_REFRESH_MAX_REQUESTS else 1
                 for (attempt in 0 until attempts) {
                     if (!current()) {
-                        diagnostic("stale", "beforeFetch attempt=$attempt generation=$generation")
+                        diagnostic("stale",
+                            "beforeFetch attempt=$attempt generation=$generation currentGeneration=$refreshGeneration " +
+                                "fragment=${fragment === target} instance=${model?.state?.instance} expectedInstance=$instance " +
+                                "player=${target.playerView?.player === mediaPlayer} " +
+                                "selected=${target.player.getCurrentPreferredSubtitle()?.url?.hashCode()} expected=${entry.originalUrl.hashCode()}")
                         break
                     }
                     val previous = refreshedCues[entry.originalUrl]
@@ -910,7 +932,11 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                         }
                     } else ElevateSubtitleRefreshRegistry.refresh(entry, previous)
                     if (!current()) {
-                        diagnostic("stale", "afterFetch attempt=$attempt generation=$generation")
+                        diagnostic("stale",
+                            "afterFetch attempt=$attempt generation=$generation currentGeneration=$refreshGeneration " +
+                                "fragment=${fragment === target} instance=${model?.state?.instance} expectedInstance=$instance " +
+                                "player=${target.playerView?.player === mediaPlayer} " +
+                                "selected=${target.player.getCurrentPreferredSubtitle()?.url?.hashCode()} expected=${entry.originalUrl.hashCode()}")
                         break
                     }
                     diagnostic("parsed", "attempt=$attempt changed=${result !== previous} cues=${result.cues.size} hash=${entry.originalUrl.hashCode()}")
@@ -923,7 +949,10 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                         refreshedOverlay.attach(target, entry.originalUrl, result)
                     }
                     panelListener?.invoke(target, entry.originalUrl)
-                    diagnostic("applied", "attempt=$attempt overlayAttempted=true notifyPanel=${panelListener != null}")
+                    diagnostic("applied",
+                        "attempt=$attempt overlayAttempted=${result !== previous} notifyPanel=${panelListener != null} " +
+                            "selectedHash=${target.player.getCurrentPreferredSubtitle()?.url?.hashCode()} " +
+                            "player=${target.playerView?.player?.let(System::identityHashCode)}")
                     if (!automatic || attempt + 1 >= attempts ||
                         SystemClock.elapsedRealtime() + AUTO_REFRESH_INTERVAL_MS >= deadline) break
                     delay(AUTO_REFRESH_INTERVAL_MS)
@@ -952,7 +981,11 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
                         button.alpha = if (selected) 1f else 0.35f
                         button.imageTintList = originalTint
                     }
-                    diagnostic("finish", "generation=$generation buttonBound=${button?.tag == entry.originalUrl} automatic=$automatic")
+                    diagnostic("finish",
+                        "generation=$generation buttonBound=${button?.tag == entry.originalUrl} automatic=$automatic " +
+                            "buttonVisible=${button?.visibility} enabled=${button?.isEnabled} " +
+                            "attached=${button?.isAttachedToWindow} size=${button?.width}x${button?.height} " +
+                            "selectedHash=${target.player.getCurrentPreferredSubtitle()?.url?.hashCode()}")
                 }
             }
         }
@@ -976,6 +1009,11 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
             diagnostic("reject", "noSelectedSubtitle automatic=$automatic")
             return false
         }
+        diagnostic("panelRefreshClick",
+            "expectedHash=${expectedUrl?.hashCode()} selectedHash=${url.hashCode()} automatic=$automatic " +
+                "buttonHash=${(button?.tag as? String)?.hashCode()} visible=${button?.visibility} " +
+                "enabled=${button?.isEnabled} attached=${button?.isAttachedToWindow} " +
+                "instance=${model?.state?.instance} player=${target.playerView?.player?.let(System::identityHashCode)}")
         if (expectedUrl != null && expectedUrl != url) {
             diagnostic("reject", "buttonUrlMismatch expected=${expectedUrl.hashCode()} actual=${url.hashCode()}")
             return false
@@ -1129,33 +1167,51 @@ internal object ElevateSubtitleTrace {
                 "phase=$phase player=null preferred=${preferred?.url?.hashCode()} seq=$requestSeq requested=$requestedHash $choice")
             return
         }
+        val textType = androidx.media3.common.C.TRACK_TYPE_TEXT
+        val groups = player.currentTracks.groups
+        val params = player.trackSelectionParameters
+        val textGroups = groups.withIndex().filter { it.value.type == textType }
         val selected = ArrayList<String>()
-        var textGroups = 0
-        player.currentTracks.groups.forEachIndexed { groupIndex, group ->
-            if (group.type != androidx.media3.common.C.TRACK_TYPE_TEXT) return@forEachIndexed
-            textGroups++
-            for (index in 0 until group.length) {
-                if (!group.isTrackSelected(index)) continue
-                val id = group.getTrackFormat(index).id
-                // CloudStream's media3 IDs have a numeric track prefix.
+        val details = ArrayList<String>()
+        textGroups.forEach { (groupIndex, group) ->
+            val tracks = (0 until group.length).map { i ->
+                val format = group.getTrackFormat(i)
+                val id = format.id
                 val normalized = id?.let {
                     if (it.substringBefore(':').toIntOrNull() != null) it.substringAfter(':') else it
                 }
                 val match = subtitles.firstOrNull { it.getId() == normalized }
-                selected += "g$groupIndex/$index rawHash=${id?.hashCode()} " +
-                    "keyHash=${normalized?.hashCode()} matchOrigin=${match?.origin} " +
-                    "matchUrl=${match?.url?.hashCode()}"
+                val active = group.isTrackSelected(i)
+                if (active) selected += "g$groupIndex/$i id=${id?.hashCode()} key=${normalized?.hashCode()} " +
+                    "match=${match?.origin}:${match?.url?.hashCode()}"
+                "i$i:${id?.hashCode()}:${format.language}:${format.sampleMimeType}:${if (active) "S" else "-"}"
             }
+            val overridden = params.overrides.entries.firstOrNull { it.key == group.mediaTrackGroup }
+            details += "g$groupIndex key=${System.identityHashCode(group.mediaTrackGroup)} " +
+                "formats=[${tracks.joinToString(",")}] override=${overridden?.value?.trackIndices?.joinToString(",")} " +
+                "selected=${group.isSelected} supported=${group.isSupported}"
         }
-        val params = player.trackSelectionParameters
         val overrides = params.overrides.entries
-            .filter { it.key.type == androidx.media3.common.C.TRACK_TYPE_TEXT }
-            .joinToString("|") { "${it.key.length}:${it.value.trackIndices.joinToString(",")}" }
+            .filter { it.key.type == textType }
+            .map { (key, choiceOverride) ->
+                val groupIndex = textGroups.firstOrNull { it.value.mediaTrackGroup == key }?.index ?: -1
+                val formats = (0 until key.length).joinToString(",") { key.getFormat(it).id?.hashCode().toString() }
+                "g$groupIndex key=${System.identityHashCode(key)} ids=[$formats] indices=${choiceOverride.trackIndices.joinToString(",")}"
+            }
         android.util.Log.d("ElevateSubtitleTracks",
-            "phase=$phase player=${System.identityHashCode(player)} " +
+            "phase=$phase player=${System.identityHashCode(player)} pos=${player.currentPosition} " +
+                "state=${player.playbackState} play=${player.isPlaying} " +
                 "preferredHash=${preferred?.url?.hashCode()} preferredOrigin=${preferred?.origin} " +
-                "seq=$requestSeq requestedHash=$requestedHash $choice totalSubs=${subtitles.size} " +
-                "groups=$textGroups textDisabled=${androidx.media3.common.C.TRACK_TYPE_TEXT in params.disabledTrackTypes} " +
-                "overrides=[$overrides] selected=[${selected.joinToString("|")}]")
+                "seq=$requestSeq requestedHash=$requestedHash $choice modelSubs=${subtitles.size} " +
+                "allGroups=${groups.size} textGroups=${textGroups.size} " +
+                "textDisabled=${textType in params.disabledTrackTypes} selected=[${selected.joinToString("|")}]")
+        overrides.forEachIndexed { i, value ->
+            android.util.Log.d("ElevateSubtitleTracks", "override phase=$phase number=$i $value")
+        }
+        // Group IDs and formats identify a replacement/remapping even when an override prints [1:0].
+        details.chunked(9).forEachIndexed { i, part ->
+            android.util.Log.d("ElevateSubtitleGroups",
+                "phase=$phase player=${System.identityHashCode(player)} chunk=$i ${part.joinToString(" ; ")}")
+        }
     }
 }

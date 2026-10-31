@@ -28,6 +28,7 @@ internal class ElevateSubtitleSourceObserver {
                         .substringBefore("/subtitles/").substringBefore("/stream/")
                     val listUrl = if (request.url.encodedPath.contains("/subtitles/"))
                         request.url.toString() else null
+                    var recorded = 0
                     fun addTrack(item: JSONObject, pos: Int, lookup: String?) {
                         val url = item.optString("url")
                         if (!url.startsWith("http://", true) &&
@@ -38,6 +39,7 @@ internal class ElevateSubtitleSourceObserver {
                                 headers[key] = objectHeaders.optString(key)
                             }
                         }
+                        recorded++
                         ElevateSubtitleRefreshRegistry.remember(
                             url, addon, item.optString("id").takeIf(String::isNotBlank),
                             item.optString("lang", item.optString("lang_code")),
@@ -58,6 +60,14 @@ internal class ElevateSubtitleSourceObserver {
                             }
                         }
                     }
+                    android.util.Log.d("ElevateRefreshProvenance",
+                        "sourceResponse endpoint=${if (listUrl != null) "subtitles" else "stream"} " +
+                            "addonHash=${addon.hashCode()} recorded=$recorded " +
+                            "subCount=${json.optJSONArray("subtitles")?.length() ?: 0} " +
+                            "streamCount=${json.optJSONArray("streams")?.length() ?: 0} bodyLength=$length")
+                }.onFailure {
+                    android.util.Log.w("ElevateRefreshProvenance",
+                        "captureFailed type=${it.javaClass.simpleName} pathHash=${request.url.encodedPath.hashCode()}")
                 }
             }
         }

@@ -860,6 +860,10 @@ internal class ElevatePlayerPanel(
     private fun renderSubtitleOptions() {
         val current = fragment.player.getCurrentPreferredSubtitle()?.url
         val group = subtitleGroups.getOrNull(selectedGroup - 1)?.second.orEmpty()
+        android.util.Log.d("ElevatePanelTouch",
+            "optionsStart selectedGroup=$selectedGroup groupCount=${group.size} " +
+                "currentHash=${current?.hashCode()} listSize=${list.width}x${list.height} " +
+                "firstVisible=${list.firstVisiblePosition} tab=$tab shown=${list.isShown}")
         replaceRows(group.mapIndexed { index, sub ->
             val number = index + 1 // Visual option index, not nameSuffix (native picker behavior).
             val label = if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) {
@@ -872,9 +876,16 @@ internal class ElevatePlayerPanel(
                 }
                 "$number" + (detail?.let { "($it)" } ?: "")
             }
-            val refreshable = sub.url == current &&
-                ElevateSubtitleRefreshHook.active() != null &&
-                ElevateSubtitleRefreshRegistry.entryFor(sub) != null
+            val selected = sub.url == current
+            val refreshHook = ElevateSubtitleRefreshHook.active()
+            val entry = if (selected) ElevateSubtitleRefreshRegistry.entryFor(sub) else null
+            val refreshable = selected && refreshHook != null && entry != null
+            if (index < 2 || selected) android.util.Log.d("ElevatePanelTouch",
+                "option row=$index urlHash=${sub.url.hashCode()} origin=${sub.origin} " +
+                    "selected=$selected activeHash=${current?.hashCode()} refreshable=$refreshable " +
+                    "hook=${refreshHook != null} entry=${entry != null} " +
+                    "entryAddon=${entry?.addonUrl?.hashCode()} entryAmbiguous=${entry?.ambiguous} " +
+                    "mime=${sub.mimeType} labelHash=${label.hashCode()}")
             Row(label, { setSubtitle(sub) },
                 if (refreshable) ({ button: ImageButton ->
                     android.util.Log.d("ElevatePanelRefresh", "tap automatic=false urlHash=${sub.url.hashCode()} selectedHash=${fragment.player.getCurrentPreferredSubtitle()?.url?.hashCode()} enabled=${button.isEnabled} attached=${button.isAttachedToWindow}")
@@ -896,6 +907,20 @@ internal class ElevatePlayerPanel(
             "subtitlesRendered modelCount=${vm.state.subtitles.size} " +
                 "selectedGroup=$selectedGroup optionRows=${rows.size} adapterCount=${adapter.count} " +
                 "languageRows=${languageAdapter.count} selectedHash=${current?.hashCode()}")
+        list.post {
+            if (tab != Tab.SUBTITLES || inSync) return@post
+            (0..1).forEach { rowIndex ->
+                val child = list.getChildAt(rowIndex - list.firstVisiblePosition) as? LinearLayout
+                val button = child?.getChildAt(2) as? ImageButton
+                android.util.Log.d("ElevatePanelTouch",
+                    "postLayout row=$rowIndex visibleRange=${list.firstVisiblePosition}..${list.lastVisiblePosition} " +
+                        "listSize=${list.width}x${list.height} rowSize=${child?.width}x${child?.height} " +
+                        "buttonSize=${button?.width}x${button?.height} buttonRect=${button?.left},${button?.top} " +
+                        "visible=${button?.visibility} enabled=${button?.isEnabled} " +
+                        "clickable=${button?.isClickable} attached=${button?.isAttachedToWindow} " +
+                        "tagHash=${(button?.tag as? String)?.hashCode()} shown=${button?.isShown}")
+            }
+        }
         // Both lists now start at the same top edge with identical 48dp rows.
     }
 

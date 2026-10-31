@@ -86,6 +86,9 @@ internal object ElevateSubtitleRefreshRegistry {
         if (previous != null && (previous.addonUrl != addonUrl ||
                 (previous.id != null && id != null && previous.id != id))) {
             // CloudStream collapses equal URLs. Never guess which addon owns that row.
+            android.util.Log.d("ElevateRefreshProvenance",
+                "ambiguous urlHash=${url.hashCode()} previousAddon=${previous.addonUrl.hashCode()} " +
+                    "incomingAddon=${addonUrl.hashCode()} previousId=${previous.id?.hashCode()} id=${id?.hashCode()}")
             entries[url] = previous.copy(ambiguous = true)
             return
         }
@@ -110,7 +113,10 @@ internal object ElevateSubtitleRefreshRegistry {
         if (!(url.startsWith("https://", true) || url.startsWith("http://", true) ||
                 url.startsWith("content://", true) || url.startsWith("file://", true))) return null
         entries[url]?.let { stored ->
-            if (stored.ambiguous) return null
+            if (stored.ambiguous) {
+                android.util.Log.d("ElevateRefreshProvenance", "entryRejected ambiguous urlHash=${url.hashCode()}")
+                return null
+            }
             if (!subtitle.headers.isNullOrEmpty()) {
                 val merged = stored.copy(headers = stored.headers + subtitle.headers.orEmpty())
                 entries[url] = merged
@@ -118,6 +124,9 @@ internal object ElevateSubtitleRefreshRegistry {
             }
             return stored
         }
+        android.util.Log.d("ElevateRefreshProvenance",
+            "fallback urlHash=${url.hashCode()} origin=${subtitle.origin} " +
+                "type=${subtitle.mimeType} headerCount=${subtitle.headers?.size ?: 0}")
         return Entry(url, "", null, subtitle.languageCode, null, 0,
             subtitle.headers.orEmpty()).also { entries[url] = it }
     }
@@ -210,6 +219,10 @@ internal object ElevateSubtitleRefreshRegistry {
         check(current.addonUrl == entry.addonUrl && current.id == entry.id &&
             current.listUrl == entry.listUrl) { "Subtitle provenance changed" }
         var url = current.latestUrl
+        android.util.Log.d("ElevateRefreshFetch",
+            "begin original=${entry.originalUrl.hashCode()} latest=${url.hashCode()} " +
+                "list=${entry.listUrl?.hashCode()} checkList=$checkList previous=${previous?.cues?.size ?: 0} " +
+                "addon=${entry.addonUrl.hashCode()} ambiguous=${current.ambiguous}")
         if (checkList && entry.listUrl != null) {
             // Translation addons can temporarily fail to list tracks. Only
             // the exact known URL is safe as fallback, not language/position.
@@ -231,12 +244,19 @@ internal object ElevateSubtitleRefreshRegistry {
             } catch (_: Exception) {
                 null
             }
+            android.util.Log.d("ElevateRefreshFetch",
+                "listResult original=${entry.originalUrl.hashCode()} " +
+                    "previousUrl=${url.hashCode()} selectedUrl=${updated?.hashCode()} fallback=${updated == null}")
             if (updated != null) url = updated
         }
         val bytes = readBytes(url, entry.headers, MAX_SUB_BYTES)
+        android.util.Log.d("ElevateRefreshFetch",
+            "body urlHash=${url.hashCode()} bytes=${bytes.size} headers=${entry.headers.size}")
         check(bytes.isNotEmpty()) { "Empty subtitle" }
         val fingerprint = MessageDigest.getInstance("SHA-256").digest(bytes)
         if (previous != null && previous.fingerprint.contentEquals(fingerprint)) {
+            android.util.Log.d("ElevateRefreshFetch",
+                "unchanged urlHash=${url.hashCode()} cues=${previous.cues.size}")
             update(entry, url)
             return@withContext previous
         }
@@ -272,6 +292,9 @@ internal object ElevateSubtitleRefreshRegistry {
         check(prepared.cues.isNotEmpty()) { "No valid subtitle cues" }
         ensureActive()
         update(entry, url)
+        android.util.Log.d("ElevateRefreshFetch",
+            "parsed original=${entry.originalUrl.hashCode()} effective=${url.hashCode()} " +
+                "mime=$type cues=${prepared.cues.size} preserveASS=${prepared.preserveAssLayout}")
         prepared
     }
 }
@@ -293,6 +316,12 @@ internal class ElevateRefreshedSubtitleOverlay {
     private var preserveAssLayout = false
     private var rendered: List<Int>? = null
     private var lastOffset = Long.MIN_VALUE
+    private val nativeLayoutLog = View.OnLayoutChangeListener { v, l, t, r, b, _, _, _, _ ->
+        android.util.Log.d("ElevateSubtitleOverlay",
+            "nativeLayout urlHash=${targetUrl?.hashCode()} size=${r-l}x${b-t} " +
+                "overlaySize=${overlay?.width}x${overlay?.height} outputSize=${originalOutput?.width}x${originalOutput?.height} " +
+                "attached=${v.isAttachedToWindow} shown=${v.isShown}")
+    }
     private val tick = Runnable { synchronize() }
     private val pipListener = Consumer<PictureInPictureModeChangedInfo> { applyAppearance() }
     private val styleListener: (com.lagradost.cloudstream3.ui.subtitles.SaveCaptionStyle) -> Unit = {
@@ -342,6 +371,10 @@ internal class ElevateRefreshedSubtitleOverlay {
         val selected = candidate.player.getCurrentPreferredSubtitle()?.url
         if (fragment !== candidate || candidate.playerView?.player !== mediaPlayer ||
             targetUrl != selected || candidate.subView !== original) {
+            android.util.Log.d("ElevateSubtitleOverlay",
+                "bindMismatch oldPlayer=${mediaPlayer?.let(System::identityHashCode)} " +
+                    "newPlayer=${candidate.playerView?.player?.let(System::identityHashCode)} " +
+                    "oldUrl=${targetUrl?.hashCode()} selected=${selected?.hashCode()} nativeChanged=${candidate.subView !== original}")
             detach()
         } else if (candidate.player.getSubtitleOffset() != lastOffset) {
             // Native offset apply/reset emits a seek event, including while paused.
@@ -361,7 +394,12 @@ internal class ElevateRefreshedSubtitleOverlay {
             android.util.Log.w("ElevateSubtitleOverlay", "attachSkipped player=${player != null} native=${native != null} nativeOutput=${nativeOutput != null} selectedMatches=${selectedUrl == subtitleUrl} urlHash=${subtitleUrl.hashCode()} cues=${parsed.size}")
             return
         }
-        android.util.Log.d("ElevateSubtitleOverlay", "attach urlHash=${subtitleUrl.hashCode()} cues=${parsed.size} reuse=${fragment === candidate && mediaPlayer === player && original === native && overlay != null}")
+        android.util.Log.d("ElevateSubtitleOverlay",
+            "attach urlHash=${subtitleUrl.hashCode()} cues=${parsed.size} " +
+                "reuse=${fragment === candidate && mediaPlayer === player && original === native && overlay != null} " +
+                "player=${System.identityHashCode(player)} time=${player.currentPosition} " +
+                "nativeSize=${native.width}x${native.height} nativeShown=${native.isShown} " +
+                "outputSize=${nativeOutput.width}x${nativeOutput.height} outputAlpha=${nativeOutput.alpha}")
         if (fragment === candidate && mediaPlayer === player &&
             original === native && targetUrl == subtitleUrl && overlay != null) {
             if (cues !== parsed) {
@@ -369,6 +407,8 @@ internal class ElevateRefreshedSubtitleOverlay {
                 timeline = prepared.timeline
                 preserveAssLayout = prepared.preserveAssLayout
                 rendered = null
+                android.util.Log.d("ElevateSubtitleOverlay",
+                    "reuseUpdated urlHash=${subtitleUrl.hashCode()} cues=${parsed.size} size=${overlay?.width}x${overlay?.height}")
                 synchronize()
             }
             return
@@ -389,8 +429,30 @@ internal class ElevateRefreshedSubtitleOverlay {
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
         // Inherit CloudStream's control-avoidance translation from the native subtitle view.
+        view.addOnLayoutChangeListener { v, l, t, r, b, oldL, oldT, oldR, oldB ->
+            android.util.Log.d("ElevateSubtitleOverlay",
+                "overlayLayout urlHash=${targetUrl?.hashCode()} size=${r-l}x${b-t} " +
+                    "previous=${oldR-oldL}x${oldB-oldT} nativeSize=${original?.width}x${original?.height} " +
+                    "outputSize=${originalOutput?.width}x${originalOutput?.height} shown=${v.isShown} " +
+                    "cues=${cues.size} rendered=${rendered?.size}")
+        }
+        view.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {
+                android.util.Log.d("ElevateSubtitleOverlay",
+                    "overlayAttached urlHash=${targetUrl?.hashCode()} size=${v.width}x${v.height}")
+            }
+            override fun onViewDetachedFromWindow(v: View) {
+                android.util.Log.d("ElevateSubtitleOverlay",
+                    "overlayDetached urlHash=${targetUrl?.hashCode()} size=${v.width}x${v.height}")
+            }
+        })
         native.addView(view, FrameLayout.LayoutParams(-1, -1))
+        native.addOnLayoutChangeListener(nativeLayoutLog)
         overlay = view
+        android.util.Log.d("ElevateSubtitleOverlay",
+            "overlayCreated urlHash=${subtitleUrl.hashCode()} size=${view.width}x${view.height} " +
+                "layout=${view.layoutParams?.width}x${view.layoutParams?.height} " +
+                "nativeSize=${native.width}x${native.height} outputSize=${nativeOutput.width}x${nativeOutput.height}")
         nativeOutput.alpha = 0f
         host = candidate.activity as? FragmentActivity
         host?.addOnPictureInPictureModeChangedListener(pipListener)
@@ -421,6 +483,10 @@ internal class ElevateRefreshedSubtitleOverlay {
         val view = overlay ?: return
         if (candidate.playerView?.player !== player ||
             candidate.player.getCurrentPreferredSubtitle()?.url != targetUrl) {
+            android.util.Log.d("ElevateSubtitleOverlay",
+                "syncDetach reason=playerOrSelectionChanged oldPlayer=${System.identityHashCode(player)} " +
+                    "newPlayer=${candidate.playerView?.player?.let(System::identityHashCode)} " +
+                    "target=${targetUrl?.hashCode()} actual=${candidate.player.getCurrentPreferredSubtitle()?.url?.hashCode()}")
             detach()
             return
         }
@@ -454,9 +520,18 @@ internal class ElevateRefreshedSubtitleOverlay {
                     }.build()
                 }
             }
+            android.util.Log.d("ElevateSubtitleOverlay",
+                "renderBefore time=$time urlHash=${targetUrl?.hashCode()} activeSegments=${indexes.size} " +
+                    "visibleCues=${visible.size} nativeSize=${original?.width}x${original?.height} " +
+                    "outputSize=${originalOutput?.width}x${originalOutput?.height} " +
+                    "shown=${view.isShown} attached=${view.isAttachedToWindow} " +
+                    "size=${view.width}x${view.height} parent=${view.parent?.javaClass?.simpleName}")
             view.setCues(visible)
             rendered = indexes
-            android.util.Log.d("ElevateSubtitleOverlay", "render time=$time activeSegments=${indexes.size} visibleCues=${visible.size} cueChars=${visible.sumOf { it.text?.length ?: 0 }} shown=${view.isShown} size=${view.width}x${view.height} offset=$offset playing=${player.isPlaying}")
+            android.util.Log.d("ElevateSubtitleOverlay",
+                "renderAfter time=$time activeSegments=${indexes.size} visibleCues=${visible.size} " +
+                    "cueChars=${visible.sumOf { it.text?.length ?: 0 }} shown=${view.isShown} " +
+                    "size=${view.width}x${view.height} offset=$offset playing=${player.isPlaying}")
         }
         if (!player.isPlaying) return
         val next = timeline?.nextAfter(time) ?: return
@@ -466,8 +541,12 @@ internal class ElevateRefreshedSubtitleOverlay {
     }
 
     fun detach() {
-        if (overlay != null) android.util.Log.d("ElevateSubtitleOverlay", "detach urlHash=${targetUrl?.hashCode()}")
+        if (overlay != null) android.util.Log.d("ElevateSubtitleOverlay",
+            "detach urlHash=${targetUrl?.hashCode()} player=${mediaPlayer?.let(System::identityHashCode)} " +
+                "shown=${overlay?.isShown} size=${overlay?.width}x${overlay?.height} " +
+                "nativeSize=${original?.width}x${original?.height} rendered=${rendered?.size}")
         main.removeCallbacks(tick)
+        original?.removeOnLayoutChangeListener(nativeLayoutLog)
         host?.removeOnPictureInPictureModeChangedListener(pipListener)
         if (overlay != null) SubtitlesFragment.applyStyleEvent -= styleListener
         val view = overlay
