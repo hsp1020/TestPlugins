@@ -21,6 +21,7 @@ import android.text.Editable
 import android.text.TextUtils
 import android.widget.TextView
 import android.util.TypedValue
+import android.util.Log
 import androidx.preference.PreferenceManager
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
@@ -409,17 +410,28 @@ internal class ElevatePlayerPanel(
     private var syncActiveCue = -1
     private val syncProgressTick = object : Runnable {
         override fun run() {
-            if (!inSync || !syncList.isShown || fragment.view !== root ||
-                fragment.playerView?.player?.isPlaying != true) return
+            val playing = fragment.playerView?.player?.isPlaying == true
+            Log.d("ElevateSyncDiag", "panel-tick running=$inSync shown=${syncList.isShown} " +
+                "rootMatches=${fragment.view === root} playing=$playing " +
+                "pos=${fragment.player.getPosition()} offset=${fragment.player.getSubtitleOffset()} " +
+                "items=${syncAdapter.itemCount}")
+            if (!inSync || !syncList.isShown || fragment.view !== root || !playing) return
             updateSyncPosition()
+            SubtitleSyncTrace.visible("panel-tick", fragment, syncAdapter, syncList)
             syncList.postDelayed(this, 500L)
         }
     }
     private fun updateSyncPosition() {
-        if (!inSync || syncAdapter.itemCount == 0) return
+        if (!inSync || syncAdapter.itemCount == 0) {
+            Log.d("ElevateSyncDiag", "panel-update-skipped inSync=$inSync items=${syncAdapter.itemCount}")
+            return
+        }
         val time = (fragment.player.getPosition() ?: 0L) + fragment.player.getSubtitleOffset()
         syncAdapter.updateTime(time)
         val active = syncAdapter.getLatestActiveItem(time)
+        Log.d("ElevateSyncDiag", "panel-update time=$time active=$active previous=$syncActiveCue " +
+            "listShown=${syncList.isShown} first=${(syncList.layoutManager as? androidx.recyclerview.widget.LinearLayoutManager)?.findFirstVisibleItemPosition()} " +
+            "chosen=${syncAdapter.immutableCurrentList.getOrNull(active)?.let { "${it.startTimeMs}..${it.endTimeMs}" }}")
         if (active != syncActiveCue) {
             syncActiveCue = active
             syncList.scrollToPosition(active)
@@ -427,12 +439,15 @@ internal class ElevatePlayerPanel(
     }
     private fun scheduleSyncPosition() {
         syncList.removeCallbacks(syncProgressTick)
-        if (inSync && syncList.isShown && fragment.view === root &&
-            fragment.playerView?.player?.isPlaying == true && syncAdapter.itemCount != 0) {
-            syncList.postDelayed(syncProgressTick, 500L)
-        }
+        val eligible = inSync && syncList.isShown && fragment.view === root &&
+            fragment.playerView?.player?.isPlaying == true && syncAdapter.itemCount != 0
+        Log.d("ElevateSyncDiag", "panel-schedule eligible=$eligible inSync=$inSync " +
+            "listShown=${syncList.isShown} rootMatches=${fragment.view === root} " +
+            "playing=${fragment.playerView?.player?.isPlaying} items=${syncAdapter.itemCount}")
+        if (eligible) syncList.postDelayed(syncProgressTick, 500L)
     }
     private fun stopSyncPosition() {
+        Log.d("ElevateSyncDiag", "panel-stopSync active=$syncActiveCue")
         syncList.removeCallbacks(syncProgressTick)
         syncActiveCue = -1
     }
@@ -462,6 +477,9 @@ internal class ElevatePlayerPanel(
                 refreshNativeSubtitleOutput()
             }
             val time = (fragment.player.getPosition() ?: 0L) + amount
+            Log.d("ElevateSyncDiag", "panel-offset-change amount=$amount time=$time " +
+                "playing=${fragment.playerView?.player?.isPlaying} rows=${syncAdapter.itemCount}")
+            SubtitleSyncTrace.snapshot("panel-offset", fragment, syncAdapter.immutableCurrentList, syncAdapter, syncList)
             offsetHint.text = when {
                 amount > 0 -> ctx.getString(R.string.subtitle_offset_extra_hint_before_format, amount)
                 amount < 0 -> ctx.getString(R.string.subtitle_offset_extra_hint_later_format, -amount)
@@ -537,10 +555,16 @@ internal class ElevatePlayerPanel(
     ) { proxy, method, args ->
         when (method.name) {
             "onCues" -> {
-                if (inSync) root.post { updateSyncCues() }
+                if (inSync) {
+                    Log.d("ElevateSyncDiag", "panel-event onCues pos=${fragment.player.getPosition()} " +
+                        "player=${fragment.playerView?.player?.let(System::identityHashCode)}")
+                    root.post { updateSyncCues() }
+                }
                 null
             }
             "onIsPlayingChanged", "onPositionDiscontinuity" -> {
+                if (inSync) Log.d("ElevateSyncDiag", "panel-event ${method.name} " +
+                    "pos=${fragment.player.getPosition()} playing=${fragment.playerView?.player?.isPlaying}")
                 if (inSync) root.post {
                     if (inSync) {
                         updateSyncPosition()
@@ -550,6 +574,9 @@ internal class ElevatePlayerPanel(
                 null
             }
             "onTracksChanged" -> {
+                if (inSync) Log.d("ElevateSyncDiag", "panel-event onTracksChanged " +
+                    "selectedHash=${fragment.player.getCurrentPreferredSubtitle()?.url?.hashCode()} " +
+                    "pos=${fragment.player.getPosition()}")
                 if (inSync) root.post { if (inSync) updateSyncCues() }
                 if (tab == Tab.SUBTITLES && !inSync)
                     root.post {
@@ -572,6 +599,9 @@ internal class ElevatePlayerPanel(
         previous?.removeListener(cueListener)
         cuePlayer = next
         next?.addListener(cueListener)
+        Log.d("ElevateSyncDiag", "panel-player-listener enabled=$enabled " +
+            "old=${previous?.let(System::identityHashCode)} " +
+            "new=${next?.let(System::identityHashCode)}")
     }
     private val touches = ArrayList<View>()
     private val linksChanged = Observer<VideoLive<Set<VideoLink>>> { update ->
@@ -581,8 +611,11 @@ internal class ElevatePlayerPanel(
         val actual = fragment.player.getCurrentPreferredSubtitle()
         onSubtitleOptionsChanged()
         if (tab == Tab.SUBTITLES) {
-            if (inSync) updateSyncCues()
-            else showTabContents()
+            if (inSync) {
+                Log.d("ElevateSyncDiag", "panel-subtitle-model-changed " +
+                    "count=${vm.state.subtitles.size} selectedHash=${actual?.url?.hashCode()}")
+                updateSyncCues()
+            } else showTabContents()
         }
     }
 
@@ -1107,6 +1140,14 @@ internal class ElevatePlayerPanel(
         }
         // CloudStream's decoder fills cue data asynchronously after selection.
         val cues = (refreshed ?: SubtitleSyncCueRepair.cuesForPlayer(fragment)).toList()
+        Log.d("ElevateSyncDiag", "panel-cue-input source=${if (refreshed != null) "refreshed" else "decoder"} " +
+            "selectedHash=${selected?.url?.hashCode()} selectedOrigin=${selected?.origin} " +
+            "player=${activePlayer?.let(System::identityHashCode)} " +
+            "decoderRows=${runCatching { fragment.player.getSubtitleCues().size }.getOrDefault(-1)} " +
+            "newRows=${cues.size} oldRows=${syncAdapter.itemCount} retry=$syncCueRetryCount")
+        SubtitleSyncTrace.snapshot("panel-input-cues", fragment, cues, null, syncList)
+        SubtitleSyncTrace.snapshot("panel-before-submit", fragment,
+            syncAdapter.immutableCurrentList, syncAdapter, syncList)
         syncList.removeCallbacks(syncCueRetry)
         if (refreshed == null && selected?.origin == SubtitleOrigin.URL &&
             cues.size < 3 && syncCueRetryCount < 40) {
@@ -1120,7 +1161,14 @@ internal class ElevatePlayerPanel(
             if (inSync) {
                 syncActiveCue = if (cues.isNotEmpty())
                     syncAdapter.getLatestActiveItem(target) else -1
+                Log.d("ElevateSyncDiag", "panel-submit-committed rows=${syncAdapter.itemCount} " +
+                    "initialTime=$target active=$syncActiveCue playing=${activePlayer?.isPlaying}")
+                SubtitleSyncTrace.snapshot("panel-submit-commit", fragment,
+                    syncAdapter.immutableCurrentList, syncAdapter, syncList)
                 if (syncActiveCue >= 0) syncList.scrollToPosition(syncActiveCue)
+                syncList.post {
+                    if (inSync) SubtitleSyncTrace.visible("panel-submit-view", fragment, syncAdapter, syncList)
+                }
                 scheduleSyncPosition()
             }
         }
@@ -1133,6 +1181,9 @@ internal class ElevatePlayerPanel(
         bindRefreshListener()
         tab = Tab.SUBTITLES
         inSync = true
+        Log.d("ElevateSyncDiag", "panel-open selectedHash=${fragment.player.getCurrentPreferredSubtitle()?.url?.hashCode()} " +
+            "pos=${fragment.player.getPosition()} offset=${fragment.player.getSubtitleOffset()} " +
+            "playing=${fragment.playerView?.player?.isPlaying}")
         observeCuePlayer(true)
         buttons.forEach { (key, button) -> button.alpha = if (key == tab) 1f else .55f }
         body.visibility = View.VISIBLE
@@ -1162,6 +1213,9 @@ internal class ElevatePlayerPanel(
         }
         offsetInput.setText(fragment.player.getSubtitleOffset().toString())
         updateSyncCues()
+        syncList.post {
+            if (inSync) SubtitleSyncTrace.visible("panel-open-laid-out", fragment, syncAdapter, syncList)
+        }
     }
 
 }
