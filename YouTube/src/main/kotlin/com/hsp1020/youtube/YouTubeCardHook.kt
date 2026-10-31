@@ -495,7 +495,23 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         startAtMs: Long? = null,
         returnToDetail: Boolean = false,
     ) {
-        if (directLoading || directPlayback != null) return
+        if (directLoading) return
+        if (directPlayback != null) {
+            // Elevate redirects the native player destination to its own Activity.
+            // The Home NavController therefore no longer points to the player,
+            // although its original destination-change listener may never see
+            // a completed playback/return and leave this session latched.
+            val redirected = app.getSharedPreferences("ElevateFeatures", Context.MODE_PRIVATE)
+                .getBoolean("PIP_LIBRARY_BROWSE", false)
+            val homeNav = host?.supportFragmentManager
+                ?.findFragmentById(R.id.nav_host_fragment) as? NavHostFragment
+            if (!redirected || homeNav?.navController?.currentDestination?.id ==
+                R.id.navigation_player) return
+            clearPlaybackReturnListener()
+            clearPendingTimeSeek()
+            directPlayback = null
+            playerFragment = null
+        }
         clearPopupReturnListener()
         expandedReturnDialog = null
         popupReturning = false
@@ -1617,7 +1633,19 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     }
 
     override fun onActivityDestroyed(activity: Activity) {
-        if (host === activity) release()
+        if (host === activity) {
+            release()
+        } else if (directPlayback != null &&
+            !activity.isChangingConfigurations &&
+            activity.javaClass.name ==
+                "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity") {
+            // Do not keep a completed quick-play session blocking later cards.
+            clearPendingTimeSeek()
+            clearPlaybackReturnListener()
+            directPlayback = null
+            playerFragment = null
+            lastPlayed = null
+        }
     }
 
     override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit

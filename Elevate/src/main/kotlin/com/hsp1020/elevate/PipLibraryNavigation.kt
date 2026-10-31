@@ -343,9 +343,11 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
     override fun onActivityPaused(activity: Activity) = Unit
     override fun onActivityStopped(activity: Activity) {
-        // PiP X can still report inPip=true while the Activity is finishing.
+        // Android can still report inPip=true while dismissing PiP.
+        // A stopped PiP Activity is no longer presenting the video;
+        // release it rather than leaving a paused task/session behind.
         if (activity === playerActivity && !activity.isChangingConfigurations &&
-            (activity.isFinishing || (wasInPip && !activity.inPip()))) {
+            (activity.isFinishing || wasInPip)) {
             closePlayer(activity as DownloadedPlayerActivity)
         }
     }
