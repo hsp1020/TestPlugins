@@ -77,6 +77,11 @@ internal object ExternalDownloads {
             .putString(TARGET, app.json().toString()).apply()
     }
 
+    fun clearSelection(c: Context) {
+        c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .remove(TARGET).remove("apps").apply()
+    }
+
     data class Pending(
         val id: Int, val parentId: Int, val title: String, val episodeName: String?,
         val episode: Int, val season: Int?, val api: String, val resultUrl: String,

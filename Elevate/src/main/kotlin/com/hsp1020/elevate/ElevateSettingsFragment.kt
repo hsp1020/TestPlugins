@@ -255,9 +255,13 @@ class ElevateSettingsFragment : DialogFragment() {
                             Triple("1DM Lite", "idm.internet.download.manager.adm.lite", "idm.internet.download.manager.Downloader"),
                             Triple("ADM", "com.dv.adm", "com.dv.adm.AEditor")
                         )
+                        val selected = ExternalDownloads.selected(ctx)
                         val saved = ComponentName.unflattenFromString(
-                            ExternalDownloads.selected(ctx)?.component.orEmpty()
-                        )?.packageName
+                            selected?.component.orEmpty()
+                        )?.packageName?.takeIf { pkg ->
+                            runCatching { ctx.packageManager.getPackageInfo(pkg, 0) }.isSuccess
+                        }
+                        if (selected != null && saved == null) ExternalDownloads.clearSelection(ctx)
                         var unselected = saved == null || apps.none { it.second == saved }
                         addView(object : Spinner(ctx) {
                             private var openedByUser = false
