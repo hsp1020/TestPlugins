@@ -34,7 +34,7 @@ import kotlin.math.roundToInt
 
 /**
  * Honors original thumbnail proportions using the finished Coil result of the
- * already-bound poster. Does not fetch images, replace URLs or affect YouTube.
+ * already-bound poster. Does not fetch images or replace URLs.
  */
 internal class OriginalThumbnailRatioHook(private val app: Application) :
     Application.ActivityLifecycleCallbacks {
@@ -283,6 +283,23 @@ internal class OriginalThumbnailRatioHook(private val app: Application) :
 
                 // The drawable may be a placeholder or from a recycled card.
                 // A matching finished Coil request is the authoritative image.
+                // Search rows rebind recycled YouTube cards as portrait before Coil finishes.
+                // Their URLs identify the ratio, so apply it before the first visible frame.
+                if (role == Role.SEARCH_ROW && item.apiName == "YouTube") {
+                    val shorts = item.url.contains("/shorts/")
+                    if (shorts || item.url.contains("/watch?v=")) {
+                        stopWaiting(view)
+                        val width = (if (shorts) HomeChildItemAdapter.minPosterSize
+                            else HomeChildItemAdapter.maxPosterSize)
+                            .takeIf { it > 0 } ?: dp(if (shorts) 114 else 180)
+                        val height = (width * (if (shorts) 16f / 9f else 9f / 16f))
+                            .roundToInt()
+                        card.layout.setCardSize(width, height)
+                        if (!holder.contains(title)) card.layout.setTitleWidth(width)
+                        return
+                    }
+                }
+
                 val result = CoilUtils.result(image)
                 if (result == null || result.request.data.toString() != posterUrl) {
                     card.layout.restoreSize()
