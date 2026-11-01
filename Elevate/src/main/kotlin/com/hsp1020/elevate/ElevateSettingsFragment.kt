@@ -265,7 +265,7 @@ class ElevateSettingsFragment : DialogFragment() {
             }
         })
         content.addView(TextView(ctx).apply {
-            text = "12s method trace samples running methods. HPROF captures live objects, not individual allocation stacks. Files may contain account data; export manually."
+            text = "60s method trace samples running methods. Stop early when reproduction is complete. HPROF captures live objects, not individual allocation stacks. Files may contain account data; export manually."
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setPadding(0, dp(8), 0, dp(4))
         })
@@ -275,7 +275,7 @@ class ElevateSettingsFragment : DialogFragment() {
                 setOnClickListener { action() }
             })
         }
-        diagnosticButton("Start 12s method trace") {
+        diagnosticButton("Start 60s method trace") {
             Toast.makeText(ctx, ElevateDiagnostics.startTrace(ctx.applicationContext), Toast.LENGTH_LONG).show()
         }
         diagnosticButton("Stop trace") {

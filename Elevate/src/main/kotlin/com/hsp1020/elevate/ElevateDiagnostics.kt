@@ -37,8 +37,8 @@ internal object ElevateDiagnostics {
             traceFile?.takeIf { it !== file }?.delete()
             traceFile = file
             probe(context, "trace_begin")
-            main.postDelayed({ stopTrace() }, 12000L)
-            "Trace started for 12s. Reproduce YouTube playback/PiP now."
+            main.postDelayed({ synchronized(lock) { if (tracing && traceFile === file) stopTrace() } }, 60000L)
+            "Trace started for up to 60s. Reproduce YouTube playback/PiP, then stop manually."
         } catch (e: Exception) {
             Log.e("CSProbe", "Cannot start trace", e)
             "Trace failed: ${e.javaClass.simpleName}"
