@@ -196,7 +196,7 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
 
         val links = when {
             item?.links?.isNotEmpty() == true -> {
-                ExternalDownloads.trace("prepare.links.item id=" + queued.id + " count=" + item.links.size)
+                ExternalDownloads.trace("prepare.links.item id=" + queued.id + " count=" + item.links?.size)
                 item.links
             }
             saved?.links?.isNotEmpty() == true -> {
