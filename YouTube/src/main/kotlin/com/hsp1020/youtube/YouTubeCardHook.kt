@@ -392,7 +392,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             } else if (enteredPlayer) {
                 popupAwaitingPlayer = false
                 clearPendingTimeSeek()
-                if (destination.id == origin) showReturnedPopup()
+                if (destination.id == origin) popupReturning = expandedReturnDialog != null
                 clearPlaybackReturnListener()
                 if (directPlayback === session) {
                     playerFragment?.let(::recordPlayerEpisode)
@@ -405,7 +405,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     playerFragment = null
                     // Native back already reveals the original Home/Search destination.
                     // Never push a details page after a direct-play exit.
-                    expandedReturnDialog = null
+                    if (!popupReturning) expandedReturnDialog = null
                 }
             }
         }
@@ -683,6 +683,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
             recordPlayerEpisode(f)
+            if (f.javaClass.name == PLAYER_SCREEN && popupReturning) showReturnedPopup()
         }
 
         override fun onFragmentDestroyed(fm: FragmentManager, f: Fragment) {
