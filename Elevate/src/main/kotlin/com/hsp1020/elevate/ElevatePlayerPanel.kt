@@ -701,6 +701,8 @@ internal class ElevatePlayerPanel(
                 it.url !in existing && it.origin != SubtitleOrigin.EMBEDDED_IN_VIDEO
             }
             if (added.isNotEmpty()) {
+                // Native import selects the first new subtitle; protect it before player reload.
+                onManualSubtitle(added.first())
                 importedUrls.addAll(added.map { it.url })
                 beforeImport = null
             }
