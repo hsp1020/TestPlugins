@@ -71,6 +71,7 @@ class ElevatePlugin : Plugin() {
     private var pipSubtitles: PipSubtitleLifecycle? = null
     private var pipLibrary: PipLibraryNavigation? = null
     private var externalDownloaderLifecycle: ExternalDownloaderLifecycle? = null
+    private var externalQueueBridge: ExternalQueueBridge? = null
     private var episodeProgress: EpisodeProgressHook? = null
     private var subtitleRetry: SubtitleRefererRetry? = null
     private var homeRecyclerGuard: HomeRecyclerCacheGuard? = null
@@ -100,7 +101,6 @@ class ElevatePlugin : Plugin() {
     override fun load(context: Context) {
         val application = context.applicationContext as? Application ?: return
         val token = generation.incrementAndGet()
-        registerVideoClickAction(ExternalDownloadAction())
         openSettings = { ctx ->
             (ctx as? FragmentActivity)?.takeUnless { it.isFinishing || it.isDestroyed }?.let { host ->
                 if (host.supportFragmentManager.findFragmentByTag("ElevateSettings") == null) {
@@ -160,7 +160,12 @@ class ElevatePlugin : Plugin() {
             if (externalDownloaderLifecycle == null) {
                 externalDownloaderLifecycle = ExternalDownloaderLifecycle(application).also { it.start() }
             }
+            if (externalQueueBridge == null) {
+                externalQueueBridge = ExternalQueueBridge(application).also { it.start() }
+            }
         } else {
+            externalQueueBridge?.stop()
+            externalQueueBridge = null
             externalDownloaderLifecycle?.stop()
             externalDownloaderLifecycle = null
         }
@@ -359,6 +364,8 @@ class ElevatePlugin : Plugin() {
         hook = null
         pipLibrary?.stop()
         pipLibrary = null
+        externalQueueBridge?.stop()
+        externalQueueBridge = null
         externalDownloaderLifecycle?.stop()
         externalDownloaderLifecycle = null
         pipSubtitles?.stop()

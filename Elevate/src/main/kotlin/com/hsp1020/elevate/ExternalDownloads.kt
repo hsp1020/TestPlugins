@@ -20,8 +20,6 @@ import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.actions.VideoClickAction
-import com.lagradost.cloudstream3.ui.result.LinkLoadingResult
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.utils.DOWNLOAD_EPISODE_CACHE
 import com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE
@@ -37,32 +35,13 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** A native episode-menu action, not a second download engine. */
-internal class ExternalDownloadAction : VideoClickAction() {
-    override val name = txt("External Download")
-    override val oneSource = true
-    override fun shouldShow(context: Context?, video: ResultEpisode?) =
-        context != null && video != null &&
-            ElevateFeaturePrefs.enabled(context, ElevateFeature.EXTERNAL_DOWNLOADS)
-
-    override suspend fun runAction(
-        context: Context?, video: ResultEpisode, result: LinkLoadingResult, index: Int?
-    ) {
-        val link = index?.let { result.links.getOrNull(it) } ?: return
-        val activity = context as? androidx.fragment.app.FragmentActivity ?: return
-        uiThread {
-            ExternalDownloads.request = video to link
-            ExternalDownloadDialog.show(activity.supportFragmentManager)
-        }
-    }
-}
-
 internal object ExternalDownloads {
     private const val PREFS = "ElevateExternalDownloads"
     private const val APPS = "apps"
     private const val PENDING = "pending"
     private const val FOLDER = "folder"
     var request: Pair<ResultEpisode, ExtractorLink>? = null
+    var handoffDone: kotlinx.coroutines.CompletableDeferred<Unit>? = null
     private val checking = AtomicBoolean(false)
     private val main = Handler(Looper.getMainLooper())
 
@@ -315,6 +294,7 @@ class ExternalDownloadDialog : DialogFragment() {
     }
 
     private var pickingMode: String = "send"
+    private var reopening = false
     private var importingId: Int = 0
     private val appPicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val target = result.data?.component
@@ -347,6 +327,7 @@ class ExternalDownloadDialog : DialogFragment() {
     private fun reopen() {
         if (!isAdded) return
         val fm = parentFragmentManager
+        reopening = true
         dismissAllowingStateLoss()
         fm.executePendingTransactions()
         show(fm)
@@ -422,6 +403,11 @@ class ExternalDownloadDialog : DialogFragment() {
             }
         }
         appPicker.launch(Intent(Intent.ACTION_PICK_ACTIVITY).putExtra(Intent.EXTRA_INTENT, sample))
+    }
+
+    override fun onDismiss(dialog: android.content.DialogInterface) {
+        super.onDismiss(dialog)
+        if (!reopening) ExternalDownloads.handoffDone?.complete(Unit)
     }
 
     private fun launchTarget(app: ExternalDownloads.App?, mode: String = app?.mode ?: "send") {

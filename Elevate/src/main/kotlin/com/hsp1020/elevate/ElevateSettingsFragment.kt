@@ -31,7 +31,7 @@ internal enum class ElevateFeature(
     ORIGINAL_THUMBNAIL_RATIOS("Home & Library", "Original Thumbnail Ratios",
         "Preserve landscape thumbnails in Search and Continue Watching; leave YouTube and portrait posters unchanged."),
     EXTERNAL_DOWNLOADS("Home & Library", "External Downloads",
-        "Send episodes to selected apps and register downloaded files in CloudStream."),
+        "Route native download requests, including selected mirrors, to external apps and register completed files."),
     LIBRARY_POSTERS("Home & Library", "Custom Library Posters",
         "Replace library covers via RPDB, XRDB, OPDB, AIORatings, TOP Posters or EasyRatingsDB."),
     EPISODE_PROGRESS("Home & Library", "Episode Progress Indicators",
