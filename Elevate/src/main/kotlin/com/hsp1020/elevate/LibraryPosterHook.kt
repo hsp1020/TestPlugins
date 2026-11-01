@@ -933,7 +933,19 @@ internal object LibraryPosterPrefs {
 
         title(content, "Library Poster Service")
         val service = Spinner(context).apply {
-            useElevateSettingsOptions(context, PosterService.entries.map { it.title })
+            adapter = object : ArrayAdapter<String>(
+                context, android.R.layout.simple_spinner_dropdown_item,
+                PosterService.entries.map { it.title }
+            ) {
+                override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
+                    super.getView(position, convertView, parent).also {
+                        (it as? TextView)?.applyElevateNativeFont()
+                    }
+                override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View =
+                    super.getDropDownView(position, convertView, parent).also {
+                        (it as? TextView)?.applyElevateNativeFont()
+                    }
+            }
             setSelection(saved.service.ordinal)
         }
         content.addView(service)

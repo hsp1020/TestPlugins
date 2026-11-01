@@ -15,8 +15,6 @@ import android.widget.Spinner
 import android.widget.ArrayAdapter
 import android.widget.AdapterView
 import android.content.ComponentName
-import android.graphics.drawable.ColorDrawable
-import android.view.View
 import androidx.fragment.app.DialogFragment
 
 internal enum class ElevateFeature(
@@ -82,38 +80,6 @@ internal object ElevateFeaturePrefs {
     fun enabled(context: Context, feature: ElevateFeature): Boolean =
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
             .getBoolean(feature.name, defaultEnabled(feature))
-}
-
-/**
- * Reuse the same native-style spinner contents and dialog surface for both setting groups.
- * Keep the theme's spinner background/arrow; tint only the text rows and dropdown surface.
- */
-internal fun Spinner.useElevateSettingsOptions(context: Context, values: List<String>) {
-    val value = TypedValue()
-    context.theme.resolveAttribute(android.R.attr.colorBackground, value, true)
-    val dialogColor = if (value.resourceId != 0)
-        androidx.core.content.ContextCompat.getColor(context, value.resourceId)
-    else value.data
-    setPopupBackgroundDrawable(ColorDrawable(dialogColor))
-    adapter = object : ArrayAdapter<String>(
-        context, android.R.layout.simple_spinner_dropdown_item, values
-    ) {
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
-            super.getView(position, convertView, parent).also {
-                (it as? TextView)?.apply {
-                    applyElevateNativeFont()
-                    setBackgroundColor(dialogColor)
-                }
-            }
-
-        override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View =
-            super.getDropDownView(position, convertView, parent).also {
-                (it as? TextView)?.apply {
-                    applyElevateNativeFont()
-                    setBackgroundColor(dialogColor)
-                }
-            }
-    }
 }
 
 class ElevateSettingsFragment : DialogFragment() {
@@ -244,13 +210,13 @@ class ElevateSettingsFragment : DialogFragment() {
                 } else null
                 val externalControls = if (feature == ElevateFeature.EXTERNAL_DOWNLOADS) {
                     LinearLayout(ctx).apply {
-                        orientation = LinearLayout.VERTICAL
-                        setPadding(dp(8), 0, 0, dp(12))
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(14), dp(4), dp(14), dp(10))
                         addView(TextView(ctx).apply {
                             text = "Download App"
-                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                             applyElevateNativeFont()
-                            setPadding(0, dp(8), 0, dp(4))
                         })
                         val apps = listOf(
                             Triple("Select app", "", ""),
@@ -260,14 +226,14 @@ class ElevateSettingsFragment : DialogFragment() {
                             Triple("ADM", "com.dv.adm", "com.dv.adm.AEditor")
                         )
                         addView(Spinner(ctx).apply {
-                            useElevateSettingsOptions(ctx, apps.map { it.first })
+                            adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, apps.map { it.first })
                             val saved = ComponentName.unflattenFromString(
                                 ExternalDownloads.selected(ctx)?.component.orEmpty()
                             )?.packageName
                             setSelection(apps.indexOfFirst { it.second == saved }.takeIf { it >= 0 } ?: 0)
                             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                                 override fun onNothingSelected(parent: AdapterView<*>?) = Unit
-                                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                                override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
                                     val (label, pkg, component) = apps[position]
                                     if (pkg.isNotEmpty()) ExternalDownloads.select(
                                         ctx, ExternalDownloads.App(
@@ -276,9 +242,7 @@ class ElevateSettingsFragment : DialogFragment() {
                                     )
                                 }
                             }
-                        }, LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-                        ))
+                        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                     }
                 } else null
                 row.addView(SwitchCompat(ctx).apply {

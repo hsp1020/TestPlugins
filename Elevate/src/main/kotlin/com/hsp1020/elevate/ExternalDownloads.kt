@@ -2,6 +2,11 @@ package com.hsp1020.elevate
 
 import android.app.Activity
 import android.app.Application
+import android.database.ContentObserver
+import android.os.Build
+import android.os.Environment
+import android.os.FileObserver
+import android.provider.MediaStore
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -27,6 +32,11 @@ import com.lagradost.safefile.SafeFile
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** A single external target; the download path is CloudStream's own General setting. */
 internal object ExternalDownloads {
@@ -35,6 +45,12 @@ internal object ExternalDownloads {
     private const val PENDING = "pending"
     private val checking = AtomicBoolean(false)
     private val main = Handler(Looper.getMainLooper())
+    private val scanner = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var pendingCache: LinkedHashMap<Int, Pending>? = null
+    private var scheduled: Runnable? = null
+    private var watchPath: String? = null
+    private var fileObserver: FileObserver? = null
+    private var contentObserver: ContentObserver? = null
     private val supported = setOf(
         "idm.internet.download.manager", "idm.internet.download.manager.plus",
         "idm.internet.download.manager.adm.lite", "com.dv.adm"
@@ -89,21 +105,43 @@ internal object ExternalDownloads {
         }
     }
 
-    private fun pending(c: Context): List<Pending> = runCatching {
-        val a = JSONArray(c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(PENDING, "[]"))
-        (0 until a.length()).mapNotNull { runCatching { Pending.parse(a.getJSONObject(it)) }.getOrNull() }
-    }.getOrDefault(emptyList())
+    /** Deserialize only once per process; persist only actual changes. */
+    @Synchronized private fun pendingMap(c: Context): LinkedHashMap<Int, Pending> {
+        pendingCache?.let { return it }
+        val result = LinkedHashMap<Int, Pending>()
+        runCatching {
+            val array = JSONArray(c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(PENDING, "[]"))
+            for (i in 0 until array.length()) {
+                val item = runCatching { Pending.parse(array.getJSONObject(i)) }.getOrNull() ?: continue
+                if (item.created <= 0L || System.currentTimeMillis() - item.created > 30L * 24 * 60 * 60 * 1000) continue
+                result[item.id] = item
+            }
+        }
+        pendingCache = result
+        return result
+    }
 
-    @Synchronized private fun addPending(c: Context, item: Pending) {
-        val next = pending(c).filterNot { it.id == item.id }.takeLast(49) + item
+    @Synchronized private fun pending(c: Context): List<Pending> =
+        pendingMap(c).values.toList()
+
+    @Synchronized private fun savePending(c: Context) {
         c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(PENDING, JSONArray(next.map { it.json() }).toString()).apply()
+            .putString(PENDING, JSONArray(pendingMap(c).values.map { it.json() }).toString()).apply()
+    }
+
+    @Synchronized private fun addPendingBatch(c: Context, items: List<Pending>) {
+        val map = pendingMap(c)
+        for (item in items) map[item.id] = item
+        savePending(c)
+        watch(c)
+        scheduleCheck(c, 2400L)
     }
 
     @Synchronized private fun removePending(c: Context, id: Int) {
-        val next = pending(c).filterNot { it.id == id }
-        c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(PENDING, JSONArray(next.map { it.json() }).toString()).apply()
+        if (pendingMap(c).remove(id) == null) return
+        savePending(c)
+        watch(c)
     }
 
     fun toast(c: Context, message: String) {
@@ -160,58 +198,84 @@ internal object ExternalDownloads {
         return "$base.$ext"
     }
 
-    /** Handoff URL, stable filename and headers without any CloudStream download popup. */
-    fun handoff(activity: Activity, queued: DownloadObjects.DownloadQueueWrapper, link: ExtractorLink) {
+    private data class Transfer(
+        val queued: DownloadObjects.DownloadQueueWrapper,
+        val link: ExtractorLink,
+        val filename: String,
+        val headers: Map<String, String>
+    )
+
+    private fun headersFor(link: ExtractorLink): Map<String, String> {
+        val result = LinkedHashMap<String, String>(link.headers.size + 1)
+        for ((key, value) in link.headers) result[key.lowercase(java.util.Locale.ROOT)] = value
+        if (link.referer.isNotBlank() && "referer" !in result) result["referer"] = link.referer
+        return result
+    }
+
+    /**
+     * 1DM 20.0: url_list and url_list.filename arrays.
+     * ADM 14.0.43: ACTION_LIST_ADD entries separated by <line>, each URL/name by <info>.
+     * Transfer together only when the HTTP headers match: both apps use batch-wide headers.
+     */
+    fun handoffBatch(
+        activity: Activity,
+        requests: List<Pair<DownloadObjects.DownloadQueueWrapper, ExtractorLink>>
+    ) {
         val app = selected(activity) ?: return
-        if (Uri.parse(link.url).scheme !in listOf("http", "https")) {
-            toast(activity, "External download requires an HTTP(S) link")
-            return
-        }
         val pkg = ComponentName.unflattenFromString(app.component)?.packageName ?: return
-        val filename = fileName(queued, link)
-        val headers = link.headers.toMutableMap()
-        if (link.referer.isNotBlank() && headers.keys.none { it.equals("referer", true) }) {
-            headers["Referer"] = link.referer
+        val transfers = requests.mapNotNull { (queued, link) ->
+            if (Uri.parse(link.url).scheme !in listOf("http", "https")) {
+                toast(activity, "External download requires an HTTP(S) link")
+                null
+            } else Transfer(queued, link, fileName(queued, link), headersFor(link))
         }
-        val bundle = Bundle().apply { headers.forEach { (key, value) -> putString(key, value) } }
-        val intent = if (pkg == "com.dv.adm") {
-            // ADM 14.0.43 AEditor handles ACTION_LIST_ADD with <info> per-file names.
-            Intent(Intent.ACTION_MAIN).apply {
-                component = ComponentName(pkg, "com.dv.adm.AEditor")
-                putExtra("com.dv.get.ACTION_LIST_ADD", "${link.url}<info>$filename")
-                putExtra("com.dv.get.ACTION_LIST_OPEN", false)
-                // ADM's legacy path extra expects a filesystem path, not a SAF URI.
-                basePath(activity)?.takeIf { it.startsWith("/") }?.let {
-                    putExtra("com.dv.get.ACTION_LIST_PATH", it)
+        if (transfers.isEmpty()) return
+        // Do not combine requests with different Referer/Cookie/User-Agent values.
+        val groups = transfers.groupBy { it.headers }
+        for ((headers, group) in groups) {
+            val first = group.first()
+            val bundle = Bundle().apply { headers.forEach { (key, value) -> putString(key, value) } }
+            val intent = if (pkg == "com.dv.adm") {
+                Intent(Intent.ACTION_MAIN).apply {
+                    component = ComponentName(pkg, "com.dv.adm.AEditor")
+                    putExtra("com.dv.get.ACTION_LIST_ADD", group.joinToString("<line>") {
+                        "${it.link.url}<info>${it.filename}"
+                    })
+                    putExtra("com.dv.get.ACTION_LIST_OPEN", false)
+                    basePath(activity)?.takeIf { it.startsWith("/") }?.let {
+                        putExtra("com.dv.get.ACTION_LIST_PATH", it)
+                    }
+                    if (headers.isNotEmpty()) putExtra("headers", bundle)
                 }
-                if (headers.isNotEmpty()) putExtra("headers", bundle)
+            } else {
+                Intent(Intent.ACTION_VIEW, Uri.parse(first.link.url)).apply {
+                    component = ComponentName(pkg, "idm.internet.download.manager.Downloader")
+                    putExtra("force_editor", false)
+                    putExtra("hide_browser_option", true)
+                    if (group.size == 1) putExtra("extra_filename", first.filename)
+                    else {
+                        putStringArrayListExtra("url_list", ArrayList(group.map { it.link.url }))
+                        putStringArrayListExtra("url_list.filename", ArrayList(group.map { it.filename }))
+                    }
+                    if (headers.isNotEmpty()) putExtra("extra_headers", bundle)
+                    headers["referer"]?.let { putExtra("extra_referer", it) }
+                    headers["user-agent"]?.let { putExtra("extra_useragent", it) }
+                    headers["cookie"]?.let { putExtra("extra_cookies", it) }
+                }
             }
-        } else {
-            // 1DM 20.0: public Downloader Activity and official filename/headers extras.
-            Intent(Intent.ACTION_VIEW, Uri.parse(link.url)).apply {
-                component = ComponentName(pkg, "idm.internet.download.manager.Downloader")
-                putExtra("extra_filename", filename)
-                putExtra("force_editor", false)
-                putExtra("hide_browser_option", true)
-                if (headers.isNotEmpty()) putExtra("extra_headers", bundle)
-                headers.entries.firstOrNull { it.key.equals("referer", true) }?.let {
-                    putExtra("extra_referer", it.value)
-                }
-                headers.entries.firstOrNull { it.key.equals("user-agent", true) }?.let {
-                    putExtra("extra_useragent", it.value)
-                }
-                headers.entries.firstOrNull { it.key.equals("cookie", true) }?.let {
-                    putExtra("extra_cookies", it.value)
-                }
+            try {
+                activity.startActivity(intent)
+                addPendingBatch(activity.applicationContext, group.map {
+                    fromQueue(activity, it.queued, it.filename)
+                })
+            } catch (e: Exception) {
+                toast(activity, "Cannot open " + app.label + ": " + e.message)
             }
-        }
-        try {
-            activity.startActivity(intent)
-            addPending(activity.applicationContext, fromQueue(activity, queued, filename))
-        } catch (e: Exception) {
-            toast(activity, "Cannot open " + app.label + ": " + e.message)
         }
     }
+
+    fun handoff(activity: Activity, queued: DownloadObjects.DownloadQueueWrapper, link: ExtractorLink) =
+        handoffBatch(activity, listOf(queued to link))
 
     @Synchronized private fun register(c: Context, p: Pending, name: String, size: Long, base: String?) {
         if (!ElevateFeaturePrefs.enabled(c, ElevateFeature.EXTERNAL_DOWNLOADS)) return
@@ -245,51 +309,145 @@ internal object ExternalDownloads {
     private fun isVideo(name: String) =
         name.substringAfterLast('.', "").lowercase() in setOf("mp4", "mkv", "webm", "avi", "mov", "ts", "m4v")
 
-    /** Only inspect CloudStream's configured folder on app resume; never copy files or poll continuously. */
+    /** One observer per pending directory; no periodic polling and no extra worker thread. */
+    @Synchronized private fun watch(c: Context) {
+        val path = basePath(c)
+        val needed = pendingMap(c).isNotEmpty()
+        val key = path ?: "@default"
+        if (!needed) {
+            stopWatching(c)
+            return
+        }
+        if (watchPath == key) return
+        stopWatching(c)
+        watchPath = key
+        @Suppress("DEPRECATION")
+        val physical = if (path.isNullOrBlank()) {
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).absolutePath
+        } else path.takeUnless { it.startsWith("content://") }
+        if (physical != null) {
+            runCatching {
+                object : FileObserver(physical, FileObserver.CLOSE_WRITE or FileObserver.MOVED_TO or FileObserver.CREATE) {
+                    override fun onEvent(event: Int, name: String?) {
+                        if (name != null && isVideo(name)) scheduleCheck(c, 2400L)
+                    }
+                }.also { it.startWatching() }
+            }.onSuccess { fileObserver = it }
+                .onFailure { android.util.Log.w("ElevateExternal", "File observer unavailable", it) }
+        }
+        val uri = when {
+            path?.startsWith("content://") == true -> Uri.parse(path)
+            path.isNullOrBlank() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            else -> null
+        }
+        if (uri != null) {
+            val observer = object : ContentObserver(main) {
+                override fun onChange(selfChange: Boolean) {
+                    scheduleCheck(c, 2400L)
+                }
+            }
+            runCatching { c.contentResolver.registerContentObserver(uri, true, observer) }
+                .onSuccess { contentObserver = observer }
+        }
+    }
+
+    @Synchronized private fun stopWatching(c: Context) {
+        fileObserver?.stopWatching()
+        fileObserver = null
+        contentObserver?.let { runCatching { c.contentResolver.unregisterContentObserver(it) } }
+        contentObserver = null
+        watchPath = null
+        if (pendingCache?.isEmpty() == true) {
+            scheduled?.let(main::removeCallbacks)
+            scheduled = null
+        }
+    }
+
+    @Synchronized private fun scheduleCheck(c: Context, delayMs: Long) {
+        if (pendingMap(c).isEmpty()) return
+        scheduled?.let(main::removeCallbacks)
+        val task = Runnable {
+            synchronized(this) { scheduled = null }
+            checkFolder(c)
+        }
+        scheduled = task
+        main.postDelayed(task, delayMs)
+    }
+
+    /** Event-driven scan with a single non-blocking stability delay per batch. */
     fun checkFolder(c: Context) {
         if (!ElevateFeaturePrefs.enabled(c, ElevateFeature.EXTERNAL_DOWNLOADS) ||
             !checking.compareAndSet(false, true)) return
-        Thread {
+        scanner.launch {
             try {
                 val requests = pending(c)
-                if (requests.isEmpty()) return@Thread
+                if (requests.isEmpty()) return@launch
                 val base = basePath(c)
-                val dir = directory(c, base) ?: return@Thread
-                val now = System.currentTimeMillis()
-                val files = dir.listFiles().orEmpty().filter { file ->
-                    isVideo(file.name().orEmpty()) &&
-                        (file.lastModified() ?: 0L) >= (requests.minOf { it.created } - 1000L) &&
-                        (file.lastModified() ?: now) < now - 15000L &&
-                        (file.length() ?: 0L) > 1024L
+                val dir = directory(c, base) ?: return@launch
+                // One directory listing, one lookup map, no nested filtering or per-file sleep.
+                val byName = HashMap<String, Pending>(requests.size)
+                for (p in requests) if (p.expectedFile.isNotBlank()) {
+                    byName[p.expectedFile.lowercase(java.util.Locale.ROOT)] = p
                 }
-                for (p in requests) {
-                    val fresh = files.filter { (it.lastModified() ?: 0L) >= p.created - 1000L }
-                    val file = fresh.singleOrNull { p.expectedFile.isNotBlank() &&
-                        it.name().equals(p.expectedFile, ignoreCase = true) }
-                    if (file == null) continue
+                val candidates = ArrayList<Triple<Pending, SafeFile, Long>>(requests.size)
+                val now = System.currentTimeMillis()
+                for (file in dir.listFiles().orEmpty()) {
+                    val name = file.name() ?: continue
+                    val pending = byName[name.lowercase(java.util.Locale.ROOT)] ?: continue
+                    if (!isVideo(name)) continue
                     val size = file.length() ?: continue
-                    Thread.sleep(1200)
-                    if (file.length() == size &&
-                        file.lastModified()?.let { it < System.currentTimeMillis() - 15000L } == true) {
-                        runCatching { register(c, p, file.name() ?: return@runCatching, size, base) }
-                            .onSuccess { toast(c, "Added to CloudStream Downloads: " + p.title) }
-                    }
+                    if (size <= 1024L) continue
+                    val modified = file.lastModified()
+                    if (modified != null && (modified < pending.created - 2000L ||
+                                modified > now - 1500L)) continue
+                    candidates.add(Triple(pending, file, size))
+                }
+                if (candidates.isEmpty()) return@launch
+                delay(750L)
+                val stableAt = System.currentTimeMillis()
+                for ((pending, file, size) in candidates) {
+                    if (file.length() != size || size <= 1024L) continue
+                    val modified = file.lastModified()
+                    if (modified != null && modified > stableAt - 1500L) continue
+                    val name = file.name() ?: continue
+                    if (!name.equals(pending.expectedFile, ignoreCase = true)) continue
+                    runCatching { register(c, pending, name, size, base) }
+                        .onFailure { android.util.Log.w("ElevateExternal", "Failed to register completed file", it) }
                 }
             } catch (e: Exception) {
                 android.util.Log.w("ElevateExternal", "Cannot inspect CloudStream download folder", e)
             } finally {
                 checking.set(false)
             }
-        }.start()
+        }
+    }
+
+    fun startRecognition(c: Context) {
+        watch(c)
+        scheduleCheck(c, 2400L)
+    }
+
+    @Synchronized fun stopRecognition(c: Context) {
+        stopWatching(c)
+        scheduled?.let(main::removeCallbacks)
+        scheduled = null
+        pendingCache = null
     }
 }
 
 internal class ExternalDownloaderLifecycle(private val app: Application) :
     Application.ActivityLifecycleCallbacks {
-    fun start() = app.registerActivityLifecycleCallbacks(this)
-    fun stop() = app.unregisterActivityLifecycleCallbacks(this)
+    fun start() {
+        app.registerActivityLifecycleCallbacks(this)
+        ExternalDownloads.startRecognition(app)
+    }
+    fun stop() {
+        ExternalDownloads.stopRecognition(app)
+        app.unregisterActivityLifecycleCallbacks(this)
+    }
     override fun onActivityResumed(activity: Activity) {
-        if (activity is MainActivity) ExternalDownloads.checkFolder(app)
+        if (activity is MainActivity) ExternalDownloads.startRecognition(app)
     }
     override fun onActivityCreated(a: Activity, b: Bundle?) = Unit
     override fun onActivityStarted(a: Activity) = Unit

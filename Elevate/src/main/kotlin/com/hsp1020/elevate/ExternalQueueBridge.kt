@@ -24,6 +24,11 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.coroutineScope
 
 /** Converts all foreground native queue requests into external app handoffs. */
 internal class ExternalQueueBridge(private val app: Application) : Application.ActivityLifecycleCallbacks {
@@ -41,7 +46,6 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
         scope.launch(Dispatchers.Unconfined) {
             DownloadQueueManager.queue.collect { queued ->
                 if (queued.isEmpty() || ExternalDownloads.selected(app) == null ||
-                    host?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) != true ||
                     !ElevateFeaturePrefs.enabled(app, ElevateFeature.EXTERNAL_DOWNLOADS)) return@collect
                 // Drain synchronously on StateFlow emission, before the download service
                 // normally receives and processes the newly queued request.
@@ -66,14 +70,34 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
             }
         }
         scope.launch {
-            for (queued in jobs) {
+            for (first in jobs) {
                 try {
+                    // Collect the entire native batch before launching the external activity.
+                    val batch = ArrayList<DownloadObjects.DownloadQueueWrapper>()
+                    batch.add(first)
+                    while (true) {
+                        val next = withTimeoutOrNull(750L) { jobs.receive() } ?: break
+                        if (batch.none { it.id == next.id }) batch.add(next)
+                    }
                     while (host?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) != true) {
                         resumes.receive()
                     }
-                    val result = withContext(Dispatchers.IO) { prepare(queued) } ?: continue
+                    // Bound simultaneous source lookups; keep all requests even if one fails.
+                    val resolved = coroutineScope {
+                        val limit = Semaphore(3)
+                        batch.map { queued ->
+                            async(Dispatchers.IO) {
+                                limit.acquire()
+                                try {
+                                    prepare(queued)?.let { queued to it.second }
+                                } finally {
+                                    limit.release()
+                                }
+                            }
+                        }.awaitAll().filterNotNull()
+                    }
                     val activity = host ?: continue
-                    ExternalDownloads.handoff(activity, queued, result.second)
+                    if (resolved.isNotEmpty()) ExternalDownloads.handoffBatch(activity, resolved)
                 } catch (cancel: CancellationException) {
                     throw cancel
                 } catch (error: Exception) {
