@@ -17,7 +17,7 @@ import android.widget.ArrayAdapter
 import android.content.ComponentName
 import android.content.res.Configuration
 import android.graphics.Color
-import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.ColorDrawable
 import androidx.fragment.app.DialogFragment
 
 internal enum class ElevateFeature(
@@ -92,13 +92,7 @@ internal fun Spinner.useElevateSettingsDropdown(
     val night = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
         Configuration.UI_MODE_NIGHT_YES
     val surface = if (night) Color.BLACK else Color.WHITE
-    val density = context.resources.displayMetrics.density
-    setPopupBackgroundDrawable(GradientDrawable().apply {
-        setColor(surface)
-        setStroke((density + 0.5f).toInt().coerceAtLeast(1),
-            if (night) Color.DKGRAY else Color.LTGRAY)
-        cornerRadius = 4f * density
-    })
+    setPopupBackgroundDrawable(ColorDrawable(surface))
     adapter = object : ArrayAdapter<String>(context, android.R.layout.simple_spinner_dropdown_item, labels) {
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
             super.getView(position, convertView, parent).also {
@@ -287,7 +281,7 @@ class ElevateSettingsFragment : DialogFragment() {
                             }
                         }.apply {
                             useElevateSettingsDropdown(ctx, apps.map { it.first }) {
-                                if (unselected) "" else null
+                                if (unselected) "Select app" else null
                             }
                             setSelection(apps.indexOfFirst { it.second == saved }.coerceAtLeast(0))
                         }, LinearLayout.LayoutParams(
