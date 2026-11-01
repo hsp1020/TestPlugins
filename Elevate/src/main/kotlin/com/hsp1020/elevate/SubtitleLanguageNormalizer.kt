@@ -163,11 +163,46 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         updateSingleOption(vm)
     }
 
+    /** Change only picker text: preserve embedded and downloaded SubtitleData identities. */
+    private fun localizeOfflineGroups(list: ListView, groups: List<List<SubtitleData>>) {
+        @Suppress("UNCHECKED_CAST")
+        val adapter = ((list.adapter as? HeaderViewListAdapter)?.wrappedAdapter
+            ?: list.adapter) as? ArrayAdapter<Spanned> ?: return
+        if (adapter.count != groups.size + 1) return // First row: No subtitles.
+        val current = (0 until adapter.count).map { adapter.getItem(it) ?: return }
+        val labels = groups.mapIndexed { index, group ->
+            val subtitle = group.firstOrNull() ?: return@mapIndexed current[index + 1]
+            if (group.none { it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO ||
+                        it.origin == SubtitleOrigin.DOWNLOADED_FILE }) {
+                return@mapIndexed current[index + 1]
+            }
+            val name = subtitle.originalName.substringBefore(" · ").substringBefore(" — ")
+                .substringBefore(" (").trim()
+            val code = if (subtitle.languageCode.equals("ms-ind", ignoreCase = true))
+                "id" else subtitle.languageCode
+            val tag = SubtitleHelper.fromCodeToLangTagIETF(code)
+                ?: SubtitleHelper.fromCodeToLangTagIETF(name)
+                ?: SubtitleHelper.fromLanguageToTagIETF(name)
+            val localized = tag?.let { SubtitleHelper.fromTagToLanguageName(it) }
+                ?.takeIf { it.isNotBlank() } ?: return@mapIndexed current[index + 1]
+            if (localized == subtitle.originalName ||
+                current[index + 1].toString() == localized) current[index + 1]
+            else localized.html()
+        }
+        if (labels.indices.all { labels[it] == current[it + 1] }) return
+        adapter.setNotifyOnChange(false)
+        adapter.clear()
+        adapter.add(current[0])
+        adapter.addAll(labels)
+        adapter.notifyDataSetChanged()
+    }
+
     private fun updateSingleOption(vm: PlayerGeneratorViewModel) {
         val dialog = singleDialog?.takeIf { it.isShowing } ?: return
         val list = singleGroups ?: return
         val options = singleOptions ?: return
         val groups = sortSubs(vm.state.subtitles).groupBy { it.originalName }.values.toList()
+        localizeOfflineGroups(list, groups)
         val displayed = (list.adapter as? HeaderViewListAdapter)?.wrappedAdapter ?: list.adapter
         val order = (list.getTag(R.id.sort_subtitles) as? IntArray)
             ?.takeIf { it.size == groups.size && it.toSet().size == groups.size }

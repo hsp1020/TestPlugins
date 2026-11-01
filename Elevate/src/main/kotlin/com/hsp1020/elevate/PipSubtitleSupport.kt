@@ -80,8 +80,9 @@ class PipSubtitleScaler(private val acceptsProvider: (String) -> Boolean) {
         if (watched !== candidate || !candidate.isAdded) return
         val playerFragment = candidate as? GeneratorPlayer ?: return
         val host = playerFragment.activity as? FragmentActivity ?: return
+        // Offline videos have no LoadResponse, but share the native subtitle view.
         val name = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
-            .state.generatorState?.response?.apiName ?: return
+            .state.generatorState?.response?.apiName.orEmpty()
         if (!acceptsProvider(name)) {
             unbind()
             return

@@ -22,6 +22,7 @@ import androidx.fragment.app.FragmentManager
 import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModelProvider
 import androidx.media3.common.Player as Media3Player
+import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
@@ -35,11 +36,15 @@ import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.syncproviders.AccountManager.Companion.animeSkipApi
 import com.lagradost.cloudstream3.syncproviders.PlainAuthRepo
+import com.lagradost.cloudstream3.ui.player.ExtractorUri
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.player.VideoLink
 import com.lagradost.cloudstream3.ui.player.VideoLive
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
+import com.lagradost.cloudstream3.utils.DataStore.getKey
+import com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE
+import com.lagradost.cloudstream3.utils.downloader.DownloadObjects
 import com.lagradost.cloudstream3.ui.settings.Globals.EMULATOR
 import com.lagradost.cloudstream3.ui.settings.Globals.TV
 import com.lagradost.cloudstream3.ui.settings.Globals.isLayout
@@ -60,11 +65,13 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
-/**
- * Keep CloudStream's existing timestamp lookup and native skip button. Only replace the
- * effective stamps when the independent Elevate providers return something preferable.
- * No StremioC types, no per-frame draw observers, no player-core modifications.
- */
+private fun skipPlaybackId(meta: Any?): Int? = when (meta) {
+    is ResultEpisode -> meta.id
+    is ExtractorUri -> meta.id
+    else -> null
+}
+
+/** Keep native skip timestamps and controls; only improve the selected source metadata. */
 internal class ElevateSkipController(private val application: Application) :
     Application.ActivityLifecycleCallbacks {
     private val main = Handler(Looper.getMainLooper())
@@ -336,7 +343,7 @@ internal class ElevateSkipController(private val application: Application) :
         if (instance < 0 || activeKey == null) return
         vm.modifyState {
             if (this.instance != instance ||
-                (generatorState?.meta as? ResultEpisode)?.id != episode ||
+                skipPlaybackId(generatorState?.meta) != episode ||
                 stamps.none { it.source.startsWith("Elevate/") }) this
             else set(native)
         }
@@ -348,7 +355,7 @@ internal class ElevateSkipController(private val application: Application) :
         placeNativeSkipButton()
         val nextPlayer = f.playerView?.player
         val state = vm.state
-        val nextEpisode = (state.generatorState?.meta as? ResultEpisode)?.id ?: -1
+        val nextEpisode = skipPlaybackId(state.generatorState?.meta) ?: -1
         if (nextPlayer !== mediaPlayer || state.instance != initialLoadInstance ||
             nextEpisode != initialLoadEpisode) {
             initialLoadCompleted = false
@@ -363,18 +370,23 @@ internal class ElevateSkipController(private val application: Application) :
         if (nextPlayer?.playbackState == Media3Player.STATE_READY) initialLoadCompleted = true
         skipButtonTimer?.attach()
         val gen = state.generatorState ?: return
-        val episode = gen.meta as? ResultEpisode ?: return
-        val response = gen.response ?: return
+        val episode = gen.meta as? ResultEpisode
+        val offline = gen.meta as? ExtractorUri
+        val response = gen.response
+        if ((episode == null || response == null) && offline?.parentId == null) return
+        val episodeId = skipPlaybackId(gen.meta) ?: return
         // Some HLS streams expose a temporary 30-second duration before their
         // real timeline becomes available. Prefer a known full episode duration.
         val playerDuration = nextPlayer?.duration?.takeIf { it > 0L }
-        val episodeDuration = episode.duration.takeIf { it > 0L }
+        val episodeDuration = episode?.duration?.takeIf { it > 0L }
         val duration = if (playerDuration != null && episodeDuration != null &&
             playerDuration < 60_000L && episodeDuration > playerDuration) {
             episodeDuration
         } else playerDuration ?: episodeDuration ?: return
-        val identity = ElevateSkipRepository.identity(response, episode, duration)
-        val key = state.instance.toString() + ":" + episode.id + ":" + identity.key
+        val identity = if (episode != null && response != null)
+            ElevateSkipRepository.identity(response, episode, duration) else null
+        val key = state.instance.toString() + ":" + episodeId + ":" +
+            (identity?.key ?: "download:${offline?.parentId}:$duration")
         if (activeKey == key) {
             scheduleAutoSkip()
             skipButtonTimer?.refreshVisibility()
@@ -385,11 +397,11 @@ internal class ElevateSkipController(private val application: Application) :
         val serial = generation
         val priorInstance = activeInstance
         val priorEpisode = activeEpisode
-        if (priorInstance != state.instance || priorEpisode != episode.id) {
+        if (priorInstance != state.instance || priorEpisode != episodeId) {
             native = state.stamps.filterNot { it.source.startsWith("Elevate/") }
         }
         activeInstance = state.instance
-        activeEpisode = episode.id
+        activeEpisode = episodeId
         activeKey = key
         custom = emptyList()
         published = emptyList()
@@ -399,7 +411,16 @@ internal class ElevateSkipController(private val application: Application) :
         ownSeek = null
         scheduleAutoSkip()
         job = scope.launch {
-            val result = ElevateSkipRepository.fetch(identity)
+            val target = identity ?: offline?.let { file ->
+                val header = withContext(Dispatchers.IO) {
+                    application.getKey<DownloadObjects.DownloadHeaderCached>(
+                        DOWNLOAD_HEADER_CACHE, file.parentId.toString()
+                    )
+                } ?: return@launch
+                ElevateSkipRepository.identityDownloaded(header, file, duration)
+            } ?: return@launch
+            if (serial != generation || activeKey != key) return@launch
+            val result = ElevateSkipRepository.fetch(target)
             if (serial != generation || activeKey != key) return@launch
             custom = result
             publish()
@@ -417,7 +438,7 @@ internal class ElevateSkipController(private val application: Application) :
             return
         }
         vm.modifyState {
-            if (this.instance != instance || (generatorState?.meta as? ResultEpisode)?.id != episode) {
+            if (this.instance != instance || skipPlaybackId(generatorState?.meta) != episode) {
                 this
             } else {
                 set(combined)
@@ -466,7 +487,8 @@ internal class ElevateSkipController(private val application: Application) :
             com.lagradost.cloudstream3.utils.videoskip.SkipType.MixedOpening -> "AUTO_SKIP_OPENING"
             com.lagradost.cloudstream3.utils.videoskip.SkipType.Recap -> "AUTO_SKIP_RECAP"
             com.lagradost.cloudstream3.utils.videoskip.SkipType.Credits ->
-                if (model?.state?.generatorState?.response?.type in setOf(
+                if ((model?.state?.generatorState?.response?.type
+                        ?: (model?.state?.generatorState?.meta as? ExtractorUri)?.tvType) in setOf(
                         com.lagradost.cloudstream3.TvType.Movie,
                         com.lagradost.cloudstream3.TvType.AnimeMovie)) {
                     "AUTO_SKIP_MOVIE_CREDITS"
@@ -525,7 +547,7 @@ internal class ElevateSkipController(private val application: Application) :
         val player = mediaPlayer ?: return
         val vm = model ?: return
         if (vm.state.instance != activeInstance ||
-            (vm.state.generatorState?.meta as? ResultEpisode)?.id != activeEpisode) {
+            skipPlaybackId(vm.state.generatorState?.meta) != activeEpisode) {
             
             return
         }
@@ -929,6 +951,12 @@ internal object ElevateSkipRepository {
             get() = listOf(imdb, tmdb, mal, anilist, kitsu, season, episode, anime, movie, duration)
                 .joinToString("|")
     }
+    private data class OfflineIds(
+        val imdb: String?, val tmdb: String?, val mal: String?,
+        val anilist: String?, val kitsu: String?, val anime: Boolean, val movie: Boolean
+    )
+    // Bounded cache stores identifiers only, never full provider responses.
+    private val offlineIds = LinkedHashMap<String, Timed<OfflineIds?>>(24)
     private data class Mapping(val mal: String?, val anilist: String?, val episode: Int)
     private data class Timed<T>(val data: T, val until: Long)
     private val mappingCache = ConcurrentHashMap<String, Timed<Mapping?>>()
@@ -965,6 +993,50 @@ internal object ElevateSkipRepository {
         return Identity(imdb, tmdb, mal, anilist, kitsu,
             episode.season ?: extra?.positive("imdbSeason"), episode.episode,
             anime, movie, duration, episode.totalEpisodeIndex)
+    }
+
+    suspend fun identityDownloaded(
+        header: DownloadObjects.DownloadHeaderCached, file: ExtractorUri, duration: Long
+    ): Identity? {
+        val type = file.tvType ?: header.type
+        val key = header.apiName + "|" + header.url
+        val now = System.currentTimeMillis()
+        val cached = synchronized(offlineIds) {
+            offlineIds[key]?.takeIf { it.until > now }
+        }
+        val info = if (cached != null) cached.data else {
+            val directImdb = header.url.substringBefore(':').takeIf { imdbPattern.matches(it) }
+            val response = if (directImdb != null || header.url.isBlank()) null else {
+                val provider = APIHolder.getApiFromNameNull(header.apiName)
+                try {
+                    if (provider == null) null else withContext(Dispatchers.IO) {
+                        withTimeoutOrNull(8_000L) { provider.load(header.url) }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            val imdb = directImdb ?: response?.getImdbId()
+            val tmdb = response?.getTMDbId()
+            val mal = response?.getMalId()
+            val anilist = response?.getAniListId()
+            val kitsu = response?.getKitsuId()
+            val found = if (listOf(imdb, tmdb, mal, anilist, kitsu).all { it.isNullOrBlank() })
+                null else OfflineIds(imdb, tmdb, mal, anilist, kitsu,
+                    type in setOf(TvType.Anime, TvType.OVA, TvType.AnimeMovie) ||
+                        response?.type in setOf(TvType.Anime, TvType.OVA, TvType.AnimeMovie) ||
+                        mal != null || anilist != null || kitsu != null,
+                    type in setOf(TvType.Movie, TvType.AnimeMovie))
+            synchronized(offlineIds) {
+                offlineIds[key] = Timed(found, now + if (found != null) DAY else MISS)
+                if (offlineIds.size > 24) offlineIds.remove(offlineIds.keys.first())
+            }
+            found
+        } ?: return null
+        return Identity(info.imdb, info.tmdb, info.mal, info.anilist, info.kitsu,
+            file.season, file.episode ?: 0, info.anime, info.movie, duration, null)
     }
 
     private suspend fun request(url: String): JSONObject? =

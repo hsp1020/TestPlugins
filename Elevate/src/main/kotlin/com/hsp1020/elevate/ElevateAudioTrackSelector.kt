@@ -22,6 +22,7 @@ import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.mvvm.Resource
+import com.lagradost.cloudstream3.ui.player.ExtractorUri
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.PlayerGeneratorViewModel
 import com.lagradost.cloudstream3.ui.player.VideoLink
@@ -195,16 +196,18 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         val vm = model ?: return
         val state = vm.state
         val generator = state.generatorState ?: return
-        val response = generator.response ?: return
-        val name = response.apiName
+        val response = generator.response
+        val offline = generator.meta as? ExtractorUri
+        if (response == null && offline == null) return
+        val name = response?.apiName.orEmpty()
         if (lastInstance == state.instance && lastProvider == name) return
         lastInstance = state.instance
         lastProvider = name
         selected = false
         val episode = generator.meta as? ResultEpisode
         val flag = animeFlag(episode)
-        val tags = response.tags.orEmpty().map { it.trim().lowercase(Locale.ROOT) }.toSet()
-        isAnime = (flag ?: ((episode?.tvType ?: response.type) in setOf(
+        val tags = response?.tags.orEmpty().map { it.trim().lowercase(Locale.ROOT) }.toSet()
+        isAnime = (flag ?: ((episode?.tvType ?: offline?.tvType ?: response?.type) in setOf(
             TvType.Anime, TvType.AnimeMovie, TvType.OVA
         ))) || "anime" in tags || ("animation" in tags && "japanese" in tags)
         val activePlayer = player

@@ -45,15 +45,19 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         private var current: PipLibraryNavigation? = null
 
         fun currentPlayerHost(): FragmentActivity? =
-            current?.playerActivity ?: (CommonActivity.activity as? MainActivity)
+            current?.playerActivity ?: (CommonActivity.activity as? FragmentActivity)
+                ?.takeIf { it is MainActivity || it is DownloadedPlayerActivity }
 
         fun playerHost(activity: Activity): FragmentActivity? = when {
             current?.playerActivity === activity -> activity as? FragmentActivity
-            activity is MainActivity && current?.playerActivity == null -> activity
+            current?.playerActivity == null && activity is MainActivity -> activity
+            current?.playerActivity == null && activity is DownloadedPlayerActivity -> activity
             else -> null
         }
 
-        fun isPlayerActivity(activity: Activity): Boolean = current?.playerActivity === activity
+        fun isPlayerActivity(activity: Activity): Boolean =
+            activity is DownloadedPlayerActivity &&
+                (current?.playerActivity == null || current?.playerActivity === activity)
 
         fun switchLiveInPip(card: SearchResponse): Boolean =
             current?.switchLive(card) == true
