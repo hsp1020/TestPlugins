@@ -1871,7 +1871,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             tracePopup("EXTERNAL_PLAYER_RESUMED_HIDE", activity)
             expandedReturnDialog?.hide()
         }
-        if (activity is MainActivity) traceFirstDraw(activity.window.decorView, "main-activity")
+        if (activity is MainActivity) traceFirstDraw(host?.window?.decorView, "main-activity")
         if (activity is MainActivity ||
             activity.javaClass.name == "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity")
             tracePopup("ACTIVITY_RESUMED_END", activity)
