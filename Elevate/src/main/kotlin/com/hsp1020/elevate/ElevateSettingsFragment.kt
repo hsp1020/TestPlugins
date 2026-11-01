@@ -1,6 +1,8 @@
 package com.hsp1020.elevate
 
+import android.app.Activity
 import android.app.Dialog
+import android.content.Intent
 import android.content.Context
 import android.os.Bundle
 import android.util.TypedValue
@@ -10,6 +12,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.widget.SwitchCompat
 import androidx.fragment.app.DialogFragment
 
@@ -31,7 +34,7 @@ internal enum class ElevateFeature(
     ORIGINAL_THUMBNAIL_RATIOS("Home & Library", "Original Thumbnail Ratios",
         "Preserve landscape thumbnails in Search and Continue Watching; leave YouTube and portrait posters unchanged."),
     EXTERNAL_DOWNLOADS("Home & Library", "External Downloads",
-        "Route native download requests, including selected mirrors, to external apps and register completed files."),
+        "Send native download requests directly to the selected app and recognize files in CloudStream's download folder."),
     LIBRARY_POSTERS("Home & Library", "Custom Library Posters",
         "Replace library covers via RPDB, XRDB, OPDB, AIORatings, TOP Posters or EasyRatingsDB."),
     EPISODE_PROGRESS("Home & Library", "Episode Progress Indicators",
@@ -79,6 +82,25 @@ internal object ElevateFeaturePrefs {
 }
 
 class ElevateSettingsFragment : DialogFragment() {
+    private var downloadAppLabel: TextView? = null
+    private val downloadAppPicker = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val component = result.data?.component
+        if (result.resultCode == Activity.RESULT_OK && component != null) {
+            val ctx = requireContext()
+            val label = runCatching {
+                ctx.packageManager.getActivityInfo(component, 0).loadLabel(ctx.packageManager).toString()
+            }.getOrDefault(component.packageName)
+            ExternalDownloads.select(ctx, ExternalDownloads.App(component.flattenToString(), label, "send"))
+            downloadAppLabel?.text = "Download App: " + label
+        }
+    }
+
+    override fun onDestroyView() {
+        downloadAppLabel = null
+        super.onDestroyView()
+    }
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
         val ctx = requireContext()
         fun dp(value: Int): Int = (value * ctx.resources.displayMetrics.density + 0.5f).toInt()
@@ -206,10 +228,20 @@ class ElevateSettingsFragment : DialogFragment() {
                 } else null
                 val externalControls = if (feature == ElevateFeature.EXTERNAL_DOWNLOADS) {
                     TextView(ctx).apply {
-                        text = "Manage Downloaders / Import Files"
+                        text = "Download App: " + (ExternalDownloads.selected(ctx)?.label ?: "Select app")
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                        applyElevateNativeFont()
                         setPadding(dp(14), dp(10), dp(14), dp(10))
-                        setOnClickListener { ExternalDownloadDialog.manage(childFragmentManager) }
+                        setOnClickListener {
+                            val share = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_TEXT, "https://example.com/video.mp4")
+                            }
+                            downloadAppPicker.launch(
+                                Intent(Intent.ACTION_PICK_ACTIVITY).putExtra(Intent.EXTRA_INTENT, share)
+                            )
+                        }
+                        downloadAppLabel = this
                     }
                 } else null
                 row.addView(SwitchCompat(ctx).apply {

@@ -16,7 +16,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.downloader.DownloadObjects
 import com.lagradost.cloudstream3.utils.downloader.DownloadQueueManager
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -41,7 +40,7 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
         }
         scope.launch(Dispatchers.Unconfined) {
             DownloadQueueManager.queue.collect { queued ->
-                if (queued.isEmpty() ||
+                if (queued.isEmpty() || ExternalDownloads.selected(app) == null ||
                     host?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) != true ||
                     !ElevateFeaturePrefs.enabled(app, ElevateFeature.EXTERNAL_DOWNLOADS)) return@collect
                 // Drain synchronously on StateFlow emission, before the download service
@@ -74,15 +73,7 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
                     }
                     val result = withContext(Dispatchers.IO) { prepare(queued) } ?: continue
                     val activity = host ?: continue
-                    val done = CompletableDeferred<Unit>()
-                    ExternalDownloads.request = result
-                    ExternalDownloads.handoffDone = done
-                    ExternalDownloadDialog.show(activity.supportFragmentManager)
-                    done.await()
-                    if (ExternalDownloads.handoffDone === done) {
-                        ExternalDownloads.handoffDone = null
-                        ExternalDownloads.request = null
-                    }
+                    ExternalDownloads.handoff(activity, queued, result.second)
                 } catch (cancel: CancellationException) {
                     throw cancel
                 } catch (error: Exception) {
@@ -149,7 +140,6 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
 
     fun stop() {
         app.unregisterActivityLifecycleCallbacks(this)
-        ExternalDownloads.handoffDone?.complete(Unit)
         scope.cancel()
         jobs.close()
         resumes.close()
