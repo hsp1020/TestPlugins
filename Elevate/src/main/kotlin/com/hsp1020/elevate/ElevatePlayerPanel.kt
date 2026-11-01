@@ -1063,17 +1063,22 @@ internal class ElevatePlayerPanel(
         }
     }
 
+    private fun knownSubtitleTag(value: String?): String? {
+        var code = value?.trim()?.replace('_', '-').orEmpty()
+        while (code.isNotEmpty()) {
+            fromCodeToLangTagIETF(code)?.let { return it }
+            code = code.substringBeforeLast('-', "")
+        }
+        return null
+    }
+
     private fun trackLanguageTag(title: String): String? {
         fromCodeToLangTagIETF(title)?.let { return it }
         fromLanguageToTagIETF(title)?.let { return it }
         val first = trackLanguageWord.find(title) ?: return null
-        var prefix = title.substring(first.range.first)
+        val prefix = title.substring(first.range.first)
             .takeWhile { it.isLetterOrDigit() || it == '-' || it == '_' }
-            .replace('_', '-')
-        while (prefix.isNotEmpty()) {
-            fromCodeToLangTagIETF(prefix)?.let { return it }
-            prefix = prefix.substringBeforeLast('-', "")
-        }
+        knownSubtitleTag(prefix)?.let { return it }
         val word = first.value.lowercase()
         fromLanguageToTagIETF(word)?.let { return it }
         fun uniqueMatch(exact: Boolean): String? = languageAliases.asSequence()
@@ -1089,10 +1094,10 @@ internal class ElevatePlayerPanel(
         fun displayName(sub: SubtitleData): String {
             if (!localize || sub.originalName.startsWith("Make ", true) ||
                 sub.originalName.startsWith("Translate ", true)) return sub.originalName
-            val code = if (sub.languageCode.equals("ms-ind", true)) "id"
-                else sub.languageCode.replace('_', '-')
-            fromTagToLanguageName(code)?.let { return it }
-            return fromTagToLanguageName(trackLanguageTag(sub.originalName)) ?: sub.originalName
+            val code = if (sub.languageCode.equals("ms-ind", true)) "id" else sub.languageCode
+            return fromTagToLanguageName(
+                knownSubtitleTag(code) ?: trackLanguageTag(sub.originalName)
+            ) ?: sub.originalName
         }
         subtitleGroups = sortSubs(vm.state.subtitles)
             .groupBy(::displayName)
