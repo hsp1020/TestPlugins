@@ -952,6 +952,8 @@ internal class NativeEpisodeOverlayHook(
             return try {
                 // Standalone videos need the panel, not an unused EpisodeAdapter.
                 if (fragment.isThereEpisodes()) fragment.showEpisodesOverlay()
+                // Select the tab before the overlay's first visible frame.
+                playerPanel?.onOpened()
                 previous.setBoolean(fragment, false) // Native close must not issue a redundant Play.
                 shown.setBoolean(fragment, true)
                 animate.invoke(fragment, true)
