@@ -1114,7 +1114,8 @@ open class StremioC(
             val syncUrl: String,
             val syncMap: Map<String, Boolean>,
             val historySyncMap: Map<String, Boolean>,
-            val streamSubtitleMap: Map<String, Boolean>,
+            val streamsAddonMap: Map<String, Boolean>,
+            val subtitlesAddonMap: Map<String, Boolean>,
             val streamSubtitleUrls: List<StreamSubtitleAddon>,
             val disabledCatalogUrls: Set<String> = emptySet(),
             val catalogEnabledIds: Map<Long, Boolean> = emptyMap(),
@@ -1147,13 +1148,14 @@ open class StremioC(
                 if (doubleCached != null && (now - cachedSyncSettingsTime) < SYNC_SETTINGS_TTL) {
                     return doubleCached
                 }
-                val context = CloudStreamApp.context ?: return SyncSettings("", emptyMap(), emptyMap(), emptyMap(), emptyList())
+                val context = CloudStreamApp.context ?: return SyncSettings("", emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyList())
                 val prefs = context.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
                 val syncUrl = prefs.getString("history_sync_url", "") ?: ""
                 val json = prefs.getString("stremio_saved_links", null)
                 val map = mutableMapOf<String, Boolean>()
                 val historyMap = mutableMapOf<String, Boolean>()
-                val extraMap = mutableMapOf<String, Boolean>()
+                val streamsMap = mutableMapOf<String, Boolean>()
+                val subtitlesMap = mutableMapOf<String, Boolean>()
                 val catalogEnabled = mutableMapOf<String, Boolean>()
                 val catalogEnabledIds = mutableMapOf<Long, Boolean>()
                 val catalogAddons = mutableListOf<StreamSubtitleAddon>()
@@ -1177,7 +1179,9 @@ open class StremioC(
                             if (link.isNotBlank()) {
                                 map[link] = obj.optBoolean("isSyncEnabled", true)
                                 historyMap[link] = obj.optBoolean("isHistorySyncEnabled", map[link] ?: true)
-                                extraMap[link] = obj.optBoolean("isStreamSubtitleSyncEnabled", false)
+                                val previous = obj.optBoolean("isStreamSubtitleSyncEnabled", false)
+                                streamsMap[link] = obj.optBoolean("isStreamsAddonEnabled", previous)
+                                subtitlesMap[link] = obj.optBoolean("isSubtitlesAddonEnabled", previous)
                             }
                         }
                     } catch (e: Exception) {
@@ -1195,7 +1199,7 @@ open class StremioC(
                     }
                 }.onFailure { error ->
                 }.getOrDefault(emptyList()).distinctBy { stremioManifestUrl(it.url) }
-                val result = SyncSettings(syncUrl, map, historyMap, extraMap, extraUrls,
+                val result = SyncSettings(syncUrl, map, historyMap, streamsMap, subtitlesMap, extraUrls,
                     catalogEnabled.filterValues { !it }.keys.toSet(), catalogEnabledIds, catalogAddons)
                 cachedSyncSettings = result
                 cachedSyncSettingsTime = System.currentTimeMillis()
@@ -3151,12 +3155,14 @@ open class StremioC(
         val currentCleanUrl = currentMainUrl.cleanBaseUrl().lowercase()
         val isHistorySyncEnabled = historySyncMap[currentCleanUrl] ?: false
 
-        val savedStreamSync = syncSettings.streamSubtitleMap[currentCleanUrl]
-        val libraryHistoryStreamSync = savedStreamSync == null && mainUrl.isBlank() &&
+        val savedStreamsAddon = syncSettings.streamsAddonMap[currentCleanUrl]
+        val savedSubtitlesAddon = syncSettings.subtitlesAddonMap[currentCleanUrl]
+        val libraryHistoryStreamSync = savedStreamsAddon == null && savedSubtitlesAddon == null && mainUrl.isBlank() &&
             syncUrl.isNotBlank() && currentCleanUrl == syncUrl.cleanBaseUrl().lowercase() &&
             stremioManifestUrl(currentMainUrl) !in syncSettings.disabledCatalogUrls
-        val streamSyncEnabled = savedStreamSync ?: libraryHistoryStreamSync
-        val extraUrls = if (streamSyncEnabled) {
+        val streamsAddonEnabled = savedStreamsAddon ?: libraryHistoryStreamSync
+        val subtitlesAddonEnabled = savedSubtitlesAddon ?: libraryHistoryStreamSync
+        val extraUrls = if (streamsAddonEnabled || subtitlesAddonEnabled) {
             syncSettings.streamSubtitleUrls.filter { addon ->
                 val parsed = addon.url.toHttpUrlOrNull()
                 parsed != null && (parsed.scheme == "http" || parsed.scheme == "https")
@@ -3394,13 +3400,15 @@ open class StremioC(
             extractorSubtitleHandler: (SubtitleFile) -> Unit,
             category: String,
             preferredName: String? = null,
-            addonUrl: String? = null
+            addonUrl: String? = null,
+            emitLinks: Boolean = true,
+            emitSubtitles: Boolean = true
         ): Int = coroutineScope {
             val jobs = streams.orEmpty().map { stream -> async(Dispatchers.IO) {
                 val readyLinks = Collections.synchronizedList(mutableListOf<ExtractorLink>())
                 withStreamCallback(category) {
                     stream.runCallback(this@StremioC, source, subtitleHandler, extractorSubtitleHandler,
-                        { readyLinks.add(it) }, preferredName, addonUrl)
+                        { readyLinks.add(it) }, preferredName, addonUrl, emitLinks, emitSubtitles)
                 }
                 readyLinks
             } }
@@ -3547,9 +3555,10 @@ open class StremioC(
                                             val response = customSession.get(requestUrl, timeout = 25L)
                                             val text = response.text
                                             val streams = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
-                                            emitOrderedAddonStreams(streams?.streams, source,
+                                            val emitted = emitOrderedAddonStreams(streams?.streams, source,
                                                 stremioSubtitleFrom(addonUrl), extractorSubtitleFrom(addonUrl),
-                                                "extra", addon.name, addonUrl)
+                                                "extra", addon.name, addonUrl, streamsAddonEnabled, subtitlesAddonEnabled)
+                                            if (streamsAddonEnabled) emitted else streams?.streams?.count { it.subtitles.isNotEmpty() } ?: 0
                                         }.getOrDefault(0)
                                         val originalLinks = fetchExtraStreams(request)
                                         if (extraType != "movie" && extraType != "series" && originalLinks == 0) {
@@ -3562,11 +3571,13 @@ open class StremioC(
                                         }
                                     }
                                 }, {
-                                    val mappedId = mappedAnimeStremioId()
-                                    if (mappedId != null) {
-                                        fetchAnimeAwareSubtitles(addonUrl, mappedId, null, null, "series", addon.name)
-                                    } else if (!isLibraryAnimeId(reqId) || actualIsMovie) {
-                                        fetchAnimeAwareSubtitles(addonUrl, reqId, season, episode, extraType, addon.name)
+                                    if (subtitlesAddonEnabled) {
+                                        val mappedId = mappedAnimeStremioId()
+                                        if (mappedId != null) {
+                                            fetchAnimeAwareSubtitles(addonUrl, mappedId, null, null, "series", addon.name)
+                                        } else if (!isLibraryAnimeId(reqId) || actualIsMovie) {
+                                            fetchAnimeAwareSubtitles(addonUrl, reqId, season, episode, extraType, addon.name)
+                                        }
                                     }
                                 })
                             }
@@ -5612,7 +5623,9 @@ open class StremioC(
             extractorSubtitleCallback: (SubtitleFile) -> Unit,
             callback: (ExtractorLink) -> Unit,
             preferredName: String? = null,
-            addonUrl: String? = null
+            addonUrl: String? = null,
+            emitLinks: Boolean = true,
+            emitSubtitles: Boolean = true
         ) {
             val displaySource = sourceName.takeIf { it.isNotBlank() } ?: name ?: ""
             suspend fun torrentLink(raw: String, type: ExtractorLinkType): String {
@@ -5624,7 +5637,7 @@ open class StremioC(
                 else StremioTorrentFiles.withIndex(withTrackers, type, index)
             }
 
-            if (url != null) {
+            if (emitLinks && url != null) {
                 val lowerUrl = url.lowercase()
                 val linkType = when {
                     lowerUrl.startsWith("magnet:") -> ExtractorLinkType.MAGNET
@@ -5648,9 +5661,13 @@ open class StremioC(
                 })
             }
 
-            if (ytId != null) loadExtractor("https://m.youtube.com/watch?v=$ytId", extractorSubtitleCallback, callback)
-            if (externalUrl != null) loadExtractor(externalUrl, extractorSubtitleCallback, callback)
-            if (infoHash != null) {
+            if ((emitLinks || emitSubtitles) && ytId != null) loadExtractor("https://m.youtube.com/watch?v=$ytId",
+                if (emitSubtitles) extractorSubtitleCallback else { _: SubtitleFile -> },
+                if (emitLinks) callback else { _: ExtractorLink -> })
+            if ((emitLinks || emitSubtitles) && externalUrl != null) loadExtractor(externalUrl,
+                if (emitSubtitles) extractorSubtitleCallback else { _: SubtitleFile -> },
+                if (emitLinks) callback else { _: ExtractorLink -> })
+            if (emitLinks && infoHash != null) {
                 val displayTitle = description ?: title ?: name ?: ""
                 val magnet = torrentLink("magnet:?xt=urn:btih:" + infoHash, ExtractorLinkType.MAGNET)
                 callback.invoke(newExtractorLink(displaySource, "[$displaySource] $displayTitle", magnet, ExtractorLinkType.MAGNET) {
@@ -5659,7 +5676,7 @@ open class StremioC(
             }
 
             val hasPlayableTarget = url != null || ytId != null || externalUrl != null || infoHash != null
-            if (hasPlayableTarget) {
+            if (emitSubtitles && hasPlayableTarget) {
                 subtitles.forEachIndexed { position, sub ->
                     provider.run {
                         sub.toCloudStreamSubtitle(sourceName, preferredName, sub.translationSourceLanguage(subtitles))

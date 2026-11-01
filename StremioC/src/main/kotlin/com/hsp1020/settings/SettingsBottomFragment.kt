@@ -139,7 +139,8 @@ data class LinkItem(
     val type: String,
     val isSyncEnabled: Boolean = true,
     val isHistorySyncEnabled: Boolean = true,
-    val isStreamSubtitleSyncEnabled: Boolean = false,
+    val isStreamsAddonEnabled: Boolean = false,
+    val isSubtitlesAddonEnabled: Boolean = false,
     val enabled: Boolean = true
 )
 
@@ -173,7 +174,8 @@ object SettingsRepository {
                         type = obj.optString("type", "StremioC"),
                         isSyncEnabled = obj.optBoolean("isSyncEnabled", true),
                         isHistorySyncEnabled = obj.optBoolean("isHistorySyncEnabled", obj.optBoolean("isSyncEnabled", true)),
-                        isStreamSubtitleSyncEnabled = obj.optBoolean("isStreamSubtitleSyncEnabled", false),
+                        isStreamsAddonEnabled = obj.optBoolean("isStreamsAddonEnabled", obj.optBoolean("isStreamSubtitleSyncEnabled", false)),
+                        isSubtitlesAddonEnabled = obj.optBoolean("isSubtitlesAddonEnabled", obj.optBoolean("isStreamSubtitleSyncEnabled", false)),
                         enabled = obj.optBoolean("enabled", true)
                     )
                 )
@@ -194,7 +196,8 @@ object SettingsRepository {
                 put("type", item.type)
                 put("isSyncEnabled", item.isSyncEnabled)
                 put("isHistorySyncEnabled", item.isHistorySyncEnabled)
-                put("isStreamSubtitleSyncEnabled", item.isStreamSubtitleSyncEnabled)
+                put("isStreamsAddonEnabled", item.isStreamsAddonEnabled)
+                put("isSubtitlesAddonEnabled", item.isSubtitlesAddonEnabled)
                 put("enabled", item.enabled)
             }
             arr.put(obj)
@@ -2038,7 +2041,7 @@ class SettingsBottomFragment(
             ?: run { showToast("Settings resources are unavailable. Reload the plugin and try again."); return }
         if (!hasViews(dialogView, mapOf(
             EditText::class.java to listOf("etName", "etLink"),
-            Switch::class.java to listOf("switchStreamSubtitleSync", "switchLinkSync", "switchHistorySync"),
+            Switch::class.java to listOf("switchStreamsAddon", "switchSubtitlesAddon", "switchLinkSync", "switchHistorySync"),
             NestedScrollView::class.java to listOf("catalogEditorScroll")
         ))) {
             showToast("Settings resources are unavailable. Reload the plugin and try again.")
@@ -2055,10 +2058,12 @@ class SettingsBottomFragment(
         val url = dialogView.findView<EditText>("etLink")
         name.setText(itemToEdit?.name.orEmpty())
         url.setText(itemToEdit?.link.orEmpty())
-        val streamSync = dialogView.findView<Switch>("switchStreamSubtitleSync")
+        val streamsAddon = dialogView.findView<Switch>("switchStreamsAddon")
+        val subtitlesAddon = dialogView.findView<Switch>("switchSubtitlesAddon")
         val metaSync = dialogView.findView<Switch>("switchLinkSync")
         val historySync = dialogView.findView<Switch>("switchHistorySync")
-        streamSync.isChecked = itemToEdit?.isStreamSubtitleSyncEnabled ?: false
+        streamsAddon.isChecked = itemToEdit?.isStreamsAddonEnabled ?: false
+        subtitlesAddon.isChecked = itemToEdit?.isSubtitlesAddonEnabled ?: false
         metaSync.isChecked = itemToEdit?.isSyncEnabled ?: true
         historySync.isChecked = itemToEdit?.isHistorySyncEnabled ?: true
         dialogView.optional("catalogSyncSection")?.visibility = if (sources) View.GONE else View.VISIBLE
@@ -2086,7 +2091,8 @@ class SettingsBottomFragment(
                 name = "", link = "", type = "StremioC"
             )).copy(name = name.text.toString().trim().ifBlank { if (sources) "" else raw },
                 link = raw, type = "StremioC", isSyncEnabled = metaSync.isChecked,
-                isHistorySyncEnabled = historySync.isChecked, isStreamSubtitleSyncEnabled = streamSync.isChecked)
+                isHistorySyncEnabled = historySync.isChecked,
+                isStreamsAddonEnabled = streamsAddon.isChecked, isSubtitlesAddonEnabled = subtitlesAddon.isChecked)
             val values = sourceDraft ?: catalogLinks()
             val index = values.indexOfFirst { it.id == changed.id }
             if (isEdit && index < 0) {
