@@ -31,6 +31,8 @@ import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showDialog
 import com.lagradost.cloudstream3.utils.SubtitleHelper.fromTagToLanguageName
+import com.lagradost.cloudstream3.utils.SubtitleHelper.fromCodeToLangTagIETF
+import com.lagradost.cloudstream3.utils.SubtitleHelper.fromLanguageToTagIETF
 import com.lagradost.cloudstream3.utils.AppContextUtils.html
 import com.lagradost.cloudstream3.ui.player.FullScreenPlayer
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
@@ -272,9 +274,11 @@ internal class ElevatePlayerPanel(
         ctx, R.layout.sort_bottom_single_choice, ArrayList()
     ) {
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-            val playingLanguage = fragment.player.getCurrentPreferredSubtitle()?.originalName
-            val checked = if (position == 0) playingLanguage == null
-                else subtitleGroups.getOrNull(position - 1)?.first == playingLanguage
+            val playing = fragment.player.getCurrentPreferredSubtitle()
+            val checked = if (position == 0) playing == null
+                else subtitleGroups.getOrNull(position - 1)?.second?.any {
+                    it.url == playing?.url && it.origin == playing?.origin
+                } == true
             return bindRow(convertView, parent, position, getItem(position) ?: "",
                 checked, compact = true, highlighted = position == selectedGroup)
         }
@@ -1051,14 +1055,25 @@ internal class ElevatePlayerPanel(
 
     private fun renderSubtitles() {
         val current = fragment.player.getCurrentPreferredSubtitle()
+        val localize = ElevateFeaturePrefs.enabled(ctx, ElevateFeature.SUBTITLE_LANGUAGE_NAMES)
+        fun displayName(sub: SubtitleData): String {
+            if (!localize || sub.originalName.startsWith("Make ", true) ||
+                sub.originalName.startsWith("Translate ", true)) return sub.originalName
+            val code = if (sub.languageCode.equals("ms-ind", true)) "id" else sub.languageCode
+            fromTagToLanguageName(code)?.let { return it }
+            val name = sub.originalName.substringBefore(" · ").substringBefore(" — ")
+                .substringBefore(" (").trim()
+            return fromTagToLanguageName(fromCodeToLangTagIETF(name)
+                ?: fromLanguageToTagIETF(name)) ?: sub.originalName
+        }
         subtitleGroups = sortSubs(vm.state.subtitles)
-            .groupBy { it.originalName }
+            .groupBy(::displayName)
             .map { (name, subtitles) -> name to orderedOptions(subtitles) }
         if (pendingSubtitleInstance != vm.state.instance ||
             pendingSubtitleUrl == current?.url) pendingSubtitleUrl = null
         if (!browsingSubtitleGroup && pendingSubtitleUrl == null) {
-            selectedGroup = subtitleGroups.indexOfFirst { (name, _) ->
-                name == current?.originalName
+            selectedGroup = subtitleGroups.indexOfFirst { (_, subtitles) ->
+                subtitles.any { it.url == current?.url && it.origin == current?.origin }
             }.let { if (it < 0) 0 else it + 1 }
         }
         languageAdapter.clear()

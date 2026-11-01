@@ -356,7 +356,8 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         val exactLanguage = languageName.substringBefore(" (").trim()
         val tag = SubtitleHelper.fromCodeToLangTagIETF(exactLanguage)
             ?: SubtitleHelper.fromLanguageToTagIETF(exactLanguage)
-            ?: (if (languageName == sourceName)
+            ?: (if (!sourceName.startsWith("Make ", ignoreCase = true) &&
+                !sourceName.startsWith("Translate ", ignoreCase = true))
                 SubtitleHelper.fromCodeToLangTagIETF(code)
                     ?: SubtitleHelper.fromLanguageToTagIETF(code) else null)
             ?: return sub

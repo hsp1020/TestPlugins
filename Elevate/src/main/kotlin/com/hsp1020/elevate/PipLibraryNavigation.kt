@@ -40,6 +40,8 @@ import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 /** Redirect new playback without rebuilding CloudStream's VideoGenerator. */
 internal class PipLibraryNavigation(private val app: Application) : Application.ActivityLifecycleCallbacks {
     companion object {
+        private const val PLAYER_RESTORE_KEY = "elevate_pip_player_restored"
+        private const val PLAYER_UUID_KEY = "elevate_pip_player_uuid"
         private var current: PipLibraryNavigation? = null
 
         fun currentPlayerHost(): FragmentActivity? =
@@ -430,12 +432,18 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
 
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
-        if (activity !is DownloadedPlayerActivity || pending == null) return
+        if (activity !is DownloadedPlayerActivity ||
+            (pending == null && savedInstanceState?.getBoolean(PLAYER_RESTORE_KEY) != true)) return
         playerActivity?.takeIf { it !== activity }?.let {
             it.supportFragmentManager.unregisterFragmentLifecycleCallbacks(playerFragments)
             it.removeOnPictureInPictureModeChangedListener(pipChanged)
+            playerNavigation?.removeOnDestinationChangedListener(playerDestination)
+            playerNavigation = null
+            exitBack.remove()
+            exitBackBound = false
         }
         playerActivity = activity
+        activeUuid = savedInstanceState?.getString(PLAYER_UUID_KEY) ?: activeUuid
         closing = false
         wasPlaying = false
         wasInPip = false
@@ -532,5 +540,10 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             }
         }
     }
-    override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+    override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {
+        if (activity === playerActivity) {
+            outState.putBoolean(PLAYER_RESTORE_KEY, true)
+            outState.putString(PLAYER_UUID_KEY, activeUuid)
+        }
+    }
 }
