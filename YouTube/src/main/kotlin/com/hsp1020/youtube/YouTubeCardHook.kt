@@ -217,6 +217,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private var popupBackFragment: Fragment? = null
     private var popupBackCallback: OnBackPressedCallback? = null
     private var popupReturning = false
+    private var returnDrawTree: ViewTreeObserver? = null
+    private var returnDrawListener: ViewTreeObserver.OnPreDrawListener? = null
     // One pending selection bridges player exit and the native detail ViewModel.
     private var pendingRange: Pair<Int, PlayedEpisode>? = null
     private var appliedRange: Pair<Int, PlayedEpisode>? = null
@@ -298,6 +300,45 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         return match
     }
 
+    // Keep the underlying Search/Home frame from drawing before the restored dialog.
+    // Both listeners are removed as soon as the dialog draws; no timer or polling.
+    private fun clearReturnDrawGuard() {
+        val tree = returnDrawTree
+        val listener = returnDrawListener
+        if (tree?.isAlive == true && listener != null) tree.removeOnPreDrawListener(listener)
+        returnDrawTree = null
+        returnDrawListener = null
+    }
+
+    private fun guardReturnedPopupDraw(popup: Dialog) {
+        val activity = host ?: return
+        val root = activity.window.decorView
+        val decor = popup.window?.decorView ?: return
+        val tree = root.viewTreeObserver.takeIf { it.isAlive } ?: return
+        clearReturnDrawGuard()
+        val listener = object : ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                if (host !== activity || activity.isFinishing || activity.isDestroyed ||
+                    !popup.isShowing || !decor.isAttachedToWindow) {
+                    if (returnDrawListener === this) clearReturnDrawGuard()
+                    return true
+                }
+                return false
+            }
+        }
+        returnDrawTree = tree
+        returnDrawListener = listener
+        tree.addOnPreDrawListener(listener)
+        decor.doOnPreDraw {
+            decor.post {
+                if (returnDrawListener === listener) {
+                    clearReturnDrawGuard()
+                    root.invalidate()
+                }
+            }
+        }
+    }
+
     private fun showReturnedPopup() {
         tracePopup("SHOW_RETURN_BEGIN")
         val popup = expandedReturnDialog ?: run {
@@ -309,6 +350,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         if (popup.window?.decorView?.isAttachedToWindow == true) {
             popup.window?.setWindowAnimations(0)
             popup.show()
+            if (popupReturning && externalDirectPlaybackHost == null) guardReturnedPopupDraw(popup)
             traceFirstDraw(popup.window?.decorView, "returned-dialog")
         }
         tracePopup("SHOW_RETURN_END")
@@ -621,6 +663,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             playerFragment = null
         }
         clearPopupReturnListener()
+        clearReturnDrawGuard()
         expandedReturnDialog = null
         popupReturning = false
         val activity = host ?: return
@@ -902,6 +945,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
     private fun release() {
         tracePopup("RELEASE_BEGIN")
+        clearReturnDrawGuard()
         clearPendingTimeSeek()
         clearPlaybackReturnListener()
         clearPopupReturnListener()
