@@ -16,6 +16,7 @@ import android.widget.HorizontalScrollView
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.ScrollView
 import android.text.TextWatcher
 import android.text.Editable
 import android.text.TextUtils
@@ -407,9 +408,13 @@ internal class ElevatePlayerPanel(
     }
     private val subtitleContent = LinearLayout(ctx).apply {
         orientation = LinearLayout.VERTICAL
-        addView(subtitlePane, LinearLayout.LayoutParams(-1, 0, 1f))
+        addView(subtitlePane, LinearLayout.LayoutParams(-1, dp(48)))
         addView(importedList, LinearLayout.LayoutParams(-1, 0))
         addView(importActions, LinearLayout.LayoutParams(-1, -2))
+    }
+    private val subtitleScroll = ScrollView(ctx).apply {
+        isVerticalScrollBarEnabled = false
+        addView(subtitleContent, FrameLayout.LayoutParams(-1, -2))
     }
     private var inSync = false
     private var offsetBeforeSync = 0L
@@ -879,9 +884,9 @@ internal class ElevatePlayerPanel(
     private fun panelContent(view: View) {
         if (body.getChildAt(body.childCount - 1) === view) return
         (list.parent as? ViewGroup)?.removeView(list)
-        (subtitleContent.parent as? ViewGroup)?.removeView(subtitleContent)
+        (subtitleScroll.parent as? ViewGroup)?.removeView(subtitleScroll)
         (nativeSync.parent as? ViewGroup)?.removeView(nativeSync)
-        if (view === subtitleContent) {
+        if (view === subtitleScroll) {
             subtitlePane.addView(list, LinearLayout.LayoutParams(0, -1, .65f))
         }
         body.addView(view, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -910,7 +915,7 @@ internal class ElevatePlayerPanel(
             Tab.SUBTITLES -> {
                 bindRefreshListener()
                 updateEncodingLabel()
-                panelContent(subtitleContent)
+                panelContent(subtitleScroll)
                 val providers = GeneratorPlayer.subsProvidersIsActive
                 onlineImport.visibility = if (providers) View.VISIBLE else View.GONE
                 val state = vm.state.generatorState
@@ -1243,6 +1248,14 @@ internal class ElevatePlayerPanel(
             it.origin == SubtitleOrigin.DOWNLOADED_FILE || it.url in importedUrls
         }.groupBy(::displayName)
             .map { (name, subtitles) -> name to orderedOptions(subtitles) }
+        // Reserve all language rows, then show full-width imports directly underneath.
+        // The outer ScrollView handles overflow instead of pinning controls to the bottom.
+        val paneParams = subtitlePane.layoutParams as LinearLayout.LayoutParams
+        val paneHeight = dp(48 * (subtitleGroups.size + 1))
+        if (paneParams.height != paneHeight) {
+            paneParams.height = paneHeight
+            subtitlePane.layoutParams = paneParams
+        }
         if (pendingSubtitleInstance != vm.state.instance ||
             pendingSubtitleUrl == current?.url) pendingSubtitleUrl = null
         if (!browsingSubtitleGroup && pendingSubtitleUrl == null) {
