@@ -242,6 +242,16 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
     }
 
+    private fun showReturnedPopup() {
+        val popup = expandedReturnDialog ?: return
+        expandedReturnDialog = null
+        popupAwaitingPlayer = false
+        if (popup.window?.decorView?.isAttachedToWindow == true) {
+            popup.window?.setWindowAnimations(0)
+            popup.show()
+        }
+    }
+
     private fun clearPlaybackReturnListener() {
         playbackNav?.let { nav ->
             playbackReturnListener?.let(nav::removeOnDestinationChangedListener)
@@ -382,7 +392,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             } else if (enteredPlayer) {
                 popupAwaitingPlayer = false
                 clearPendingTimeSeek()
-                if (destination.id == origin) expandedReturnDialog?.hide()
+                if (destination.id == origin) showReturnedPopup()
                 clearPlaybackReturnListener()
                 if (directPlayback === session) {
                     playerFragment?.let(::recordPlayerEpisode)
@@ -684,7 +694,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
             // Normally the destination listener already handled return.
             // Disarm a stale listener if the player was removed externally.
-            if (directPlayback != null && playbackReturnListener == null) {
+            if (directPlayback != null && playbackReturnListener == null &&
+                externalDirectPlaybackHost == null) {
                 directPlayback = null
                 lastPlayed = null
                 expandedReturnDialog = null
@@ -694,7 +705,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
             when (f.javaClass.name) {
                 in EXPANDED_ORIGINS -> {
-                    if (!popupAwaitingPlayer) expandedReturnDialog?.hide()
                     if (popupReturning) {
                         if (f.javaClass.name in SEARCH_ORIGINS) suppressReturnedSearchIme(f)
                         popupReturning = false
@@ -709,9 +719,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
 
         override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, view: View, state: Bundle?) {
-            if (f.javaClass.name in EXPANDED_ORIGINS && !popupAwaitingPlayer) {
-                expandedReturnDialog?.hide()
-            }
             if (popupReturning && f.javaClass.name in SEARCH_ORIGINS) {
                 suppressReturnedSearchIme(f)
             }
@@ -742,6 +749,14 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
             screens.remove(f)?.close()
         }
+    }
+
+    private fun restoreExternalPopup() {
+        val player = externalDirectPlaybackHost ?: return
+        if (!player.isFinishing && !player.isDestroyed &&
+            !(Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
+                player.isInPictureInPictureMode)) return
+        showReturnedPopup()
     }
 
     private fun observeExternalPlayer(activity: Activity) {
@@ -1735,6 +1750,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         if (activity is MainActivity) {
             if (host === activity) screens.values.forEach { it.restoreChannelPressOnResume() }
             use(activity)
+            restoreExternalPopup()
+        } else if (activity === externalDirectPlaybackHost) {
+            expandedReturnDialog?.hide()
         }
     }
 
@@ -1742,6 +1760,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         val refreshHome = externalDirectPlaybackHost === activity &&
             activity.isFinishing && !activity.isChangingConfigurations
         if (externalDirectPlaybackHost === activity) {
+            if (refreshHome) restoreExternalPopup()
             externalDirectPlaybackHost = null
             externalDirectPlaybackRestoring = activity.isChangingConfigurations
         }
