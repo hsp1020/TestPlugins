@@ -2558,7 +2558,7 @@ class YoutubeProvider(
             val next = findTokenRecursive(initialData)
 
             val result = DirectPageResult(directResults.toList(), next)
-            if (result.items.isNotEmpty() && result.items.size <= 200) {
+            if (result.items.isNotEmpty() && result.items.size <= 320) {
                 synchronized(directMainPageLock) {
                     directMainPageCache[cacheKey] = CachedDirectMainPage(result, System.currentTimeMillis())
                     // Keep the total retained item count within the original 8 x 80 limit.
