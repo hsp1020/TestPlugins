@@ -1,8 +1,6 @@
 package com.hsp1020.elevate
 
-import android.app.Activity
 import android.app.Dialog
-import android.content.Intent
 import android.content.Context
 import android.os.Bundle
 import android.util.TypedValue
@@ -12,8 +10,11 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.widget.SwitchCompat
+import android.widget.Spinner
+import android.widget.ArrayAdapter
+import android.widget.AdapterView
+import android.content.ComponentName
 import androidx.fragment.app.DialogFragment
 
 internal enum class ElevateFeature(
@@ -82,25 +83,6 @@ internal object ElevateFeaturePrefs {
 }
 
 class ElevateSettingsFragment : DialogFragment() {
-    private var downloadAppLabel: TextView? = null
-    private val downloadAppPicker = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        val component = result.data?.component
-        if (result.resultCode == Activity.RESULT_OK && component != null) {
-            val ctx = requireContext()
-            val label = runCatching {
-                ctx.packageManager.getActivityInfo(component, 0).loadLabel(ctx.packageManager).toString()
-            }.getOrDefault(component.packageName)
-            ExternalDownloads.select(ctx, ExternalDownloads.App(component.flattenToString(), label, "send"))
-            downloadAppLabel?.text = "Download App: " + label
-        }
-    }
-
-    override fun onDestroyView() {
-        downloadAppLabel = null
-        super.onDestroyView()
-    }
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
         val ctx = requireContext()
         fun dp(value: Int): Int = (value * ctx.resources.displayMetrics.density + 0.5f).toInt()
@@ -227,21 +209,40 @@ class ElevateSettingsFragment : DialogFragment() {
                     }
                 } else null
                 val externalControls = if (feature == ElevateFeature.EXTERNAL_DOWNLOADS) {
-                    TextView(ctx).apply {
-                        text = "Download App: " + (ExternalDownloads.selected(ctx)?.label ?: "Select app")
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                        applyElevateNativeFont()
-                        setPadding(dp(14), dp(10), dp(14), dp(10))
-                        setOnClickListener {
-                            val share = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(Intent.EXTRA_TEXT, "https://example.com/video.mp4")
+                    LinearLayout(ctx).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(dp(14), dp(4), dp(14), dp(10))
+                        addView(TextView(ctx).apply {
+                            text = "Download App"
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                            applyElevateNativeFont()
+                        })
+                        val apps = listOf(
+                            Triple("Select app", "", ""),
+                            Triple("1DM", "idm.internet.download.manager", "idm.internet.download.manager.Downloader"),
+                            Triple("1DM+", "idm.internet.download.manager.plus", "idm.internet.download.manager.Downloader"),
+                            Triple("1DM Lite", "idm.internet.download.manager.adm.lite", "idm.internet.download.manager.Downloader"),
+                            Triple("ADM", "com.dv.adm", "com.dv.adm.AEditor")
+                        )
+                        addView(Spinner(ctx).apply {
+                            adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, apps.map { it.first })
+                            val saved = ComponentName.unflattenFromString(
+                                ExternalDownloads.selected(ctx)?.component.orEmpty()
+                            )?.packageName
+                            setSelection(apps.indexOfFirst { it.second == saved }.takeIf { it >= 0 } ?: 0)
+                            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+                                override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                                    val (label, pkg, component) = apps[position]
+                                    if (pkg.isNotEmpty()) ExternalDownloads.select(
+                                        ctx, ExternalDownloads.App(
+                                            ComponentName(pkg, component).flattenToString(), label, "direct"
+                                        )
+                                    )
+                                }
                             }
-                            downloadAppPicker.launch(
-                                Intent(Intent.ACTION_PICK_ACTIVITY).putExtra(Intent.EXTRA_INTENT, share)
-                            )
-                        }
-                        downloadAppLabel = this
+                        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                     }
                 } else null
                 row.addView(SwitchCompat(ctx).apply {

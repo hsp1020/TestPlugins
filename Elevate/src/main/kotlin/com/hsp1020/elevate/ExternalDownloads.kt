@@ -35,6 +35,10 @@ internal object ExternalDownloads {
     private const val PENDING = "pending"
     private val checking = AtomicBoolean(false)
     private val main = Handler(Looper.getMainLooper())
+    private val supported = setOf(
+        "idm.internet.download.manager", "idm.internet.download.manager.plus",
+        "idm.internet.download.manager.adm.lite", "com.dv.adm"
+    )
 
     data class App(val component: String, val label: String, val mode: String) {
         fun json() = JSONObject().put("component", component).put("label", label).put("mode", mode)
@@ -46,10 +50,10 @@ internal object ExternalDownloads {
     // Retain the old app selection when upgrading, but expose only one target.
     fun selected(c: Context): App? = runCatching {
         val prefs = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        prefs.getString(TARGET, null)?.let { App.parse(JSONObject(it)) }
+        (prefs.getString(TARGET, null)?.let { App.parse(JSONObject(it)) }
             ?: JSONArray(prefs.getString("apps", "[]")).let { array ->
                 if (array.length() == 0) null else App.parse(array.getJSONObject(0))
-            }
+            })?.takeIf { ComponentName.unflattenFromString(it.component)?.packageName in supported }
     }.getOrNull()
 
     fun select(c: Context, app: App) {
@@ -115,16 +119,13 @@ internal object ExternalDownloads {
         else -> SafeFile.fromFilePath(c, path)
     }
 
-    private fun fromQueue(c: Context, queued: DownloadObjects.DownloadQueueWrapper, link: ExtractorLink): Pending {
+    private fun fromQueue(c: Context, queued: DownloadObjects.DownloadQueueWrapper, filename: String): Pending {
         val item = queued.downloadItem
         val ep = item?.episode
         val resume = queued.resumePackage?.item?.ep
         val header = c.getKey<DownloadObjects.DownloadHeaderCached>(
             DOWNLOAD_HEADER_CACHE, queued.parentId.toString()
         )
-        val filename = runCatching {
-            Uri.decode(Uri.parse(link.url).lastPathSegment.orEmpty()).substringBefore('?').take(240)
-        }.getOrDefault("")
         return Pending(
             queued.id, queued.parentId,
             item?.resultName ?: header?.name ?: resume?.mainName ?: ep?.headerName.orEmpty(),
@@ -138,27 +139,75 @@ internal object ExternalDownloads {
         )
     }
 
-    /** Direct handoff: no action dialog and no downloader-side status monitoring. */
+    /** Deterministic episode name, independent of the URL basename. */
+    private fun fileName(queued: DownloadObjects.DownloadQueueWrapper, link: ExtractorLink): String {
+        val item = queued.downloadItem
+        val ep = item?.episode
+        val resume = queued.resumePackage?.item?.ep
+        val title = item?.resultName ?: resume?.mainName ?: ep?.headerName ?: "Video"
+        val season = ep?.season ?: resume?.season
+        val episode = ep?.episode ?: resume?.episode
+        val suffix = if (season != null && episode != null) {
+            " S%02dE%02d".format(java.util.Locale.US, season, episode)
+        } else ""
+        val base = "$title$suffix [CS-${queued.id}]"
+            .replace(Regex("""[\\/:*?"<>|]"""), " ").trim().take(190)
+        val ext = if (link.isM3u8) "mp4" else {
+            Uri.parse(link.url).lastPathSegment.orEmpty().substringAfterLast('.', "")
+                .lowercase().takeIf { it in setOf("mp4", "mkv", "webm", "avi", "mov", "ts", "m4v") }
+                ?: "mp4"
+        }
+        return "$base.$ext"
+    }
+
+    /** Handoff URL, stable filename and headers without any CloudStream download popup. */
     fun handoff(activity: Activity, queued: DownloadObjects.DownloadQueueWrapper, link: ExtractorLink) {
         val app = selected(activity) ?: return
         if (Uri.parse(link.url).scheme !in listOf("http", "https")) {
             toast(activity, "External download requires an HTTP(S) link")
             return
         }
-        val component = ComponentName.unflattenFromString(app.component) ?: return
-        val intent = if (app.mode == "view") {
-            Intent(Intent.ACTION_VIEW, Uri.parse(link.url))
-        } else {
-            Intent(Intent.ACTION_SEND).apply {
-                type = "text/plain"
-                putExtra(Intent.EXTRA_TEXT, link.url)
-                putExtra(Intent.EXTRA_SUBJECT, link.name)
-                putExtra(Intent.EXTRA_TITLE, link.name)
+        val pkg = ComponentName.unflattenFromString(app.component)?.packageName ?: return
+        val filename = fileName(queued, link)
+        val headers = link.headers.toMutableMap()
+        if (link.referer.isNotBlank() && headers.keys.none { it.equals("referer", true) }) {
+            headers["Referer"] = link.referer
+        }
+        val bundle = Bundle().apply { headers.forEach { (key, value) -> putString(key, value) } }
+        val intent = if (pkg == "com.dv.adm") {
+            // ADM 14.0.43 AEditor handles ACTION_LIST_ADD with <info> per-file names.
+            Intent(Intent.ACTION_MAIN).apply {
+                component = ComponentName(pkg, "com.dv.adm.AEditor")
+                putExtra("com.dv.get.ACTION_LIST_ADD", "${link.url}<info>$filename")
+                putExtra("com.dv.get.ACTION_LIST_OPEN", false)
+                // ADM's legacy path extra expects a filesystem path, not a SAF URI.
+                basePath(activity)?.takeIf { it.startsWith("/") }?.let {
+                    putExtra("com.dv.get.ACTION_LIST_PATH", it)
+                }
+                if (headers.isNotEmpty()) putExtra("headers", bundle)
             }
-        }.apply { this.component = component }
+        } else {
+            // 1DM 20.0: public Downloader Activity and official filename/headers extras.
+            Intent(Intent.ACTION_VIEW, Uri.parse(link.url)).apply {
+                component = ComponentName(pkg, "idm.internet.download.manager.Downloader")
+                putExtra("extra_filename", filename)
+                putExtra("force_editor", false)
+                putExtra("hide_browser_option", true)
+                if (headers.isNotEmpty()) putExtra("extra_headers", bundle)
+                headers.entries.firstOrNull { it.key.equals("referer", true) }?.let {
+                    putExtra("extra_referer", it.value)
+                }
+                headers.entries.firstOrNull { it.key.equals("user-agent", true) }?.let {
+                    putExtra("extra_useragent", it.value)
+                }
+                headers.entries.firstOrNull { it.key.equals("cookie", true) }?.let {
+                    putExtra("extra_cookies", it.value)
+                }
+            }
+        }
         try {
             activity.startActivity(intent)
-            addPending(activity.applicationContext, fromQueue(activity, queued, link))
+            addPending(activity.applicationContext, fromQueue(activity, queued, filename))
         } catch (e: Exception) {
             toast(activity, "Cannot open " + app.label + ": " + e.message)
         }
@@ -215,10 +264,8 @@ internal object ExternalDownloads {
                 }
                 for (p in requests) {
                     val fresh = files.filter { (it.lastModified() ?: 0L) >= p.created - 1000L }
-                    val exact = fresh.filter { p.expectedFile.isNotBlank() &&
+                    val file = fresh.singleOrNull { p.expectedFile.isNotBlank() &&
                         it.name().equals(p.expectedFile, ignoreCase = true) }
-                    // When the downloader renames the file, auto-associate only if unambiguous.
-                    val file = exact.singleOrNull() ?: if (requests.size == 1) fresh.singleOrNull() else null
                     if (file == null) continue
                     val size = file.length() ?: continue
                     Thread.sleep(1200)
