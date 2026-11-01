@@ -8,6 +8,9 @@ import com.fasterxml.jackson.core.JsonToken
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.DataStoreHelper.getResultEpisode
+import com.lagradost.cloudstream3.utils.DataStoreHelper.setResultEpisode
+import com.lagradost.cloudstream3.ui.settings.Globals
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.mapper
 import okhttp3.Interceptor
@@ -3332,8 +3335,21 @@ class YoutubeProvider(
 
     /** One-shot detail cache, valid for the entire playback regardless of duration. */
     override suspend fun load(url: String): LoadResponse {
-        directPageCache.remove(url)?.let { return it }
-        return loadPage(url, direct = false)
+        val response = directPageCache.remove(url) ?: loadPage(url, direct = false)
+        if (url.contains("/shorts/") && response is TvSeriesLoadResponse) {
+            YoutubeUtils.extractYoutubeId(url)?.let { videoId ->
+                val episode = response.episodes.firstOrNull {
+                    YoutubeUtils.extractYoutubeId(it.data) == videoId
+                }?.episode
+                if (episode != null && episode > 0) {
+                    val rangeSize = if (Globals.isLayout(Globals.TV or Globals.EMULATOR)) 50 else 20
+                    val start = ((episode - 1) / rangeSize) * rangeSize + 1
+                    val id = response.uniqueUrl.replace(mainUrl, "").replace("/", "").hashCode()
+                    if (getResultEpisode(id) != start) setResultEpisode(id, start)
+                }
+            }
+        }
+        return response
     }
 
     /** Construct the initial player episode list from the home card, with no HTTP. */

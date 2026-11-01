@@ -41,6 +41,10 @@ import android.widget.ImageView
 import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
 import com.lagradost.cloudstream3.utils.AppContextUtils.loadResult
 import com.lagradost.cloudstream3.utils.DataStoreHelper
+import com.lagradost.cloudstream3.utils.DataStore.containsKey
+import com.lagradost.cloudstream3.utils.DataStore.setKey
+import com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE
+import com.lagradost.cloudstream3.utils.downloader.DownloadObjects
 import com.lagradost.cloudstream3.utils.DataStoreHelper.setResultEpisode
 import com.lagradost.cloudstream3.utils.DataStoreHelper.setResultSeason
 import com.lagradost.cloudstream3.ActorData
@@ -413,7 +417,21 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         val activity = host ?: return
         activity.lifecycleScope.launch {
             val full = try {
-                withContext(Dispatchers.IO) { api.prefetchDirectDetails(session.card.url) }
+                withContext(Dispatchers.IO) {
+                    val id = session.parentId.toString()
+                    if (!app.containsKey(DOWNLOAD_HEADER_CACHE, id)) {
+                        app.setKey(DOWNLOAD_HEADER_CACHE, id, DownloadObjects.DownloadHeaderCached(
+                            apiName = "YouTube",
+                            url = session.card.url,
+                            type = TvType.TvSeries,
+                            name = session.card.name,
+                            poster = session.card.posterUrl,
+                            cacheTime = System.currentTimeMillis(),
+                            id = session.parentId,
+                        ))
+                    }
+                    api.prefetchDirectDetails(session.card.url)
+                }
             } catch (cancel: kotlinx.coroutines.CancellationException) {
                 throw cancel
             } catch (_: Exception) {
