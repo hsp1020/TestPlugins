@@ -809,8 +809,13 @@ internal class NativeEpisodeOverlayHook(
                 return@Runnable
             }
             val nativeAdapter = list?.adapter as? EpisodeAdapter ?: return@Runnable
-            if (nativeAdapter === filteredAdapter || nativeAdapter === lastNativeAdapter)
+            if (nativeAdapter === filteredAdapter || nativeAdapter === lastNativeAdapter) {
+                if (!overlayWasShown && playerPanel != null) {
+                    overlayWasShown = true
+                    playerPanel.onOpened()
+                }
                 return@Runnable
+            }
             lastNativeAdapter = nativeAdapter
             overlayWasShown = true
             overlayOpening()

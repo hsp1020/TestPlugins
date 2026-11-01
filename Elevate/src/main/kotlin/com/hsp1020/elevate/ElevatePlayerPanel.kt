@@ -392,6 +392,7 @@ internal class ElevatePlayerPanel(
         addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
     }
     private var tab = Tab.EPISODES
+    private var explicitlySelectedTab = false
     private var filter: String? = null
     // Inflate the actual CloudStream subtitle_offset layout, preserving its TextViews,
     // buttons, cue adapter and localized resources. Only reflow its two containers
@@ -734,12 +735,15 @@ internal class ElevatePlayerPanel(
         }
         if (destination != tab && destination == Tab.SUBTITLES) browsingSubtitleGroup = false
         tab = destination
+        explicitlySelectedTab = true
         if (sync) showSync() else showTabContents()
         return true
     }
     fun onOpened() {
         updateAvailableTabs()
-        if (buttons[tab]?.visibility != View.VISIBLE) tab = Tab.SOURCES
+        if (!explicitlySelectedTab && buttons[Tab.EPISODES]?.visibility == View.VISIBLE)
+            tab = Tab.EPISODES
+        else if (buttons[tab]?.visibility != View.VISIBLE) tab = Tab.SOURCES
         showTabContents()
     }
 
