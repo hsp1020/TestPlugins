@@ -75,6 +75,7 @@ import com.lagradost.cloudstream3.ui.AutofitRecyclerView
 import com.lagradost.cloudstream3.ui.BaseAdapter
 import com.lagradost.cloudstream3.ui.ViewHolderState
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
+import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
 import com.lagradost.cloudstream3.ui.search.SearchClickCallback
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
@@ -222,6 +223,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private var playbackReturnListener: NavController.OnDestinationChangedListener? = null
     private var playerFragment: Fragment? = null
     private var externalPlayerHost: FragmentActivity? = null
+    // Retain quick-play ownership across external player Fragment teardown.
+    private var externalDirectPlaybackHost: FragmentActivity? = null
+    private var externalDirectPlaybackRestoring = false
 
     /** Find the native Home, Search, or Quick Search expanded catalog dialog. */
     private fun findExpandedDialog(windowRoot: View): Dialog? {
@@ -607,7 +611,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             @Suppress("UNCHECKED_CAST")
             val switchPip = activity.window.decorView.getTag(R.id.global_to_navigation_player)
                 as? ((Bundle) -> Boolean)
-            if (switchPip?.invoke(playerArgs) != true) {
+            if (switchPip?.invoke(playerArgs) == true) {
+                // A new YouTube video can replace the existing PiP player.
+                externalDirectPlaybackHost = externalPlayerHost
+            } else {
                 registerReturn(navHost.navController, session)
                 // Avoid a native pop animation flashing between playback and Home/Search.
                 val noTransition = NavOptions.Builder()
@@ -744,6 +751,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         externalPlayerHost?.supportFragmentManager
             ?.unregisterFragmentLifecycleCallbacks(fragments)
         externalPlayerHost = activity
+        if (directPlayback != null || externalDirectPlaybackRestoring) {
+            externalDirectPlaybackHost = activity
+            externalDirectPlaybackRestoring = false
+        }
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
         // onActivityCreated can follow the initial player view creation.
         fun scan(manager: FragmentManager) {
@@ -779,6 +790,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         externalPlayerHost?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
         externalPlayerHost = null
+        externalDirectPlaybackHost = null
+        externalDirectPlaybackRestoring = false
         focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
         focusTree = null
         dialogs.values.toList().forEach { it.close() }
@@ -1726,10 +1739,24 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     }
 
     override fun onActivityDestroyed(activity: Activity) {
+        val refreshHome = externalDirectPlaybackHost === activity &&
+            activity.isFinishing && !activity.isChangingConfigurations
+        if (externalDirectPlaybackHost === activity) {
+            externalDirectPlaybackHost = null
+            externalDirectPlaybackRestoring = activity.isChangingConfigurations
+        }
         if (externalPlayerHost === activity) {
             externalPlayerHost?.supportFragmentManager
                 ?.unregisterFragmentLifecycleCallbacks(fragments)
             externalPlayerHost = null
+        }
+        if (refreshHome) {
+            val mainActivity = host?.takeUnless { it.isFinishing || it.isDestroyed }
+            val nav = (mainActivity?.supportFragmentManager
+                ?.findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)?.navController
+            if (mainActivity != null && nav?.currentDestination?.id == R.id.navigation_home) {
+                ViewModelProvider(mainActivity)[HomeViewModel::class.java].reloadStored()
+            }
         }
         if (host === activity) {
             release()
