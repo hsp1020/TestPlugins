@@ -738,6 +738,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             manager.fragments.forEach { fragment ->
                 if (fragment.javaClass.name == PLAYER_SCREEN && fragment.view != null) {
                     playerFragment = fragment
+                    fragment.view?.let { attach(fragment, it) }
                     watchPendingTimeSeek(fragment)
                 }
                 if (fragment.isAdded) scan(fragment.childFragmentManager)
@@ -1080,8 +1081,13 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
 
         init {
-            observeNativeRanges()
-            observeDescriptionAndTags()
+            if (fragment is GeneratorPlayer) {
+                root.findViewById<RecyclerView>(R.id.player_episode_list)
+                    ?.let { watch(it, Role.DETAIL_EPISODE) }
+            } else {
+                observeNativeRanges()
+                observeDescriptionAndTags()
+            }
             if (popup) root.findViewById<RecyclerView>(R.id.home_expanded_recycler)
                 ?.let { watch(it, Role.DIALOG_GRID) }
             root.findViewById<RecyclerView>(R.id.home_master_recycler)?.let { watch(it, Role.HOME_PARENT) }
@@ -1746,7 +1752,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             "com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment",
             "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
             "com.lagradost.cloudstream3.ui.result.ResultTrailerPlayer",
-            "com.lagradost.cloudstream3.ui.result.ResultFragmentTv"
+            "com.lagradost.cloudstream3.ui.result.ResultFragmentTv",
+            PLAYER_SCREEN
         )
     }
 }
