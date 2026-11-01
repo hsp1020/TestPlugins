@@ -13,12 +13,10 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.widget.SwitchCompat
 import android.widget.Spinner
 import android.widget.ArrayAdapter
-import android.widget.AdapterView
 import android.content.ComponentName
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
-import android.view.View
 import androidx.fragment.app.DialogFragment
 
 internal enum class ElevateFeature(
@@ -87,7 +85,9 @@ internal object ElevateFeaturePrefs {
 }
 
 /** The same native-font dropdown and background as the Elevate settings dialog. */
-internal fun Spinner.useElevateSettingsDropdown(context: Context, labels: List<String>) {
+internal fun Spinner.useElevateSettingsDropdown(
+    context: Context, labels: List<String>, initialLabel: (() -> String?)? = null
+) {
     val night = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
         Configuration.UI_MODE_NIGHT_YES
     val surface = if (night) Color.BLACK else Color.WHITE
@@ -98,6 +98,7 @@ internal fun Spinner.useElevateSettingsDropdown(context: Context, labels: List<S
                 (it as? TextView)?.apply {
                     applyElevateNativeFont()
                     setBackgroundColor(surface)
+                    initialLabel?.invoke()?.let { text = it }
                 }
             }
 
@@ -248,29 +249,40 @@ class ElevateSettingsFragment : DialogFragment() {
                             setPadding(0, dp(8), 0, dp(4))
                         })
                         val apps = listOf(
-                            Triple("Select app", "", ""),
                             Triple("1DM", "idm.internet.download.manager", "idm.internet.download.manager.Downloader"),
                             Triple("1DM+", "idm.internet.download.manager.plus", "idm.internet.download.manager.Downloader"),
                             Triple("1DM Lite", "idm.internet.download.manager.adm.lite", "idm.internet.download.manager.Downloader"),
                             Triple("ADM", "com.dv.adm", "com.dv.adm.AEditor")
                         )
-                        addView(Spinner(ctx).apply {
-                            useElevateSettingsDropdown(ctx, apps.map { it.first })
-                            val saved = ComponentName.unflattenFromString(
-                                ExternalDownloads.selected(ctx)?.component.orEmpty()
-                            )?.packageName
-                            setSelection(apps.indexOfFirst { it.second == saved }.takeIf { it >= 0 } ?: 0)
-                            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
-                                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                                    val (label, pkg, component) = apps[position]
-                                    if (pkg.isNotEmpty()) ExternalDownloads.select(
-                                        ctx, ExternalDownloads.App(
-                                            ComponentName(pkg, component).flattenToString(), label, "direct"
-                                        )
-                                    )
-                                }
+                        val saved = ComponentName.unflattenFromString(
+                            ExternalDownloads.selected(ctx)?.component.orEmpty()
+                        )?.packageName
+                        var unselected = saved == null || apps.none { it.second == saved }
+                        addView(object : Spinner(ctx) {
+                            private var openedByUser = false
+                            override fun performClick(): Boolean {
+                                openedByUser = true
+                                return super.performClick()
                             }
+                            override fun setSelection(position: Int) {
+                                super.setSelection(position)
+                                // Ignore Android's automatic first-row selection on initial layout.
+                                if (!openedByUser || position !in apps.indices) return
+                                val (label, pkg, component) = apps[position]
+                                ExternalDownloads.select(
+                                    ctx, ExternalDownloads.App(
+                                        ComponentName(pkg, component).flattenToString(), label, "direct"
+                                    )
+                                )
+                                unselected = false
+                                openedByUser = false
+                                (adapter as? android.widget.BaseAdapter)?.notifyDataSetChanged()
+                            }
+                        }.apply {
+                            useElevateSettingsDropdown(ctx, apps.map { it.first }) {
+                                if (unselected) "Select app" else null
+                            }
+                            setSelection(apps.indexOfFirst { it.second == saved }.coerceAtLeast(0))
                         }, LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
                         ))
