@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Environment
 import android.os.FileObserver
 import android.provider.MediaStore
+import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -268,6 +269,8 @@ internal object ExternalDownloads {
                 addPendingBatch(activity.applicationContext, group.map {
                     fromQueue(activity, it.queued, it.filename)
                 })
+            } catch (e: ActivityNotFoundException) {
+                toast(activity, "Please install ${app.label}.")
             } catch (e: Exception) {
                 toast(activity, "Cannot open " + app.label + ": " + e.message)
             }
