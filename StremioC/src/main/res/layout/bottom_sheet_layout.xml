@@ -123,7 +123,7 @@
                         <TextView
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:text="Sources &amp; Integrations"
+                            android:text="Streams &amp; Subtitles"
                             android:textSize="16sp"
                             android:textStyle="bold" />
                         <TextView
@@ -168,7 +168,7 @@
                         <TextView
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:text="Metadata &amp; Sync"
+                            android:text="Metadata"
                             android:textSize="16sp"
                             android:textStyle="bold" />
                         <TextView
@@ -235,143 +235,6 @@
                 </LinearLayout>
             </LinearLayout>
             <LinearLayout
-                android:id="@+id/pageSources"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:visibility="gone">
-                <LinearLayout
-                    android:id="@+id/rowStreamSubtitleAddons"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:minHeight="56dp"
-                    android:layout_marginTop="3dp"
-                    android:layout_marginBottom="3dp"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:paddingTop="8dp"
-                    android:paddingBottom="8dp"
-                    android:focusable="true"
-                    android:clickable="true"
-                    android:background="?android:attr/selectableItemBackground">
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:orientation="vertical">
-                        <TextView
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:text="Streams / Subtitles Addon"
-                            android:textSize="16sp"
-                            android:textStyle="bold" />
-                        
-                    </LinearLayout>
-                    <TextView
-                        android:layout_width="24dp"
-                        android:layout_height="wrap_content"
-                        android:gravity="center"
-                        android:text="›"
-                        android:textSize="24sp"
-                        android:importantForAccessibility="no" />
-                </LinearLayout>
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:minHeight="48dp"
-                    android:layout_marginTop="3dp"
-                    android:layout_marginBottom="3dp"
-                    android:orientation="horizontal"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:gravity="center_vertical">
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="CineStream Streams"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
-                    <Switch
-                        android:id="@+id/switchCineStream"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:minHeight="48dp"
-                        android:focusable="true"
-                        android:contentDescription="CineStream Streams" />
-                </LinearLayout>
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:minHeight="48dp"
-                    android:layout_marginTop="3dp"
-                    android:layout_marginBottom="3dp"
-                    android:orientation="horizontal"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:gravity="center_vertical">
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="StreamPlay Streams"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
-                    <Switch
-                        android:id="@+id/switchStreamPlay"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:minHeight="48dp"
-                        android:focusable="true"
-                        android:contentDescription="StreamPlay Streams" />
-                </LinearLayout>
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:minHeight="48dp"
-                    android:layout_marginTop="3dp"
-                    android:layout_marginBottom="3dp"
-                    android:orientation="horizontal"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:gravity="center_vertical">
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="VixSrc Streams"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
-                    <Switch
-                        android:id="@+id/switchVixSrc"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:minHeight="48dp"
-                        android:focusable="true"
-                        android:contentDescription="VixSrc Streams" />
-                </LinearLayout>
-                <LinearLayout
-                    android:id="@+id/containerStreamSubtitleUrls"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:visibility="gone" />
-                <ImageView
-                    android:id="@+id/toggleStreamSubtitleUrls"
-                    android:layout_width="0dp"
-                    android:layout_height="0dp"
-                    android:visibility="gone"
-                    android:importantForAccessibility="no" />
-                <TextView
-                    android:id="@+id/btnAddStreamSubtitleUrl"
-                    android:layout_width="0dp"
-                    android:layout_height="0dp"
-                    android:visibility="gone"
-                    android:importantForAccessibility="no" />
-            </LinearLayout>
-            <LinearLayout
                 android:id="@+id/pageMetadata"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -385,8 +248,7 @@
                     android:textStyle="bold" />
                 <FrameLayout
                     android:layout_width="match_parent"
-                    android:layout_height="48dp"
-                    android:layout_marginTop="2dp">
+                    android:layout_height="35dp">
                     <EditText
                         android:id="@+id/etTmdbApiKey"
                         android:layout_width="match_parent"
@@ -426,7 +288,7 @@
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:text="TMDB Language"
-                            android:textSize="16sp"
+                            android:textSize="12sp"
                             android:textStyle="bold" />
                         <TextView
                             android:id="@+id/summaryLanguage"
@@ -464,21 +326,27 @@
                         android:text="Meta / History Addon"
                         android:textSize="16sp"
                         android:textStyle="bold" />
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:paddingStart="12dp"
+                        android:text="History and metadata sync, including recommendation posters, for enabled catalogs. (via Aiometadata)"
+                        android:textSize="12sp"
+                        android:tag="stremioc_secondary" />
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
                         android:orientation="horizontal"
-                        android:gravity="center_vertical">
+                        android:gravity="top">
                         <FrameLayout
                             android:layout_width="0dp"
-                            android:layout_height="48dp"
+                            android:layout_height="35dp"
                             android:layout_weight="1">
                             <EditText
                                 android:id="@+id/etHistorySyncUrl"
                                 android:layout_width="match_parent"
                                 android:layout_height="35dp"
-                                android:layout_gravity="center_vertical"
+                                android:layout_gravity="top"
                                 android:hint="Aiometadata URL"
                                 android:inputType="textUri"
                                 android:singleLine="true"
@@ -510,12 +378,6 @@
                             android:importantForAccessibility="no"
                             android:background="?android:attr/selectableItemBackgroundBorderless" />
                     </LinearLayout>
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="History and metadata sync, including recommendation posters, for enabled catalogs."
-                        android:textSize="12sp"
-                        android:tag="stremioc_secondary" />
                 </LinearLayout>
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -549,17 +411,17 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:text="MDBList API Key"
+                        android:paddingStart="12dp"
                         android:textSize="12sp"
                         android:tag="stremioc_secondary" />
                     <FrameLayout
                         android:layout_width="match_parent"
-                        android:layout_height="48dp"
-                        android:layout_marginTop="2dp">
+                        android:layout_height="48dp">
                         <EditText
                             android:id="@+id/etMdbListApiKey"
                             android:layout_width="match_parent"
                             android:layout_height="35dp"
-                            android:layout_gravity="center_vertical"
+                            android:layout_gravity="top"
                             android:hint="Enter MdbList API Key"
                             android:inputType="textPassword"
                             android:singleLine="true"

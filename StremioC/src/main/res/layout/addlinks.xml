@@ -68,26 +68,6 @@
                 android:layout_marginTop="6dp"
                 android:orientation="vertical">
                 <Switch
-                    android:id="@+id/switchStreamsAddon"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:minHeight="48dp"
-                    android:text="Streams Sync"
-                    android:textSize="14sp"
-                    android:focusable="true"
-                    android:padding="4dp"
-                    android:background="@android:color/transparent" />
-                <Switch
-                    android:id="@+id/switchSubtitlesAddon"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:minHeight="48dp"
-                    android:text="Subtitles Sync"
-                    android:textSize="14sp"
-                    android:focusable="true"
-                    android:padding="4dp"
-                    android:background="@android:color/transparent" />
-                <Switch
                     android:id="@+id/switchLinkSync"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -103,6 +83,56 @@
                     android:layout_height="wrap_content"
                     android:minHeight="48dp"
                     android:text="History Sync"
+                    android:textSize="14sp"
+                    android:focusable="true"
+                    android:padding="4dp"
+                    android:background="@android:color/transparent" />
+                <Switch
+                    android:id="@+id/switchStreamsAddon"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:text="Streams Addon"
+                    android:textSize="14sp"
+                    android:focusable="true"
+                    android:padding="4dp"
+                    android:background="@android:color/transparent" />
+                <Switch
+                    android:id="@+id/switchSubtitlesAddon"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:text="Subtitles Addon"
+                    android:textSize="14sp"
+                    android:focusable="true"
+                    android:padding="4dp"
+                    android:background="@android:color/transparent" />
+                <Switch
+                    android:id="@+id/switchCineStream"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:text="CineStream Integration"
+                    android:textSize="14sp"
+                    android:focusable="true"
+                    android:padding="4dp"
+                    android:background="@android:color/transparent" />
+                <Switch
+                    android:id="@+id/switchStreamPlay"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:text="StreamPlay Integration"
+                    android:textSize="14sp"
+                    android:focusable="true"
+                    android:padding="4dp"
+                    android:background="@android:color/transparent" />
+                <Switch
+                    android:id="@+id/switchVixSrc"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:text="VixSrc Integration"
                     android:textSize="14sp"
                     android:focusable="true"
                     android:padding="4dp"

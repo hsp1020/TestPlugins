@@ -372,7 +372,7 @@ class SettingsBottomFragment(
         } catch (t: Throwable) {}
     }
 
-    private enum class SettingsPage { HUB, SOURCES, METADATA, BACKUP }
+    private enum class SettingsPage { HUB, METADATA, BACKUP }
     private var backHandler: (() -> Boolean)? = null
     private var refreshSummaries: (() -> Unit)? = null
     private var closing = false
@@ -514,9 +514,7 @@ class SettingsBottomFragment(
             val row = view.parent as? LinearLayout
             if (view is Switch && row != null && row.orientation == LinearLayout.HORIZONTAL &&
                 row.childCount == 2 && row.getChildAt(0) is TextView) {
-                val switchOnly = listOf(
-                    "switchCineStream", "switchStreamPlay", "switchVixSrc", "switchMdbList"
-                ).any { view.id == getCachedResId(it, "id") }
+                val switchOnly = view.id == getCachedResId("switchMdbList", "id")
                 if (switchOnly) {
                     row.setOnClickListener(null)
                     row.isClickable = false
@@ -1101,7 +1099,7 @@ class SettingsBottomFragment(
         val tv = isLayout(TV)
         if (!tv) return
         val navigationRow = id in listOf("rowCatalogs", "rowSources", "rowMetadata",
-            "rowBackup", "rowStreamSubtitleAddons").map { getCachedResId(it, "id") }
+            "rowBackup").map { getCachedResId(it, "id") }
         val attrs = hostContext.obtainStyledAttributes(intArrayOf(HostR.attr.focusBackground))
         val effect = attrs.getDrawable(0)
         attrs.recycle()
@@ -1232,19 +1230,17 @@ class SettingsBottomFragment(
         }
         if (view !is LinearLayout || !hasViews(view, mapOf(
             LinearLayout::class.java to listOf("settingsRoot", "settingsHeader", "settingsBody",
-                "containerStreamSubtitleUrls", "layoutHistorySyncUrl", "layoutMdbList",
-                "pageHub", "pageSources", "pageMetadata",
+                "layoutHistorySyncUrl", "layoutMdbList",
+                "pageHub", "pageMetadata",
                 "pageBackup", "settingsFooter", "saveAction", "rowCatalogs",
-                "rowLanguage", "rowSources", "rowMetadata", "rowBackup",
-                "rowStreamSubtitleAddons"),
+                "rowLanguage", "rowSources", "rowMetadata", "rowBackup"),
             NestedScrollView::class.java to listOf("settingsViewport"),
-            TextView::class.java to listOf("settingsToggle", "tvExport", "tvImport", "settingsBack",
-                "btnAddStreamSubtitleUrl"),
+            TextView::class.java to listOf("settingsToggle", "tvExport", "tvImport", "settingsBack"),
             ImageView::class.java to listOf("saveIcon", "addlinks", "showlinks",
-                "btnSelectLanguage", "toggleStreamSubtitleUrls"),
+                "btnSelectLanguage"),
             ImageButton::class.java to listOf("btnConfigureHistoryAddon", "btnDeleteHistoryAddon", "btnRevealMdbListApiKey"),
             EditText::class.java to listOf("etTmdbApiKey", "etMdbListApiKey", "etHistorySyncUrl"),
-            Switch::class.java to listOf("switchMdbList", "switchCineStream", "switchStreamPlay", "switchVixSrc")
+            Switch::class.java to listOf("switchMdbList")
         ))) {
             showToast("Settings resources are unavailable. Reload the plugin and try again.")
             finish(); return
@@ -1278,8 +1274,10 @@ class SettingsBottomFragment(
         tvImport.makeTvCompatible()
 
         tvExport.setOnClickListener {
-            val isStreamPlayExportActive = try { view.findView<Switch>("switchStreamPlay").isChecked } catch (_: Throwable) { false }
-            val isCineStreamExportActive = try { view.findView<Switch>("switchCineStream").isChecked } catch (_: Throwable) { false }
+            val isStreamPlayExportActive = isStreamPlayInstalled() &&
+                SettingsRepository.isIntegrationEnabled(sharedPref, SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED)
+            val isCineStreamExportActive = isCineStreamInstalled() &&
+                SettingsRepository.isIntegrationEnabled(sharedPref, SettingsRepository.PREF_KEY_CINESTREAM_ENABLED)
 
             uiScope.launch {
                 try {
@@ -1601,16 +1599,6 @@ class SettingsBottomFragment(
             if (url.isNotBlank()) sourceDraft.add(LinkItem(id = i.toLong(), name = name, link = url,
                 type = "StremioC", enabled = (entry as? JSONObject)?.optBoolean("enabled", true) ?: true))
         }
-        view.findView<LinearLayout>("containerStreamSubtitleUrls").visibility = View.GONE
-        view.findView<ImageView>("toggleStreamSubtitleUrls").apply {
-            visibility = View.GONE; isFocusable = false; isClickable = false
-        }
-        val sourceEntry = view.optional("rowStreamSubtitleAddons") ?: simpleButton("Streams / Subtitles Addon ›").also {
-            (view.findView<LinearLayout>("containerStreamSubtitleUrls").parent as ViewGroup).addView(it)
-        }
-        view.optional("btnAddStreamSubtitleUrl")?.visibility = View.GONE
-        sourceEntry.setOnClickListener { showAddonListDialog(sourceDraft, onDraftChanged = { refreshSummaries?.invoke() }) }
-
         val layoutHistorySyncUrl: View = try { view.findView("layoutHistorySyncUrl") } catch (e: Throwable) { throw Exception("layoutHistorySyncUrl View not found", e) }
         val etHistorySyncUrl: EditText = try { view.findView("etHistorySyncUrl") } catch (e: Throwable) { throw Exception("etHistorySyncUrl EditText not found", e) }
 
@@ -1622,9 +1610,6 @@ class SettingsBottomFragment(
         }
         if (historyGear != null) bindAddonActions(settingsDialog, etHistorySyncUrl, historyGear, trash = null)
 
-        setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
-        setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
-        setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
 
         val btnSelectLanguage: ImageView = try { view.findView("btnSelectLanguage") } catch (e: Throwable) { throw Exception("btnSelectLanguage ImageView not found", e) }
         btnSelectLanguage.setImageDrawable(getDrawable("settings_icon"))
@@ -1691,24 +1676,22 @@ class SettingsBottomFragment(
         var currentPage = SettingsPage.HUB
         val pageScroll = IntArray(SettingsPage.entries.size)
         val pageFocus = arrayOfNulls<View>(SettingsPage.entries.size)
-        val pages = listOf("pageHub", "pageSources", "pageMetadata", "pageBackup").map { view.optional(it) }
-        val titles = listOf("Stremio Settings", "Sources & Integrations", "Metadata & Sync", "Backup")
+        val pages = listOf("pageHub", "pageMetadata", "pageBackup").map { view.optional(it) }
+        val titles = listOf("Stremio Settings", "Metadata", "Backup")
         val back = view.optional("settingsBack") as? TextView
         fun updateSummaries() {
             val catalogCount = catalogLinks().count { it.link.isNotBlank() }
             (view.optional("summaryCatalogs") as? TextView)?.text =
                 if (catalogCount == 0) "No URL entries" else if (catalogCount == 1) "1 URL entry" else "$catalogCount URL entries"
             val count = sourceDraft.count { it.link.isNotBlank() }
-            val integrations = listOf("switchCineStream", "switchStreamPlay", "switchVixSrc")
-                .count { view.findView<Switch>(it).isChecked }
             (view.optional("summarySources") as? TextView)?.text =
-                "${if (count == 0) "No URL entries" else if (count == 1) "1 URL entry" else "$count URL entries"} · $integrations integrations on"
+                if (count == 0) "No URL entries" else if (count == 1) "1 URL entry" else "$count URL entries"
             val code = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "en-US") ?: "en-US"
             val names = LANGUAGES.filter { it.second == code }
             (view.optional("summaryLanguage") as? TextView)?.text = names.singleOrNull()?.first ?: code
             (view.optional("summaryMetadata") as? TextView)?.text =
-                "$code · ${if (etTmdbApiKey.text.isNotBlank()) "API key set" else "API key required"} · MDB Ratings: ${if (switchMdbList.isChecked) "On" else "Off"}"
-            listOf("rowCatalogs", "rowSources", "rowMetadata", "rowLanguage", "rowBackup", "rowStreamSubtitleAddons").forEach { id ->
+                "$code · MDB Ratings: ${if (switchMdbList.isChecked) "On" else "Off"}"
+            listOf("rowCatalogs", "rowSources", "rowMetadata", "rowLanguage", "rowBackup").forEach { id ->
                 (view.optional(id) as? ViewGroup)?.let { row ->
                     val texts = mutableListOf<String>()
                     fun labels(node: View) {
@@ -1751,7 +1734,10 @@ class SettingsBottomFragment(
         refreshSummaries = { updateSummaries() }
         if (hub != null) {
             view.findView<View>("rowCatalogs").setOnClickListener { showlinks.performClick() }
-            listOf("rowSources" to SettingsPage.SOURCES, "rowMetadata" to SettingsPage.METADATA,
+            view.findView<View>("rowSources").setOnClickListener {
+                showAddonListDialog(sourceDraft, onDraftChanged = { refreshSummaries?.invoke() })
+            }
+            listOf("rowMetadata" to SettingsPage.METADATA,
                 "rowBackup" to SettingsPage.BACKUP).forEach { (id, page) ->
                 view.findView<View>(id).setOnClickListener { showPage(page) }
             }
@@ -1777,10 +1763,6 @@ class SettingsBottomFragment(
                 return@setOnClickListener
             }
 
-            val switchCineStream = view.findView<Switch>("switchCineStream")
-            val switchStreamPlay = view.findView<Switch>("switchStreamPlay")
-            val switchVixSrc = view.findView<Switch>("switchVixSrc")
-
             val extraUrlList = sourceDraft.filter { it.link.isNotBlank() }
                 .distinctBy { stremioManifestUrl(it.link.trim()) }
             val invalid = extraUrlList.firstOrNull {
@@ -1789,7 +1771,6 @@ class SettingsBottomFragment(
                 }.getOrDefault(true)
             }
             if (invalid != null) {
-                showPage(SettingsPage.SOURCES)
                 showToast("Invalid stream/subtitle addon URL")
                 showAddonListDialog(sourceDraft, { refreshSummaries?.invoke() }, invalid.id)
                 return@setOnClickListener
@@ -1807,9 +1788,6 @@ class SettingsBottomFragment(
             editor.remove("custom_poster_url").remove("custom_poster_enabled")
             editor.putBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, switchMdbList.isChecked)
 
-            editor.putBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, switchCineStream.isChecked)
-            editor.putBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, switchStreamPlay.isChecked)
-            editor.putBoolean(SettingsRepository.PREF_KEY_VIXSRC_ENABLED, switchVixSrc.isChecked)
             editor.commit()
             StremioC.invalidateSyncSettingsCache()
 
@@ -1901,7 +1879,7 @@ class SettingsBottomFragment(
             return
         }
         val sources = sourceDraft != null
-        (content.getChildAt(0) as? TextView)?.text = if (sources) "Streams / Subtitles Addon" else "Catalogs"
+        (content.getChildAt(0) as? TextView)?.text = if (sources) "Streams & Subtitles" else "Catalogs"
         content.background = getDarkThemeBg()
         val rv = content.findView<RecyclerView>("rvLinks")
         rv.layoutManager = LinearLayoutManager(ctx)
@@ -2041,7 +2019,8 @@ class SettingsBottomFragment(
             ?: run { showToast("Settings resources are unavailable. Reload the plugin and try again."); return }
         if (!hasViews(dialogView, mapOf(
             EditText::class.java to listOf("etName", "etLink"),
-            Switch::class.java to listOf("switchStreamsAddon", "switchSubtitlesAddon", "switchLinkSync", "switchHistorySync"),
+            Switch::class.java to listOf("switchStreamsAddon", "switchSubtitlesAddon", "switchLinkSync",
+                "switchHistorySync", "switchCineStream", "switchStreamPlay", "switchVixSrc"),
             NestedScrollView::class.java to listOf("catalogEditorScroll")
         ))) {
             showToast("Settings resources are unavailable. Reload the plugin and try again.")
@@ -2067,6 +2046,11 @@ class SettingsBottomFragment(
         metaSync.isChecked = itemToEdit?.isSyncEnabled ?: true
         historySync.isChecked = itemToEdit?.isHistorySyncEnabled ?: true
         dialogView.optional("catalogSyncSection")?.visibility = if (sources) View.GONE else View.VISIBLE
+        if (!sources) {
+            setupToggle(dialogView, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
+            setupToggle(dialogView, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
+            setupToggle(dialogView, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
+        }
         val close = simpleButton("Close")
         val save = simpleButton("Save")
         dialogView.addView(popupButtons(close, save))
@@ -2101,7 +2085,15 @@ class SettingsBottomFragment(
             }
             save.isEnabled = false
             if (isEdit) values[index] = changed else values.add(changed)
-            if (sourceDraft == null) SettingsRepository.saveLinks(sharedPref, values)
+            if (sourceDraft == null) {
+                SettingsRepository.saveLinks(sharedPref, values)
+                sharedPref.edit()
+                    .putBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, dialogView.findView<Switch>("switchCineStream").isChecked)
+                    .putBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, dialogView.findView<Switch>("switchStreamPlay").isChecked)
+                    .putBoolean(SettingsRepository.PREF_KEY_VIXSRC_ENABLED, dialogView.findView<Switch>("switchVixSrc").isChecked)
+                    .commit()
+                StremioC.invalidateSyncSettingsCache()
+            }
             if (onLinksChanged != null) onLinksChanged(changed.id)
             else (rv?.adapter as? LinksAdapter)?.updateItem(changed)
             showToast(if (isEdit) "Addon updated" else "Addon added")
@@ -2840,10 +2832,10 @@ private fun showLanguageSelectDialog() {
             switchView.isEnabled = isInstalled
             if (!isInstalled) {
                 switchView.isChecked = false
-                switchView.text = "Not Installed"
+                switchView.text = "$displayName Integration (Not Installed)"
                 SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
             } else {
-                switchView.text = ""
+                switchView.text = "$displayName Integration"
                 switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
             }
             switchView.setOnCheckedChangeListener { _, isChecked ->
