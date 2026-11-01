@@ -1063,8 +1063,15 @@ internal class ElevatePlayerPanel(
             fromTagToLanguageName(code)?.let { return it }
             val name = sub.originalName.substringBefore(" · ").substringBefore(" — ")
                 .substringBefore(" (").trim()
-            return fromTagToLanguageName(fromCodeToLangTagIETF(name)
-                ?: fromLanguageToTagIETF(name)) ?: sub.originalName
+            val tag = fromCodeToLangTagIETF(name) ?: fromLanguageToTagIETF(name)
+                ?: when {
+                    name.startsWith("Рус.", true) -> "ru"
+                    name.startsWith("Укр.", true) -> "uk"
+                    name == "ਪੰਜਾਬੀ" -> "pa"
+                    name == "中文" -> "zh"
+                    else -> null
+                }
+            return fromTagToLanguageName(tag) ?: sub.originalName
         }
         subtitleGroups = sortSubs(vm.state.subtitles)
             .groupBy(::displayName)
@@ -1085,14 +1092,20 @@ internal class ElevatePlayerPanel(
 
     private fun renderSubtitleOptions() {
         val current = fragment.player.getCurrentPreferredSubtitle()?.url
-        val group = subtitleGroups.getOrNull(selectedGroup - 1)?.second.orEmpty()
+        val selected = subtitleGroups.getOrNull(selectedGroup - 1)
+        val group = selected?.second.orEmpty()
         val detailCache = SubtitleLanguageNormalizer.stremioDetailCache()
         replaceRows(group.mapIndexed { index, sub ->
             val number = index + 1 // Visual option index, not nameSuffix (native picker behavior).
             val label = if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) {
                 val embedded = ctx.getString(R.string.subtitles_from_embedded)
-                "$number ($embedded" +
-                    (if (sub.nameSuffix.isNotBlank()) " · ${sub.nameSuffix}" else "") + ")"
+                val original = sub.originalName.trim().takeIf {
+                    it.isNotEmpty() && it != selected?.first &&
+                        (it.contains(' ') || it.contains('(') || it.contains('-'))
+                }
+                val detail = listOfNotNull(original, sub.nameSuffix.takeIf { it.isNotBlank() })
+                    .distinct().joinToString(" · ")
+                "$number ($embedded" + if (detail.isNotEmpty()) " · $detail)" else ")"
             } else {
                 val detail = detailCache?.get(sub.url)?.takeIf { it.isNotBlank() }
                     ?: sub.nameSuffix.takeIf {
