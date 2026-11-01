@@ -5431,8 +5431,13 @@ open class StremioC(
             year: Int? = null, 
             originalAnimeId: String? = null
         ): Episode { 
-            val tmdbEp = tmdbMetaMap["${displaySeason}_${displayEpisode}"] ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
-            val finalAirDate = tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@Video.firstAired ?: this@Video.released
+            val unknownEpisode = type != "movie" && type != "series" && (episode ?: number ?: 0) <= 0
+            val tmdbEp = if (unknownEpisode) null else (
+                tmdbMetaMap["${displaySeason}_${displayEpisode}"] ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
+            )
+            val finalAirDate = if (unknownEpisode) null else (
+                tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@Video.firstAired ?: this@Video.released
+            )
             val airedYearInt = finalAirDate?.split("-")?.first()?.toIntOrNull()
 
             return provider.newEpisode(LoadData(
@@ -5469,11 +5474,11 @@ open class StremioC(
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
 
                 var finalEpDesc = (tmdbEp?.overview ?: this@Video.overview ?: this@Video.description)?.takeIf { it != "null" }
-                if (type != "movie" && type != "series") {
+                if (type != "movie" && type != "series" && !unknownEpisode) {
                     finalEpDesc = if (finalEpDesc.isNullOrBlank()) cleanOriginalTitle else "$finalEpDesc<br>$cleanOriginalTitle"
                 }
 
-                this.description = finalEpDesc
+                this.description = if (unknownEpisode) null else finalEpDesc
                 this.season = displaySeason
                 this.episode = displayEpisode
                 this.runTime = stremioRuntimeMinutes(this@Video.runtime)
