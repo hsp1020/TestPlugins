@@ -104,7 +104,7 @@ class PipSubtitleScaler(private val acceptsProvider: (String) -> Boolean) {
             view.setPadding(view.paddingLeft, 0, view.paddingRight, view.paddingBottom)
         }
         if (view.translationY != 0f) view.translationY = 0f
-        view.setBottomPaddingFraction(SubtitleView.DEFAULT_BOTTOM_PADDING_FRACTION)
+        view.setBottomPaddingFraction(0.05f)
         view.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * 1.5f)
     }
 
