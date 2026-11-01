@@ -45,17 +45,12 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
         }
         scope.launch(Dispatchers.Unconfined) {
             DownloadQueueManager.queue.collect { queued ->
-                if (queued.isEmpty() ||
+                if (queued.isEmpty() || ExternalDownloads.selected(app) == null ||
                     !ElevateFeaturePrefs.enabled(app, ElevateFeature.EXTERNAL_DOWNLOADS)) return@collect
-                val target = ExternalDownloads.selected(app) ?: return@collect
                 // Drain synchronously on StateFlow emission, before the download service
                 // normally receives and processes the newly queued request.
                 DownloadQueueManager.removeAllFromQueue()
-                if (ExternalDownloads.isInstalled(app, target)) {
-                    queued.forEach { jobs.trySend(it) }
-                } else {
-                    ExternalDownloads.toast(app, "Please install ${target.label}.")
-                }
+                queued.forEach { jobs.trySend(it) }
                 // addToQueue can emit IsPending once more after this collector returns.
                 // Reset that transient status without touching running downloads.
                 main.post {

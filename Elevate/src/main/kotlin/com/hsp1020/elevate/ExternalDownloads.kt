@@ -7,7 +7,6 @@ import android.os.Build
 import android.os.Environment
 import android.os.FileObserver
 import android.provider.MediaStore
-import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -76,16 +75,6 @@ internal object ExternalDownloads {
     fun select(c: Context, app: App) {
         c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(TARGET, app.json().toString()).apply()
-    }
-
-    fun isInstalled(c: Context, target: App): Boolean {
-        val pkg = ComponentName.unflattenFromString(target.component)?.packageName ?: return false
-        return try {
-            c.packageManager.getPackageInfo(pkg, 0)
-            true
-        } catch (_: android.content.pm.PackageManager.NameNotFoundException) {
-            false
-        }
     }
 
     data class Pending(
@@ -279,8 +268,6 @@ internal object ExternalDownloads {
                 addPendingBatch(activity.applicationContext, group.map {
                     fromQueue(activity, it.queued, it.filename)
                 })
-            } catch (e: ActivityNotFoundException) {
-                toast(activity, "Please install ${app.label}.")
             } catch (e: Exception) {
                 toast(activity, "Cannot open " + app.label + ": " + e.message)
             }
