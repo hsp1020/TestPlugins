@@ -266,17 +266,28 @@ class ElevateSettingsFragment : DialogFragment() {
                                 return super.performClick()
                             }
                             override fun setSelection(position: Int) {
-                                super.setSelection(position)
                                 // Ignore Android's automatic first-row selection on initial layout.
-                                if (!openedByUser || position !in apps.indices) return
+                                if (!openedByUser || position !in apps.indices) {
+                                    super.setSelection(position)
+                                    return
+                                }
                                 val (label, pkg, component) = apps[position]
+                                openedByUser = false
+                                if (runCatching { ctx.packageManager.getPackageInfo(pkg, 0) }.isFailure) {
+                                    val previous = ComponentName.unflattenFromString(
+                                        ExternalDownloads.selected(ctx)?.component.orEmpty()
+                                    )?.packageName
+                                    super.setSelection(apps.indexOfFirst { it.second == previous }.coerceAtLeast(0))
+                                    android.widget.Toast.makeText(ctx, "Please install $label.", android.widget.Toast.LENGTH_LONG).show()
+                                    return
+                                }
+                                super.setSelection(position)
                                 ExternalDownloads.select(
                                     ctx, ExternalDownloads.App(
                                         ComponentName(pkg, component).flattenToString(), label, "direct"
                                     )
                                 )
                                 unselected = false
-                                openedByUser = false
                                 (adapter as? android.widget.BaseAdapter)?.notifyDataSetChanged()
                             }
                         }.apply {
