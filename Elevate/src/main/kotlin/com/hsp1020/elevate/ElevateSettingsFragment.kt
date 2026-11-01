@@ -15,8 +15,8 @@ import androidx.appcompat.widget.SwitchCompat
 import android.widget.Spinner
 import android.widget.ArrayAdapter
 import android.content.ComponentName
-import android.content.res.Configuration
-import android.graphics.Color
+import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import android.graphics.drawable.ColorDrawable
 import androidx.fragment.app.DialogFragment
 
@@ -89,9 +89,8 @@ internal object ElevateFeaturePrefs {
 internal fun Spinner.useElevateSettingsDropdown(
     context: Context, labels: List<String>, initialLabel: (() -> String?)? = null
 ) {
-    val night = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-        Configuration.UI_MODE_NIGHT_YES
-    val surface = if (night) Color.BLACK else Color.WHITE
+    val surface = context.colorFromAttribute(R.attr.primaryGrayBackground)
+    val textColor = context.colorFromAttribute(R.attr.textColor)
     setPopupBackgroundDrawable(ColorDrawable(surface))
     adapter = object : ArrayAdapter<String>(context, android.R.layout.simple_spinner_dropdown_item, labels) {
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
@@ -99,6 +98,7 @@ internal fun Spinner.useElevateSettingsDropdown(
                 (it as? TextView)?.apply {
                     applyElevateNativeFont()
                     setBackgroundColor(surface)
+                    setTextColor(textColor)
                     initialLabel?.invoke()?.let { text = it }
                 }
             }
@@ -108,6 +108,7 @@ internal fun Spinner.useElevateSettingsDropdown(
                 (it as? TextView)?.apply {
                     applyElevateNativeFont()
                     setBackgroundColor(surface)
+                    setTextColor(textColor)
                 }
             }
     }
