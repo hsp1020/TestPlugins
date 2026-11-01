@@ -45,6 +45,7 @@ import com.lagradost.cloudstream3.utils.SubtitleHelper.fromTagToLanguageName
 import com.lagradost.cloudstream3.utils.SubtitleHelper.fromCodeToLangTagIETF
 import com.lagradost.cloudstream3.utils.SubtitleHelper.fromLanguageToTagIETF
 import com.lagradost.cloudstream3.utils.AppContextUtils.html
+import com.lagradost.cloudstream3.ui.player.CSPlayerEvent
 import com.lagradost.cloudstream3.ui.player.FullScreenPlayer
 import com.lagradost.cloudstream3.ui.player.GeneratorPlayer
 import com.lagradost.cloudstream3.ui.player.CustomDecoder.Companion.updateForcedEncoding
@@ -285,10 +286,10 @@ internal class ElevatePlayerPanel(
         ctx, R.layout.sort_bottom_single_choice, ArrayList()
     ) {
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-            val playing = fragment.player.getCurrentPreferredSubtitle()
-            val checked = if (position == 0) playing == null
+            val selectedUrl = visibleSubtitleUrl()
+            val checked = if (position == 0) selectedUrl == null
                 else subtitleGroups.getOrNull(position - 1)?.second?.any {
-                    it.url == playing?.url && it.origin == playing?.origin
+                    it.url == selectedUrl
                 } == true
             return bindRow(convertView, parent, position, getItem(position) ?: "",
                 checked, compact = true, highlighted = position == selectedGroup)
@@ -318,11 +319,13 @@ internal class ElevatePlayerPanel(
     // Imported tracks and import actions are full-width; original language/option lists stay split.
     private val importedUrls = HashSet<String>()
     private var beforeImport: Set<String>? = null
+    private var resumeAfterFileImport = false
     private var importInstance = -1
     private fun syncImportInstance() {
         if (importInstance == vm.state.instance) return
         importInstance = vm.state.instance
         beforeImport = null
+        resumeAfterFileImport = false
         importedUrls.clear()
     }
     private val importedSubtitles = ArrayList<SubtitleData>()
@@ -331,9 +334,8 @@ internal class ElevatePlayerPanel(
     ) {
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
             val sub = getItem(position) ?: return View(ctx)
-            val selected = fragment.player.getCurrentPreferredSubtitle()
             return bindRow(convertView, parent, position, sub.originalName,
-                sub.url == selected?.url && sub.origin == selected?.origin, compact = false)
+                sub.url == visibleSubtitleUrl(), compact = false)
         }
     }
     private val importedList = ListView(ctx).apply {
@@ -367,10 +369,14 @@ internal class ElevatePlayerPanel(
         }
     }
     private val fileImport = importAction(R.string.player_load_subtitles) {
+        resumeAfterFileImport = fragment.player.getIsPlaying()
         runCatching {
             GeneratorPlayer::class.java.getDeclaredMethod("openSubPicker")
                 .apply { isAccessible = true }.invoke(fragment)
-        }.onFailure { android.util.Log.w("ElevatePanel", "Subtitle file picker failed", it) }
+        }.onFailure {
+            resumeAfterFileImport = false
+            android.util.Log.w("ElevatePanel", "Subtitle file picker failed", it)
+        }
     }
     private val onlineImport = importAction(R.string.player_load_subtitles_online) {
         fragment.openOnlineSubPicker(ctx, vm.state.generatorState?.response) {}
@@ -705,6 +711,19 @@ internal class ElevatePlayerPanel(
                 onManualSubtitle(added.first())
                 importedUrls.addAll(added.map { it.url })
                 beforeImport = null
+                val resume = resumeAfterFileImport &&
+                    added.first().origin == SubtitleOrigin.DOWNLOADED_FILE
+                resumeAfterFileImport = false
+                if (resume) {
+                    val instance = vm.state.instance
+                    // Runs after native addAndSelectSubtitles() has reloaded and selected the file.
+                    root.post {
+                        if (fragment.isResumed && fragment.view === root &&
+                            vm.state.instance == instance && !fragment.player.getIsPlaying()) {
+                            fragment.player.handleEvent(CSPlayerEvent.Play, PlayerEventSource.UI)
+                        }
+                    }
+                }
             }
         }
         val actual = fragment.player.getCurrentPreferredSubtitle()
@@ -838,6 +857,7 @@ internal class ElevatePlayerPanel(
         beforeImport = null
         importedUrls.clear()
         importedSubtitles.clear()
+        resumeAfterFileImport = false
         importInstance = -1
         ElevateSubtitleRefreshHook.active()?.setPanelListener(null)
         observeCuePlayer(false)
@@ -1158,6 +1178,8 @@ internal class ElevatePlayerPanel(
 
     private fun setSubtitle(sub: SubtitleData?) {
         browsingSubtitleGroup = false
+        beforeImport = null
+        resumeAfterFileImport = false
         onManualSubtitle(sub)
         pendingSubtitleUrl = sub?.url
         pendingSubtitleInstance = vm.state.instance
@@ -1176,7 +1198,12 @@ internal class ElevatePlayerPanel(
             pendingSubtitleUrl = null
             android.util.Log.w("ElevatePanelSelect", "Subtitle selection failed", it)
         }
+        if (tab == Tab.SUBTITLES && !inSync) renderSubtitles()
     }
+
+    private fun visibleSubtitleUrl(): String? =
+        pendingSubtitleUrl?.takeIf { pendingSubtitleInstance == vm.state.instance }
+            ?: fragment.player.getCurrentPreferredSubtitle()?.url
 
     private fun orderedOptions(group: List<SubtitleData>): List<SubtitleData> =
         group.sortedBy { it.nameSuffix.toIntOrNull() ?: 0 }
@@ -1260,9 +1287,10 @@ internal class ElevatePlayerPanel(
         }
         if (pendingSubtitleInstance != vm.state.instance ||
             pendingSubtitleUrl == current?.url) pendingSubtitleUrl = null
-        if (!browsingSubtitleGroup && pendingSubtitleUrl == null) {
+        if (!browsingSubtitleGroup) {
+            val chosen = visibleSubtitleUrl()
             selectedGroup = subtitleGroups.indexOfFirst { (_, subtitles) ->
-                subtitles.any { it.url == current?.url && it.origin == current?.origin }
+                subtitles.any { it.url == chosen }
             }.let { if (it < 0) 0 else it + 1 }
         }
         languageAdapter.clear()
@@ -1273,7 +1301,8 @@ internal class ElevatePlayerPanel(
     }
 
     private fun renderSubtitleOptions() {
-        val current = fragment.player.getCurrentPreferredSubtitle()?.url
+        val current = visibleSubtitleUrl()
+        val active = fragment.player.getCurrentPreferredSubtitle()?.url
         val selected = subtitleGroups.getOrNull(selectedGroup - 1)
         val group = selected?.second.orEmpty()
         val detailCache = SubtitleLanguageNormalizer.stremioDetailCache()
@@ -1298,7 +1327,8 @@ internal class ElevatePlayerPanel(
             val selected = sub.url == current
             val refreshHook = ElevateSubtitleRefreshHook.active()
             val entry = if (selected) ElevateSubtitleRefreshRegistry.entryFor(sub) else null
-            val refreshable = selected && refreshHook != null && entry != null
+            val refreshable = selected && sub.url == active &&
+                refreshHook != null && entry != null
             Row(label, { setSubtitle(sub) },
                 if (refreshable) ({ button: ImageButton ->
                     val accepted = ElevateSubtitleRefreshHook.active()?.refreshSelected(false, button, sub.url)
