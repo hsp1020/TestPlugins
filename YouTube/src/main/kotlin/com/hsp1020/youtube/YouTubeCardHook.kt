@@ -76,6 +76,8 @@ import com.lagradost.cloudstream3.ui.BaseAdapter
 import com.lagradost.cloudstream3.ui.ViewHolderState
 import com.lagradost.cloudstream3.ui.home.HomeChildItemAdapter
 import com.lagradost.cloudstream3.ui.search.SearchAdapter
+import com.lagradost.cloudstream3.ui.search.SearchClickCallback
+import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
 import com.lagradost.cloudstream3.ui.settings.Globals
 import com.lagradost.cloudstream3.utils.UIHelper.navigate
 import com.lagradost.cloudstream3.APIHolder
@@ -105,11 +107,28 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         val startingSeason: Int?,
         val episodes: CopyOnWriteArrayList<ResultEpisode>,
         var prefetchStarted: Boolean = false,
-        val returnToDetail: Boolean = false,
     )
     private var lastPlayed: PlayedEpisode? = null
     private var directPlayback: DirectPlayback? = null
     private var directLoading = false
+
+    // Intercept native Home adapter callbacks instead of card View listeners:
+    // native/Elevate rebinds are free to replace the View's click listener.
+    private inner class HomeDirectClick(val original: (SearchClickCallback) -> Unit) :
+        (SearchClickCallback) -> Unit {
+        override fun invoke(event: SearchClickCallback) {
+            val card = event.card
+            if (host != null && event.action == SEARCH_ACTION_LOAD &&
+                card.apiName == "YouTube" &&
+                (card.url.contains("/watch?v=") || card.url.contains("/shorts/")) &&
+                !card.url.contains("list=") &&
+                card !is DataStoreHelper.ResumeWatchingResult) {
+                playHomeVideo(card)
+            } else {
+                original(event)
+            }
+        }
+    }
     private var directGeneration = 0
     private data class PendingTimeSeek(val videoId: String, val positionMs: Long)
     private var pendingTimeSeek: PendingTimeSeek? = null
@@ -352,7 +371,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     ) {
         clearPlaybackReturnListener()
         val origin = controller.currentDestination?.id ?: return
-        val originEntry = controller.currentBackStackEntry?.id
         var enteredPlayer = false
         val listener = NavController.OnDestinationChangedListener { nav, destination, _ ->
             if (destination.id == R.id.navigation_player) {
@@ -371,35 +389,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     lastPlayed = null
                     appliedRange = null
                     playerFragment = null
-                    if (destination.id == origin && !session.returnToDetail) {
-                        val target = if (Globals.isLayout(Globals.TV or Globals.EMULATOR)) {
-                            R.id.global_to_navigation_results_tv
-                        } else R.id.global_to_navigation_results_phone
-                        val noTransition = NavOptions.Builder()
-                            .setEnterAnim(0).setExitAnim(0)
-                            .setPopEnterAnim(0).setPopExitAnim(0).build()
-                        val popup = expandedReturnDialog
-                        fun openDetail(): Boolean = try {
-                            nav.navigate(target, ResultFragment.newInstance(session.card), noTransition)
-                            if (popup != null && originEntry != null)
-                                registerPopupReturn(nav, originEntry, popup)
-                            true
-                        } catch (_: IllegalStateException) {
-                            false
-                        }
-                        // Retry once if the player pop is still being dispatched.
-                        if (!openDetail()) main.post {
-                            if (playbackNav == null && host != null &&
-                                nav.currentBackStackEntry?.id == originEntry && !openDetail()) {
-                                if (expandedReturnDialog === popup) {
-                                    expandedReturnDialog = null
-                                    popup?.show()
-                                }
-                            }
-                        }
-                    } else if (destination.id != origin) {
-                        expandedReturnDialog = null
-                    }
+                    // Native back already reveals the original Home/Search destination.
+                    // Never push a details page after a direct-play exit.
+                    expandedReturnDialog = null
                 }
             }
         }
@@ -525,7 +517,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         card: SearchResponse,
         popupRoot: View? = null,
         startAtMs: Long? = null,
-        returnToDetail: Boolean = false,
     ) {
         if (directLoading) return
         val generation = ++directGeneration
@@ -594,7 +585,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             val session = DirectPlayback(
                 card, parentId, initial[selectedIndex].episode,
                 initial[selectedIndex].season, episodes,
-                returnToDetail = returnToDetail,
             )
             lastPlayed = null
             pendingRange = null
@@ -619,8 +609,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 as? ((Bundle) -> Boolean)
             if (switchPip?.invoke(playerArgs) != true) {
                 registerReturn(navHost.navController, session)
+                // Avoid a native pop animation flashing between playback and Home/Search.
+                val noTransition = NavOptions.Builder()
+                    .setEnterAnim(0).setExitAnim(0)
+                    .setPopEnterAnim(0).setPopExitAnim(0).build()
                 navHost.navController.navigate(
-                    R.id.global_to_navigation_player, playerArgs
+                    R.id.global_to_navigation_player, playerArgs, noTransition
                 )
             }
             prefetchDirectEpisodes(session, api, generation)
@@ -911,7 +905,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             val card = api.newMovieSearchResponse(title, pageUrl, TvType.Movie) {
                 posterUrl = YoutubeUtils.buildThumbnailFromId(videoId)
             }
-            playHomeVideo(card, startAtMs = seconds * 1000L, returnToDetail = true)
+            playHomeVideo(card, startAtMs = seconds * 1000L)
         }
 
         private fun openTagSearch(query: String) {
@@ -1161,6 +1155,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             private val modified = IdentityHashMap<View, CardState>()
             private val episodeSizes = IdentityHashMap<View, Pair<View, Pair<Int, Int>>>()
             private val directClicks = IdentityHashMap<View, View.OnClickListener>()
+            private var homeAdapter: HomeChildItemAdapter? = null
+            private var homeOriginalClick: ((SearchClickCallback) -> Unit)? = null
+            private var homeWrappedClick: HomeDirectClick? = null
             private val castViews = IdentityHashMap<View, Boolean>()
             private val channelPressInterpolator = android.view.animation.DecelerateInterpolator()
             private var channelLongPressHandled = false
@@ -1290,6 +1287,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 list.removeOnChildAttachStateChangeListener(children)
                 list.removeOnLayoutChangeListener(resized)
                 observed?.unregisterAdapterDataObserver(changes)
+                unbindHomeClick()
                 observed = null
                 modified.keys.toList().forEach(::restore)
                 modified.clear()
@@ -1301,12 +1299,38 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 posted = false
             }
 
+            private fun unbindHomeClick() {
+                val adapter = homeAdapter
+                val wrapped = homeWrappedClick
+                if (adapter != null && wrapped != null && adapter.clickCallback === wrapped) {
+                    adapter.clickCallback = wrapped.original
+                }
+                homeAdapter = null
+                homeOriginalClick = null
+                homeWrappedClick = null
+            }
+
             private fun syncAdapter() {
                 val current = list.adapter
-                if (observed === current) return
-                observed?.unregisterAdapterDataObserver(changes)
-                observed = current
-                current?.registerAdapterDataObserver(changes)
+                if (observed !== current) {
+                    observed?.unregisterAdapterDataObserver(changes)
+                    unbindHomeClick()
+                    observed = current
+                    current?.registerAdapterDataObserver(changes)
+                }
+                if (role == Role.HOME_CARD && current is HomeChildItemAdapter) {
+                    if (homeAdapter !== current) {
+                        homeAdapter = current
+                        homeOriginalClick = current.clickCallback
+                        val wrapper = HomeDirectClick(current.clickCallback)
+                        homeWrappedClick = wrapper
+                        current.clickCallback = wrapper
+                    } else if (current.clickCallback === homeOriginalClick) {
+                        // ParentItemAdapter restores its native callback on rebind.
+                        // Reapply only after that reset, not over other wrappers.
+                        homeWrappedClick?.let { current.clickCallback = it }
+                    }
+                }
             }
 
             private fun schedule() {
@@ -1375,7 +1399,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 val video = item.url.contains("/watch?v=")
                 val shorts = item.url.contains("/shorts/")
                 // Direct play only for Home/Search cards and their catalog dialogs.
-                if ((role == Role.HOME_CARD || role == Role.SEARCH_CARD ||
+                if ((role == Role.SEARCH_CARD ||
                     role == Role.SEARCH_GRID || role == Role.DIALOG_GRID) &&
                     (video || shorts) && !item.url.contains("list=") &&
                     item !is DataStoreHelper.ResumeWatchingResult) {
