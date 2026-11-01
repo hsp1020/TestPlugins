@@ -30,6 +30,7 @@ import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showDialog
+import com.lagradost.cloudstream3.utils.SubtitleHelper
 import com.lagradost.cloudstream3.utils.SubtitleHelper.fromTagToLanguageName
 import com.lagradost.cloudstream3.utils.SubtitleHelper.fromCodeToLangTagIETF
 import com.lagradost.cloudstream3.utils.SubtitleHelper.fromLanguageToTagIETF
@@ -1053,6 +1054,28 @@ internal class ElevatePlayerPanel(
                 }.thenBy { it.index }
             ).map { it.value }
 
+    private val trackLanguageWord = Regex("""[\p{L}\p{M}]+""")
+    private val languageAliases by lazy(LazyThreadSafetyMode.NONE) {
+        SubtitleHelper.languages.flatMap { language ->
+            (listOf(language.languageName) + language.nativeName.split(',')).map {
+                it.trim().lowercase() to language.IETF_tag
+            }
+        }
+    }
+
+    private fun trackLanguageTag(title: String): String? {
+        fromCodeToLangTagIETF(title)?.let { return it }
+        fromLanguageToTagIETF(title)?.let { return it }
+        val word = trackLanguageWord.find(title)?.value?.lowercase() ?: return null
+        fromCodeToLangTagIETF(word)?.let { return it }
+        fromLanguageToTagIETF(word)?.let { return it }
+        fun uniqueMatch(exact: Boolean): String? = languageAliases.asSequence()
+            .filter { (alias, _) -> if (exact) alias == word else alias.startsWith(word) }
+            .map { it.second }.distinct().take(2).toList().singleOrNull()
+        val exact = languageAliases.any { it.first == word }
+        return if (exact) uniqueMatch(true) else if (word.length >= 3) uniqueMatch(false) else null
+    }
+
     private fun renderSubtitles() {
         val current = fragment.player.getCurrentPreferredSubtitle()
         val localize = ElevateFeaturePrefs.enabled(ctx, ElevateFeature.SUBTITLE_LANGUAGE_NAMES)
@@ -1061,17 +1084,7 @@ internal class ElevatePlayerPanel(
                 sub.originalName.startsWith("Translate ", true)) return sub.originalName
             val code = if (sub.languageCode.equals("ms-ind", true)) "id" else sub.languageCode
             fromTagToLanguageName(code)?.let { return it }
-            val name = sub.originalName.substringBefore(" · ").substringBefore(" — ")
-                .substringBefore(" (").trim()
-            val tag = fromCodeToLangTagIETF(name) ?: fromLanguageToTagIETF(name)
-                ?: when {
-                    name.startsWith("Рус.", true) -> "ru"
-                    name.startsWith("Укр.", true) -> "uk"
-                    name == "ਪੰਜਾਬੀ" -> "pa"
-                    name == "中文" -> "zh"
-                    else -> null
-                }
-            return fromTagToLanguageName(tag) ?: sub.originalName
+            return fromTagToLanguageName(trackLanguageTag(sub.originalName)) ?: sub.originalName
         }
         subtitleGroups = sortSubs(vm.state.subtitles)
             .groupBy(::displayName)
