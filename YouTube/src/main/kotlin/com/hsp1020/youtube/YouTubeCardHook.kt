@@ -95,7 +95,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private val main = Handler(Looper.getMainLooper())
     private var host: FragmentActivity? = null
     private var focusTree: ViewTreeObserver? = null
-    private val focusListener = ViewTreeObserver.OnWindowFocusChangeListener {
+    private val focusListener = ViewTreeObserver.OnWindowFocusChangeListener { focused ->
+        tracePopup("WINDOW_FOCUS focused=$focused")
         main.post { discoverDialogs() }
     }
     private val screens = mutableMapOf<Fragment, Screen>()
@@ -227,11 +228,64 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private var externalDirectPlaybackHost: FragmentActivity? = null
     private var externalDirectPlaybackRestoring = false
 
+    // Temporary event-only diagnostics. One tag and monotonic clock for both plugins.
+    private fun tracePopup(event: String, activity: Activity? = host) {
+        val navId = runCatching {
+            ((host?.supportFragmentManager?.findFragmentById(R.id.nav_host_fragment))
+                as? NavHostFragment)?.navController?.currentDestination?.id
+        }.getOrNull()
+        val popup = expandedReturnDialog
+        val decor = popup?.window?.decorView
+        val origins = screens.keys.filter { it.javaClass.name in EXPANDED_ORIGINS }
+            .joinToString(",") { fragment ->
+                val native = runCatching {
+                    fragment.javaClass.getDeclaredField("bottomSheetDialog").apply {
+                        isAccessible = true
+                    }.get(fragment) as? Dialog
+                }.getOrNull()
+                "${fragment.javaClass.simpleName}#${System.identityHashCode(fragment)}:" +
+                    "${System.identityHashCode(native)}:${native?.isShowing}:" +
+                    "${native?.window?.decorView?.isAttachedToWindow}"
+            }
+        Log.i("PopupTrace", "YT ms=${android.os.SystemClock.uptimeMillis()} $event" +
+            " act=${activity?.javaClass?.simpleName}#${System.identityHashCode(activity)}" +
+            " host#${System.identityHashCode(host)} nav=$navId" +
+            " ending=${activity?.isFinishing} config=${activity?.isChangingConfigurations}" +
+            " destroyed=${activity?.isDestroyed} orientation=${activity?.resources?.configuration?.orientation}" +
+            " session=${directPlayback != null} loading=$directLoading" +
+            " navListener=${playbackReturnListener != null} awaiting=$popupAwaitingPlayer" +
+            " returning=$popupReturning external#${System.identityHashCode(externalDirectPlaybackHost)}" +
+            " popup#${System.identityHashCode(popup)} showing=${popup?.isShowing}" +
+            " attached=${decor?.isAttachedToWindow} decorVisibility=${decor?.visibility}" +
+            " native=[$origins]")
+    }
+
+    private fun traceFragment(event: String, fragment: Fragment) {
+        if (fragment.javaClass.name !in EXPANDED_ORIGINS &&
+            fragment.javaClass.name != PLAYER_SCREEN &&
+            fragment.javaClass.name !in DETAIL_SCREENS) return
+        tracePopup("$event fragment=${fragment.javaClass.simpleName}#" +
+            "${System.identityHashCode(fragment)} added=${fragment.isAdded}" +
+            " resumed=${fragment.isResumed} view#${System.identityHashCode(fragment.view)}" +
+            " viewAttached=${fragment.view?.isAttachedToWindow}")
+    }
+
+    private fun traceFirstDraw(view: View?, source: String) {
+        view?.doOnPreDraw {
+            tracePopup("FIRST_PRE_DRAW $source view#${System.identityHashCode(view)}" +
+                " attached=${view.isAttachedToWindow} visibility=${view.visibility}")
+        }
+    }
+
     /** Find the native Home, Search, or Quick Search expanded catalog dialog. */
     private fun findExpandedDialog(windowRoot: View): Dialog? {
+        tracePopup("FIND_DIALOG root#${System.identityHashCode(windowRoot)}")
         val recycler = windowRoot.findViewById<RecyclerView>(R.id.home_expanded_recycler)
-            ?: return null
-        return screens.keys.asSequence().mapNotNull { fragment ->
+            ?: run {
+                tracePopup("FIND_DIALOG_NO_RECYCLER")
+                return null
+            }
+        val match = screens.keys.asSequence().mapNotNull { fragment ->
             runCatching {
                 fragment.javaClass.getDeclaredField("bottomSheetDialog").apply {
                     isAccessible = true
@@ -240,16 +294,24 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }.firstOrNull { dialog ->
             dialog.window?.decorView?.findViewById<View>(R.id.home_expanded_recycler) === recycler
         }
+        tracePopup("FIND_DIALOG_RESULT found=${match != null} match#${System.identityHashCode(match)}")
+        return match
     }
 
     private fun showReturnedPopup() {
-        val popup = expandedReturnDialog ?: return
+        tracePopup("SHOW_RETURN_BEGIN")
+        val popup = expandedReturnDialog ?: run {
+            tracePopup("SHOW_RETURN_NO_DIALOG")
+            return
+        }
         expandedReturnDialog = null
         popupAwaitingPlayer = false
         if (popup.window?.decorView?.isAttachedToWindow == true) {
             popup.window?.setWindowAnimations(0)
             popup.show()
+            traceFirstDraw(popup.window?.decorView, "returned-dialog")
         }
+        tracePopup("SHOW_RETURN_END")
     }
 
     private fun clearPlaybackReturnListener() {
@@ -385,14 +447,17 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     ) {
         clearPlaybackReturnListener()
         val origin = controller.currentDestination?.id ?: return
+        tracePopup("REGISTER_RETURN origin=$origin")
         var enteredPlayer = false
         val listener = NavController.OnDestinationChangedListener { nav, destination, _ ->
+            tracePopup("NAV_DEST id=${destination.id} origin=$origin entered=$enteredPlayer")
             if (destination.id == R.id.navigation_player) {
                 enteredPlayer = true
             } else if (enteredPlayer) {
                 popupAwaitingPlayer = false
                 clearPendingTimeSeek()
                 if (destination.id == origin) popupReturning = expandedReturnDialog != null
+                tracePopup("NAV_RETURN_DECISION sameOrigin=${destination.id == origin}")
                 clearPlaybackReturnListener()
                 if (directPlayback === session) {
                     playerFragment?.let(::recordPlayerEpisode)
@@ -407,6 +472,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     // Never push a details page after a direct-play exit.
                     if (!popupReturning) expandedReturnDialog = null
                 }
+                tracePopup("NAV_RETURN_DONE")
             }
         }
         playbackNav = controller
@@ -532,7 +598,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         popupRoot: View? = null,
         startAtMs: Long? = null,
     ) {
-        if (directLoading) return
+        tracePopup("DIRECT_CLICK root#${System.identityHashCode(popupRoot)}")
+        if (directLoading) {
+            tracePopup("DIRECT_CLICK_SKIP loading")
+            return
+        }
         val generation = ++directGeneration
         if (directPlayback != null) {
             // Elevate redirects the native player destination to its own Activity.
@@ -559,6 +629,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment ?: return
         val videoId = YoutubeUtils.extractYoutubeId(card.url) ?: return
         val popupDialog = popupRoot?.let(::findExpandedDialog)
+        tracePopup("DIRECT_DIALOG_FOUND popup#${System.identityHashCode(popupDialog)}")
         directLoading = true
         activity.lifecycleScope.launch {
         try {
@@ -611,6 +682,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
             expandedReturnDialog = popupDialog
             popupAwaitingPlayer = popupDialog != null
+            tracePopup("DIRECT_SESSION_READY")
             val playerArgs = GeneratorPlayer.newInstance(
                 RepoLinkGenerator(episodes, page = page),
                 selectedIndex,
@@ -622,9 +694,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             val switchPip = activity.window.decorView.getTag(R.id.global_to_navigation_player)
                 as? ((Bundle) -> Boolean)
             if (switchPip?.invoke(playerArgs) == true) {
+                tracePopup("PIP_BRIDGE_SWITCH_SUCCESS")
                 // A new YouTube video can replace the existing PiP player.
                 externalDirectPlaybackHost = externalPlayerHost
             } else {
+                tracePopup("NATIVE_NAVIGATE_BEGIN")
                 registerReturn(navHost.navController, session)
                 // Avoid a native pop animation flashing between playback and Home/Search.
                 val noTransition = NavOptions.Builder()
@@ -633,9 +707,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 navHost.navController.navigate(
                     R.id.global_to_navigation_player, playerArgs, noTransition
                 )
+                tracePopup("NATIVE_NAVIGATE_END")
             }
             prefetchDirectEpisodes(session, api, generation)
         } catch (e: Exception) {
+            tracePopup("DIRECT_PLAY_ERROR type=${e.javaClass.simpleName}")
             popupAwaitingPlayer = false
             clearPendingTimeSeek()
             clearPlaybackReturnListener()
@@ -681,12 +757,27 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     }
 
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
+        override fun onFragmentCreated(fm: FragmentManager, f: Fragment, savedInstanceState: Bundle?) {
+            traceFragment("FRAGMENT_CREATED saved=${savedInstanceState != null}", f)
+        }
+
+        override fun onFragmentStarted(fm: FragmentManager, f: Fragment) {
+            traceFragment("FRAGMENT_STARTED", f)
+        }
+
+        override fun onFragmentStopped(fm: FragmentManager, f: Fragment) {
+            traceFragment("FRAGMENT_STOPPED", f)
+        }
+
         override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
+            traceFragment("FRAGMENT_PAUSED_BEFORE", f)
             recordPlayerEpisode(f)
             if (f.javaClass.name == PLAYER_SCREEN && popupReturning) showReturnedPopup()
+            traceFragment("FRAGMENT_PAUSED_AFTER", f)
         }
 
         override fun onFragmentDestroyed(fm: FragmentManager, f: Fragment) {
+            traceFragment("FRAGMENT_DESTROYED_BEGIN", f)
             if (f.javaClass.name != PLAYER_SCREEN) return
             recordPlayerEpisode(f)
             if (playerFragment === f) {
@@ -701,9 +792,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 lastPlayed = null
                 expandedReturnDialog = null
             }
+            traceFragment("FRAGMENT_DESTROYED_END", f)
         }
 
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
+            traceFragment("FRAGMENT_RESUMED_BEGIN", f)
             when (f.javaClass.name) {
                 in EXPANDED_ORIGINS -> {
                     if (popupReturning) {
@@ -717,9 +810,13 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 }
             }
             screens[f]?.applyNativeRangeIfPending()
+            traceFragment("FRAGMENT_RESUMED_END", f)
         }
 
         override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, view: View, state: Bundle?) {
+            traceFragment("FRAGMENT_VIEW_CREATED", f)
+            if (f.javaClass.name in EXPANDED_ORIGINS || f.javaClass.name == PLAYER_SCREEN)
+                traceFirstDraw(view, "fragment-${f.javaClass.simpleName}")
             if (popupReturning && f.javaClass.name in SEARCH_ORIGINS) {
                 suppressReturnedSearchIme(f)
             }
@@ -735,9 +832,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 watchPendingTimeSeek(f)
             }
             attach(f, view)
+            traceFragment("FRAGMENT_VIEW_CREATED_END", f)
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
+            traceFragment("FRAGMENT_VIEW_DESTROYED_BEGIN", f)
             if (popupBackFragment === f) clearPopupBackHandler()
             if (popupAwaitingPlayer && f.javaClass.name in EXPANDED_ORIGINS) {
                 expandedReturnDialog?.let { popup ->
@@ -749,14 +848,17 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 }
             }
             screens.remove(f)?.close()
+            traceFragment("FRAGMENT_VIEW_DESTROYED_END", f)
         }
     }
 
     private fun restoreExternalPopup() {
+        tracePopup("EXTERNAL_RESTORE_CHECK")
         val player = externalDirectPlaybackHost ?: return
         if (!player.isFinishing && !player.isDestroyed &&
             !(Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
                 player.isInPictureInPictureMode)) return
+        tracePopup("EXTERNAL_RESTORE_ACTION")
         showReturnedPopup()
     }
 
@@ -764,6 +866,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         if (activity.javaClass.name !=
             "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity" ||
             activity !is FragmentActivity || externalPlayerHost === activity) return
+        tracePopup("EXTERNAL_PLAYER_OBSERVE", activity)
         externalPlayerHost?.supportFragmentManager
             ?.unregisterFragmentLifecycleCallbacks(fragments)
         externalPlayerHost = activity
@@ -784,6 +887,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
         }
         scan(activity.supportFragmentManager)
+        tracePopup("EXTERNAL_PLAYER_OBSERVED", activity)
     }
 
     fun start() {
@@ -797,6 +901,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     }
 
     private fun release() {
+        tracePopup("RELEASE_BEGIN")
         clearPendingTimeSeek()
         clearPlaybackReturnListener()
         clearPopupReturnListener()
@@ -821,9 +926,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         appliedRange = null
         directLoading = false
         host = null
+        tracePopup("RELEASE_END")
     }
 
     private fun use(activity: FragmentActivity) {
+        tracePopup("USE_MAIN_BEGIN", activity)
         if (host === activity) return
         release()
         host = activity
@@ -840,6 +947,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
         }
         scan(activity.supportFragmentManager)
+        tracePopup("USE_MAIN_END", activity)
     }
 
     private fun attach(fragment: Fragment, root: View) {
@@ -850,6 +958,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     }
 
     private fun discoverDialogs() {
+        if (expandedReturnDialog != null || directPlayback != null || popupReturning)
+            tracePopup("DISCOVER_DIALOGS_BEGIN")
         val activity = host ?: return
         val windows: List<View> = if (Build.VERSION.SDK_INT >= 29) {
             WindowInspector.getGlobalWindowViews()
@@ -875,6 +985,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         active.forEach { window ->
             if (!dialogs.containsKey(window)) dialogs[window] = Screen(window, true)
         }
+        if (expandedReturnDialog != null || directPlayback != null || popupReturning)
+            tracePopup("DISCOVER_DIALOGS_END active=${active.size} watched=${dialogs.size}")
         // Native expanded descriptions are separate AlertDialog text views.
         windows.forEach { window ->
             if (owner(window.context) === activity) {
@@ -1748,16 +1860,27 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         (value * app.resources.displayMetrics.density + 0.5f).toInt()
 
     override fun onActivityResumed(activity: Activity) {
+        if (activity is MainActivity ||
+            activity.javaClass.name == "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity")
+            tracePopup("ACTIVITY_RESUMED_BEGIN", activity)
         if (activity is MainActivity) {
             if (host === activity) screens.values.forEach { it.restoreChannelPressOnResume() }
             use(activity)
             restoreExternalPopup()
         } else if (activity === externalDirectPlaybackHost) {
+            tracePopup("EXTERNAL_PLAYER_RESUMED_HIDE", activity)
             expandedReturnDialog?.hide()
         }
+        if (activity is MainActivity) traceFirstDraw(activity.window.decorView, "main-activity")
+        if (activity is MainActivity ||
+            activity.javaClass.name == "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity")
+            tracePopup("ACTIVITY_RESUMED_END", activity)
     }
 
     override fun onActivityDestroyed(activity: Activity) {
+        if (activity is MainActivity ||
+            activity.javaClass.name == "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity")
+            tracePopup("ACTIVITY_DESTROYED_BEGIN", activity)
         val refreshHome = externalDirectPlaybackHost === activity &&
             activity.isFinishing && !activity.isChangingConfigurations
         if (externalDirectPlaybackHost === activity) {
@@ -1791,17 +1914,38 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             playerFragment = null
             lastPlayed = null
         }
+        if (activity is MainActivity ||
+            activity.javaClass.name == "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity")
+            tracePopup("ACTIVITY_DESTROYED_END", activity)
     }
 
     override fun onActivityCreated(activity: Activity, state: Bundle?) {
+        if (activity is MainActivity ||
+            activity.javaClass.name == "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity")
+            tracePopup("ACTIVITY_CREATED saved=${state != null}", activity)
         observeExternalPlayer(activity)
     }
     override fun onActivityStarted(activity: Activity) {
+        if (activity is MainActivity ||
+            activity.javaClass.name == "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity")
+            tracePopup("ACTIVITY_STARTED", activity)
         observeExternalPlayer(activity)
     }
-    override fun onActivityPaused(activity: Activity) = Unit
-    override fun onActivityStopped(activity: Activity) = Unit
-    override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
+    override fun onActivityPaused(activity: Activity) {
+        if (activity is MainActivity ||
+            activity.javaClass.name == "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity")
+            tracePopup("ACTIVITY_PAUSED", activity)
+    }
+    override fun onActivityStopped(activity: Activity) {
+        if (activity is MainActivity ||
+            activity.javaClass.name == "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity")
+            tracePopup("ACTIVITY_STOPPED", activity)
+    }
+    override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) {
+        if (activity is MainActivity ||
+            activity.javaClass.name == "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity")
+            tracePopup("ACTIVITY_SAVE_INSTANCE", activity)
+    }
 
     private enum class Role { HOME_PARENT, HOME_CARD, SEARCH_PARENT, SEARCH_CARD, SEARCH_GRID, DIALOG_GRID, DETAIL_RECOMMENDATIONS, DETAIL_EPISODE, DETAIL_CAST }
 

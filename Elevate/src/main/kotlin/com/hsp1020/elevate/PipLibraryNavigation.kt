@@ -83,6 +83,19 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     private var playerNavigation: NavController? = null
     private var exitBackBound = false
 
+    // Temporary diagnostics share the YouTube tag and monotonic clock.
+    private fun trace(event: String, activity: Activity? = playerActivity ?: mainActivity) {
+        Log.i("PopupTrace", "EL ms=${android.os.SystemClock.uptimeMillis()} $event" +
+            " act=${activity?.javaClass?.simpleName}#${System.identityHashCode(activity)}" +
+            " main#${System.identityHashCode(mainActivity)} player#${System.identityHashCode(playerActivity)}" +
+            " mainNav=${controller?.currentDestination?.id} playerNav=${playerNavigation?.currentDestination?.id}" +
+            " enabled=$enabled pending=${pending != null} redirecting=$redirecting restoreNative=$restoreNative" +
+            " closing=$closing exitBound=$exitBackBound wasPlaying=$wasPlaying" +
+            " wasPip=$wasInPip inPip=${(activity?.let { it.inPip() })}" +
+            " finish=${activity?.isFinishing} config=${activity?.isChangingConfigurations}" +
+            " destroyed=${activity?.isDestroyed} orientation=${activity?.resources?.configuration?.orientation}")
+    }
+
     private fun Activity.inPip(): Boolean =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode
 
@@ -108,11 +121,16 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     // Shared through the MainActivity decor tag; YouTube and Elevate have
     // independent plugin class loaders, but both use the native Bundle type.
     private val youtubePipBridge: (Bundle) -> Boolean = { args ->
+        trace("PIP_BRIDGE_ATTEMPT")
         val pip = playerActivity?.takeIf {
             enabled && it.inPip() && !it.isFinishing && !it.isDestroyed
         }
         if (pip == null || args.getString("uuid").isNullOrBlank() ||
-            !args.containsKey("index")) false else {
+            !args.containsKey("index")) {
+            trace("PIP_BRIDGE_REJECT")
+            false
+        } else {
+            trace("PIP_BRIDGE_ACCEPT")
             nextPipVideo?.getString("uuid")?.let(::forgetPlaceholder)
             nextPipVideo = Bundle(args)
             schedulePipSwitch(pip)
@@ -129,6 +147,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
 
     private val destinations = NavController.OnDestinationChangedListener {
             nav: NavController, destination: NavDestination, args: Bundle? ->
+        trace("MAIN_NAV destination=${destination.id}")
         if (destination.id != R.id.navigation_player) restoreLandscapeNavigation()
         if (restoreNative) {
             restoreNative = false
@@ -141,11 +160,14 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             !it.getString("uuid").isNullOrEmpty() && it.containsKey("index")
         } ?: return@OnDestinationChangedListener
         redirecting = true
+        trace("REDIRECT_BEGIN")
         try {
             val pip = playerActivity?.takeIf {
                 it.inPip() && !it.isFinishing && !it.isDestroyed
             }
-            if (!nav.popBackStack()) return@OnDestinationChangedListener
+            val popped = nav.popBackStack()
+            trace("REDIRECT_POP success=$popped destination=${nav.currentDestination?.id}")
+            if (!popped) return@OnDestinationChangedListener
             if (pip != null) {
                 // Do not bring the PiP activity to the foreground.
                 nextPipVideo?.getString("uuid")?.let(::forgetPlaceholder)
@@ -154,14 +176,17 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             } else {
                 pending = Bundle(bundle)
                 val uuid = bundle.getString("uuid")
+                trace("EXTERNAL_LAUNCH_BEGIN", origin)
                 // A non-network stub creates the native player destination.
                 origin.startActivity(Intent(origin, DownloadedPlayerActivity::class.java).apply {
                     action = Intent.ACTION_SEND
                     putExtra(Intent.EXTRA_TEXT, "https://127.0.0.1/__elevate_pip/$uuid")
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 })
+                trace("EXTERNAL_LAUNCH_DISPATCHED", origin)
             }
         } catch (error: Exception) {
+            trace("REDIRECT_ERROR type=${error.javaClass.simpleName}")
             pending = null
             Log.e("ElevatePiP", "Player routing failed", error)
             if (playerActivity?.inPip() != true) {
@@ -174,6 +199,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             }
         } finally {
             redirecting = false
+            trace("REDIRECT_END")
         }
     }
 
@@ -315,11 +341,18 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
 
     private val exitBack = object : OnBackPressedCallback(true) {
-        override fun handleOnBackPressed() { playerActivity?.let(::closePlayer) }
+        override fun handleOnBackPressed() {
+            trace("PLAYER_BACK_CALLBACK")
+            playerActivity?.let(::closePlayer)
+        }
     }
 
     private fun closePlayer(activity: DownloadedPlayerActivity) {
-        if (closing || playerActivity !== activity) return
+        trace("CLOSE_PLAYER_BEGIN", activity)
+        if (closing || playerActivity !== activity) {
+            trace("CLOSE_PLAYER_SKIPPED", activity)
+            return
+        }
         closing = true
         nextPipVideo?.getString("uuid")?.let(::forgetPlaceholder)
         nextPipVideo = null
@@ -329,11 +362,14 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         }
         forgetPlaceholder(activeUuid)
         activeUuid = null
+        trace("FINISH_AND_REMOVE_TASK_BEGIN", activity)
         activity.finishAndRemoveTask()
+        trace("FINISH_AND_REMOVE_TASK_DISPATCHED", activity)
     }
 
     private val playerDestination = NavController.OnDestinationChangedListener {
             _: NavController, destination: NavDestination, _: Bundle? ->
+        trace("EXTERNAL_NAV destination=${destination.id}")
         if (switching) return@OnDestinationChangedListener
         if (destination.id == R.id.navigation_player) wasPlaying = true
         else if (wasPlaying) playerActivity?.let(::closePlayer)
@@ -342,6 +378,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     private val playerFragments = object : FragmentManager.FragmentLifecycleCallbacks() {
         override fun onFragmentPreAttached(fm: FragmentManager, f: Fragment, context: Context) {
             if (f !is GeneratorPlayer) return
+            trace("PLAYER_FRAGMENT_PRE_ATTACH fragment#${System.identityHashCode(f)}")
             val activity = playerActivity ?: return
             val latest = pending ?: if (switching) nextPipVideo else null
             val oldUuid = f.arguments?.getString("uuid")
@@ -361,9 +398,30 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
                 activity.finish()
             }
         }
+
+        override fun onFragmentViewCreated(fm: FragmentManager, f: Fragment, view: View, savedInstanceState: Bundle?) {
+            if (f is GeneratorPlayer) trace("PLAYER_FRAGMENT_VIEW_CREATED fragment#${System.identityHashCode(f)}")
+        }
+
+        override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
+            if (f is GeneratorPlayer) trace("PLAYER_FRAGMENT_RESUMED fragment#${System.identityHashCode(f)}")
+        }
+
+        override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
+            if (f is GeneratorPlayer) trace("PLAYER_FRAGMENT_PAUSED fragment#${System.identityHashCode(f)}")
+        }
+
+        override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
+            if (f is GeneratorPlayer) trace("PLAYER_FRAGMENT_VIEW_DESTROYED fragment#${System.identityHashCode(f)}")
+        }
+
+        override fun onFragmentDestroyed(fm: FragmentManager, f: Fragment) {
+            if (f is GeneratorPlayer) trace("PLAYER_FRAGMENT_DESTROYED fragment#${System.identityHashCode(f)}")
+        }
     }
 
     private val pipChanged = Consumer<PictureInPictureModeChangedInfo> { change ->
+        trace("PIP_CHANGED inPip=${change.isInPictureInPictureMode}")
         val activity = playerActivity ?: return@Consumer
         if (!change.isInPictureInPictureMode) return@Consumer
         wasInPip = true
@@ -388,6 +446,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
 
     fun start() {
+        trace("START")
         if (enabled) return
         enabled = true
         current = this
@@ -399,6 +458,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
 
     fun stop() {
+        trace("STOP")
         detachYoutubeBridge(mainActivity)
         enabled = false
         liveSwitchSequence++
@@ -417,6 +477,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
 
     private fun watchMain(activity: FragmentActivity) {
+        trace("WATCH_MAIN_BEGIN", activity)
         if (!enabled) return
         if (mainActivity === activity) {
             activity.window.decorView.setTag(R.id.global_to_navigation_player, youtubePipBridge)
@@ -433,9 +494,12 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             try { it.addOnDestinationChangedListener(destinations) }
             finally { redirecting = false }
         }
+        trace("WATCH_MAIN_END", activity)
     }
 
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+        if (activity is MainActivity || activity is DownloadedPlayerActivity)
+            trace("ACTIVITY_CREATED saved=${savedInstanceState != null}", activity)
         if (activity !is DownloadedPlayerActivity ||
             (pending == null && savedInstanceState?.getBoolean(PLAYER_RESTORE_KEY) != true)) return
         playerActivity?.takeIf { it !== activity }?.let {
@@ -456,9 +520,11 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         // DownloadedPlayerActivity.onCreate has registered its own back callback
         // and inflated the NavHost.
         activity.addOnPictureInPictureModeChangedListener(pipChanged)
+        trace("EXTERNAL_ACTIVITY_BOUND", activity)
     }
 
     private fun bindPlayerExit(activity: DownloadedPlayerActivity) {
+        trace("BIND_EXIT_BEGIN", activity)
         if (!exitBackBound) {
             // Registered after the core Activity back callback, and before
             // FullScreenPlayer's later resume callback.
@@ -470,16 +536,23 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
                 .findFragmentById(R.id.nav_host_fragment) as? NavHostFragment)
                 ?.navController?.also { it.addOnDestinationChangedListener(playerDestination) }
         }
+        trace("BIND_EXIT_END", activity)
     }
 
     override fun onActivityStarted(activity: Activity) {
+        if (activity is MainActivity || activity is DownloadedPlayerActivity)
+            trace("ACTIVITY_STARTED_BEGIN", activity)
         if (activity is MainActivity) watchMain(activity)
         if (activity === playerActivity) {
             bindPlayerExit(activity as DownloadedPlayerActivity)
             if (nextPipVideo != null) schedulePipSwitch(activity)
         }
+        if (activity is MainActivity || activity is DownloadedPlayerActivity)
+            trace("ACTIVITY_STARTED_END", activity)
     }
     override fun onActivityResumed(activity: Activity) {
+        if (activity is MainActivity || activity is DownloadedPlayerActivity)
+            trace("ACTIVITY_RESUMED_BEGIN", activity)
         if (activity is MainActivity) {
             watchMain(activity)
             restoreLandscapeNavigation()
@@ -489,8 +562,12 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             if (!activity.inPip()) wasInPip = false
             if (nextPipVideo != null) schedulePipSwitch(activity)
         }
+        if (activity is MainActivity || activity is DownloadedPlayerActivity)
+            trace("ACTIVITY_RESUMED_END", activity)
     }
     override fun onActivityDestroyed(activity: Activity) {
+        if (activity is MainActivity || activity is DownloadedPlayerActivity)
+            trace("ACTIVITY_DESTROYED_BEGIN", activity)
         if (activity === mainActivity) {
             detachYoutubeBridge(mainActivity)
             liveSwitchSequence++
@@ -522,9 +599,16 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             closing = false
             if (!enabled) unregister()
         }
+        if (activity is MainActivity || activity is DownloadedPlayerActivity)
+            trace("ACTIVITY_DESTROYED_END", activity)
     }
-    override fun onActivityPaused(activity: Activity) = Unit
+    override fun onActivityPaused(activity: Activity) {
+        if (activity is MainActivity || activity is DownloadedPlayerActivity)
+            trace("ACTIVITY_PAUSED", activity)
+    }
     override fun onActivityStopped(activity: Activity) {
+        if (activity is MainActivity || activity is DownloadedPlayerActivity)
+            trace("ACTIVITY_STOPPED_BEGIN", activity)
         // Android can still report inPip=true while dismissing PiP.
         // A stopped PiP Activity is no longer presenting the video;
         // release it rather than leaving a paused task/session behind.
@@ -532,9 +616,13 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             (activity.isFinishing || wasInPip)) {
             closePlayer(activity as DownloadedPlayerActivity)
         }
+        if (activity is MainActivity || activity is DownloadedPlayerActivity)
+            trace("ACTIVITY_STOPPED_END", activity)
     }
 
     override fun onActivityPreDestroyed(activity: Activity) {
+        if (activity is MainActivity || activity is DownloadedPlayerActivity)
+            trace("ACTIVITY_PRE_DESTROYED", activity)
         if (activity === playerActivity && !closing && !activity.isChangingConfigurations) {
             // Android's PiP X can destroy the Activity without dispatching a
             // back press. Do not leave the native decoder waiting for onStop.
@@ -545,6 +633,8 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         }
     }
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {
+        if (activity is MainActivity || activity is DownloadedPlayerActivity)
+            trace("ACTIVITY_SAVE_INSTANCE", activity)
         if (activity === playerActivity) {
             outState.putBoolean(PLAYER_RESTORE_KEY, true)
             outState.putString(PLAYER_UUID_KEY, activeUuid)
