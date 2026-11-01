@@ -99,6 +99,28 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         }
     }
 
+    // Shared through the MainActivity decor tag; YouTube and Elevate have
+    // independent plugin class loaders, but both use the native Bundle type.
+    private val youtubePipBridge: (Bundle) -> Boolean = { args ->
+        val pip = playerActivity?.takeIf {
+            enabled && it.inPip() && !it.isFinishing && !it.isDestroyed
+        }
+        if (pip == null || args.getString("uuid").isNullOrBlank() ||
+            !args.containsKey("index")) false else {
+            nextPipVideo?.getString("uuid")?.let(::forgetPlaceholder)
+            nextPipVideo = Bundle(args)
+            schedulePipSwitch(pip)
+            true
+        }
+    }
+
+    private fun detachYoutubeBridge(activity: FragmentActivity?) {
+        val decor = activity?.window?.decorView ?: return
+        if (decor.getTag(R.id.global_to_navigation_player) === youtubePipBridge) {
+            decor.setTag(R.id.global_to_navigation_player, null)
+        }
+    }
+
     private val destinations = NavController.OnDestinationChangedListener {
             nav: NavController, destination: NavDestination, args: Bundle? ->
         if (destination.id != R.id.navigation_player) restoreLandscapeNavigation()
@@ -371,6 +393,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
 
     fun stop() {
+        detachYoutubeBridge(mainActivity)
         enabled = false
         liveSwitchSequence++
         liveSwitchJob?.cancel()
@@ -388,9 +411,15 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
 
     private fun watchMain(activity: FragmentActivity) {
-        if (!enabled || mainActivity === activity) return
+        if (!enabled) return
+        if (mainActivity === activity) {
+            activity.window.decorView.setTag(R.id.global_to_navigation_player, youtubePipBridge)
+            return
+        }
+        detachYoutubeBridge(mainActivity)
         controller?.removeOnDestinationChangedListener(destinations)
         mainActivity = activity
+        activity.window.decorView.setTag(R.id.global_to_navigation_player, youtubePipBridge)
         controller = (activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)
             as? NavHostFragment)?.navController?.also {
             // Adding a listener immediately dispatches the current destination.
@@ -451,6 +480,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
     override fun onActivityDestroyed(activity: Activity) {
         if (activity === mainActivity) {
+            detachYoutubeBridge(mainActivity)
             liveSwitchSequence++
             liveSwitchJob?.cancel()
             liveSwitchJob = null

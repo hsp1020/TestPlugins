@@ -101,12 +101,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         val startingSeason: Int?,
         val episodes: CopyOnWriteArrayList<ResultEpisode>,
         var prefetchStarted: Boolean = false,
-        var prefetchObservedPlayer: Fragment? = null,
         val returnToDetail: Boolean = false,
     )
     private var lastPlayed: PlayedEpisode? = null
     private var directPlayback: DirectPlayback? = null
     private var directLoading = false
+    private var directGeneration = 0
     private data class PendingTimeSeek(val videoId: String, val positionMs: Long)
     private var pendingTimeSeek: PendingTimeSeek? = null
     private var seekPlayer: Media3Player? = null
@@ -404,65 +404,65 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         controller.addOnDestinationChangedListener(listener)
     }
 
-    /** Never delay the first stream for YouTube recommendations. */
-    private fun prefetchAfterLinks(fragment: Fragment) {
-        val session = directPlayback ?: return
-        if (session.prefetchStarted || session.prefetchObservedPlayer === fragment ||
-            fragment.javaClass.name != PLAYER_SCREEN) return
-        val api = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
-        session.prefetchObservedPlayer = fragment
-        val model = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
-        fun startWhenReady() {
-            if (session.prefetchStarted || model.state.links.isEmpty() ||
-                directPlayback !== session) return
-            val current = model.state.generatorState?.meta as? ResultEpisode ?: return
-            if (current.apiName != "YouTube" ||
-                YoutubeUtils.extractYoutubeId(current.data) !=
-                    YoutubeUtils.extractYoutubeId(session.card.url)) return
-            session.prefetchStarted = true
-            fragment.viewLifecycleOwner.lifecycleScope.launch {
-                val full = try {
-                    withContext(Dispatchers.IO) {
-                        api.prefetchDirectDetails(session.card.url)
-                    }
-                } catch (cancel: kotlinx.coroutines.CancellationException) {
-                    throw cancel
-                } catch (_: Exception) {
-                    null
-                } ?: return@launch
-                if (directPlayback !== session) return@launch
-                val known = session.episodes.mapTo(hashSetOf()) {
-                    YoutubeUtils.extractYoutubeId(it.data) ?: it.data
+    /** Start metadata in parallel with playback, without waiting for player-link observers. */
+    private fun prefetchDirectEpisodes(
+        session: DirectPlayback, api: YoutubeProvider, generation: Int
+    ) {
+        if (session.prefetchStarted) return
+        session.prefetchStarted = true
+        val activity = host ?: return
+        activity.lifecycleScope.launch {
+            val full = try {
+                withContext(Dispatchers.IO) { api.prefetchDirectDetails(session.card.url) }
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (_: Exception) {
+                null
+            } ?: return@launch
+            if (generation != directGeneration) return@launch
+            val known = session.episodes.mapTo(hashSetOf()) {
+                YoutubeUtils.extractYoutubeId(it.data) ?: it.data
+            }
+            val previousCount = session.episodes.size
+            full.episodes.sortedBy {
+                (it.season?.times(10_000) ?: 0) + (it.episode ?: 0)
+            }.forEachIndexed { index, episode ->
+                val key = YoutubeUtils.extractYoutubeId(episode.data) ?: episode.data
+                if (!known.add(key)) return@forEachIndexed
+                val number = episode.episode ?: index + 1
+                session.episodes.add(buildResultEpisode(
+                    headerName = full.name,
+                    name = episode.name,
+                    poster = episode.posterUrl,
+                    episode = number,
+                    seasonIndex = episode.season,
+                    season = episode.season,
+                    data = episode.data,
+                    apiName = full.apiName,
+                    id = session.parentId +
+                        (episode.season?.times(100_000) ?: 0) + number + 1,
+                    index = session.episodes.size,
+                    rating = episode.score,
+                    description = episode.description,
+                    isFiller = null,
+                    tvType = full.type,
+                    parentId = session.parentId,
+                    airDate = episode.date,
+                    runTime = episode.runTime,
+                ))
+            }
+
+            if (session.episodes.size > previousCount) {
+                // RepoLinkGenerator owns this same list; never rebuild the player.
+                val fragment = playerFragment?.takeIf { it.isAdded && it.view != null }
+                val model = fragment?.let {
+                    ViewModelProvider(it)[PlayerGeneratorViewModel::class.java]
                 }
-                val previousCount = session.episodes.size
-                full.episodes.sortedBy {
-                    (it.season?.times(10_000) ?: 0) + (it.episode ?: 0)
-                }.forEachIndexed { index, episode ->
-                    val key = YoutubeUtils.extractYoutubeId(episode.data) ?: episode.data
-                    if (!known.add(key)) return@forEachIndexed
-                    val number = episode.episode ?: index + 1
-                    session.episodes.add(buildResultEpisode(
-                        headerName = full.name,
-                        name = episode.name,
-                        poster = episode.posterUrl,
-                        episode = number,
-                        seasonIndex = episode.season,
-                        season = episode.season,
-                        data = episode.data,
-                        apiName = full.apiName,
-                        id = session.parentId +
-                            (episode.season?.times(100_000) ?: 0) + number + 1,
-                        index = session.episodes.size,
-                        rating = episode.score,
-                        description = episode.description,
-                        isFiller = null,
-                        tvType = full.type,
-                        parentId = session.parentId,
-                        airDate = episode.date,
-                        runTime = episode.runTime,
-                    ))
-                }
-                if (session.episodes.size > previousCount) {
+                val current = model?.state?.generatorState?.meta as? ResultEpisode
+                if (fragment != null && model != null && current != null &&
+                    current.apiName == "YouTube" &&
+                    YoutubeUtils.extractYoutubeId(current.data) ==
+                        YoutubeUtils.extractYoutubeId(session.card.url)) {
                     // Preserve the native next-episode/resume metadata without
                     // reloading any video link, player, or UI hierarchy.
                     model.modifyState {
@@ -501,9 +501,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 }
             }
         }
-        model.loadingLinks.observe(fragment.viewLifecycleOwner) { startWhenReady() }
-        model.currentLinks.observe(fragment.viewLifecycleOwner) { startWhenReady() }
-        startWhenReady()
     }
 
     private fun playHomeVideo(
@@ -513,6 +510,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         returnToDetail: Boolean = false,
     ) {
         if (directLoading) return
+        val generation = ++directGeneration
         if (directPlayback != null) {
             // Elevate redirects the native player destination to its own Activity.
             // The Home NavController therefore no longer points to the player,
@@ -591,15 +589,23 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
             expandedReturnDialog = popupDialog
             popupAwaitingPlayer = popupDialog != null
-            registerReturn(navHost.navController, session)
-            navHost.navController.navigate(
-                R.id.global_to_navigation_player,
-                GeneratorPlayer.newInstance(
-                    RepoLinkGenerator(episodes, page = page),
-                    selectedIndex,
-                    HashMap(page.syncData),
-                ),
+            val playerArgs = GeneratorPlayer.newInstance(
+                RepoLinkGenerator(episodes, page = page),
+                selectedIndex,
+                HashMap(page.syncData),
             )
+            // Elevate's PiP bridge uses the existing switch mechanism without
+            // navigating the MainActivity player destination (no nav-bar flash).
+            @Suppress("UNCHECKED_CAST")
+            val switchPip = activity.window.decorView.getTag(R.id.global_to_navigation_player)
+                as? ((Bundle) -> Boolean)
+            if (switchPip?.invoke(playerArgs) != true) {
+                registerReturn(navHost.navController, session)
+                navHost.navController.navigate(
+                    R.id.global_to_navigation_player, playerArgs
+                )
+            }
+            prefetchDirectEpisodes(session, api, generation)
         } catch (e: Exception) {
             popupAwaitingPlayer = false
             clearPendingTimeSeek()
@@ -699,16 +705,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                         popup.hide()
                     }
                 }
-                prefetchAfterLinks(f)
                 watchPendingTimeSeek(f)
             }
             attach(f, view)
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
-            if (directPlayback?.prefetchObservedPlayer === f) {
-                directPlayback?.prefetchObservedPlayer = null
-            }
             if (popupBackFragment === f) clearPopupBackHandler()
             if (popupAwaitingPlayer && f.javaClass.name in EXPANDED_ORIGINS) {
                 expandedReturnDialog?.let { popup ->
@@ -736,7 +738,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             manager.fragments.forEach { fragment ->
                 if (fragment.javaClass.name == PLAYER_SCREEN && fragment.view != null) {
                     playerFragment = fragment
-                    prefetchAfterLinks(fragment)
                     watchPendingTimeSeek(fragment)
                 }
                 if (fragment.isAdded) scan(fragment.childFragmentManager)
