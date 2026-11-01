@@ -551,7 +551,6 @@ class YoutubeProvider(
                 nextToken = payload.homeNextToken,
                 createdAtMs = createdAt
             )
-            logHomeCache("prepared_store", "$requestLang|$mainUrl", payload.homeItems.size)
             sharedChipBootstrapSnapshot = snapshot
             return snapshot
         } catch (e: CancellationException) {
@@ -2422,12 +2421,9 @@ class YoutubeProvider(
                         val url = YoutubeUtils.urlDecode(section.url)
                         "$currentLang|${if (url == "Home") mainUrl else url}"
                     }.toSet()
-                val removed = synchronized(directMainPageLock) {
-                    val originalSize = directMainPageCache.size
+                synchronized(directMainPageLock) {
                     directMainPageCache.keys.retainAll(activeKeys)
-                    originalSize - directMainPageCache.size
                 }
-                if (removed > 0) logHomeCache("settings_prune", "$currentLang|home", removed)
 
                 sharedLastLang = currentLang
                 sharedLastCustomSectionsJson = currentCustomSectionsJson
@@ -2496,22 +2492,6 @@ class YoutubeProvider(
     private fun homeCacheKey(requestData: String): String =
         "$lang|${if (requestData == "Home") mainUrl else requestData}"
 
-    // Event-only diagnostics: sampled process memory, not the cache's retained size.
-    private fun logHomeCache(event: String, cacheKey: String, items: Int, elapsedMs: Long = 0L) {
-        val (catalogs, retainedItems) = synchronized(directMainPageLock) {
-            directMainPageCache.size to directMainPageCache.values.sumOf { it.result.items.size }
-        }
-        val runtime = Runtime.getRuntime()
-        val preparedItems = getFreshPreparedHomePage()?.items?.size ?: 0
-        Log.i("YouTubeHomeCache",
-            "event=$event key=${Integer.toHexString(cacheKey.hashCode())} " +
-                "items=$items catalogs=$catalogs retainedItems=$retainedItems preparedItems=$preparedItems " +
-                "heapMiB=${(runtime.totalMemory() - runtime.freeMemory()) / 1048576L} " +
-                "heapLimitMiB=${runtime.maxMemory() / 1048576L} " +
-                "nativeMiB=${android.os.Debug.getNativeHeapAllocatedSize() / 1048576L} " +
-                "gc=${android.os.Debug.getRuntimeStat("art.gc.gc-count")} elapsedMs=$elapsedMs")
-    }
-
     private fun getCachedHomePage(cacheKey: String): DirectPageResult? {
         val now = System.currentTimeMillis()
         val result = synchronized(directMainPageLock) {
@@ -2523,11 +2503,10 @@ class YoutubeProvider(
                 null
             }
         }
-        logHomeCache(if (result != null) "hit" else "miss", cacheKey, result?.items?.size ?: 0)
         return result
     }
 
-    private fun storeCachedHomePage(cacheKey: String, result: DirectPageResult, elapsedMs: Long) {
+    private fun storeCachedHomePage(cacheKey: String, result: DirectPageResult) {
         if (result.items.isEmpty()) return
         val now = System.currentTimeMillis()
         synchronized(directMainPageLock) {
@@ -2538,7 +2517,6 @@ class YoutubeProvider(
             }
             directMainPageCache[cacheKey] = CachedDirectMainPage(result, now)
         }
-        logHomeCache("store", cacheKey, result.items.size, elapsedMs)
     }
 
     private fun getFreshPreparedHomePage(): PreparedHomePage? {
@@ -2556,7 +2534,6 @@ class YoutubeProvider(
         awaitStartupDirectRequestSettle()
         return youtubePayloadSemaphore.withPermit {
             currentCoroutineContext().ensureActive()
-            val startedAt = android.os.SystemClock.elapsedRealtime()
             val html = app.get(
                 targetUrl,
                 interceptor = ytInterceptor,
@@ -2614,9 +2591,7 @@ class YoutubeProvider(
             val next = findTokenRecursive(initialData)
 
             val result = DirectPageResult(directResults.toList(), next)
-            storeCachedHomePage(
-                cacheKey, result, android.os.SystemClock.elapsedRealtime() - startedAt
-            )
+            storeCachedHomePage(cacheKey, result)
             if (requestData == "Home") {
                 sharedPreparedHomePage = PreparedHomePage(
                     language = lang,
@@ -2660,7 +2635,6 @@ class YoutubeProvider(
                             }
                         }
                     } else {
-                        val chipStartedAt = android.os.SystemClock.elapsedRealtime()
                         val bootstrap = ensureChipBootstrap()
                         if (bootstrap == null) {
                             Log.w("YoutubeUtils", "[CHIP] page=1 bootstrap unavailable key=$requestData")
@@ -2704,8 +2678,7 @@ class YoutubeProvider(
                                         chipCatalogSessions[requestData] = newSession
                                         storeCachedHomePage(
                                             homeCacheKey(requestData),
-                                            DirectPageResult(results.toList(), nextToken),
-                                            android.os.SystemClock.elapsedRealtime() - chipStartedAt
+                                            DirectPageResult(results.toList(), nextToken)
                                         )
                                     } else {
                                         Log.w("YoutubeUtils", "[CHIP] SESSION_NOT_COMMITTED page=1 key=$requestData")
@@ -2751,7 +2724,6 @@ class YoutubeProvider(
                     if (prepared != null) {
                         results.addAll(prepared.items)
                         nextContinuation = prepared.nextToken
-                        logHomeCache("prepared_hit", homeCacheKey(requestData), prepared.items.size)
                     } else if (cached != null) {
                         results.addAll(cached.items)
                         nextContinuation = cached.nextToken
@@ -2762,7 +2734,6 @@ class YoutubeProvider(
                         if (refreshed != null) {
                             results.addAll(refreshed.items)
                             nextContinuation = refreshed.nextToken
-                            logHomeCache("prepared_hit", homeCacheKey(requestData), refreshed.items.size)
                         } else {
                             val direct = loadDirectPage1(requestData)
                             if (direct != null) {

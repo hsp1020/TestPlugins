@@ -101,6 +101,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         val startingSeason: Int?,
         val episodes: CopyOnWriteArrayList<ResultEpisode>,
         var prefetchStarted: Boolean = false,
+        var prefetchObservedPlayer: Fragment? = null,
         val returnToDetail: Boolean = false,
     )
     private var lastPlayed: PlayedEpisode? = null
@@ -197,6 +198,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private var playbackNav: NavController? = null
     private var playbackReturnListener: NavController.OnDestinationChangedListener? = null
     private var playerFragment: Fragment? = null
+    private var externalPlayerHost: FragmentActivity? = null
 
     /** Find the native Home, Search, or Quick Search expanded catalog dialog. */
     private fun findExpandedDialog(windowRoot: View): Dialog? {
@@ -405,14 +407,16 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     /** Never delay the first stream for YouTube recommendations. */
     private fun prefetchAfterLinks(fragment: Fragment) {
         val session = directPlayback ?: return
-        if (session.prefetchStarted || fragment.javaClass.name != PLAYER_SCREEN) return
+        if (session.prefetchStarted || session.prefetchObservedPlayer === fragment ||
+            fragment.javaClass.name != PLAYER_SCREEN) return
         val api = APIHolder.getApiFromNameNull("YouTube") as? YoutubeProvider ?: return
+        session.prefetchObservedPlayer = fragment
         val model = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
-        model.loadingLinks.observe(fragment.viewLifecycleOwner) { update ->
+        fun startWhenReady() {
             if (session.prefetchStarted ||
-                update?.value !is Resource.Success ||
+                model.state.loading !is Resource.Success ||
                 model.state.links.isEmpty() ||
-                directPlayback !== session) return@observe
+                directPlayback !== session) return
             session.prefetchStarted = true
             fragment.viewLifecycleOwner.lifecycleScope.launch {
                 val full = try {
@@ -487,6 +491,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 }
             }
         }
+        model.loadingLinks.observe(fragment.viewLifecycleOwner) { startWhenReady() }
+        model.currentLinks.observe(fragment.viewLifecycleOwner) { startWhenReady() }
+        startWhenReady()
     }
 
     private fun playHomeVideo(
@@ -689,6 +696,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
+            if (directPlayback?.prefetchObservedPlayer === f) {
+                directPlayback?.prefetchObservedPlayer = null
+            }
             if (popupBackFragment === f) clearPopupBackHandler()
             if (popupAwaitingPlayer && f.javaClass.name in EXPANDED_ORIGINS) {
                 expandedReturnDialog?.let { popup ->
@@ -701,6 +711,28 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
             screens.remove(f)?.close()
         }
+    }
+
+    private fun observeExternalPlayer(activity: Activity) {
+        if (activity.javaClass.name !=
+            "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity" ||
+            activity !is FragmentActivity || externalPlayerHost === activity) return
+        externalPlayerHost?.supportFragmentManager
+            ?.unregisterFragmentLifecycleCallbacks(fragments)
+        externalPlayerHost = activity
+        activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
+        // onActivityCreated can follow the initial player view creation.
+        fun scan(manager: FragmentManager) {
+            manager.fragments.forEach { fragment ->
+                if (fragment.javaClass.name == PLAYER_SCREEN && fragment.view != null) {
+                    playerFragment = fragment
+                    prefetchAfterLinks(fragment)
+                    watchPendingTimeSeek(fragment)
+                }
+                if (fragment.isAdded) scan(fragment.childFragmentManager)
+            }
+        }
+        scan(activity.supportFragmentManager)
     }
 
     fun start() {
@@ -721,6 +753,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         popupReturning = false
         playerFragment = null
         host?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
+        externalPlayerHost?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(fragments)
+        externalPlayerHost = null
         focusTree?.takeIf { it.isAlive }?.removeOnWindowFocusChangeListener(focusListener)
         focusTree = null
         dialogs.values.toList().forEach { it.close() }
@@ -1633,6 +1667,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     }
 
     override fun onActivityDestroyed(activity: Activity) {
+        if (externalPlayerHost === activity) {
+            externalPlayerHost?.supportFragmentManager
+                ?.unregisterFragmentLifecycleCallbacks(fragments)
+            externalPlayerHost = null
+        }
         if (host === activity) {
             release()
         } else if (directPlayback != null &&
@@ -1648,8 +1687,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
     }
 
-    override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
-    override fun onActivityStarted(activity: Activity) = Unit
+    override fun onActivityCreated(activity: Activity, state: Bundle?) {
+        observeExternalPlayer(activity)
+    }
+    override fun onActivityStarted(activity: Activity) {
+        observeExternalPlayer(activity)
+    }
     override fun onActivityPaused(activity: Activity) = Unit
     override fun onActivityStopped(activity: Activity) = Unit
     override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit

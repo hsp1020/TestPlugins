@@ -18,6 +18,18 @@ import androidx.navigation.NavDestination
 import androidx.navigation.NavOptions
 import androidx.navigation.fragment.NavHostFragment
 import com.lagradost.cloudstream3.CommonActivity
+import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.MovieLoadResponse
+import com.lagradost.cloudstream3.LiveStreamLoadResponse
+import com.lagradost.cloudstream3.TvSeriesLoadResponse
+import com.lagradost.cloudstream3.APIHolder.getApiFromNameNull
+import com.lagradost.cloudstream3.ui.result.buildResultEpisode
+import com.lagradost.cloudstream3.ui.player.RepoLinkGenerator
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity
@@ -38,6 +50,9 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         }
 
         fun isPlayerActivity(activity: Activity): Boolean = current?.playerActivity === activity
+
+        fun switchLiveInPip(card: SearchResponse): Boolean =
+            current?.switchLive(card) == true
     }
 
     private var enabled = false
@@ -55,6 +70,8 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     private var wasInPip = false
     private var closing = false
     private var activeUuid: String? = null
+    private var liveSwitchSequence = 0
+    private var liveSwitchJob: Job? = null
     private var playerNavigation: NavController? = null
     private var exitBackBound = false
 
@@ -108,6 +125,98 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         } finally {
             redirecting = false
         }
+    }
+
+    /**
+     * Load a live card without navigating through ResultFragment while a PiP
+     * player is active. The existing player destination hook performs the switch.
+     */
+    private fun switchLive(card: SearchResponse): Boolean {
+        if (!enabled) return false
+        val pip = playerActivity?.takeIf {
+            it.inPip() && !it.isFinishing && !it.isDestroyed
+        } ?: return false
+        val origin = mainActivity ?: return false
+        val nav = controller ?: return false
+        val api = getApiFromNameNull(card.apiName) ?: return false
+        val selection = ++liveSwitchSequence
+        liveSwitchJob?.cancel()
+        liveSwitchJob = origin.lifecycleScope.launch {
+            try {
+                val page = withContext(Dispatchers.IO) { api.load(card.url) }
+                    ?: return@launch
+                if (selection != liveSwitchSequence || playerActivity !== pip ||
+                    !pip.inPip() || controller !== nav || !enabled) return@launch
+                val parentId = page.uniqueUrl.replace(api.mainUrl, "")
+                    .replace("/", "").hashCode()
+                val episodes = when (page) {
+                    is TvSeriesLoadResponse -> page.episodes.sortedBy {
+                        (it.season?.times(10_000) ?: 0) + (it.episode ?: 0)
+                    }.mapIndexed { index, episode ->
+                        val number = episode.episode ?: index + 1
+                        buildResultEpisode(
+                            headerName = page.name,
+                            name = episode.name,
+                            poster = episode.posterUrl,
+                            episode = number,
+                            seasonIndex = episode.season,
+                            season = episode.season,
+                            data = episode.data,
+                            apiName = page.apiName,
+                            id = parentId + (episode.season?.times(100_000) ?: 0) + number + 1,
+                            index = index,
+                            rating = episode.score,
+                            description = episode.description,
+                            isFiller = null,
+                            tvType = page.type,
+                            parentId = parentId,
+                            airDate = episode.date,
+                            runTime = episode.runTime,
+                        )
+                    }
+                    is MovieLoadResponse, is LiveStreamLoadResponse -> {
+                        val data = when (page) {
+                            is MovieLoadResponse -> page.dataUrl
+                            is LiveStreamLoadResponse -> page.dataUrl
+                            else -> ""
+                        }
+                        listOf(buildResultEpisode(
+                            headerName = page.name,
+                            name = page.name,
+                            poster = null,
+                            episode = 0,
+                            seasonIndex = null,
+                            season = null,
+                            data = data,
+                            apiName = page.apiName,
+                            id = parentId,
+                            index = 0,
+                            rating = null,
+                            description = null,
+                            isFiller = null,
+                            tvType = page.type,
+                            parentId = parentId,
+                        ))
+                    }
+                    else -> emptyList()
+                }
+                if (episodes.isEmpty()) return@launch
+                val args = GeneratorPlayer.newInstance(
+                    RepoLinkGenerator(episodes, page = page), 0, HashMap(page.syncData)
+                )
+                try {
+                    nav.navigate(R.id.global_to_navigation_player, args)
+                } catch (error: Exception) {
+                    forgetPlaceholder(args.getString("uuid"))
+                    throw error
+                }
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (error: Exception) {
+                Log.e("ElevatePiP", "Live PiP switch failed", error)
+            }
+        }
+        return true
     }
 
     // Event-based; multiple selections before the next UI turn become one load.
@@ -241,6 +350,9 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
 
     fun stop() {
         enabled = false
+        liveSwitchSequence++
+        liveSwitchJob?.cancel()
+        liveSwitchJob = null
         controller?.removeOnDestinationChangedListener(destinations)
         controller = null
         mainActivity = null
@@ -314,6 +426,9 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     }
     override fun onActivityDestroyed(activity: Activity) {
         if (activity === mainActivity) {
+            liveSwitchSequence++
+            liveSwitchJob?.cancel()
+            liveSwitchJob = null
             controller?.removeOnDestinationChangedListener(destinations)
             controller = null
             mainActivity = null

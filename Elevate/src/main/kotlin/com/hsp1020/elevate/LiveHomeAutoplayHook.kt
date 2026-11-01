@@ -36,7 +36,8 @@ import kotlin.math.roundToInt
 
 /**
  * Only intercept Home and expanded-catalog live card clicks. Reuse the
- * same native START_ACTION_LOAD_EP route verified in commit 31597b6.
+ * same native START_ACTION_LOAD_EP route verified in commit 31597b6
+ * unless a PiP player is active (then switch directly, without a detail page).
  * Do not use resume-latest or a separate result-fragment observer.
  */
 internal class LiveHomeAutoplayHook(private val app: Application) :
@@ -73,8 +74,8 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
                 original(event)
                 return
             }
-            // Restore the working native ResultFragment auto-start path.
-            // The core builds a single movie/live episode with this ID.
+            if (PipLibraryNavigation.switchLiveInPip(card)) return
+            // Keep native auto-start for normal (non-PiP) live playback.
             val id = card.url.replace(api.mainUrl, "").replace("/", "").hashCode()
             loadSearchResult(card, START_ACTION_LOAD_EP, id)
         }
@@ -270,6 +271,7 @@ internal class LiveHomeAutoplayHook(private val app: Application) :
                 )
                 return@OnClickListener
             }
+            if (PipLibraryNavigation.switchLiveInPip(current)) return@OnClickListener
             val id = current.url.replace(api.mainUrl, "").replace("/", "").hashCode()
             if (Globals.isLayout(Globals.PHONE)) {
                 returningPopup = (recycler as? AutofitRecyclerView)?.let { WeakReference(it) }
