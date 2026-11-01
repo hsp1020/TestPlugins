@@ -4,6 +4,8 @@ import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
+import android.view.View
 import android.os.Bundle
 import android.os.Build
 import android.util.Log
@@ -78,8 +80,28 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     private fun Activity.inPip(): Boolean =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInPictureInPictureMode
 
+    /** The native nav layout reads system orientation, which may remain portrait
+     * after Shorts PiP although MainActivity is still landscape. */
+    private fun restoreLandscapeNavigation() {
+        val activity = mainActivity ?: return
+        if (playerActivity?.inPip() != true ||
+            activity.resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) return
+        activity.window.decorView.post {
+            if (mainActivity !== activity || playerActivity?.inPip() != true ||
+                activity.resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) return@post
+            val bottom = activity.findViewById<View>(R.id.nav_view) ?: return@post
+            val rail = activity.findViewById<View>(R.id.nav_rail_view) ?: return@post
+            // Do not expose navigation if the current destination hides both.
+            if (bottom.visibility == View.VISIBLE && rail.visibility != View.VISIBLE) {
+                bottom.visibility = View.GONE
+                rail.visibility = View.VISIBLE
+            }
+        }
+    }
+
     private val destinations = NavController.OnDestinationChangedListener {
             nav: NavController, destination: NavDestination, args: Bundle? ->
+        if (destination.id != R.id.navigation_player) restoreLandscapeNavigation()
         if (restoreNative) {
             restoreNative = false
             return@OnDestinationChangedListener
@@ -417,7 +439,10 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         }
     }
     override fun onActivityResumed(activity: Activity) {
-        if (activity is MainActivity) watchMain(activity)
+        if (activity is MainActivity) {
+            watchMain(activity)
+            restoreLandscapeNavigation()
+        }
         if (activity === playerActivity) {
             bindPlayerExit(activity as DownloadedPlayerActivity)
             if (!activity.inPip()) wasInPip = false

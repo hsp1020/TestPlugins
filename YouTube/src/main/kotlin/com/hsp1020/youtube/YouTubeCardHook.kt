@@ -413,10 +413,12 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         session.prefetchObservedPlayer = fragment
         val model = ViewModelProvider(fragment)[PlayerGeneratorViewModel::class.java]
         fun startWhenReady() {
-            if (session.prefetchStarted ||
-                model.state.loading !is Resource.Success ||
-                model.state.links.isEmpty() ||
+            if (session.prefetchStarted || model.state.links.isEmpty() ||
                 directPlayback !== session) return
+            val current = model.state.generatorState?.meta as? ResultEpisode ?: return
+            if (current.apiName != "YouTube" ||
+                YoutubeUtils.extractYoutubeId(current.data) !=
+                    YoutubeUtils.extractYoutubeId(session.card.url)) return
             session.prefetchStarted = true
             fragment.viewLifecycleOwner.lifecycleScope.launch {
                 val full = try {
@@ -478,6 +480,14 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                     // episode-list growth. The native click listeners remain intact.
                     if (model.hasNextEpisode() == true) {
                         val root = fragment.view
+                        // Native updateUIVisibility() ran when quick play still had one
+                        // episode. Reveal the existing button only if controls are shown.
+                        if (root?.findViewById<View>(R.id.player_video_bar)?.visibility == View.VISIBLE) {
+                            root.findViewById<View>(R.id.player_episodes_button_root)?.visibility =
+                                View.VISIBLE
+                            root.findViewById<View>(R.id.player_episodes_button)?.visibility =
+                                View.VISIBLE
+                        }
                         if (Globals.isLayout(Globals.PHONE)) {
                             root?.findViewById<View>(R.id.player_skip_episode)?.visibility =
                                 View.VISIBLE
