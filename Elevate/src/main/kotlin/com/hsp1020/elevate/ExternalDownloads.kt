@@ -78,6 +78,16 @@ internal object ExternalDownloads {
             .putString(TARGET, app.json().toString()).apply()
     }
 
+    fun isInstalled(c: Context, target: App): Boolean {
+        val pkg = ComponentName.unflattenFromString(target.component)?.packageName ?: return false
+        return try {
+            c.packageManager.getPackageInfo(pkg, 0)
+            true
+        } catch (_: android.content.pm.PackageManager.NameNotFoundException) {
+            false
+        }
+    }
+
     data class Pending(
         val id: Int, val parentId: Int, val title: String, val episodeName: String?,
         val episode: Int, val season: Int?, val api: String, val resultUrl: String,
