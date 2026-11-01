@@ -1,10 +1,6 @@
 package com.hsp1020.elevate
 
 import android.app.Dialog
-import android.widget.Button
-import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
-import java.io.File
 import android.content.Context
 import android.os.Bundle
 import android.util.TypedValue
@@ -81,28 +77,6 @@ internal object ElevateFeaturePrefs {
 }
 
 class ElevateSettingsFragment : DialogFragment() {
-    private var pendingExport: File? = null
-    private val exportDiagnostic = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("application/octet-stream")
-    ) { uri ->
-        val file = pendingExport
-        val resolver = context?.applicationContext?.contentResolver
-        if (uri == null || file == null || resolver == null) return@registerForActivityResult
-        Thread({
-            val result = runCatching {
-                require(file.isFile) { "File missing" }
-                val output = resolver.openOutputStream(uri) ?: error("Destination unavailable")
-                output.use { out -> file.inputStream().use { it.copyTo(out) } }
-            }
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                context?.let { ctx ->
-                    Toast.makeText(ctx, if (result.isSuccess) "Saved ${file.name}"
-                        else "Export failed: ${result.exceptionOrNull()?.javaClass?.simpleName}", Toast.LENGTH_LONG).show()
-                }
-            }
-        }, "Elevate-Diagnostics-Export").start()
-    }
-
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
         val ctx = requireContext()
         fun dp(value: Int): Int = (value * ctx.resources.displayMetrics.density + 0.5f).toInt()
@@ -248,58 +222,6 @@ class ElevateSettingsFragment : DialogFragment() {
                     savePosterSettings = LibraryPosterPrefs.controls(ctx, container, ::dp)
                     content.addView(container)
                 }
-            }
-        }
-        content.addView(TextView(ctx).apply {
-            text = "Diagnostics (temporary)"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-            applyElevateNativeFont(bold = true)
-            setPadding(0, dp(16), 0, dp(6))
-        })
-        val probePrefs = ctx.applicationContext.getSharedPreferences("CSProbe", Context.MODE_PRIVATE)
-        content.addView(SwitchCompat(ctx).apply {
-            text = "Enable 4-plugin CSProbe logs"
-            isChecked = probePrefs.getBoolean("enabled", false)
-            setOnCheckedChangeListener { _, checked ->
-                probePrefs.edit().putBoolean("enabled", checked).apply()
-            }
-        })
-        content.addView(TextView(ctx).apply {
-            text = "60s method trace samples running methods. Stop early when reproduction is complete. HPROF captures live objects, not individual allocation stacks. Files may contain account data; export manually."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(0, dp(8), 0, dp(4))
-        })
-        fun diagnosticButton(label: String, action: () -> Unit) {
-            content.addView(Button(ctx).apply {
-                text = label
-                setOnClickListener { action() }
-            })
-        }
-        diagnosticButton("Start 60s method trace") {
-            Toast.makeText(ctx, ElevateDiagnostics.startTrace(ctx.applicationContext), Toast.LENGTH_LONG).show()
-        }
-        diagnosticButton("Stop trace") {
-            Toast.makeText(ctx, ElevateDiagnostics.stopTrace(), Toast.LENGTH_LONG).show()
-        }
-        diagnosticButton("Save last .trace") {
-            val file = ElevateDiagnostics.lastTraceFile()
-            if (file == null) Toast.makeText(ctx, "No completed trace", Toast.LENGTH_SHORT).show()
-            else {
-                pendingExport = file
-                exportDiagnostic.launch(file.name)
-            }
-        }
-        diagnosticButton("Capture HPROF (manual)") {
-            Toast.makeText(ctx, ElevateDiagnostics.captureHeap(ctx.applicationContext) { status ->
-                if (isAdded) Toast.makeText(requireContext(), status, Toast.LENGTH_LONG).show()
-            }, Toast.LENGTH_LONG).show()
-        }
-        diagnosticButton("Save last .hprof") {
-            val file = ElevateDiagnostics.lastHeapFile()
-            if (file == null) Toast.makeText(ctx, "No completed HPROF", Toast.LENGTH_SHORT).show()
-            else {
-                pendingExport = file
-                exportDiagnostic.launch(file.name)
             }
         }
         return AlertDialog.Builder(ctx)

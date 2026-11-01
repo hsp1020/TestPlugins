@@ -73,17 +73,6 @@ import java.security.MessageDigest
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
-
-private fun stremioProbe(event: String, detail: String = "") {
-    val context = CloudStreamApp.context ?: return
-    if (!context.getSharedPreferences("CSProbe", Context.MODE_PRIVATE).getBoolean("enabled", false)) return
-    val r = Runtime.getRuntime()
-    android.util.Log.i("CSProbe", "run=${android.os.Process.myPid()} module=StremioC event=$event $detail " +
-        "heapMiB=${(r.totalMemory() - r.freeMemory()) / 1048576L} " +
-        "nativeMiB=${android.os.Debug.getNativeHeapAllocatedSize() / 1048576L} " +
-        "gc=${android.os.Debug.getRuntimeStat("art.gc.gc-count") ?: "?"}")
-}
-
 inline fun <T> runSuspendCatching(block: () -> T): Result<T> {
     return try {
         Result.success(block())
@@ -1773,8 +1762,7 @@ open class StremioC(
 
         private suspend fun fetchHomeJson(url: String): String {
             val task = synchronized(homeJsonFlights) {
-                homeJsonFlights[url]?.also { stremioProbe("json_flight_join") }
-                    ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
+                homeJsonFlights[url] ?: addonMetaScope.async(start = CoroutineStart.LAZY) {
                     try {
                         val body = fetchHomeJsonUnshared(url)
                         body
@@ -2509,8 +2497,6 @@ open class StremioC(
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val started = SystemClock.elapsedRealtime()
-        stremioProbe("home_start", "page=$page key=${Integer.toHexString(request.data.hashCode())}")
         if (!isAddonEnabled()) return newHomePageResponse(
             listOf(HomePageList(request.name, emptyList<SearchResponse>())), hasNext = false)
         return try {
@@ -2519,10 +2505,7 @@ open class StremioC(
 
             throw e
         } catch (t: Throwable) {
-            stremioProbe("home_error", "kind=${t.javaClass.simpleName}")
             newHomePageResponse(listOf(HomePageList(request.name, emptyList<SearchResponse>())), hasNext = false)
-        } finally {
-            stremioProbe("home_end", "page=$page elapsedMs=${SystemClock.elapsedRealtime() - started}")
         }
     }
 
@@ -2538,7 +2521,6 @@ open class StremioC(
             val existing = activePageRequests[key]
             if (existing != null) {
                 existing.waiters++
-                stremioProbe("home_join_inflight", "waiters=${existing.waiters}")
                 existing
             } else {
                 owner = true
@@ -2634,23 +2616,9 @@ open class StremioC(
             recentHomeResults[cacheKey]?.takeIf {
                 System.currentTimeMillis() - it.savedAt in 0L..HOME_RESULTS_REUSE_MS
             }?.result
-        }?.let {
-            stremioProbe("catalog_hit", "key=${Integer.toHexString(cacheKey.hashCode())}")
-            return it
-        }
-        stremioProbe("catalog_miss", "key=${Integer.toHexString(cacheKey.hashCode())}")
+        }?.let { return it }
         return homeForegroundSemaphore.withPermit {
-            synchronized(recentHomeResults) {
-                recentHomeResults[cacheKey]?.takeIf {
-                    System.currentTimeMillis() - it.savedAt in 0L..HOME_RESULTS_REUSE_MS
-                }?.result
-            }?.let {
-                stremioProbe("catalog_hit_after_wait", "key=${Integer.toHexString(cacheKey.hashCode())}")
-                return@withPermit it
-            }
-            val started = SystemClock.elapsedRealtime()
             val json = fetchHomeJson(buildUrl(path))
-            stremioProbe("catalog_json", "chars=${json.length} fetchMs=${SystemClock.elapsedRealtime() - started}")
             val metas = parseJson<HomeCatalogResponse>(json).metas
                 ?: throw IllegalStateException("Catalog response is missing metas")
             val items = metas.mapNotNull { meta ->
@@ -2663,7 +2631,6 @@ open class StremioC(
                 newMovieSearchResponse(title, metaUrl, TvType.Others) { posterUrl = meta.poster }
             }
             val result = items to metas.size
-            stremioProbe("catalog_parsed", "items=${items.size} metas=${metas.size} elapsedMs=${SystemClock.elapsedRealtime() - started}")
             if (items.isNotEmpty() && items.size <= 80) {
                 synchronized(recentHomeResults) {
                     recentHomeResults[cacheKey] = CachedHomeResult(result, System.currentTimeMillis())

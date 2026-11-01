@@ -72,18 +72,6 @@ internal object SyncPlaybackThrottle {
         if (nextAllowedAt <= 0L) 5_000L else (nextAllowedAt - now).coerceAtLeast(0L)
 }
 
-
-private fun syncProbe(event: String, detail: String = "") {
-    val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
-    if (!context.getSharedPreferences("CSProbe", Context.MODE_PRIVATE)
-            .getBoolean("enabled", false)) return
-    val r = Runtime.getRuntime()
-    android.util.Log.i("CSProbe", "run=${android.os.Process.myPid()} module=SyncCS event=$event $detail " +
-        "heapMiB=${(r.totalMemory() - r.freeMemory()) / 1048576L} " +
-        "nativeMiB=${android.os.Debug.getNativeHeapAllocatedSize() / 1048576L} " +
-        "gc=${android.os.Debug.getRuntimeStat("art.gc.gc-count") ?: "?"}")
-}
-
 @CloudstreamPlugin
 class SyncPlugin : Plugin() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -204,7 +192,6 @@ class SyncPlugin : Plugin() {
     }
 
     private fun queueSync(reason: String) {
-        syncProbe("sync_queued", "reason=$reason")
         val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return
         if (!isOwner(context) || !config(context).active()) return
         if (SyncAuthGuard.needsReauthentication(config(context)) &&
@@ -215,12 +202,12 @@ class SyncPlugin : Plugin() {
             if (worker?.isActive == true &&
                 reason in setOf("remote-head-poll-20s", "home-reload",
                     "activity-resumed", "activity-paused", "activity-stopped")) {
-                syncProbe("sync_ignored_inflight", "reason=$reason")
+
                 return
             }
             rerunRequested = true
             if (worker?.isActive == true) {
-                syncProbe("sync_coalesced", "reason=$reason")
+
                 return
             }
             worker = scope.launch {
@@ -255,10 +242,7 @@ class SyncPlugin : Plugin() {
                     }
 
 
-                    val syncStarted = android.os.SystemClock.elapsedRealtime()
-                    syncProbe("sync_begin", "trigger=$reason")
-                    val result = try { SyncCoordinator.synchronize(context, active) }
-                        finally { syncProbe("sync_end", "trigger=$reason elapsedMs=${android.os.SystemClock.elapsedRealtime() - syncStarted}") }
+                    val result = SyncCoordinator.synchronize(context, active)
                     if (result.startsWith("Sync failed:") ||
                         result.startsWith("Sync failed during") ||
                         result.startsWith("Sync conflict:")) {
@@ -303,7 +287,6 @@ class SyncPlugin : Plugin() {
         }
 
         trigger?.cancel()
-        syncProbe("sync_scheduled", "reason=$reason delayMs=$delayMs")
         trigger = scope.launch {
             delay(delayMs)
             if (isOwner(context)) {
@@ -327,7 +310,6 @@ class SyncPlugin : Plugin() {
 
             }
             override fun onActivityResumed(activity: Activity) {
-                syncProbe("activity_resumed", "type=${activity.javaClass.simpleName} task=${activity.taskId} instance=${System.identityHashCode(activity)}")
                 currentActivity = WeakReference(activity)
                 foreground = true
                 if (activityCount == 0) activityCount = 1
@@ -346,7 +328,6 @@ class SyncPlugin : Plugin() {
                 request(1500, "activity-paused")
             }
             override fun onActivityStopped(activity: Activity) {
-                syncProbe("activity_stopped", "type=${activity.javaClass.simpleName} task=${activity.taskId} instance=${System.identityHashCode(activity)}")
                 if (!isOwner(context)) return
                 activityCount = maxOf(0, activityCount - 1)
                 if (activityCount == 0) {
@@ -384,7 +365,8 @@ class SyncPlugin : Plugin() {
         }
     }
     override fun load(context: Context) {
-        syncProbe("plugin_load")
+
+
         config(context).preferences.edit().putString("active_instance", owner).commit()
         val session = config(context)
 
@@ -405,7 +387,6 @@ class SyncPlugin : Plugin() {
         }
     }
     fun unload() {
-        syncProbe("plugin_unload")
         currentActivity = null
         scope.cancel()
         trigger?.cancel()

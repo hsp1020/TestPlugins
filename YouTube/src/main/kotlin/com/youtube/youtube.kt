@@ -35,18 +35,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
-
-private fun ytProbe(event: String, detail: String = "") {
-    val context = CloudStreamApp.context ?: return
-    if (!context.getSharedPreferences("CSProbe", android.content.Context.MODE_PRIVATE)
-            .getBoolean("enabled", false)) return
-    val r = Runtime.getRuntime()
-    Log.i("CSProbe", "run=${android.os.Process.myPid()} module=YouTube event=$event $detail " +
-        "heapMiB=${(r.totalMemory() - r.freeMemory()) / 1048576L} " +
-        "nativeMiB=${android.os.Debug.getNativeHeapAllocatedSize() / 1048576L} " +
-        "gc=${android.os.Debug.getRuntimeStat("art.gc.gc-count") ?: "?"}")
-}
-
 fun String.stripWhitespace(): String {
     if (this.isEmpty()) return this
     val sb = java.lang.StringBuilder(this.length)
@@ -104,8 +92,7 @@ class YoutubeProvider(
 
     private data class ProcessedChipPayload(
         val items: List<SearchResponse>,
-        val nextToken: String?,
-        val chips: LinkedHashMap<String, String> = LinkedHashMap()
+        val nextToken: String?
     )
 
     private data class DirectPageResult(
@@ -434,27 +421,27 @@ class YoutubeProvider(
         }
     }
 
-    private fun appendChipTokens(out: LinkedHashMap<String, String>, source: Any?) {
-        val chips = source as? List<*> ?: return
-        for (chipItem in chips) {
-            val chipMap = (chipItem as? Map<*, *>)
-                ?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
-            val text = getText(chipMap["text"])
-            val token = safeGet(
-                chipMap, "navigationEndpoint", "continuationCommand", "token"
-            ) as? String
-            if (text.isNotBlank() && !token.isNullOrBlank()) out[text] = token
-        }
-    }
-
     private fun extractChipTokens(initialData: Any?): LinkedHashMap<String, String> {
         val out = LinkedHashMap<String, String>()
-        appendChipTokens(out, safeGet(
+        val chipBar = safeGet(
             initialData,
             "contents", "twoColumnBrowseResultsRenderer", "tabs", 0,
             "tabRenderer", "content", "richGridRenderer", "header",
             "feedFilterChipBarRenderer", "contents"
-        ))
+        ) as? List<*> ?: return out
+
+        for (chipItem in chipBar) {
+            val chipMap = (chipItem as? Map<*, *>)
+                ?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
+            val text = getText(chipMap["text"])
+            val token = safeGet(
+                chipMap,
+                "navigationEndpoint", "continuationCommand", "token"
+            ) as? String
+            if (text.isNotBlank() && !token.isNullOrBlank()) {
+                out[text] = token
+            }
+        }
         return out
     }
 
@@ -467,25 +454,52 @@ class YoutubeProvider(
         }
     }
 
-    private suspend fun fetchAndPrepareHomeBootstrap(requestLang: String): HomeBootstrapPayload? =
-        youtubePayloadSemaphore.withPermit {
+    private suspend fun fetchAndPrepareHomeBootstrap(requestLang: String): HomeBootstrapPayload? {
+        return youtubePayloadSemaphore.withPermit {
             currentCoroutineContext().ensureActive()
-            val home = fetchInitialBrowse("FEwhat_to_watch", requestLang = requestLang)
-                ?.takeIf { it.items.isNotEmpty() } ?: return@withPermit null
-            ytProbe("bootstrap_api", "items=${home.items.size} chips=${home.chips.size}")
+            val freshUrl = "$mainUrl/?t=${System.currentTimeMillis()}"
+            val html = app.get(
+                freshUrl,
+                interceptor = ytInterceptor,
+                headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")
+            ).textLarge
+            currentCoroutineContext().ensureActive()
+
+            val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
+                ?: savedApiKey
+                ?: appPrefs?.getString("yt_api_key", null)
+            val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
+                ?: savedVisitorData
+                ?: appPrefs?.getString("yt_visitor_data", null)
+            val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION")
+                ?: savedClientVersion
+                ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
+                ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
+
+            val initialData = extractHomeInitialData(html) ?: return@withPermit null
+
+            val freshChips = extractChipTokens(initialData)
+            val homeResults = mutableListOf<SearchResponse>()
+            val homeSeenIds = mutableSetOf<String>()
+            processRecursive(
+                initialData,
+                homeResults,
+                homeSeenIds,
+                playlistMode = false,
+                isSearch = false
+            )
+            val homeNextToken = findTokenRecursive(initialData)
+
             HomeBootstrapPayload(
-                apiKey = savedApiKey?.takeIf { it.isNotBlank() }
-                    ?: appPrefs?.getString("yt_api_key", null)?.takeIf { it.isNotBlank() }
-                    ?: YoutubeExtractor.DESKTOP_API_KEY,
-                clientVersion = savedClientVersion
-                    ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
-                    ?: YoutubeUtils.DEFAULT_CLIENT_VERSION,
-                visitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null),
-                chips = home.chips,
-                homeItems = home.items,
-                homeNextToken = home.nextToken
+                apiKey = apiKey ?: return@withPermit null,
+                clientVersion = clientVersion,
+                visitorData = visitorData,
+                chips = freshChips,
+                homeItems = homeResults.toList(),
+                homeNextToken = homeNextToken
             )
         }
+    }
 
     private suspend fun refreshChipBootstrap(requestLang: String): ChipBootstrapSnapshot? {
         val now = System.currentTimeMillis()
@@ -496,7 +510,7 @@ class YoutubeProvider(
 
         try {
             val payload = fetchAndPrepareHomeBootstrap(requestLang)
-            if (payload == null || payload.apiKey.isBlank()) {
+            if (payload == null || payload.apiKey.isBlank() || payload.chips.isEmpty()) {
                 Log.w(
                     "YoutubeUtils",
                     "[CHIP_BOOTSTRAP] REFRESH_INVALID payload=${payload != null} chips=${payload?.chips?.size ?: 0}; fallback=${fallback != null}"
@@ -915,8 +929,6 @@ class YoutubeProvider(
     private data class StreamingChipState(
         val results: MutableList<SearchResponse> = mutableListOf(),
         val seenIds: MutableSet<String> = mutableSetOf(),
-        val chips: LinkedHashMap<String, String> = LinkedHashMap(),
-        val playlistId: String? = null,
         var pageLevelNextToken: String? = null,
         var processedAny: Boolean = false
     )
@@ -947,8 +959,7 @@ class YoutubeProvider(
             state.results,
             state.seenIds,
             playlistMode = false,
-            isSearch = false,
-            playlistId = state.playlistId
+            isSearch = false
         )
     }
 
@@ -1037,12 +1048,6 @@ class YoutubeProvider(
                         field == "continuationItems" &&
                             parser.currentToken == JsonToken.START_ARRAY ->
                             streamContinuationItems(parser, state)
-
-                        field == "feedFilterChipBarRenderer" &&
-                            parser.currentToken == JsonToken.START_OBJECT -> {
-                            val bar = mapper.readValue(parser, Any::class.java) as? Map<*, *>
-                            appendChipTokens(state.chips, bar?.get("contents"))
-                        }
 
                         field in chipResultRendererKeys ->
                             processStreamedRenderer(field, parser, state)
@@ -1179,9 +1184,9 @@ class YoutubeProvider(
         }
     }
 
-    private fun streamProcessChipResponse(body: String, playlistId: String? = null): ProcessedChipPayload? {
+    private fun streamProcessChipResponse(body: String): ProcessedChipPayload? {
         return try {
-            val state = StreamingChipState(playlistId = playlistId)
+            val state = StreamingChipState()
             mapper.factory.createParser(body).use { parser ->
                 if (parser.nextToken() != JsonToken.START_OBJECT) return@use null
 
@@ -1227,7 +1232,7 @@ class YoutubeProvider(
                 }
             }
 
-            ProcessedChipPayload(state.results, nextToken, state.chips)
+            ProcessedChipPayload(state.results, nextToken)
         } catch (e: Exception) {
             Log.e(
                 "YoutubeUtils",
@@ -1300,85 +1305,6 @@ class YoutubeProvider(
             currentCoroutineContext().ensureActive()
             fetchAndParseChipPayload(bootstrap, token, requestKey, page)
         }
-    }
-
-
-    // Initial browse reuses the renderer-streaming parser without full JSON Maps.
-    // API failure is reported to the caller; catalog HTML is never fetched.
-    private suspend fun fetchInitialBrowse(
-        browseId: String?,
-        params: String? = null,
-        resolveUrl: String? = null,
-        requestLang: String = lang
-    ): ProcessedChipPayload? {
-        val apiKey = savedApiKey?.takeIf { it.isNotBlank() }
-            ?: appPrefs?.getString("yt_api_key", null)?.takeIf { it.isNotBlank() }
-            ?: YoutubeExtractor.DESKTOP_API_KEY
-        val clientVersion = savedClientVersion
-            ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
-            ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
-        val visitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
-        val client = linkedMapOf<String, Any>(
-            "clientName" to "WEB",
-            "clientVersion" to clientVersion,
-            "hl" to requestLang,
-            "platform" to "DESKTOP"
-        )
-        if (!visitorData.isNullOrBlank()) client["visitorData"] = visitorData
-        val context = mapOf("client" to client)
-        val headers = mapOf(
-            "Origin" to mainUrl, "Referer" to mainUrl,
-            "X-Youtube-Client-Name" to "WEB",
-            "X-Youtube-Client-Version" to clientVersion
-        )
-        var resolvedParams: String? = null
-        val resolved = if (resolveUrl != null) {
-            val response = app.post(
-                "$mainUrl/youtubei/v1/navigation/resolve_url?key=$apiKey",
-                json = mapOf("context" to context, "url" to resolveUrl),
-                headers = headers, interceptor = ytInterceptor
-            ).parsedSafe<Map<String, Any>>() ?: return null
-            val endpoint = safeGet(response, "endpoint", "browseEndpoint")
-            resolvedParams = safeGet(endpoint, "params") as? String
-            safeGet(endpoint, "browseId") as? String
-        } else browseId
-        if (resolved.isNullOrBlank()) return null
-
-        val payload = linkedMapOf<String, Any>(
-            "context" to context, "browseId" to resolved
-        )
-        val selectedParams = resolvedParams ?: params
-        if (!selectedParams.isNullOrBlank()) payload["params"] = selectedParams
-        val response = app.post(
-            "$mainUrl/youtubei/v1/browse?key=$apiKey",
-            json = payload, headers = headers, interceptor = ytInterceptor
-        )
-        currentCoroutineContext().ensureActive()
-        val body = response.textLarge
-        currentCoroutineContext().ensureActive()
-        return if (body.isBlank()) null else streamProcessChipResponse(
-            body, if (resolved.startsWith("VL")) resolved.removePrefix("VL") else null
-        )
-    }
-
-    // Resolve channel tabs through the API; never download catalog HTML.
-    private fun directBrowseTarget(url: String): Triple<String?, String?, String?>? {
-        if (url == "Home") return Triple("FEwhat_to_watch", null, null)
-        val uri = android.net.Uri.parse(url)
-        if (uri.scheme !in listOf("https", "http") ||
-            uri.host?.lowercase() !in setOf("youtube.com", "www.youtube.com", "m.youtube.com")) return null
-        val path = uri.path.orEmpty()
-        val listId = uri.getQueryParameter("list")?.takeIf { it.isNotBlank() }
-        if (listId != null && (path == "/playlist" || path == "/watch")) {
-            return Triple("VL$listId", null, null)
-        }
-        val videoParams = if (path.endsWith("/videos")) "EgZ2aWRlb3PyBgQKAjoA" else null
-        val channelId = if (path.startsWith("/channel/") && !path.substringAfter("/channel/").contains("/")) {
-            path.substringAfter("/channel/").takeIf { it.startsWith("UC") }
-        } else null
-        if (channelId != null) return Triple(channelId, null, null)
-        // resolve_url preserves channel tabs (@handle/videos, /shorts, etc.) where available.
-        return Triple(null, videoParams, url)
     }
 
     private suspend fun awaitStartupDirectRequestSettle() {
@@ -2380,6 +2306,10 @@ class YoutubeProvider(
         }
     }
 
+    private fun extractHomeInitialData(html: String): Map<String, Any>? {
+        return extractYtInitialDataInternal(html, setOf("contents"))
+    }
+
     private fun findTokenRecursive(data: Any?): String? {
         if (data is Map<*, *>) {
             val renderer = data["continuationItemRenderer"] as? Map<*, *>
@@ -2567,60 +2497,93 @@ class YoutubeProvider(
             directMainPageCache[cacheKey]?.takeIf {
                 System.currentTimeMillis() - it.savedAt in 0L..PREPARED_HOME_REUSE_MS
             }?.result
-        }?.let {
-            ytProbe("catalog_hit", "key=${Integer.toHexString(cacheKey.hashCode())}")
-            return it
-        }
-        ytProbe("catalog_miss", "key=${Integer.toHexString(cacheKey.hashCode())}")
+        }?.let { return it }
         awaitStartupDirectRequestSettle()
         return youtubePayloadSemaphore.withPermit {
             currentCoroutineContext().ensureActive()
-            // A waiting request can reuse a result published by the previous owner.
-            synchronized(directMainPageLock) {
-                directMainPageCache[cacheKey]?.takeIf {
-                    System.currentTimeMillis() - it.savedAt in 0L..PREPARED_HOME_REUSE_MS
-                }?.result
-            }?.let {
-                ytProbe("catalog_hit_after_wait", "key=${Integer.toHexString(cacheKey.hashCode())}")
-                return@withPermit it
+            val html = app.get(
+                targetUrl,
+                interceptor = ytInterceptor,
+                headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")
+            ).textLarge
+            currentCoroutineContext().ensureActive()
+
+            savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
+            savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
+            savedClientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION")
+                ?: savedClientVersion
+                ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
+
+            if (!savedApiKey.isNullOrBlank()) {
+                appPrefs?.edit()
+                    ?.putString("yt_api_key", savedApiKey)
+                    ?.putString("yt_visitor_data", savedVisitorData)
+                    ?.putString("yt_client_version", savedClientVersion)
+                    ?.apply()
             }
-            val browseTarget = directBrowseTarget(requestData)
-            val apiResult = if (browseTarget == null) null else try {
-                fetchInitialBrowse(browseTarget.first, browseTarget.second, browseTarget.third)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                ytProbe("catalog_api_error", "kind=${e.javaClass.simpleName}")
-                null
+
+            val initialData = if (requestData == "Home") {
+                extractHomeInitialData(html)
+            } else {
+                extractYtInitialData(html)
+            } ?: return@withPermit null
+
+            if (requestData == "Home") {
+                val chips = extractChipTokens(initialData)
+                if (chips.isNotEmpty()) {
+                    mergeAndSaveChips(chips.map { CachedChip(it.key, it.value) })
+                    publishChipBootstrapFromHome(
+                        savedApiKey,
+                        savedClientVersion,
+                        savedVisitorData,
+                        chips
+                    )
+                }
             }
-            if (apiResult == null || apiResult.items.isEmpty()) {
-                ytProbe("catalog_api_unavailable", "key=${Integer.toHexString(cacheKey.hashCode())}")
-                return@withPermit null
-            }
-            val result = DirectPageResult(apiResult.items, apiResult.nextToken)
-            ytProbe("catalog_api", "key=${Integer.toHexString(cacheKey.hashCode())} items=${result.items.size}")
-            if (result.items.size <= 80) {
+
+            val playlistId = if (requestData.contains("list=")) {
+                requestData.substringAfter("list=", "").substringBefore("&")
+            } else null
+
+            val directResults = mutableListOf<SearchResponse>()
+            val directSeenIds = mutableSetOf<String>()
+            processRecursive(
+                initialData,
+                directResults,
+                directSeenIds,
+                playlistMode = false,
+                isSearch = false,
+                playlistId = playlistId
+            )
+            val next = findTokenRecursive(initialData)
+
+            val result = DirectPageResult(directResults.toList(), next)
+            if (result.items.isNotEmpty() && result.items.size <= 200) {
                 synchronized(directMainPageLock) {
                     directMainPageCache[cacheKey] = CachedDirectMainPage(result, System.currentTimeMillis())
+                    // Keep the total retained item count within the original 8 x 80 limit.
+                    var retained = directMainPageCache.values.sumOf { it.result.items.size }
+                    val entries = directMainPageCache.entries.iterator()
+                    while (retained > 640 && entries.hasNext()) {
+                        val oldest = entries.next()
+                        retained -= oldest.value.result.items.size
+                        entries.remove()
+                    }
                 }
             }
             if (requestData == "Home") {
                 sharedPreparedHomePage = PreparedHomePage(
-                    language = lang, items = result.items, nextToken = result.nextToken,
+                    language = lang,
+                    items = result.items,
+                    nextToken = result.nextToken,
                     createdAtMs = System.currentTimeMillis()
                 )
-                if (apiResult.chips.isNotEmpty()) {
-                    mergeAndSaveChips(apiResult.chips.map { CachedChip(it.key, it.value) })
-                }
             }
             result
-
         }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val homeStarted = android.os.SystemClock.elapsedRealtime()
-        ytProbe("home_start", "page=$page key=${Integer.toHexString(request.data.hashCode())}")
         val rawRequestData = request.data
         val requestData = YoutubeUtils.urlDecode(rawRequestData)
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
@@ -2721,11 +2684,9 @@ class YoutubeProvider(
                         getFreshPreparedHomePage()
                     }
                     if (prepared != null) {
-                        ytProbe("prepared_home_hit", "items=${prepared.items.size}")
                         results.addAll(prepared.items)
                         nextContinuation = prepared.nextToken
                     } else {
-                        ytProbe("prepared_home_miss")
                         val direct = loadDirectPage1(requestData)
                         if (direct != null) {
                             results.addAll(direct.items)
@@ -2743,9 +2704,7 @@ class YoutubeProvider(
                 var tokenToUse = getSavedContinuationToken(requestData)
 
                 if (!tokenToUse.isNullOrBlank() && results.isEmpty()) {
-                    val apiKey = savedApiKey?.takeIf { it.isNotBlank() }
-                        ?: appPrefs?.getString("yt_api_key", null)?.takeIf { it.isNotBlank() }
-                        ?: YoutubeExtractor.DESKTOP_API_KEY
+                    val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val cVersion = savedClientVersion
                         ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
                         ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
@@ -2766,18 +2725,34 @@ class YoutubeProvider(
                         "continuation" to tokenToUse
                     )
                     val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
-                    val body = app.post(
-                        apiUrl, json = payload, headers = headers,
+                    val response = app.post(
+                        apiUrl,
+                        json = payload,
+                        headers = headers,
                         interceptor = ytInterceptor
-                    ).textLarge
+                    ).parsedSafe<Map<String, Any>>()
                     currentCoroutineContext().ensureActive()
-                    val playlistId = if (requestData.contains("list=")) {
-                        requestData.substringAfter("list=", "").substringBefore("&")
-                    } else null
-                    val processed = streamProcessChipResponse(body, playlistId)
-                    if (processed != null) {
-                        results.addAll(processed.items)
-                        nextContinuation = processed.nextToken
+
+                    if (response != null) {
+                        val actions = response["onResponseReceivedActions"]
+                            ?: response["onResponseReceivedEndpoints"]
+                            ?: response["onResponseReceivedCommands"]
+                            ?: response["continuationContents"]
+                            ?: response
+
+                        val playlistId = if (requestData.contains("list=")) {
+                            requestData.substringAfter("list=", "").substringBefore("&")
+                        } else null
+
+                        processRecursive(
+                            actions,
+                            results,
+                            seenIds,
+                            playlistMode = false,
+                            isSearch = false,
+                            playlistId = playlistId
+                        )
+                        nextContinuation = findTokenRecursive(response)
                     }
                 }
             }
@@ -2819,8 +2794,6 @@ class YoutubeProvider(
             results.addAll(sorted)
         }
 
-        ytProbe("home_end", "page=$page key=${Integer.toHexString(request.data.hashCode())} " +
-            "items=${results.size} elapsedMs=${android.os.SystemClock.elapsedRealtime() - homeStarted}")
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
 
@@ -3310,13 +3283,8 @@ class YoutubeProvider(
 
     /** One-shot detail cache, valid for the entire playback regardless of duration. */
     override suspend fun load(url: String): LoadResponse {
-        val started = android.os.SystemClock.elapsedRealtime()
-        directPageCache.remove(url)?.let {
-            ytProbe("detail_cache_hit")
-            return it
-        }
-        return try { loadPage(url, direct = false) }
-            finally { ytProbe("detail_html_end", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}") }
+        directPageCache.remove(url)?.let { return it }
+        return loadPage(url, direct = false)
     }
 
     /** Construct the initial player episode list from the home card, with no HTTP. */
@@ -3350,9 +3318,7 @@ class YoutubeProvider(
 
     /** Fetch HTML metadata only after stream links resolve; never block initial playback. */
     internal suspend fun prefetchDirectDetails(url: String): TvSeriesLoadResponse? {
-        val started = android.os.SystemClock.elapsedRealtime()
-        val page = try { loadPage(url, direct = true) }
-            finally { ytProbe("detail_prefetch_end", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}") }
+        val page = loadPage(url, direct = true)
             as? TvSeriesLoadResponse ?: return null
         if (directPageCache.size >= 16) directPageCache.clear()
         directPageCache[url] = page
@@ -3360,11 +3326,8 @@ class YoutubeProvider(
     }
 
     /** HTML-only detail path; initial playback uses quickPlaybackPage(). */
-    internal suspend fun loadForDirectPlayback(url: String): LoadResponse {
-        val started = android.os.SystemClock.elapsedRealtime()
-        return try { loadPage(url, direct = true) }
-            finally { ytProbe("detail_direct_end", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - started}") }
-    }
+    internal suspend fun loadForDirectPlayback(url: String): LoadResponse =
+        loadPage(url, direct = true)
 
     private suspend fun loadPage(url: String, direct: Boolean): LoadResponse {
         if (url.contains("/shorts/")) {
@@ -4118,8 +4081,6 @@ class YoutubeProvider(
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val linksStarted = android.os.SystemClock.elapsedRealtime()
-        ytProbe("links_start")
         val videoId = YoutubeUtils.extractYoutubeId(data) ?: data
         val isShort = data.contains("/shorts/")
 
@@ -4129,7 +4090,6 @@ class YoutubeProvider(
         try {
             val htmlUrl = if (isShort) "$mainUrl/shorts/$videoId" else fullUrl
             val htmlResponse = app.get(htmlUrl, interceptor = ytInterceptor).text
-            ytProbe("links_player_html", "chars=${htmlResponse.length} elapsedMs=${android.os.SystemClock.elapsedRealtime() - linksStarted}")
             
             val marker1 = "ytInitialPlayerResponse = "
             var startIdx = htmlResponse.indexOf(marker1)
@@ -4182,11 +4142,7 @@ class YoutubeProvider(
             }
         }
 
-        try {
-            com.hsp1020.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
-        } finally {
-            ytProbe("links_end", "elapsedMs=${android.os.SystemClock.elapsedRealtime() - linksStarted}")
-        }
+        com.hsp1020.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
 
         return true
     }                                             
