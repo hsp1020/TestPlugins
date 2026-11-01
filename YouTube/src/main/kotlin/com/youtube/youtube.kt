@@ -106,7 +106,7 @@ class YoutubeProvider(
     )
 
     private val chipCatalogSessions = ConcurrentHashMap<String, ChipCatalogSession>()
-    private val chipBootstrapTtlMs = 60_000L
+    private val chipBootstrapTtlMs = 30 * 60_000L
     private val chipBootstrapStaleFallbackMs = 120_000L
 
     override var mainUrl = "https://www.youtube.com"
@@ -125,13 +125,10 @@ class YoutubeProvider(
         private const val YOUTUBE_PAYLOAD_CONCURRENCY = 5
         private val youtubePayloadSemaphore = Semaphore(YOUTUBE_PAYLOAD_CONCURRENCY)
 
-        private const val PREPARED_HOME_REUSE_MS = 60_000L
+        private const val PREPARED_HOME_REUSE_MS = 30 * 60_000L
         private data class CachedDirectMainPage(val result: DirectPageResult, val savedAt: Long)
         private val directMainPageLock = Any()
-        private val directMainPageCache = object : LinkedHashMap<String, CachedDirectMainPage>(8, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CachedDirectMainPage>?): Boolean =
-                size > 8
-        }
+        private val directMainPageCache = LinkedHashMap<String, CachedDirectMainPage>(8, 0.75f, true)
 
         private const val STARTUP_DIRECT_REQUEST_SETTLE_MS = 200L
         private val startupGateLock = Any()
@@ -554,6 +551,7 @@ class YoutubeProvider(
                 nextToken = payload.homeNextToken,
                 createdAtMs = createdAt
             )
+            logHomeCache("prepared_store", "$requestLang|$mainUrl", payload.homeItems.size)
             sharedChipBootstrapSnapshot = snapshot
             return snapshot
         } catch (e: CancellationException) {
@@ -2418,6 +2416,19 @@ class YoutubeProvider(
                     }
                 }
 
+                val activeKeys = customSections.asSequence()
+                    .filter { it.isEnabled }
+                    .map { section ->
+                        val url = YoutubeUtils.urlDecode(section.url)
+                        "$currentLang|${if (url == "Home") mainUrl else url}"
+                    }.toSet()
+                val removed = synchronized(directMainPageLock) {
+                    val originalSize = directMainPageCache.size
+                    directMainPageCache.keys.retainAll(activeKeys)
+                    originalSize - directMainPageCache.size
+                }
+                if (removed > 0) logHomeCache("settings_prune", "$currentLang|home", removed)
+
                 sharedLastLang = currentLang
                 sharedLastCustomSectionsJson = currentCustomSectionsJson
                 sharedCachedMainPageList = list
@@ -2482,6 +2493,54 @@ class YoutubeProvider(
         savedContinuationToken = null
     }
 
+    private fun homeCacheKey(requestData: String): String =
+        "$lang|${if (requestData == "Home") mainUrl else requestData}"
+
+    // Event-only diagnostics: sampled process memory, not the cache's retained size.
+    private fun logHomeCache(event: String, cacheKey: String, items: Int, elapsedMs: Long = 0L) {
+        val (catalogs, retainedItems) = synchronized(directMainPageLock) {
+            directMainPageCache.size to directMainPageCache.values.sumOf { it.result.items.size }
+        }
+        val runtime = Runtime.getRuntime()
+        val preparedItems = getFreshPreparedHomePage()?.items?.size ?: 0
+        Log.i("YouTubeHomeCache",
+            "event=$event key=${Integer.toHexString(cacheKey.hashCode())} " +
+                "items=$items catalogs=$catalogs retainedItems=$retainedItems preparedItems=$preparedItems " +
+                "heapMiB=${(runtime.totalMemory() - runtime.freeMemory()) / 1048576L} " +
+                "heapLimitMiB=${runtime.maxMemory() / 1048576L} " +
+                "nativeMiB=${android.os.Debug.getNativeHeapAllocatedSize() / 1048576L} " +
+                "gc=${android.os.Debug.getRuntimeStat("art.gc.gc-count")} elapsedMs=$elapsedMs")
+    }
+
+    private fun getCachedHomePage(cacheKey: String): DirectPageResult? {
+        val now = System.currentTimeMillis()
+        val result = synchronized(directMainPageLock) {
+            val entry = directMainPageCache[cacheKey]
+            if (entry != null && now - entry.savedAt in 0L..PREPARED_HOME_REUSE_MS) {
+                entry.result
+            } else {
+                if (entry != null) directMainPageCache.remove(cacheKey)
+                null
+            }
+        }
+        logHomeCache(if (result != null) "hit" else "miss", cacheKey, result?.items?.size ?: 0)
+        return result
+    }
+
+    private fun storeCachedHomePage(cacheKey: String, result: DirectPageResult, elapsedMs: Long) {
+        if (result.items.isEmpty()) return
+        val now = System.currentTimeMillis()
+        synchronized(directMainPageLock) {
+            val entries = directMainPageCache.entries.iterator()
+            while (entries.hasNext()) {
+                val entry = entries.next()
+                if (now - entry.value.savedAt !in 0L..PREPARED_HOME_REUSE_MS) entries.remove()
+            }
+            directMainPageCache[cacheKey] = CachedDirectMainPage(result, now)
+        }
+        logHomeCache("store", cacheKey, result.items.size, elapsedMs)
+    }
+
     private fun getFreshPreparedHomePage(): PreparedHomePage? {
         val prepared = sharedPreparedHomePage ?: return null
         val age = System.currentTimeMillis() - prepared.createdAtMs
@@ -2492,15 +2551,12 @@ class YoutubeProvider(
 
     private suspend fun loadDirectPage1(requestData: String): DirectPageResult? {
         val targetUrl = if (requestData == "Home") mainUrl else requestData
-        val cacheKey = "$lang|$targetUrl"
-        synchronized(directMainPageLock) {
-            directMainPageCache[cacheKey]?.takeIf {
-                System.currentTimeMillis() - it.savedAt in 0L..PREPARED_HOME_REUSE_MS
-            }?.result
-        }?.let { return it }
+        val cacheKey = homeCacheKey(requestData)
+        getCachedHomePage(cacheKey)?.let { return it }
         awaitStartupDirectRequestSettle()
         return youtubePayloadSemaphore.withPermit {
             currentCoroutineContext().ensureActive()
+            val startedAt = android.os.SystemClock.elapsedRealtime()
             val html = app.get(
                 targetUrl,
                 interceptor = ytInterceptor,
@@ -2558,19 +2614,9 @@ class YoutubeProvider(
             val next = findTokenRecursive(initialData)
 
             val result = DirectPageResult(directResults.toList(), next)
-            if (result.items.isNotEmpty() && result.items.size <= 320) {
-                synchronized(directMainPageLock) {
-                    directMainPageCache[cacheKey] = CachedDirectMainPage(result, System.currentTimeMillis())
-                    // Keep the total retained item count within the original 8 x 80 limit.
-                    var retained = directMainPageCache.values.sumOf { it.result.items.size }
-                    val entries = directMainPageCache.entries.iterator()
-                    while (retained > 640 && entries.hasNext()) {
-                        val oldest = entries.next()
-                        retained -= oldest.value.result.items.size
-                        entries.remove()
-                    }
-                }
-            }
+            storeCachedHomePage(
+                cacheKey, result, android.os.SystemClock.elapsedRealtime() - startedAt
+            )
             if (requestData == "Home") {
                 sharedPreparedHomePage = PreparedHomePage(
                     language = lang,
@@ -2599,53 +2645,75 @@ class YoutubeProvider(
         try {
             if (isChip) {
                 if (page == 1) {
-                    val bootstrap = ensureChipBootstrap()
-                    if (bootstrap == null) {
-                        Log.w("YoutubeUtils", "[CHIP] page=1 bootstrap unavailable key=$requestData")
-                    } else {
-                        val persistedChips = readPersistedChips()
-                        val chipName: String?
-                        val tokenToUse: String?
-
-                        if (requestData.startsWith("chip_name_")) {
-                            chipName = requestData.removePrefix("chip_name_")
-                            val freshToken = bootstrap.chips[chipName]
-                            val persistedToken = persistedChips.firstOrNull { it.name == chipName }?.token
-                            tokenToUse = freshToken ?: persistedToken
-                        } else {
-                            val legacyToken = requestData.removePrefix("chip_")
-                            chipName = persistedChips.firstOrNull { it.token == legacyToken }?.name
-                            val freshToken = chipName?.let { bootstrap.chips[it] }
-                            tokenToUse = freshToken ?: legacyToken
+                    val cached = getCachedHomePage(homeCacheKey(requestData))
+                    if (cached != null) {
+                        results.addAll(cached.items)
+                        nextContinuation = cached.nextToken
+                        if (!cached.nextToken.isNullOrBlank()) {
+                            val session = chipCatalogSessions[requestData]
+                            if (session == null || session.bootstrap.language != lang) {
+                                ensureChipBootstrap()?.let { bootstrap ->
+                                    val restored = ChipCatalogSession(bootstrap)
+                                    restored.pageTokens[2] = cached.nextToken
+                                    chipCatalogSessions[requestData] = restored
+                                }
+                            }
                         }
-
-                        if (tokenToUse.isNullOrBlank()) {
-                            Log.w(
-                                "YoutubeUtils",
-                                "[CHIP] page=1 token missing key=$requestData name=${chipName ?: "unknown"} freshChips=${bootstrap.chips.size} persisted=${persistedChips.size}"
-                            )
+                    } else {
+                        val chipStartedAt = android.os.SystemClock.elapsedRealtime()
+                        val bootstrap = ensureChipBootstrap()
+                        if (bootstrap == null) {
+                            Log.w("YoutubeUtils", "[CHIP] page=1 bootstrap unavailable key=$requestData")
                         } else {
-                            val browse = executeChipBrowseAndProcess(bootstrap, tokenToUse, requestData, 1)
-                            if (browse != null) {
-                                results.addAll(browse.items)
-                                val nextToken = browse.nextToken
-                                nextContinuation = nextToken
-                                if (results.isEmpty()) {
-                                    Log.w("YoutubeUtils", "[CHIP] NO_ITEMS page=1 key=$requestData")
-                                }
+                            val persistedChips = readPersistedChips()
+                            val chipName: String?
+                            val tokenToUse: String?
 
-                                if (results.isNotEmpty() || !nextToken.isNullOrBlank()) {
-                                    val newSession = ChipCatalogSession(bootstrap)
-                                    if (!nextToken.isNullOrBlank()) {
-                                        newSession.pageTokens[2] = nextToken
-                                    }
-                                    chipCatalogSessions[requestData] = newSession
-                                } else {
-                                    Log.w("YoutubeUtils", "[CHIP] SESSION_NOT_COMMITTED page=1 key=$requestData")
-                                }
-
+                            if (requestData.startsWith("chip_name_")) {
+                                chipName = requestData.removePrefix("chip_name_")
+                                val freshToken = bootstrap.chips[chipName]
+                                val persistedToken = persistedChips.firstOrNull { it.name == chipName }?.token
+                                tokenToUse = freshToken ?: persistedToken
                             } else {
-                                Log.w("YoutubeUtils", "[CHIP] BROWSE_EMPTY_RESPONSE page=1 key=$requestData")
+                                val legacyToken = requestData.removePrefix("chip_")
+                                chipName = persistedChips.firstOrNull { it.token == legacyToken }?.name
+                                val freshToken = chipName?.let { bootstrap.chips[it] }
+                                tokenToUse = freshToken ?: legacyToken
+                            }
+
+                            if (tokenToUse.isNullOrBlank()) {
+                                Log.w(
+                                    "YoutubeUtils",
+                                    "[CHIP] page=1 token missing key=$requestData name=${chipName ?: "unknown"} freshChips=${bootstrap.chips.size} persisted=${persistedChips.size}"
+                                )
+                            } else {
+                                val browse = executeChipBrowseAndProcess(bootstrap, tokenToUse, requestData, 1)
+                                if (browse != null) {
+                                    results.addAll(browse.items)
+                                    val nextToken = browse.nextToken
+                                    nextContinuation = nextToken
+                                    if (results.isEmpty()) {
+                                        Log.w("YoutubeUtils", "[CHIP] NO_ITEMS page=1 key=$requestData")
+                                    }
+
+                                    if (results.isNotEmpty() || !nextToken.isNullOrBlank()) {
+                                        val newSession = ChipCatalogSession(bootstrap)
+                                        if (!nextToken.isNullOrBlank()) {
+                                            newSession.pageTokens[2] = nextToken
+                                        }
+                                        chipCatalogSessions[requestData] = newSession
+                                        storeCachedHomePage(
+                                            homeCacheKey(requestData),
+                                            DirectPageResult(results.toList(), nextToken),
+                                            android.os.SystemClock.elapsedRealtime() - chipStartedAt
+                                        )
+                                    } else {
+                                        Log.w("YoutubeUtils", "[CHIP] SESSION_NOT_COMMITTED page=1 key=$requestData")
+                                    }
+
+                                } else {
+                                    Log.w("YoutubeUtils", "[CHIP] BROWSE_EMPTY_RESPONSE page=1 key=$requestData")
+                                }
                             }
                         }
                     }
@@ -2678,19 +2746,29 @@ class YoutubeProvider(
                 }
             } else if (page == 1) {
                 if (requestData == "Home") {
-                    val prepared = getFreshPreparedHomePage() ?: run {
-                        ensureChipBootstrap()
-                        currentCoroutineContext().ensureActive()
-                        getFreshPreparedHomePage()
-                    }
+                    val prepared = getFreshPreparedHomePage()
+                    val cached = if (prepared == null) getCachedHomePage(homeCacheKey(requestData)) else null
                     if (prepared != null) {
                         results.addAll(prepared.items)
                         nextContinuation = prepared.nextToken
+                        logHomeCache("prepared_hit", homeCacheKey(requestData), prepared.items.size)
+                    } else if (cached != null) {
+                        results.addAll(cached.items)
+                        nextContinuation = cached.nextToken
                     } else {
-                        val direct = loadDirectPage1(requestData)
-                        if (direct != null) {
-                            results.addAll(direct.items)
-                            nextContinuation = direct.nextToken
+                        ensureChipBootstrap()
+                        currentCoroutineContext().ensureActive()
+                        val refreshed = getFreshPreparedHomePage()
+                        if (refreshed != null) {
+                            results.addAll(refreshed.items)
+                            nextContinuation = refreshed.nextToken
+                            logHomeCache("prepared_hit", homeCacheKey(requestData), refreshed.items.size)
+                        } else {
+                            val direct = loadDirectPage1(requestData)
+                            if (direct != null) {
+                                results.addAll(direct.items)
+                                nextContinuation = direct.nextToken
+                            }
                         }
                     }
                 } else {
