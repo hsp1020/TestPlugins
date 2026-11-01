@@ -464,6 +464,12 @@ class SettingsBottomFragment(
     private fun prepareInput(field: EditText) {
         field.backgroundTintList = null
         field.background = getCardBg()
+        // Keep metadata text flush below its label; background drawable may reset XML padding.
+        when (field.id) {
+            getCachedResId("etTmdbApiKey", "id"),
+            getCachedResId("etHistorySyncUrl", "id") -> field.setPadding(dp(12), 0, dp(12), 0)
+            getCachedResId("etMdbListApiKey", "id") -> field.setPadding(dp(12), 0, dp(60), 0)
+        }
         field.setTextColor(hostContext.colorFromAttribute(HostR.attr.textColor))
         field.setHintTextColor(hostContext.colorFromAttribute(HostR.attr.grayTextColor))
         field.textSize = 14f

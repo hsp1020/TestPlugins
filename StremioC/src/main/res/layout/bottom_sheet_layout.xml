@@ -245,6 +245,7 @@
                     android:layout_height="wrap_content"
                     android:text="TMDB Settings"
                     android:textSize="16sp"
+                        android:includeFontPadding="false"
                     android:textStyle="bold" />
                 <TextView
                     android:layout_width="match_parent"
@@ -253,6 +254,7 @@
                     android:paddingStart="12dp"
                     android:text="TMDB API Key (Required)"
                     android:textSize="12sp"
+                        android:includeFontPadding="false"
                     android:tag="stremioc_secondary" />
                 <FrameLayout
                     android:layout_width="match_parent"
@@ -262,7 +264,9 @@
                         android:id="@+id/etTmdbApiKey"
                         android:layout_width="match_parent"
                         android:layout_height="28dp"
-                        android:layout_gravity="center_vertical"
+                        android:layout_gravity="top"
+                        android:gravity="top|start"
+                        android:includeFontPadding="false"
                         android:hint="Enter TMDb API Key"
                         android:inputType="text"
                         android:singleLine="true"
@@ -334,6 +338,7 @@
                         android:layout_height="wrap_content"
                         android:text="Meta / History Addon"
                         android:textSize="16sp"
+                        android:includeFontPadding="false"
                         android:textStyle="bold" />
                     <TextView
                         android:layout_width="match_parent"
@@ -342,6 +347,7 @@
                         android:paddingStart="12dp"
                         android:text="History and metadata sync, including recommendation posters, for enabled catalogs. (via Aiometadata)"
                         android:textSize="12sp"
+                        android:includeFontPadding="false"
                         android:tag="stremioc_secondary" />
                     <LinearLayout
                         android:layout_width="match_parent"
@@ -357,7 +363,9 @@
                                 android:id="@+id/etHistorySyncUrl"
                                 android:layout_width="match_parent"
                                 android:layout_height="28dp"
-                                android:layout_gravity="center_vertical"
+                                android:layout_gravity="top"
+                                android:gravity="top|start"
+                                android:includeFontPadding="false"
                                 android:hint="Aiometadata URL"
                                 android:inputType="textUri"
                                 android:singleLine="true"
@@ -372,7 +380,10 @@
                             android:id="@+id/btnConfigureHistoryAddon"
                             android:layout_width="48dp"
                             android:layout_height="48dp"
-                            android:padding="12dp"
+                            android:paddingLeft="12dp"
+                            android:paddingRight="12dp"
+                            android:paddingTop="0dp"
+                            android:paddingBottom="24dp"
                             android:scaleType="centerInside"
                             android:contentDescription="Addon settings for Meta / History"
                             android:focusable="true"
@@ -404,6 +415,7 @@
                             android:layout_height="wrap_content"
                             android:text="MDBList Ratings"
                             android:textSize="16sp"
+                        android:includeFontPadding="false"
                             android:textStyle="bold" />
                         <LinearLayout
                             android:id="@+id/layoutMdbList"
@@ -418,6 +430,7 @@
                                 android:text="MDBList API Key"
                                 android:paddingStart="12dp"
                                 android:textSize="12sp"
+                        android:includeFontPadding="false"
                                 android:tag="stremioc_secondary" />
                             <FrameLayout
                                 android:layout_width="match_parent"
@@ -427,7 +440,9 @@
                                     android:id="@+id/etMdbListApiKey"
                                     android:layout_width="match_parent"
                                     android:layout_height="28dp"
-                                    android:layout_gravity="center_vertical"
+                                    android:layout_gravity="top"
+                                    android:gravity="top|start"
+                                    android:includeFontPadding="false"
                                     android:hint="Enter MdbList API Key"
                                     android:inputType="textPassword"
                                     android:singleLine="true"
@@ -442,6 +457,7 @@
                                     android:layout_width="48dp"
                                     android:layout_height="48dp"
                                     android:layout_gravity="end|center_vertical"
+                                    android:paddingBottom="24dp"
                                     android:scaleType="center"
                                     android:focusable="true"
                                     android:contentDescription="Show MDBList API key"
