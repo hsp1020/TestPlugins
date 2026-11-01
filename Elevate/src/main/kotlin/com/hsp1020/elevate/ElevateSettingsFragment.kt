@@ -30,6 +30,8 @@ internal enum class ElevateFeature(
         "Repair stale Home cards when switching providers."),
     ORIGINAL_THUMBNAIL_RATIOS("Home & Library", "Original Thumbnail Ratios",
         "Preserve landscape thumbnails in Search and Continue Watching; leave YouTube and portrait posters unchanged."),
+    EXTERNAL_DOWNLOADS("Home & Library", "External Downloads",
+        "Send episodes to selected apps and register downloaded files in CloudStream."),
     LIBRARY_POSTERS("Home & Library", "Custom Library Posters",
         "Replace library covers via RPDB, XRDB, OPDB, AIORatings, TOP Posters or EasyRatingsDB."),
     EPISODE_PROGRESS("Home & Library", "Episode Progress Indicators",
@@ -202,21 +204,33 @@ class ElevateSettingsFragment : DialogFragment() {
                         }
                     }
                 } else null
+                val externalControls = if (feature == ElevateFeature.EXTERNAL_DOWNLOADS) {
+                    TextView(ctx).apply {
+                        text = "Manage Downloaders / Import Files"
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                        setPadding(dp(14), dp(10), dp(14), dp(10))
+                        setOnClickListener { ExternalDownloadDialog.manage(childFragmentManager) }
+                    }
+                } else null
                 row.addView(SwitchCompat(ctx).apply {
                     isChecked = preferences.getBoolean(feature.name, ElevateFeaturePrefs.defaultEnabled(feature))
                     contentDescription = feature.label
                     posterControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     skipControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
+                    externalControls?.visibility = if (isChecked) android.view.View.VISIBLE else android.view.View.GONE
                     setOnCheckedChangeListener { _, checked ->
                         preferences.edit().putBoolean(feature.name, checked).apply()
                         posterControls?.visibility =
                             if (checked) android.view.View.VISIBLE else android.view.View.GONE
                         skipControls?.visibility =
                             if (checked) android.view.View.VISIBLE else android.view.View.GONE
+                        externalControls?.visibility =
+                            if (checked) android.view.View.VISIBLE else android.view.View.GONE
                     }
                 }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = dp(12) })
                 content.addView(row)
+                externalControls?.let { content.addView(it) }
                 skipControls?.let { content.addView(it) }
                 posterControls?.let { container ->
                     savePosterSettings = LibraryPosterPrefs.controls(ctx, container, ::dp)

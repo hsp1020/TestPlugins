@@ -70,6 +70,7 @@ class ElevatePlugin : Plugin() {
     private var hook: NativeDetailSearchHook? = null
     private var pipSubtitles: PipSubtitleLifecycle? = null
     private var pipLibrary: PipLibraryNavigation? = null
+    private var externalDownloaderLifecycle: ExternalDownloaderLifecycle? = null
     private var episodeProgress: EpisodeProgressHook? = null
     private var subtitleRetry: SubtitleRefererRetry? = null
     private var homeRecyclerGuard: HomeRecyclerCacheGuard? = null
@@ -99,6 +100,7 @@ class ElevatePlugin : Plugin() {
     override fun load(context: Context) {
         val application = context.applicationContext as? Application ?: return
         val token = generation.incrementAndGet()
+        registerVideoClickAction(ExternalDownloadAction())
         openSettings = { ctx ->
             (ctx as? FragmentActivity)?.takeUnless { it.isFinishing || it.isDestroyed }?.let { host ->
                 if (host.supportFragmentManager.findFragmentByTag("ElevateSettings") == null) {
@@ -153,6 +155,14 @@ class ElevatePlugin : Plugin() {
     private fun syncFeatures() {
         val application = app ?: run {
             return
+        }
+        if (enabled(ElevateFeature.EXTERNAL_DOWNLOADS)) {
+            if (externalDownloaderLifecycle == null) {
+                externalDownloaderLifecycle = ExternalDownloaderLifecycle(application).also { it.start() }
+            }
+        } else {
+            externalDownloaderLifecycle?.stop()
+            externalDownloaderLifecycle = null
         }
         if (enabled(ElevateFeature.PIP_LIBRARY_BROWSE)) {
             if (pipLibrary == null) pipLibrary = PipLibraryNavigation(application)
@@ -349,6 +359,8 @@ class ElevatePlugin : Plugin() {
         hook = null
         pipLibrary?.stop()
         pipLibrary = null
+        externalDownloaderLifecycle?.stop()
+        externalDownloaderLifecycle = null
         pipSubtitles?.stop()
         pipSubtitles = null
         episodeProgress?.stop()

@@ -10,6 +10,7 @@ cloudstream {
 
 dependencies {
     compileOnly("io.coil-kt.coil3:coil:3.3.0")
+    compileOnly("com.github.LagradOst:SafeFile:0.0.8")
     compileOnly("androidx.navigation:navigation-common:2.9.8")
     compileOnly("androidx.navigation:navigation-fragment:2.9.8")
     compileOnly("androidx.media3:media3-ui:1.9.3")
