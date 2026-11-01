@@ -147,6 +147,7 @@ internal class ElevatePlayerPanel(
     })
     private var pendingSubtitleUrl: String? = null
     private var pendingSubtitleInstance = -1
+    private var resumeAfterSubtitleReloadInstance: Int? = null
     private val list = object : ListView(ctx) {
         override fun dispatchTouchEvent(event: MotionEvent): Boolean {
             if (event.actionMasked == MotionEvent.ACTION_DOWN) {
@@ -655,6 +656,19 @@ internal class ElevatePlayerPanel(
     }
     // Only subtitle cue events update the sync list; no polling.
     private var cuePlayer: Player? = null
+    private fun resumeSubtitleReloadIfReady() {
+        val instance = resumeAfterSubtitleReloadInstance ?: return
+        if (vm.state.instance != instance || fragment.view !== root || !fragment.isResumed) {
+            resumeAfterSubtitleReloadInstance = null
+            return
+        }
+        val player = fragment.playerView?.player ?: return
+        if (player !== cuePlayer || player.playbackState != Player.STATE_READY) return
+        resumeAfterSubtitleReloadInstance = null
+        if (!fragment.player.getIsPlaying()) {
+            fragment.player.handleEvent(CSPlayerEvent.Play, PlayerEventSource.UI)
+        }
+    }
     private val cueListener = java.lang.reflect.Proxy.newProxyInstance(
         Player.Listener::class.java.classLoader, arrayOf(Player.Listener::class.java)
     ) { proxy, method, args ->
@@ -676,10 +690,14 @@ internal class ElevatePlayerPanel(
                 if (inSync) root.post { if (inSync) updateSyncCues() }
                 if (tab == Tab.SUBTITLES && !inSync)
                     root.post {
-                        if (tab == Tab.SUBTITLES && !inSync) {
-                            renderSubtitles()
-                        }
+                        if (tab == Tab.SUBTITLES && !inSync) renderSubtitles()
+                        resumeSubtitleReloadIfReady()
                     }
+                null
+            }
+            "onPlaybackStateChanged" -> {
+                if (resumeAfterSubtitleReloadInstance != null)
+                    root.post { resumeSubtitleReloadIfReady() }
                 null
             }
             "equals" -> proxy === args?.getOrNull(0)
@@ -695,6 +713,8 @@ internal class ElevatePlayerPanel(
         previous?.removeListener(cueListener)
         cuePlayer = next
         next?.addListener(cueListener)
+        if (resumeAfterSubtitleReloadInstance != null)
+            root.post { resumeSubtitleReloadIfReady() }
     }
     private val touches = ArrayList<View>()
     private val linksChanged = Observer<VideoLive<Set<VideoLink>>> { update ->
@@ -858,6 +878,7 @@ internal class ElevatePlayerPanel(
         importedUrls.clear()
         importedSubtitles.clear()
         resumeAfterFileImport = false
+        resumeAfterSubtitleReloadInstance = null
         importInstance = -1
         ElevateSubtitleRefreshHook.active()?.setPanelListener(null)
         observeCuePlayer(false)
@@ -1180,6 +1201,8 @@ internal class ElevatePlayerPanel(
         browsingSubtitleGroup = false
         beforeImport = null
         resumeAfterFileImport = false
+        resumeAfterSubtitleReloadInstance = null
+        val wasPlaying = fragment.player.getIsPlaying()
         onManualSubtitle(sub)
         pendingSubtitleUrl = sub?.url
         pendingSubtitleInstance = vm.state.instance
@@ -1189,12 +1212,16 @@ internal class ElevatePlayerPanel(
             ).apply { isAccessible = true }.invoke(fragment, sub, true) as? Boolean == true
             if (requiresReload) {
                 currentLink()?.let { link ->
+                    if (wasPlaying) resumeAfterSubtitleReloadInstance = vm.state.instance
                     GeneratorPlayer::class.java.getDeclaredMethod(
                         "loadLink", Pair::class.java, Boolean::class.javaPrimitiveType!!
                     ).apply { isAccessible = true }.invoke(fragment, link, true)
+                    // Native reload replaces Media3 Player; transfer our existing listener.
+                    observeCuePlayer(tab == Tab.SUBTITLES)
                 }
             }
         }.onFailure {
+            resumeAfterSubtitleReloadInstance = null
             pendingSubtitleUrl = null
             android.util.Log.w("ElevatePanelSelect", "Subtitle selection failed", it)
         }
@@ -1302,7 +1329,6 @@ internal class ElevatePlayerPanel(
 
     private fun renderSubtitleOptions() {
         val current = visibleSubtitleUrl()
-        val active = fragment.player.getCurrentPreferredSubtitle()?.url
         val selected = subtitleGroups.getOrNull(selectedGroup - 1)
         val group = selected?.second.orEmpty()
         val detailCache = SubtitleLanguageNormalizer.stremioDetailCache()
@@ -1327,8 +1353,7 @@ internal class ElevatePlayerPanel(
             val selected = sub.url == current
             val refreshHook = ElevateSubtitleRefreshHook.active()
             val entry = if (selected) ElevateSubtitleRefreshRegistry.entryFor(sub) else null
-            val refreshable = selected && sub.url == active &&
-                refreshHook != null && entry != null
+            val refreshable = selected && refreshHook != null && entry != null
             Row(label, { setSubtitle(sub) },
                 if (refreshable) ({ button: ImageButton ->
                     val accepted = ElevateSubtitleRefreshHook.active()?.refreshSelected(false, button, sub.url)
