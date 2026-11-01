@@ -129,7 +129,7 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
                 synchronized(found) { found.values.toList() }
             }
             else -> emptyList()
-        }
+        }.orEmpty()
         if (links.isEmpty()) {
             ExternalDownloads.toast(app, "No downloadable source found")
             return null
