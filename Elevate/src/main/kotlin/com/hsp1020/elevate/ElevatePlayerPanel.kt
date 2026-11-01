@@ -27,7 +27,16 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.recyclerview.widget.RecyclerView
 import androidx.media3.common.Player
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.LoadResponse.Companion.getAniListId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getImdbId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getMalId
+import com.lagradost.cloudstream3.LoadResponse.Companion.getTMDbId
 import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.isMovieType
+import com.lagradost.cloudstream3.subtitles.AbstractSubtitleEntities.SubtitleSearch
+import com.lagradost.cloudstream3.ui.player.ExtractorUri
+import com.lagradost.cloudstream3.ui.result.ResultEpisode
+import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment.Companion.getAutoSelectLanguageTagIETF
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showDialog
 import com.lagradost.cloudstream3.utils.SubtitleHelper
@@ -304,6 +313,103 @@ internal class ElevatePlayerPanel(
     private val subtitlePane = LinearLayout(ctx).apply {
         orientation = LinearLayout.HORIZONTAL
         addView(languageList, LinearLayout.LayoutParams(0, -1, .35f))
+    }
+    // Imported tracks and import actions are full-width; original language/option lists stay split.
+    private val importedUrls = HashSet<String>()
+    private var beforeImport: Set<String>? = null
+    private var importInstance = -1
+    private fun syncImportInstance() {
+        if (importInstance == vm.state.instance) return
+        importInstance = vm.state.instance
+        beforeImport = null
+        importedUrls.clear()
+    }
+    private val importedSubtitles = ArrayList<SubtitleData>()
+    private val importedAdapter = object : ArrayAdapter<SubtitleData>(
+        ctx, android.R.layout.simple_list_item_1, importedSubtitles
+    ) {
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val sub = getItem(position) ?: return View(ctx)
+            val selected = fragment.player.getCurrentPreferredSubtitle()
+            return bindRow(convertView, parent, position, sub.originalName,
+                sub.url == selected?.url && sub.origin == selected?.origin, compact = false)
+        }
+    }
+    private val importedList = ListView(ctx).apply {
+        divider = null
+        choiceMode = AbsListView.CHOICE_MODE_NONE
+        adapter = importedAdapter
+        visibility = View.GONE
+        setOnItemClickListener { _, _, position, _ ->
+            importedSubtitles.getOrNull(position)?.let(::setSubtitle)
+        }
+    }
+    private fun importAction(label: Int, action: () -> Unit) = LinearLayout(ctx).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = dp(48)
+        addView(TextView(ctx).apply {
+            text = "+"
+            styleRow(this, false)
+            gravity = Gravity.CENTER
+        }, LinearLayout.LayoutParams(dp(24), dp(48)))
+        addView(TextView(ctx).apply {
+            text = ctx.getString(label)
+            styleRow(this, false)
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        setOnClickListener {
+            if (fragment.isAdded) {
+                syncImportInstance()
+                beforeImport = vm.state.subtitles.map { sub -> sub.url }.toSet()
+                action()
+            }
+        }
+    }
+    private val fileImport = importAction(R.string.player_load_subtitles) {
+        runCatching {
+            GeneratorPlayer::class.java.getDeclaredMethod("openSubPicker")
+                .apply { isAccessible = true }.invoke(fragment)
+        }.onFailure { android.util.Log.w("ElevatePanel", "Subtitle file picker failed", it) }
+    }
+    private val onlineImport = importAction(R.string.player_load_subtitles_online) {
+        fragment.openOnlineSubPicker(ctx, vm.state.generatorState?.response) {}
+    }
+    private val firstImport = importAction(R.string.player_load_one_subtitle_online) {
+        val state = vm.state.generatorState
+        val response = state?.response
+        val episode = state?.meta as? ResultEpisode
+        val offline = state?.meta as? ExtractorUri
+        val name = episode?.headerName ?: offline?.headerName ?: response?.name
+        if (name.isNullOrBlank()) return@importAction
+        android.widget.Toast.makeText(ctx, R.string.loading, android.widget.Toast.LENGTH_SHORT).show()
+        val type = episode?.tvType ?: offline?.tvType ?: response?.type
+        val query = SubtitleSearch(
+            query = name,
+            lang = getAutoSelectLanguageTagIETF().ifBlank { null },
+            imdbId = response?.getImdbId(),
+            tmdbId = response?.getTMDbId()?.toIntOrNull(),
+            malId = response?.getMalId()?.toIntOrNull(),
+            aniListId = response?.getAniListId()?.toIntOrNull(),
+            epNumber = if (type?.isMovieType() == true) null else episode?.episode ?: offline?.episode,
+            seasonNumber = if (type?.isMovieType() == true) null else episode?.season ?: offline?.season,
+            year = vm.currentSubtitleYear.value
+        )
+        runCatching {
+            GeneratorPlayer::class.java.getDeclaredMethod("addFirstSub", SubtitleSearch::class.java)
+                .apply { isAccessible = true }.invoke(fragment, query)
+        }.onFailure { android.util.Log.w("ElevatePanel", "Subtitle auto-search failed", it) }
+    }
+    private val importActions = LinearLayout(ctx).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(fileImport, LinearLayout.LayoutParams(-1, dp(48)))
+        addView(onlineImport, LinearLayout.LayoutParams(-1, dp(48)))
+        addView(firstImport, LinearLayout.LayoutParams(-1, dp(48)))
+    }
+    private val subtitleContent = LinearLayout(ctx).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(subtitlePane, LinearLayout.LayoutParams(-1, 0, 1f))
+        addView(importedList, LinearLayout.LayoutParams(-1, 0))
+        addView(importActions, LinearLayout.LayoutParams(-1, -2))
     }
     private var inSync = false
     private var offsetBeforeSync = 0L
@@ -584,6 +690,16 @@ internal class ElevatePlayerPanel(
         if (tab == Tab.SOURCES) showTabContents()
     }
     private val subtitlesChanged = Observer<VideoLive<Set<SubtitleData>>> { update ->
+        syncImportInstance()
+        beforeImport?.let { existing ->
+            val added = vm.state.subtitles.filter {
+                it.url !in existing && it.origin != SubtitleOrigin.EMBEDDED_IN_VIDEO
+            }
+            if (added.isNotEmpty()) {
+                importedUrls.addAll(added.map { it.url })
+                beforeImport = null
+            }
+        }
         val actual = fragment.player.getCurrentPreferredSubtitle()
         onSubtitleOptionsChanged()
         if (tab == Tab.SUBTITLES) {
@@ -633,11 +749,9 @@ internal class ElevatePlayerPanel(
     private fun updateAvailableTabs() {
         val tracks = fragment.player.getVideoTracks()
         val hasTracks = tracks.allAudioTracks.size > 1 || tracks.allVideoTracks.size > 1
-        val hasSubtitles = vm.state.subtitles.isNotEmpty() ||
-            tracks.allTextTracks.isNotEmpty() ||
-            fragment.player.getCurrentPreferredSubtitle() != null
         buttons[Tab.AUDIO]?.visibility = if (hasTracks) View.VISIBLE else View.GONE
-        buttons[Tab.SUBTITLES]?.visibility = if (hasSubtitles) View.VISIBLE else View.GONE
+        // Native subtitle file import must remain reachable even with no loaded tracks.
+        buttons[Tab.SUBTITLES]?.visibility = View.VISIBLE
         buttons[Tab.EPISODES]?.visibility =
             if (fragment.isThereEpisodes()) View.VISIBLE else View.GONE
 
@@ -714,6 +828,10 @@ internal class ElevatePlayerPanel(
         stopSyncPosition()
         vm.currentLinks.removeObserver(linksChanged)
         vm.currentSubtitles.removeObserver(subtitlesChanged)
+        beforeImport = null
+        importedUrls.clear()
+        importedSubtitles.clear()
+        importInstance = -1
         ElevateSubtitleRefreshHook.active()?.setPanelListener(null)
         observeCuePlayer(false)
         touches.forEach { it.setOnTouchListener(null) }
@@ -761,9 +879,9 @@ internal class ElevatePlayerPanel(
     private fun panelContent(view: View) {
         if (body.getChildAt(body.childCount - 1) === view) return
         (list.parent as? ViewGroup)?.removeView(list)
-        (subtitlePane.parent as? ViewGroup)?.removeView(subtitlePane)
+        (subtitleContent.parent as? ViewGroup)?.removeView(subtitleContent)
         (nativeSync.parent as? ViewGroup)?.removeView(nativeSync)
-        if (view === subtitlePane) {
+        if (view === subtitleContent) {
             subtitlePane.addView(list, LinearLayout.LayoutParams(0, -1, .65f))
         }
         body.addView(view, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -792,7 +910,14 @@ internal class ElevatePlayerPanel(
             Tab.SUBTITLES -> {
                 bindRefreshListener()
                 updateEncodingLabel()
-                panelContent(subtitlePane)
+                panelContent(subtitleContent)
+                val providers = GeneratorPlayer.subsProvidersIsActive
+                onlineImport.visibility = if (providers) View.VISIBLE else View.GONE
+                val state = vm.state.generatorState
+                val query = (state?.meta as? ResultEpisode)?.headerName
+                    ?: (state?.meta as? ExtractorUri)?.headerName ?: state?.response?.name
+                firstImport.visibility = if (providers && !query.isNullOrBlank())
+                    View.VISIBLE else View.GONE
                 renderSubtitles()
             }
             Tab.EPISODES -> Unit
@@ -1089,6 +1214,7 @@ internal class ElevatePlayerPanel(
     }
 
     private fun renderSubtitles() {
+        syncImportInstance()
         val current = fragment.player.getCurrentPreferredSubtitle()
         val localize = ElevateFeaturePrefs.enabled(ctx, ElevateFeature.SUBTITLE_LANGUAGE_NAMES)
         fun displayName(sub: SubtitleData): String {
@@ -1099,8 +1225,23 @@ internal class ElevatePlayerPanel(
                 knownSubtitleTag(code) ?: trackLanguageTag(sub.originalName)
             ) ?: sub.originalName
         }
-        subtitleGroups = sortSubs(vm.state.subtitles)
-            .groupBy(::displayName)
+        val all = sortSubs(vm.state.subtitles)
+        val imported = all.filter {
+            it.origin == SubtitleOrigin.DOWNLOADED_FILE || it.url in importedUrls
+        }
+        importedSubtitles.clear()
+        importedSubtitles.addAll(imported)
+        importedAdapter.notifyDataSetChanged()
+        importedList.visibility = if (imported.isEmpty()) View.GONE else View.VISIBLE
+        (importedList.layoutParams as LinearLayout.LayoutParams).apply {
+            height = if (imported.isEmpty()) 0 else dp(64 * minOf(3, imported.size))
+            importedList.layoutParams = this
+        }
+        subtitlePane.visibility = if (all.size == imported.size && imported.isNotEmpty())
+            View.GONE else View.VISIBLE
+        subtitleGroups = all.filterNot {
+            it.origin == SubtitleOrigin.DOWNLOADED_FILE || it.url in importedUrls
+        }.groupBy(::displayName)
             .map { (name, subtitles) -> name to orderedOptions(subtitles) }
         if (pendingSubtitleInstance != vm.state.instance ||
             pendingSubtitleUrl == current?.url) pendingSubtitleUrl = null
