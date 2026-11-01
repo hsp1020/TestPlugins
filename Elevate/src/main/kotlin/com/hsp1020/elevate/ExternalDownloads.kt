@@ -15,6 +15,8 @@ import android.os.Bundle
 import android.util.Base64
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
 import android.widget.Toast
 import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.MainActivity
@@ -44,6 +46,14 @@ internal object ExternalDownloads {
     private const val PREFS = "ElevateExternalDownloads"
     private const val TARGET = "selected_app"
     private const val PENDING = "pending"
+    internal fun trace(event: String) {
+        Log.i("ExternalDLTrace", "up=" + SystemClock.elapsedRealtime() + " pid=" + android.os.Process.myPid() +
+            " thread=" + Thread.currentThread().name + " " + event)
+    }
+    internal fun errorInfo(error: Throwable): String {
+        val frame = error.stackTrace.firstOrNull()
+        return error.javaClass.name + " at " + (frame?.className ?: "?") + ":" + (frame?.lineNumber ?: -1)
+    }
     private val checking = AtomicBoolean(false)
     private val main = Handler(Looper.getMainLooper())
     private val scanner = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -74,11 +84,13 @@ internal object ExternalDownloads {
     }.getOrNull()
 
     fun select(c: Context, app: App) {
+        trace("selection.change target=" + app.label + " package=" + ComponentName.unflattenFromString(app.component)?.packageName)
         c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(TARGET, app.json().toString()).apply()
     }
 
     fun clearSelection(c: Context) {
+        trace("selection.clear")
         c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .remove(TARGET).remove("apps").apply()
     }
@@ -137,15 +149,21 @@ internal object ExternalDownloads {
     }
 
     @Synchronized private fun addPendingBatch(c: Context, items: List<Pending>) {
+        trace("pending.add ids=" + items.joinToString(",") { it.id.toString() } + " count=" + items.size)
         val map = pendingMap(c)
         for (item in items) map[item.id] = item
         savePending(c)
         watch(c)
         scheduleCheck(c, 2400L)
+        trace("pending.add.complete total=" + map.size)
     }
 
     @Synchronized private fun removePending(c: Context, id: Int) {
-        if (pendingMap(c).remove(id) == null) return
+        if (pendingMap(c).remove(id) == null) {
+            trace("pending.remove.missing id=" + id)
+            return
+        }
+        trace("pending.remove id=" + id)
         savePending(c)
         watch(c)
     }
@@ -227,19 +245,38 @@ internal object ExternalDownloads {
         activity: Activity,
         requests: List<Pair<DownloadObjects.DownloadQueueWrapper, ExtractorLink>>
     ) {
-        val app = selected(activity) ?: return
-        val pkg = ComponentName.unflattenFromString(app.component)?.packageName ?: return
+        trace("handoff.enter count=" + requests.size + " ids=" +
+            requests.joinToString(",") { it.first.id.toString() } + " activity=" +
+            System.identityHashCode(activity) + " finishing=" + activity.isFinishing +
+            " destroyed=" + activity.isDestroyed)
+        val app = selected(activity) ?: run { trace("handoff.noSelection"); return }
+        val pkg = ComponentName.unflattenFromString(app.component)?.packageName ?: run {
+            trace("handoff.badComponent"); return
+        }
+        trace("handoff.target package=" + pkg + " mode=" + app.mode)
         val transfers = requests.mapNotNull { (queued, link) ->
-            if (Uri.parse(link.url).scheme !in listOf("http", "https")) {
+            val scheme = Uri.parse(link.url).scheme
+            val transferHeaders = headersFor(link)
+            trace("handoff.validate id=" + queued.id + " scheme=" + scheme + " hls=" + link.isM3u8 +
+                " headerKeys=" + transferHeaders.keys.joinToString(","))
+            if (scheme !in listOf("http", "https")) {
+                trace("handoff.rejectedScheme id=" + queued.id)
                 toast(activity, "External download requires an HTTP(S) link")
                 null
-            } else Transfer(queued, link, fileName(queued, link), headersFor(link))
+            } else Transfer(queued, link, fileName(queued, link), transferHeaders)
         }
-        if (transfers.isEmpty()) return
+        if (transfers.isEmpty()) {
+            trace("handoff.noValidTransfers")
+            return
+        }
+        trace("handoff.valid count=" + transfers.size)
         // Do not combine requests with different Referer/Cookie/User-Agent values.
         val groups = transfers.groupBy { it.headers }
+        trace("handoff.groups count=" + groups.size + " sizes=" + groups.values.joinToString(",") { it.size.toString() })
         for ((headers, group) in groups) {
             val first = group.first()
+            trace("handoff.group ids=" + group.joinToString(",") { it.queued.id.toString() } +
+                " target=" + pkg + " count=" + group.size + " headerKeys=" + headers.keys.joinToString(","))
             val bundle = Bundle().apply { headers.forEach { (key, value) -> putString(key, value) } }
             val intent = if (pkg == "com.gopeed.gopeed") {
                 // Gopeed 1.9/2.0 CreateTask deep link: preserve headers and single-file names.
@@ -287,25 +324,37 @@ internal object ExternalDownloads {
                 }
             }
             try {
+                trace("intent.launch.begin ids=" + group.joinToString(",") { it.queued.id.toString() } +
+                    " package=" + pkg + " action=" + intent.action + " component=" + intent.component?.className +
+                    " scheme=" + intent.data?.scheme + " queryLength=" + (intent.data?.encodedQuery?.length ?: 0) +
+                    " extras=" + (intent.extras?.keySet()?.joinToString(",") ?: "none"))
                 activity.startActivity(intent)
+                trace("intent.launch.return ids=" + group.joinToString(",") { it.queued.id.toString() } +
+                    " package=" + pkg + " note=acceptedByAndroidNotDownloadConfirmed")
                 // Gopeed's multiline create form cannot assign names per URL.
                 if (pkg != "com.gopeed.gopeed" || group.size == 1) {
+                    trace("handoff.pending.begin count=" + group.size)
                     addPendingBatch(activity.applicationContext, group.map {
                         fromQueue(activity, it.queued, it.filename)
                     })
-                }
+                    trace("handoff.pending.end count=" + group.size)
+                } else trace("handoff.pending.skipped reason=gopeedBatchWithoutNames")
             } catch (e: Exception) {
+                trace("intent.launch.error package=" + pkg + " " + errorInfo(e))
                 toast(activity, "Cannot open " + app.label + ": " + e.message)
             }
         }
+        trace("handoff.exit count=" + transfers.size + " target=" + pkg)
     }
 
     fun handoff(activity: Activity, queued: DownloadObjects.DownloadQueueWrapper, link: ExtractorLink) =
         handoffBatch(activity, listOf(queued to link))
 
     @Synchronized private fun register(c: Context, p: Pending, name: String, size: Long, base: String?) {
+        trace("recognition.register.begin id=" + p.id + " bytes=" + size)
         if (!ElevateFeaturePrefs.enabled(c, ElevateFeature.EXTERNAL_DOWNLOADS)) return
         if (VideoDownloadManager.getDownloadFileInfo(c, p.id) != null) {
+            trace("recognition.register.alreadyPresent id=" + p.id)
             removePending(c, p.id)
             return
         }
@@ -314,7 +363,10 @@ internal object ExternalDownloads {
             VideoDownloadManager.KEY_DOWNLOAD_INFO, p.id.toString(),
             DownloadObjects.DownloadedFileInfo(size, "", name, basePath = base)
         )
-        if (VideoDownloadManager.getDownloadFileInfo(c, p.id) == null) return
+        if (VideoDownloadManager.getDownloadFileInfo(c, p.id) == null) {
+            trace("recognition.register.infoNotReadable id=" + p.id)
+            return
+        }
         c.setKey(
             getFolderName(DOWNLOAD_EPISODE_CACHE, p.parentId.toString()), p.id.toString(),
             DownloadObjects.DownloadEpisodeCached(
@@ -330,6 +382,7 @@ internal object ExternalDownloads {
             )
         )
         removePending(c, p.id)
+        trace("recognition.register.complete id=" + p.id)
     }
 
     private fun isVideo(name: String) =
@@ -340,11 +393,17 @@ internal object ExternalDownloads {
         val path = basePath(c)
         val needed = pendingMap(c).isNotEmpty()
         val key = path ?: "@default"
+        trace("watch.evaluate needed=" + needed + " mode=" +
+            (if (path == null) "default" else if (path.startsWith("content://")) "SAF" else "file") +
+            " existing=" + (watchPath != null))
         if (!needed) {
             stopWatching(c)
             return
         }
-        if (watchPath == key) return
+        if (watchPath == key) {
+            trace("watch.unchanged")
+            return
+        }
         stopWatching(c)
         watchPath = key
         @Suppress("DEPRECATION")
@@ -355,10 +414,16 @@ internal object ExternalDownloads {
             runCatching {
                 object : FileObserver(physical, FileObserver.CLOSE_WRITE or FileObserver.MOVED_TO or FileObserver.CREATE) {
                     override fun onEvent(event: Int, name: String?) {
-                        if (name != null && isVideo(name)) scheduleCheck(c, 2400L)
+                        if (name != null && isVideo(name)) {
+                            trace("watch.file.event event=" + event + " type=video")
+                            scheduleCheck(c, 2400L)
+                        }
                     }
                 }.also { it.startWatching() }
-            }.onSuccess { fileObserver = it }
+            }.onSuccess {
+                fileObserver = it
+                trace("watch.file.registered")
+            }
                 .onFailure { android.util.Log.w("ElevateExternal", "File observer unavailable", it) }
         }
         val uri = when {
@@ -370,15 +435,20 @@ internal object ExternalDownloads {
         if (uri != null) {
             val observer = object : ContentObserver(main) {
                 override fun onChange(selfChange: Boolean) {
+                    trace("watch.media.event selfChange=" + selfChange)
                     scheduleCheck(c, 2400L)
                 }
             }
             runCatching { c.contentResolver.registerContentObserver(uri, true, observer) }
-                .onSuccess { contentObserver = observer }
+                .onSuccess {
+                    contentObserver = observer
+                    trace("watch.media.registered")
+                }
         }
     }
 
     @Synchronized private fun stopWatching(c: Context) {
+        trace("watch.stop file=" + (fileObserver != null) + " media=" + (contentObserver != null))
         fileObserver?.stopWatching()
         fileObserver = null
         contentObserver?.let { runCatching { c.contentResolver.unregisterContentObserver(it) } }
@@ -391,26 +461,48 @@ internal object ExternalDownloads {
     }
 
     @Synchronized private fun scheduleCheck(c: Context, delayMs: Long) {
-        if (pendingMap(c).isEmpty()) return
+        if (pendingMap(c).isEmpty()) {
+            trace("scan.schedule.skip emptyPending")
+            return
+        }
+        trace("scan.schedule pending=" + pendingMap(c).size + " delayMs=" + delayMs +
+            " replacing=" + (scheduled != null))
         scheduled?.let(main::removeCallbacks)
         val task = Runnable {
             synchronized(this) { scheduled = null }
             checkFolder(c)
         }
         scheduled = task
-        main.postDelayed(task, delayMs)
+        val posted = main.postDelayed(task, delayMs)
+        trace("scan.schedule.posted ok=" + posted)
     }
 
     /** Event-driven scan with a single non-blocking stability delay per batch. */
     fun checkFolder(c: Context) {
-        if (!ElevateFeaturePrefs.enabled(c, ElevateFeature.EXTERNAL_DOWNLOADS) ||
-            !checking.compareAndSet(false, true)) return
+        if (!ElevateFeaturePrefs.enabled(c, ElevateFeature.EXTERNAL_DOWNLOADS)) {
+            trace("scan.skip disabled")
+            return
+        }
+        if (!checking.compareAndSet(false, true)) {
+            trace("scan.skip alreadyRunning")
+            return
+        }
+        trace("scan.begin")
         scanner.launch {
             try {
                 val requests = pending(c)
-                if (requests.isEmpty()) return@launch
+                if (requests.isEmpty()) {
+                    trace("scan.emptyPending")
+                    return@launch
+                }
                 val base = basePath(c)
-                val dir = directory(c, base) ?: return@launch
+                val dir = directory(c, base)
+                if (dir == null) {
+                    trace("scan.noDirectory pending=" + requests.size)
+                    return@launch
+                }
+                trace("scan.directory.ready pending=" + requests.size + " mode=" +
+                    (if (base == null) "default" else if (base.startsWith("content://")) "SAF" else "file"))
                 // One directory listing, one lookup map, no nested filtering or per-file sleep.
                 val byName = HashMap<String, Pending>(requests.size)
                 for (p in requests) if (p.expectedFile.isNotBlank()) {
@@ -418,43 +510,75 @@ internal object ExternalDownloads {
                 }
                 val candidates = ArrayList<Triple<Pending, SafeFile, Long>>(requests.size)
                 val now = System.currentTimeMillis()
-                for (file in dir.listFiles().orEmpty()) {
+                val files = dir.listFiles().orEmpty()
+                trace("scan.list count=" + files.size + " pending=" + requests.size)
+                for (file in files) {
                     val name = file.name() ?: continue
                     val pending = byName[name.lowercase(java.util.Locale.ROOT)] ?: continue
-                    if (!isVideo(name)) continue
+                    if (!isVideo(name)) {
+                        trace("scan.reject.id=" + pending.id + " reason=notVideo")
+                        continue
+                    }
                     val size = file.length() ?: continue
-                    if (size <= 1024L) continue
+                    if (size <= 1024L) {
+                        trace("scan.reject.id=" + pending.id + " reason=size bytes=" + size)
+                        continue
+                    }
                     val modified = file.lastModified()
                     if (modified != null && (modified < pending.created - 2000L ||
-                                modified > now - 1500L)) continue
+                                modified > now - 1500L)) {
+                        trace("scan.reject.id=" + pending.id + " reason=mtime deltaMs=" +
+                            (now - modified))
+                        continue
+                    }
+                    trace("scan.candidate id=" + pending.id + " bytes=" + size)
                     candidates.add(Triple(pending, file, size))
                 }
+                trace("scan.candidates count=" + candidates.size)
                 if (candidates.isEmpty()) return@launch
                 delay(750L)
+                trace("scan.stabilityWait.done count=" + candidates.size)
                 val stableAt = System.currentTimeMillis()
                 for ((pending, file, size) in candidates) {
-                    if (file.length() != size || size <= 1024L) continue
+                    if (file.length() != size || size <= 1024L) {
+                        trace("scan.unstable id=" + pending.id + " reason=size")
+                        continue
+                    }
                     val modified = file.lastModified()
-                    if (modified != null && modified > stableAt - 1500L) continue
+                    if (modified != null && modified > stableAt - 1500L) {
+                        trace("scan.unstable id=" + pending.id + " reason=mtime")
+                        continue
+                    }
                     val name = file.name() ?: continue
-                    if (!name.equals(pending.expectedFile, ignoreCase = true)) continue
+                    if (!name.equals(pending.expectedFile, ignoreCase = true)) {
+                        trace("scan.unstable id=" + pending.id + " reason=nameMismatch")
+                        continue
+                    }
+                    trace("scan.register.attempt id=" + pending.id + " bytes=" + size)
                     runCatching { register(c, pending, name, size, base) }
-                        .onFailure { android.util.Log.w("ElevateExternal", "Failed to register completed file", it) }
+                        .onFailure {
+                            trace("scan.register.error id=" + pending.id + " " + errorInfo(it))
+                            android.util.Log.w("ElevateExternal", "Failed to register completed file", it)
+                        }
                 }
             } catch (e: Exception) {
+                trace("scan.error " + errorInfo(e))
                 android.util.Log.w("ElevateExternal", "Cannot inspect CloudStream download folder", e)
             } finally {
                 checking.set(false)
+                trace("scan.end")
             }
         }
     }
 
     fun startRecognition(c: Context) {
+        trace("recognition.start")
         watch(c)
         scheduleCheck(c, 2400L)
     }
 
     @Synchronized fun stopRecognition(c: Context) {
+        trace("recognition.stop")
         stopWatching(c)
         scheduled?.let(main::removeCallbacks)
         scheduled = null
@@ -465,15 +589,20 @@ internal object ExternalDownloads {
 internal class ExternalDownloaderLifecycle(private val app: Application) :
     Application.ActivityLifecycleCallbacks {
     fun start() {
+        ExternalDownloads.trace("recognition.lifecycle.start")
         app.registerActivityLifecycleCallbacks(this)
         ExternalDownloads.startRecognition(app)
     }
     fun stop() {
+        ExternalDownloads.trace("recognition.lifecycle.stop")
         ExternalDownloads.stopRecognition(app)
         app.unregisterActivityLifecycleCallbacks(this)
     }
     override fun onActivityResumed(activity: Activity) {
-        if (activity is MainActivity) ExternalDownloads.startRecognition(app)
+        if (activity is MainActivity) {
+            ExternalDownloads.trace("recognition.lifecycle.resumed id=" + System.identityHashCode(activity))
+            ExternalDownloads.startRecognition(app)
+        }
     }
     override fun onActivityCreated(a: Activity, b: Bundle?) = Unit
     override fun onActivityStarted(a: Activity) = Unit
