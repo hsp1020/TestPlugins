@@ -248,11 +248,11 @@
                     android:textStyle="bold" />
                 <FrameLayout
                     android:layout_width="match_parent"
-                    android:layout_height="35dp">
+                    android:layout_height="28dp">
                     <EditText
                         android:id="@+id/etTmdbApiKey"
                         android:layout_width="match_parent"
-                        android:layout_height="35dp"
+                        android:layout_height="28dp"
                         android:layout_gravity="center_vertical"
                         android:hint="Enter TMDb API Key"
                         android:inputType="text"
@@ -266,10 +266,10 @@
                 </FrameLayout>
                 <LinearLayout
                     android:id="@+id/rowLanguage"
-                    android:layout_marginTop="8dp"
+                    android:layout_marginTop="0dp"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:minHeight="48dp"
+                    android:minHeight="40dp"
                     android:orientation="horizontal"
                     android:gravity="center_vertical"
                     android:paddingStart="12dp"
@@ -288,7 +288,7 @@
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:text="TMDB Language"
-                            android:textSize="12sp"
+                            android:textSize="13sp"
                             android:textStyle="bold" />
                         <TextView
                             android:id="@+id/summaryLanguage"
@@ -318,7 +318,7 @@
                     android:id="@+id/layoutHistorySyncUrl"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
+                    android:layout_marginTop="2dp"
                     android:orientation="vertical">
                     <TextView
                         android:layout_width="match_parent"
@@ -329,6 +329,7 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
                         android:paddingStart="12dp"
                         android:text="History and metadata sync, including recommendation posters, for enabled catalogs. (via Aiometadata)"
                         android:textSize="12sp"
@@ -340,12 +341,12 @@
                         android:gravity="top">
                         <FrameLayout
                             android:layout_width="0dp"
-                            android:layout_height="35dp"
+                            android:layout_height="28dp"
                             android:layout_weight="1">
                             <EditText
                                 android:id="@+id/etHistorySyncUrl"
                                 android:layout_width="match_parent"
-                                android:layout_height="35dp"
+                                android:layout_height="28dp"
                                 android:layout_gravity="top"
                                 android:hint="Aiometadata URL"
                                 android:inputType="textUri"
