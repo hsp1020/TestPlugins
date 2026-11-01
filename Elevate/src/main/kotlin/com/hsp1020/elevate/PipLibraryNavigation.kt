@@ -32,9 +32,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.CancellationException
-import com.lagradost.cloudstream3.ui.player.LOADTYPE_INAPP
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity
@@ -69,8 +66,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     private var redirecting = false
     private var restoreNative = false
     private var nextPipVideo: Bundle? = null
-    private var prefetchJob: Job? = null
-    private var prefetchUuid: String? = null
+    private var switchPosted = false
     private var switching = false
     private var wasPlaying = false
     private var wasInPip = false
@@ -267,73 +263,37 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         return true
     }
 
-    // Prefetch only links into CloudStream's existing cache; keep the old decoder
-    // playing until lookup completes. Never create a second player.
+    // Event-based; multiple selections before the next UI turn become one load.
     private fun schedulePipSwitch(activity: DownloadedPlayerActivity) {
-        if (switching) return
-        val nextRequest = nextPipVideo ?: return
-        val uuid = nextRequest.getString("uuid") ?: return
-        val targetIndex = nextRequest.getInt("index")
-        if (prefetchUuid == uuid) return
-        prefetchJob?.cancel()
-        prefetchUuid = uuid
-        prefetchJob = activity.lifecycleScope.launch {
+        if (switchPosted || switching) return
+        switchPosted = true
+        activity.window.decorView.post {
+            switchPosted = false
+            if (playerActivity !== activity || activity.isFinishing || activity.isDestroyed) return@post
+            val manager = activity.supportFragmentManager
+            if (manager.isStateSaved) return@post // Retry on Activity start/resume.
+            val nav = (manager.findFragmentById(R.id.nav_host_fragment)
+                as? NavHostFragment)?.navController ?: return@post
+            if (nav.currentDestination?.id != R.id.navigation_player) return@post
+            val next = nextPipVideo ?: return@post
+            val old = findPlayer(manager) ?: return@post
+            val previous = old.arguments?.getString("uuid")
+            switching = true
             try {
-                val generator = runCatching {
-                    @Suppress("UNCHECKED_CAST")
-                    val stored = GeneratorPlayer::class.java.getDeclaredField("generators")
-                        .apply { isAccessible = true }.get(null) as? Map<String, *>
-                    stored?.get(uuid) as? RepoLinkGenerator
-                }.getOrNull()
-                if (generator != null) {
-                    withTimeoutOrNull(8_000L) {
-                        withContext(Dispatchers.IO) {
-                            generator.generateLinks(
-                                clearCache = false,
-                                sourceTypes = LOADTYPE_INAPP,
-                                callback = {},
-                                subtitleCallback = {},
-                                offset = targetIndex,
-                                isCasting = false,
-                            )
-                        }
-                    }
-                }
-            } catch (cancel: CancellationException) {
-                throw cancel
-            } catch (_: Exception) {
-                // Preserve the native link-loading fallback on preload failure.
-            }
-            activity.window.decorView.post {
-                if (prefetchUuid != uuid) return@post
-                prefetchUuid = null
-                prefetchJob = null
-                if (playerActivity !== activity || activity.isFinishing || activity.isDestroyed) return@post
-                val manager = activity.supportFragmentManager
-                if (manager.isStateSaved) return@post // Retry on Activity start/resume.
-                val nav = (manager.findFragmentById(R.id.nav_host_fragment)
-                    as? NavHostFragment)?.navController ?: return@post
-                if (nav.currentDestination?.id != R.id.navigation_player) return@post
-                val next = nextPipVideo?.takeIf { it.getString("uuid") == uuid } ?: return@post
-                val old = findPlayer(manager) ?: return@post
-                val previous = old.arguments?.getString("uuid")
-                switching = true
-                try {
-                    old.releasePlayer() // Only now stop the previous decoder.
-                    nextPipVideo = null
-                    nav.navigate(
-                        R.id.global_to_navigation_player, next,
-                        NavOptions.Builder()
-                            .setPopUpTo(R.id.navigation_player, true, false)
-                            .setEnterAnim(0).setExitAnim(0)
-                            .setPopEnterAnim(0).setPopExitAnim(0).build()
-                    )
-                    if (previous != uuid) forgetPlaceholder(previous)
-                } catch (error: Exception) {
-                    switching = false
-                    nextPipVideo = next
-                    Log.e("ElevatePiP", "PiP video switch failed", error)
-                }
+                old.releasePlayer() // Stops the decoder before any replacement starts.
+                nextPipVideo = null
+                nav.navigate(
+                    R.id.global_to_navigation_player, next,
+                    NavOptions.Builder()
+                        .setPopUpTo(R.id.navigation_player, true, false)
+                        .setEnterAnim(0).setExitAnim(0)
+                        .setPopEnterAnim(0).setPopExitAnim(0).build()
+                )
+                if (previous != next.getString("uuid")) forgetPlaceholder(previous)
+            } catch (error: Exception) {
+                switching = false
+                nextPipVideo = next
+                Log.e("ElevatePiP", "PiP video switch failed", error)
             }
         }
     }
@@ -355,9 +315,6 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
     private fun closePlayer(activity: DownloadedPlayerActivity) {
         if (closing || playerActivity !== activity) return
         closing = true
-        prefetchJob?.cancel()
-        prefetchJob = null
-        prefetchUuid = null
         nextPipVideo?.getString("uuid")?.let(::forgetPlaceholder)
         nextPipVideo = null
         findPlayer(activity.supportFragmentManager)?.let { player ->
@@ -437,9 +394,6 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
 
     fun stop() {
         detachYoutubeBridge(mainActivity)
-        prefetchJob?.cancel()
-        prefetchJob = null
-        prefetchUuid = null
         enabled = false
         liveSwitchSequence++
         liveSwitchJob?.cancel()
@@ -535,9 +489,6 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             mainActivity = null
         }
         if (activity === playerActivity) {
-            prefetchJob?.cancel()
-            prefetchJob = null
-            prefetchUuid = null
             (activity as DownloadedPlayerActivity).apply {
                 playerNavigation?.removeOnDestinationChangedListener(playerDestination)
                 supportFragmentManager.unregisterFragmentLifecycleCallbacks(playerFragments)
@@ -553,6 +504,7 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
             playerActivity = null
             pending = null
             switching = false
+            switchPosted = false
             wasPlaying = false
             wasInPip = false
             closing = false
