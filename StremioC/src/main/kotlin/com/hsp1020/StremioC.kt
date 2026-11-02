@@ -23,9 +23,6 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.ui.player.Torrent
-import com.lagradost.cloudstream3.ui.player.LOADTYPE_INAPP_DOWNLOAD
-import com.lagradost.cloudstream3.ui.player.Cache
-import com.lagradost.cloudstream3.ui.player.RepoLinkGenerator
 import com.lagradost.cloudstream3.syncproviders.AccountManager
 import com.lagradost.cloudstream3.syncproviders.SyncIdName
 import com.lagradost.cloudstream3.syncproviders.providers.SimklApi
@@ -3084,16 +3081,6 @@ open class StremioC(
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        // The native mirror picker uses LOADTYPE_INAPP_DOWNLOAD, whereas subtitle downloads
-        // use LOADTYPE_ALL. Inspect only the host generator callback's captured values.
-        val captures = callback.javaClass.declaredFields.mapNotNull { field ->
-            runCatching { field.isAccessible = true; field.name to field.get(callback) }.getOrNull()
-        }
-        val coreCache = captures.firstNotNullOfOrNull { it.second as? Cache }
-        val videoOnly = currentCoroutineContext()[CoroutineName]?.name == "ElevateDownloadVideoOnly" ||
-            (coreCache != null && captures.any {
-                it.first.contains("sourceTypes") && it.second == LOADTYPE_INAPP_DOWNLOAD
-            })
         if (!isAddonEnabled()) {
             return false
         }
@@ -3489,7 +3476,7 @@ open class StremioC(
                         }
                         emitOrderedAddonStreams(namedStreams, name,
                             stremioSubtitleFrom(currentMainUrl), extractorSubtitleFrom(currentMainUrl),
-                            "embedded", addonUrl = currentMainUrl, emitSubtitles = !videoOnly)
+                            "embedded", addonUrl = currentMainUrl)
                     }
                 }
             },
@@ -3504,7 +3491,7 @@ open class StremioC(
                             val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
                             emitOrderedAddonStreams(res?.streams, name,
                                 stremioSubtitleFrom(currentMainUrl), extractorSubtitleFrom(currentMainUrl),
-                                "main", addonUrl = currentMainUrl, emitSubtitles = !videoOnly)
+                                "main", addonUrl = currentMainUrl)
                         }
                             .getOrDefault(0)
 
@@ -3523,17 +3510,15 @@ open class StremioC(
             },
             {
 
-                if (!videoOnly) {
                 val mappedId = mappedAnimeStremioId()
                 if (mappedId != null) {
                     fetchAnimeAwareSubtitles(currentMainUrl, mappedId, null, null, "series")
                 } else if (!isLibraryAnimeId(primaryId) || actualIsMovie) {
                     fetchAnimeAwareSubtitles(currentMainUrl, primaryId, loadData.season, loadData.episode)
                 }
-                }
             },
             {
-                if (!videoOnly && isHistorySyncEnabled && syncUrl.isNotBlank()) {
+                if (isHistorySyncEnabled && syncUrl.isNotBlank()) {
                     fetchAnimeAwareSubtitles(
                         syncUrl,
                         globalId ?: primaryId,
@@ -3544,7 +3529,7 @@ open class StremioC(
                 }
             },
             {
-                if (extraUrls.isNotEmpty() && (!videoOnly || streamsAddonEnabled)) coroutineScope {
+                if (extraUrls.isNotEmpty()) coroutineScope {
                     val limiter = Semaphore(4)
                     val reqId = loadData.originalAnimeId ?: integrationImdbId ?: globalId.takeIf { it.isNotBlank() }
                     extraUrls.map { addon -> async(Dispatchers.IO) {
@@ -3572,8 +3557,7 @@ open class StremioC(
                                             val streams = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
                                             val emitted = emitOrderedAddonStreams(streams?.streams, source,
                                                 stremioSubtitleFrom(addonUrl), extractorSubtitleFrom(addonUrl),
-                                                "extra", addon.name, addonUrl, streamsAddonEnabled,
-                                                subtitlesAddonEnabled && !videoOnly)
+                                                "extra", addon.name, addonUrl, streamsAddonEnabled, subtitlesAddonEnabled)
                                             if (streamsAddonEnabled) emitted else streams?.streams?.count { it.subtitles.isNotEmpty() } ?: 0
                                         }.getOrDefault(0)
                                         val originalLinks = fetchExtraStreams(request)
@@ -3587,7 +3571,7 @@ open class StremioC(
                                         }
                                     }
                                 }, {
-                                    if (subtitlesAddonEnabled && !videoOnly) {
+                                    if (subtitlesAddonEnabled) {
                                         val mappedId = mappedAnimeStremioId()
                                         if (mappedId != null) {
                                             fetchAnimeAwareSubtitles(addonUrl, mappedId, null, null, "series", addon.name)
@@ -3602,7 +3586,7 @@ open class StremioC(
                 }
             },
             {
-                if (!videoOnly && !actualIsMovie) coroutineScope {
+                if (!actualIsMovie) coroutineScope {
                     val limiter = Semaphore(4)
                     integrationAddons.filter { it.subtitleOnly }.map { addon -> async(Dispatchers.IO) {
                         limiter.withPermit {
@@ -3614,9 +3598,7 @@ open class StremioC(
                 }
             },
             {
-                invokeCineStream(loadData, integrationTargetType, globalId, globalSeason, globalEpisode, isCasting,
-                    integratedSubtitleFrom(1), wrappedCallback, mappingDeferred,
-                    { payload -> if (!videoOnly) fetchCineInlineSubtitles(payload) })
+                invokeCineStream(loadData, integrationTargetType, globalId, globalSeason, globalEpisode, isCasting, integratedSubtitleFrom(1), wrappedCallback, mappingDeferred, ::fetchCineInlineSubtitles)
             },
             {
                 invokeTmdbStremioIntegrationFallback(
@@ -3640,10 +3622,6 @@ open class StremioC(
             }
         )
         mappingDeferred.cancel()
-        }
-        if (videoOnly && coreCache != null) synchronized(RepoLinkGenerator.cache) {
-            // A video-only response must not satisfy a later subtitle-download cache hit.
-            RepoLinkGenerator.cache.entries.removeAll { it.value === coreCache }
         }
         return true
     }
