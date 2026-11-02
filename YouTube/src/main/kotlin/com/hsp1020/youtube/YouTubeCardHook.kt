@@ -1124,7 +1124,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         private var descriptionWatcher: TextWatcher? = null
         private var nativeMovement: android.text.method.MovementMethod? = null
         private var editingDescription = false
-        private val linkPadding = IdentityHashMap<TextView, Int>()
 
         private fun openTimestamp(seconds: Int) {
             val active = fragment?.takeIf { it.isAdded } ?: return
@@ -1238,14 +1237,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 }
             }
             if (links == 0) return
-            // A last-line native underline can be clipped by TextView's bottom edge.
-            if (!linkPadding.containsKey(view)) {
-                linkPadding[view] = view.paddingBottom
-                view.setPadding(
-                    view.paddingLeft, view.paddingTop, view.paddingRight,
-                    view.paddingBottom + dp(2)
-                )
-            }
             editingDescription = true
             try {
                 view.setText(styled, TextView.BufferType.SPANNABLE)
@@ -1360,12 +1351,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
 
         fun close() {
-            linkPadding.forEach { (view, bottom) ->
-                if (view.paddingBottom != bottom) {
-                    view.setPadding(view.paddingLeft, view.paddingTop, view.paddingRight, bottom)
-                }
-            }
-            linkPadding.clear()
             descriptionWatcher?.let { listener -> description?.removeTextChangedListener(listener) }
             descriptionWatcher = null
             description?.movementMethod = nativeMovement
@@ -2074,7 +2059,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         override fun onClick(widget: View) = action()
         override fun updateDrawState(ds: TextPaint) {
             ds.color = color
-            ds.isUnderlineText = true
+            ds.isUnderlineText = false
         }
     }
 
