@@ -216,8 +216,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private var popupReturnListener: NavController.OnDestinationChangedListener? = null
     private var popupBackFragment: Fragment? = null
     private var popupBackCallback: OnBackPressedCallback? = null
-    private var playerPopupBackFragment: Fragment? = null
-    private var playerPopupBackCallback: OnBackPressedCallback? = null
     private var popupReturning = false
     // One pending selection bridges player exit and the native detail ViewModel.
     private var pendingRange: Pair<Int, PlayedEpisode>? = null
@@ -400,94 +398,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         popupBackFragment = fragment
         popupBackCallback = callback
         activity.onBackPressedDispatcher.addCallback(fragment.viewLifecycleOwner, callback)
-    }
-
-    // Mirror the working detail->expanded-dialog return: make the existing Dialog
-    // visible and committed before the native player's Navigation destination pops.
-    private fun clearPlayerPopupBackHandler() {
-        playerPopupBackCallback?.remove()
-        playerPopupBackCallback = null
-        playerPopupBackFragment = null
-    }
-
-    private fun installPlayerPopupBackHandler(fragment: Fragment) {
-        if (playerPopupBackFragment === fragment || directPlayback == null ||
-            externalDirectPlaybackHost != null || Globals.isLayout(Globals.TV or Globals.EMULATOR)) return
-        val popup = expandedReturnDialog ?: return
-        val activity = host ?: return
-        val nav = playbackNav ?: return
-        if (nav.currentDestination?.id != R.id.navigation_player) return
-        clearPlayerPopupBackHandler()
-        val callback = object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                tracePopup("PLAYER_POPUP_BACK_BEGIN")
-                val decor = popup.window?.decorView
-                if (expandedReturnDialog !== popup || !fragment.isAdded ||
-                    nav.currentDestination?.id != R.id.navigation_player ||
-                    decor?.isAttachedToWindow != true ||
-                    (fragment as? GeneratorPlayer)?.isDialogOpen() == true) {
-                    // Let the native player dismiss its own panels and dialogs.
-                    tracePopup("PLAYER_POPUP_BACK_NATIVE")
-                    isEnabled = false
-                    activity.onBackPressedDispatcher.onBackPressed()
-                    fragment.view?.post {
-                        if (playerPopupBackCallback === this &&
-                            nav.currentDestination?.id == R.id.navigation_player) isEnabled = true
-                    }
-                    return
-                }
-                isEnabled = false
-                popup.window?.setWindowAnimations(0)
-                popup.window?.setSoftInputMode(
-                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
-                popup.show()
-                tracePopup("PLAYER_POPUP_BACK_SHOWN")
-                fun popAfterFrame() {
-                    decor.post {
-                        if (playerPopupBackCallback !== this || !fragment.isAdded ||
-                            nav.currentDestination?.id != R.id.navigation_player) return@post
-                        if (!popup.isShowing) {
-                            tracePopup("PLAYER_POPUP_BACK_HIDDEN")
-                            isEnabled = true
-                            return@post
-                        }
-                        // The Dialog's frame is ready, but the native player
-                        // normally remains attached for another 0.10-0.13s.
-                        // Hide its entire UI (including the back ripple), not just
-                        // the video SurfaceView, before starting the native pop.
-                        val playerView = fragment.view
-                        val previousVisibility = playerView?.visibility
-                        if (playerView?.isAttachedToWindow == true) {
-                            playerView.visibility = View.INVISIBLE
-                        }
-                        tracePopup("PLAYER_POPUP_BACK_HIDE_PLAYER attached=${playerView?.isAttachedToWindow}" +
-                            " visibility=${playerView?.visibility}")
-                        if (!runCatching { nav.popBackStack() }.getOrDefault(false)) {
-                            if (previousVisibility != null) playerView?.visibility = previousVisibility
-                            popup.hide()
-                            isEnabled = true
-                            tracePopup("PLAYER_POPUP_BACK_POP_FAILED_RESTORED")
-                        } else {
-                            tracePopup("PLAYER_POPUP_BACK_POP")
-                        }
-                    }
-                }
-                if (Build.VERSION.SDK_INT >= 29 && decor.viewTreeObserver.isAlive) {
-                    // Unlike onPreDraw, this confirms the Dialog's buffer was submitted.
-                    decor.viewTreeObserver.registerFrameCommitCallback {
-                        tracePopup("PLAYER_POPUP_BACK_FRAME_COMMIT")
-                        popAfterFrame()
-                    }
-                    decor.invalidate()
-                } else {
-                    decor.doOnPreDraw { popAfterFrame() }
-                }
-            }
-        }
-        playerPopupBackFragment = fragment
-        playerPopupBackCallback = callback
-        activity.onBackPressedDispatcher.addCallback(fragment.viewLifecycleOwner, callback)
-        tracePopup("PLAYER_POPUP_BACK_INSTALLED")
     }
 
     private fun clearPopupReturnListener() {
@@ -710,7 +620,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             directPlayback = null
             playerFragment = null
         }
-        clearPlayerPopupBackHandler()
         clearPopupReturnListener()
         expandedReturnDialog = null
         popupReturning = false
@@ -863,13 +772,13 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
             traceFragment("FRAGMENT_PAUSED_BEFORE", f)
             recordPlayerEpisode(f)
+            if (f.javaClass.name == PLAYER_SCREEN && popupReturning) showReturnedPopup()
             traceFragment("FRAGMENT_PAUSED_AFTER", f)
         }
 
         override fun onFragmentDestroyed(fm: FragmentManager, f: Fragment) {
             traceFragment("FRAGMENT_DESTROYED_BEGIN", f)
             if (f.javaClass.name != PLAYER_SCREEN) return
-            if (playerPopupBackFragment === f) clearPlayerPopupBackHandler()
             recordPlayerEpisode(f)
             if (playerFragment === f) {
                 clearPendingTimeSeek()
@@ -889,13 +798,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
             traceFragment("FRAGMENT_RESUMED_BEGIN", f)
             when (f.javaClass.name) {
-                PLAYER_SCREEN -> installPlayerPopupBackHandler(f)
                 in EXPANDED_ORIGINS -> {
                     if (popupReturning) {
                         if (f.javaClass.name in SEARCH_ORIGINS) suppressReturnedSearchIme(f)
                         popupReturning = false
-                        popupAwaitingPlayer = false
-                        expandedReturnDialog = null
                     }
                 }
                 in DETAIL_SCREENS -> {
@@ -931,7 +837,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
             traceFragment("FRAGMENT_VIEW_DESTROYED_BEGIN", f)
-            if (playerPopupBackFragment === f) clearPlayerPopupBackHandler()
             if (popupBackFragment === f) clearPopupBackHandler()
             if (popupAwaitingPlayer && f.javaClass.name in EXPANDED_ORIGINS) {
                 expandedReturnDialog?.let { popup ->
@@ -999,7 +904,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         tracePopup("RELEASE_BEGIN")
         clearPendingTimeSeek()
         clearPlaybackReturnListener()
-        clearPlayerPopupBackHandler()
         clearPopupReturnListener()
         popupAwaitingPlayer = false
         popupReturning = false
