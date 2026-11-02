@@ -451,8 +451,25 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                             isEnabled = true
                             return@post
                         }
-                        tracePopup("PLAYER_POPUP_BACK_POP")
-                        nav.popBackStack()
+                        // The Dialog's frame is ready, but the native player
+                        // normally remains attached for another 0.10-0.13s.
+                        // Hide its entire UI (including the back ripple), not just
+                        // the video SurfaceView, before starting the native pop.
+                        val playerView = fragment.view
+                        val previousVisibility = playerView?.visibility
+                        if (playerView?.isAttachedToWindow == true) {
+                            playerView.visibility = View.INVISIBLE
+                        }
+                        tracePopup("PLAYER_POPUP_BACK_HIDE_PLAYER attached=${playerView?.isAttachedToWindow}" +
+                            " visibility=${playerView?.visibility}")
+                        if (!runCatching { nav.popBackStack() }.getOrDefault(false)) {
+                            if (previousVisibility != null) playerView?.visibility = previousVisibility
+                            popup.hide()
+                            isEnabled = true
+                            tracePopup("PLAYER_POPUP_BACK_POP_FAILED_RESTORED")
+                        } else {
+                            tracePopup("PLAYER_POPUP_BACK_POP")
+                        }
                     }
                 }
                 if (Build.VERSION.SDK_INT >= 29 && decor.viewTreeObserver.isAlive) {
