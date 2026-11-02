@@ -254,8 +254,7 @@ class ElevateSettingsFragment : DialogFragment() {
                             Triple("1DM", "idm.internet.download.manager", "idm.internet.download.manager.Downloader"),
                             Triple("1DM+", "idm.internet.download.manager.plus", "idm.internet.download.manager.Downloader"),
                             Triple("1DM Lite", "idm.internet.download.manager.adm.lite", "idm.internet.download.manager.Downloader"),
-                            Triple("ADM", "com.dv.adm", "com.dv.adm.AEditor"),
-                            Triple("Gopeed", "com.gopeed.gopeed", "com.gopeed.gopeed.MainActivity")
+                            Triple("ADM", "com.dv.adm", "com.dv.adm.AEditor")
                         )
                         val selected = ExternalDownloads.selected(ctx)
                         val saved = ComponentName.unflattenFromString(

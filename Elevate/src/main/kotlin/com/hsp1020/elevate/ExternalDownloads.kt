@@ -12,7 +12,6 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.util.Base64
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -64,7 +63,7 @@ internal object ExternalDownloads {
     private var contentObserver: ContentObserver? = null
     private val supported = setOf(
         "idm.internet.download.manager", "idm.internet.download.manager.plus",
-        "idm.internet.download.manager.adm.lite", "com.dv.adm", "com.gopeed.gopeed"
+        "idm.internet.download.manager.adm.lite", "com.dv.adm"
     )
 
     data class App(val component: String, val label: String, val mode: String) {
@@ -278,24 +277,7 @@ internal object ExternalDownloads {
             trace("handoff.group ids=" + group.joinToString(",") { it.queued.id.toString() } +
                 " target=" + pkg + " count=" + group.size + " headerKeys=" + headers.keys.joinToString(","))
             val bundle = Bundle().apply { headers.forEach { (key, value) -> putString(key, value) } }
-            val intent = if (pkg == "com.gopeed.gopeed") {
-                // Gopeed 1.9/2.0 CreateTask deep link: preserve headers and single-file names.
-                val payload = JSONObject().put("req", JSONObject().apply {
-                    put("url", group.joinToString("\n") { it.link.url })
-                    if (headers.isNotEmpty()) put("extra", JSONObject().put("header", JSONObject(headers)))
-                }).put("opts", JSONObject().apply {
-                    if (group.size == 1) put("name", first.filename)
-                    basePath(activity)?.takeIf { it.startsWith("/") }?.let { put("path", it) }
-                })
-                val encoded = Base64.encodeToString(
-                    payload.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP
-                )
-                Intent(Intent.ACTION_VIEW, Uri.parse("gopeed:///create").buildUpon()
-                    .appendQueryParameter("params", encoded).build()).apply {
-                    // Explicit component also works with Gopeed 1.9, whose manifest lacks this scheme.
-                    component = ComponentName(pkg, "com.gopeed.gopeed.MainActivity")
-                }
-            } else if (pkg == "com.dv.adm") {
+            val intent = if (pkg == "com.dv.adm") {
                 Intent(Intent.ACTION_MAIN).apply {
                     component = ComponentName(pkg, "com.dv.adm.AEditor")
                     putExtra("com.dv.get.ACTION_LIST_ADD", group.joinToString("<line>") {
@@ -331,14 +313,11 @@ internal object ExternalDownloads {
                 activity.startActivity(intent)
                 trace("intent.launch.return ids=" + group.joinToString(",") { it.queued.id.toString() } +
                     " package=" + pkg + " note=acceptedByAndroidNotDownloadConfirmed")
-                // Gopeed's multiline create form cannot assign names per URL.
-                if (pkg != "com.gopeed.gopeed" || group.size == 1) {
-                    trace("handoff.pending.begin count=" + group.size)
-                    addPendingBatch(activity.applicationContext, group.map {
-                        fromQueue(activity, it.queued, it.filename)
-                    })
-                    trace("handoff.pending.end count=" + group.size)
-                } else trace("handoff.pending.skipped reason=gopeedBatchWithoutNames")
+                trace("handoff.pending.begin count=" + group.size)
+                addPendingBatch(activity.applicationContext, group.map {
+                    fromQueue(activity, it.queued, it.filename)
+                })
+                trace("handoff.pending.end count=" + group.size)
             } catch (e: Exception) {
                 trace("intent.launch.error package=" + pkg + " " + errorInfo(e))
                 toast(activity, "Cannot open " + app.label + ": " + e.message)
