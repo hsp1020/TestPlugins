@@ -34,7 +34,6 @@ import androidx.navigation.fragment.NavHostFragment
 import android.widget.Toast
 import android.view.View
 import android.view.ViewGroup
-import android.view.SurfaceView
 import android.view.ViewTreeObserver
 import android.view.animation.Animation
 import android.view.inspector.WindowInspector
@@ -217,44 +216,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private var popupReturnListener: NavController.OnDestinationChangedListener? = null
     private var popupBackFragment: Fragment? = null
     private var popupBackCallback: OnBackPressedCallback? = null
+    private var playerPopupBackFragment: Fragment? = null
+    private var playerPopupBackCallback: OnBackPressedCallback? = null
     private var popupReturning = false
-    private var returnDrawTree: ViewTreeObserver? = null
-    private var returnDrawListener: ViewTreeObserver.OnPreDrawListener? = null
-    private var returnGridTraceBudget = 0
-
-    // Event-only player/container diagnostics; no frame loop, timer or retained view.
-    private fun tracePlayerLayer(event: String, root: View?) {
-        var surface: SurfaceView? = null
-        var pressed = 0
-        var animated = 0
-        fun inspect(view: View) {
-            if (surface == null && view is SurfaceView) surface = view
-            if (view.isPressed) pressed++
-            if (view.animation != null || view.hasTransientState()) animated++
-            if (view is ViewGroup) for (i in 0 until view.childCount) inspect(view.getChildAt(i))
-        }
-        if (root != null) inspect(root)
-        val sv = surface
-        Log.i("PopupTrace", "YT ms=${android.os.SystemClock.uptimeMillis()} PLAYER_LAYER $event" +
-            " root#${System.identityHashCode(root)} attached=${root?.isAttachedToWindow}" +
-            " shown=${root?.isShown} visibility=${root?.visibility} alpha=${root?.alpha}" +
-            " parent=${root?.parent?.javaClass?.simpleName}" +
-            " surface#${System.identityHashCode(sv)} surfaceValid=${sv?.holder?.surface?.isValid}" +
-            " surfaceAttached=${sv?.isAttachedToWindow} pressed=$pressed animated=$animated")
-    }
-
-    private fun traceReturnGrid(event: String, list: RecyclerView, view: View? = null, url: String? = null) {
-        if (returnGridTraceBudget <= 0) return
-        returnGridTraceBudget--
-        val image = view?.findViewById<ImageView>(R.id.imageView)
-        Log.i("PopupTrace", "YT ms=${android.os.SystemClock.uptimeMillis()} RETURN_GRID $event" +
-            " list#${System.identityHashCode(list)} items=${list.adapter?.itemCount}" +
-            " visible=${list.childCount} pos=${view?.let(list::getChildAdapterPosition)}" +
-            " cardAttached=${view?.isAttachedToWindow} image#${System.identityHashCode(image)}" +
-            " drawable=${image?.drawable?.javaClass?.simpleName}" +
-            " imageSize=${image?.width}x${image?.height} url=$url")
-    }
-
     // One pending selection bridges player exit and the native detail ViewModel.
     private var pendingRange: Pair<Int, PlayedEpisode>? = null
     private var appliedRange: Pair<Int, PlayedEpisode>? = null
@@ -336,52 +300,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         return match
     }
 
-    // Keep the underlying Search/Home frame from drawing before the restored dialog.
-    // Both listeners are removed as soon as the dialog draws; no timer or polling.
-    private fun clearReturnDrawGuard() {
-        val tree = returnDrawTree
-        val listener = returnDrawListener
-        if (tree?.isAlive == true && listener != null) tree.removeOnPreDrawListener(listener)
-        returnDrawTree = null
-        returnDrawListener = null
-    }
-
-    private fun guardReturnedPopupDraw(popup: Dialog) {
-        val activity = host ?: return
-        val root = activity.window.decorView
-        val decor = popup.window?.decorView ?: return
-        val tree = root.viewTreeObserver.takeIf { it.isAlive } ?: return
-        clearReturnDrawGuard()
-        tracePopup("RETURN_DRAW_GUARD_ARMED playerAttached=${playerFragment?.view?.isAttachedToWindow}")
-        var blockedFrames = 0
-        val listener = object : ViewTreeObserver.OnPreDrawListener {
-            override fun onPreDraw(): Boolean {
-                if (host !== activity || activity.isFinishing || activity.isDestroyed ||
-                    !popup.isShowing || !decor.isAttachedToWindow) {
-                    if (returnDrawListener === this) {
-                        tracePopup("RETURN_DRAW_GUARD_ABORTED")
-                        clearReturnDrawGuard()
-                    }
-                    return true
-                }
-                if (blockedFrames++ < 3) tracePopup("RETURN_ROOT_DRAW_BLOCKED frame=$blockedFrames")
-                return false
-            }
-        }
-        returnDrawTree = tree
-        returnDrawListener = listener
-        tree.addOnPreDrawListener(listener)
-        decor.doOnPreDraw {
-            decor.post {
-                if (returnDrawListener === listener) {
-                    tracePopup("RETURN_ROOT_DRAW_RELEASED blocked=$blockedFrames")
-                    clearReturnDrawGuard()
-                    root.invalidate()
-                }
-            }
-        }
-    }
-
     private fun showReturnedPopup() {
         tracePopup("SHOW_RETURN_BEGIN")
         val popup = expandedReturnDialog ?: run {
@@ -390,28 +308,10 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         }
         expandedReturnDialog = null
         popupAwaitingPlayer = false
-        val decor = popup.window?.decorView
-        if (decor?.isAttachedToWindow == true) {
-            tracePlayerLayer("BEFORE_DIALOG_SHOW", playerFragment?.view)
-            returnGridTraceBudget = 200
+        if (popup.window?.decorView?.isAttachedToWindow == true) {
             popup.window?.setWindowAnimations(0)
             popup.show()
-            tracePopup("RETURN_DIALOG_SHOWN popup#${System.identityHashCode(popup)}" +
-                " attached=${decor.isAttachedToWindow} shown=${popup.isShowing}")
-            if (popupReturning && externalDirectPlaybackHost == null) guardReturnedPopupDraw(popup)
-            decor.findViewById<RecyclerView>(R.id.home_expanded_recycler)?.let { list ->
-                traceReturnGrid("DIALOG_SHOW", list)
-                list.doOnPreDraw { traceReturnGrid("DIALOG_FIRST_PRE_DRAW", list) }
-            }
-            if (Build.VERSION.SDK_INT >= 29 && decor.viewTreeObserver.isAlive) {
-                decor.viewTreeObserver.registerFrameCommitCallback {
-                    Log.i("PopupTrace", "YT ms=${android.os.SystemClock.uptimeMillis()}" +
-                        " RETURN_DIALOG_FRAME_COMMITTED popup#${System.identityHashCode(popup)}")
-                }
-            }
-            traceFirstDraw(decor, "returned-dialog")
-        } else {
-            tracePopup("RETURN_DIALOG_NO_ATTACHED_DECOR")
+            traceFirstDraw(popup.window?.decorView, "returned-dialog")
         }
         tracePopup("SHOW_RETURN_END")
     }
@@ -500,6 +400,77 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         popupBackFragment = fragment
         popupBackCallback = callback
         activity.onBackPressedDispatcher.addCallback(fragment.viewLifecycleOwner, callback)
+    }
+
+    // Mirror the working detail->expanded-dialog return: make the existing Dialog
+    // visible and committed before the native player's Navigation destination pops.
+    private fun clearPlayerPopupBackHandler() {
+        playerPopupBackCallback?.remove()
+        playerPopupBackCallback = null
+        playerPopupBackFragment = null
+    }
+
+    private fun installPlayerPopupBackHandler(fragment: Fragment) {
+        if (playerPopupBackFragment === fragment || directPlayback == null ||
+            externalDirectPlaybackHost != null || Globals.isLayout(Globals.TV or Globals.EMULATOR)) return
+        val popup = expandedReturnDialog ?: return
+        val activity = host ?: return
+        val nav = playbackNav ?: return
+        if (nav.currentDestination?.id != R.id.navigation_player) return
+        clearPlayerPopupBackHandler()
+        val callback = object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                tracePopup("PLAYER_POPUP_BACK_BEGIN")
+                val decor = popup.window?.decorView
+                if (expandedReturnDialog !== popup || !fragment.isAdded ||
+                    nav.currentDestination?.id != R.id.navigation_player ||
+                    decor?.isAttachedToWindow != true ||
+                    (fragment as? GeneratorPlayer)?.isDialogOpen() == true) {
+                    // Let the native player dismiss its own panels and dialogs.
+                    tracePopup("PLAYER_POPUP_BACK_NATIVE")
+                    isEnabled = false
+                    activity.onBackPressedDispatcher.onBackPressed()
+                    fragment.view?.post {
+                        if (playerPopupBackCallback === this &&
+                            nav.currentDestination?.id == R.id.navigation_player) isEnabled = true
+                    }
+                    return
+                }
+                isEnabled = false
+                popup.window?.setWindowAnimations(0)
+                popup.window?.setSoftInputMode(
+                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
+                popup.show()
+                tracePopup("PLAYER_POPUP_BACK_SHOWN")
+                fun popAfterFrame() {
+                    decor.post {
+                        if (playerPopupBackCallback !== this || !fragment.isAdded ||
+                            nav.currentDestination?.id != R.id.navigation_player) return@post
+                        if (!popup.isShowing) {
+                            tracePopup("PLAYER_POPUP_BACK_HIDDEN")
+                            isEnabled = true
+                            return@post
+                        }
+                        tracePopup("PLAYER_POPUP_BACK_POP")
+                        nav.popBackStack()
+                    }
+                }
+                if (Build.VERSION.SDK_INT >= 29 && decor.viewTreeObserver.isAlive) {
+                    // Unlike onPreDraw, this confirms the Dialog's buffer was submitted.
+                    decor.viewTreeObserver.registerFrameCommitCallback {
+                        tracePopup("PLAYER_POPUP_BACK_FRAME_COMMIT")
+                        popAfterFrame()
+                    }
+                    decor.invalidate()
+                } else {
+                    decor.doOnPreDraw { popAfterFrame() }
+                }
+            }
+        }
+        playerPopupBackFragment = fragment
+        playerPopupBackCallback = callback
+        activity.onBackPressedDispatcher.addCallback(fragment.viewLifecycleOwner, callback)
+        tracePopup("PLAYER_POPUP_BACK_INSTALLED")
     }
 
     private fun clearPopupReturnListener() {
@@ -722,9 +693,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             directPlayback = null
             playerFragment = null
         }
+        clearPlayerPopupBackHandler()
         clearPopupReturnListener()
-        clearReturnDrawGuard()
-        returnGridTraceBudget = 0
         expandedReturnDialog = null
         popupReturning = false
         val activity = host ?: return
@@ -875,20 +845,14 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
         override fun onFragmentPaused(fm: FragmentManager, f: Fragment) {
             traceFragment("FRAGMENT_PAUSED_BEFORE", f)
-            if (f.javaClass.name == PLAYER_SCREEN) tracePlayerLayer("PLAYER_PAUSED", f.view)
             recordPlayerEpisode(f)
-            // Do not show a Dialog over the still-attached player/back-ripple layer.
-            // The native Fragment removes the entire player View before viewDestroyed.
             traceFragment("FRAGMENT_PAUSED_AFTER", f)
         }
 
         override fun onFragmentDestroyed(fm: FragmentManager, f: Fragment) {
             traceFragment("FRAGMENT_DESTROYED_BEGIN", f)
             if (f.javaClass.name != PLAYER_SCREEN) return
-            if (popupReturning && expandedReturnDialog != null) {
-                tracePopup("RETURN_FALLBACK_PLAYER_DESTROYED")
-                showReturnedPopup()
-            }
+            if (playerPopupBackFragment === f) clearPlayerPopupBackHandler()
             recordPlayerEpisode(f)
             if (playerFragment === f) {
                 clearPendingTimeSeek()
@@ -908,10 +872,13 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         override fun onFragmentResumed(fm: FragmentManager, f: Fragment) {
             traceFragment("FRAGMENT_RESUMED_BEGIN", f)
             when (f.javaClass.name) {
+                PLAYER_SCREEN -> installPlayerPopupBackHandler(f)
                 in EXPANDED_ORIGINS -> {
                     if (popupReturning) {
                         if (f.javaClass.name in SEARCH_ORIGINS) suppressReturnedSearchIme(f)
                         popupReturning = false
+                        popupAwaitingPlayer = false
+                        expandedReturnDialog = null
                     }
                 }
                 in DETAIL_SCREENS -> {
@@ -932,16 +899,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             }
             if (f.javaClass.name == PLAYER_SCREEN) {
                 playerFragment = f
-                tracePlayerLayer("PLAYER_VIEW_CREATED", view)
-                view.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
-                    override fun onViewAttachedToWindow(v: View) {
-                        tracePlayerLayer("PLAYER_VIEW_ATTACHED", v)
-                    }
-                    override fun onViewDetachedFromWindow(v: View) {
-                        tracePlayerLayer("PLAYER_VIEW_DETACHED", v)
-                        v.removeOnAttachStateChangeListener(this)
-                    }
-                })
                 val popup = expandedReturnDialog
                 if (popupAwaitingPlayer && popup != null) view.doOnPreDraw {
                     if (popupAwaitingPlayer && expandedReturnDialog === popup) {
@@ -957,15 +914,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
         override fun onFragmentViewDestroyed(fm: FragmentManager, f: Fragment) {
             traceFragment("FRAGMENT_VIEW_DESTROYED_BEGIN", f)
-            if (f.javaClass.name == PLAYER_SCREEN) {
-                tracePlayerLayer("PLAYER_VIEW_DESTROYED", f.view)
-                if (popupReturning) {
-                    // The player, including its back-ripple UI, is now detached.
-                    // Restore the native popup before the Search/Home frame draws.
-                    tracePopup("RETURN_AFTER_PLAYER_VIEW_DESTROYED")
-                    showReturnedPopup()
-                }
-            }
+            if (playerPopupBackFragment === f) clearPlayerPopupBackHandler()
             if (popupBackFragment === f) clearPopupBackHandler()
             if (popupAwaitingPlayer && f.javaClass.name in EXPANDED_ORIGINS) {
                 expandedReturnDialog?.let { popup ->
@@ -1031,10 +980,9 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
     private fun release() {
         tracePopup("RELEASE_BEGIN")
-        clearReturnDrawGuard()
-        returnGridTraceBudget = 0
         clearPendingTimeSeek()
         clearPlaybackReturnListener()
+        clearPlayerPopupBackHandler()
         clearPopupReturnListener()
         popupAwaitingPlayer = false
         popupReturning = false
@@ -1510,23 +1458,14 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             private var posted = false
 
             private val changes = object : RecyclerView.AdapterDataObserver() {
-                private fun changed(event: String) {
-                    if (role == Role.DIALOG_GRID) traceReturnGrid(event, list)
-                    schedule()
-                }
-                override fun onChanged() = changed("ADAPTER_CHANGED")
-                override fun onItemRangeChanged(start: Int, count: Int) =
-                    changed("ADAPTER_RANGE_CHANGED $start/$count")
-                override fun onItemRangeInserted(start: Int, count: Int) =
-                    changed("ADAPTER_INSERTED $start/$count")
-                override fun onItemRangeRemoved(start: Int, count: Int) =
-                    changed("ADAPTER_REMOVED $start/$count")
-                override fun onItemRangeMoved(from: Int, to: Int, count: Int) =
-                    changed("ADAPTER_MOVED $from/$to/$count")
+                override fun onChanged() = schedule()
+                override fun onItemRangeChanged(start: Int, count: Int) = schedule()
+                override fun onItemRangeInserted(start: Int, count: Int) = schedule()
+                override fun onItemRangeRemoved(start: Int, count: Int) = schedule()
+                override fun onItemRangeMoved(from: Int, to: Int, count: Int) = schedule()
             }
             private val children = object : RecyclerView.OnChildAttachStateChangeListener {
                 override fun onChildViewAttachedToWindow(view: View) {
-                    if (role == Role.DIALOG_GRID) traceReturnGrid("CARD_ATTACHED", list, view)
                     syncAdapter()
                     apply(view)
                     if (role == Role.HOME_CARD) remeasureOnVisibleShortsChange()
@@ -1536,7 +1475,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 }
 
                 override fun onChildViewDetachedFromWindow(view: View) {
-                    if (role == Role.DIALOG_GRID) traceReturnGrid("CARD_DETACHED", list, view)
                     if (isParent) {
                         view.findViewById<RecyclerView>(R.id.home_child_recyclerview)?.let(::unwatch)
                     } else if (role == Role.DETAIL_EPISODE) {
@@ -1677,7 +1615,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
                 val item = if (position == RecyclerView.NO_POSITION) null
                     else adapter.getItemOrNull(position) as? SearchResponse
                 if (item?.apiName != "YouTube") return restore(view)
-                if (role == Role.DIALOG_GRID) traceReturnGrid("CARD_BOUND", list, view, item.posterUrl)
                 val card = view.findViewById<View>(R.id.background_card) ?: return
                 val video = item.url.contains("/watch?v=")
                 val shorts = item.url.contains("/shorts/")
