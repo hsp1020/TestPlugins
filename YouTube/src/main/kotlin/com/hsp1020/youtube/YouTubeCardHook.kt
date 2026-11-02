@@ -3,7 +3,6 @@ package com.hsp1020.youtube
 import android.app.Activity
 import android.app.Application
 import android.app.Dialog
-import android.content.Intent
 import android.app.SearchManager
 import android.content.Intent
 import android.content.Context
@@ -238,6 +237,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     private var standaloneWasPlaying = false
 
     private fun launchStandalonePlayer(activity: FragmentActivity, args: Bundle): Boolean {
+        // Earlier Android versions cannot register before the player Activity's onCreate.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
         val uuid = args.getString("uuid") ?: return false
         if (standaloneHost != null || standaloneArgs != null) return false
         standaloneUuid = uuid
@@ -973,6 +974,8 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             externalDirectPlaybackHost = activity
             externalDirectPlaybackRestoring = false
         }
+        if (standaloneHost === activity)
+            activity.supportFragmentManager.unregisterFragmentLifecycleCallbacks(fragments)
         activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
         // onActivityCreated can follow the initial player view creation.
         fun scan(manager: FragmentManager) {
@@ -2020,15 +2023,24 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             tracePopup("ACTIVITY_DESTROYED_END", activity)
     }
 
+    override fun onActivityPreCreated(activity: Activity, state: Bundle?) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            activity is FragmentActivity &&
+            activity.javaClass.name ==
+                "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity" &&
+            standaloneArgs != null &&
+            activity.intent?.getStringExtra("youtube_direct_uuid") == standaloneUuid) {
+            // The native Activity navigates to GeneratorPlayer inside onCreate.
+            // Register first so onFragmentPreAttached can hand over the real generator.
+            standaloneHost = activity
+            activity.supportFragmentManager.registerFragmentLifecycleCallbacks(fragments, true)
+        }
+    }
+
     override fun onActivityCreated(activity: Activity, state: Bundle?) {
         if (activity is MainActivity ||
             activity.javaClass.name == "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity")
             tracePopup("ACTIVITY_CREATED saved=${state != null}", activity)
-        if (activity is FragmentActivity &&
-            activity.intent?.getStringExtra("youtube_direct_uuid") == standaloneUuid &&
-            standaloneArgs != null) {
-            standaloneHost = activity
-        }
         observeExternalPlayer(activity)
     }
     override fun onActivityStarted(activity: Activity) {
