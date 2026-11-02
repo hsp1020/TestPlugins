@@ -25,7 +25,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.sync.Semaphore
@@ -211,21 +211,56 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
             item != null -> {
                 ExternalDownloads.trace("prepare.generate.begin id=" + queued.id)
                 val found = java.util.Collections.synchronizedMap(LinkedHashMap<String, ExtractorLink>())
-                withContext(CoroutineName("ElevateDownloadVideoOnly")) {
-                    RepoLinkGenerator(listOf(episode)).generateLinks(
-                    clearCache = false,
+                val videoSignal = Channel<Unit>(Channel.CONFLATED)
+                var stoppedEarly = false
+                coroutineScope {
+                    val load = launch(Dispatchers.IO) {
+                        try {
+                            RepoLinkGenerator(listOf(episode)).generateLinks(
+                                clearCache = false,
                     sourceTypes = LOADTYPE_INAPP_DOWNLOAD,
                     callback = { (link, _) ->
                         if (link != null) {
                             found[link.url] = link
+                            videoSignal.trySend(Unit)
                             ExternalDownloads.trace("prepare.generate.link id=" + queued.id +
                                 " quality=" + link.quality + " hls=" + link.isM3u8)
                         } else ExternalDownloads.trace("prepare.generate.nullLink id=" + queued.id)
                     },
                     subtitleCallback = {},
                     offset = 0,
-                    isCasting = false
-                    )
+                                isCasting = false
+                            )
+                        } finally {
+                            videoSignal.trySend(Unit)
+                        }
+                    }
+                    try {
+                        // Only video updates extend the window; subtitle callbacks are ignored.
+                        while (load.isActive && synchronized(found) { found.isEmpty() }) videoSignal.receive()
+                        if (synchronized(found) { found.isNotEmpty() }) {
+                            while (load.isActive) {
+                                if (withTimeoutOrNull(4_000L) { videoSignal.receive() } == null) {
+                                    stoppedEarly = true
+                                    ExternalDownloads.trace("prepare.video.quietLimit id=" + queued.id +
+                                        " available=" + synchronized(found) { found.size })
+                                    load.cancel()
+                                    break
+                                }
+                            }
+                        }
+                    } finally {
+                        load.cancelAndJoin()
+                        videoSignal.close()
+                    }
+                }
+                if (stoppedEarly) {
+                    // A partial VIDEO-only result must not prevent the next native subtitle lookup.
+                    synchronized(RepoLinkGenerator.cache) {
+                        RepoLinkGenerator.cache[episode.apiName to episode.id]?.let { entry ->
+                            synchronized(entry) { entry.saturated = false }
+                        }
+                    }
                 }
                 synchronized(found) { found.values.toList() }.also {
                     ExternalDownloads.trace("prepare.generate.end id=" + queued.id + " unique=" + it.size)
