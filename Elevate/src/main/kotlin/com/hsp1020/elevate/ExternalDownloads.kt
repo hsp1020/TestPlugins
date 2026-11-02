@@ -61,6 +61,7 @@ internal object ExternalDownloads {
     private var watchPath: String? = null
     private var fileObserver: FileObserver? = null
     private var contentObserver: ContentObserver? = null
+    private var unstableRetries = 0
     private val supported = setOf(
         "idm.internet.download.manager", "idm.internet.download.manager.plus",
         "idm.internet.download.manager.adm.lite", "com.dv.adm"
@@ -151,6 +152,7 @@ internal object ExternalDownloads {
         trace("pending.add ids=" + items.joinToString(",") { it.id.toString() } + " count=" + items.size)
         val map = pendingMap(c)
         for (item in items) map[item.id] = item
+        unstableRetries = 0
         savePending(c)
         watch(c)
         scheduleCheck(c, 2400L)
@@ -241,14 +243,14 @@ internal object ExternalDownloads {
      * Transfer together only when the HTTP headers match: both apps use batch-wide headers.
      */
     fun handoffBatch(
-        activity: Activity,
+        context: Context,
         requests: List<Pair<DownloadObjects.DownloadQueueWrapper, ExtractorLink>>
     ) {
         trace("handoff.enter count=" + requests.size + " ids=" +
-            requests.joinToString(",") { it.first.id.toString() } + " activity=" +
-            System.identityHashCode(activity) + " finishing=" + activity.isFinishing +
-            " destroyed=" + activity.isDestroyed)
-        val app = selected(activity) ?: run { trace("handoff.noSelection"); return }
+            requests.joinToString(",") { it.first.id.toString() } + " context=" +
+            System.identityHashCode(context) + " finishing=" + (context as? Activity)?.isFinishing +
+            " destroyed=" + (context as? Activity)?.isDestroyed)
+        val app = selected(context) ?: run { trace("handoff.noSelection"); return }
         val pkg = ComponentName.unflattenFromString(app.component)?.packageName ?: run {
             trace("handoff.badComponent"); return
         }
@@ -260,7 +262,7 @@ internal object ExternalDownloads {
                 " headerKeys=" + transferHeaders.keys.joinToString(","))
             if (scheme !in listOf("http", "https")) {
                 trace("handoff.rejectedScheme id=" + queued.id)
-                toast(activity, "External download requires an HTTP(S) link")
+                toast(context, "External download requires an HTTP(S) link")
                 null
             } else Transfer(queued, link, fileName(queued, link), transferHeaders)
         }
@@ -284,7 +286,7 @@ internal object ExternalDownloads {
                         "${it.link.url}<info>${it.filename}"
                     })
                     putExtra("com.dv.get.ACTION_LIST_OPEN", false)
-                    basePath(activity)?.takeIf { it.startsWith("/") }?.let {
+                    basePath(context)?.takeIf { it.startsWith("/") }?.let {
                         putExtra("com.dv.get.ACTION_LIST_PATH", it)
                     }
                     if (headers.isNotEmpty()) putExtra("headers", bundle)
@@ -310,17 +312,18 @@ internal object ExternalDownloads {
                     " package=" + pkg + " action=" + intent.action + " component=" + intent.component?.className +
                     " scheme=" + intent.data?.scheme + " queryLength=" + (intent.data?.encodedQuery?.length ?: 0) +
                     " extras=" + (intent.extras?.keySet()?.joinToString(",") ?: "none"))
-                activity.startActivity(intent)
+                if (context !is Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
                 trace("intent.launch.return ids=" + group.joinToString(",") { it.queued.id.toString() } +
                     " package=" + pkg + " note=acceptedByAndroidNotDownloadConfirmed")
                 trace("handoff.pending.begin count=" + group.size)
-                addPendingBatch(activity.applicationContext, group.map {
-                    fromQueue(activity, it.queued, it.filename)
+                addPendingBatch(context.applicationContext, group.map {
+                    fromQueue(context, it.queued, it.filename)
                 })
                 trace("handoff.pending.end count=" + group.size)
             } catch (e: Exception) {
                 trace("intent.launch.error package=" + pkg + " " + errorInfo(e))
-                toast(activity, "Cannot open " + app.label + ": " + e.message)
+                toast(context, "Cannot open " + app.label + ": " + e.message)
             }
         }
         trace("handoff.exit count=" + transfers.size + " target=" + pkg)
@@ -468,6 +471,7 @@ internal object ExternalDownloads {
         }
         trace("scan.begin")
         scanner.launch {
+            var unstableFile = false
             try {
                 val requests = pending(c)
                 if (requests.isEmpty()) {
@@ -501,6 +505,7 @@ internal object ExternalDownloads {
                     val size = file.length() ?: continue
                     if (size <= 1024L) {
                         trace("scan.reject.id=" + pending.id + " reason=size bytes=" + size)
+                        unstableFile = true
                         continue
                     }
                     val modified = file.lastModified()
@@ -508,6 +513,7 @@ internal object ExternalDownloads {
                                 modified > now - 1500L)) {
                         trace("scan.reject.id=" + pending.id + " reason=mtime deltaMs=" +
                             (now - modified))
+                        if (modified >= pending.created - 2000L) unstableFile = true
                         continue
                     }
                     trace("scan.candidate id=" + pending.id + " bytes=" + size)
@@ -521,11 +527,13 @@ internal object ExternalDownloads {
                 for ((pending, file, size) in candidates) {
                     if (file.length() != size || size <= 1024L) {
                         trace("scan.unstable id=" + pending.id + " reason=size")
+                        unstableFile = true
                         continue
                     }
                     val modified = file.lastModified()
                     if (modified != null && modified > stableAt - 1500L) {
                         trace("scan.unstable id=" + pending.id + " reason=mtime")
+                        unstableFile = true
                         continue
                     }
                     val name = file.name() ?: continue
@@ -545,6 +553,11 @@ internal object ExternalDownloads {
                 android.util.Log.w("ElevateExternal", "Cannot inspect CloudStream download folder", e)
             } finally {
                 checking.set(false)
+                if (unstableFile && unstableRetries < 2) {
+                    unstableRetries++
+                    trace("scan.retry.unstable attempt=" + unstableRetries)
+                    scheduleCheck(c, 6_000L)
+                } else if (!unstableFile) unstableRetries = 0
                 trace("scan.end")
             }
         }
@@ -552,12 +565,14 @@ internal object ExternalDownloads {
 
     fun startRecognition(c: Context) {
         trace("recognition.start")
+        unstableRetries = 0
         watch(c)
         scheduleCheck(c, 2400L)
     }
 
     @Synchronized fun stopRecognition(c: Context) {
         trace("recognition.stop")
+        unstableRetries = 0
         stopWatching(c)
         scheduled?.let(main::removeCallbacks)
         scheduled = null

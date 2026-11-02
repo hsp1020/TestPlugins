@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.sync.Semaphore
@@ -114,11 +115,14 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
                     if (host?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) != true) {
                         ExternalDownloads.trace("host.wait.enter " + hostInfo())
                     }
-                    while (host?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) != true) {
-                        resumes.receive()
-                        ExternalDownloads.trace("host.wait.wakeup " + hostInfo())
-                    }
-                    ExternalDownloads.trace("host.ready " + hostInfo())
+                    val ready = withTimeoutOrNull(2500L) {
+                        while (host?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.RESUMED) != true) {
+                            resumes.receive()
+                            ExternalDownloads.trace("host.wait.wakeup " + hostInfo())
+                        }
+                        true
+                    } == true
+                    ExternalDownloads.trace("host.wait.end ready=" + ready + " " + hostInfo())
                     // Bound simultaneous source lookups; keep all requests even if one fails.
                     val resolved = coroutineScope {
                         val limit = Semaphore(3)
@@ -146,14 +150,15 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
                         }.awaitAll().filterNotNull()
                     }
                     ExternalDownloads.trace("batch.resolved requested=" + batch.size + " count=" + resolved.size)
-                    val activity = host
-                    if (activity == null) {
-                        ExternalDownloads.trace("handoff.skip.noHost " + hostInfo())
-                        continue
-                    }
-                    ExternalDownloads.trace("handoff.call count=" + resolved.size + " host=" +
-                        System.identityHashCode(activity) + " state=" + activity.lifecycle.currentState)
-                    if (resolved.isNotEmpty()) ExternalDownloads.handoffBatch(activity, resolved)
+                    val activity = ((CommonActivity.activity as? FragmentActivity)
+                        ?.takeIf { it.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+                            !it.isFinishing && !it.isDestroyed })
+                        ?: host?.takeIf { it.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+                            !it.isFinishing && !it.isDestroyed }
+                    val target = activity ?: app
+                    ExternalDownloads.trace("handoff.call count=" + resolved.size +
+                        " target=" + (if (activity == null) "application" else "activity") + " " + hostInfo())
+                    if (resolved.isNotEmpty()) ExternalDownloads.handoffBatch(target, resolved)
                     ExternalDownloads.trace("worker.end id=" + first.id + " elapsedMs=" +
                         (android.os.SystemClock.elapsedRealtime() - started))
                 } catch (cancel: CancellationException) {
@@ -206,7 +211,8 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
             item != null -> {
                 ExternalDownloads.trace("prepare.generate.begin id=" + queued.id)
                 val found = java.util.Collections.synchronizedMap(LinkedHashMap<String, ExtractorLink>())
-                RepoLinkGenerator(listOf(episode)).generateLinks(
+                withContext(CoroutineName("ElevateDownloadVideoOnly")) {
+                    RepoLinkGenerator(listOf(episode)).generateLinks(
                     clearCache = false,
                     sourceTypes = LOADTYPE_INAPP_DOWNLOAD,
                     callback = { (link, _) ->
@@ -219,7 +225,8 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
                     subtitleCallback = {},
                     offset = 0,
                     isCasting = false
-                )
+                    )
+                }
                 synchronized(found) { found.values.toList() }.also {
                     ExternalDownloads.trace("prepare.generate.end id=" + queued.id + " unique=" + it.size)
                 }

@@ -72,6 +72,7 @@ class ElevatePlugin : Plugin() {
     private var pipLibrary: PipLibraryNavigation? = null
     private var externalDownloaderLifecycle: ExternalDownloaderLifecycle? = null
     private var externalQueueBridge: ExternalQueueBridge? = null
+    private var downloadPickerPresentation: DownloadPickerPresentationHook? = null
     private var episodeProgress: EpisodeProgressHook? = null
     private var subtitleRetry: SubtitleRefererRetry? = null
     private var homeRecyclerGuard: HomeRecyclerCacheGuard? = null
@@ -163,7 +164,12 @@ class ElevatePlugin : Plugin() {
             if (externalQueueBridge == null) {
                 externalQueueBridge = ExternalQueueBridge(application).also { it.start() }
             }
+            if (downloadPickerPresentation == null) {
+                downloadPickerPresentation = DownloadPickerPresentationHook(application).also { it.start() }
+            }
         } else {
+            downloadPickerPresentation?.stop()
+            downloadPickerPresentation = null
             externalQueueBridge?.stop()
             externalQueueBridge = null
             externalDownloaderLifecycle?.stop()
@@ -364,6 +370,8 @@ class ElevatePlugin : Plugin() {
         hook = null
         pipLibrary?.stop()
         pipLibrary = null
+        downloadPickerPresentation?.stop()
+        downloadPickerPresentation = null
         externalQueueBridge?.stop()
         externalQueueBridge = null
         externalDownloaderLifecycle?.stop()
