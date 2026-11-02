@@ -12,6 +12,10 @@ import androidx.lifecycle.ViewModelProvider
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
+import com.lagradost.cloudstream3.mvvm.Resource
+import com.lagradost.cloudstream3.sortUrls
+import com.lagradost.cloudstream3.ui.player.LOADTYPE_INAPP_DOWNLOAD
+import com.lagradost.cloudstream3.ui.player.RepoLinkGenerator
 import com.lagradost.cloudstream3.ui.result.LinkLoadingResult
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.ui.result.SelectPopup
@@ -52,7 +56,49 @@ internal class DownloadPickerPresentationHook(private val app: Application) :
         return null
     }
 
-    private fun updatedPopup(fragment: Fragment, popup: SelectPopup.SelectText): SelectPopup.SelectText? {
+    /** Rebuild native link order from its own cache; this also contains links kept by Skip. */
+    private fun cachedOrders(
+        model: ResultViewModel2, options: List<String>, profileId: Int
+    ): List<Int>? {
+        val episodeKeys = HashSet<Pair<String, Int>>()
+        val episodes = model.episodes.value
+        if (episodes is Resource.Success) episodes.value.forEach {
+            episodeKeys.add(it.apiName to it.id)
+        }
+        val movie = model.movie.value
+        if (movie is Resource.Success) movie.value.second.let {
+            episodeKeys.add(it.apiName to it.id)
+        }
+
+        // This is the same filtered, quality-sorted set used by the native mirror popup.
+        val candidates = synchronized(RepoLinkGenerator.cache) {
+            RepoLinkGenerator.cache.mapNotNull { (key, cached) ->
+                if (episodeKeys.isNotEmpty() && key !in episodeKeys) return@mapNotNull null
+                val links = synchronized(cached) {
+                    sortUrls(cached.linkCache.filterTo(LinkedHashSet<ExtractorLink>()) {
+                        it.type in LOADTYPE_INAPP_DOWNLOAD
+                    })
+                }
+                links.takeIf { it.size == options.size && links.indices.all { index ->
+                    options[index] == links[index].name + " " +
+                        Qualities.getStringByInt(links[index].quality)
+                } }
+            }
+        }
+        val orders = candidates.map { links ->
+            links.indices.sortedWith(compareByDescending<Int> {
+                QualityDataHelper.getLinkPriority(profileId, links[it])
+            }.thenBy { it })
+        }.distinct()
+        return orders.singleOrNull().also {
+            if (it == null) ExternalDownloads.trace(
+                "picker.mirror.cache." + (if (orders.isEmpty()) "noMatch" else "ambiguous") +
+                    " options=" + options.size + " candidates=" + candidates.size
+            )
+        }
+    }
+
+    private fun updatedPopup(fragment: Fragment, model: ResultViewModel2, popup: SelectPopup.SelectText): SelectPopup? {
         val ctx = fragment.context ?: return null
         return when (popup.getTitle(ctx)) {
             ctx.getString(R.string.episode_action_download_subtitle) -> {
@@ -68,32 +114,31 @@ internal class DownloadPickerPresentationHook(private val app: Application) :
                 }
             }
             ctx.getString(R.string.episode_action_download_mirror) -> {
-                val links = capturedLinks(popup.callback) ?: run {
-                    ExternalDownloads.trace("picker.mirror.capture.unavailable")
-                    return null
-                }
-                if (links.size != popup.options.size) {
-                    ExternalDownloads.trace("picker.mirror.capture.countMismatch")
-                    return null
-                }
-                if (links.indices.any { index ->
-                    popup.options[index].asString(ctx) !=
-                        links[index].name + " " + Qualities.getStringByInt(links[index].quality)
-                }) {
-                    ExternalDownloads.trace("picker.mirror.capture.labelsMismatch")
-                    return null
-                }
                 val profile = QualityDataHelper.getProfiles().firstOrNull {
                     QualityDataHelper.QualityProfileType.Download in it.types
                 } ?: return null
-                val order = links.indices.sortedWith(compareByDescending<Int> {
-                    QualityDataHelper.getLinkPriority(profile.id, links[it])
-                }.thenBy { it })
+                val labels = popup.options.map { it.asString(ctx) }
+                // Read the actual ExtractorLinks without relying on compiler-generated lambda fields.
+                // On native Skip, the popup and this cache both contain the partial link set.
+                val order = cachedOrders(model, labels, profile.id)
+                    ?: capturedLinks(popup.callback)?.takeIf { links ->
+                        links.size == labels.size && links.indices.all { index ->
+                            labels[index] == links[index].name + " " +
+                                Qualities.getStringByInt(links[index].quality)
+                        }
+                    }?.let { links ->
+                        ExternalDownloads.trace("picker.mirror.callback.fallback count=" + links.size)
+                        links.indices.sortedWith(compareByDescending<Int> {
+                            QualityDataHelper.getLinkPriority(profile.id, links[it])
+                        }.thenBy { it })
+                    } ?: return null
                 if (order.indices.all { order[it] == it }) return null
                 ExternalDownloads.trace("picker.mirror.sorted count=" + order.size + " profile=" + profile.id)
-                popup.copy(options = order.map { popup.options[it] }) { index ->
-                    popup.callback(index?.let { order.getOrNull(it) })
-                }
+                // Native SelectArray already maps displayed row -> original callback index.
+                // Leave the original callback and native selection/download queue unchanged.
+                SelectPopup.SelectArray(
+                    popup.text, order.map { popup.options[it] to it }, popup.callback
+                )
             }
             else -> null
         }
@@ -108,7 +153,7 @@ internal class DownloadPickerPresentationHook(private val app: Application) :
         var replacement: SelectPopup? = null
         val observer = Observer<SelectPopup?> { popup ->
             if (popup !is SelectPopup.SelectText || popup === replacement) return@Observer
-            val revised = runCatching { updatedPopup(fragment, popup) }.getOrNull() ?: return@Observer
+            val revised = runCatching { updatedPopup(fragment, model, popup) }.getOrNull() ?: return@Observer
             replacement = revised
             (model.selectPopup as? MutableLiveData<SelectPopup?>)?.value = revised
         }
