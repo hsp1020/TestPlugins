@@ -125,16 +125,36 @@ internal class PipLibraryNavigation(private val app: Application) : Application.
         val pip = playerActivity?.takeIf {
             enabled && it.inPip() && !it.isFinishing && !it.isDestroyed
         }
-        if (pip == null || args.getString("uuid").isNullOrBlank() ||
-            !args.containsKey("index")) {
+        val directLaunch = args.getBoolean("youtube_direct_launch", false)
+        val origin = mainActivity
+        if (!enabled || args.getString("uuid").isNullOrBlank() ||
+            !args.containsKey("index") ||
+            (pip == null && (!directLaunch || origin == null))) {
             trace("PIP_BRIDGE_REJECT")
             false
-        } else {
+        } else if (pip != null) {
             trace("PIP_BRIDGE_ACCEPT")
             nextPipVideo?.getString("uuid")?.let(::forgetPlaceholder)
-            nextPipVideo = Bundle(args)
+            nextPipVideo = Bundle(args).apply { remove("youtube_direct_launch") }
             schedulePipSwitch(pip)
             true
+        } else {
+            // Preserve SearchFragment in MainActivity instead of navigating away.
+            val uuid = args.getString("uuid")!!
+            pending = Bundle(args).apply { remove("youtube_direct_launch") }
+            try {
+                origin!!.startActivity(Intent(origin, DownloadedPlayerActivity::class.java).apply {
+                    action = Intent.ACTION_SEND
+                    putExtra(Intent.EXTRA_TEXT, "https://127.0.0.1/__elevate_pip/$uuid")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                })
+                trace("YOUTUBE_DIRECT_EXTERNAL_LAUNCHED")
+                true
+            } catch (error: Exception) {
+                pending = null
+                Log.e("ElevatePiP", "YouTube direct player launch failed", error)
+                false
+            }
         }
     }
 

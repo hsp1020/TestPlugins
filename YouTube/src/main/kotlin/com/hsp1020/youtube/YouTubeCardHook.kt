@@ -3,6 +3,7 @@ package com.hsp1020.youtube
 import android.app.Activity
 import android.app.Application
 import android.app.Dialog
+import android.content.Intent
 import android.app.SearchManager
 import android.content.Intent
 import android.content.Context
@@ -227,6 +228,82 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     // Retain quick-play ownership across external player Fragment teardown.
     private var externalDirectPlaybackHost: FragmentActivity? = null
     private var externalDirectPlaybackRestoring = false
+    // Used only when the optional Elevate PiP bridge is disabled.
+    private var standaloneArgs: Bundle? = null
+    private var standaloneUuid: String? = null
+    private var standaloneHost: FragmentActivity? = null
+    private var standaloneNavigation: NavController? = null
+    private var standaloneBack: OnBackPressedCallback? = null
+    private var standaloneDestination: NavController.OnDestinationChangedListener? = null
+    private var standaloneWasPlaying = false
+
+    private fun launchStandalonePlayer(activity: FragmentActivity, args: Bundle): Boolean {
+        val uuid = args.getString("uuid") ?: return false
+        if (standaloneHost != null || standaloneArgs != null) return false
+        standaloneUuid = uuid
+        standaloneArgs = Bundle(args)
+        return try {
+            activity.startActivity(Intent(activity,
+                com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity::class.java).apply {
+                action = Intent.ACTION_SEND
+                putExtra(Intent.EXTRA_TEXT, "https://127.0.0.1/__youtube_direct/$uuid")
+                putExtra("youtube_direct_uuid", uuid)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+            true
+        } catch (error: Exception) {
+            standaloneArgs = null
+            standaloneUuid = null
+            Log.w("PopupTrace", "YouTube standalone player launch failed", error)
+            false
+        }
+    }
+
+    private fun finishStandalonePlayer(activity: FragmentActivity) {
+        if (standaloneHost !== activity || activity.isFinishing) return
+        playerFragment?.let(::recordPlayerEpisode)
+        directPlayback?.let { session ->
+            val played = lastPlayed ?: PlayedEpisode(session.startingNumber, session.startingSeason)
+            selectLastPlaybackRange(session.parentId, played)
+        }
+        (playerFragment as? GeneratorPlayer)?.releasePlayer()
+        activity.finishAndRemoveTask()
+    }
+
+    private fun bindStandalonePlayer(activity: FragmentActivity) {
+        if (standaloneHost !== activity) return
+        if (standaloneBack == null) {
+            standaloneBack = object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() = finishStandalonePlayer(activity)
+            }.also { activity.onBackPressedDispatcher.addCallback(activity, it) }
+        }
+        if (standaloneNavigation == null) {
+            val nav = (activity.supportFragmentManager.findFragmentById(R.id.nav_host_fragment)
+                as? NavHostFragment)?.navController ?: return
+            standaloneWasPlaying = nav.currentDestination?.id == R.id.navigation_player
+            val listener = NavController.OnDestinationChangedListener { _, destination, _ ->
+                if (destination.id == R.id.navigation_player) standaloneWasPlaying = true
+                else if (standaloneWasPlaying) finishStandalonePlayer(activity)
+            }
+            standaloneNavigation = nav
+            standaloneDestination = listener
+            nav.addOnDestinationChangedListener(listener)
+        }
+    }
+
+    private fun clearStandalonePlayer() {
+        standaloneBack?.remove()
+        standaloneBack = null
+        standaloneDestination?.let { listener ->
+            standaloneNavigation?.removeOnDestinationChangedListener(listener)
+        }
+        standaloneDestination = null
+        standaloneNavigation = null
+        standaloneHost = null
+        standaloneArgs = null
+        standaloneUuid = null
+        standaloneWasPlaying = false
+    }
 
     // Temporary event-only diagnostics. One tag and monotonic clock for both plugins.
     private fun tracePopup(event: String, activity: Activity? = host) {
@@ -693,10 +770,14 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             @Suppress("UNCHECKED_CAST")
             val switchPip = activity.window.decorView.getTag(R.id.global_to_navigation_player)
                 as? ((Bundle) -> Boolean)
-            if (switchPip?.invoke(playerArgs) == true) {
-                tracePopup("PIP_BRIDGE_SWITCH_SUCCESS")
-                // A new YouTube video can replace the existing PiP player.
+            val bridged = switchPip?.invoke(if (popupDialog != null)
+                Bundle(playerArgs).apply { putBoolean("youtube_direct_launch", true) }
+                else playerArgs) == true
+            if (bridged) {
+                tracePopup("EXTERNAL_BRIDGE_SUCCESS")
                 externalDirectPlaybackHost = externalPlayerHost
+            } else if (popupDialog != null && launchStandalonePlayer(activity, playerArgs)) {
+                tracePopup("STANDALONE_PLAYER_LAUNCHED")
             } else {
                 tracePopup("NATIVE_NAVIGATE_BEGIN")
                 registerReturn(navHost.navController, session)
@@ -757,6 +838,24 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     }
 
     private val fragments = object : FragmentManager.FragmentLifecycleCallbacks() {
+        override fun onFragmentPreAttached(fm: FragmentManager, f: Fragment, context: Context) {
+            val args = standaloneArgs ?: return
+            if (context !== standaloneHost || f.javaClass.name != PLAYER_SCREEN) return
+            val placeholder = f.arguments?.getString("uuid")
+            f.arguments = Bundle(args)
+            standaloneArgs = null
+            if (placeholder != args.getString("uuid")) {
+                // Remove only the unused native placeholder generator.
+                runCatching {
+                    @Suppress("UNCHECKED_CAST")
+                    val generators = GeneratorPlayer::class.java.getDeclaredField("generators")
+                        .apply { isAccessible = true }.get(null) as? MutableMap<String, *>
+                    generators?.remove(placeholder)
+                }
+            }
+            tracePopup("STANDALONE_GENERATOR_ATTACHED")
+        }
+
         override fun onFragmentCreated(fm: FragmentManager, f: Fragment, savedInstanceState: Bundle?) {
             traceFragment("FRAGMENT_CREATED saved=${savedInstanceState != null}", f)
         }
@@ -902,6 +1001,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
 
     private fun release() {
         tracePopup("RELEASE_BEGIN")
+        clearStandalonePlayer()
         clearPendingTimeSeek()
         clearPlaybackReturnListener()
         clearPopupReturnListener()
@@ -1878,6 +1978,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     }
 
     override fun onActivityDestroyed(activity: Activity) {
+        if (activity === standaloneHost) clearStandalonePlayer()
         if (activity is MainActivity ||
             activity.javaClass.name == "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity")
             tracePopup("ACTIVITY_DESTROYED_BEGIN", activity)
@@ -1923,6 +2024,11 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         if (activity is MainActivity ||
             activity.javaClass.name == "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity")
             tracePopup("ACTIVITY_CREATED saved=${state != null}", activity)
+        if (activity is FragmentActivity &&
+            activity.intent?.getStringExtra("youtube_direct_uuid") == standaloneUuid &&
+            standaloneArgs != null) {
+            standaloneHost = activity
+        }
         observeExternalPlayer(activity)
     }
     override fun onActivityStarted(activity: Activity) {
@@ -1930,6 +2036,7 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
             activity.javaClass.name == "com.lagradost.cloudstream3.ui.player.DownloadedPlayerActivity")
             tracePopup("ACTIVITY_STARTED", activity)
         observeExternalPlayer(activity)
+        if (activity is FragmentActivity) bindStandalonePlayer(activity)
     }
     override fun onActivityPaused(activity: Activity) {
         if (activity is MainActivity ||
