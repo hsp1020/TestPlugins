@@ -446,11 +446,12 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         val playerFragment = fragment ?: return
         playerFragment.viewLifecycleOwner.lifecycleScope.launch {
             val found = withContext(Dispatchers.IO) {
+                val basePath = meta.basePath
                 val root = when {
-                    meta.basePath.isNullOrBlank() -> DownloadFileManagement.getDefaultDir(application)
-                    meta.basePath.startsWith("content://") ->
-                        SafeFile.fromUri(application, Uri.parse(meta.basePath))
-                    else -> SafeFile.fromFilePath(application, meta.basePath)
+                    basePath.isNullOrBlank() -> DownloadFileManagement.getDefaultDir(application)
+                    basePath.startsWith("content://") ->
+                        SafeFile.fromUri(application, Uri.parse(basePath))
+                    else -> SafeFile.fromFilePath(application, basePath)
                 }
                 root?.gotoDirectory(relative, createMissingDirectories = false)
                     ?.listFiles().orEmpty().mapNotNull { file ->
