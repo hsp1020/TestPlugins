@@ -398,6 +398,14 @@ internal object ExternalDownloads {
         return result
     }
 
+    /** Match ADM's 128-character filename limit while preserving short extensions. */
+    private fun admSavedName(name: String): String {
+        if (name.length <= 128) return name
+        val dot = name.lastIndexOf('.')
+        val ext = if (dot >= 0 && name.length - dot in 2..8) name.substring(dot) else ""
+        return name.take(128 - ext.length) + ext
+    }
+
     /**
      * Preserve the existing 1DM/ADM batch intent formats. Subtitles are sent
      * alongside video, grouped by HTTP headers; only videos enter pending recognition.
@@ -449,7 +457,11 @@ internal object ExternalDownloads {
                 context.startActivity(intent)
                 launched = true
                 val videos = group.mapNotNull { transfer ->
-                    transfer.queued?.let { fromQueue(context, it, transfer.filename) }
+                    transfer.queued?.let {
+                        fromQueue(context, it,
+                            if (pkg == "com.dv.adm") admSavedName(transfer.filename)
+                            else transfer.filename)
+                    }
                 }
                 if (videos.isNotEmpty()) addPendingBatch(context.applicationContext, videos)
             } catch (e: Exception) {
@@ -617,8 +629,15 @@ internal object ExternalDownloads {
                 }
                 // One directory listing, one lookup map, no nested filtering or per-file sleep.
                 val byName = HashMap<String, Pending>(requests.size)
+                val adm = selected(c)?.let {
+                    ComponentName.unflattenFromString(it.component)?.packageName == "com.dv.adm"
+                } == true
                 for (p in requests) if (p.expectedFile.isNotBlank()) {
                     byName[p.expectedFile.lowercase(java.util.Locale.ROOT)] = p
+                    // Recognize files downloaded before the ADM filename fix as well.
+                    if (adm && p.expectedFile.length > 128) {
+                        byName[admSavedName(p.expectedFile).lowercase(java.util.Locale.ROOT)] = p
+                    }
                 }
                 val candidates = ArrayList<Triple<Pending, SafeFile, Long>>(requests.size)
                 val now = System.currentTimeMillis()
@@ -656,7 +675,8 @@ internal object ExternalDownloads {
                         continue
                     }
                     val name = file.name() ?: continue
-                    if (!name.equals(pending.expectedFile, ignoreCase = true)) {
+                    if (!name.equals(pending.expectedFile, ignoreCase = true) &&
+                        !(adm && name.equals(admSavedName(pending.expectedFile), ignoreCase = true))) {
                         continue
                     }
                     runCatching { register(c, pending, name, size, base) }
