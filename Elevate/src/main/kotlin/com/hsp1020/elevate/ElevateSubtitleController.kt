@@ -878,7 +878,7 @@ internal class ElevateSubtitleController(private val pluginResources: Resources)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                android.util.Log.e("ElevateSubtitleRefresh", "failed stage=fetchOrParse generation=$generation urlHash=${entry.originalUrl.hashCode()} current=${current()}", e)
+                android.util.Log.e("ElevateSubtitleRefresh", "Subtitle refresh failed", e)
                 if (current()) {
                     android.widget.Toast.makeText(
                         target.context, getPluginSubtitleString(
