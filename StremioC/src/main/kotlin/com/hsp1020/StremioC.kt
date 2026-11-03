@@ -4203,7 +4203,7 @@ open class StremioC(
 
             if (media.isAnime) {
 
-                withTimeoutOrNull(55000L) {
+                withTimeoutOrNull(60000L) {
                     supervisorScope {
                         val anime = if (media.hasSeasonMapping || (loadData.originalAnimeId == null && (media.season ?: 1) <= 1))
                             async(Dispatchers.IO) { callCine(animeRoute = true) } else null
@@ -4230,7 +4230,7 @@ open class StremioC(
                     }
                 }
             } else {
-                withTimeoutOrNull(55000L) { callCine(animeRoute = false) }
+                withTimeoutOrNull(60000L) { callCine(animeRoute = false) }
             }
         } catch (e: CancellationException) {
             throw e
@@ -4263,7 +4263,7 @@ open class StremioC(
 
             if (!media.isAnime) {
                 if (streamPlayProvider != null) {
-                    withTimeoutOrNull(55000L) {
+                    withTimeoutOrNull(60000L) {
                         withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(
                             streamPlayPayload(loadData, targetType, media).toJson(),
                             isCasting, subtitleCallback, callback
@@ -4301,7 +4301,7 @@ open class StremioC(
                                 "isBollywood" to loadData.isBollywood,
                                 "isCartoon" to loadData.isCartoon
                             )
-                            withTimeoutOrNull(35000L) {
+                            withTimeoutOrNull(60000L) {
                                 withIntegratedSource("anime") { animeProvider.loadLinks(
                                     animePayload.toJson(), isCasting, subtitleCallback, callback
                                 ) }
@@ -4315,7 +4315,7 @@ open class StremioC(
                 if (streamPlayProvider != null) {
                     val anime = async(Dispatchers.IO) {
                         try {
-                            if (media.hasSeasonMapping || (loadData.originalAnimeId == null && (media.season ?: 1) <= 1)) withTimeoutOrNull(35000L) {
+                            if (media.hasSeasonMapping || (loadData.originalAnimeId == null && (media.season ?: 1) <= 1)) withTimeoutOrNull(60000L) {
                                 withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(
                                     streamPlayPayload(loadData, targetType, media).toJson(),
                                     isCasting, subtitleCallback, callback
@@ -4331,7 +4331,7 @@ open class StremioC(
                         (media.imdbId != null || media.tmdbId != null)) {
                         async(Dispatchers.IO) {
                             try {
-                                withTimeoutOrNull(35000L) {
+                                withTimeoutOrNull(60000L) {
                                     withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(
                                         streamPlayPayload(
                                             loadData, targetType, media, generalAnimeRoute = true
@@ -4350,7 +4350,7 @@ open class StremioC(
                         (media.hasSeasonMapping || (loadData.originalAnimeId == null && (media.season ?: 1) > 1))) {
                         async(Dispatchers.IO) {
                             runSuspendCatching {
-                                withTimeoutOrNull(35000L) {
+                                withTimeoutOrNull(60000L) {
                                     withIntegratedSource("streamplay") { streamPlayProvider.loadLinks(
                                         streamPlayPayload(loadData, targetType, media,
                                             generalAnimeRoute = true, imdbOnlyRoute = true).toJson(),
