@@ -82,6 +82,11 @@ internal class ElevateSkipController(private val application: Application) :
     private var model: PlayerGeneratorViewModel? = null
     private var skipButtonTimer: ElevateSkipButtonTimer? = null
     private var mediaPlayer: Media3Player? = null
+    private var observedRoot: View? = null
+    // Mirror the audio selector's cheap late-player attachment fallback.
+    private val rootLayout = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+        if (fragment?.playerView?.player !== mediaPlayer) refresh()
+    }
     // Nuvio Mobile-style: hide before the first READY, not during rebuffering.
     private var initialLoadCompleted = false
     private var initialLoadInstance = -1
@@ -284,6 +289,7 @@ internal class ElevateSkipController(private val application: Application) :
         }
         detach()
         fragment = candidate
+        observedRoot = candidate.view?.also { it.addOnLayoutChangeListener(rootLayout) }
         placeNativeSkipButton()
         val vm = ViewModelProvider(candidate)[PlayerGeneratorViewModel::class.java]
         model = vm
@@ -318,6 +324,8 @@ internal class ElevateSkipController(private val application: Application) :
         // First unsubscribe: restoring native stamps must not trigger our own observer.
         unobserve?.invoke()
         unobserve = null
+        observedRoot?.removeOnLayoutChangeListener(rootLayout)
+        observedRoot = null
         generation++
         job?.cancel()
         job = null
@@ -375,10 +383,13 @@ internal class ElevateSkipController(private val application: Application) :
             initialLoadInstance = state.instance
             initialLoadEpisode = nextEpisode
         }
-        if (nextPlayer !== mediaPlayer) {
+        val playerChanged = nextPlayer !== mediaPlayer
+        if (playerChanged) {
             mediaPlayer?.removeListener(playerListener)
             mediaPlayer = nextPlayer
             nextPlayer?.addListener(playerListener)
+            skipTrace("player", if (nextPlayer == null) "detached" else "attached",
+                "state=" + nextPlayer?.playbackState)
         }
         if (nextPlayer?.playbackState == Media3Player.STATE_READY) initialLoadCompleted = true
         skipButtonTimer?.attach()
@@ -401,6 +412,8 @@ internal class ElevateSkipController(private val application: Application) :
         val key = state.instance.toString() + ":" + episodeId + ":" +
             (identity?.key ?: "download:${offline?.parentId}:$duration")
         if (activeKey == key) {
+            // A new/reloaded Media3 player can begin inside an already known skip.
+            if (nextPlayer?.isPlaying == true) tryAutoSkip()
             scheduleAutoSkip()
             skipButtonTimer?.refreshVisibility()
             return
@@ -495,6 +508,11 @@ internal class ElevateSkipController(private val application: Application) :
         ownSeek = null
         if (internal) {
             skipTrace("seek", "own:" + from + ":" + to)
+            return
+        }
+        // Restore/no-op seeks during player setup are not intentional user skips.
+        if (!initialLoadCompleted || from == to) {
+            skipTrace("seek", "initialOrNoop:" + from + ":" + to)
             return
         }
         lastManualSeek = from to to
@@ -1112,6 +1130,21 @@ internal object ElevateSkipRepository {
         } ?: return null
         return Identity(info.imdb, info.tmdb, info.mal, info.anilist, info.kitsu,
             file.season, file.episode ?: 0, info.anime, info.movie, duration, null)
+    }
+
+    /** Resolve ambiguous offline TvSeries using existing cached IDs and AIOStreams mapping. */
+    suspend fun isDownloadedAnime(
+        header: DownloadObjects.DownloadHeaderCached, file: ExtractorUri
+    ): Boolean? {
+        val animeTypes = setOf(TvType.Anime, TvType.AnimeMovie, TvType.OVA)
+        if (file.tvType in animeTypes || header.type in animeTypes) return true
+        val identity = identityDownloaded(header, file, 0L) ?: return null
+        if (identity.anime) return true
+        // AIOStreams maps anime identities; it is not a generic title classifier.
+        if (identity.imdb == null && identity.mal == null &&
+            identity.anilist == null && identity.kitsu == null) return false
+        val match = withTimeoutOrNull(8_000L) { mapped(identity.copy(anime = true)) }
+        return match?.let { it.mal != null || it.anilist != null } == true
     }
 
     private suspend fun request(url: String): JSONObject? =

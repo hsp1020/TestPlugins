@@ -16,6 +16,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.media3.common.C
 import androidx.media3.common.Player as Media3Player
 import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import com.lagradost.cloudstream3.CommonActivity
@@ -29,6 +30,16 @@ import com.lagradost.cloudstream3.ui.player.VideoLink
 import com.lagradost.cloudstream3.ui.player.VideoLive
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.utils.SubtitleHelper
+import com.lagradost.cloudstream3.utils.DataStore.getKey
+import com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE
+import com.lagradost.cloudstream3.utils.downloader.DownloadObjects
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.util.Locale
 
@@ -68,6 +79,11 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
     private var isAnime = false
     private var selected = false
     private var started = false
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var animeJob: Job? = null
+    private var awaitingAnime = false
+    private var pendingTrackParameters: TrackSelectionParameters? = null
+    private var lastEpisodeId: Int? = null
     private fun audioTrace(message: String) {
         android.util.Log.d("ElevateAudioDiag", message)
     }
@@ -111,6 +127,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         }
         player = next
         selected = false
+        pendingTrackParameters = null
         audioTrace("PLAYER_ATTACH host=" + active?.activity?.javaClass?.simpleName +
             " attached=" + (next != null) + " instance=" + lastInstance)
         if (next != null && active != null) {
@@ -145,6 +162,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         activity?.supportFragmentManager?.unregisterFragmentLifecycleCallbacks(callbacks)
         detach()
         activity = null
+        scope.cancel()
     }
 
     private fun use(next: FragmentActivity) {
@@ -220,11 +238,18 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             return
         }
         val name = response?.apiName.orEmpty()
-        if (lastInstance == state.instance && lastProvider == name) return
+        val episode = generator.meta as? ResultEpisode
+        val episodeId = episode?.id ?: offline?.id
+        if (lastInstance == state.instance && lastProvider == name &&
+            lastEpisodeId == episodeId) return
+        animeJob?.cancel()
+        animeJob = null
+        awaitingAnime = false
+        pendingTrackParameters = null
         lastInstance = state.instance
         lastProvider = name
+        lastEpisodeId = episodeId
         selected = false
-        val episode = generator.meta as? ResultEpisode
         val flag = animeFlag(episode)
         val tags = response?.tags.orEmpty().map { it.trim().lowercase(Locale.ROOT) }.toSet()
         isAnime = (flag ?: ((episode?.tvType ?: offline?.tvType ?: response?.type) in setOf(
@@ -234,6 +259,41 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
             " offline=" + (offline != null) + " ExtractorUri.tvType=" + offline?.tvType +
             " episodeType=" + episode?.tvType + " responseType=" + response?.type +
             " episodeAnimeFlag=" + flag + " tags=" + tags + " isAnime=" + isAnime)
+
+        if (offline != null && response == null && !isAnime) {
+            // The native download generator often labels anime as TvSeries.
+            // Resolve the saved title ID without blocking the player or picking English first.
+            awaitingAnime = true
+            val expectedFragment = fragment
+            val expectedInstance = state.instance
+            animeJob = scope.launch {
+                val header = withContext(Dispatchers.IO) {
+                    application.getKey<DownloadObjects.DownloadHeaderCached>(
+                        DOWNLOAD_HEADER_CACHE, offline.parentId.toString()
+                    )
+                }
+                val detected = header?.let { ElevateSkipRepository.isDownloadedAnime(it, offline) }
+                if (fragment !== expectedFragment || lastInstance != expectedInstance ||
+                    lastEpisodeId != episodeId) return@launch
+                awaitingAnime = false
+                if (detected != null) isAnime = detected
+                audioTrace("ANIME_RESOLVED downloaded=true header=" + (header != null) +
+                    " isAnime=" + isAnime + " tvType=" + offline.tvType)
+                val current = player
+                if (current != null) {
+                    if (pendingTrackParameters != null &&
+                        pendingTrackParameters != current.trackSelectionParameters) {
+                        // Do not override a manual track change while metadata was loading.
+                        selected = true
+                        current.removeListener(audioListener)
+                        audioTrace("SELECT preserved changed track parameters")
+                    } else {
+                        select(current.currentTracks)
+                    }
+                }
+                pendingTrackParameters = null
+            }
+        }
         val activePlayer = player
         if (activePlayer != null) {
             select(activePlayer.currentTracks)
@@ -252,6 +312,13 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         audioTrace("TRACKS isAnime=" + isAnime + " entries=" + describeAudio(tracks))
         if (groups.isEmpty()) {
             audioTrace("SELECT aborted noAudioGroups")
+            return
+        }
+        if (awaitingAnime) {
+            if (pendingTrackParameters == null) {
+                pendingTrackParameters = current.trackSelectionParameters
+            }
+            audioTrace("SELECT deferred pending downloaded anime identification")
             return
         }
         val appLanguage = fragment?.context?.resources?.configuration?.let {
@@ -295,6 +362,10 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         if (candidate != null && candidate !== fragment) return
         main.removeCallbacks(attachRetry)
         attachAttempts = 0
+        animeJob?.cancel()
+        animeJob = null
+        awaitingAnime = false
+        pendingTrackParameters = null
         observedRoot?.removeOnLayoutChangeListener(rootLayout)
         observedRoot = null
         removeObserver?.invoke()
@@ -304,6 +375,7 @@ internal class ElevateAudioTrackSelector(private val application: Application) :
         model = null
         lastInstance = null
         lastProvider = null
+        lastEpisodeId = null
         fragment = null
         selected = false
     }
