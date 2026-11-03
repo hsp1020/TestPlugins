@@ -20,6 +20,8 @@ import com.lagradost.cloudstream3.ui.result.LinkLoadingResult
 import com.lagradost.cloudstream3.ui.result.LinkProgress
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.ui.result.SelectPopup
+import com.lagradost.cloudstream3.ui.result.ResultFragmentPhone
+import com.lagradost.cloudstream3.ui.result.ResultFragmentTv
 import com.lagradost.cloudstream3.ui.result.getTitle
 import com.lagradost.cloudstream3.ui.player.source_priority.QualityDataHelper
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -277,10 +279,7 @@ internal class DownloadPickerPresentationHook(private val app: Application) :
 
     private fun watch(fragment: Fragment) {
         val type = fragment.javaClass.name
-        if (type !in setOf(
-                "com.lagradost.cloudstream3.ui.result.ResultFragmentPhone",
-                "com.lagradost.cloudstream3.ui.result.ResultFragmentTv"
-            )) return
+        if (fragment !is ResultFragmentPhone && fragment !is ResultFragmentTv) return
         if (observers.containsKey(fragment)) {
             ExternalDownloads.trace("picker.watch.alreadyBound fragment=" +
                 System.identityHashCode(fragment))
