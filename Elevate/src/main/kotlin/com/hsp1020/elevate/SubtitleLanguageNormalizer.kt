@@ -231,6 +231,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
 
     /** Change only picker text: preserve embedded and downloaded SubtitleData identities. */
     private fun localizeOfflineGroups(list: ListView, groups: List<List<SubtitleData>>) {
+        if (!ElevateFeaturePrefs.enabled(application, ElevateFeature.SUBTITLE_LANGUAGE_NAMES)) return
         @Suppress("UNCHECKED_CAST")
         val adapter = ((list.adapter as? HeaderViewListAdapter)?.wrappedAdapter
             ?: list.adapter) as? ArrayAdapter<Spanned> ?: return

@@ -335,7 +335,8 @@ internal class ElevatePlayerPanel(
     ) {
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
             val sub = getItem(position) ?: return View(ctx)
-            return bindRow(convertView, parent, position, sub.originalName,
+            val label = "${subtitleDisplayName(sub)} ${sub.nameSuffix.trim()}".trimEnd()
+            return bindRow(convertView, parent, position, label,
                 sub.url == visibleSubtitleUrl(), compact = false)
         }
     }
@@ -1274,18 +1275,20 @@ internal class ElevatePlayerPanel(
         return if (exact) uniqueMatch(true) else if (word.length >= 3) uniqueMatch(false) else null
     }
 
+    /** Use the same language localization for grouped and downloaded subtitle rows. */
+    private fun subtitleDisplayName(sub: SubtitleData): String {
+        if (!ElevateFeaturePrefs.enabled(ctx, ElevateFeature.SUBTITLE_LANGUAGE_NAMES) ||
+            sub.originalName.startsWith("Make ", true) ||
+            sub.originalName.startsWith("Translate ", true)) return sub.originalName
+        val code = if (sub.languageCode.equals("ms-ind", true)) "id" else sub.languageCode
+        return fromTagToLanguageName(
+            knownSubtitleTag(code) ?: trackLanguageTag(sub.originalName)
+        ) ?: sub.originalName
+    }
+
     private fun renderSubtitles() {
         syncImportInstance()
         val current = fragment.player.getCurrentPreferredSubtitle()
-        val localize = ElevateFeaturePrefs.enabled(ctx, ElevateFeature.SUBTITLE_LANGUAGE_NAMES)
-        fun displayName(sub: SubtitleData): String {
-            if (!localize || sub.originalName.startsWith("Make ", true) ||
-                sub.originalName.startsWith("Translate ", true)) return sub.originalName
-            val code = if (sub.languageCode.equals("ms-ind", true)) "id" else sub.languageCode
-            return fromTagToLanguageName(
-                knownSubtitleTag(code) ?: trackLanguageTag(sub.originalName)
-            ) ?: sub.originalName
-        }
         val all = sortSubs(vm.state.subtitles)
             .filter { SubtitleLanguageNormalizer.isSelectable(it) }
         val imported = all.filter {
@@ -1296,14 +1299,14 @@ internal class ElevatePlayerPanel(
         importedAdapter.notifyDataSetChanged()
         importedList.visibility = if (imported.isEmpty()) View.GONE else View.VISIBLE
         (importedList.layoutParams as LinearLayout.LayoutParams).apply {
-            height = if (imported.isEmpty()) 0 else dp(64 * minOf(3, imported.size))
+            height = if (imported.isEmpty()) 0 else dp(64 * minOf(5, imported.size))
             importedList.layoutParams = this
         }
         subtitlePane.visibility = if (all.size == imported.size && imported.isNotEmpty())
             View.GONE else View.VISIBLE
         subtitleGroups = all.filterNot {
             it.origin == SubtitleOrigin.DOWNLOADED_FILE || it.url in importedUrls
-        }.groupBy(::displayName)
+        }.groupBy(::subtitleDisplayName)
             .map { (name, subtitles) -> name to orderedOptions(subtitles) }
         // Reserve all language rows, then show full-width imports directly underneath.
         // The outer ScrollView handles overflow instead of pinning controls to the bottom.
