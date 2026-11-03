@@ -434,6 +434,8 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         val meta = vm.state.generatorState?.meta as? ExtractorUri ?: return
         val id = meta.id ?: return
         val display = meta.displayName ?: return
+        // Native discovery handles the shared-stem format; retain old-format compatibility.
+        if ("[CS-$id--" !in display) return
         val relative = meta.relativePath ?: return
         val marker = "[CS-$id--"
         val titlePrefix = display.substringBefore("[CS-$id").trimEnd()

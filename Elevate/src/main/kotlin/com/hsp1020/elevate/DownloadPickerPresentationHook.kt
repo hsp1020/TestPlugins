@@ -39,20 +39,6 @@ internal class DownloadPickerPresentationHook(private val app: Application) :
         val popup: Observer<SelectPopup?>
     )
     private val observers = HashMap<Fragment, Binding>()
-    private val numericEntity = Regex("&#(?:x([0-9a-fA-F]+)|([0-9]+));")
-
-    private fun displayName(raw: String): String {
-        val input = raw.replace("&amp;#", "&#", ignoreCase = true)
-        if (!input.contains("&#")) return raw
-        return numericEntity.replace(input) { match ->
-            val hex = match.groupValues[1]
-            val cp = (if (hex.isNotEmpty()) hex.toIntOrNull(16)
-                else match.groupValues[2].toIntOrNull())
-            if (cp == null || !Character.isValidCodePoint(cp) || cp in 0xD800..0xDFFF)
-                match.value else String(Character.toChars(cp))
-        }
-    }
-
     private fun capturedResult(callback: Any, depth: Int = 7): LinkLoadingResult? {
         if (callback is LinkLoadingResult) return callback
         if (depth == 0 || callback !is Function<*>) return null
@@ -157,7 +143,7 @@ internal class DownloadPickerPresentationHook(private val app: Application) :
                         val raw = label.asString(ctx)
                         if (!SubtitleLanguageNormalizer.isSelectableLabel(raw)) null
                         else {
-                            val fixed = displayName(raw)
+                            val fixed = ExternalDownloads.displayName(raw)
                             (if (raw == fixed) label else txt(fixed)) to index
                         }
                     }
@@ -165,44 +151,22 @@ internal class DownloadPickerPresentationHook(private val app: Application) :
                         options.indices.all { options[it].first == popup.options[it] }) null
                     else SelectPopup.SelectArray(popup.text, options, popup.callback)
                 } else {
-                    val ranks = SubtitleLanguageNormalizer.stremioRanks()
-                    val details = SubtitleLanguageNormalizer.stremioDetailCache()
-                    val localize = ElevateFeaturePrefs.enabled(app, ElevateFeature.SUBTITLE_LANGUAGE_NAMES)
-                    val localized = subs.map { sub ->
-                        if (localize) SubtitleLanguageNormalizer.localized(sub, ranks) else sub
-                    }
-                    val grouped = subs.indices.filter { SubtitleLanguageNormalizer.isSelectable(subs[it]) }
-                        .groupBy { displayName(localized[it].originalName) }
-                    val options = grouped.toSortedMap(String.CASE_INSENSITIVE_ORDER).flatMap { (language, rows) ->
-                        rows.sortedWith(compareBy<Int> {
-                            (ranks?.get(subs[it].url) as? Number)?.toInt() ?: Int.MAX_VALUE
-                        }.thenBy { it }).mapIndexed { position, originalIndex ->
-                            val sub = subs[originalIndex]
-                            val suffix = displayName(localized[originalIndex].nameSuffix)
-                            val detail = details?.get(sub.url)?.takeIf { it.isNotBlank() }
-                                ?: suffix.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
-                            val text = "$language ${position + 1}" +
-                                (detail?.let { "($it)" } ?: "")
-                            val fileLanguage = SubtitleHelper.fromTagToLanguageName(sub.getIETF_tag())
-                                ?: language.substringBefore(" (").trim()
-                            Triple(txt(text), originalIndex, text to "$fileLanguage ${position + 1}")
-                        }
-                    }
+                    val options = ExternalDownloads.subtitleChoices(ctx, subs)
                     SelectPopup.SelectArray(
-                        popup.text, options.map { it.first to it.second }
+                        popup.text, options.map { txt(it.title) to it.originalIndex }
                     ) { originalIndex ->
                         if (originalIndex == null) {
                             popup.callback(null)
                         } else {
                             val subtitle = subs.getOrNull(originalIndex)
-                            val labels = options.firstOrNull { it.second == originalIndex }?.third
-                            if (subtitle == null || labels == null) {
+                            val label = options.firstOrNull { it.originalIndex == originalIndex }?.title
+                            if (subtitle == null || label == null) {
                                 popup.callback(originalIndex)
                             } else {
                                 val title = (model.page.value as? Resource.Success)?.value?.title
                                     ?: episode.headerName
                                 if (!ExternalDownloads.handoffManualSubtitle(
-                                        ctx, episode, title, subtitle, labels.first, labels.second
+                                        ctx, episode, title, subtitle, label
                                     )) ExternalDownloads.toast(ctx, "Cannot open external downloader")
                                 popup.callback(null)
                             }
