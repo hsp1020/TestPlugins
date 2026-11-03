@@ -1305,6 +1305,8 @@ open class StremioC(
         internal val subtitleOrderByUrl = Collections.synchronizedMap(lruCacheMap<String, Int>(1200))
         internal val subtitleDetailByUrl = Collections.synchronizedMap(lruCacheMap<String, String>(2400))
         internal val subtitleSourceByUrl = Collections.synchronizedMap(lruCacheMap<String, String>(2400))
+        // Download-only metadata; preserve normal source labels and bound memory usage.
+        internal val streamFilenameByLink = Collections.synchronizedMap(lruCacheMap<String, String>(256))
 
         // CloudStream decodes subtitle names once on registration and once in the picker.
         // Keep translation labels opaque to language auto-selection until the picker.
@@ -5601,7 +5603,7 @@ open class StremioC(
         return newSubtitleFile(groupKey, subtitleUrl)
     }
     private data class ProxyHeaders(@JsonProperty("request") val request: Map<String, String>?)   
-    private data class BehaviorHints(@JsonProperty("proxyHeaders") val proxyHeaders: ProxyHeaders?, @JsonProperty("headers") val headers: Map<String, String>?)
+    private data class BehaviorHints(@JsonProperty("proxyHeaders") val proxyHeaders: ProxyHeaders?, @JsonProperty("headers") val headers: Map<String, String>?, @JsonProperty("filename") val filename: String? = null)
 
     private data class Stream(
         @JsonProperty("name") val name: String?,
@@ -5628,6 +5630,12 @@ open class StremioC(
             emitSubtitles: Boolean = true
         ) {
             val displaySource = sourceName.takeIf { it.isNotBlank() } ?: name ?: ""
+            fun rememberFilename(url: String, displayName: String) {
+                val key = url + "\u0000" + displayName
+                val filename = behaviorHints?.filename?.trim()?.takeIf { it.isNotEmpty() }
+                if (filename == null) streamFilenameByLink.remove(key)
+                else streamFilenameByLink[key] = filename
+            }
             suspend fun torrentLink(raw: String, type: ExtractorLinkType): String {
                 val withTrackers = StremioTorrentFiles.addTrackers(raw, sources)
                 val index = fileIdx?.takeIf { it >= 0 }
@@ -5655,7 +5663,9 @@ open class StremioC(
                 val displayTitle = description ?: title ?: name ?: ""
                 val playbackUrl = if (linkType == ExtractorLinkType.MAGNET ||
                     linkType == ExtractorLinkType.TORRENT) torrentLink(url, linkType) else url
-                callback.invoke(newExtractorLink(displaySource, "[$displaySource] $displayTitle", playbackUrl, linkType) {
+                val linkName = "[$displaySource] $displayTitle"
+                rememberFilename(playbackUrl, linkName)
+                callback.invoke(newExtractorLink(displaySource, linkName, playbackUrl, linkType) {
                     this.quality = getQuality(listOf(description, title, name))
                     this.headers = behaviorHints?.proxyHeaders?.request ?: behaviorHints?.headers ?: mapOf()
                 })
@@ -5670,7 +5680,9 @@ open class StremioC(
             if (emitLinks && infoHash != null) {
                 val displayTitle = description ?: title ?: name ?: ""
                 val magnet = torrentLink("magnet:?xt=urn:btih:" + infoHash, ExtractorLinkType.MAGNET)
-                callback.invoke(newExtractorLink(displaySource, "[$displaySource] $displayTitle", magnet, ExtractorLinkType.MAGNET) {
+                val linkName = "[$displaySource] $displayTitle"
+                rememberFilename(magnet, linkName)
+                callback.invoke(newExtractorLink(displaySource, linkName, magnet, ExtractorLinkType.MAGNET) {
                     this.quality = Qualities.Unknown.value
                 })
             }

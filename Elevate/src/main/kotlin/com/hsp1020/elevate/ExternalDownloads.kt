@@ -16,6 +16,7 @@ import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
 import androidx.preference.PreferenceManager
+import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.TvType
@@ -25,6 +26,7 @@ import com.lagradost.cloudstream3.utils.DataStore.getFolderName
 import com.lagradost.cloudstream3.utils.DataStore.getKey
 import com.lagradost.cloudstream3.utils.DataStore.setKey
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment
@@ -190,9 +192,9 @@ internal object ExternalDownloads {
         )
     }
 
-    /** Keep the episode/ID stable; store the visible source or subtitle title in the bracket. */
+    /** Sanitize unsafe filesystem characters while keeping legitimate release-name brackets. */
     private fun safePart(raw: String, maxBytes: Int): String {
-        var part = raw.replace(Regex("""[\u0000-\u001F\\/:*?"<>|\[\]]"""), " ")
+        var part = raw.replace(Regex("""[\u0000-\u001F\\/:*?"<>|]"""), " ")
             .replace(Regex("""\s+"""), " ").trim().ifBlank { "Source" }
         while (part.toByteArray(Charsets.UTF_8).size > maxBytes && part.isNotEmpty()) {
             val last = part.lastIndex
@@ -209,20 +211,80 @@ internal object ExternalDownloads {
         return "${safePart(title + suffix, 80)} [CS-$id]"
     }
 
+    private val videoExts = setOf("mp4", "mkv", "webm", "avi", "mov", "ts", "m4v")
+    private val filenameInLine = Regex(
+        """\.(?:mkv|mp4|webm|avi|mov|ts|m4v)(?=$|[\s)\]])""",
+        RegexOption.IGNORE_CASE
+    )
+    private val genericUrlName = Regex(
+        """(?i)(?:index|playlist|master|manifest|stream|video|download|playback|file)(?:[-_.]?\d+)?"""
+    )
+
+    /** Look up exact selected link metadata without modifying its visible name. */
+    private fun stremioFilename(link: ExtractorLink): String? = runCatching {
+        val method = APIHolder::class.java.methods.firstOrNull { it.name == "getAllProviders" }
+        val provider = (method?.invoke(APIHolder) as? Iterable<*>)?.firstOrNull {
+            it?.javaClass?.name == "com.hsp1020.StremioC"
+        } ?: return@runCatching null
+        val field = provider.javaClass.getDeclaredField("streamFilenameByLink")
+            .apply { isAccessible = true }
+        val cache = field.get(null) as? Map<*, *>
+        cache?.get(link.url + "\u0000" + link.name) as? String
+    }.getOrNull()?.takeIf { it.isNotBlank() }
+
+    /** Only a clear video filename, not the full multiline source description. */
+    private fun filenameInDescription(name: String): String? =
+        name.lineSequence().mapNotNull { line ->
+            val text = line.trim()
+            if ("://" in text) return@mapNotNull null
+            val extension = filenameInLine.findAll(text).lastOrNull() ?: return@mapNotNull null
+            val filename = text.substring(0, extension.range.last + 1)
+                .replace(Regex("""^[^\p{L}\p{N}\[\](_.-]+"""), "").trim()
+            filename.takeIf { it.length >= 6 && it.any(Char::isLetter) }
+        }.firstOrNull()
+
+    /** Reject CDN tokens and generic endpoints rather than presenting them as file titles. */
+    private fun filenameInUrl(url: String): String? = runCatching {
+        val uri = Uri.parse(url)
+        if (uri.scheme !in listOf("http", "https")) return@runCatching null
+        val filename = uri.lastPathSegment?.trim().orEmpty()
+        val ext = filename.substringAfterLast('.', "").lowercase(java.util.Locale.ROOT)
+        val stem = filename.substringBeforeLast('.', filename)
+        filename.takeIf {
+            ext in videoExts && stem.length >= 6 && stem.any(Char::isLetter) &&
+                !genericUrlName.matches(stem) &&
+                !Regex("""(?i)[a-f0-9_-]{16,}""").matches(stem)
+        }
+    }.getOrNull()
+
+    private fun fallbackSourceName(link: ExtractorLink): String {
+        val quality = Qualities.getStringByInt(link.quality).trim()
+            .takeUnless { link.quality == Qualities.Unknown.value || it.equals("Unknown", true) }
+            ?: Regex("""(?i)(?<!\d)(?:2160|1440|1080|720|576|480|360|240)\s*p\b""")
+                .find(link.name)?.value?.replace(" ", "")?.lowercase(java.util.Locale.ROOT)
+        return listOfNotNull(link.source.trim().takeIf { it.isNotBlank() } ?: "Source",
+            quality?.takeIf { it.isNotBlank() }).joinToString(" ")
+    }
+
     private fun fileName(queued: DownloadObjects.DownloadQueueWrapper, link: ExtractorLink): String {
         val item = queued.downloadItem
         val ep = item?.episode
         val resume = queued.resumePackage?.item?.ep
         val title = item?.resultName ?: resume?.mainName ?: ep?.headerName ?: "Video"
-        val ext = if (link.isM3u8) "mp4" else {
-            Uri.parse(link.url).lastPathSegment.orEmpty().substringAfterLast('.', "")
-                .lowercase().takeIf { it in setOf("mp4", "mkv", "webm", "avi", "mov", "ts", "m4v") }
-                ?: "mp4"
-        }
-        val visibleSource = link.name + " " +
-            com.lagradost.cloudstream3.utils.Qualities.getStringByInt(link.quality)
-        return episodeStem(queued.id, title, ep?.season ?: resume?.season,
-            ep?.episode ?: resume?.episode) + " ${safePart(visibleSource, 90)}.$ext"
+        val prefix = episodeStem(queued.id, title, ep?.season ?: resume?.season,
+            ep?.episode ?: resume?.episode)
+        // Standard Stremio metadata -> displayed original file -> media URL -> source + quality.
+        val original = stremioFilename(link) ?: filenameInDescription(link.name)
+            ?: filenameInUrl(link.url) ?: fallbackSourceName(link)
+        val leaf = original.substringAfterLast('/').substringAfterLast('\\').trim()
+        val extension = leaf.substringAfterLast('.', "").lowercase(java.util.Locale.ROOT)
+            .takeIf { it in videoExts }
+        val name = if (extension != null) leaf.substringBeforeLast('.') else leaf
+        // HLS output is MP4 even if an addon declares another container.
+        val outputExt = if (link.isM3u8) "mp4" else extension ?: "mp4"
+        // Reserve room for a subtitle language/index suffix within Android's 255-byte limit.
+        val available = (210 - prefix.toByteArray(Charsets.UTF_8).size - 1).coerceAtLeast(1)
+        return "$prefix ${safePart(name, available)}.$outputExt"
     }
 
     private data class Transfer(
@@ -233,9 +295,11 @@ internal object ExternalDownloads {
     )
 
     private fun subtitleTransfer(stem: String, subtitle: SubtitleData, label: String): Transfer {
-        val suffix = safePart(label, 90)
         val url = subtitle.getFixedUrl()
         val extension = if (url.contains(".srt", ignoreCase = true)) "srt" else "vtt"
+        val available = (255 - stem.toByteArray(Charsets.UTF_8).size -
+            extension.toByteArray(Charsets.UTF_8).size - 2).coerceAtLeast(1)
+        val suffix = safePart(label, available)
         return Transfer(null, url, "$stem $suffix.$extension", subtitle.headers)
     }
 
