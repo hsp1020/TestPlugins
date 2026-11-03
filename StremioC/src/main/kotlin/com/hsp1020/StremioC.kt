@@ -3445,7 +3445,7 @@ open class StremioC(
                         val requestUrl = "$base/stream/$type/${id.urlEncode()}.json$suffix"
                         if (!cineSubtitleRequests.add(requestUrl)) return@withPermit
                         runSuspendCatching {
-                            val text = customSession.get(requestUrl, timeout = 25L).text
+                            val text = customSession.get(requestUrl, timeout = 30L).text
                             val response = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
                             response?.streams.orEmpty().forEach { stream ->
                                 if (stream.url == null && stream.infoHash == null &&
@@ -3486,7 +3486,7 @@ open class StremioC(
                     suspend fun fetchMainStreams(route: Pair<String, String>): Int =
                         runSuspendCatching {
                             val streamRequestUrl = "$cleanBaseUrl/stream/${route.first}/${route.second.urlEncode()}.json$querySuffix"
-                            val response = customSession.get(streamRequestUrl, timeout = 25L)
+                            val response = customSession.get(streamRequestUrl, timeout = 30L)
                             val text = response.text
                             val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
                             emitOrderedAddonStreams(res?.streams, name,
@@ -3552,7 +3552,7 @@ open class StremioC(
                                     if (request != null && base.isNotBlank()) {
                                         suspend fun fetchExtraStreams(route: Pair<String, String>): Int = runSuspendCatching {
                                             val requestUrl = "$base/stream/${route.first}/${route.second.urlEncode()}.json$suffix"
-                                            val response = customSession.get(requestUrl, timeout = 25L)
+                                            val response = customSession.get(requestUrl, timeout = 30L)
                                             val text = response.text
                                             val streams = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
                                             val emitted = emitOrderedAddonStreams(streams?.streams, source,
@@ -4127,7 +4127,7 @@ open class StremioC(
                             }
                         } else {
                             val requestUrl = "$cleanBaseUrl/stream/$targetType/${encodedId}.json$querySuffix"
-                            val response = customSession.get(requestUrl, timeout = 25L)
+                            val response = customSession.get(requestUrl, timeout = 30L)
                             val text = response.text
                             val res = if (text.isNotBlank()) parseJson<StreamsResponse>(text) else null
                             res?.streams?.forEach { stream ->
