@@ -100,6 +100,18 @@ internal class ElevateSkipController(private val application: Application) :
     // No sampled position-difference heuristic, including for small seeks.
     private var lastManualSeek: Pair<Long, Long>? = null
     private val manualSeekProtected = hashSetOf<String>()
+    // Temporary, state-deduplicated diagnostics; never poll frames or issue extra requests.
+    private val skipTraceStates = HashMap<String, String>()
+    private fun skipTrace(stage: String, reason: String, extra: String = "") {
+        if (skipTraceStates.put(stage, reason) == reason) return
+        android.util.Log.d("ElevateSkipDiag",
+            "stage=" + stage + " reason=" + reason +
+                " instance=" + activeInstance + " episode=" + activeEpisode +
+                " opening=" + settings.getBoolean("AUTO_SKIP_OPENING", false) +
+                " protected=" + manualSeekProtected.size +
+                " playing=" + mediaPlayer?.isPlaying +
+                " position=" + mediaPlayer?.currentPosition + " " + extra)
+    }
     private var ownSeek: Pair<Long, Long>? = null
     private var polling = false
     // Keep the native MaterialButton and its click/focus/animation handlers intact.
@@ -334,6 +346,7 @@ internal class ElevateSkipController(private val application: Application) :
         manualSeekProtected.clear()
         lastManualSeek = null
         ownSeek = null
+        skipTraceStates.clear()
     }
 
     private fun restoreNative() {
@@ -403,6 +416,8 @@ internal class ElevateSkipController(private val application: Application) :
         activeInstance = state.instance
         activeEpisode = episodeId
         activeKey = key
+        skipTraceStates.clear()
+        skipTrace("source", "new", "offline=" + (offline != null) + " tvType=" + offline?.tvType + " duration=" + duration)
         custom = emptyList()
         published = emptyList()
         autoSkipped.clear()
@@ -422,6 +437,8 @@ internal class ElevateSkipController(private val application: Application) :
             if (serial != generation || activeKey != key) return@launch
             val result = ElevateSkipRepository.fetch(target)
             if (serial != generation || activeKey != key) return@launch
+            skipTrace("fetch", "complete", "count=" + result.size + " anime=" + target.anime +
+                " imdb=" + (target.imdb != null) + " mal=" + (target.mal != null))
             custom = result
             publish()
         }
@@ -435,6 +452,7 @@ internal class ElevateSkipController(private val application: Application) :
         if (instance < 0 || activeKey == null) return
         if (combined == vm.state.stamps) {
             published = combined
+            skipTrace("publish", "unchanged", "count=" + combined.size)
             return
         }
         vm.modifyState {
@@ -445,6 +463,9 @@ internal class ElevateSkipController(private val application: Application) :
             }
         }
         published = combined
+        skipTrace("publish", "updated", "stamps=" + combined.joinToString(limit = 6) {
+            it.timestamp.type.toString() + ":" + it.timestamp.startMs + "-" + it.timestamp.endMs
+        })
         lastManualSeek?.let { protectManualSeek(it.first, it.second) }
         skipButtonTimer?.refreshVisibility()
         if (autoEnabled()) {
@@ -473,10 +494,13 @@ internal class ElevateSkipController(private val application: Application) :
         } == true
         ownSeek = null
         if (internal) {
+            skipTrace("seek", "own:" + from + ":" + to)
             return
         }
         lastManualSeek = from to to
         protectManualSeek(from, to)
+        skipTrace("seek", "manual:" + from + ":" + to,
+            "protectedKeys=" + manualSeekProtected.joinToString(limit = 6))
         skipButtonTimer?.refreshVisibility()
     }
 
@@ -508,29 +532,57 @@ internal class ElevateSkipController(private val application: Application) :
     }
 
     private fun scheduleAutoSkip() {
-        val next = autoEnabled() && fragment?.view != null
+        val enabled = autoEnabled()
+        val next = enabled && fragment?.view != null
         polling = next
         main.removeCallbacks(autoTick)
-        if (!next) return
-        // Only schedule at an actionable timestamp. Playback state/seek,
-        // speed, timeline and new stamp callbacks reschedule the deadline.
-        nextAutoDelay()?.let { main.postDelayed(autoTick, it) }
+        if (!next) {
+            skipTrace("schedule", if (enabled) "noFragmentView" else "autoTypesOff")
+            return
+        }
+        val delay = nextAutoDelay()
+        skipTrace("schedule", if (delay == null) "noDeadline" else "scheduled",
+            "delayMs=" + delay + " autoTypes=" + ElevateSkipPreferences.autoTypes.joinToString {
+                it + "=" + settings.getBoolean(it, false)
+            })
+        if (delay != null) main.postDelayed(autoTick, delay)
     }
 
     private fun nextAutoDelay(): Long? {
-        val player = mediaPlayer ?: return null
-        if (!player.isPlaying || published.isEmpty()) return null
+        val player = mediaPlayer ?: run {
+            skipTrace("deadline", "noPlayer")
+            return null
+        }
+        if (!player.isPlaying) {
+            skipTrace("deadline", "notPlaying")
+            return null
+        }
+        if (published.isEmpty()) {
+            skipTrace("deadline", "noStamps")
+            return null
+        }
         val now = player.currentPosition
         val upcoming = published.asSequence()
             .filter { settings.getBoolean(autoPreference(it), false) }
             .filter { stampKey(it) !in autoSkipped && stampKey(it) !in manualSeekProtected }
             .filter { it.timestamp.endMs > now }
             .map { it.timestamp.startMs }
-            .minOrNull() ?: return null
-        if (upcoming <= now) return 650L // Active stamp; wait for a valid timeline if necessary.
+            .minOrNull() ?: run {
+                skipTrace("deadline", "noEligibleStamp", "stamps=" + published.joinToString(limit = 6) {
+                    it.timestamp.type.toString() + ":" + it.timestamp.startMs + "-" + it.timestamp.endMs +
+                        ":enabled=" + settings.getBoolean(autoPreference(it), false) +
+                        ":protected=" + (stampKey(it) in manualSeekProtected) +
+                        ":skipped=" + (stampKey(it) in autoSkipped)
+                })
+                return null
+            }
+        if (upcoming <= now) {
+            skipTrace("deadline", "activeStamp", "start=" + upcoming)
+            return 650L
+        }
         val speed = player.playbackParameters.speed.coerceAtLeast(0.1f)
         val delta = ((upcoming - now) / speed).toLong()
-        // An early wake avoids skipping the first frames of a chapter.
+        skipTrace("deadline", "upcomingStamp", "start=" + upcoming + " speed=" + speed)
         return (delta - 100L).coerceIn(150L, 60_000L)
     }
 
@@ -544,41 +596,62 @@ internal class ElevateSkipController(private val application: Application) :
     }
 
     private fun tryAutoSkip() {
-        val player = mediaPlayer ?: return
-        val vm = model ?: return
-        if (vm.state.instance != activeInstance ||
-            skipPlaybackId(vm.state.generatorState?.meta) != activeEpisode) {
-            
+        val player = mediaPlayer ?: run {
+            skipTrace("attempt", "noPlayer")
             return
         }
-        if (published.isEmpty()) { return }
-        if (player.duration <= 0L) { return }
+        val vm = model ?: run {
+            skipTrace("attempt", "noViewModel")
+            return
+        }
+        if (vm.state.instance != activeInstance ||
+            skipPlaybackId(vm.state.generatorState?.meta) != activeEpisode) {
+            skipTrace("attempt", "episodeMismatch")
+            return
+        }
+        if (published.isEmpty()) {
+            skipTrace("attempt", "noStamps")
+            return
+        }
+        if (player.duration <= 0L) {
+            skipTrace("attempt", "invalidDuration", "duration=" + player.duration)
+            return
+        }
         val current = player.currentPosition
         val active = published.firstOrNull {
             current >= it.timestamp.startMs && current < it.timestamp.endMs
-        } ?: return
+        } ?: run {
+            skipTrace("attempt", "outsideSkipIntervals", "position=" + current)
+            return
+        }
         if (!settings.getBoolean(autoPreference(active), false)) {
-            
+            skipTrace("attempt", "typeDisabled", "type=" + active.timestamp.type)
             return
         }
         val key = stampKey(active)
-        if (key in manualSeekProtected) { return }
-        if (key in autoSkipped) { return }
-        if (!player.isPlaying) { return }
+        if (key in manualSeekProtected) {
+            skipTrace("attempt", "manualSeekProtected", "stamp=" + key)
+            return
+        }
+        if (key in autoSkipped) {
+            skipTrace("attempt", "alreadyAutoSkipped", "stamp=" + key)
+            return
+        }
+        if (!player.isPlaying) {
+            skipTrace("attempt", "notPlaying", "stamp=" + key)
+            return
+        }
         val stamp = active.timestamp
-        // A provisional HLS timeline (often 30s) must not turn an intro skip
-        // into a seek to the wrong point. Keep the manual fallback available.
         if (player.duration <= stamp.endMs) {
-            
+            skipTrace("attempt", "endExceedsDuration", "duration=" + player.duration +
+                " end=" + stamp.endMs)
             return
         }
         val target = stamp.endMs.coerceAtMost(player.duration - 1L)
         if (target > current && target > 0L && autoSkipped.add(key)) {
-            
-
+            skipTrace("attempt", "seeking", "stamp=" + key + " from=" + current + " to=" + target)
             ownSeek = target to android.os.SystemClock.uptimeMillis()
             player.seekTo(target)
-            // Use the native skip button's UiText for localized or custom labels.
             fragment?.context?.let { ctx ->
                 val totalSeconds = target / 1000L
                 val clock = if (totalSeconds >= 3600L) {
@@ -589,11 +662,13 @@ internal class ElevateSkipController(private val application: Application) :
                         totalSeconds / 60L, totalSeconds % 60L)
                 }
                 val localizedLabel = active.uiText.asString(ctx)
-                val toastMessage: String = "$localizedLabel → $clock"
+                val toastMessage: String = "${localizedLabel} → ${clock}"
                 android.widget.Toast.makeText(
                     ctx, toastMessage, android.widget.Toast.LENGTH_SHORT
                 ).show()
             }
+        } else {
+            skipTrace("attempt", "invalidTarget", "current=" + current + " target=" + target)
         }
     }
 
