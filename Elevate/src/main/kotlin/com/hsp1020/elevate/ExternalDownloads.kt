@@ -241,17 +241,20 @@ internal object ExternalDownloads {
 
     /** Manual subtitle downloads use the same external app as video downloads. */
     fun handoffManualSubtitle(
-        context: Context, episode: ResultEpisode, subtitle: SubtitleData, label: String
+        context: Context, episode: ResultEpisode, title: String,
+        subtitle: SubtitleData, fileLabel: String
     ): Boolean {
         val app = selected(context) ?: return false
-        val stored = context.getKey<DownloadObjects.DownloadedFileInfo>(
-            VideoDownloadManager.KEY_DOWNLOAD_INFO, episode.id.toString()
-        )?.takeIf { it.relativePath.isEmpty() && it.basePath == basePath(context) }
-        val current = stored?.displayName
-            ?: pending(context).firstOrNull { it.id == episode.id }?.expectedFile
+        val current = pending(context).firstOrNull { it.id == episode.id }?.expectedFile
+            ?: context.getKey<DownloadObjects.DownloadedFileInfo>(
+                VideoDownloadManager.KEY_DOWNLOAD_INFO, episode.id.toString()
+            )?.takeIf {
+                it.relativePath.isEmpty() && it.basePath == basePath(context) &&
+                    it.displayName.contains("[CS-${episode.id}]")
+            }?.displayName
         val stem = current?.substringBeforeLast('.')
-            ?: episodeStem(episode.id, episode.headerName, episode.season, episode.episode)
-        return dispatch(context, app, listOf(subtitleTransfer(stem, subtitle, label)))
+            ?: episodeStem(episode.id, title, episode.season, episode.episode)
+        return dispatch(context, app, listOf(subtitleTransfer(stem, subtitle, fileLabel)))
     }
 
     private fun headersFor(link: ExtractorLink): Map<String, String> {

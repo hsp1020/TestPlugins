@@ -27,6 +27,7 @@ import com.lagradost.cloudstream3.ui.result.getTitle
 import com.lagradost.cloudstream3.ui.player.source_priority.QualityDataHelper
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.SubtitleHelper
 import com.lagradost.cloudstream3.utils.txt
 
 /** Present native download pickers without changing their source or selection objects. */
@@ -176,7 +177,10 @@ internal class DownloadPickerPresentationHook(private val app: Application) :
                                 ?: suffix.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
                             val text = "$language ${position + 1}" +
                                 (detail?.let { "($it)" } ?: "")
-                            Triple(txt(text), originalIndex, text)
+                            val fileLanguage = sub.getIETF_tag()
+                                ?.let(SubtitleHelper::fromTagToEnglishLanguageName)
+                                ?: language.substringBefore(" (").trim()
+                            Triple(txt(text), originalIndex, "$fileLanguage ${position + 1}")
                         }
                     }
                     SelectPopup.SelectArray(
@@ -190,8 +194,10 @@ internal class DownloadPickerPresentationHook(private val app: Application) :
                             if (subtitle == null || label == null) {
                                 popup.callback(originalIndex)
                             } else {
+                                val title = (model.page.value as? Resource.Success)?.value?.title
+                                    ?: episode.headerName
                                 if (!ExternalDownloads.handoffManualSubtitle(
-                                        ctx, episode, subtitle, label
+                                        ctx, episode, title, subtitle, label
                                     )) ExternalDownloads.toast(ctx, "Cannot open external downloader")
                                 popup.callback(null)
                             }
