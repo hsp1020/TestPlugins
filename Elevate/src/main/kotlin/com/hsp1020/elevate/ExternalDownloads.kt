@@ -190,13 +190,23 @@ internal object ExternalDownloads {
         )
     }
 
-    /** Keep video and subtitle stems identical for native offline subtitle discovery. */
-    private fun episodeStem(id: Int, title: String, season: Int?, episode: Int?): String {
+    /** Keep the episode/ID stable; store the visible source or subtitle title in the bracket. */
+    private fun safePart(raw: String, maxBytes: Int): String {
+        var part = raw.replace(Regex("""[\u0000-\u001F\\/:*?"<>|\[\]]"""), " ")
+            .replace(Regex("""\s+"""), " ").trim().ifBlank { "Source" }
+        while (part.toByteArray(Charsets.UTF_8).size > maxBytes && part.isNotEmpty()) {
+            val last = part.lastIndex
+            part = part.dropLast(if (last > 0 && Character.isLowSurrogate(part[last]) &&
+                Character.isHighSurrogate(part[last - 1])) 2 else 1)
+        }
+        return part.trim()
+    }
+
+    private fun episodeStem(id: Int, title: String, season: Int?, episode: Int?, shownTitle: String): String {
         val suffix = if (season != null && episode != null) {
             " S%02dE%02d".format(java.util.Locale.US, season, episode)
         } else ""
-        return "$title$suffix [CS-$id]"
-            .replace(Regex("""[\\/:*?"<>|]"""), " ").trim().take(190)
+        return "${safePart(title + suffix, 80)} [CS-$id--${safePart(shownTitle, 90)}]"
     }
 
     private fun fileName(queued: DownloadObjects.DownloadQueueWrapper, link: ExtractorLink): String {
@@ -209,8 +219,9 @@ internal object ExternalDownloads {
                 .lowercase().takeIf { it in setOf("mp4", "mkv", "webm", "avi", "mov", "ts", "m4v") }
                 ?: "mp4"
         }
+        val visibleSource = link.name + " " + com.lagradost.cloudstream3.utils.Qualities.getStringByInt(link.quality)
         return episodeStem(queued.id, title, ep?.season ?: resume?.season,
-            ep?.episode ?: resume?.episode) + ".$ext"
+            ep?.episode ?: resume?.episode, visibleSource) + ".$ext"
     }
 
     private data class Transfer(
@@ -221,40 +232,57 @@ internal object ExternalDownloads {
     )
 
     private fun subtitleTransfer(stem: String, subtitle: SubtitleData, label: String): Transfer {
-        val suffix = label.replace(Regex("""[\\/:*?"<>|]"""), " ")
-            .replace(Regex("\\s+"), " ").trim().take(100).ifBlank { "Subtitle" }
+        val suffix = safePart(label, 32)
         val url = subtitle.getFixedUrl()
         val extension = if (url.contains(".srt", ignoreCase = true)) "srt" else "vtt"
         return Transfer(null, url, "$stem $suffix.$extension", subtitle.headers)
     }
 
-    private fun matchingSubtitles(subs: List<SubtitleData>): List<SubtitleData> {
+    private data class SubtitleChoice(
+        val subtitle: SubtitleData, val shownTitle: String, val languageNumber: String
+    )
+
+    private fun matchingSubtitles(subs: List<SubtitleData>): List<SubtitleChoice> {
         val languages = SubtitlesFragment.getDownloadSubsLanguageTagIETF()
-        return subs.filter { subtitle ->
-            languages.any { language ->
-                subtitle.languageCode == language || subtitle.originalName.contains(
-                    SubtitleHelper.fromTagToEnglishLanguageName(language) ?: language
-                )
-            }
-        }.take(3)
+        val ranks = SubtitleLanguageNormalizer.stremioRanks()
+        val details = SubtitleLanguageNormalizer.stremioDetailCache()
+        val ordered = subs.withIndex().filter { (_, sub) ->
+            SubtitleLanguageNormalizer.isSelectable(sub) &&
+                !sub.originalName.startsWith("Make ", true) &&
+                !sub.originalName.startsWith("Translate ", true) &&
+                languages.any { language ->
+                    sub.getIETF_tag()?.equals(language, true) == true ||
+                        sub.originalName.contains(
+                            SubtitleHelper.fromTagToEnglishLanguageName(language) ?: language, true
+                        )
+                }
+        }.sortedWith(compareBy<IndexedValue<SubtitleData>> {
+            (ranks?.get(it.value.url) as? Number)?.toInt() ?: Int.MAX_VALUE
+        }.thenBy { it.index })
+        val counts = HashMap<String, Int>()
+        return ordered.take(3).map { (_, sub) ->
+            val localized = SubtitleLanguageNormalizer.localized(sub, ranks)
+            val tag = sub.getIETF_tag()
+            val language = SubtitleHelper.fromTagToLanguageName(tag)
+                ?: localized.originalName.substringBefore(" · ").substringBefore(" — ")
+                    .substringBefore(" (").trim()
+            val number = (counts[language] ?: 0) + 1
+            counts[language] = number
+            val shortLabel = "$language $number"
+            val suffix = details?.get(sub.url)?.takeIf { it.isNotBlank() }
+                ?: localized.nameSuffix.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
+            SubtitleChoice(sub, shortLabel + (suffix?.let { "($it)" } ?: ""), shortLabel)
+        }
     }
 
     /** Manual subtitle downloads use the same external app as video downloads. */
     fun handoffManualSubtitle(
         context: Context, episode: ResultEpisode, title: String,
-        subtitle: SubtitleData, fileLabel: String
+        subtitle: SubtitleData, shownTitle: String, languageNumber: String
     ): Boolean {
         val app = selected(context) ?: return false
-        val current = pending(context).firstOrNull { it.id == episode.id }?.expectedFile
-            ?: context.getKey<DownloadObjects.DownloadedFileInfo>(
-                VideoDownloadManager.KEY_DOWNLOAD_INFO, episode.id.toString()
-            )?.takeIf {
-                it.relativePath.isEmpty() && it.basePath == basePath(context) &&
-                    it.displayName.contains("[CS-${episode.id}]")
-            }?.displayName
-        val stem = current?.substringBeforeLast('.')
-            ?: episodeStem(episode.id, title, episode.season, episode.episode)
-        return dispatch(context, app, listOf(subtitleTransfer(stem, subtitle, fileLabel)))
+        val stem = episodeStem(episode.id, title, episode.season, episode.episode, shownTitle)
+        return dispatch(context, app, listOf(subtitleTransfer(stem, subtitle, languageNumber)))
     }
 
     private fun headersFor(link: ExtractorLink): Map<String, String> {
@@ -340,12 +368,14 @@ internal object ExternalDownloads {
             val video = Transfer(queued, link.url, filename, headersFor(link))
             val stem = filename.substringBeforeLast('.')
             val subs = matchingSubtitles(subtitles[queued.id].orEmpty())
-            val duplicates = HashMap<String, Int>()
-            listOf(video) + subs.map { sub ->
-                val label = sub.name.trim().ifBlank { "Subtitle" }
-                val count = (duplicates[label] ?: 0) + 1
-                duplicates[label] = count
-                subtitleTransfer(stem, sub, if (count == 1) label else "$label $count")
+            listOf(video) + subs.map { choice ->
+                val subtitleStem = episodeStem(queued.id,
+                    queued.downloadItem?.resultName ?: queued.downloadItem?.episode?.headerName
+                        ?: queued.resumePackage?.item?.ep?.mainName ?: "Video",
+                    queued.downloadItem?.episode?.season ?: queued.resumePackage?.item?.ep?.season,
+                    queued.downloadItem?.episode?.episode ?: queued.resumePackage?.item?.ep?.episode,
+                    choice.shownTitle)
+                subtitleTransfer(subtitleStem, choice.subtitle, choice.languageNumber)
             }
         }
         dispatch(context, app, transfers)

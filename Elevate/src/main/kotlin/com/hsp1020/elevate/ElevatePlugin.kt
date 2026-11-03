@@ -324,7 +324,8 @@ class ElevatePlugin : Plugin() {
             skipController?.stop()
             skipController = null
         }
-        if (enabled(ElevateFeature.SUBTITLE_LANGUAGE_NAMES)) {
+        if (enabled(ElevateFeature.SUBTITLE_LANGUAGE_NAMES) || panelEnabled ||
+            enabled(ElevateFeature.EXTERNAL_DOWNLOADS)) {
             if (subtitleLanguageNormalizer == null) {
                 subtitleLanguageNormalizer = SubtitleLanguageNormalizer(application).also { it.start() }
             }

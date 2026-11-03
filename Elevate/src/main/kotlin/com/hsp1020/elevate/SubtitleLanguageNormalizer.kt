@@ -2,6 +2,16 @@ package com.hsp1020.elevate
 
 import android.app.Activity
 import android.app.Application
+import android.net.Uri
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import com.lagradost.cloudstream3.ui.player.DownloadFileGenerator
+import com.lagradost.cloudstream3.ui.player.ExtractorUri
+import com.lagradost.cloudstream3.ui.player.PlayerSubtitleHelper.Companion.toSubtitleMimeType
+import com.lagradost.cloudstream3.utils.downloader.DownloadFileManagement
+import com.lagradost.safefile.SafeFile
 import android.app.Dialog
 import android.os.Bundle
 import android.text.Spanned
@@ -102,6 +112,14 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
     // Share original extractor descriptions through the existing URL metadata cache,
     // without modifying nameSuffix, which is part of the native track identity.
     companion object {
+        internal fun isSelectableLabel(raw: String): Boolean {
+            val language = raw.substringBefore(" · ").substringBefore(" — ")
+                .substringBefore(" (").trim().replace(Regex("""\s+\d+$"""), "").trim()
+            return language.isNotBlank() && !language.equals("Unknown", true) &&
+                !language.equals("und", true)
+        }
+        internal fun isSelectable(sub: SubtitleData): Boolean = isSelectableLabel(sub.originalName)
+
         /** Shared with the integrated player panel; details are indexed by subtitle URL. */
         internal fun stremioDetailCache(): MutableMap<String, String>? = runCatching {
             val method = APIHolder::class.java.methods.firstOrNull { it.name == "getAllProviders" }
@@ -403,6 +421,58 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         removeObserver = null
         fragment = null
         model = null
+        scannedOfflineKey = null
+    }
+
+    private var scannedOfflineKey: String? = null
+
+    /** Native DownloadFileGenerator requires an identical video/subtitle stem.
+     * Discover our [CS-ID--different-title] subtitle filenames once per offline episode.
+     */
+    private fun scanExternalOfflineSubtitles(vm: PlayerGeneratorViewModel) {
+        if (vm.generator !is DownloadFileGenerator) return
+        val meta = vm.state.generatorState?.meta as? ExtractorUri ?: return
+        val id = meta.id ?: return
+        val display = meta.displayName ?: return
+        val relative = meta.relativePath ?: return
+        val marker = "[CS-$id--"
+        val titlePrefix = display.substringBefore("[CS-$id").trimEnd()
+        val instance = vm.state.instance
+        val key = "$instance:$id:$display"
+        if (key == scannedOfflineKey) return
+        scannedOfflineKey = key
+        val playerFragment = fragment ?: return
+        playerFragment.viewLifecycleOwner.lifecycleScope.launch {
+            val found = withContext(Dispatchers.IO) {
+                val root = when {
+                    meta.basePath.isNullOrBlank() -> DownloadFileManagement.getDefaultDir(application)
+                    meta.basePath.startsWith("content://") ->
+                        SafeFile.fromUri(application, Uri.parse(meta.basePath))
+                    else -> SafeFile.fromFilePath(application, meta.basePath)
+                }
+                root?.gotoDirectory(relative, createMissingDirectories = false)
+                    ?.listFiles().orEmpty().mapNotNull { file ->
+                        val name = file.name() ?: return@mapNotNull null
+                        if (!name.startsWith(titlePrefix) || marker !in name ||
+                            listOf(".srt", ".vtt", ".ass", ".ttml").none { name.endsWith(it, true) })
+                            return@mapNotNull null
+                        val label = name.substringAfter("] ", "").substringBeforeLast('.').trim()
+                        val match = Regex("""\s+(\d+)$""").find(label)
+                        val language = label.removeSuffix(match?.value.orEmpty()).trim()
+                        if (!isSelectableLabel(language)) return@mapNotNull null
+                        val uri = file.uri() ?: return@mapNotNull null
+                        SubtitleData(language, match?.groupValues?.get(1).orEmpty(),
+                            uri.toString(), SubtitleOrigin.DOWNLOADED_FILE, name.toSubtitleMimeType(),
+                            emptyMap(), SubtitleHelper.fromLanguageToTagIETF(language))
+                    }
+            }
+            if (found.isNotEmpty() && fragment === playerFragment && vm.state.instance == instance) {
+                vm.modifyState {
+                    val fresh = found.filter { sub -> subtitles.none { it.url == sub.url } }
+                    if (fresh.isEmpty()) this else add(fresh)
+                }
+            }
+        }
     }
 
     private fun normalize(vm: PlayerGeneratorViewModel) {
@@ -415,6 +485,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         pendingDialogView?.removeOnAttachStateChangeListener(onDialogDetached)
         pendingDialogView = null
         val state = vm.state
+        scanExternalOfflineSubtitles(vm)
         if (state.subtitles.isEmpty()) return
         val ranks = stremioRanks()
         val stremio = state.generatorState?.response?.apiName?.equals("StremioC", true) == true
@@ -426,7 +497,8 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             if (instance != state.instance || subtitles.isEmpty()) return@modifyState this
             val before = subtitles
             val normalized = before.map { sub ->
-                val localized = localized(sub, ranks)
+                val localized = if (ElevateFeaturePrefs.enabled(application,
+                        ElevateFeature.SUBTITLE_LANGUAGE_NAMES)) localized(sub, ranks) else sub
                 if (details != null && sub.origin == SubtitleOrigin.URL &&
                     localized.originalName != sub.originalName) {
                     val original = sub.originalName.trim()
@@ -438,11 +510,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
                     }
                 }
                 localized
-            }.filter {
-                val language = it.originalName.substringBefore(" · ").substringBefore(" — ").trim()
-                language.isNotEmpty() && !language.equals("Unknown", ignoreCase = true) &&
-                    !language.equals("und", ignoreCase = true)
-            }.distinctBy {
+            }.filter { isSelectable(it) }.distinctBy {
                 if (it.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) it.origin to it.url else it
             }
 

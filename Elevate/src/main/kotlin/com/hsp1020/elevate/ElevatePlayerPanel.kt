@@ -1287,6 +1287,7 @@ internal class ElevatePlayerPanel(
             ) ?: sub.originalName
         }
         val all = sortSubs(vm.state.subtitles)
+            .filter { SubtitleLanguageNormalizer.isSelectable(it) }
         val imported = all.filter {
             it.origin == SubtitleOrigin.DOWNLOADED_FILE || it.url in importedUrls
         }
