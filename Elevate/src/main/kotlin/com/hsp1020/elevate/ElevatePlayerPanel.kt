@@ -297,6 +297,7 @@ internal class ElevatePlayerPanel(
         }
     }
     private var subtitleGroups = emptyList<Pair<String, List<SubtitleData>>>()
+    private val numberedDownloadedDetail = Regex("""^\d+\s*\((.*)\)$""")
     private var selectedGroup = 0
     private var browsingSubtitleGroup = false
     private val languageList = ListView(ctx).apply {
@@ -317,8 +318,7 @@ internal class ElevatePlayerPanel(
         orientation = LinearLayout.HORIZONTAL
         addView(languageList, LinearLayout.LayoutParams(0, -1, .35f))
     }
-    // Imported tracks and import actions are full-width; original language/option lists stay split.
-    private val importedUrls = HashSet<String>()
+    // All subtitle origins share the same language and option lists.
     private var beforeImport: Set<String>? = null
     private var resumeAfterFileImport = false
     private var importInstance = -1
@@ -327,27 +327,6 @@ internal class ElevatePlayerPanel(
         importInstance = vm.state.instance
         beforeImport = null
         resumeAfterFileImport = false
-        importedUrls.clear()
-    }
-    private val importedSubtitles = ArrayList<SubtitleData>()
-    private val importedAdapter = object : ArrayAdapter<SubtitleData>(
-        ctx, android.R.layout.simple_list_item_1, importedSubtitles
-    ) {
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-            val sub = getItem(position) ?: return View(ctx)
-            val label = "${subtitleDisplayName(sub)} ${sub.nameSuffix.trim()}".trimEnd()
-            return bindRow(convertView, parent, position, label,
-                sub.url == visibleSubtitleUrl(), compact = false)
-        }
-    }
-    private val importedList = ListView(ctx).apply {
-        divider = null
-        choiceMode = AbsListView.CHOICE_MODE_NONE
-        adapter = importedAdapter
-        visibility = View.GONE
-        setOnItemClickListener { _, _, position, _ ->
-            importedSubtitles.getOrNull(position)?.let(::setSubtitle)
-        }
     }
     private fun importAction(label: Int, action: () -> Unit) = LinearLayout(ctx).apply {
         orientation = LinearLayout.HORIZONTAL
@@ -417,7 +396,6 @@ internal class ElevatePlayerPanel(
     private val subtitleContent = LinearLayout(ctx).apply {
         orientation = LinearLayout.VERTICAL
         addView(subtitlePane, LinearLayout.LayoutParams(-1, dp(48)))
-        addView(importedList, LinearLayout.LayoutParams(-1, 0))
         addView(importActions, LinearLayout.LayoutParams(-1, -2))
     }
     private val subtitleScroll = ScrollView(ctx).apply {
@@ -730,8 +708,8 @@ internal class ElevatePlayerPanel(
             if (added.isNotEmpty()) {
                 // Native import selects the first new subtitle; protect it before player reload.
                 onManualSubtitle(added.first())
-                importedUrls.addAll(added.map { it.url })
                 beforeImport = null
+                browsingSubtitleGroup = false
                 val resume = resumeAfterFileImport &&
                     added.first().origin == SubtitleOrigin.DOWNLOADED_FILE
                 resumeAfterFileImport = false
@@ -876,8 +854,6 @@ internal class ElevatePlayerPanel(
         vm.currentLinks.removeObserver(linksChanged)
         vm.currentSubtitles.removeObserver(subtitlesChanged)
         beforeImport = null
-        importedUrls.clear()
-        importedSubtitles.clear()
         resumeAfterFileImport = false
         resumeAfterSubtitleReloadInstance = null
         importInstance = -1
@@ -1291,27 +1267,12 @@ internal class ElevatePlayerPanel(
         val current = fragment.player.getCurrentPreferredSubtitle()
         val all = sortSubs(vm.state.subtitles)
             .filter { SubtitleLanguageNormalizer.isSelectable(it) }
-        val imported = all.filter {
-            it.origin == SubtitleOrigin.DOWNLOADED_FILE || it.url in importedUrls
-        }
-        importedSubtitles.clear()
-        importedSubtitles.addAll(imported)
-        importedAdapter.notifyDataSetChanged()
-        importedList.visibility = if (imported.isEmpty()) View.GONE else View.VISIBLE
-        (importedList.layoutParams as LinearLayout.LayoutParams).apply {
-            height = if (imported.isEmpty()) 0 else dp(64 * minOf(5, imported.size))
-            importedList.layoutParams = this
-        }
-        subtitlePane.visibility = if (all.size == imported.size && imported.isNotEmpty())
-            View.GONE else View.VISIBLE
-        subtitleGroups = all.filterNot {
-            it.origin == SubtitleOrigin.DOWNLOADED_FILE || it.url in importedUrls
-        }.groupBy(::subtitleDisplayName)
+        subtitleGroups = all.groupBy(::subtitleDisplayName)
             .map { (name, subtitles) -> name to orderedOptions(subtitles) }
-        // Reserve all language rows, then show full-width imports directly underneath.
-        // The outer ScrollView handles overflow instead of pinning controls to the bottom.
+        // Keep both columns tall enough for the language rows and up to five options.
         val paneParams = subtitlePane.layoutParams as LinearLayout.LayoutParams
-        val paneHeight = dp(48 * (subtitleGroups.size + 1))
+        val paneHeight = dp(48 * maxOf(subtitleGroups.size + 1,
+            minOf(5, subtitleGroups.maxOfOrNull { it.second.size } ?: 0)))
         if (paneParams.height != paneHeight) {
             paneParams.height = paneHeight
             subtitlePane.layoutParams = paneParams
@@ -1348,11 +1309,13 @@ internal class ElevatePlayerPanel(
                     .distinct().joinToString(" · ")
                 "$number ($embedded" + if (detail.isNotEmpty()) " · $detail)" else ")"
             } else {
+                val suffix = sub.nameSuffix.trim()
                 val detail = detailCache?.get(sub.url)?.takeIf { it.isNotBlank() }
-                    ?: sub.nameSuffix.takeIf {
-                        it.isNotBlank() && it.toIntOrNull() == null
-                    }
-                "$number" + (detail?.let { "($it)" } ?: "")
+                    ?: if (sub.origin == SubtitleOrigin.DOWNLOADED_FILE)
+                        numberedDownloadedDetail.matchEntire(suffix)?.groupValues?.get(1)
+                            ?: suffix.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
+                    else suffix.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
+                "$number" + (detail?.takeIf { it.isNotBlank() }?.let { "($it)" } ?: "")
             }
             val selected = sub.url == current
             val refreshHook = ElevateSubtitleRefreshHook.active()
