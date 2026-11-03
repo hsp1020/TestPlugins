@@ -10,7 +10,7 @@ import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.ui.player.LOADTYPE_INAPP_DOWNLOAD
 import com.lagradost.cloudstream3.ui.player.RepoLinkGenerator
 import com.lagradost.cloudstream3.ui.player.source_priority.QualityDataHelper
-import com.lagradost.cloudstream3.ui.result.ResultEpisode
+import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.result.buildResultEpisode
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.downloader.DownloadObjects
@@ -100,7 +100,7 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
                                 limit.acquire()
                                 try {
                                     val result = prepare(queued)
-                                    result?.let { queued to it.second }
+                                    result?.let { queued to it }
                                 } catch (error: Exception) {
                                     throw error
                                 } finally {
@@ -115,7 +115,10 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
                         ?: host?.takeIf { it.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
                             !it.isFinishing && !it.isDestroyed }
                     val target = activity ?: app
-                    if (resolved.isNotEmpty()) ExternalDownloads.handoffBatch(target, resolved)
+                    if (resolved.isNotEmpty()) ExternalDownloads.handoffBatch(
+                        target, resolved.map { it.first to it.second.first },
+                        resolved.associate { it.first.id to it.second.second }
+                    )
                 } catch (cancel: CancellationException) {
                     throw cancel
                 } catch (error: Exception) {
@@ -127,7 +130,7 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
 
     private suspend fun prepare(
         queued: DownloadObjects.DownloadQueueWrapper
-    ): Pair<ResultEpisode, ExtractorLink>? {
+    ): Pair<ExtractorLink, List<SubtitleData>>? {
         val item = queued.downloadItem
         val saved = queued.resumePackage?.item
         val episode = item?.episode ?: saved?.ep?.let { info ->
@@ -148,6 +151,8 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
             return null
         }
 
+        val collectedSubs = java.util.Collections.synchronizedSet(LinkedHashSet<SubtitleData>())
+        item?.subs?.let(collectedSubs::addAll)
         val links = when {
             item?.links?.isNotEmpty() == true -> {
                 item.links
@@ -166,7 +171,7 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
                             found[link.url] = link
                         }
                     },
-                    subtitleCallback = {},
+                    subtitleCallback = { collectedSubs.add(it) },
                     offset = 0,
                     isCasting = false
                     )
@@ -191,7 +196,7 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
             if (profile == null) links.first()
             else links.maxBy { QualityDataHelper.getLinkPriority(profile.id, it) }
         }
-        return episode to selected
+        return selected to synchronized(collectedSubs) { collectedSubs.toList() }
     }
 
     fun stop() {

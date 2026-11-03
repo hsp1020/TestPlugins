@@ -17,6 +17,8 @@ import com.lagradost.cloudstream3.sortUrls
 import com.lagradost.cloudstream3.ui.player.LOADTYPE_INAPP_DOWNLOAD
 import com.lagradost.cloudstream3.ui.player.RepoLinkGenerator
 import com.lagradost.cloudstream3.ui.result.LinkLoadingResult
+import com.lagradost.cloudstream3.ui.result.EpisodeClickEvent
+import com.lagradost.cloudstream3.ui.result.ResultEpisode
 import com.lagradost.cloudstream3.ui.result.ResultViewModel2
 import com.lagradost.cloudstream3.ui.result.SelectPopup
 import com.lagradost.cloudstream3.ui.result.ResultFragmentPhone
@@ -50,21 +52,32 @@ internal class DownloadPickerPresentationHook(private val app: Application) :
         }
     }
 
-    private fun capturedLinks(callback: Any, depth: Int = 6): List<ExtractorLink>? {
-        if (callback is LinkLoadingResult) {
-            return callback.links
-        }
+    private fun capturedResult(callback: Any, depth: Int = 7): LinkLoadingResult? {
+        if (callback is LinkLoadingResult) return callback
         if (depth == 0 || callback !is Function<*>) return null
-        val fields = callback.javaClass.declaredFields
-        for (field in fields) {
+        for (field in callback.javaClass.declaredFields) {
             val value = runCatching {
                 field.isAccessible = true
                 field.get(callback)
             }.getOrNull() ?: continue
-            if (value is LinkLoadingResult) {
-                return value.links
-            }
-            if (value is Function<*>) capturedLinks(value, depth - 1)?.let { return it }
+            if (value is LinkLoadingResult) return value
+            if (value is Function<*>) capturedResult(value, depth - 1)?.let { return it }
+        }
+        return null
+    }
+
+    private fun capturedEpisode(callback: Any, depth: Int = 8): ResultEpisode? {
+        if (callback is ResultEpisode) return callback
+        if (callback is EpisodeClickEvent) return callback.data
+        if (depth == 0 || callback !is Function<*>) return null
+        for (field in callback.javaClass.declaredFields) {
+            val value = runCatching {
+                field.isAccessible = true
+                field.get(callback)
+            }.getOrNull() ?: continue
+            if (value is ResultEpisode) return value
+            if (value is EpisodeClickEvent) return value.data
+            if (value is Function<*>) capturedEpisode(value, depth - 1)?.let { return it }
         }
         return null
     }
@@ -133,15 +146,57 @@ internal class DownloadPickerPresentationHook(private val app: Application) :
         val title = popup.getTitle(ctx)
         return when (title) {
             ctx.getString(R.string.episode_action_download_subtitle) -> {
-                val options = popup.options.map { item ->
-                    val text = item.asString(ctx)
-                    val display = displayName(text)
-                    if (display == text) item else txt(display)
-                }
-                if (options == popup.options) {
-                    null
+                val subs = capturedResult(popup.callback)?.subs
+                    ?.takeIf { it.size == popup.options.size }
+                val episode = capturedEpisode(popup.callback)
+                    ?: (model.movie.value as? Resource.Success)?.value?.second
+                    ?: (model.episodes.value as? Resource.Success)?.value?.singleOrNull()
+                if (subs == null || episode == null) {
+                    val options = popup.options.map { label ->
+                        val raw = label.asString(ctx)
+                        val fixed = displayName(raw)
+                        if (raw == fixed) label else txt(fixed)
+                    }
+                    if (options == popup.options) null else popup.copy(options = options)
                 } else {
-                    popup.copy(options = options)
+                    val ranks = SubtitleLanguageNormalizer.stremioRanks()
+                    val details = SubtitleLanguageNormalizer.stremioDetailCache()
+                    val localize = ElevateFeaturePrefs.enabled(app, ElevateFeature.SUBTITLE_LANGUAGE_NAMES)
+                    val localized = subs.map { sub ->
+                        if (localize) SubtitleLanguageNormalizer.localized(sub, ranks) else sub
+                    }
+                    val grouped = subs.indices.groupBy { displayName(localized[it].originalName) }
+                    val options = grouped.toSortedMap(String.CASE_INSENSITIVE_ORDER).flatMap { (language, rows) ->
+                        rows.sortedWith(compareBy<Int> {
+                            (ranks?.get(subs[it].url) as? Number)?.toInt() ?: Int.MAX_VALUE
+                        }.thenBy { it }).mapIndexed { position, originalIndex ->
+                            val sub = subs[originalIndex]
+                            val suffix = displayName(localized[originalIndex].nameSuffix)
+                            val detail = details?.get(sub.url)?.takeIf { it.isNotBlank() }
+                                ?: suffix.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
+                            val text = "$language ${position + 1}" +
+                                (detail?.let { "($it)" } ?: "")
+                            Triple(txt(text), originalIndex, text)
+                        }
+                    }
+                    SelectPopup.SelectArray(
+                        popup.text, options.map { it.first to it.second }
+                    ) { originalIndex ->
+                        if (originalIndex == null) {
+                            popup.callback(null)
+                        } else {
+                            val subtitle = subs.getOrNull(originalIndex)
+                            val label = options.firstOrNull { it.second == originalIndex }?.third
+                            if (subtitle == null || label == null) {
+                                popup.callback(originalIndex)
+                            } else {
+                                if (!ExternalDownloads.handoffManualSubtitle(
+                                        ctx, episode, subtitle, label
+                                    )) ExternalDownloads.toast(ctx, "Cannot open external downloader")
+                                popup.callback(null)
+                            }
+                        }
+                    }
                 }
             }
             ctx.getString(R.string.episode_action_download_mirror) -> {
@@ -151,7 +206,7 @@ internal class DownloadPickerPresentationHook(private val app: Application) :
                     return null
                 }
                 val labels = popup.options.map { it.asString(ctx) }
-                val captured = capturedLinks(popup.callback)
+                val captured = capturedResult(popup.callback)?.links
                 val direct = captured?.takeIf { links ->
                     val mismatch = links.indices.firstOrNull {
                         it >= labels.size || labels[it] != labelOf(links[it])

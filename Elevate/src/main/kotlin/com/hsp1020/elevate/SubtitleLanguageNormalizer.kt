@@ -114,6 +114,54 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
             val cache = field.get(null) as? MutableMap<String, String>
             cache
         }.getOrNull()
+    internal fun stremioRanks(): Map<*, *>? = runCatching {
+        val method = APIHolder::class.java.methods.firstOrNull { it.name == "getAllProviders" }
+        val providers = method?.invoke(APIHolder) as? Iterable<*>
+        val provider = providers?.firstOrNull {
+            it?.javaClass?.name == "com.hsp1020.StremioC"
+        } ?: return@runCatching null
+        val field = provider.javaClass.getDeclaredField("subtitleOrderByUrl")
+            .apply { isAccessible = true }
+        field.get(null) as? Map<*, *>
+    }.getOrNull()
+
+    internal fun localized(sub: SubtitleData, ranks: Map<*, *>?): SubtitleData {
+        // Keep the player's original embedded track object (including its language code).
+        // Media3 reports the same track again after reload; copied data is not equal to it.
+        if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) return sub
+        // ms-ind is used for Indonesian next to a separate ms (Malay) track.
+        // Do not treat unrecognized language tags as generic Malay.
+        val code = if (sub.languageCode.equals("ms-ind", ignoreCase = true)) "id"
+            else sub.languageCode
+        if (sub.origin != SubtitleOrigin.URL) return sub
+
+        // StremioC preserves subtitle detail metadata separately from the language group.
+        // Rank ranges 1000/10000/20000 refer to registered StremioC/CineStream/StreamPlay addons.
+        val rank = (ranks?.get(sub.url) as? Number)?.toInt()
+        val integrationSubtitle = rank != null && rank >= 10_000
+
+        val sourceName = sub.originalName.trim()
+        val stremio = sourceName.endsWith(" (Stremio)", ignoreCase = true)
+        val languageName = (if (stremio)
+            sourceName.dropLast(" (Stremio)".length).trim() else sourceName)
+            .substringBefore(" · ").substringBefore(" — ").trim()
+        val exactLanguage = languageName.substringBefore(" (").trim()
+        val tag = SubtitleHelper.fromCodeToLangTagIETF(exactLanguage)
+            ?: SubtitleHelper.fromLanguageToTagIETF(exactLanguage)
+            ?: (if (!sourceName.startsWith("Make ", ignoreCase = true) &&
+                !sourceName.startsWith("Translate ", ignoreCase = true))
+                SubtitleHelper.fromCodeToLangTagIETF(code)
+                    ?: SubtitleHelper.fromLanguageToTagIETF(code) else null)
+            ?: return sub
+        val displayLanguage = SubtitleHelper.fromTagToLanguageName(tag) ?: return sub
+        val displayed = displayLanguage + if (stremio && !integrationSubtitle) " (Stremio)" else ""
+        if (displayed == sub.originalName && code == sub.languageCode) return sub
+
+        // Native right-hand options keep the original track label when it held detail.
+        val details = sourceName.substringAfter(" · ", "").ifBlank { sub.nameSuffix }
+        return sub.copy(originalName = displayed, nameSuffix = details, languageCode = tag)
+    }
+
     }
 
     private fun stremioSubtitleDetail(url: String): String? = stremioDetailCache()?.get(url)
@@ -355,54 +403,6 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         removeObserver = null
         fragment = null
         model = null
-    }
-
-    private fun stremioRanks(): Map<*, *>? = runCatching {
-        val method = APIHolder::class.java.methods.firstOrNull { it.name == "getAllProviders" }
-        val providers = method?.invoke(APIHolder) as? Iterable<*>
-        val provider = providers?.firstOrNull {
-            it?.javaClass?.name == "com.hsp1020.StremioC"
-        } ?: return@runCatching null
-        val field = provider.javaClass.getDeclaredField("subtitleOrderByUrl")
-            .apply { isAccessible = true }
-        field.get(null) as? Map<*, *>
-    }.getOrNull()
-
-    private fun localized(sub: SubtitleData, ranks: Map<*, *>?): SubtitleData {
-        // Keep the player's original embedded track object (including its language code).
-        // Media3 reports the same track again after reload; copied data is not equal to it.
-        if (sub.origin == SubtitleOrigin.EMBEDDED_IN_VIDEO) return sub
-        // ms-ind is used for Indonesian next to a separate ms (Malay) track.
-        // Do not treat unrecognized language tags as generic Malay.
-        val code = if (sub.languageCode.equals("ms-ind", ignoreCase = true)) "id"
-            else sub.languageCode
-        if (sub.origin != SubtitleOrigin.URL) return sub
-
-        // StremioC preserves subtitle detail metadata separately from the language group.
-        // Rank ranges 1000/10000/20000 refer to registered StremioC/CineStream/StreamPlay addons.
-        val rank = (ranks?.get(sub.url) as? Number)?.toInt()
-        val integrationSubtitle = rank != null && rank >= 10_000
-
-        val sourceName = sub.originalName.trim()
-        val stremio = sourceName.endsWith(" (Stremio)", ignoreCase = true)
-        val languageName = (if (stremio)
-            sourceName.dropLast(" (Stremio)".length).trim() else sourceName)
-            .substringBefore(" · ").substringBefore(" — ").trim()
-        val exactLanguage = languageName.substringBefore(" (").trim()
-        val tag = SubtitleHelper.fromCodeToLangTagIETF(exactLanguage)
-            ?: SubtitleHelper.fromLanguageToTagIETF(exactLanguage)
-            ?: (if (!sourceName.startsWith("Make ", ignoreCase = true) &&
-                !sourceName.startsWith("Translate ", ignoreCase = true))
-                SubtitleHelper.fromCodeToLangTagIETF(code)
-                    ?: SubtitleHelper.fromLanguageToTagIETF(code) else null)
-            ?: return sub
-        val displayLanguage = SubtitleHelper.fromTagToLanguageName(tag) ?: return sub
-        val displayed = displayLanguage + if (stremio && !integrationSubtitle) " (Stremio)" else ""
-        if (displayed == sub.originalName && code == sub.languageCode) return sub
-
-        // Native right-hand options keep the original track label when it held detail.
-        val details = sourceName.substringAfter(" · ", "").ifBlank { sub.nameSuffix }
-        return sub.copy(originalName = displayed, nameSuffix = details, languageCode = tag)
     }
 
     private fun normalize(vm: PlayerGeneratorViewModel) {

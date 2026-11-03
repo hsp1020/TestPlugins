@@ -25,6 +25,10 @@ import com.lagradost.cloudstream3.utils.DataStore.getFolderName
 import com.lagradost.cloudstream3.utils.DataStore.getKey
 import com.lagradost.cloudstream3.utils.DataStore.setKey
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.ui.player.SubtitleData
+import com.lagradost.cloudstream3.ui.result.ResultEpisode
+import com.lagradost.cloudstream3.ui.subtitles.SubtitlesFragment
+import com.lagradost.cloudstream3.utils.SubtitleHelper
 import com.lagradost.cloudstream3.utils.downloader.DownloadObjects
 import com.lagradost.cloudstream3.utils.downloader.DownloadFileManagement
 import com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager
@@ -186,33 +190,69 @@ internal object ExternalDownloads {
         )
     }
 
-    /** Deterministic episode name, independent of the URL basename. */
+    /** Keep video and subtitle stems identical for native offline subtitle discovery. */
+    private fun episodeStem(id: Int, title: String, season: Int?, episode: Int?): String {
+        val suffix = if (season != null && episode != null) {
+            " S%02dE%02d".format(java.util.Locale.US, season, episode)
+        } else ""
+        return "$title$suffix [CS-$id]"
+            .replace(Regex("""[\\/:*?"<>|]"""), " ").trim().take(190)
+    }
+
     private fun fileName(queued: DownloadObjects.DownloadQueueWrapper, link: ExtractorLink): String {
         val item = queued.downloadItem
         val ep = item?.episode
         val resume = queued.resumePackage?.item?.ep
         val title = item?.resultName ?: resume?.mainName ?: ep?.headerName ?: "Video"
-        val season = ep?.season ?: resume?.season
-        val episode = ep?.episode ?: resume?.episode
-        val suffix = if (season != null && episode != null) {
-            " S%02dE%02d".format(java.util.Locale.US, season, episode)
-        } else ""
-        val base = "$title$suffix [CS-${queued.id}]"
-            .replace(Regex("""[\\/:*?"<>|]"""), " ").trim().take(190)
         val ext = if (link.isM3u8) "mp4" else {
             Uri.parse(link.url).lastPathSegment.orEmpty().substringAfterLast('.', "")
                 .lowercase().takeIf { it in setOf("mp4", "mkv", "webm", "avi", "mov", "ts", "m4v") }
                 ?: "mp4"
         }
-        return "$base.$ext"
+        return episodeStem(queued.id, title, ep?.season ?: resume?.season,
+            ep?.episode ?: resume?.episode) + ".$ext"
     }
 
     private data class Transfer(
-        val queued: DownloadObjects.DownloadQueueWrapper,
-        val link: ExtractorLink,
+        val queued: DownloadObjects.DownloadQueueWrapper?,
+        val url: String,
         val filename: String,
         val headers: Map<String, String>
     )
+
+    private fun subtitleTransfer(stem: String, subtitle: SubtitleData, label: String): Transfer {
+        val suffix = label.replace(Regex("""[\\/:*?"<>|]"""), " ")
+            .replace(Regex("\\s+"), " ").trim().take(100).ifBlank { "Subtitle" }
+        val url = subtitle.getFixedUrl()
+        val extension = if (url.contains(".srt", ignoreCase = true)) "srt" else "vtt"
+        return Transfer(null, url, "$stem $suffix.$extension", subtitle.headers)
+    }
+
+    private fun matchingSubtitles(subs: List<SubtitleData>): List<SubtitleData> {
+        val languages = SubtitlesFragment.getDownloadSubsLanguageTagIETF()
+        return subs.filter { subtitle ->
+            languages.any { language ->
+                subtitle.languageCode == language || subtitle.originalName.contains(
+                    SubtitleHelper.fromTagToEnglishLanguageName(language) ?: language
+                )
+            }
+        }.take(3)
+    }
+
+    /** Manual subtitle downloads use the same external app as video downloads. */
+    fun handoffManualSubtitle(
+        context: Context, episode: ResultEpisode, subtitle: SubtitleData, label: String
+    ): Boolean {
+        val app = selected(context) ?: return false
+        val stored = context.getKey<DownloadObjects.DownloadedFileInfo>(
+            VideoDownloadManager.KEY_DOWNLOAD_INFO, episode.id.toString()
+        )?.takeIf { it.relativePath.isEmpty() && it.basePath == basePath(context) }
+        val current = stored?.displayName
+            ?: pending(context).firstOrNull { it.id == episode.id }?.expectedFile
+        val stem = current?.substringBeforeLast('.')
+            ?: episodeStem(episode.id, episode.headerName, episode.season, episode.episode)
+        return dispatch(context, app, listOf(subtitleTransfer(stem, subtitle, label)))
+    }
 
     private fun headersFor(link: ExtractorLink): Map<String, String> {
         val result = LinkedHashMap<String, String>(link.headers.size + 1)
@@ -222,39 +262,28 @@ internal object ExternalDownloads {
     }
 
     /**
-     * 1DM 20.0: url_list and url_list.filename arrays.
-     * ADM 14.0.43: ACTION_LIST_ADD entries separated by <line>, each URL/name by <info>.
-     * Transfer together only when the HTTP headers match: both apps use batch-wide headers.
+     * Preserve the existing 1DM/ADM batch intent formats. Subtitles are sent
+     * alongside video, grouped by HTTP headers; only videos enter pending recognition.
      */
-    fun handoffBatch(
-        context: Context,
-        requests: List<Pair<DownloadObjects.DownloadQueueWrapper, ExtractorLink>>
-    ) {
-        val app = selected(context) ?: return
-        val pkg = ComponentName.unflattenFromString(app.component)?.packageName ?: run {
-            return
-        }
-        val transfers = requests.mapNotNull { (queued, link) ->
-            val scheme = Uri.parse(link.url).scheme
-            val transferHeaders = headersFor(link)
+    private fun dispatch(context: Context, app: App, transfers: List<Transfer>): Boolean {
+        val pkg = ComponentName.unflattenFromString(app.component)?.packageName ?: return false
+        val valid = transfers.filter { transfer ->
+            val scheme = Uri.parse(transfer.url).scheme
             if (scheme !in listOf("http", "https")) {
                 toast(context, "External download requires an HTTP(S) link")
-                null
-            } else Transfer(queued, link, fileName(queued, link), transferHeaders)
+                false
+            } else true
         }
-        if (transfers.isEmpty()) {
-            return
-        }
-        // Do not combine requests with different Referer/Cookie/User-Agent values.
-        val groups = transfers.groupBy { it.headers }
-        for ((headers, group) in groups) {
+        if (valid.isEmpty()) return false
+        var launched = false
+        for ((headers, group) in valid.groupBy { it.headers }) {
             val first = group.first()
             val bundle = Bundle().apply { headers.forEach { (key, value) -> putString(key, value) } }
             val intent = if (pkg == "com.dv.adm") {
                 Intent(Intent.ACTION_MAIN).apply {
                     component = ComponentName(pkg, "com.dv.adm.AEditor")
                     putExtra("com.dv.get.ACTION_LIST_ADD", group.joinToString("<line>") {
-                        "${it.link.url}<info>${it.filename}"
+                        "${it.url}<info>${it.filename}"
                     })
                     putExtra("com.dv.get.ACTION_LIST_OPEN", false)
                     basePath(context)?.takeIf { it.startsWith("/") }?.let {
@@ -263,13 +292,13 @@ internal object ExternalDownloads {
                     if (headers.isNotEmpty()) putExtra("headers", bundle)
                 }
             } else {
-                Intent(Intent.ACTION_VIEW, Uri.parse(first.link.url)).apply {
+                Intent(Intent.ACTION_VIEW, Uri.parse(first.url)).apply {
                     component = ComponentName(pkg, "idm.internet.download.manager.Downloader")
                     putExtra("force_editor", false)
                     putExtra("hide_browser_option", true)
                     if (group.size == 1) putExtra("extra_filename", first.filename)
                     else {
-                        putStringArrayListExtra("url_list", ArrayList(group.map { it.link.url }))
+                        putStringArrayListExtra("url_list", ArrayList(group.map { it.url }))
                         putStringArrayListExtra("url_list.filename", ArrayList(group.map { it.filename }))
                     }
                     if (headers.isNotEmpty()) putExtra("extra_headers", bundle)
@@ -281,13 +310,42 @@ internal object ExternalDownloads {
             try {
                 if (context !is Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 context.startActivity(intent)
-                addPendingBatch(context.applicationContext, group.map {
-                    fromQueue(context, it.queued, it.filename)
-                })
+                launched = true
+                val videos = group.mapNotNull { transfer ->
+                    transfer.queued?.let { fromQueue(context, it, transfer.filename) }
+                }
+                if (videos.isNotEmpty()) addPendingBatch(context.applicationContext, videos)
             } catch (e: Exception) {
                 toast(context, "Cannot open " + app.label + ": " + e.message)
             }
         }
+        return launched
+    }
+
+    fun handoffBatch(
+        context: Context,
+        requests: List<Pair<DownloadObjects.DownloadQueueWrapper, ExtractorLink>>,
+        subtitles: Map<Int, List<SubtitleData>> = emptyMap()
+    ) {
+        val app = selected(context) ?: return
+        val transfers = requests.flatMap { (queued, link) ->
+            if (Uri.parse(link.url).scheme !in listOf("http", "https")) {
+                toast(context, "External download requires an HTTP(S) link")
+                return@flatMap emptyList()
+            }
+            val filename = fileName(queued, link)
+            val video = Transfer(queued, link.url, filename, headersFor(link))
+            val stem = filename.substringBeforeLast('.')
+            val subs = matchingSubtitles(subtitles[queued.id].orEmpty())
+            val duplicates = HashMap<String, Int>()
+            listOf(video) + subs.map { sub ->
+                val label = sub.name.trim().ifBlank { "Subtitle" }
+                val count = (duplicates[label] ?: 0) + 1
+                duplicates[label] = count
+                subtitleTransfer(stem, sub, if (count == 1) label else "$label $count")
+            }
+        }
+        dispatch(context, app, transfers)
     }
 
     fun handoff(activity: Activity, queued: DownloadObjects.DownloadQueueWrapper, link: ExtractorLink) =
