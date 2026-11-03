@@ -297,7 +297,7 @@ internal class ElevatePlayerPanel(
         }
     }
     private var subtitleGroups = emptyList<Pair<String, List<SubtitleData>>>()
-    private val numberedDownloadedDetail = Regex("""^\d+\s*\((.*)\)$""")
+    private val numberedDownloadedDetail = Regex("""^\d+\s*\((.*)$""")
     private var selectedGroup = 0
     private var browsingSubtitleGroup = false
     private val languageList = ListView(ctx).apply {
@@ -1312,7 +1312,7 @@ internal class ElevatePlayerPanel(
                 val suffix = sub.nameSuffix.trim()
                 val detail = detailCache?.get(sub.url)?.takeIf { it.isNotBlank() }
                     ?: if (sub.origin == SubtitleOrigin.DOWNLOADED_FILE)
-                        numberedDownloadedDetail.matchEntire(suffix)?.groupValues?.get(1)
+                        numberedDownloadedDetail.matchEntire(suffix)?.groupValues?.get(1)?.removeSuffix(")")
                             ?: suffix.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
                     else suffix.takeIf { it.isNotBlank() && it.toIntOrNull() == null }
                 "$number" + (detail?.takeIf { it.isNotBlank() }?.let { "($it)" } ?: "")

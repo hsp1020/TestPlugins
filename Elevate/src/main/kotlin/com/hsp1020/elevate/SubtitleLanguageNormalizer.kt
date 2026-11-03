@@ -437,7 +437,7 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
         val relative = meta.relativePath ?: return
         val titlePrefix = display.substringBefore("[CS-$id").trimEnd()
         val shortPrefix = "$titlePrefix [CS-$id] "
-        val numberedSubtitle = Regex("""^(.+?)\s+(\d+)(?:\s*\(.*\))?$""")
+        val numberedSubtitle = Regex("""^(.+?)\s+(\d+)(?:\s*\(.*)?$""")
         val instance = vm.state.instance
         val key = "$instance:$id:$display"
         if (key == scannedOfflineKey) return
