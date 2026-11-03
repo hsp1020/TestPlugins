@@ -70,13 +70,10 @@ internal object ExternalDownloads {
         }
     }
 
-    // Retain the old app selection when upgrading, but expose only one target.
     fun selected(c: Context): App? = runCatching {
-        val prefs = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        (prefs.getString(TARGET, null)?.let { App.parse(JSONObject(it)) }
-            ?: JSONArray(prefs.getString("apps", "[]")).let { array ->
-                if (array.length() == 0) null else App.parse(array.getJSONObject(0))
-            })?.takeIf { ComponentName.unflattenFromString(it.component)?.packageName in supported }
+        c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(TARGET, null)?.let { App.parse(JSONObject(it)) }
+            ?.takeIf { ComponentName.unflattenFromString(it.component)?.packageName in supported }
     }.getOrNull()
 
     fun select(c: Context, app: App) {
@@ -86,7 +83,7 @@ internal object ExternalDownloads {
 
     fun clearSelection(c: Context) {
         c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .remove(TARGET).remove("apps").apply()
+            .remove(TARGET).apply()
     }
 
     data class Pending(
@@ -629,15 +626,8 @@ internal object ExternalDownloads {
                 }
                 // One directory listing, one lookup map, no nested filtering or per-file sleep.
                 val byName = HashMap<String, Pending>(requests.size)
-                val adm = selected(c)?.let {
-                    ComponentName.unflattenFromString(it.component)?.packageName == "com.dv.adm"
-                } == true
                 for (p in requests) if (p.expectedFile.isNotBlank()) {
                     byName[p.expectedFile.lowercase(java.util.Locale.ROOT)] = p
-                    // Recognize files downloaded before the ADM filename fix as well.
-                    if (adm && p.expectedFile.length > 128) {
-                        byName[admSavedName(p.expectedFile).lowercase(java.util.Locale.ROOT)] = p
-                    }
                 }
                 val candidates = ArrayList<Triple<Pending, SafeFile, Long>>(requests.size)
                 val now = System.currentTimeMillis()
@@ -675,8 +665,7 @@ internal object ExternalDownloads {
                         continue
                     }
                     val name = file.name() ?: continue
-                    if (!name.equals(pending.expectedFile, ignoreCase = true) &&
-                        !(adm && name.equals(admSavedName(pending.expectedFile), ignoreCase = true))) {
+                    if (!name.equals(pending.expectedFile, ignoreCase = true)) {
                         continue
                     }
                     runCatching { register(c, pending, name, size, base) }

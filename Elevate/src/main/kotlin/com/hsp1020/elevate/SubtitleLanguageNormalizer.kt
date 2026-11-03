@@ -426,17 +426,16 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
 
     private var scannedOfflineKey: String? = null
 
-    /** Discover compact [CS-ID] subtitles and legacy [CS-ID--...] files for offline playback. */
+    /** Discover external-download [CS-ID] subtitles for offline playback. */
     private fun scanExternalOfflineSubtitles(vm: PlayerGeneratorViewModel) {
         if (vm.generator !is DownloadFileGenerator) return
         val meta = vm.state.generatorState?.meta as? ExtractorUri ?: return
         val id = meta.id ?: return
         val display = meta.displayName ?: return
-        if ("[CS-$id]" !in display && "[CS-$id--" !in display) return
+        if ("[CS-$id]" !in display) return
         val relative = meta.relativePath ?: return
         val titlePrefix = display.substringBefore("[CS-$id").trimEnd()
         val shortPrefix = "$titlePrefix [CS-$id] "
-        val legacyMarker = "[CS-$id--"
         val numberedSubtitle = Regex("""^(.+?)\s+(\d+)(?:\s*\(.*\))?$""")
         val instance = vm.state.instance
         val key = "$instance:$id:$display"
@@ -455,12 +454,10 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
                 root?.gotoDirectory(relative, createMissingDirectories = false)
                     ?.listFiles().orEmpty().mapNotNull { file ->
                         val name = file.name() ?: return@mapNotNull null
-                        if (!name.startsWith(titlePrefix) ||
-                            !(name.startsWith(shortPrefix) || legacyMarker in name) ||
+                        if (!name.startsWith(shortPrefix) ||
                             listOf(".srt", ".vtt", ".ass", ".ttml").none { name.endsWith(it, true) })
                             return@mapNotNull null
-                        val label = (if (name.startsWith(shortPrefix))
-                            name.removePrefix(shortPrefix) else name.substringAfter("] ", ""))
+                        val label = name.removePrefix(shortPrefix)
                             .substringBeforeLast('.').trim()
                         val match = numberedSubtitle.matchEntire(label)
                         val language = match?.groupValues?.get(1)?.trim() ?: label

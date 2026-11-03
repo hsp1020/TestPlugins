@@ -115,18 +115,6 @@ class ElevatePlugin : Plugin() {
             app = application
             try {
                 val preferences = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
-                // Preserve the user's previous visible/hidden choice when changing to "ON = hide".
-                if (!preferences.getBoolean("hero_hide_semantics_v2", false)) {
-                    preferences.edit().apply {
-                        if (preferences.contains(ElevateFeature.HERO_CAROUSEL.name)) {
-                            putBoolean(
-                                ElevateFeature.HERO_CAROUSEL.name,
-                                !preferences.getBoolean(ElevateFeature.HERO_CAROUSEL.name, true)
-                            )
-                        }
-                        putBoolean("hero_hide_semantics_v2", true)
-                    }.apply()
-                }
                 featurePrefs = preferences
                 featureListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
                     if (ElevateFeature.entries.any { it.name == key }) {

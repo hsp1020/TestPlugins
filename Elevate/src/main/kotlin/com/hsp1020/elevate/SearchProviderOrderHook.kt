@@ -96,20 +96,8 @@ internal class SearchProviderOrderHook(private val app: Application) :
         if (!started) return
         val pinned = DataStoreHelper.pinnedProviders.toList()
         val homeByName = APIHolder.allProviders.filter { it.hasMainPage }.associateBy { it.name }
-        val previouslyManaged = if (prefs.contains("managed_search_pins")) {
+        val previouslyManaged =
             prefs.getStringSet("managed_search_pins", emptySet())?.toSet().orEmpty()
-        } else {
-            buildSet {
-                pinned.forEachIndexed { index, name ->
-                    val home = homeByName[name] ?: return@forEachIndexed
-                    val expected = relatedSearchProviders(home).asReversed().map { it.name }
-                    if (expected.isNotEmpty() && index >= expected.size &&
-                        pinned.subList(index - expected.size, index) == expected) {
-                        addAll(expected)
-                    }
-                }
-            }
-        }
         val original = pinned.filterNot { it in previouslyManaged }
         val explicitNames = original.toHashSet()
         val newlyManaged = mutableSetOf<String>()

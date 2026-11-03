@@ -851,18 +851,13 @@ internal object LibraryPosterPrefs {
 
     fun get(context: Context): PosterConfig {
         val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-        val legacyUrl = prefs.getString("template", "").orEmpty().trim()
-        val legacy = runCatching { Uri.parse(legacyUrl).takeIf { it.scheme == "https" } }.getOrNull()
-        val legacyBase = legacy?.host?.takeIf { it.isNotBlank() }?.let {
-            "https://${it}${legacy.encodedPath?.substringBefore("/poster/").orEmpty()}"
-        }
         return PosterConfig(
             PosterService.entries.firstOrNull { it.name == prefs.getString("service", null) }
                 ?: PosterService.RPDB,
             prefs.getString("key", "").orEmpty().trim(),
-            prefs.getString("xrdb_profile", null) ?: legacy?.getQueryParameter("config").orEmpty(),
-            prefs.getString("xrdb_base", null) ?: legacyBase ?: DEFAULT_XRDB_BASE,
-            prefs.getString("xrdb_render_key", null) ?: legacy?.getQueryParameter("key").orEmpty()
+            prefs.getString("xrdb_profile", "").orEmpty(),
+            prefs.getString("xrdb_base", DEFAULT_XRDB_BASE) ?: DEFAULT_XRDB_BASE,
+            prefs.getString("xrdb_render_key", "").orEmpty()
         )
     }
 
