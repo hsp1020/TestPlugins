@@ -426,19 +426,18 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
 
     private var scannedOfflineKey: String? = null
 
-    /** Native DownloadFileGenerator requires an identical video/subtitle stem.
-     * Discover our [CS-ID--different-title] subtitle filenames once per offline episode.
-     */
+    /** Discover compact [CS-ID] subtitles and legacy [CS-ID--...] files for offline playback. */
     private fun scanExternalOfflineSubtitles(vm: PlayerGeneratorViewModel) {
         if (vm.generator !is DownloadFileGenerator) return
         val meta = vm.state.generatorState?.meta as? ExtractorUri ?: return
         val id = meta.id ?: return
         val display = meta.displayName ?: return
-        // Native discovery handles the shared-stem format; retain old-format compatibility.
-        if ("[CS-$id--" !in display) return
+        if ("[CS-$id]" !in display && "[CS-$id--" !in display) return
         val relative = meta.relativePath ?: return
-        val marker = "[CS-$id--"
         val titlePrefix = display.substringBefore("[CS-$id").trimEnd()
+        val shortPrefix = "$titlePrefix [CS-$id] "
+        val legacyMarker = "[CS-$id--"
+        val numberedSubtitle = Regex("""^(.+?)\s+(\d+)(?:\s*\(.*\))?$""")
         val instance = vm.state.instance
         val key = "$instance:$id:$display"
         if (key == scannedOfflineKey) return
@@ -456,15 +455,19 @@ internal class SubtitleLanguageNormalizer(private val application: Application) 
                 root?.gotoDirectory(relative, createMissingDirectories = false)
                     ?.listFiles().orEmpty().mapNotNull { file ->
                         val name = file.name() ?: return@mapNotNull null
-                        if (!name.startsWith(titlePrefix) || marker !in name ||
+                        if (!name.startsWith(titlePrefix) ||
+                            !(name.startsWith(shortPrefix) || legacyMarker in name) ||
                             listOf(".srt", ".vtt", ".ass", ".ttml").none { name.endsWith(it, true) })
                             return@mapNotNull null
-                        val label = name.substringAfter("] ", "").substringBeforeLast('.').trim()
-                        val match = Regex("""\s+(\d+)$""").find(label)
-                        val language = label.removeSuffix(match?.value.orEmpty()).trim()
+                        val label = (if (name.startsWith(shortPrefix))
+                            name.removePrefix(shortPrefix) else name.substringAfter("] ", ""))
+                            .substringBeforeLast('.').trim()
+                        val match = numberedSubtitle.matchEntire(label)
+                        val language = match?.groupValues?.get(1)?.trim() ?: label
                         if (!isSelectableLabel(language)) return@mapNotNull null
+                        val suffix = match?.let { label.removePrefix(it.groupValues[1]).trim() }.orEmpty()
                         val uri = file.uri() ?: return@mapNotNull null
-                        SubtitleData(language, match?.groupValues?.get(1).orEmpty(),
+                        SubtitleData(language, suffix,
                             uri.toString(), SubtitleOrigin.DOWNLOADED_FILE, name.toSubtitleMimeType(),
                             emptyMap(), SubtitleHelper.fromLanguageToTagIETF(language))
                     }

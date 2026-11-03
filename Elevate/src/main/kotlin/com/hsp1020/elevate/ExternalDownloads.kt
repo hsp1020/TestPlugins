@@ -287,6 +287,14 @@ internal object ExternalDownloads {
         return "$prefix ${safePart(name, available)}.$outputExt"
     }
 
+    /** Strip the video source filename while retaining the episode's stable CS identity. */
+    private fun subtitleStemFromVideo(id: Int, videoName: String): String? {
+        val marker = "[CS-$id"
+        if (marker !in videoName) return null
+        val title = videoName.substringBefore(marker).trimEnd()
+        return title.takeIf { it.isNotEmpty() }?.let { "$it [CS-$id]" }
+    }
+
     private data class Transfer(
         val queued: DownloadObjects.DownloadQueueWrapper?,
         val url: String,
@@ -360,7 +368,7 @@ internal object ExternalDownloads {
                 }
         }.sortedWith(compareBy<SubtitleChoice> {
             (ranks?.get(it.subtitle.url) as? Number)?.toInt() ?: Int.MAX_VALUE
-        }.thenBy { it.originalIndex }).take(3)
+        }.thenBy { it.originalIndex }).take(5)
     }
 
     /** Manual subtitle downloads use the same external app as video downloads. */
@@ -369,7 +377,7 @@ internal object ExternalDownloads {
         subtitle: SubtitleData, shownTitle: String
     ): Boolean {
         val app = selected(context) ?: return false
-        // Match the complete video stem for CloudStream's native subtitle discovery.
+        // Reuse the downloaded video's actual title prefix, not its source filename.
         val existing = pending(context).firstOrNull { it.id == episode.id }?.expectedFile
             ?: context.getKey<DownloadObjects.DownloadedFileInfo>(
                 VideoDownloadManager.KEY_DOWNLOAD_INFO, episode.id.toString()
@@ -378,7 +386,7 @@ internal object ExternalDownloads {
                     (it.displayName.contains("[CS-" + episode.id + "]") ||
                         it.displayName.contains("[CS-" + episode.id + "--"))
             }?.displayName
-        val stem = existing?.substringBeforeLast('.')
+        val stem = existing?.let { subtitleStemFromVideo(episode.id, it) }
             ?: episodeStem(episode.id, title, episode.season, episode.episode)
         return dispatch(context, app, listOf(subtitleTransfer(stem, subtitle, shownTitle)))
     }
@@ -464,7 +472,8 @@ internal object ExternalDownloads {
             }
             val filename = fileName(queued, link)
             val video = Transfer(queued, link.url, filename, headersFor(link))
-            val stem = filename.substringBeforeLast('.')
+            val stem = subtitleStemFromVideo(queued.id, filename)
+                ?: filename.substringBeforeLast('.')
             val subs = matchingSubtitles(context, subtitles[queued.id].orEmpty())
             listOf(video) + subs.map { choice ->
                 subtitleTransfer(stem, choice.subtitle, choice.title)
