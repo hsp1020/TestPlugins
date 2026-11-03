@@ -30,6 +30,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 
 /** Converts all foreground native queue requests into external app handoffs. */
 internal class ExternalQueueBridge(private val app: Application) : Application.ActivityLifecycleCallbacks {
@@ -101,8 +103,12 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
                                 try {
                                     val result = prepare(queued)
                                     result?.let { queued to it }
+                                } catch (error: CancellationException) {
+                                    if (!currentCoroutineContext().isActive) throw error
+                                    null
                                 } catch (error: Exception) {
-                                    throw error
+                                    android.util.Log.w("ElevateExternal", "Download source lookup failed", error)
+                                    null
                                 } finally {
                                     limit.release()
                                 }
@@ -162,19 +168,23 @@ internal class ExternalQueueBridge(private val app: Application) : Application.A
             }
             item != null -> {
                 val found = java.util.Collections.synchronizedMap(LinkedHashMap<String, ExtractorLink>())
-                withContext(CoroutineName("ElevateDownloadVideoOnly")) {
-                    RepoLinkGenerator(listOf(episode)).generateLinks(
-                    clearCache = false,
-                    sourceTypes = LOADTYPE_INAPP_DOWNLOAD,
-                    callback = { (link, _) ->
-                        if (link != null) {
-                            found[link.url] = link
-                        }
-                    },
-                    subtitleCallback = { collectedSubs.add(it) },
-                    offset = 0,
-                    isCasting = false
-                    )
+                try {
+                    withContext(CoroutineName("ElevateDownloadVideoOnly")) {
+                        RepoLinkGenerator(listOf(episode)).generateLinks(
+                            clearCache = false,
+                            sourceTypes = LOADTYPE_INAPP_DOWNLOAD,
+                            callback = { (link, _) ->
+                                if (link != null) found[link.url] = link
+                            },
+                            subtitleCallback = { collectedSubs.add(it) },
+                            offset = 0,
+                            isCasting = false
+                        )
+                    }
+                } catch (error: Exception) {
+                    // Native provider timeouts can arrive after valid links were emitted.
+                    // Do not discard those links or cancel the entire download batch.
+                    if (!currentCoroutineContext().isActive || found.isEmpty()) throw error
                 }
                 synchronized(found) { found.values.toList() }
             }
