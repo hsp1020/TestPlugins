@@ -153,7 +153,13 @@ internal object SyncPreferencePlanner {
                 }
             }
 
-        for (key in all.filter { SyncTrace.relevant(it) }) {
+        val traced = all.filter { SyncTrace.relevant(it) }
+        val samples = traced.filter { it.startsWith("p/ElevateFeatures/") }.take(12) +
+            traced.filter { it.startsWith("p/ultima_evo_settings/") }.take(20)
+        SyncTrace.log("RECONCILE_SAMPLE", "relevant=" + traced.size +
+            " shown=" + samples.size + " omitted=" +
+            (traced.size - samples.size).coerceAtLeast(0))
+        for (key in samples) {
             val outcome = when {
                 key in apply && key in upload -> "merge"
                 key in apply -> "apply"

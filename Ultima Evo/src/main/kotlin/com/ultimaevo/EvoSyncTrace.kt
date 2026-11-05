@@ -56,7 +56,15 @@ internal object EvoSyncTrace {
         })
         log(event, "allKeys=" + data.size + " focusCount=" + important.size +
             " focusSha=" + checksum)
-        for ((key, raw) in important) {
+        val sample = important.entries.filter { it.key.startsWith("provider_enabled_") }.take(4) +
+            important.entries.filter { it.key.startsWith("auto_add_") }.take(4) +
+            important.entries.filter { it.key.startsWith("cat_toggle_") }.take(4) +
+            important.entries.filter { it.key.startsWith("evo_active_cats_json_") }.take(4) +
+            important.entries.filter { it.key.startsWith("evo_instance_count") ||
+                it.key.startsWith("evo_name_") }.take(4)
+        log(event + "_SAMPLE", "shown=" + sample.size +
+            " omitted=" + (important.size - sample.size).coerceAtLeast(0))
+        for ((key, raw) in sample) {
             val type = JSONObject(raw).optString("type")
             val bool = if (type == "bool") " value=" + JSONObject(raw).optBoolean("value") else ""
             log(event + "_KEY", "kind=" + group(key) + " id=" + sha(PREFIX + key) +

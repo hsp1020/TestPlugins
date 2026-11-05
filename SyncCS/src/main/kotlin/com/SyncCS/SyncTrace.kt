@@ -32,7 +32,20 @@ internal object SyncTrace {
             })
         log(event, "count=" + entries.size + " focusCount=" + essential.size +
             " allSha=" + sum(entries) + " focusSha=" + sum(essential))
-        for ((path, raw) in entries) {
+        // Limit routine output; a full restore can contain thousands of keys.
+        // Failure details are logged separately by SyncApplyVerification.
+        val samples = entries.entries.filter { it.key.startsWith(ELV) }.take(12) +
+            entries.entries.filter { it.key.startsWith(EVO) &&
+                important(it.key) && it.key.substringAfter(EVO).startsWith("provider_enabled_") }.take(4) +
+            entries.entries.filter { it.key.startsWith(EVO) &&
+                it.key.substringAfter(EVO).startsWith("auto_add_") }.take(4) +
+            entries.entries.filter { it.key.startsWith(EVO) &&
+                it.key.substringAfter(EVO).startsWith("cat_toggle_") }.take(4) +
+            entries.entries.filter { it.key.startsWith(EVO) &&
+                it.key.substringAfter(EVO).startsWith("evo_active_cats_json_") }.take(4)
+        log(event + "_SAMPLE", "shown=" + samples.size + " omitted=" +
+            (entries.size - samples.size).coerceAtLeast(0))
+        for ((path, raw) in samples) {
             val key = if (path.startsWith(EVO)) path.removePrefix(EVO) else path.removePrefix(ELV)
             val group = when {
                 path.startsWith(ELV) -> "elevate"

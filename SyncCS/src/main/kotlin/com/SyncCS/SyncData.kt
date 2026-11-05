@@ -191,8 +191,13 @@ internal object SyncData {
         path.startsWith("p/") -> {
             val file = path.removePrefix("p/").substringBefore('/')
             val key = path.removePrefix("p/").substringAfter('/', "")
-            file !in listOf("StremioC_Manifest", "AwOriginVisitLoggerPrefs",
-                "android.app.ActivityThread.IDS") &&
+            file.length in 1..80 && !file.contains("..") &&
+                forbiddenFileParts.none { file.contains(it, ignoreCase = true) } &&
+                file != PREFERENCES_NAME &&
+                file != com.lagradost.cloudstream3.CloudStreamApp.context
+                    ?.packageName?.plus("_preferences") &&
+                file !in listOf("StremioC_Manifest", "AwOriginVisitLoggerPrefs",
+                    "android.app.ActivityThread.IDS") &&
                 key.isNotBlank() && key.length <= 300 &&
                 pluginPreferenceAllowed(file, key) &&
                 !key.contains("cache", true) && !key.contains("logcat", true)
@@ -559,6 +564,8 @@ internal object SyncData {
                     val name = key.removePrefix("p/").substringBefore('/')
                     val prefKey = key.removePrefix("p/").substringAfter('/', "")
                     if (name.length !in 1..80 || name.contains("..") ||
+                        name == PREFERENCES_NAME ||
+                        name == context.packageName + "_preferences" ||
                         forbiddenFileParts.any { name.contains(it, true) } ||
                         name in listOf("StremioC_Manifest", "AwOriginVisitLoggerPrefs",
                             "android.app.ActivityThread.IDS") ||
