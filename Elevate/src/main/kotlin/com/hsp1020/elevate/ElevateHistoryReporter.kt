@@ -51,10 +51,7 @@ import java.util.UUID
 @OptIn(UnstableApi::class)
 internal class ElevateHistoryReporter(private val application: Application) : Application.ActivityLifecycleCallbacks {
     private val prefs = application.getSharedPreferences(ElevateFeaturePrefs.FILE, Context.MODE_PRIVATE)
-    private val legacyPrefs = application.getSharedPreferences("StremioC", Context.MODE_PRIVATE)
     private var host: FragmentActivity? = null
-    private val stremioMappings = LinkedHashMap<String, Map<String, String>>()
-    private var stremioCatalogSettings: String? = null
     private val simklMappings = LinkedHashMap<String, Pair<Long, Map<String, String>>>()
     private val senderScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val queue = Channel<Report>(64)
@@ -132,8 +129,7 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
 
     private fun playbackBase(): String? {
         if (!ElevateFeaturePrefs.enabled(application, ElevateFeature.HISTORY_SYNC)) return null
-        val url = (prefs.getString("HISTORY_SYNC_URL", null)
-            ?: legacyPrefs.getString("history_sync_url", null))?.trim()
+        val url = prefs.getString("HISTORY_SYNC_URL", null)?.trim()
             ?.replace("stremio://", "https://") ?: return null
         return runCatching {
             val uri = URI(url)
@@ -513,12 +509,6 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
 
     private suspend fun stremioOverrides(item: Item): Map<String, String> {
         val provider = item.stremioProvider ?: return emptyMap()
-        val settings = legacyPrefs.getString("stremio_saved_links", null)
-        if (stremioCatalogSettings != settings) {
-            stremioMappings.clear()
-            stremioCatalogSettings = settings
-        }
-        stremioMappings[item.key]?.let { return it }
         val result = withTimeoutOrNull(12_000L) {
             val completion = CompletableDeferred<Map<String, String>>()
             try {
@@ -531,8 +521,6 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
                 emptyMap()
             }
         } ?: emptyMap()
-        stremioMappings[item.key] = result
-        if (stremioMappings.size > 24) stremioMappings.remove(stremioMappings.keys.first())
         return result
     }
 
