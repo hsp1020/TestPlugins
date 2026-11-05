@@ -697,8 +697,9 @@ internal class ElevateHistoryReporter(private val application: Application) : Ap
         } else null
         val episodeData = when (detail) {
             is TvSeriesLoadResponse -> {
+                val episodeNumber = file.episode
                 val matches = detail.episodes.filter {
-                    file.episode != null && file.episode > 0 && it.episode == file.episode
+                    episodeNumber != null && episodeNumber > 0 && it.episode == episodeNumber
                 }
                 (matches.firstOrNull { it.season == file.season }
                     ?: matches.singleOrNull())?.data
