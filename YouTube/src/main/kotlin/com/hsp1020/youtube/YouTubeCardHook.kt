@@ -965,7 +965,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
     }
 
     private fun discoverDialogs() {
-        if (expandedReturnDialog != null || directPlayback != null || popupReturning)
         val activity = host ?: return
         val windows: List<View> = if (Build.VERSION.SDK_INT >= 29) {
             WindowInspector.getGlobalWindowViews()
@@ -991,7 +990,6 @@ internal class YouTubeCardHook(private val app: Application) : Application.Activ
         active.forEach { window ->
             if (!dialogs.containsKey(window)) dialogs[window] = Screen(window, true)
         }
-        if (expandedReturnDialog != null || directPlayback != null || popupReturning)
         // Native expanded descriptions are separate AlertDialog text views.
         windows.forEach { window ->
             if (owner(window.context) === activity) {
